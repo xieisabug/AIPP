@@ -1,0 +1,18 @@
+.round-button {
+    height: 30px;
+    padding: 6px 20px;
+    border: 0px;
+    border-radius: 15px;
+    background: rgba(255, 255, 255, 1);
+    box-shadow: 0px 2px 4px  rgba(226, 154, 154, 0.25);
+    cursor: pointer;
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.round-button.primary {
+    color: white;
+    background: var(--main-color);
+}
