@@ -93,44 +93,19 @@ export function useScrollManagement(): UseScrollManagementReturn {
         const container = scrollContainerRef.current;
         if (!container) return;
 
-        // 优先查找带有 last-reply-container 的容器
-        const lastReplyContainer = container.querySelector('#last-reply-container') as HTMLElement;
+        isAutoScrolling.current = true;
+        // 重置用户滚动状态
+        isUserScrolledUpRef.current = false;
         
-        if (lastReplyContainer) {
-            isAutoScrolling.current = true;
-            // 重置用户滚动状态
-            isUserScrolledUpRef.current = false;
-            
-            // 使用scrollIntoView将整个容器滚动到视口顶部
-            lastReplyContainer.scrollIntoView({
-                behavior: 'smooth',
-                block: 'start',
-                inline: 'nearest'
-            });
+        // 直接滚动到容器底部（最底部位置）
+        container.scrollTo({
+            top: container.scrollHeight,
+            behavior: 'smooth'
+        });
 
-            setTimeout(() => {
-                isAutoScrolling.current = false;
-            }, 500); // 增加延迟以匹配平滑滚动时间
-        } else {
-            // 降级方案：如果没有找到容器，查找最后一条用户消息
-            const messageElements = container.querySelectorAll('[data-message-item][data-message-type="user"]');
-            const lastUserMessage = messageElements[messageElements.length - 1] as HTMLElement;
-            
-            if (lastUserMessage) {
-                isAutoScrolling.current = true;
-                isUserScrolledUpRef.current = false;
-                
-                lastUserMessage.scrollIntoView({
-                    behavior: 'smooth',
-                    block: 'start',
-                    inline: 'nearest'
-                });
-
-                setTimeout(() => {
-                    isAutoScrolling.current = false;
-                }, 500);
-            }
-        }
+        setTimeout(() => {
+            isAutoScrolling.current = false;
+        }, 500); // 增加延迟以匹配平滑滚动时间
     }, []);
 
     // 组件卸载时清理资源
