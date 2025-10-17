@@ -196,8 +196,8 @@ const MessageList: React.FC<MessageListProps> = ({
                 <div
                     key="last-reply-container"
                     id="last-reply-container"
-                    style={{ minHeight: 'calc(100dvh - 200px)' }}
-                    className="flex flex-col"
+                    style={{ minHeight: 'calc(100dvh - 130px)' }}
+                    className="flex flex-col gap-4"
                 >
                     {last.map((item, idx) => (
                         <React.Fragment key={`last-group-${messageElements[lastUserMessageIndex + idx].messageId}`}>
@@ -206,6 +206,7 @@ const MessageList: React.FC<MessageListProps> = ({
                         </React.Fragment>
                     ))}
                     {placeholderElements}
+                    <div className="flex-none h-[120px]"></div>
                 </div>
             );
         } else {
