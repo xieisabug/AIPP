@@ -139,7 +139,7 @@ const MessageItem = React.memo<MessageItemProps>(
 
         // 常规消息渲染
         return (
-            <div className="flex flex-col">
+            <div className="flex flex-col" data-message-item data-message-type={message.message_type}>
                 {/* Message-level sub-tasks - shown at the top of each message */}
                 {conversationId && (
                     <SubTaskList

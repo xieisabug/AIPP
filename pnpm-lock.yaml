@@ -152,6 +152,9 @@ importers:
       lodash:
         specifier: ^4.17.21
         version: 4.17.21
+      lowlight:
+        specifier: ^3.3.0
+        version: 3.3.0
       lucide-react:
         specifier: ^0.532.0
         version: 0.532.0(react@19.1.1)

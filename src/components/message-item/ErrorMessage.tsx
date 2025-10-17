@@ -104,7 +104,7 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content }) => {
     };
 
     return (
-        <div className="group relative py-4 px-5 rounded-2xl inline-block max-w-[65%] transition-all duration-200 self-start bg-red-50 text-red-800 border border-red-200">
+        <div data-message-item data-message-type="error" className="group relative py-4 px-5 rounded-2xl inline-block max-w-[65%] transition-all duration-200 self-start bg-red-50 text-red-800 border border-red-200">
             <div className="flex items-start space-x-3">
                 <div className="flex-shrink-0 w-5 h-5 mt-0.5">
                     <svg

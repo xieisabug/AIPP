@@ -139,6 +139,8 @@ const ReasoningMessage = React.memo(
         if (isComplete && !isReasoningExpanded) {
             return (
                 <div
+                    data-message-item
+                    data-message-type="reasoning"
                     className="my-2 p-2 bg-gray-50 border-l-4 border-gray-400 rounded-r-lg w-80 max-w-[60%] cursor-pointer hover:bg-gray-100 transition-colors"
                     onClick={() => onToggleReasoningExpand?.()}
                 >
@@ -157,7 +159,7 @@ const ReasoningMessage = React.memo(
 
         // 完整展示（思考完成展开或思考中）
         return (
-            <div className="my-2 p-3 bg-gray-50 border-l-4 border-gray-400 rounded-r-lg max-w-[80%]">
+            <div data-message-item data-message-type="reasoning" className="my-2 p-3 bg-gray-50 border-l-4 border-gray-400 rounded-r-lg max-w-[80%]">
                 <div className="flex items-center gap-2 mb-2">
                     <div
                         className={`w-2 h-2 bg-gray-500 rounded-full ${isThinking ? "animate-pulse" : ""}`}

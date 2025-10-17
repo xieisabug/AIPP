@@ -204,7 +204,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         );
 
         // 滚动管理 - 移除依赖项，改为手动调用
-        const { messagesEndRef, scrollContainerRef, handleScroll, smartScroll } = useScrollManagement();
+        const { messagesEndRef, scrollContainerRef, handleScroll, smartScroll, scrollToUserMessage } = useScrollManagement();
 
         // 使用 useMemo 稳定 options 对象，避免频繁触发 useConversationEvents 内部的 useEffect
         const conversationEventsOptions = useMemo(() => {
@@ -481,6 +481,19 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 }
             };
         }, [updateShiningMessages]);
+
+        // 监听消息变化，当用户发送消息时滚动到用户消息位置
+        useEffect(() => {
+            const lastMessage = allDisplayMessages[allDisplayMessages.length - 1];
+            if (lastMessage && lastMessage.message_type === 'user') {
+                // 在渲染和布局之后执行，避免时间竞态
+                requestAnimationFrame(() =>
+                    requestAnimationFrame(() => {
+                        scrollToUserMessage();
+                    })
+                );
+            }
+        }, [allDisplayMessages.length, scrollToUserMessage]);
 
         // ============= 组件渲染 =============
 

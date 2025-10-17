@@ -113,6 +113,16 @@ const MessageList: React.FC<MessageListProps> = ({
             ));
     }, [messageElements, handleGenerationVersionChange]);
 
+    // 建立版本控制元素的快速索引映射，避免重复查找
+    const versionMap = useMemo(() => {
+        const map = new Map<string, React.ReactElement>();
+        versionControlElements.forEach((el) => {
+            const key = el.key != null ? String(el.key) : "";
+            if (key) map.set(key, el);
+        });
+        return map;
+    }, [versionControlElements]);
+
     // 优化占位符消息的渲染
     const placeholderElements = useMemo(() => {
         const placeholders: React.ReactElement[] = [];
@@ -157,30 +167,56 @@ const MessageList: React.FC<MessageListProps> = ({
         return placeholders;
     }, [generationGroups, selectedVersions, handleGenerationVersionChange]);
 
-    // 组合所有元素
+    // 组合所有元素，并将最后的 user + AI 响应包裹在带 min-height 的容器中
     const allElements = useMemo(() => {
         const elements: React.ReactElement[] = [];
-        
-        // 添加消息元素
-        messageElements.forEach(({ messageElement, groupControl }, index) => {
-            elements.push(messageElement);
-            
-            // 如果有版本控制，添加对应的版本控制元素
-            if (groupControl) {
-                const versionElement = versionControlElements.find(
-                    (element) => element.key === `version-${messageElements[index].messageId}`
-                );
-                if (versionElement) {
-                    elements.push(versionElement);
-                }
+
+        // 查找最后一条 user 消息的索引
+        let lastUserMessageIndex = -1;
+        for (let i = allDisplayMessages.length - 1; i >= 0; i--) {
+            if (allDisplayMessages[i].message_type === 'user') {
+                lastUserMessageIndex = i;
+                break;
             }
-        });
-        
-        // 添加占位符元素
-        elements.push(...placeholderElements);
-        
+        }
+
+        if (lastUserMessageIndex >= 0) {
+            const before = messageElements.slice(0, lastUserMessageIndex);
+            const last = messageElements.slice(lastUserMessageIndex);
+
+            // 渲染最后一组之前的消息及其版本控制
+            before.forEach((item, i) => {
+                elements.push(item.messageElement);
+                const ve = versionMap.get(`version-${messageElements[i].messageId}`);
+                if (ve) elements.push(ve);
+            });
+
+            // 渲染最后一组，放入容器中，保证最小高度
+            elements.push(
+                <div
+                    key="last-reply-container"
+                    id="last-reply-container"
+                    style={{ minHeight: 'calc(100dvh - 200px)' }}
+                    className="flex flex-col"
+                >
+                    {last.map((item, idx) => (
+                        <React.Fragment key={`last-group-${messageElements[lastUserMessageIndex + idx].messageId}`}>
+                            {item.messageElement}
+                            {versionMap.get(`version-${messageElements[lastUserMessageIndex + idx].messageId}`) || null}
+                        </React.Fragment>
+                    ))}
+                    {placeholderElements}
+                </div>
+            );
+        } else {
+            // 如果没有找到 user 消息（比如空对话），添加占位符
+            if (placeholderElements.length > 0) {
+                elements.push(...placeholderElements);
+            }
+        }
+
         return elements;
-    }, [messageElements, versionControlElements, placeholderElements]);
+    }, [messageElements, versionMap, placeholderElements, allDisplayMessages]);
 
     return <>{allElements}</>;
 };
