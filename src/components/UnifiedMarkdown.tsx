@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import type { Options } from 'react-markdown';
 import { useMarkdownConfig } from '../hooks/useMarkdownConfig';
 import { useCodeTheme } from '../hooks/useCodeTheme';
@@ -63,21 +63,102 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
         },
     }), [markdownConfig.markdownComponents]);
 
+    const containerRef = useRef<HTMLDivElement | null>(null);
+
+    // 注入“运行”按钮至每个代码块的工具栏（不破坏 Streamdown/Shiki 默认渲染）
+    useEffect(() => {
+        if (!onCodeRun) return; // 未提供回调则不注入
+        const root = containerRef.current;
+        if (!root) return;
+
+        const markerAttr = 'data-run-code-button';
+
+        const injectRunButtons = (scope: HTMLElement) => {
+            const headers = scope.querySelectorAll<HTMLDivElement>('[data-code-block-header]');
+            headers.forEach((header) => {
+                // actions 容器为 header 内最后一个 flex 区域
+                const actions = header.querySelector<HTMLDivElement>('div.flex.items-center.gap-2')
+                    || header.querySelector<HTMLDivElement>('div:last-child');
+                if (!actions) return;
+
+                if (actions.querySelector(`[${markerAttr}]`)) return; // 已注入
+
+                const parentContainer = header.closest('[data-code-block-container]') as HTMLElement | null;
+                if (!parentContainer) return;
+
+                const btn = document.createElement('button');
+                btn.setAttribute(markerAttr, 'true');
+                btn.type = 'button';
+                btn.title = '运行代码';
+                btn.setAttribute('aria-label', '运行代码');
+                btn.className = 'cursor-pointer p-1 text-muted-foreground transition-all hover:text-foreground';
+                // 使用与内置按钮一致的尺寸（14px），采用内联 SVG 的播放图标
+                btn.innerHTML = `
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                        <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                    </svg>
+                `;
+
+                btn.addEventListener('click', () => {
+                    try {
+                        const language = (parentContainer.getAttribute('data-language') || '').toString();
+                        // 优先选择当前可见的 code 区域；若无法判断则取第一个
+                        const blocks = parentContainer.querySelectorAll<HTMLElement>('[data-code-block]');
+                        let codeEl: HTMLElement | null = null;
+                        if (blocks.length === 1) {
+                            codeEl = blocks[0];
+                        } else if (blocks.length > 1) {
+                            codeEl = Array.from(blocks).find(el => el.offsetParent !== null) || blocks[0];
+                        }
+                        const code = (codeEl?.textContent || '').toString();
+                        onCodeRun?.(language, code);
+                    } catch {
+                        // 忽略点击错误，避免影响其他按钮
+                    }
+                });
+
+                actions.appendChild(btn);
+            });
+        };
+
+        // 初次注入
+        injectRunButtons(root);
+
+        // 监听流式/动态变更，增量注入
+        const observer = new MutationObserver((mutations) => {
+            for (const m of mutations) {
+                if (m.type === 'childList') {
+                    // 尝试在变更节点内注入
+                    m.addedNodes.forEach((node) => {
+                        if (node instanceof HTMLElement) {
+                            injectRunButtons(node);
+                        }
+                    });
+                }
+            }
+        });
+        observer.observe(root, { childList: true, subtree: true });
+
+        return () => observer.disconnect();
+    }, [onCodeRun]);
+
     const markdownNode = (
-        <Response
-            parseIncompleteMarkdown={!disableMarkdownSyntax}
-            // 使用统一的 Remark 插件；Rehype 使用 Response/Streamdown 默认（包含 harden/raw/katex）
-            remarkPlugins={[...markdownConfig.remarkPlugins] as any}
-            components={customComponents}
-            shikiTheme={[lightTheme as BundledTheme, darkTheme as BundledTheme]}
-            controls={{
-                code: true,
-                table: true,
-                mermaid: true,
-            }}
-        >
-            {children}
-        </Response>
+        <div ref={containerRef} className="contents">
+            <Response
+                parseIncompleteMarkdown={!disableMarkdownSyntax}
+                // 使用统一的 Remark 插件；Rehype 使用 Response/Streamdown 默认（包含 harden/raw/katex）
+                remarkPlugins={[...markdownConfig.remarkPlugins] as any}
+                components={customComponents}
+                shikiTheme={[lightTheme as BundledTheme, darkTheme as BundledTheme]}
+                controls={{
+                    code: true,
+                    table: true,
+                    mermaid: true,
+                }}
+            >
+                {children}
+            </Response>
+        </div>
     );
 
     if (noProseWrapper) {
