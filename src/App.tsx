@@ -8,7 +8,6 @@ import PluginWindow from "./windows/PluginWindow.tsx";
 import ArtifactCollectionsWindow from "./windows/ArtifactCollectionsWindow.tsx";
 import ArtifactWindow from "./windows/ArtifactWindow.tsx";
 import PluginStoreWindow from "./windows/PluginStoreWindow.tsx";
-import CodeThemeLoader from "./components/CodeThemeLoader.tsx";
 import { Toaster } from "./components/ui/sonner.tsx";
 
 const windowsMap: Record<string, typeof AskWindow> = {
@@ -31,10 +30,10 @@ function App() {
     const WindowComponent = getWindowComponent(win.label);
 
     return (
-        <CodeThemeLoader>
+        <>
             {WindowComponent ? WindowComponent() : <div>未知窗口类型: {win.label}</div>}
             <Toaster richColors />
-        </CodeThemeLoader>
+        </>
     );
 }
 

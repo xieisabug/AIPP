@@ -1,6 +1,6 @@
 import { useMemo, useCallback } from 'react';
 import React from 'react';
-import { Components } from 'react-markdown';
+import type { Options } from 'react-markdown';
 import { open } from '@tauri-apps/plugin-shell';
 import CodeBlock from '@/components/CodeBlock';
 import { 
@@ -14,9 +14,9 @@ interface UseMarkdownConfigOptions {
     disableMarkdownSyntax?: boolean;
 }
 
-interface CustomComponents extends Components {
+type CustomComponents = NonNullable<Options['components']> & {
     antthinking: React.ElementType;
-}
+};
 
 export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: UseMarkdownConfigOptions = {}) => {
     // 换行处理函数 - 完全按原样展示文本，保留所有换行和空行
@@ -34,19 +34,19 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
             // 根据 disableMarkdownSyntax 决定如何渲染标准 Markdown 元素
             ...(disableMarkdownSyntax ? {
                 // 纯文本模式：重写标准 Markdown 组件为纯文本渲染，支持换行
-                h1: ({ children }) => <span>#{' '}{renderTextWithBreaks(children)}</span>,
-                h2: ({ children }) => <span>##{' '}{renderTextWithBreaks(children)}</span>,
-                h3: ({ children }) => <span>###{' '}{renderTextWithBreaks(children)}</span>,
-                h4: ({ children }) => <span>####{' '}{renderTextWithBreaks(children)}</span>,
-                h5: ({ children }) => <span>#####{' '}{renderTextWithBreaks(children)}</span>,
-                h6: ({ children }) => <span>######{' '}{renderTextWithBreaks(children)}</span>,
-                strong: ({ children }) => <span>**{children}**</span>,
-                em: ({ children }) => <span>*{children}*</span>,
-                blockquote: ({ children }) => <span>{'> '}{renderTextWithBreaks(children)}</span>,
-                ul: ({ children }) => <div>{children}</div>,
-                ol: ({ children }) => <div>{children}</div>,
-                li: ({ children }) => <div>- {renderTextWithBreaks(children)}</div>,
-                p: ({ children }) => <div>{renderTextWithBreaks(children)}</div>,
+                h1: ({ children }: any) => <span>#{' '}{renderTextWithBreaks(children)}</span>,
+                h2: ({ children }: any) => <span>##{' '}{renderTextWithBreaks(children)}</span>,
+                h3: ({ children }: any) => <span>###{' '}{renderTextWithBreaks(children)}</span>,
+                h4: ({ children }: any) => <span>####{' '}{renderTextWithBreaks(children)}</span>,
+                h5: ({ children }: any) => <span>#####{' '}{renderTextWithBreaks(children)}</span>,
+                h6: ({ children }: any) => <span>######{' '}{renderTextWithBreaks(children)}</span>,
+                strong: ({ children }: any) => <span>**{children}**</span>,
+                em: ({ children }: any) => <span>*{children}*</span>,
+                blockquote: ({ children }: any) => <span>{'> '}{renderTextWithBreaks(children)}</span>,
+                ul: ({ children }: any) => <div>{children}</div>,
+                ol: ({ children }: any) => <div>{children}</div>,
+                li: ({ children }: any) => <div>- {renderTextWithBreaks(children)}</div>,
+                p: ({ children }: any) => <div>{renderTextWithBreaks(children)}</div>,
                 br: () => <br />,
             } : {}),
             // antthinking自定义组件
@@ -61,7 +61,7 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
                     </div>
                 </div>
             ),
-            code: ({ className, children }) => {
+            code: ({ className, children }: any) => {
                 const match = /language-(\w+)/.exec(className || '');
                 
                 // 纯文本模式：代码块显示为原始文本
@@ -90,7 +90,7 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
                     </code>
                 );
             },
-            a: ({ href, children, ...props }) => {
+            a: ({ href, children, ...props }: any) => {
                 const handleClick = useCallback(
                     (e: React.MouseEvent) => {
                         e.preventDefault();

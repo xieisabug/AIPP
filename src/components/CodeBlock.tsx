@@ -133,7 +133,8 @@ const CodeBlock = React.memo(
             };
         }, []);
 
-        // 不再在客户端动态高亮，直接渲染 rehype-highlight 生成的元素
+        // Streamdown uses Shiki for highlighting, which generates pre-styled HTML
+        // We wrap it and add custom buttons
 
         const ButtonGroup = () => (
             <div className="flex bg-white/90 opacity-0 group-hover/codeblock:opacity-100 hover:opacity-100 transition-opacity duration-200 rounded-md p-1 backdrop-blur-sm">
@@ -148,7 +149,7 @@ const CodeBlock = React.memo(
         return (
             <div
                 ref={containerRef}
-                className="relative rounded-lg overflow-hidden group/codeblock prose-code:text-sm"
+                className="relative rounded-lg overflow-hidden group/codeblock"
                 data-theme={currentTheme}
                 data-force-update={forceUpdate}
             >
@@ -170,9 +171,10 @@ const CodeBlock = React.memo(
                     </div>
                 )}
 
-                <code ref={codeRef} className={`hljs language-${language}`}>
+                {/* 渲染 Shiki 生成的 pre/code 结构 */}
+                <div ref={codeRef as any}>
                     {children}
-                </code>
+                </div>
             </div>
         );
     }

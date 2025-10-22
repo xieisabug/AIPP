@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
-import ReactMarkdown from 'react-markdown';
-import { MARKDOWN_COMPONENTS_BASE, REMARK_PLUGINS, REHYPE_PLUGINS } from '@/constants/markdown';
+import { Streamdown } from 'streamdown';
+import { MARKDOWN_COMPONENTS_BASE, REMARK_PLUGINS } from '@/constants/markdown';
 
 interface RawTextRendererProps {
     content: string;
@@ -58,18 +58,15 @@ const RawTextRenderer: React.FC<RawTextRendererProps> = ({ content }) => {
 
             // 处理自定义标签
             parts.push(
-                <ReactMarkdown
+                <Streamdown
                     key={`tag-${tagMatch.index}`}
-                    children={tagMatch.content}
                     remarkPlugins={[
                         REMARK_PLUGINS.find(plugin => plugin.name === 'remarkCustomCompenent') || REMARK_PLUGINS[3]
                     ].filter(Boolean) as any}
-                    rehypePlugins={[
-                        REHYPE_PLUGINS[0], // rehypeRaw
-                        REHYPE_PLUGINS[1], // rehypeSanitize
-                    ] as any}
                     components={MARKDOWN_COMPONENTS_BASE as any}
-                />
+                >
+                    {tagMatch.content}
+                </Streamdown>
             );
 
             currentIndex = tagMatch.index + tagMatch.length;
