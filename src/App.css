@@ -256,7 +256,7 @@ body {
 }
 
 .prose code {
-    @apply text-foreground bg-muted px-1 py-0.5 rounded text-sm;
+    @apply text-foreground px-1 py-0.5 rounded text-sm;
 }
 
 .prose pre {

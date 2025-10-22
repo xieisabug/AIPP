@@ -2,12 +2,12 @@ import { useMemo, useCallback } from 'react';
 import React from 'react';
 import type { Options } from 'react-markdown';
 import { open } from '@tauri-apps/plugin-shell';
-import CodeBlock from '@/components/CodeBlock';
-import { 
-    REMARK_PLUGINS, 
-    REHYPE_PLUGINS, 
-    MARKDOWN_COMPONENTS_BASE 
+import {
+    REMARK_PLUGINS,
+    REHYPE_PLUGINS,
+    MARKDOWN_COMPONENTS_BASE,
 } from '@/constants/markdown';
+import remarkCustomCompenent from '@/react-markdown/remarkCustomComponent';
 
 interface UseMarkdownConfigOptions {
     onCodeRun?: (lang: string, code: string) => void;
@@ -61,35 +61,8 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
                     </div>
                 </div>
             ),
-            code: ({ className, children }: any) => {
-                const match = /language-(\w+)/.exec(className || '');
-                
-                // 纯文本模式：代码块显示为原始文本
-                if (disableMarkdownSyntax) {
-                    return match ? (
-                        <span>```{match[1]}{'\n'}{children}{'\n'}```</span>
-                    ) : (
-                        <span>`{children}`</span>
-                    );
-                }
-                
-                // Markdown 模式：正常的代码块渲染
-                return match ? (
-                    <CodeBlock
-                        language={match[1]}
-                        onCodeRun={onCodeRun || (() => {})}
-                    >
-                        {children}
-                    </CodeBlock>
-                ) : (
-                    <code
-                        className={className}
-                        style={{ overflow: 'auto' }}
-                    >
-                        {children}
-                    </code>
-                );
-            },
+            // 注意：代码块渲染交由 ai-elements/Response 内置的 Streamdown + Shiki 处理，
+            // 此处不覆写 code 组件以避免冲突与重复渲染。
             a: ({ href, children, ...props }: any) => {
                 const handleClick = useCallback(
                     (e: React.MouseEvent) => {
@@ -119,12 +92,10 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
     // 根据 disableMarkdownSyntax 决定使用哪些插件
     const remarkPlugins = useMemo(() => {
         if (disableMarkdownSyntax) {
-            // 纯文本模式：只保留自定义组件处理
-            return [
-                REMARK_PLUGINS.find(plugin => plugin.name === 'remarkCustomCompenent') || REMARK_PLUGINS[3]
-            ].filter(Boolean);
+            // 纯文本模式：只保留自定义组件处理（避免引入 GFM/Math 等 Markdown 语法）
+            return [remarkCustomCompenent];
         }
-        // Markdown 模式：使用所有插件
+        // Markdown 模式：使用项目统一的插件集合（与 Response 默认兼容，会合并扩展）
         return REMARK_PLUGINS;
     }, [disableMarkdownSyntax]);
 
