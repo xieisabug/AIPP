@@ -482,6 +482,22 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             };
         }, [updateShiningMessages]);
 
+        // 在切换对话后，加载完成并渲染出消息后，强制滚动到底部
+        useEffect(() => {
+            // 必须有对话且不在加载中，且有可显示的消息时才执行
+            if (!conversationId) return;
+            if (isLoadingShow) return;
+            if (allDisplayMessages.length === 0) return;
+
+            // 等待渲染与布局稳定后再滚动（双 rAF）
+            requestAnimationFrame(() =>
+                requestAnimationFrame(() => {
+                    // 忽略“用户上滑”状态，切换话题后总是滚动到底部
+                    smartScroll(true);
+                })
+            );
+        }, [conversationId, isLoadingShow, allDisplayMessages.length, smartScroll]);
+
         // 监听消息变化，当用户发送消息时滚动到用户消息位置
         useEffect(() => {
             const lastMessage = allDisplayMessages[allDisplayMessages.length - 1];
