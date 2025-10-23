@@ -44,6 +44,34 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
 
     // UI state
     const [isSubmitting, setIsSubmitting] = useState(false);
+    // Header rows state for SSE/HTTP
+    type HeaderRow = { id: string; key: string; value: string };
+    const [headerRows, setHeaderRows] = useState<HeaderRow[]>([]);
+
+    // helpers for headers KV <-> JSON string
+    const parseHeadersToRows = useCallback((headersStr?: string | null): HeaderRow[] => {
+        if (!headersStr) return [];
+        try {
+            const v = JSON.parse(headersStr);
+            if (v && typeof v === 'object' && !Array.isArray(v)) {
+                const entries = Object.entries(v as Record<string, unknown>)
+                    .filter(([, val]) => typeof val === 'string') as Array<[string, string]>;
+                return entries.map(([k, v], idx) => ({ id: `${Date.now()}-${idx}-${k}`, key: k, value: v }));
+            }
+        } catch (_) {
+            // ignore invalid JSON; keep empty rows
+        }
+        return [];
+    }, []);
+
+    const rowsToHeadersString = useCallback((rows: HeaderRow[]) => {
+        const obj: Record<string, string> = {};
+        rows.forEach(r => {
+            const key = r.key.trim();
+            if (key) obj[key] = r.value;
+        });
+        return Object.keys(obj).length ? JSON.stringify(obj, null, 2) : '';
+    }, []);
 
     // 初始化界面数据
     useEffect(() => {
@@ -72,6 +100,8 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                 is_long_running: editingServer.is_long_running,
                 is_enabled: editingServer.is_enabled,
             });
+            // initialize header rows from existing headers
+            setHeaderRows(parseHeadersToRows(prettyHeaders));
         } else {
             // 重置表单，使用可选的初始配置
             const defaultConfig: MCPServerRequest = {
@@ -91,6 +121,8 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
             const finalConfig = initialConfig ? { ...defaultConfig, ...initialConfig } : defaultConfig;
 
             setFormData(finalConfig);
+            // initialize rows from default/initial config
+            setHeaderRows(parseHeadersToRows(finalConfig.headers));
         }
     }, [editingServer, isOpen, initialServerType, initialConfig]);
 
@@ -100,6 +132,38 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
             ...prev,
             [field]: value
         }));
+    }, []);
+
+    // Keep formData.headers in sync with headerRows for http/sse
+    useEffect(() => {
+        if (formData.transport_type === 'http' || formData.transport_type === 'sse') {
+            const headersStr = rowsToHeadersString(headerRows);
+            if (headersStr !== (formData.headers || '')) {
+                setFormData(prev => ({ ...prev, headers: headersStr }));
+            }
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [headerRows, formData.transport_type]);
+
+    // When transport type changes away from http/sse, clear header rows sync (but keep stored string)
+    useEffect(() => {
+        if (formData.transport_type !== 'http' && formData.transport_type !== 'sse') {
+            setHeaderRows([]);
+        } else {
+            // ensure rows reflect current headers string once upon switch
+            setHeaderRows(parseHeadersToRows(formData.headers));
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [formData.transport_type]);
+
+    const addHeaderRow = useCallback(() => {
+        setHeaderRows(prev => [...prev, { id: `${Date.now()}-${prev.length}`, key: '', value: '' }]);
+    }, []);
+    const removeHeaderRow = useCallback((id: string) => {
+        setHeaderRows(prev => prev.filter(r => r.id !== id));
+    }, []);
+    const updateHeaderRow = useCallback((id: string, patch: Partial<HeaderRow>) => {
+        setHeaderRows(prev => prev.map(r => (r.id === id ? { ...r, ...patch } : r)));
     }, []);
 
     // 处理表单提交
@@ -276,16 +340,38 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
 
                                 {(formData.transport_type === 'http' || formData.transport_type === 'sse') && (
                                     <div className="space-y-2">
-                                        <Label htmlFor="headers">自定义请求头 (JSON)</Label>
-                                        <Textarea
-                                            id="headers"
-                                            placeholder='例如：{ "Authorization": "Bearer ${API_KEY}" }'
-                                            rows={5}
-                                            value={formData.headers || ''}
-                                            onChange={(e) => updateField('headers', e.target.value)}
-                                            className="font-mono text-xs resize-none h-40 overflow-auto leading-5"
-                                        />
-                                        <p className="text-xs text-muted-foreground">仅支持 JSON 对象格式；支持 ${'{'}VAR{'}'} 环境变量占位符</p>
+                                        <Label>自定义请求头</Label>
+                                        <div className="space-y-2">
+                                            {headerRows.map((row) => (
+                                                <div key={row.id} className="flex gap-2 items-center">
+                                                    <Input
+                                                        placeholder="Header 名称，例如 Authorization"
+                                                        value={row.key}
+                                                        onChange={(e) => updateHeaderRow(row.id, { key: e.target.value })}
+                                                        className="flex-[0.45]"
+                                                    />
+                                                    <Input
+                                                        placeholder="Header 值，例如 Bearer ${API_KEY}"
+                                                        value={row.value}
+                                                        onChange={(e) => updateHeaderRow(row.id, { value: e.target.value })}
+                                                        className="flex-1"
+                                                    />
+                                                    <Button
+                                                        type="button"
+                                                        variant="outline"
+                                                        onClick={() => removeHeaderRow(row.id)}
+                                                    >
+                                                        删除
+                                                    </Button>
+                                                </div>
+                                            ))}
+                                            <div>
+                                                <Button type="button" variant="secondary" onClick={addHeaderRow}>
+                                                    添加Header
+                                                </Button>
+                                            </div>
+                                        </div>
+                                        <p className="text-xs text-muted-foreground">支持 ${'{'}VAR{'}'} 环境变量占位符；重复键以最后一次填写为准；空键将被忽略</p>
                                     </div>
                                 )}
                             </AccordionContent>

@@ -22,7 +22,6 @@ use rmcp::{
     ServiceExt,
 };
 use serde_json::Map as JsonMap;
-use serde_json::Value as JsonValue;
 use tauri::Emitter;
 use tokio::process::Command;
 use tracing::{debug, error, info, instrument, warn};
@@ -586,60 +585,8 @@ pub async fn execute_tool_by_transport(
         }
     }
 }
-/// 提取 Authorization 头（如果存在），以及完整 headers Map
-/// 解析服务器配置中的 headers，支持环境变量占位替换，返回 (Authorization, 全部headers映射)。
-fn parse_server_headers(
-    server: &MCPServer,
-) -> (Option<String>, Option<std::collections::HashMap<String, String>>) {
-    if let Some(raw) = &server.headers {
-        if raw.trim().is_empty() {
-            return (None, None);
-        }
-        if let Ok(v) = serde_json::from_str::<JsonValue>(raw) {
-            if let Some(obj) = v.as_object() {
-                let mut map = std::collections::HashMap::new();
-                let mut auth: Option<String> = None;
-                for (k, val) in obj.iter() {
-                    if let Some(s) = val.as_str() {
-                        // 环境变量占位符替换 ${VAR}
-                        let replaced = replace_env_placeholders(s);
-                        if k.eq_ignore_ascii_case("authorization") {
-                            auth = Some(replaced.clone());
-                        }
-                        map.insert(k.clone(), replaced);
-                    }
-                }
-                return (auth, Some(map));
-            }
-        }
-    }
-    (None, None)
-}
-
-/// 将字符串中的 `${VAR}` 替换为对应的环境变量值；若不存在保持原占位形式。
-fn replace_env_placeholders(input: &str) -> String {
-    // 简单替换 ${VAR} => env::var(VAR) 或原样
-    let mut out = String::new();
-    let chars: Vec<char> = input.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
-            if let Some(end) = chars[i + 2..].iter().position(|c| *c == '}') {
-                let var_name: String = chars[i + 2..i + 2 + end].iter().collect();
-                if let Ok(val) = std::env::var(&var_name) {
-                    out.push_str(&val);
-                } else {
-                    out.push_str(&format!("${{{}}}", var_name));
-                }
-                i += 2 + end + 1; // skip ${VAR}
-                continue;
-            }
-        }
-        out.push(chars[i]);
-        i += 1;
-    }
-    out
-}
+// Reuse shared MCP header parsing utilities
+use crate::mcp::util::{parse_server_headers, sanitize_headers_for_log};
 /// 通过 stdio 传输执行工具（外部进程）。
 #[instrument(skip(app_handle,server,parameters), fields(server_id=server.id, tool_name=%tool_name))]
 async fn execute_stdio_tool(
@@ -722,6 +669,9 @@ async fn execute_sse_tool(
     // Build SSE transport with a preconfigured reqwest client (propagate all headers)
     let (_auth_header, __all_headers_for_sse) = parse_server_headers(server);
     let sse_transport = if let Some(hdrs) = __all_headers_for_sse {
+        // log sanitized headers
+        let to_log = sanitize_headers_for_log(&hdrs);
+        info!(server_id = server.id, headers = ?to_log, "Using SSE headers");
         let mut header_map = HeaderMap::new();
         for (k, v) in hdrs.iter() {
             if let (Ok(name), Ok(value)) =
@@ -762,6 +712,7 @@ async fn execute_sse_tool(
                 client_info: Implementation {
                     name: "AIPP MCP SSE Client".to_string(),
                     version: "0.1.0".to_string(),
+                    ..Default::default()
                 },
             };
             let client =
@@ -859,6 +810,8 @@ async fn execute_http_tool(
         let (_auth_header, all_headers) = parse_server_headers(server);
         let mut header_map = HeaderMap::new();
         if let Some(hdrs) = all_headers.as_ref() {
+            let to_log = sanitize_headers_for_log(hdrs);
+            info!(server_id = server.id, headers = ?to_log, "Using HTTP headers");
             for (k, v) in hdrs.iter() {
                 if let (Ok(name), Ok(value)) =
                     (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v.as_str()))
@@ -879,6 +832,7 @@ async fn execute_http_tool(
         client_info: Implementation {
             name: "AIPP MCP HTTP Client".to_string(),
             version: "0.1.0".to_string(),
+            ..Default::default()
         },
     };
 
