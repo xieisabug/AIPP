@@ -18,6 +18,36 @@ use tauri_plugin_notification::NotificationExt;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, info, warn, error};
 
+/// 删除会话中最后一条错误消息（如果最后一条是 error）
+async fn cleanup_last_error_message(
+    conversation_db: &ConversationDatabase,
+    conversation_id: i64,
+) -> anyhow::Result<()> {
+    // 读取该会话的所有消息（含附件信息）
+    let messages = conversation_db
+        .message_repo()
+        .context("failed to get message_repo for cleanup")?
+        .list_by_conversation_id(conversation_id)
+        .context("failed to list messages for cleanup")?;
+
+    // 找到 id 最大的消息
+    if let Some((last_msg, _)) = messages
+        .iter()
+        .max_by_key(|(m, _)| m.id)
+        .cloned()
+    {
+        if last_msg.message_type == "error" {
+            // 删除该错误消息
+            let _ = conversation_db
+                .message_repo()
+                .context("failed to get message_repo for delete")?
+                .delete(last_msg.id);
+        }
+    }
+
+    Ok(())
+}
+
 /// 发送消息完成通知
 async fn send_completion_notification(
     app_handle: &tauri::AppHandle,
@@ -97,6 +127,11 @@ async fn ensure_stream_message(
     parent_group_id_override: Option<String>,
 ) -> anyhow::Result<i64> {
     let now = chrono::Utc::now();
+
+    // 在创建新的 response 消息前，如果上一条是错误消息，则清理
+    if message_type == "response" {
+        let _ = cleanup_last_error_message(conversation_db, conversation_id).await;
+    }
 
     let new_message = conversation_db
         .message_repo()
@@ -614,6 +649,50 @@ async fn enhanced_error_logging_v2<E: std::error::Error + 'static>(
     create_structured_error_message(error, None)
 }
 
+/// 构建统一的、可被前端解析的富错误负载（JSON字符串）
+fn build_rich_error_payload(
+    main_message: String,
+    details: Option<String>,
+    model_name: Option<String>,
+    phase: &str,
+    attempts: Option<i32>,
+    original_error: String,
+) -> String {
+    // 根据主要信息给出建议
+    let mut suggestions: Vec<&str> = Vec::new();
+    let lower = main_message.to_lowercase();
+    if lower.contains("网络") || lower.contains("network") || lower.contains("连接") {
+        suggestions.push("检查网络连接与代理设置");
+    }
+    if lower.contains("认证") || lower.contains("api密钥") || lower.contains("unauthorized") || lower.contains("401") {
+        suggestions.push("检查 API Key 是否正确、是否过期");
+    }
+    if lower.contains("权限") || lower.contains("forbidden") || lower.contains("403") {
+        suggestions.push("检查账户或密钥是否有对应权限");
+    }
+    if lower.contains("频繁") || lower.contains("429") || lower.contains("rate limit") {
+        suggestions.push("降低调用频率或稍后再试");
+    }
+    if lower.contains("服务器") || lower.contains("503") || lower.contains("502") || lower.contains("500") {
+        suggestions.push("服务端异常，稍后重试");
+    }
+    if lower.contains("格式") || lower.contains("json") || lower.contains("parse") {
+        suggestions.push("检查 Base URL / 模型配置与请求参数格式");
+    }
+
+    let payload = serde_json::json!({
+        "message": main_message,
+        "details": details,
+        "model": model_name,
+        "phase": phase,
+        "attempts": attempts,
+        "original_error": original_error,
+        "suggestions": suggestions,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    });
+    payload.to_string()
+}
+
 // 创建结构化错误消息
 fn create_structured_error_message<E: std::fmt::Display>(
     error: &E,
@@ -959,17 +1038,27 @@ pub async fn handle_stream_chat(
                 warn!(attempt = main_attempts, error = %e, "stream chat failed attempt");
 
                 if main_attempts >= max_retry_attempts {
-                    // 最终失败，清理资源并返回错误
-                    let final_error =
-                        format!("AI请求失败: {}", get_user_friendly_error_message(&e));
+                    // 最终失败，构建结构化错误并返回
+                    let user_friendly = get_user_friendly_error_message(&e);
+                    // 最终失败不再尝试网络抓取错误体，避免泛型/trait 限制，这里仅构建富错误载荷
+                    let details_opt: Option<String> = None;
+                    // 使用更友好的主消息
+                    let final_main = format!("AI请求失败: {}", user_friendly);
+                    let payload = build_rich_error_payload(
+                        final_main,
+                        details_opt,
+                        Some(llm_model_name.clone()),
+                        "stream",
+                        Some(main_attempts as i32),
+                        e.to_string(),
+                    );
                     error!(
                         "[[final_stream_error]]: 流式聊天在{}次尝试后失败: {}",
                         main_attempts, e
                     );
 
                     // 发送错误通知到合适的窗口
-                    let user_friendly_error = get_user_friendly_error_message(&e);
-                    send_error_to_appropriate_window(&window, &user_friendly_error);
+                    send_error_to_appropriate_window(&window, &user_friendly);
 
                     // 创建错误消息
                     create_error_message(
@@ -977,14 +1066,14 @@ pub async fn handle_stream_chat(
                         conversation_id,
                         llm_model_id,
                         llm_model_name.clone(),
-                        &final_error,
+                        &payload,
                         generation_group_id_override.clone(),
                         parent_group_id_override.clone(),
                         window,
                     )
                     .await;
 
-                    return Err(anyhow::anyhow!("{}", final_error));
+                    return Err(anyhow::anyhow!("AI stream failed after retries"));
                 }
 
                 let delay = calculate_retry_delay(main_attempts);
@@ -1564,6 +1653,9 @@ pub async fn handle_non_stream_chat(
 
     match chat_result {
         Ok(chat_response) => {
+            // 在创建新的 response 消息前，如果上一条是错误消息，则清理
+            let _ = cleanup_last_error_message(conversation_db, conversation_id).await;
+
             let mut content = chat_response.first_text().unwrap_or("").to_string();
 
             // 现在才创建响应消息（在有实际内容后）
@@ -1714,7 +1806,16 @@ pub async fn handle_non_stream_chat(
         }
         Err(e) => {
             let user_friendly_error = get_user_friendly_error_message(&e);
-            let err_msg = format!("AI请求失败: {}", user_friendly_error);
+            // 此处不尝试网络抓取错误体，直接构建富错误载荷
+            let details_opt: Option<String> = None;
+            let err_msg = build_rich_error_payload(
+                format!("AI请求失败: {}", user_friendly_error),
+                details_opt,
+                Some(llm_model_name.clone()),
+                "non_stream",
+                None,
+                e.to_string(),
+            );
             let now = chrono::Utc::now();
             send_error_to_appropriate_window(&window, &user_friendly_error);
 
