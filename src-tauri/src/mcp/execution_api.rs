@@ -58,11 +58,42 @@ fn build_call_tool_request(
 }
 
 /// 根据响应结构统一提取并序列化返回内容；若标记错误则返回 Err。
+/// 注意：部分 MCP 服务器可能返回包含二进制/不可序列化字段的内容（例如嵌入资源、blob 等），
+/// 这会导致直接 JSON 序列化失败。为保证稳健性：
+/// 1) 优先尝试将 content 做 JSON 序列化；
+/// 2) 若失败，则回退为 Debug 字符串拼接，并进行长度截断，避免超大结果引发内存压力。
 fn serialize_tool_response(response: &rmcp::model::CallToolResult) -> Result<String> {
+    // 处理服务器标记的错误
     if response.is_error.unwrap_or(false) {
-        Err(anyhow!("工具执行错误: {:?}", response.content))
-    } else {
-        Ok(serde_json::to_string(&response.content).context("序列化工具执行结果失败")?)
+        return Err(anyhow!("工具执行错误: {:?}", response.content));
+    }
+
+    // 优先尝试 JSON 序列化（与之前行为保持一致）
+    match serde_json::to_string(&response.content) {
+        Ok(s) => Ok(s),
+        Err(json_err) => {
+            // 回退：使用 Debug 格式串联各个 content part，确保始终有可显示的结果
+            const MAX_LEN: usize = 100_000; // 保护上限，避免过大输出
+            let joined = response
+                .content
+                .iter()
+                .map(|part| format!("{:?}", part))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let truncated = if joined.len() > MAX_LEN {
+                let mut s = joined;
+                s.truncate(MAX_LEN);
+                s.push_str("\n...[truncated]...");
+                s
+            } else {
+                joined
+            };
+
+            // 记录一次警告日志，便于后续针对特定服务器/工具做更细化的适配
+            warn!(error=%json_err, content_len=truncated.len(), "fallback to debug-string for tool response serialization");
+            Ok(truncated)
+        }
     }
 }
 
@@ -655,8 +686,10 @@ async fn execute_stdio_tool(
         let args = parse_tool_arguments(parameters).context("解析工具参数失败")?;
         let request_param = build_call_tool_request(tool_name, args);
         let response = client.call_tool(request_param).await.context("工具调用失败")?;
+        debug!(is_error=?response.is_error, parts=?response.content.len(), "received stdio tool response");
         client.cancel().await.context("关闭客户端连接失败")?;
-        serialize_tool_response(&response).context("序列化工具响应失败")
+        // 不再包裹错误上下文，直接返回底层错误以保留真实原因（例如服务器返回的错误信息）
+        serialize_tool_response(&response)
     })
     .await;
 
@@ -738,11 +771,13 @@ async fn execute_sse_tool(
 
             // TODO: rmcp 当前 SseClientTransport::send 未暴露 auth_token; 通过自定义 client 已用于初始化，后续调用暂不重复 header
             let response = client.call_tool(request_param).await.context("Tool call failed")?;
+            debug!(is_error=?response.is_error, parts=?response.content.len(), "received sse tool response");
 
             // Cancel the client connection
             client.cancel().await.context("Failed to cancel client")?;
 
-            serialize_tool_response(&response).context("序列化工具响应失败")
+            // 不包裹序列化错误上下文，避免将服务器端错误误标为“序列化失败”
+            serialize_tool_response(&response)
         },
     )
     .await;
@@ -859,11 +894,12 @@ async fn execute_http_tool(
             let request_param = build_call_tool_request(tool_name, args);
 
             let response = client.call_tool(request_param).await.context("Tool call failed")?;
+            debug!(is_error=?response.is_error, parts=?response.content.len(), "received http tool response");
 
             // Cancel the client connection
             client.cancel().await.context("Failed to cancel client")?;
 
-            serialize_tool_response(&response).context("序列化工具响应失败")
+            serialize_tool_response(&response)
         },
     )
     .await;
