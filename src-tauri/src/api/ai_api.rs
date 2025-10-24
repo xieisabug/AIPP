@@ -411,6 +411,37 @@ pub async fn tool_result_continue_ask_ai(
         None,
     )?;
 
+    // Emit events so UI can render the tool_result immediately without manual refresh
+    // 1) message_add
+    let add_event = ConversationEvent {
+        r#type: "message_add".to_string(),
+        data: serde_json::to_value(MessageAddEvent {
+            message_id: tool_result_message.id,
+            message_type: "tool_result".to_string(),
+        })
+        .unwrap(),
+    };
+    let _ = window.emit(
+        format!("conversation_event_{}", conversation_id_i64).as_str(),
+        add_event,
+    );
+
+    // 2) message_update (is_done = true)
+    let update_event = ConversationEvent {
+        r#type: "message_update".to_string(),
+        data: serde_json::to_value(MessageUpdateEvent {
+            message_id: tool_result_message.id,
+            message_type: "tool_result".to_string(),
+            content: tool_result_message.content.clone(),
+            is_done: true,
+        })
+        .unwrap(),
+    };
+    let _ = window.emit(
+        format!("conversation_event_{}", conversation_id_i64).as_str(),
+        update_event,
+    );
+
     // Get all existing messages
     let all_messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id_i64)?;
 
