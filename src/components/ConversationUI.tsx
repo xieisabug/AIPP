@@ -261,6 +261,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             updateShiningMessages,
             updateFunctionMap,
             clearStreamingMessages,
+            clearShiningMessages,
         } = useConversationEvents(conversationEventsOptions);
 
         // 当 functionMap 变化时更新事件处理器
@@ -340,6 +341,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             onChangeConversationId,
             setShiningMessageIds,
             updateShiningMessages,
+            clearShiningMessages,
             assistantTypePluginMap,
             assistantRunApi,
         });
@@ -373,6 +375,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 setConversation(undefined);
                 // 清理流式消息和闪烁状态
                 clearStreamingMessages();
+                clearShiningMessages();
 
                 invoke<Array<AssistantListItem>>("get_assistants").then((assistantList) => {
                     setAssistants(assistantList);
@@ -392,6 +395,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             // 在切换对话时立即清理所有与前一个对话相关的状态
             setGroupMergeMap(new Map()); // 切换对话时清理组合并状态
             clearStreamingMessages(); // 清理流式消息
+            clearShiningMessages(); // 清理闪烁状态
 
             console.log(`conversationId change : ${conversationId}`);
 
@@ -425,7 +429,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             return () => {
                 currentLoadingRef.cancelled = true;
             };
-        }, [conversationId, clearStreamingMessages]);
+        }, [conversationId, clearStreamingMessages, clearShiningMessages]);
 
         // 监听对话标题变化
         useEffect(() => {
