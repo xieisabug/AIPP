@@ -23,43 +23,49 @@ pub async fn generate_title(
     config_feature_map: HashMap<String, HashMap<String, FeatureConfig>>,
     window: tauri::Window,
 ) -> Result<(), AppError> {
-    let feature_config = config_feature_map
-        .get("conversation_summary")
-        .ok_or_else(|| AppError::UnknownError("未配置『会话标题生成』(conversation_summary)，请在设置中完成配置".to_string()))?;
+    // 1) 读取会话总结配置，允许缺省并做智能回退
+    let feature_config_opt = config_feature_map.get("conversation_summary");
 
-    // provider_id
-    let provider_id_str = feature_config
-        .get("provider_id")
-        .ok_or_else(|| AppError::UnknownError("标题生成配置错误: 缺少 provider_id".to_string()))?
-        .value
-        .clone();
-    let provider_id = provider_id_str.parse::<i64>().map_err(|_| {
-        AppError::UnknownError("标题生成配置错误: provider_id 必须是数字".to_string())
-    })?;
+    // 默认提示词（当未配置时回退使用）
+    let default_prompt = "请根据提供的大模型问答对话,总结一个简洁明了的标题。标题要求:\n- 字数在5-15个字左右，必须是中文，不要包含标点符号\n- 准确概括对话的核心主题，尽量贴近用户的提问\n- 不要透露任何私人信息\n- 用祈使句或陈述句".to_string();
 
-    // model_code
-    let model_code = feature_config
-        .get("model_code")
-        .ok_or_else(|| AppError::UnknownError("标题生成配置错误: 缺少 model_code".to_string()))?
-        .value
-        .clone();
+    // 解析 summary_length 与 prompt，缺省有默认值
+    let (summary_length, prompt) = if let Some(feature_config) = feature_config_opt {
+        let prompt = feature_config
+            .get("prompt")
+            .map(|c| c.value.clone())
+            .unwrap_or(default_prompt.clone());
+        let summary_length = feature_config
+            .get("summary_length")
+            .map(|c| c.value.clone())
+            .unwrap_or_else(|| "100".to_string());
+        let summary_length = summary_length.parse::<i32>().unwrap_or(100);
+        (summary_length, prompt)
+    } else {
+        (100, default_prompt.clone())
+    };
 
-    // prompt
-    let prompt = feature_config
-        .get("prompt")
-        .ok_or_else(|| AppError::UnknownError("标题生成配置错误: 缺少 prompt".to_string()))?
-        .value
-        .clone();
+    // 解析 provider_id 与 model_code，若缺失/非法，则回退为“使用当前对话的回复消息模型”
+    enum ModelSource {
+        FromConfig { provider_id: i64, model_code: String },
+        FromConversationMessage,
+    }
 
-    // summary_length
-    let summary_length_str = feature_config
-        .get("summary_length")
-        .ok_or_else(|| AppError::UnknownError("标题生成配置错误: 缺少 summary_length".to_string()))?
-        .value
-        .clone();
-    let summary_length = summary_length_str.parse::<i32>().map_err(|_| {
-        AppError::UnknownError("标题生成配置错误: summary_length 必须是整数".to_string())
-    })?;
+    let model_source = if let Some(feature_config) = feature_config_opt {
+        let provider_id_res = feature_config
+            .get("provider_id")
+            .map(|c| c.value.clone())
+            .and_then(|v| v.parse::<i64>().ok());
+        let model_code_opt = feature_config.get("model_code").map(|c| c.value.clone());
+        match (provider_id_res, model_code_opt) {
+            (Some(pid), Some(mcode)) if !mcode.is_empty() => {
+                ModelSource::FromConfig { provider_id: pid, model_code: mcode }
+            }
+            _ => ModelSource::FromConversationMessage,
+        }
+    } else {
+        ModelSource::FromConversationMessage
+    };
 
         let mut context = String::new();
         if summary_length == -1 {
@@ -128,10 +134,38 @@ pub async fn generate_title(
             }
         }
 
+        // 2) 获取用于标题生成的模型详情：优先配置，其次回退到最近的一条 response 消息所用模型
         let llm_db = LLMDatabase::new(app_handle).map_err(AppError::from)?;
-        let model_detail = llm_db
-            .get_llm_model_detail(&provider_id, &model_code)
-            .map_err(|e| AppError::DatabaseError(format!("获取模型配置失败: {}", e)))?;
+        let model_detail = match model_source {
+            ModelSource::FromConfig { provider_id, model_code } => llm_db
+                .get_llm_model_detail(&provider_id, &model_code)
+                .map_err(|e| AppError::DatabaseError(format!("获取模型配置失败: {}", e)))?,
+            ModelSource::FromConversationMessage => {
+                // 从当前对话中找出最近的一条 response 消息，读取其 llm_model_id
+                let conversation_db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
+                let messages = conversation_db
+                    .message_repo()
+                    .map_err(AppError::from)?
+                    .list_by_conversation_id(conversation_id)
+                    .map_err(AppError::from)?;
+                // 选取 id 最大的 response 消息（通常是最新的）
+                let last_response_model_id = messages
+                    .iter()
+                    .filter(|(m, _)| m.message_type == "response")
+                    .max_by_key(|(m, _)| m.id)
+                    .and_then(|(m, _)| m.llm_model_id);
+
+                if let Some(model_id) = last_response_model_id {
+                    llm_db
+                        .get_llm_model_detail_by_id(&model_id)
+                        .map_err(|e| AppError::DatabaseError(format!("获取标题模型失败(根据消息推断): {}", e)))?
+                } else {
+                    return Err(AppError::UnknownError(
+                        "未配置『会话标题生成』且无法从对话消息推断模型，请在设置中为“AI总结”选择模型".to_string(),
+                    ));
+                }
+            }
+        };
 
         // 从配置中获取网络代理和超时设置
         let network_proxy = get_network_proxy_from_config(&config_feature_map);
