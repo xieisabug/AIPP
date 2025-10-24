@@ -36,6 +36,9 @@ export function useScrollManagement(): UseScrollManagementReturn {
 
     // 智能滚动函数
     const smartScroll = useCallback((forceScroll: boolean = false) => {
+        // 如果当前正处于程序触发的平滑滚动阶段，避免用 auto 覆盖动画
+        if (isAutoScrolling.current) return;
+
         // 从 Ref 读取状态，这总是最新的值
         if ((!forceScroll && isUserScrolledUpRef.current) || !scrollContainerRef.current) {
             return;
@@ -51,22 +54,25 @@ export function useScrollManagement(): UseScrollManagementReturn {
 
         const scrollToBottom = () => {
             // 再次从 Ref 检查，确保万无一失
-            if ((!forceScroll && isUserScrolledUpRef.current) || !scrollContainerRef.current) {
+            if (isAutoScrolling.current || (!forceScroll && isUserScrolledUpRef.current) || !scrollContainerRef.current) {
                 if (resizeObserverRef.current) {
                     resizeObserverRef.current.disconnect();
                 }
                 return;
             }
-            const c = scrollContainerRef.current;
+            const c = scrollContainerRef.current!;
+            const distanceToBottom = c.scrollHeight - c.scrollTop - c.clientHeight;
+            // 距离较大时使用平滑滚动，避免“瞬移”感；小距离仍然使用 auto 以跟随流式输出
+            const behavior: ScrollBehavior = distanceToBottom > 120 ? 'smooth' : 'auto';
+
             isAutoScrolling.current = true;
-            // 流式更新使用即时滚动以保持跟随性
-            c!.scrollTo({ top: c!.scrollHeight, behavior: 'auto' });
+            c.scrollTo({ top: c.scrollHeight, behavior });
             if (resizeObserverRef.current) {
                 resizeObserverRef.current.disconnect();
             }
             setTimeout(() => {
                 isAutoScrolling.current = false;
-            }, 100);
+            }, behavior === 'smooth' ? 500 : 100);
         };
 
         // 优先观察最后一组容器，其次观察最后一条消息元素
