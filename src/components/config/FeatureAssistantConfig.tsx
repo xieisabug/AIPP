@@ -136,7 +136,9 @@ const FeatureAssistantConfig: React.FC = () => {
                 const providerId = summaryConfig.get("provider_id") || "";
                 const modelCode = summaryConfig.get("model_code") || "";
                 summaryForm.reset({
-                    model: `${providerId}%%${modelCode}`,
+                    // ConfigForm's model-select uses value format: `${model.code}%%${model.llm_provider_id}`
+                    // Keep the same order here when restoring the form value
+                    model: `${modelCode}%%${providerId}`,
                     summary_length: summaryConfig.get("summary_length") || "100",
                     form_autofill_model: summaryConfig.get("form_autofill_model") || "",
                     prompt: summaryConfig.get("prompt") || "",
@@ -186,7 +188,12 @@ const FeatureAssistantConfig: React.FC = () => {
 
     const handleSaveSummaryConfig = useCallback(async () => {
         const values = summaryForm.getValues();
-        const [provider_id, model_code] = (values.model as string).split("%%");
+        // model-select value format is `${model_code}%%${provider_id}`
+        const [model_code, provider_id] = (values.model as string).split("%%");
+        // Ensure provider_id is numeric string
+        if (!provider_id || isNaN(Number(provider_id))) {
+            throw new Error("provider_id 必须是数字，请重新选择模型");
+        }
         await saveFeatureConfig("conversation_summary", {
             provider_id,
             model_code,

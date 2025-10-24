@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { getErrorMessage } from "@/utils/error";
 
 export interface ModelForSelect {
     name: string;
@@ -27,7 +28,7 @@ export const useModels = (shouldFetch: boolean = true) => {
                 setError(null);
             })
             .catch((err) => {
-                const errorMsg = "获取模型列表失败: " + err;
+                const errorMsg = "获取模型列表失败: " + getErrorMessage(err);
                 setError(errorMsg);
                 toast.error(errorMsg);
             })

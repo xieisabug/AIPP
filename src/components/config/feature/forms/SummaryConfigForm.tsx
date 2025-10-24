@@ -2,6 +2,7 @@ import React, { useCallback } from "react";
 import { UseFormReturn } from "react-hook-form";
 import ConfigForm from "@/components/ConfigForm";
 import { toast } from "sonner";
+import { getErrorMessage } from "@/utils/error";
 
 interface SummaryConfigFormProps {
     form: UseFormReturn<any>;
@@ -20,7 +21,7 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({ form, onSa
             await onSave();
             toast.success("AI总结配置保存成功");
         } catch (e) {
-            toast.error("保存AI总结配置失败: " + e);
+            toast.error("保存AI总结配置失败: " + getErrorMessage(e));
         }
     }, [form, onSave]);
 

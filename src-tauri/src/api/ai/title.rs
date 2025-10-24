@@ -23,21 +23,43 @@ pub async fn generate_title(
     config_feature_map: HashMap<String, HashMap<String, FeatureConfig>>,
     window: tauri::Window,
 ) -> Result<(), AppError> {
-    let feature_config = config_feature_map.get("conversation_summary");
-    if let Some(config) = feature_config {
-        let provider_id = config
-            .get("provider_id")
-            .ok_or(AppError::NoConfigError("provider_id".to_string()))?
-            .value
-            .parse::<i64>()?;
-        let model_code = config
-            .get("model_code")
-            .ok_or(AppError::NoConfigError("model_code".to_string()))?
-            .value
-            .clone();
-        let prompt = config.get("prompt").unwrap().value.clone();
-        let summary_length =
-            config.get("summary_length").unwrap().value.clone().parse::<i32>().unwrap();
+    let feature_config = config_feature_map
+        .get("conversation_summary")
+        .ok_or_else(|| AppError::UnknownError("未配置『会话标题生成』(conversation_summary)，请在设置中完成配置".to_string()))?;
+
+    // provider_id
+    let provider_id_str = feature_config
+        .get("provider_id")
+        .ok_or_else(|| AppError::UnknownError("标题生成配置错误: 缺少 provider_id".to_string()))?
+        .value
+        .clone();
+    let provider_id = provider_id_str.parse::<i64>().map_err(|_| {
+        AppError::UnknownError("标题生成配置错误: provider_id 必须是数字".to_string())
+    })?;
+
+    // model_code
+    let model_code = feature_config
+        .get("model_code")
+        .ok_or_else(|| AppError::UnknownError("标题生成配置错误: 缺少 model_code".to_string()))?
+        .value
+        .clone();
+
+    // prompt
+    let prompt = feature_config
+        .get("prompt")
+        .ok_or_else(|| AppError::UnknownError("标题生成配置错误: 缺少 prompt".to_string()))?
+        .value
+        .clone();
+
+    // summary_length
+    let summary_length_str = feature_config
+        .get("summary_length")
+        .ok_or_else(|| AppError::UnknownError("标题生成配置错误: 缺少 summary_length".to_string()))?
+        .value
+        .clone();
+    let summary_length = summary_length_str.parse::<i32>().map_err(|_| {
+        AppError::UnknownError("标题生成配置错误: summary_length 必须是整数".to_string())
+    })?;
 
         let mut context = String::new();
         if summary_length == -1 {
@@ -59,7 +81,12 @@ pub async fn generate_title(
                 );
             }
         } else {
-            let unsize_summary_length: usize = summary_length.try_into().unwrap();
+            // 仅在非 -1 的情况下安全地转换为 usize
+            let unsize_summary_length: usize = if summary_length < 0 {
+                0
+            } else {
+                summary_length as usize
+            };
             if content.is_empty() {
                 if user_prompt.len() > unsize_summary_length {
                     context.push_str(
@@ -102,7 +129,9 @@ pub async fn generate_title(
         }
 
         let llm_db = LLMDatabase::new(app_handle).map_err(AppError::from)?;
-        let model_detail = llm_db.get_llm_model_detail(&provider_id, &model_code).unwrap();
+        let model_detail = llm_db
+            .get_llm_model_detail(&provider_id, &model_code)
+            .map_err(|e| AppError::DatabaseError(format!("获取模型配置失败: {}", e)))?;
 
         // 从配置中获取网络代理和超时设置
         let network_proxy = get_network_proxy_from_config(&config_feature_map);
@@ -148,24 +177,27 @@ pub async fn generate_title(
         match response {
             Err(e) => {
                 error!(error = %e, conversation_id, "chat error during title generation");
+                // 将错误发送到前端，并同时返回错误供调用方处理
                 send_error_to_appropriate_window(&window, "生成对话标题失败，请检查配置");
+                return Err(AppError::UnknownError(format!("生成对话标题失败: {}", e)));
             }
             Ok(response_text) => {
                 debug!(conversation_id, response_text, "generated title successfully");
                 let conversation_db =
                     ConversationDatabase::new(app_handle).map_err(AppError::from)?;
-                let _ = conversation_db.conversation_repo().unwrap().update_name(&Conversation {
+                if let Err(e) = conversation_db.conversation_repo().unwrap().update_name(&Conversation {
                     id: conversation_id,
                     name: response_text.clone(),
                     assistant_id: None,
                     created_time: chrono::Utc::now(),
-                });
-                window
-                    .emit(TITLE_CHANGE_EVENT, (conversation_id, response_text.clone()))
-                    .map_err(|e| e.to_string())
-                    .unwrap();
+                }) {
+                    error!(error = %e, conversation_id, "failed to update conversation name after title generation");
+                    return Err(AppError::DatabaseError("更新对话标题失败".to_string()));
+                }
+                if let Err(e) = window.emit(TITLE_CHANGE_EVENT, (conversation_id, response_text.clone())) {
+                    warn!(error = %e, conversation_id, "failed to emit TITLE_CHANGE_EVENT");
+                }
             }
         }
-    }
     Ok(())
 }
