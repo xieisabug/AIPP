@@ -384,6 +384,7 @@ async fn handle_captured_tool_calls_common(
 }
 
 /// 助手提及信息
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AssistantMention {
     pub assistant_id: i64,
@@ -394,6 +395,7 @@ pub struct AssistantMention {
 }
 
 /// 消息解析结果
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct MessageParseResult {
     pub mentions: Vec<AssistantMention>,
@@ -403,6 +405,7 @@ pub struct MessageParseResult {
 }
 
 /// 位置限制选项
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum PositionRestriction {
     Anywhere,     // 任何位置
@@ -1161,6 +1164,12 @@ async fn attempt_stream_chat(
     let mut response_message_id: Option<i64> = None;
     let mut captured_tool_calls: Vec<ToolCall> = Vec::new();
 
+    // Diagnostics: counters for stream content
+    let mut response_chunk_count: usize = 0;
+    let mut response_char_count: usize = 0;
+    let mut reasoning_chunk_count: usize = 0;
+    let mut reasoning_char_count: usize = 0;
+
     let generation_group_id =
         generation_group_id_override.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
@@ -1178,6 +1187,8 @@ async fn attempt_stream_chat(
                 match stream_event {
                     ChatStreamEvent::Start => {}
                     ChatStreamEvent::Chunk(chunk) => {
+                        response_chunk_count += 1;
+                        response_char_count += chunk.content.chars().count();
                         if current_output_type == OutputType::Reasoning {
                             if let (Some(msg_id), Some(start_time)) =
                                 (reasoning_message_id, reasoning_start_time)
@@ -1261,6 +1272,8 @@ async fn attempt_stream_chat(
                         }
                     }
                     ChatStreamEvent::ReasoningChunk(reasoning_chunk) => {
+                        reasoning_chunk_count += 1;
+                        reasoning_char_count += reasoning_chunk.content.chars().count();
                         if current_output_type != OutputType::Reasoning {
                             current_output_type = OutputType::Reasoning;
                         }
@@ -1310,6 +1323,19 @@ async fn attempt_stream_chat(
                             captured_tool_calls = tool_calls;
                             debug!(?captured_tool_calls, "captured tool calls");
                         }
+
+                        // Info summary for easier debugging / visibility
+                        info!(
+                            response_chunks = response_chunk_count,
+                            response_chars = response_char_count,
+                            reasoning_chunks = reasoning_chunk_count,
+                            reasoning_chars = reasoning_char_count,
+                            response_len = response_content.chars().count(),
+                            reasoning_len = reasoning_content.chars().count(),
+                            has_response_message = response_message_id.is_some(),
+                            captured_tool_calls = captured_tool_calls.len(),
+                            "stream summary"
+                        );
 
                         // If native tool calls were captured, persist UI hints and DB records, and optionally auto-run
                         if !captured_tool_calls.is_empty() {
@@ -1422,6 +1448,11 @@ async fn attempt_stream_chat(
                                     &window,
                                     conversation_id,
                                 )?;
+
+                                // 明确记录无内容结束的情况
+                                if response_chunk_count == 0 && reasoning_chunk_count == 0 {
+                                    info!("stream ended with no content chunks");
+                                }
                             }
                         }
 
