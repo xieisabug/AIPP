@@ -154,7 +154,16 @@ fn query_accessibility_permissions() -> bool {
 
 #[tauri::command]
 async fn get_selected() -> Result<String, String> {
-    let result = get_selected_text().unwrap_or_default();
+    // First try native selected-text crate
+    let mut result = get_selected_text().unwrap_or_default();
+
+    // Fallback on macOS: simulate Cmd+C and read from clipboard, then restore clipboard
+    #[cfg(target_os = "macos")]
+    if result.is_empty() {
+        if let Some(fallback) = copy_selection_via_clipboard_fallback() {
+            result = fallback;
+        }
+    }
     debug!(?result, "initialization result");
     Ok(result)
 }
@@ -170,6 +179,59 @@ async fn save_config(state: tauri::State<'_, AppState>, config: Config) -> Resul
 async fn get_config(state: tauri::State<'_, AppState>) -> Result<Config, String> {
     let selected_text = state.selected_text.lock().await;
     Ok(Config { selected_text: selected_text.clone() })
+}
+
+#[cfg(target_os = "macos")]
+fn read_clipboard_text() -> Option<String> {
+    use std::process::{Command, Stdio};
+    let output = Command::new("pbpaste")
+        .stdout(Stdio::piped())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&output.stdout).to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+#[cfg(target_os = "macos")]
+fn write_clipboard_text(text: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    if let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn copy_selection_via_clipboard_fallback() -> Option<String> {
+    use std::thread;
+    use std::time::Duration;
+
+    // Save current clipboard content
+    let previous = read_clipboard_text().unwrap_or_default();
+
+    // Ask the frontmost app to copy selection
+    if let Err(e) = crate::artifacts::applescript::run_applescript(
+        "tell application \"System Events\" to keystroke \"c\" using {command down}"
+    ) {
+        debug!(error=%format!("{:?}", e), "AppleScript copy failed");
+    }
+
+    // Wait a bit for clipboard to update
+    thread::sleep(Duration::from_millis(180));
+
+    // Read new clipboard
+    let new_clip = read_clipboard_text().unwrap_or_default();
+
+    // Restore previous clipboard (best effort)
+    write_clipboard_text(&previous);
+
+    if new_clip.is_empty() || new_clip == previous { None } else { Some(new_clip) }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -460,18 +522,25 @@ pub(crate) fn register_global_shortcuts(app_handle: &tauri::AppHandle) {
                         }
                     }
 
-                    // 捕获选中文本
+                    // 捕获选中文本（优先原生方式，失败则使用复制剪贴板回退策略）
+                    let mut captured: Option<String> = None;
                     match get_selected_text() {
-                        Ok(selected_text) => {
-                            if !selected_text.is_empty() {
-                                let _ = _app.emit("get_selected_text_event", selected_text.clone());
-                                if let Some(state) = _app.try_state::<AppState>() {
-                                    *state.selected_text.blocking_lock() = selected_text;
-                                }
+                        Ok(t) if !t.is_empty() => captured = Some(t),
+                        Ok(_) => {}
+                        Err(e) => debug!("获取选中文本失败: {}", e),
+                    }
+
+                    #[cfg(target_os = "macos")]
+                    if captured.as_deref().unwrap_or("").is_empty() {
+                        captured = copy_selection_via_clipboard_fallback();
+                    }
+
+                    if let Some(text) = captured {
+                        if !text.is_empty() {
+                            let _ = _app.emit("get_selected_text_event", text.clone());
+                            if let Some(state) = _app.try_state::<AppState>() {
+                                *state.selected_text.blocking_lock() = text;
                             }
-                        }
-                        Err(e) => {
-                            debug!("获取选中文本失败: {}", e);
                         }
                     }
                     // 打开 Ask 窗口
