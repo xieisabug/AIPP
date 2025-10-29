@@ -105,6 +105,7 @@ fn get_window_size_and_position(
 }
 
 pub fn create_ask_window(app: &AppHandle) {
+    let t_build_total = std::time::Instant::now();
     let window_builder =
         WebviewWindowBuilder::new(app, "ask", WebviewUrl::App("index.html".into()))
             .title("Aipp")
@@ -119,6 +120,8 @@ pub fn create_ask_window(app: &AppHandle) {
 
     match window_builder.build() {
         Ok(window) => {
+            let dt = t_build_total.elapsed().as_millis();
+            info!(elapsed_ms=%dt, "Ask window built (first creation)");
             let window_clone = window.clone();
             window.on_window_event(move |event| {
                 if let WindowEvent::CloseRequested { .. } = event {
@@ -341,23 +344,35 @@ struct ReactComponentPayload {
 
 pub fn handle_open_ask_window(app_handle: &AppHandle) {
     use chrono::Local;
-
+    let t_handle = std::time::Instant::now();
     let ask_window = app_handle.get_webview_window("ask");
 
     match ask_window {
         None => {
             info!(ts=%Local::now().to_string(), "Creating ask window");
+            let t_create = std::time::Instant::now();
             create_ask_window(app_handle);
+            let dt = t_create.elapsed().as_millis();
+            info!(elapsed_ms=%dt, "create_ask_window returned");
         }
         Some(window) => {
             debug!(ts=%Local::now().to_string(), "Focusing ask window");
+            let t_focus = std::time::Instant::now();
             if window.is_minimized().unwrap_or(false) {
+                let t_unmin = std::time::Instant::now();
                 window.unminimize().unwrap();
+                info!(elapsed_ms=%t_unmin.elapsed().as_millis(), "ask window unminimize");
             }
+            let t_show = std::time::Instant::now();
             window.show().unwrap();
+            let show_ms = t_show.elapsed().as_millis();
+            let t_setf = std::time::Instant::now();
             window.set_focus().unwrap();
+            let focus_ms = t_setf.elapsed().as_millis();
+            info!(show_ms=%show_ms, focus_ms=%focus_ms, total_ms=%t_focus.elapsed().as_millis(), "ask window show+focus timings");
         }
     }
+    info!(elapsed_ms=%t_handle.elapsed().as_millis(), "handle_open_ask_window done");
 }
 
 pub fn awaken_aipp(app_handle: &AppHandle) {

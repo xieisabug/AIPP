@@ -211,11 +211,15 @@ fn write_clipboard_text(text: &str) {
 fn copy_selection_via_clipboard_fallback() -> Option<String> {
     use std::thread;
     use std::time::Duration;
+    let t_total = std::time::Instant::now();
 
     // Save current clipboard content
+    let t_prev = std::time::Instant::now();
     let previous = read_clipboard_text().unwrap_or_default();
+    let prev_ms = t_prev.elapsed().as_millis();
 
     // Ask the frontmost app to copy selection
+    let t_apple = std::time::Instant::now();
     if let Err(e) = crate::artifacts::applescript::run_applescript(
         "tell application \"System Events\" to keystroke \"c\" using {command down}"
     ) {
@@ -224,12 +228,20 @@ fn copy_selection_via_clipboard_fallback() -> Option<String> {
 
     // Wait a bit for clipboard to update
     thread::sleep(Duration::from_millis(180));
+    let apple_ms = t_apple.elapsed().as_millis();
 
     // Read new clipboard
+    let t_new = std::time::Instant::now();
     let new_clip = read_clipboard_text().unwrap_or_default();
+    let new_ms = t_new.elapsed().as_millis();
 
     // Restore previous clipboard (best effort)
+    let t_restore = std::time::Instant::now();
     write_clipboard_text(&previous);
+    let restore_ms = t_restore.elapsed().as_millis();
+
+    let total_ms = t_total.elapsed().as_millis();
+    info!(total_ms=%total_ms, read_prev_ms=%prev_ms, apple_copy_ms=%apple_ms, read_new_ms=%new_ms, restore_ms=%restore_ms, "Clipboard fallback timings");
 
     if new_clip.is_empty() || new_clip == previous { None } else { Some(new_clip) }
 }
@@ -514,6 +526,8 @@ pub(crate) fn register_global_shortcuts(app_handle: &tauri::AppHandle) {
             .with_handler(|_app, _shortcut, event| {
                 // 仅在按键释放时触发
                 if event.state() == ShortcutState::Released {
+                    let t_event = std::time::Instant::now();
+                    info!("Global shortcut released: start handling");
                     // 如果正在录入快捷键，忽略全局事件
                     if let Some(state) = _app.try_state::<AppState>() {
                         if *state.recording_shortcut.blocking_lock() {
@@ -522,29 +536,106 @@ pub(crate) fn register_global_shortcuts(app_handle: &tauri::AppHandle) {
                         }
                     }
 
-                    // 捕获选中文本（优先原生方式，失败则使用复制剪贴板回退策略）
-                    let mut captured: Option<String> = None;
-                    match get_selected_text() {
-                        Ok(t) if !t.is_empty() => captured = Some(t),
-                        Ok(_) => {}
-                        Err(e) => debug!("获取选中文本失败: {}", e),
-                    }
-
+                    // macOS：使用“先复制，再延迟聚焦，再后台读取剪贴板”的策略，绕过慢速 crate
                     #[cfg(target_os = "macos")]
-                    if captured.as_deref().unwrap_or("").is_empty() {
-                        captured = copy_selection_via_clipboard_fallback();
+                    {
+                        use std::thread;
+                        use std::time::Duration;
+
+                        // 1) 读取当前剪贴板
+                        let t_prev = std::time::Instant::now();
+                        let previous = read_clipboard_text().unwrap_or_default();
+                        let prev_ms = t_prev.elapsed().as_millis();
+
+                        // 2) 立刻向前台应用发送 Cmd+C（尽量不等我们窗口抢焦点）
+                        let t_apple = std::time::Instant::now();
+                        if let Err(e) = crate::artifacts::applescript::run_applescript(
+                            "tell application \"System Events\" to keystroke \"c\" using {command down}"
+                        ) {
+                            debug!(error=%format!("{:?}", e), "AppleScript copy dispatch failed");
+                        }
+                        let apple_ms = t_apple.elapsed().as_millis();
+
+                        // 3) 稍等 25ms 再打开/聚焦 Ask 窗口，给前台应用时间处理复制
+                        thread::sleep(Duration::from_millis(25));
+                        let t_open = std::time::Instant::now();
+                        handle_open_ask_window(_app);
+                        info!(elapsed_ms=%t_open.elapsed().as_millis(), "Ask window opened/focused (mac, delayed)");
+
+                        // 4) 后台线程：等待 150~180ms，读取剪贴板，恢复之前内容，若变更则发事件
+                        let app_handle = _app.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            use std::thread;
+                            use std::time::Duration;
+                            let t_worker = std::time::Instant::now();
+                            thread::sleep(Duration::from_millis(160));
+                            let t_new = std::time::Instant::now();
+                            let new_clip = read_clipboard_text().unwrap_or_default();
+                            let new_ms = t_new.elapsed().as_millis();
+                            let t_restore = std::time::Instant::now();
+                            write_clipboard_text(&previous);
+                            let restore_ms = t_restore.elapsed().as_millis();
+                            info!(prev_ms=%prev_ms, apple_ms=%apple_ms, read_new_ms=%new_ms, restore_ms=%restore_ms, worker_total_ms=%t_worker.elapsed().as_millis(), "Copy-first worker timings (mac)");
+
+                            if !new_clip.is_empty() && new_clip != previous {
+                                let _ = app_handle.emit("get_selected_text_event", new_clip.clone());
+                                if let Some(state) = app_handle.try_state::<AppState>() {
+                                    *state.selected_text.blocking_lock() = new_clip;
+                                }
+                            } else {
+                                debug!("Copy-first worker: no new selection or same as previous");
+                            }
+                        });
+
+                        let dt_total = t_event.elapsed().as_millis();
+                        info!(elapsed_ms=%dt_total, "Global shortcut (mac) initial path done");
+                        return;
                     }
 
-                    if let Some(text) = captured {
-                        if !text.is_empty() {
-                            let _ = _app.emit("get_selected_text_event", text.clone());
-                            if let Some(state) = _app.try_state::<AppState>() {
-                                *state.selected_text.blocking_lock() = text;
+                    // 其他平台：保留原有快速获取 + 异步回退
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        // 先尝试快速获取（不阻塞 UI）
+                        let mut immediate: Option<String> = None;
+                        let t_sel = std::time::Instant::now();
+                        match get_selected_text() {
+                            Ok(t) if !t.is_empty() => {
+                                let dt = t_sel.elapsed().as_millis();
+                                info!(elapsed_ms=%dt, len=t.len(), "Fast selected-text attempt succeeded");
+                                immediate = Some(t)
+                            }
+                            Ok(_) => {
+                                let dt = t_sel.elapsed().as_millis();
+                                info!(elapsed_ms=%dt, "Fast selected-text attempt empty");
+                            }
+                            Err(e) => {
+                                let dt = t_sel.elapsed().as_millis();
+                                warn!(elapsed_ms=%dt, error=%e.to_string(), "Fast selected-text attempt failed");
                             }
                         }
+
+                        // 立即打开 Ask 窗口，提升唤醒速度
+                        let t_open = std::time::Instant::now();
+                        handle_open_ask_window(_app);
+                        let dt_open = t_open.elapsed().as_millis();
+                        info!(elapsed_ms=%dt_open, "Ask window opened/focused (handle_open_ask_window)");
+
+                        // 如果快速获取到了，立刻发给前端并缓存
+                        if let Some(text) = immediate {
+                            if !text.is_empty() {
+                                let _ = _app.emit("get_selected_text_event", text.clone());
+                                if let Some(state) = _app.try_state::<AppState>() {
+                                    *state.selected_text.blocking_lock() = text;
+                                }
+                                let dt_total = t_event.elapsed().as_millis();
+                                info!(elapsed_ms=%dt_total, "Global shortcut handling done (no fallback needed)");
+                                return;
+                            }
+                        }
+
+                        let dt_total = t_event.elapsed().as_millis();
+                        info!(elapsed_ms=%dt_total, "Global shortcut handling finished initial path");
                     }
-                    // 打开 Ask 窗口
-                    handle_open_ask_window(_app);
                 }
             })
             .build(),
