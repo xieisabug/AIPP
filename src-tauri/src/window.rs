@@ -4,6 +4,7 @@ use tauri::webview::DownloadEvent;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri::{LogicalPosition, LogicalSize};
 use tracing::{debug, error, info, warn};
+use tauri_plugin_notification::NotificationExt;
 
 /// 当按照显示器大小调整窗口尺寸时保留的屏幕占比（90%）
 const SCREEN_MARGIN_RATIO: f64 = 0.9;
@@ -194,6 +195,20 @@ pub fn create_chat_ui_window(app: &AppHandle) {
                     }
                     DownloadEvent::Finished { url, path, success } => {
                         debug!("downloaded {} to {:?}, success: {}", url, path, success);
+                        if success {
+                            let title = "下载完成";
+                            let body = format!("文件已保存到：{:?}", download_path);
+                            if let Err(e) = webview
+                                .app_handle()
+                                .notification()
+                                .builder()
+                                .title(title)
+                                .body(&body)
+                                .show()
+                            {
+                                warn!(error = %e, "failed to show download notification");
+                            }
+                        }
                     }
                     _ => {}
                 }
