@@ -101,20 +101,8 @@ export const useTheme = () => {
         applyTheme(resolvedTheme);
     }, [config, isLoading, detectSystemTheme, resolveTheme, applyTheme]);
 
-    // 初始化时设置主题
-    useEffect(() => {
-        const systemTheme = detectSystemTheme();
-        const mode: ThemeMode = 'system'; // 默认值，会被config覆盖
-        const resolvedTheme = resolveTheme(mode, systemTheme);
-        
-        setThemeState({
-            mode,
-            resolvedTheme,
-            systemTheme
-        });
-
-        applyTheme(resolvedTheme);
-    }, [detectSystemTheme, resolveTheme, applyTheme]);
+    // 注意：不在初始化时强制设置主题，避免在子组件挂载时反复切换 .dark 导致白屏闪烁。
+    // 初始主题已在 index.html 里通过内联脚本应用；当配置或系统主题变化时再更新。
 
     // 监听跨窗口主题同步事件
     useEffect(() => {
