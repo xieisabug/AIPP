@@ -5,6 +5,8 @@ import { useCodeTheme } from '../hooks/useCodeTheme';
 import type { BundledTheme } from 'shiki';
 import { Response } from '@/components/ai-elements/response';
 import { invoke } from '@tauri-apps/api/core';
+import { useTheme } from '../hooks/useTheme';
+import type { MermaidConfig } from 'streamdown';
 
 interface UnifiedMarkdownProps {
     children: string;
@@ -38,6 +40,20 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
 
     // 获取当前代码主题（提供明暗两套给 Shiki）
     const { lightTheme, darkTheme } = useCodeTheme();
+
+    // 读取系统/用户解析后的主题
+    const { resolvedTheme } = useTheme();
+
+    // 根据明暗主题动态生成 mermaid 配置
+    const mermaidConfig = useMemo<MermaidConfig>(() => {
+        const isDark = resolvedTheme === 'dark';
+        return {
+            theme: isDark ? 'dark' : 'default',
+            themeVariables: {
+                darkMode: isDark,
+            },
+        };
+    }, [resolvedTheme]);
 
     // 迁移到 ai-elements 的 Response 组件后，不再手动注入运行按钮。
 
@@ -232,11 +248,13 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
     const markdownNode = (
         <div ref={containerRef} className="contents">
             <Response
+                key={`md-${resolvedTheme}`}
                 parseIncompleteMarkdown={!disableMarkdownSyntax}
                 // 使用统一的 Remark 插件；Rehype 使用 Response/Streamdown 默认（包含 harden/raw/katex）
                 remarkPlugins={[...markdownConfig.remarkPlugins] as any}
                 components={customComponents}
                 shikiTheme={[lightTheme as BundledTheme, darkTheme as BundledTheme]}
+                mermaidConfig={mermaidConfig}
                 controls={{
                     code: true,
                     table: true,
