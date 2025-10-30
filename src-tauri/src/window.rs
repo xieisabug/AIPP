@@ -1,5 +1,6 @@
 use crate::artifacts::artifacts_db::ArtifactCollection;
 use serde::{Deserialize, Serialize};
+use tauri::webview::DownloadEvent;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri::{LogicalPosition, LogicalSize};
 use tracing::{debug, error, info, warn};
@@ -179,6 +180,25 @@ pub fn create_chat_ui_window(app: &AppHandle) {
             .fullscreen(false)
             .resizable(true)
             .decorations(true)
+            .on_download(|webview, event| { 
+                let download_path = webview
+                            .app_handle()
+                            .path()
+                            .download_dir()
+                            .unwrap_or_default();
+                        
+                match event {
+                    DownloadEvent::Requested { url, destination } => {
+                        debug!("downloading {} to {}", url, download_path.clone().to_string_lossy());
+                        *destination = download_path.join(&mut *destination);
+                    }
+                    DownloadEvent::Finished { url, path, success } => {
+                        debug!("downloaded {} to {:?}, success: {}", url, path, success);
+                    }
+                    _ => {}
+                }
+                true 
+            })
             .disable_drag_drop_handler();
 
     // macOS 若仍有偏差可考虑额外使用 parent(&window) 方案
