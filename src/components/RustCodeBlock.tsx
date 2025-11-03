@@ -13,9 +13,11 @@ interface RustCodeBlockProps {
     children: React.ReactNode; // code string
     onCodeRun?: (lang: string, code: string) => void;
     className?: string;
+    // 是否处于大模型流式输出中（用于首次阈值超限时自动折叠）
+    isStreaming?: boolean;
 }
 
-const RustCodeBlock: React.FC<RustCodeBlockProps> = ({ language, children, onCodeRun, className = "" }) => {
+const RustCodeBlock: React.FC<RustCodeBlockProps> = ({ language, children, onCodeRun, className = "", isStreaming = false }) => {
     const code = useMemo(() => (typeof children === "string" ? children : String(children)), [children]);
     const { resolvedTheme } = useTheme();
     const [html, setHtml] = useState<string>("");
@@ -28,6 +30,14 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({ language, children, onCod
     const rafRef = useRef<number | null>(null);
     const { currentTheme } = useCodeTheme();
     const rustHighlight = useRustHighlight();
+
+    // 折叠逻辑相关
+    const COLLAPSED_MAX_HEIGHT = 320; // px，固定高度容器
+    const [isCollapsed, setIsCollapsed] = useState(false);
+    const [isOverflow, setIsOverflow] = useState(false);
+    const userToggledRef = useRef(false);
+    const streamingAutoCollapsedOnceRef = useRef(false);
+    const hasInitialDecisionRef = useRef(false); // 非流式时仅在首次渲染做一次自动判断
 
     useEffect(() => {
         let cancelled = false;
@@ -44,6 +54,56 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({ language, children, onCod
             cancelled = true;
         };
     }, [language, code, resolvedTheme, currentTheme]);
+
+    // 计算是否超出折叠阈值，并在需要时进行自动折叠
+    useEffect(() => {
+        const el = codeRef.current;
+        if (!el) return;
+
+        const measure = () => {
+            const contentHeight = el.scrollHeight; // 实际内容高度
+            const overflow = contentHeight > COLLAPSED_MAX_HEIGHT + 4; // 允许少量误差
+            setIsOverflow(overflow);
+
+            // 用户手动切换后，不再自动改变折叠状态
+            if (userToggledRef.current) return;
+
+            if (isStreaming) {
+                // 流式场景：仅在第一次超过阈值时自动收起
+                if (overflow && !streamingAutoCollapsedOnceRef.current) {
+                    setIsCollapsed(true);
+                    streamingAutoCollapsedOnceRef.current = true;
+                    // 一旦在流式阶段自动折叠，视为已完成初始决策，避免流结束时状态闪烁
+                    hasInitialDecisionRef.current = true;
+                }
+            } else {
+                // 如果在流式阶段已经自动折叠过，则保持当前状态，不再自动调整
+                if (streamingAutoCollapsedOnceRef.current) {
+                    return;
+                }
+                // 非流式场景：首次渲染时根据是否溢出设定初始折叠状态
+                if (!hasInitialDecisionRef.current) {
+                    setIsCollapsed(overflow);
+                    hasInitialDecisionRef.current = true;
+                }
+            }
+        };
+
+        // 首次测量
+        measure();
+
+        // 监听窗口大小变化，重新测量（避免布局变化导致判断不准）
+        const onResize = () => {
+            // 使用 RAF，避免高频触发
+            if (rafRef.current) cancelAnimationFrame(rafRef.current);
+            rafRef.current = requestAnimationFrame(measure);
+        };
+        window.addEventListener('resize', onResize);
+        return () => {
+            window.removeEventListener('resize', onResize);
+        };
+        // 依赖 html 与 code，在代码或高亮结果变化时重新测量
+    }, [html, code, isStreaming]);
 
     // 监听滚动判断是否需要 sticky - 使用 RAF 节流
     useEffect(() => {
@@ -100,6 +160,12 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({ language, children, onCod
         setTimeout(() => setCopyState("copy"), 1500);
     }, [code]);
 
+    const toggleCollapse = useCallback(() => {
+        // 标记用户手动切换
+        userToggledRef.current = true;
+        setIsCollapsed((prev) => !prev);
+    }, []);
+
     return (
         <div 
             ref={containerRef}
@@ -127,17 +193,44 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({ language, children, onCod
                 <IconButton icon={<Run fill="black" />} onClick={() => onCodeRun?.(language, code)} />
             </div>
 
-            {/* Highlighted HTML from Rust */}
-            {html ? (
-                <div
-                    ref={codeRef}
-                    className="overflow-auto text-sm leading-6 font-mono"
-                    dangerouslySetInnerHTML={{ __html: html }}
-                />
-            ) : (
-                <pre className="overflow-auto text-sm leading-6 font-mono p-3">
-                    <code>{code}</code>
-                </pre>
+            {/* Code content with collapsible container */}
+            <div
+                className="relative"
+                style={{
+                    maxHeight: isCollapsed ? COLLAPSED_MAX_HEIGHT : undefined,
+                    overflow: isCollapsed ? 'hidden' : 'auto',
+                }}
+            >
+                {html ? (
+                    <div
+                        ref={codeRef}
+                        className="overflow-auto text-sm leading-6 font-mono"
+                        dangerouslySetInnerHTML={{ __html: html }}
+                    />
+                ) : (
+                    <pre ref={codeRef as any} className="overflow-auto text-sm leading-6 font-mono p-3">
+                        <code>{code}</code>
+                    </pre>
+                )}
+
+                {/* Bottom gradient hint when collapsed */}
+                {isCollapsed && isOverflow && (
+                    <div className="pointer-events-none absolute bottom-0 left-0 right-0 h-10 bg-gradient-to-t from-background/95 to-transparent" />
+                )}
+            </div>
+
+            {/* Expand/Collapse control */}
+            {isOverflow && (
+                <div className="flex justify-center p-1">
+                    <button
+                        type="button"
+                        onClick={toggleCollapse}
+                        className="px-2 py-1 text-xs text-foreground/80 hover:text-foreground transition-colors"
+                        aria-label={isCollapsed ? '展开代码' : '收起代码'}
+                    >
+                        {isCollapsed ? '展开' : '收起'}
+                    </button>
+                </div>
             )}
         </div>
     );

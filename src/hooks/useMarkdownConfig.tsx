@@ -12,13 +12,15 @@ import CodeBlock from '@/components/RustCodeBlock';
 interface UseMarkdownConfigOptions {
     onCodeRun?: (lang: string, code: string) => void;
     disableMarkdownSyntax?: boolean;
+    // 是否处于流式输出中，用于代码块自动折叠的首次触发
+    isStreaming?: boolean;
 }
 
 interface CustomComponents extends Components {
     antthinking: React.ElementType;
 }
 
-export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: UseMarkdownConfigOptions = {}) => {
+export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false, isStreaming = false }: UseMarkdownConfigOptions = {}) => {
     // 换行处理函数 - 完全按原样展示文本，保留所有换行和空行
     const renderTextWithBreaks = useCallback((children: React.ReactNode): React.ReactNode => {
         if (typeof children === 'string') {
@@ -78,6 +80,7 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
                     <CodeBlock
                         language={match[1]}
                         onCodeRun={onCodeRun || (() => {})}
+                        isStreaming={isStreaming}
                     >
                         {String(children).replace(/\n$/, '')}
                     </CodeBlock>
@@ -113,7 +116,7 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
                 );
             },
         }),
-        [onCodeRun, disableMarkdownSyntax, renderTextWithBreaks],
+        [onCodeRun, disableMarkdownSyntax, renderTextWithBreaks, isStreaming],
     );
 
     // 根据 disableMarkdownSyntax 决定使用哪些插件

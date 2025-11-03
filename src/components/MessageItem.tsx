@@ -72,9 +72,11 @@ const MessageItem = React.memo<MessageItemProps>(
 
         // 统一的 Markdown 配置，根据用户消息类型和配置决定是否禁用 Markdown 语法
         const isUserMessage = message.message_type === "user";
+        const isStreaming = !!streamEvent && !streamEvent.is_done;
         const markdownConfig = useMarkdownConfig({
             onCodeRun,
             disableMarkdownSyntax: isUserMessage && !isUserMessageMarkdownEnabled,
+            isStreaming,
         });
 
         const { processContent } = useMcpToolCallProcessor(markdownConfig, {
@@ -106,6 +108,7 @@ const MessageItem = React.memo<MessageItemProps>(
                                 // 使用 noProseWrapper，避免嵌套重复 prose 容器
                                 noProseWrapper
                                 onCodeRun={onCodeRun}
+                                isStreaming={isStreaming}
                             >
                                 {markdownContent}
                             </UnifiedMarkdown>
