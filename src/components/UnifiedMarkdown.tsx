@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import ReactMarkdown, { Components } from 'react-markdown';
-import CodeBlock from './CodeBlock';
+import CodeBlock from './RustCodeBlock';
 import { useMarkdownConfig } from '../hooks/useMarkdownConfig';
 
 interface UnifiedMarkdownProps {
@@ -103,4 +103,13 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
     );
 };
 
-export default UnifiedMarkdown;
+// 避免不必要的重渲染：仅在核心 props/children 变更时更新
+export default React.memo(UnifiedMarkdown, (prev, next) => {
+    return (
+        prev.children === next.children &&
+        prev.className === next.className &&
+        prev.disableMarkdownSyntax === next.disableMarkdownSyntax &&
+        prev.noProseWrapper === next.noProseWrapper &&
+        prev.onCodeRun === next.onCodeRun
+    );
+});

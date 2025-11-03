@@ -7,7 +7,7 @@ import {
     REHYPE_PLUGINS,
     MARKDOWN_COMPONENTS_BASE,
 } from '@/constants/markdown';
-import CodeBlock from '@/components/CodeBlock';
+import CodeBlock from '@/components/RustCodeBlock';
 
 interface UseMarkdownConfigOptions {
     onCodeRun?: (lang: string, code: string) => void;
@@ -79,7 +79,7 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
                         language={match[1]}
                         onCodeRun={onCodeRun || (() => {})}
                     >
-                        {children}
+                        {String(children).replace(/\n$/, '')}
                     </CodeBlock>
                 ) : (
                     <code

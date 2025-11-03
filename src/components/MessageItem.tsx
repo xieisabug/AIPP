@@ -77,7 +77,7 @@ const MessageItem = React.memo<MessageItemProps>(
             disableMarkdownSyntax: isUserMessage && !isUserMessageMarkdownEnabled,
         });
 
-        const mcpProcessor = useMcpToolCallProcessor(markdownConfig, {
+        const { processContent } = useMcpToolCallProcessor(markdownConfig, {
             conversationId,
             messageId: message.id,
             mcpToolCallStates,
@@ -112,11 +112,11 @@ const MessageItem = React.memo<MessageItemProps>(
                         );
 
                         // MCP 工具调用后处理
-                        return mcpProcessor.processContent(markdownContent, element);
+                        return processContent(markdownContent, element);
                     },
                     true
                 ),
-            [markdownContent, onCodeRun, mcpProcessor, message.id, isUserMessage, isUserMessageMarkdownEnabled]
+            [markdownContent, onCodeRun, processContent, message.id, isUserMessage, isUserMessageMarkdownEnabled]
         );
 
         // 早期返回：reasoning 类型消息

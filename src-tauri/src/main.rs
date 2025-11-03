@@ -22,6 +22,7 @@ use crate::api::assistant_api::{
     update_assistant_mcp_config, update_assistant_mcp_tool_config,
     update_assistant_model_config_value,
 };
+use crate::api::highlight_api::{highlight_code, list_syntect_themes};
 use crate::api::attachment_api::{add_attachment, open_attachment_with_default_app};
 use crate::api::conversation_api::{
     create_conversation_with_messages, create_message, delete_conversation, fork_conversation,
@@ -456,7 +457,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             get_sub_task_execution_detail_for_ui,
             cancel_sub_task_execution,
                get_sub_task_mcp_calls_for_ui, cancel_sub_task_execution_for_ui,
-            ensure_hidden_search_window
+            highlight_code,
+            ensure_hidden_search_window,
+            list_syntect_themes
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");

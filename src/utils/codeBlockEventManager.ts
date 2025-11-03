@@ -26,11 +26,21 @@ class CodeBlockEventManager {
         };
     }
 
+    private rafPending = false;
+    private lastMouseEvent: MouseEvent | null = null;
+
     private handleGlobalMouseMove = (e: MouseEvent) => {
         this.mousePosition = { x: e.clientX, y: e.clientY };
-        // 通知所有注册的 CodeBlock
-        this.codeBlocks.forEach((handlers) => {
-            handlers.onMouseMove(e);
+        this.lastMouseEvent = e;
+        if (this.rafPending) return;
+        this.rafPending = true;
+        requestAnimationFrame(() => {
+            const evt = this.lastMouseEvent as MouseEvent | null;
+            // 通知所有注册的 CodeBlock（每帧一次）
+            this.codeBlocks.forEach((handlers) => {
+                if (evt) handlers.onMouseMove(evt);
+            });
+            this.rafPending = false;
         });
     };
 
