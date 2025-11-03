@@ -227,8 +227,9 @@ impl MessageRepository {
     ) -> Result<Vec<(Message, Option<MessageAttachment>)>> {
         let mut stmt = self.conn.prepare("SELECT message.id, message.parent_id, message.conversation_id, message.message_type, message.content, message.llm_model_id, message.llm_model_name, message.created_time, message.start_time, message.finish_time, message.token_count, message.generation_group_id, message.parent_group_id, message.tool_calls_json, ma.attachment_type, ma.attachment_url, ma.attachment_content, ma.use_vector as attachment_use_vector, ma.token_count as attachment_token_count
                                           FROM message
-                                          LEFT JOIN message_attachment ma on message.id = ma.message_id
-                                          WHERE conversation_id = ?1")?;
+                                          LEFT JOIN message_attachment ma ON message.id = ma.message_id
+                                          WHERE message.conversation_id = ?1
+                                          ORDER BY message.created_time ASC")?;
         let rows = stmt.query_map(&[&conversation_id], |row| {
             let attachment_type_int: Option<i64> = row.get(14).ok();
             let attachment_type = attachment_type_int.map(AttachmentType::try_from).transpose()?;
@@ -496,30 +497,39 @@ impl ConversationDatabase {
 
     #[instrument(level = "debug", skip(self))]
     pub fn get_connection(&self) -> rusqlite::Result<Connection> {
-        Connection::open(&self.db_path)
+        let conn = Connection::open(&self.db_path)?;
+        // 性能优化：为所有连接设置更合适的 PRAGMA
+        // - WAL 能改善读写并发性能
+        // - synchronous=NORMAL 在保证安全的同时提升速度
+        // - busy_timeout 防止短暂锁竞争导致的失败
+        // - temp_store=MEMORY、适度增大 cache_size 提升查询性能
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;\nPRAGMA synchronous=NORMAL;\nPRAGMA foreign_keys=ON;\nPRAGMA busy_timeout=5000;\nPRAGMA temp_store=MEMORY;\nPRAGMA cache_size=-20000;",
+        )?;
+        Ok(conn)
     }
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn conversation_repo(&self) -> Result<ConversationRepository, AppError> {
-        let conn = Connection::open(self.db_path.clone()).map_err(AppError::from)?;
+        let conn = self.get_connection().map_err(AppError::from)?;
         Ok(ConversationRepository::new(conn))
     }
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn message_repo(&self) -> Result<MessageRepository, AppError> {
-        let conn = Connection::open(self.db_path.clone()).map_err(AppError::from)?;
+        let conn = self.get_connection().map_err(AppError::from)?;
         Ok(MessageRepository::new(conn))
     }
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn attachment_repo(&self) -> Result<MessageAttachmentRepository, AppError> {
-        let conn = Connection::open(self.db_path.clone()).map_err(AppError::from)?;
+        let conn = self.get_connection().map_err(AppError::from)?;
         Ok(MessageAttachmentRepository::new(conn))
     }
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn create_tables(&self) -> rusqlite::Result<()> {
-        let conn = Connection::open(self.db_path.clone()).unwrap();
+        let conn = self.get_connection().unwrap();
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS conversation (
@@ -579,6 +589,24 @@ impl ConversationDatabase {
                 use_vector         BOOLEAN default 0 not null,
                 token_count        INTEGER
             )",
+            [],
+        )?;
+
+        // 关键索引：显著提升查询性能
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_message_conversation_id ON message(conversation_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_message_conversation_created ON message(conversation_id, created_time)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_message_parent_id ON message(parent_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_message_attachment_message_id ON message_attachment(message_id)",
             [],
         )?;
 

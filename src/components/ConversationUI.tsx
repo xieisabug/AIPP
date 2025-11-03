@@ -397,17 +397,22 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             clearStreamingMessages(); // 清理流式消息
             clearShiningMessages(); // 清理闪烁状态
 
-            console.log(`conversationId change : ${conversationId}`);
+            console.log(`[PERF-FRONTEND] conversationId change : ${conversationId}`);
+            const frontendStartTime = performance.now();
 
             invoke<ConversationWithMessages>("get_conversation_with_messages", {
                 conversationId: +conversationId,
             })
                 .then((res: ConversationWithMessages) => {
+                    const backendDuration = performance.now() - frontendStartTime;
+                    console.log(`[PERF-FRONTEND] 后端返回数据耗时: ${backendDuration.toFixed(2)}ms, 消息数: ${res.messages.length}`);
+                    
                     // 检查请求是否已被取消
                     if (currentLoadingRef.cancelled) {
                         return;
                     }
 
+                    const setStateStartTime = performance.now();
                     setMessages(res.messages);
                     setConversation(res.conversation);
                     setIsLoadingShow(false); // 这里会触发 useLayoutEffect 中的聚焦
@@ -417,6 +422,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             setShiningMessageIds((prev) => new Set([...prev, res.messages[1].id]));
                         }
                     }
+                    
+                    const setStateDuration = performance.now() - setStateStartTime;
+                    console.log(`[PERF-FRONTEND] 设置状态耗时: ${setStateDuration.toFixed(2)}ms`);
                 })
                 .catch((error) => {
                     if (!currentLoadingRef.cancelled) {
@@ -493,10 +501,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             if (isLoadingShow) return;
             if (allDisplayMessages.length === 0) return;
 
+            const renderStartTime = performance.now();
+            console.log(`[PERF-FRONTEND] 开始渲染 ${allDisplayMessages.length} 条消息`);
+            
             // 等待渲染与布局稳定后再滚动（双 rAF）
             requestAnimationFrame(() =>
                 requestAnimationFrame(() => {
-                    // 忽略“用户上滑”状态，切换话题后总是滚动到底部
+                    const renderDuration = performance.now() - renderStartTime;
+                    console.log(`[PERF-FRONTEND] 消息渲染完成耗时: ${renderDuration.toFixed(2)}ms`);
+                    // 忽略"用户上滑"状态，切换话题后总是滚动到底部
                     smartScroll(true);
                 })
             );
