@@ -35,7 +35,7 @@ const ConversationTitle: React.FC<{
 
     return (
         <>
-            <div className="flex justify-between flex-none h-[68px] items-center px-6 box-border border-b border-border bg-background rounded-t-xl">
+            <div className="flex justify-between flex-none h-[68px] items-center px-6 box-border border-b border-border bg-background rounded-t-xl z-20">
                 <div className="flex-1 overflow-hidden">
                     <div className="text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap text-foreground cursor-pointer" onClick={onEdit}>{conversation?.name}</div>
                     <div className="text-xs text-muted-foreground overflow-hidden text-ellipsis whitespace-nowrap mt-0.5">{conversation?.assistant_name}</div>

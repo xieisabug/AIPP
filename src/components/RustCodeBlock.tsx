@@ -176,12 +176,12 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({ language, children, onCod
             {/* Toolbar - 根据 isSticky 切换定位方式 */}
             <div 
                 className={`
-                    z-50
+                    z-10
                     flex items-center gap-1 
                     bg-white/90 dark:bg-neutral-800/80 rounded p-1 backdrop-blur-sm
                     transition-opacity duration-150 ease-out
                     will-change-opacity
-                    ${isSticky ? 'fixed top-2 shadow-lg' : 'absolute right-2 top-2'}
+                    ${isSticky ? 'fixed top-20 shadow-lg' : 'absolute right-2 top-2'}
                     ${isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'}
                 `}
                 style={isSticky ? { right: `${toolbarRight}px` } : undefined}
