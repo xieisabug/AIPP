@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, Profiler } from "react";
 import MessageList from "./MessageList";
+import { onRenderCallback } from "../../hooks/usePerformanceMonitor";
 import NewChatComponent from "../NewChatComponent";
 import { Message, StreamEvent } from "../../data/Conversation";
 import { AssistantListItem } from "../../data/Assistant";
@@ -76,28 +77,32 @@ const ConversationContent: React.FC<ConversationContentProps> = ({
             <>
                 {/* Conversation-level sub-tasks - shown between header and messages */}
                 {isValidConversationId && (
-                    <SubTaskList
-                        conversation_id={conversationIdNum}
-                        onTaskDetailView={handleSubTaskDetailView}
-                    />
+                    <Profiler id="SubTaskList-Conversation" onRender={onRenderCallback as any}>
+                        <SubTaskList
+                            conversation_id={conversationIdNum}
+                            onTaskDetailView={handleSubTaskDetailView}
+                        />
+                    </Profiler>
                 )}
 
-                <MessageList
-                    allDisplayMessages={allDisplayMessages}
-                    streamingMessages={streamingMessages}
-                    shiningMessageIds={shiningMessageIds}
-                    reasoningExpandStates={reasoningExpandStates}
-                    mcpToolCallStates={mcpToolCallStates}
-                    generationGroups={generationGroups}
-                    selectedVersions={selectedVersions}
-                    getGenerationGroupControl={getGenerationGroupControl}
-                    handleGenerationVersionChange={handleGenerationVersionChange}
-                    onCodeRun={onCodeRun}
-                    onMessageRegenerate={onMessageRegenerate}
-                    onMessageEdit={onMessageEdit}
-                    onMessageFork={onMessageFork}
-                    onToggleReasoningExpand={onToggleReasoningExpand}
-                />
+                <Profiler id="MessageList-Container" onRender={onRenderCallback as any}>
+                    <MessageList
+                        allDisplayMessages={allDisplayMessages}
+                        streamingMessages={streamingMessages}
+                        shiningMessageIds={shiningMessageIds}
+                        reasoningExpandStates={reasoningExpandStates}
+                        mcpToolCallStates={mcpToolCallStates}
+                        generationGroups={generationGroups}
+                        selectedVersions={selectedVersions}
+                        getGenerationGroupControl={getGenerationGroupControl}
+                        handleGenerationVersionChange={handleGenerationVersionChange}
+                        onCodeRun={onCodeRun}
+                        onMessageRegenerate={onMessageRegenerate}
+                        onMessageEdit={onMessageEdit}
+                        onMessageFork={onMessageFork}
+                        onToggleReasoningExpand={onToggleReasoningExpand}
+                    />
+                </Profiler>
 
                 {/* Sub-task detail dialog */}
                 {selectedSubTask && (

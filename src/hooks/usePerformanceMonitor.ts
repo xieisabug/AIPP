@@ -120,6 +120,7 @@ export const usePerformanceMonitor = (
 };
 
 // React DevTools Profiler 的回调函数
+// 支持 React 18/19 不同签名（React 19 移除了 interactions 参数）
 export const onRenderCallback = (
     id: string,
     phase: "mount" | "update",
@@ -127,19 +128,22 @@ export const onRenderCallback = (
     baseDuration: number,
     startTime: number,
     commitTime: number,
-    interactions: Set<any>,
-    enabled: boolean = true,
+    interactionsOrEnabled?: Set<any> | boolean,
+    maybeEnabled?: boolean,
 ) => {
-    if (!isDevelopment || !enabled) {
-        return;
-    }
+    // 统一参数解析
+    const hasInteractionsParam = interactionsOrEnabled instanceof Set;
+    const interactions = hasInteractionsParam ? (interactionsOrEnabled as Set<any>) : undefined;
+    const enabled = hasInteractionsParam ? (maybeEnabled ?? true) : ((interactionsOrEnabled as boolean) ?? true);
+
+    if (!isDevelopment || !enabled) return;
 
     console.log(`📈 [Profiler-${id}] ${phase}:`, {
         actualDuration: `${actualDuration.toFixed(2)}ms`,
         baseDuration: `${baseDuration.toFixed(2)}ms`,
         startTime: `${startTime.toFixed(2)}ms`,
         commitTime: `${commitTime.toFixed(2)}ms`,
-        interactions: interactions.size,
+        interactions: interactions ? interactions.size : 0,
     });
 
     // 性能阈值警告

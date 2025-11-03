@@ -85,7 +85,7 @@ const MessageItem = React.memo<MessageItemProps>(
 
         // 处理自定义标签解析
         const markdownContent = useMemo(
-            () => measureSync(`markdown-parsing-${message.id}`, () => parseCustomTags(message.content), false),
+            () => measureSync(`markdown-parsing-${message.id}`, () => parseCustomTags(message.content), true),
             [message.content, parseCustomTags, message.id]
         );
 
@@ -114,7 +114,7 @@ const MessageItem = React.memo<MessageItemProps>(
                         // MCP 工具调用后处理
                         return mcpProcessor.processContent(markdownContent, element);
                     },
-                    false
+                    true
                 ),
             [markdownContent, onCodeRun, mcpProcessor, message.id, isUserMessage, isUserMessageMarkdownEnabled]
         );
@@ -145,6 +145,7 @@ const MessageItem = React.memo<MessageItemProps>(
                     <SubTaskList
                         conversation_id={conversationId}
                         message_id={message.id}
+                        autoLoad={false}
                         onTaskDetailView={handleSubTaskDetailView}
                         className="mb-2"
                     />

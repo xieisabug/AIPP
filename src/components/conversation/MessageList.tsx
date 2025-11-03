@@ -1,7 +1,8 @@
-import React, { useMemo } from "react";
+import React, { useMemo, Profiler } from "react";
 import MessageItem from "../MessageItem";
 import VersionPagination from "../VersionPagination";
 import { Message, StreamEvent } from "../../data/Conversation";
+import { onRenderCallback } from "../../hooks/usePerformanceMonitor";
 
 export interface MessageListProps {
     allDisplayMessages: Message[];
@@ -41,7 +42,8 @@ const MessageList: React.FC<MessageListProps> = ({
 }) => {
     // 将消息渲染逻辑拆分为更小的部分
     const messageElements = useMemo(() => {
-        return allDisplayMessages.map((message) => {
+        const t0 = performance.now();
+        const elements = allDisplayMessages.map((message) => {
             // 查找对应的流式消息信息（如果存在）
             const streamEvent = streamingMessages.get(message.id);
 
@@ -54,8 +56,8 @@ const MessageList: React.FC<MessageListProps> = ({
             return {
                 messageId: message.id,
                 messageElement: (
-                    <MemoizedMessageItem
-                        key={`message-${message.id}`}
+                    <Profiler id={`MessageItem-${message.id}`} onRender={onRenderCallback as any} key={`message-${message.id}`}>
+                        <MemoizedMessageItem
                         message={message}
                         streamEvent={streamEvent}
                         onCodeRun={onCodeRun}
@@ -75,11 +77,15 @@ const MessageList: React.FC<MessageListProps> = ({
                         conversationId={message.conversation_id}
                         // 传递 MCP 工具调用状态
                         mcpToolCallStates={mcpToolCallStates}
-                    />
+                        />
+                    </Profiler>
                 ),
                 groupControl,
             };
         });
+        const dt = performance.now() - t0;
+        console.log(`[PERF-FRONTEND] MessageList 构建元素耗时: ${dt.toFixed(2)}ms (count: ${elements.length})`);
+        return elements;
     }, [
         allDisplayMessages,
         streamingMessages,
@@ -219,7 +225,11 @@ const MessageList: React.FC<MessageListProps> = ({
         return elements;
     }, [messageElements, versionMap, placeholderElements, allDisplayMessages]);
 
-    return <>{allElements}</>;
+    return (
+        <Profiler id="MessageList" onRender={onRenderCallback as any}>
+            {allElements}
+        </Profiler>
+    );
 };
 
 export default React.memo(MessageList);

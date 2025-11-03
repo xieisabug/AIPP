@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import {
     SubTaskDefinition,
     SubTaskExecutionSummary,
@@ -140,15 +140,23 @@ export function useSubTaskManager(options: UseSubTaskManagerOptions) {
         []
     );
 
-    // 刷新数据
+    // 刷新数据（节流，避免短时间内重复刷新）
+    const lastRefreshRef = useRef<number>(0);
     const refresh = useCallback(async () => {
+        const now = Date.now();
+        if (now - lastRefreshRef.current < 500) {
+            // 500ms 内不重复刷新
+            return;
+        }
+        lastRefreshRef.current = now;
         await Promise.all([loadDefinitions(), loadExecutions()]);
     }, [loadDefinitions, loadExecutions]);
 
-    // 初始化加载
+    // 初始化加载（可选）
     useEffect(() => {
+        if (options.autoRefreshOnMount === false) return;
         refresh();
-    }, [refresh]);
+    }, [refresh, options.autoRefreshOnMount]);
 
     return {
         // 数据

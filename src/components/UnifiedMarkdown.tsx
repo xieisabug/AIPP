@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, Profiler } from 'react';
 import type { Options } from 'react-markdown';
 import { useMarkdownConfig } from '../hooks/useMarkdownConfig';
 import { useCodeTheme } from '../hooks/useCodeTheme';
@@ -7,6 +7,7 @@ import { Response } from '@/components/ai-elements/response';
 import { invoke } from '@tauri-apps/api/core';
 import { useTheme } from '../hooks/useTheme';
 import type { MermaidConfig } from 'streamdown';
+import { onRenderCallback } from '../hooks/usePerformanceMonitor';
 
 interface UnifiedMarkdownProps {
     children: string;
@@ -82,6 +83,21 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
 
     const containerRef = useRef<HTMLDivElement | null>(null);
 
+    // 在空闲或下一帧再执行重任务，避免阻塞首次渲染/布局
+    const scheduleIdle = (fn: () => void) => {
+        try {
+            const ric = (window as any).requestIdleCallback as
+                | ((cb: (deadline: { timeRemaining: () => number }) => void) => number)
+                | undefined;
+            if (typeof ric === 'function') {
+                ric(() => fn());
+                return;
+            }
+        } catch {}
+        // 退化为双 rAF，确保先完成一轮绘制
+        requestAnimationFrame(() => setTimeout(fn, 0));
+    };
+
     // 注入“运行”按钮至每个代码块的工具栏（不破坏 Streamdown/Shiki 默认渲染）
     useEffect(() => {
         if (!onCodeRun) return; // 未提供回调则不注入
@@ -138,25 +154,21 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
             });
         };
 
-        // 初次注入
-        injectRunButtons(root);
+        // 如果没有任何 code block，则不做任何注入与监听
+        const hasCodeHeader = root.querySelector('[data-code-block-header]') !== null;
+        if (!hasCodeHeader) return;
 
-        // 监听流式/动态变更，增量注入
-        const observer = new MutationObserver((mutations) => {
-            for (const m of mutations) {
-                if (m.type === 'childList') {
-                    // 尝试在变更节点内注入
-                    m.addedNodes.forEach((node) => {
-                        if (node instanceof HTMLElement) {
-                            injectRunButtons(node);
-                        }
-                    });
-                }
-            }
+        // 初次注入延后到空闲时间，避免阻塞首屏
+        let disposed = false;
+        scheduleIdle(() => {
+            if (disposed) return;
+            injectRunButtons(root);
         });
-        observer.observe(root, { childList: true, subtree: true });
 
-        return () => observer.disconnect();
+        // 对静态内容，不再附加全量 MutationObserver，减少布局抖动
+        return () => {
+            disposed = true;
+        };
     }, [onCodeRun]);
 
     // 注入"Mermaid 全屏预览"按钮，并在新窗口中打开交互预览
@@ -226,43 +238,42 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
             });
         };
 
-        // 初次注入
-        injectButtons(root);
+        // 如果没有 mermaid block，则直接返回
+        const hasMermaid = root.querySelector('[data-streamdown="mermaid-block"]') !== null;
+        if (!hasMermaid) return;
 
-        const observer = new MutationObserver((mutations) => {
-            for (const m of mutations) {
-                if (m.type === 'childList') {
-                    m.addedNodes.forEach((node) => {
-                        if (node instanceof HTMLElement) {
-                            injectButtons(node);
-                        }
-                    });
-                }
-            }
+        let disposed = false;
+        scheduleIdle(() => {
+            if (disposed) return;
+            injectButtons(root);
         });
-        observer.observe(root, { childList: true, subtree: true });
 
-        return () => observer.disconnect();
+        // 对静态内容不附加全局 MutationObserver，避免额外的重排
+        return () => {
+            disposed = true;
+        };
     }, [children]);
 
     const markdownNode = (
         <div ref={containerRef} className="contents">
-            <Response
-                key={`md-${resolvedTheme}`}
-                parseIncompleteMarkdown={!disableMarkdownSyntax}
-                // 使用统一的 Remark 插件；Rehype 使用 Response/Streamdown 默认（包含 harden/raw/katex）
-                remarkPlugins={[...markdownConfig.remarkPlugins] as any}
-                components={customComponents}
-                shikiTheme={[lightTheme as BundledTheme, darkTheme as BundledTheme]}
-                mermaidConfig={mermaidConfig}
-                controls={{
-                    code: true,
-                    table: true,
-                    mermaid: true,
-                }}
-            >
-                {children}
-            </Response>
+            <Profiler id={`Response-${children.length}`} onRender={onRenderCallback as any}>
+                <Response
+                    key={`md-${resolvedTheme}`}
+                    parseIncompleteMarkdown={!disableMarkdownSyntax}
+                    // 使用统一的 Remark 插件；Rehype 使用 Response/Streamdown 默认（包含 harden/raw/katex）
+                    remarkPlugins={[...markdownConfig.remarkPlugins] as any}
+                    components={customComponents}
+                    shikiTheme={[lightTheme as BundledTheme, darkTheme as BundledTheme]}
+                    mermaidConfig={mermaidConfig}
+                    controls={{
+                        code: true,
+                        table: true,
+                        mermaid: true,
+                    }}
+                >
+                    {children}
+                </Response>
+            </Profiler>
         </div>
     );
 

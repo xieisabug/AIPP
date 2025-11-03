@@ -396,6 +396,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             setGroupMergeMap(new Map()); // 切换对话时清理组合并状态
             clearStreamingMessages(); // 清理流式消息
             clearShiningMessages(); // 清理闪烁状态
+            // 立即清空当前消息与会话，避免先渲染旧数据再渲染新数据导致的双次渲染
+            setMessages([]);
+            setConversation(undefined);
 
             console.log(`[PERF-FRONTEND] conversationId change : ${conversationId}`);
             const frontendStartTime = performance.now();
