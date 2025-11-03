@@ -169,7 +169,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({ language, children, onCod
     return (
         <div 
             ref={containerRef}
-            className={`relative rounded-lg border border-border bg-background ${className}`}
+            className={`relative overflow-hidden bg-transparent ${className}`}
             onMouseEnter={() => setIsHovered(true)}
             onMouseLeave={() => setIsHovered(false)}
         >
@@ -178,7 +178,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({ language, children, onCod
                 className={`
                     z-10
                     flex items-center gap-1 
-                    bg-white/90 dark:bg-neutral-800/80 rounded p-1 backdrop-blur-sm
+                    bg-white/85 dark:bg-neutral-800/75 rounded-md p-1 backdrop-blur-sm shadow-sm
                     transition-opacity duration-150 ease-out
                     will-change-opacity
                     ${isSticky ? 'fixed top-20 shadow-lg' : 'absolute right-2 top-2'}
@@ -208,24 +208,23 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({ language, children, onCod
                         dangerouslySetInnerHTML={{ __html: html }}
                     />
                 ) : (
-                    <pre ref={codeRef as any} className="overflow-auto text-sm leading-6 font-mono p-3">
+                    <pre ref={codeRef as any} className="overflow-auto text-sm leading-6 font-mono p-3 bg-transparent">
                         <code>{code}</code>
                     </pre>
                 )}
-
-                {/* Bottom gradient hint when collapsed */}
+                {/* Gradient overlay when collapsed */}
                 {isCollapsed && isOverflow && (
-                    <div className="pointer-events-none absolute bottom-0 left-0 right-0 h-10 bg-gradient-to-t from-background/95 to-transparent" />
+                    <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-white dark:from-neutral-950 to-transparent pointer-events-none" />
                 )}
             </div>
 
             {/* Expand/Collapse control */}
             {isOverflow && (
-                <div className="flex justify-center p-1">
+                <div className="flex justify-center pt-2 pb-1 bg-white dark:bg-neutral-950">
                     <button
                         type="button"
+                        className="px-3 py-1 text-xs text-foreground/70 hover:text-foreground transition-colors cursor-pointer"
                         onClick={toggleCollapse}
-                        className="px-2 py-1 text-xs text-foreground/80 hover:text-foreground transition-colors"
                         aria-label={isCollapsed ? '展开代码' : '收起代码'}
                     >
                         {isCollapsed ? '展开' : '收起'}

@@ -259,9 +259,9 @@ body {
 }
 
 .prose pre {
-    @apply p-4 rounded-lg overflow-x-auto;
-    margin-top: 1.5em;
-    margin-bottom: 1.5em;
+    @apply p-2 rounded-lg overflow-x-auto;
+    margin-top: 0;
+    margin-bottom: 0;
 }
 
 .prose pre code {
