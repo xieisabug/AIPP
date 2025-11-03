@@ -111,11 +111,6 @@ pub fn highlight_code(
 
     // Figure out theme name for logging
     let ts = theme_set();
-    let used_theme_name = ts
-        .themes
-        .iter()
-        .find_map(|(name, t)| if std::ptr::eq(t, theme) { Some(name.clone()) } else { None })
-        .unwrap_or_else(|| "<unknown>".into());
 
     // Try by token, then by extension, else plain text
     let token = lang.trim();
