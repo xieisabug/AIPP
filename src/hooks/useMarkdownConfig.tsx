@@ -1,22 +1,22 @@
 import { useMemo, useCallback } from 'react';
 import React from 'react';
-import type { Options } from 'react-markdown';
+import { Components } from 'react-markdown';
 import { open } from '@tauri-apps/plugin-shell';
 import {
     REMARK_PLUGINS,
     REHYPE_PLUGINS,
     MARKDOWN_COMPONENTS_BASE,
 } from '@/constants/markdown';
-import remarkCustomCompenent from '@/react-markdown/remarkCustomComponent';
+import CodeBlock from '@/components/CodeBlock';
 
 interface UseMarkdownConfigOptions {
     onCodeRun?: (lang: string, code: string) => void;
     disableMarkdownSyntax?: boolean;
 }
 
-type CustomComponents = NonNullable<Options['components']> & {
+interface CustomComponents extends Components {
     antthinking: React.ElementType;
-};
+}
 
 export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: UseMarkdownConfigOptions = {}) => {
     // 换行处理函数 - 完全按原样展示文本，保留所有换行和空行
@@ -61,8 +61,35 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
                     </div>
                 </div>
             ),
-            // 注意：代码块渲染交由 ai-elements/Response 内置的 Streamdown + Shiki 处理，
-            // 此处不覆写 code 组件以避免冲突与重复渲染。
+            code: ({ className, children }) => {
+                const match = /language-(\w+)/.exec(className || '');
+                
+                // 纯文本模式：代码块显示为原始文本
+                if (disableMarkdownSyntax) {
+                    return match ? (
+                        <span>```{match[1]}{'\n'}{children}{'\n'}```</span>
+                    ) : (
+                        <span>`{children}`</span>
+                    );
+                }
+                
+                // Markdown 模式：正常的代码块渲染
+                return match ? (
+                    <CodeBlock
+                        language={match[1]}
+                        onCodeRun={onCodeRun || (() => {})}
+                    >
+                        {children}
+                    </CodeBlock>
+                ) : (
+                    <code
+                        className={className}
+                        style={{ overflow: 'auto' }}
+                    >
+                        {children}
+                    </code>
+                );
+            },
             a: ({ href, children, ...props }: any) => {
                 const handleClick = useCallback(
                     (e: React.MouseEvent) => {
@@ -92,10 +119,12 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
     // 根据 disableMarkdownSyntax 决定使用哪些插件
     const remarkPlugins = useMemo(() => {
         if (disableMarkdownSyntax) {
-            // 纯文本模式：只保留自定义组件处理（避免引入 GFM/Math 等 Markdown 语法）
-            return [remarkCustomCompenent];
+            // 纯文本模式：只保留自定义组件处理
+            return [
+                REMARK_PLUGINS.find(plugin => plugin.name === 'remarkCustomCompenent') || REMARK_PLUGINS[3]
+            ].filter(Boolean);
         }
-        // Markdown 模式：使用项目统一的插件集合（与 Response 默认兼容，会合并扩展）
+        // Markdown 模式：使用所有插件
         return REMARK_PLUGINS;
     }, [disableMarkdownSyntax]);
 

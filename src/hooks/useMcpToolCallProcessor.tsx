@@ -1,13 +1,12 @@
 import React, { useCallback } from 'react';
-import { Streamdown } from 'streamdown';
-import type { Options } from 'react-markdown';
+import ReactMarkdown, { Components } from 'react-markdown';
 import McpToolCall from '@/components/McpToolCall';
 import { MCPToolCallUpdateEvent } from '@/data/Conversation';
 
 interface McpProcessorOptions {
     remarkPlugins: readonly any[];
     rehypePlugins: readonly any[];
-    markdownComponents: NonNullable<Options['components']>;
+    markdownComponents: Components;
 }
 
 interface ProcessorContext {
@@ -44,13 +43,13 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
                 // 添加注释前的内容
                 if (beforeComment.trim()) {
                     parts.push(
-                        <Streamdown
+                        <ReactMarkdown
                             key={`before-${index}`}
+                            children={beforeComment}
                             remarkPlugins={[...remarkPlugins]}
+                            rehypePlugins={[...rehypePlugins]}
                             components={markdownComponents}
-                        >
-                            {beforeComment}
-                        </Streamdown>
+                        />
                     );
                 }
 
@@ -78,13 +77,13 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         const remainingContent = markdownContent.slice(lastIndex);
         if (remainingContent.trim()) {
             parts.push(
-                <Streamdown
+                <ReactMarkdown
                     key="remaining"
+                    children={remainingContent}
                     remarkPlugins={[...remarkPlugins]}
+                    rehypePlugins={[...rehypePlugins]}
                     components={markdownComponents}
-                >
-                    {remainingContent}
-                </Streamdown>
+                />
             );
         }
 

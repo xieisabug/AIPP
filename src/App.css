@@ -2,7 +2,6 @@
 
 @custom-variant dark (&:is(.dark *));
 @config "../tailwind.config.js";
-@source "../node_modules/streamdown/dist/index.js";
 
 @font-face {
     font-family: "Siyuanrouhei";

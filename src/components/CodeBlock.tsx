@@ -32,6 +32,7 @@ const CodeBlock = React.memo(
 
         // 获取当前主题信息
         const { currentTheme } = useCodeTheme();
+        const { resolvedTheme } = useTheme();
         const [forceUpdate, setForceUpdate] = useState(0);
 
         const getCodeString = useCallback(() => {
@@ -133,8 +134,7 @@ const CodeBlock = React.memo(
             };
         }, []);
 
-        // Streamdown uses Shiki for highlighting, which generates pre-styled HTML
-        // We wrap it and add custom buttons
+        // 使用 react-syntax-highlighter 进行客户端高亮渲染
 
         const ButtonGroup = () => (
             <div className="flex bg-white/90 opacity-0 group-hover/codeblock:opacity-100 hover:opacity-100 transition-opacity duration-200 rounded-md p-1 backdrop-blur-sm">
@@ -171,9 +171,14 @@ const CodeBlock = React.memo(
                     </div>
                 )}
 
-                {/* 渲染 Shiki 生成的 pre/code 结构 */}
                 <div ref={codeRef as any}>
-                    {children}
+                    <SyntaxHighlighter
+                        language={language}
+                        style={resolvedTheme === 'dark' ? (oneDark as any) : (oneLight as any)}
+                        PreTag="div"
+                    >
+                        {typeof children === 'string' ? children : String(children)}
+                    </SyntaxHighlighter>
                 </div>
             </div>
         );
@@ -181,3 +186,6 @@ const CodeBlock = React.memo(
 );
 
 export default CodeBlock;
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { oneDark, oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { useTheme } from "../hooks/useTheme";

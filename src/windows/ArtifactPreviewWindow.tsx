@@ -4,12 +4,14 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { open } from '@tauri-apps/plugin-shell';
 import mermaid from 'mermaid';
-import { Streamdown } from 'streamdown';
-// Removed explicit syntax highlighter; use Streamdown's built-in Shiki
+import ReactMarkdown from 'react-markdown';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import remarkMath from 'remark-math';
 import remarkBreaks from 'remark-breaks';
 import remarkCustomCompenent from '@/react-markdown/remarkCustomComponent';
-// Use Streamdown default rehype plugins (harden/raw/katex)
+import rehypeKatex from 'rehype-katex';
+import rehypeRaw from 'rehype-raw';
 import TipsComponent from '@/react-markdown/components/TipsComponent';
 import '../styles/ArtifactPreviewWIndow.css';
 import 'katex/dist/katex.min.css';
@@ -679,17 +681,34 @@ export default function ArtifactPreviewWindow() {
                                     <div className="prose prose-lg max-w-none dark:prose-invert">
                                         {(() => {
                                             const mdComponents: any = {
-                                                // 仅保留自定义组件，避免覆盖 Streamdown 的 code 渲染
                                                 tipscomponent: TipsComponent,
+                                                code({ className, children, ...props }: any) {
+                                                    const match = /language-(\w+)/.exec(className || '');
+                                                    const isInline = !match;
+                                                    return !isInline ? (
+                                                        <SyntaxHighlighter
+                                                            style={oneDark as any}
+                                                            language={match[1]}
+                                                            PreTag="div"
+                                                            {...props}
+                                                        >
+                                                            {String(children).replace(/\n$/, '')}
+                                                        </SyntaxHighlighter>
+                                                    ) : (
+                                                        <code className={className} {...props}>
+                                                            {children}
+                                                        </code>
+                                                    );
+                                                },
                                             };
                                             return (
-                                                <Streamdown
+                                                <ReactMarkdown
                                                     remarkPlugins={[remarkMath, remarkBreaks, remarkCustomCompenent]}
-                                                    // 使用 Streamdown 默认 rehype（包含 harden/raw/katex），避免 sanitize 或自定义覆盖破坏高亮
+                                                    rehypePlugins={[rehypeKatex, rehypeRaw]}
                                                     components={mdComponents}
                                                 >
                                                     {markdownContent}
-                                                </Streamdown>
+                                                </ReactMarkdown>
                                             );
                                         })()}
                                     </div>

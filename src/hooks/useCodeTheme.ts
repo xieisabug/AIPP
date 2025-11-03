@@ -2,7 +2,7 @@ import { useCallback } from 'react';
 import { useDisplayConfig } from './useDisplayConfig';
 import { useTheme } from './useTheme';
 
-// 可用的代码主题配置 (Shiki themes)
+// 可用的代码主题配置
 export interface CodeThemeOption {
     id: string;
     name: string;
@@ -10,18 +10,18 @@ export interface CodeThemeOption {
 }
 
 export const AVAILABLE_CODE_THEMES: CodeThemeOption[] = [
-    // 浅色主题 (Shiki bundled themes)
-    { id: 'github-light', name: 'GitHub Light', category: 'light' },
-    { id: 'github-light-default', name: 'GitHub Light Default', category: 'light' },
-    { id: 'min-light', name: 'Min Light', category: 'light' },
-    { id: 'one-light', name: 'One Light', category: 'light' },
+    // 浅色主题
+    { id: 'github', name: 'GitHub', category: 'light' },
+    { id: 'vs', name: 'Visual Studio', category: 'light' },
+    { id: 'atom-one-light', name: 'Atom One Light', category: 'light' },
+    { id: 'base16/github', name: 'GitHub Base16', category: 'light' },
     
-    // 深色主题 (Shiki bundled themes)
+    // 深色主题
     { id: 'github-dark', name: 'GitHub Dark', category: 'dark' },
-    { id: 'github-dark-default', name: 'GitHub Dark Default', category: 'dark' },
     { id: 'github-dark-dimmed', name: 'GitHub Dark Dimmed', category: 'dark' },
-    { id: 'min-dark', name: 'Min Dark', category: 'dark' },
-    { id: 'one-dark-pro', name: 'One Dark Pro', category: 'dark' },
+    { id: 'vs2015', name: 'Visual Studio 2015', category: 'dark' },
+    { id: 'atom-one-dark', name: 'Atom One Dark', category: 'dark' },
+    { id: 'atom-one-dark-reasonable', name: 'Atom One Dark Reasonable', category: 'dark' },
 ];
 
 export const useCodeTheme = () => {
@@ -34,17 +34,8 @@ export const useCodeTheme = () => {
         
         return resolvedTheme === 'dark' 
             ? config.code_theme_dark || 'github-dark'
-            : config.code_theme_light || 'github-light';
+            : config.code_theme_light || 'github';
     }, [config, resolvedTheme]);
-
-    // 提供明暗两套主题，供 Shiki 选择
-    const getLightTheme = useCallback((): string => {
-        return config?.code_theme_light || 'github-light';
-    }, [config]);
-
-    const getDarkTheme = useCallback((): string => {
-        return config?.code_theme_dark || 'github-dark';
-    }, [config]);
 
     // 预设主题选项
     const getLightThemes = useCallback((): CodeThemeOption[] => {
@@ -57,8 +48,6 @@ export const useCodeTheme = () => {
 
     return {
         currentTheme: getCurrentTheme(),
-        lightTheme: getLightTheme(),
-        darkTheme: getDarkTheme(),
         getLightThemes,
         getDarkThemes,
         availableThemes: AVAILABLE_CODE_THEMES
