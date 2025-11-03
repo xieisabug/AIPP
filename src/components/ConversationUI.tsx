@@ -512,8 +512,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 requestAnimationFrame(() => {
                     const renderDuration = performance.now() - renderStartTime;
                     console.log(`[PERF-FRONTEND] 消息渲染完成耗时: ${renderDuration.toFixed(2)}ms`);
-                    // 忽略"用户上滑"状态，切换话题后总是滚动到底部
-                    smartScroll(true);
+                    // 忽略"用户上滑"状态，切换话题后总是瞬时滚动到底部（无平滑动画）
+                    smartScroll(true, 'auto');
                 })
             );
         }, [conversationId, isLoadingShow, allDisplayMessages.length, smartScroll]);

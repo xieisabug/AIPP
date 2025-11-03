@@ -4,7 +4,8 @@ export interface UseScrollManagementReturn {
     messagesEndRef: React.RefObject<HTMLDivElement | null>;
     scrollContainerRef: React.RefObject<HTMLDivElement | null>;
     handleScroll: () => void;
-    smartScroll: (forceScroll?: boolean) => void;
+    // Allow overriding behavior for specific scenarios (e.g., instant on open)
+    smartScroll: (forceScroll?: boolean, behaviorOverride?: ScrollBehavior) => void;
     scrollToUserMessage: () => void;
 }
 
@@ -35,7 +36,7 @@ export function useScrollManagement(): UseScrollManagementReturn {
     }, []); // 依赖项为空，函数是稳定的
 
     // 智能滚动函数
-    const smartScroll = useCallback((forceScroll: boolean = false) => {
+    const smartScroll = useCallback((forceScroll: boolean = false, behaviorOverride?: ScrollBehavior) => {
         // 如果当前正处于程序触发的平滑滚动阶段，避免用 auto 覆盖动画
         if (isAutoScrolling.current) return;
 
@@ -62,8 +63,8 @@ export function useScrollManagement(): UseScrollManagementReturn {
             }
             const c = scrollContainerRef.current!;
             const distanceToBottom = c.scrollHeight - c.scrollTop - c.clientHeight;
-            // 距离较大时使用平滑滚动，避免“瞬移”感；小距离仍然使用 auto 以跟随流式输出
-            const behavior: ScrollBehavior = distanceToBottom > 120 ? 'smooth' : 'auto';
+            // 优先使用外部传入的行为；否则距离较大时使用平滑滚动，小距离使用 auto
+            const behavior: ScrollBehavior = behaviorOverride ?? (distanceToBottom > 120 ? 'smooth' : 'auto');
 
             isAutoScrolling.current = true;
             c.scrollTo({ top: c.scrollHeight, behavior });
