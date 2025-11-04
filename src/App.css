@@ -260,8 +260,7 @@ body {
 
 .prose pre {
     @apply p-2 rounded-lg overflow-x-auto;
-    margin-top: 0;
-    margin-bottom: 0;
+    margin-block: 0;
 }
 
 .prose pre code {

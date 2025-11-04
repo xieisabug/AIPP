@@ -204,11 +204,11 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({ language, children, onCod
                 {html ? (
                     <div
                         ref={codeRef}
-                        className="overflow-auto text-sm leading-6 font-mono"
+                        className="text-sm font-mono"
                         dangerouslySetInnerHTML={{ __html: html }}
                     />
                 ) : (
-                    <pre ref={codeRef as any} className="overflow-auto text-sm leading-6 font-mono p-3 bg-transparent">
+                    <pre ref={codeRef as any} className="text-sm font-mono p-3 bg-transparent">
                         <code>{code}</code>
                     </pre>
                 )}
