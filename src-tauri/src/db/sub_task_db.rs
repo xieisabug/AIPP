@@ -1,14 +1,82 @@
 use std::path::PathBuf;
 
-use chrono::prelude::*;
-use rusqlite::{params, Connection, OptionalExtension, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
-
-use crate::utils::db_utils::{get_datetime_from_row, get_required_datetime_from_row};
+use sea_orm::{
+    entity::prelude::*, Database, DatabaseConnection, DbErr, Set, ActiveValue,
+    Condition, QueryOrder, QuerySelect,
+};
 
 use super::get_db_path;
 
+// ============ SubTaskDefinition Entity ============
+pub mod sub_task_definition {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "sub_task_definition")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub name: String,
+        #[sea_orm(unique)]
+        pub code: String,
+        pub description: String,
+        pub system_prompt: String,
+        pub plugin_source: String, // 'mcp' | 'plugin'
+        pub source_id: i64,
+        pub is_enabled: bool,
+        pub created_time: ChronoDateTimeUtc,
+        pub updated_time: ChronoDateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+// ============ SubTaskExecution Entity ============
+pub mod sub_task_execution {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "sub_task_execution")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub task_definition_id: i64,
+        pub task_code: String,
+        pub task_name: String,
+        pub task_prompt: String,
+        pub parent_conversation_id: i64,
+        pub parent_message_id: Option<i64>,
+        pub status: String, // 'pending' | 'running' | 'success' | 'failed' | 'cancelled'
+        pub result_content: Option<String>,
+        pub error_message: Option<String>,
+        pub mcp_result_json: Option<String>,
+
+        // 消息消费相关字段 (参考 message 表)
+        pub llm_model_id: Option<i64>,
+        pub llm_model_name: Option<String>,
+        pub token_count: i32,
+        pub input_token_count: i32,
+        pub output_token_count: i32,
+
+        // 时间字段
+        pub started_time: Option<ChronoDateTimeUtc>,
+        pub finished_time: Option<ChronoDateTimeUtc>,
+        pub created_time: ChronoDateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+// Legacy structs for backward compatibility
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SubTaskDefinition {
     pub id: i64,
@@ -21,6 +89,23 @@ pub struct SubTaskDefinition {
     pub is_enabled: bool,
     pub created_time: DateTime<Utc>,
     pub updated_time: DateTime<Utc>,
+}
+
+impl From<sub_task_definition::Model> for SubTaskDefinition {
+    fn from(model: sub_task_definition::Model) -> Self {
+        Self {
+            id: model.id,
+            name: model.name,
+            code: model.code,
+            description: model.description,
+            system_prompt: model.system_prompt,
+            plugin_source: model.plugin_source,
+            source_id: model.source_id,
+            is_enabled: model.is_enabled,
+            created_time: model.created_time.into(),
+            updated_time: model.updated_time.into(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -50,6 +135,32 @@ pub struct SubTaskExecution {
     pub created_time: DateTime<Utc>,
 }
 
+impl From<sub_task_execution::Model> for SubTaskExecution {
+    fn from(model: sub_task_execution::Model) -> Self {
+        Self {
+            id: model.id,
+            task_definition_id: model.task_definition_id,
+            task_code: model.task_code,
+            task_name: model.task_name,
+            task_prompt: model.task_prompt,
+            parent_conversation_id: model.parent_conversation_id,
+            parent_message_id: model.parent_message_id,
+            status: model.status,
+            result_content: model.result_content,
+            error_message: model.error_message,
+            mcp_result_json: model.mcp_result_json,
+            llm_model_id: model.llm_model_id,
+            llm_model_name: model.llm_model_name,
+            token_count: model.token_count,
+            input_token_count: model.input_token_count,
+            output_token_count: model.output_token_count,
+            started_time: model.started_time.map(|dt| dt.into()),
+            finished_time: model.finished_time.map(|dt| dt.into()),
+            created_time: model.created_time.into(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SubTaskExecutionSummary {
     pub id: i64,
@@ -66,22 +177,67 @@ impl SubTaskDefinition {
 }
 
 pub struct SubTaskDatabase {
-    pub conn: Connection,
+    pub conn: DatabaseConnection,
     pub db_path: PathBuf,
 }
 
 impl SubTaskDatabase {
     #[instrument(level = "debug", skip(app_handle), fields(db = "conversation.db"))]
-    pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
-        let db_path = get_db_path(app_handle, "conversation.db").unwrap();
-        let conn = Connection::open(&db_path)?;
+    pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, DbErr> {
+        let db_path = get_db_path(app_handle, "conversation.db").map_err(|e| DbErr::Custom(e))?;
+        let url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
+        
+        let conn = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                tokio::task::block_in_place(|| handle.block_on(async { Database::connect(&url).await }))?
+            }
+            Err(_) => {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
+                rt.block_on(async { Database::connect(&url).await })?
+            }
+        };
+        
         debug!("Opened sub task database");
         Ok(SubTaskDatabase { conn, db_path })
     }
 
-    pub fn get_connection(&self) -> rusqlite::Result<Connection> {
+    pub fn get_connection(&self) -> Result<rusqlite::Connection, String> {
         // Open a fresh connection when needed by migrations or external helpers
-        Connection::open(&self.db_path)
+        rusqlite::Connection::open(&self.db_path).map_err(|e| e.to_string())
+    }
+
+    // Helper method to run async code in correct runtime context
+    fn with_runtime<F, Fut, T>(f: F) -> Result<T, DbErr>
+    where
+        F: FnOnce(Option<DatabaseConnection>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, DbErr>>,
+    {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f(None))),
+            Err(_) => {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
+                rt.block_on(f(None))
+            }
+        }
+    }
+
+    // Helper method for instance operations
+    fn with_runtime_conn<F, Fut, T>(&self, f: F) -> Result<T, DbErr>
+    where
+        F: FnOnce(DatabaseConnection) -> Fut,
+        Fut: std::future::Future<Output = Result<T, DbErr>>,
+    {
+        let conn = self.conn.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f(conn))),
+            Err(_) => {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
+                rt.block_on(f(conn))
+            }
+        }
     }
 
     // Definition methods
@@ -91,71 +247,50 @@ impl SubTaskDatabase {
         plugin_source: Option<&str>,
         source_id: Option<i64>,
         is_enabled: Option<bool>,
-    ) -> Result<Vec<SubTaskDefinition>> {
-        let mut query = String::from("SELECT id, name, code, description, system_prompt, plugin_source, source_id, is_enabled, created_time, updated_time FROM sub_task_definition WHERE 1=1");
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-        if let Some(source) = plugin_source {
-            query.push_str(" AND plugin_source = ?");
-            params.push(Box::new(source.to_string()));
-        }
-
-        if let Some(sid) = source_id {
-            query.push_str(" AND source_id = ?");
-            params.push(Box::new(sid));
-        }
-
-        if let Some(enabled) = is_enabled {
-            query.push_str(" AND is_enabled = ?");
-            params.push(Box::new(enabled));
-        }
-
-        query.push_str(" ORDER BY created_time DESC");
-
-        let mut stmt = self.conn.prepare(&query)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt.query_map(&param_refs[..], |row| {
-            Ok(SubTaskDefinition {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                code: row.get(2)?,
-                description: row.get(3)?,
-                system_prompt: row.get(4)?,
-                plugin_source: row.get(5)?,
-                source_id: row.get(6)?,
-                is_enabled: row.get(7)?,
-                created_time: row.get(8)?,
-                updated_time: row.get(9)?,
-            })
+    ) -> Result<Vec<SubTaskDefinition>, DbErr> {
+        let plugin_source = plugin_source.map(|s| s.to_string());
+        
+        let defs = self.with_runtime_conn(|conn| async move {
+            let mut query = sub_task_definition::Entity::find();
+            
+            if let Some(source) = plugin_source {
+                query = query.filter(sub_task_definition::Column::PluginSource.eq(source));
+            }
+            
+            if let Some(sid) = source_id {
+                query = query.filter(sub_task_definition::Column::SourceId.eq(sid));
+            }
+            
+            if let Some(enabled) = is_enabled {
+                query = query.filter(sub_task_definition::Column::IsEnabled.eq(enabled));
+            }
+            
+            let models = query
+                .order_by_desc(sub_task_definition::Column::CreatedTime)
+                .all(&conn)
+                .await?;
+            
+            Ok(models.into_iter().map(|m| m.into()).collect::<Vec<SubTaskDefinition>>())
         })?;
-        let defs: Vec<SubTaskDefinition> = rows.collect::<Result<Vec<_>>>()?;
+        
         debug!(count = defs.len(), "Fetched sub task definitions");
         Ok(defs)
     }
+
     #[instrument(level = "debug", skip(self), fields(code))]
-    pub fn find_definition_by_code(&self, code: &str) -> Result<Option<SubTaskDefinition>> {
-        let def = self.conn
-            .query_row(
-                "SELECT id, name, code, description, system_prompt, plugin_source, source_id, is_enabled, created_time, updated_time FROM sub_task_definition WHERE code = ?",
-                [code],
-                |row| {
-                    Ok(SubTaskDefinition {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        code: row.get(2)?,
-                        description: row.get(3)?,
-                        system_prompt: row.get(4)?,
-                        plugin_source: row.get(5)?,
-                        source_id: row.get(6)?,
-                        is_enabled: row.get(7)?,
-                        created_time: row.get(8)?,
-                        updated_time: row.get(9)?,
-                    })
-                },
-            )
-            .optional()?;
-        debug!(found = def.is_some(), "Fetched definition by code");
-        Ok(def)
+    pub fn find_definition_by_code(&self, code: &str) -> Result<Option<SubTaskDefinition>, DbErr> {
+        let code = code.to_string();
+        
+        let def = self.with_runtime_conn(|conn| async move {
+            sub_task_definition::Entity::find()
+                .filter(sub_task_definition::Column::Code.eq(code))
+                .one(&conn)
+                .await
+        })?;
+        
+        let result = def.map(|m| m.into());
+        debug!(found = result.is_some(), "Fetched definition by code");
+        Ok(result)
     }
 
     #[instrument(level = "debug", skip(self), fields(plugin_source, source_id, code))]
@@ -164,36 +299,29 @@ impl SubTaskDatabase {
         plugin_source: &str,
         source_id: i64,
         code: &str,
-    ) -> Result<Option<SubTaskDefinition>> {
-        let def = self.conn
-            .query_row(
-                "SELECT id, name, code, description, system_prompt, plugin_source, source_id, is_enabled, created_time, updated_time FROM sub_task_definition WHERE plugin_source = ? AND source_id = ? AND code = ?",
-                params![plugin_source, source_id, code],
-                |row| {
-                    Ok(SubTaskDefinition {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        code: row.get(2)?,
-                        description: row.get(3)?,
-                        system_prompt: row.get(4)?,
-                        plugin_source: row.get(5)?,
-                        source_id: row.get(6)?,
-                        is_enabled: row.get(7)?,
-                        created_time: row.get(8)?,
-                        updated_time: row.get(9)?,
-                    })
-                },
-            )
-            .optional()?;
-        debug!(found = def.is_some(), "Fetched definition by source & code");
-        Ok(def)
+    ) -> Result<Option<SubTaskDefinition>, DbErr> {
+        let plugin_source = plugin_source.to_string();
+        let code = code.to_string();
+        
+        let def = self.with_runtime_conn(|conn| async move {
+            sub_task_definition::Entity::find()
+                .filter(sub_task_definition::Column::PluginSource.eq(plugin_source))
+                .filter(sub_task_definition::Column::SourceId.eq(source_id))
+                .filter(sub_task_definition::Column::Code.eq(code))
+                .one(&conn)
+                .await
+        })?;
+        
+        let result = def.map(|m| m.into());
+        debug!(found = result.is_some(), "Fetched definition by source & code");
+        Ok(result)
     }
 
     #[instrument(level = "debug", skip(self, definition), fields(code = %definition.code, source_id = definition.source_id, plugin_source = %definition.plugin_source))]
     pub fn upsert_sub_task_definition(
         &self,
         definition: &SubTaskDefinition,
-    ) -> Result<SubTaskDefinition> {
+    ) -> Result<SubTaskDefinition, DbErr> {
         // First try to find existing definition by source and code
         if let Some(existing) = self.find_definition_by_source_and_code(
             &definition.plugin_source,
@@ -239,11 +367,19 @@ impl SubTaskDatabase {
     }
 
     #[instrument(level = "debug", skip(self), fields(id, is_enabled))]
-    pub fn update_definition_enabled_status(&self, id: i64, is_enabled: bool) -> Result<()> {
-        self.conn.execute(
-            "UPDATE sub_task_definition SET is_enabled = ?, updated_time = CURRENT_TIMESTAMP WHERE id = ?",
-            params![is_enabled, id],
-        )?;
+    pub fn update_definition_enabled_status(&self, id: i64, is_enabled: bool) -> Result<(), DbErr> {
+        let now = Utc::now();
+        
+        self.with_runtime_conn(|conn| async move {
+            sub_task_definition::Entity::update_many()
+                .col_expr(sub_task_definition::Column::IsEnabled, Expr::value(is_enabled))
+                .col_expr(sub_task_definition::Column::UpdatedTime, Expr::value(now))
+                .filter(sub_task_definition::Column::Id.eq(id))
+                .exec(&conn)
+                .await?;
+            Ok(())
+        })?;
+        
         debug!("Updated definition enabled status");
         Ok(())
     }
@@ -252,55 +388,87 @@ impl SubTaskDatabase {
     pub fn create_sub_task_definition(
         &self,
         definition: &SubTaskDefinition,
-    ) -> Result<SubTaskDefinition> {
-        self.conn.execute(
-            "INSERT INTO sub_task_definition (name, code, description, system_prompt, plugin_source, source_id, is_enabled, created_time, updated_time) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![definition.name, definition.code, definition.description, definition.system_prompt, definition.plugin_source, definition.source_id, definition.is_enabled, definition.created_time, definition.updated_time],
-        )?;
-        let id = self.conn.last_insert_rowid();
+    ) -> Result<SubTaskDefinition, DbErr> {
+        let name = definition.name.clone();
+        let code = definition.code.clone();
+        let description = definition.description.clone();
+        let system_prompt = definition.system_prompt.clone();
+        let plugin_source = definition.plugin_source.clone();
+        let source_id = definition.source_id;
+        let is_enabled = definition.is_enabled;
+        let created_time = definition.created_time;
+        let updated_time = definition.updated_time;
+        
+        let model = self.with_runtime_conn(|conn| async move {
+            let active_model = sub_task_definition::ActiveModel {
+                id: ActiveValue::NotSet,
+                name: Set(name),
+                code: Set(code),
+                description: Set(description),
+                system_prompt: Set(system_prompt),
+                plugin_source: Set(plugin_source),
+                source_id: Set(source_id),
+                is_enabled: Set(is_enabled),
+                created_time: Set(created_time.into()),
+                updated_time: Set(updated_time.into()),
+            };
+            active_model.insert(&conn).await
+        })?;
+        
+        let id = model.id;
         debug!(id, "Inserted sub task definition row");
-        Ok(SubTaskDefinition { id, ..definition.clone() })
+        Ok(model.into())
     }
 
     #[instrument(level = "debug", skip(self), fields(id))]
-    pub fn read_sub_task_definition(&self, id: i64) -> Result<Option<SubTaskDefinition>> {
-        let def = self.conn
-            .query_row(
-                "SELECT id, name, code, description, system_prompt, plugin_source, source_id, is_enabled, created_time, updated_time FROM sub_task_definition WHERE id = ?",
-                [id],
-                |row| {
-                    Ok(SubTaskDefinition {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        code: row.get(2)?,
-                        description: row.get(3)?,
-                        system_prompt: row.get(4)?,
-                        plugin_source: row.get(5)?,
-                        source_id: row.get(6)?,
-                        is_enabled: row.get(7)?,
-                        created_time: row.get(8)?,
-                        updated_time: row.get(9)?,
-                    })
-                },
-            )
-            .optional()?;
-        debug!(found = def.is_some(), "Read definition by id");
-        Ok(def)
+    pub fn read_sub_task_definition(&self, id: i64) -> Result<Option<SubTaskDefinition>, DbErr> {
+        let def = self.with_runtime_conn(|conn| async move {
+            sub_task_definition::Entity::find_by_id(id)
+                .one(&conn)
+                .await
+        })?;
+        
+        let result = def.map(|m| m.into());
+        debug!(found = result.is_some(), "Read definition by id");
+        Ok(result)
     }
 
     #[instrument(level = "debug", skip(self, definition), fields(id = definition.id))]
-    pub fn update_sub_task_definition(&self, definition: &SubTaskDefinition) -> Result<()> {
-        self.conn.execute(
-            "UPDATE sub_task_definition SET name = ?1, description = ?2, system_prompt = ?3, is_enabled = ?4, updated_time = CURRENT_TIMESTAMP WHERE id = ?5",
-            params![definition.name, definition.description, definition.system_prompt, definition.is_enabled, definition.id],
-        )?;
+    pub fn update_sub_task_definition(&self, definition: &SubTaskDefinition) -> Result<(), DbErr> {
+        let id = definition.id;
+        let name = definition.name.clone();
+        let description = definition.description.clone();
+        let system_prompt = definition.system_prompt.clone();
+        let is_enabled = definition.is_enabled;
+        let now = Utc::now();
+        
+        self.with_runtime_conn(|conn| async move {
+            sub_task_definition::Entity::update_many()
+                .col_expr(sub_task_definition::Column::Name, Expr::value(name))
+                .col_expr(sub_task_definition::Column::Description, Expr::value(description))
+                .col_expr(sub_task_definition::Column::SystemPrompt, Expr::value(system_prompt))
+                .col_expr(sub_task_definition::Column::IsEnabled, Expr::value(is_enabled))
+                .col_expr(sub_task_definition::Column::UpdatedTime, Expr::value(now))
+                .filter(sub_task_definition::Column::Id.eq(id))
+                .exec(&conn)
+                .await?;
+            Ok(())
+        })?;
+        
         debug!("Updated sub task definition row");
         Ok(())
     }
 
     #[instrument(level = "debug", skip(self), fields(id))]
-    pub fn delete_sub_task_definition_row(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM sub_task_definition WHERE id = ?", [id])?;
+    pub fn delete_sub_task_definition_row(&self, id: i64) -> Result<(), DbErr> {
+        self.with_runtime_conn(|conn| async move {
+            sub_task_definition::Entity::delete_many()
+                .filter(sub_task_definition::Column::Id.eq(id))
+                .exec(&conn)
+                .await?;
+            Ok(())
+        })?;
+        
         debug!("Deleted sub task definition row");
         Ok(())
     }
@@ -314,52 +482,51 @@ impl SubTaskDatabase {
         status: Option<&str>,
         page: u32,
         page_size: u32,
-    ) -> Result<Vec<SubTaskExecutionSummary>> {
+    ) -> Result<Vec<SubTaskExecutionSummary>, DbErr> {
         let offset = (page - 1) * page_size;
-        let mut query = String::from(
-            "SELECT id, task_code, task_name, task_prompt, status, created_time, token_count 
-             FROM sub_task_execution 
-             WHERE parent_conversation_id = ?",
-        );
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(parent_conversation_id)];
-
-        // 修复：明确处理 parent_message_id 的查询条件
-        match parent_message_id {
-            Some(msg_id) => {
-                query.push_str(" AND parent_message_id = ?");
-                params.push(Box::new(msg_id));
+        let status = status.map(|s| s.to_string());
+        
+        let summaries = self.with_runtime_conn(|conn| async move {
+            let mut query = sub_task_execution::Entity::find()
+                .filter(sub_task_execution::Column::ParentConversationId.eq(parent_conversation_id));
+            
+            // Handle parent_message_id filter
+            match parent_message_id {
+                Some(msg_id) => {
+                    query = query.filter(sub_task_execution::Column::ParentMessageId.eq(msg_id));
+                }
+                None => {
+                    // If you want to filter for NULL parent_message_id, uncomment:
+                    // query = query.filter(sub_task_execution::Column::ParentMessageId.is_null());
+                }
             }
-            None => {
-                // 如果要查询所有消息（包括 parent_message_id 为 NULL 的），保持原逻辑
-                // 如果只要查询 parent_message_id 为 NULL 的，使用下面这行：
-                // query.push_str(" AND parent_message_id IS NULL");
+            
+            if let Some(st) = status {
+                query = query.filter(sub_task_execution::Column::Status.eq(st));
             }
-        }
-
-        if let Some(st) = status {
-            query.push_str(" AND status = ?");
-            params.push(Box::new(st.to_string()));
-        }
-
-        query.push_str(" ORDER BY created_time DESC LIMIT ? OFFSET ?");
-        params.push(Box::new(page_size as i64)); // 修复：确保类型一致
-        params.push(Box::new(offset as i64)); // 修复：确保类型一致
-
-        let mut stmt = self.conn.prepare(&query)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt.query_map(&param_refs[..], |row| {
-            Ok(SubTaskExecutionSummary {
-                id: row.get(0)?,
-                task_code: row.get(1)?,
-                task_name: row.get(2)?,
-                task_prompt: row.get(3)?,
-                status: row.get(4)?,
-                created_time: get_required_datetime_from_row(row, 5, "created_time")?,
-                token_count: row.get(6)?,
-            })
+            
+            let models = query
+                .order_by_desc(sub_task_execution::Column::CreatedTime)
+                .limit(page_size as u64)
+                .offset(offset as u64)
+                .all(&conn)
+                .await?;
+            
+            let summaries: Vec<SubTaskExecutionSummary> = models.into_iter().map(|m| {
+                SubTaskExecutionSummary {
+                    id: m.id,
+                    task_code: m.task_code,
+                    task_name: m.task_name,
+                    task_prompt: m.task_prompt,
+                    status: m.status,
+                    created_time: m.created_time.into(),
+                    token_count: m.token_count,
+                }
+            }).collect();
+            
+            Ok(summaries)
         })?;
 
-        let summaries: Vec<SubTaskExecutionSummary> = rows.collect::<Result<Vec<_>>>()?;
         debug!(count = summaries.len(), "Fetched executions by conversation");
         Ok(summaries)
     }
@@ -370,21 +537,27 @@ impl SubTaskDatabase {
         id: i64,
         status: &str,
         started_time: Option<DateTime<Utc>>,
-    ) -> Result<()> {
-        match started_time {
-            Some(time) => {
-                self.conn.execute(
-                    "UPDATE sub_task_execution SET status = ?, started_time = ? WHERE id = ?",
-                    params![status, time, id],
-                )?;
+    ) -> Result<(), DbErr> {
+        let status = status.to_string();
+        
+        self.with_runtime_conn(|conn| async move {
+            let mut update = sub_task_execution::Entity::update_many()
+                .col_expr(sub_task_execution::Column::Status, Expr::value(status));
+            
+            if let Some(time) = started_time {
+                update = update.col_expr(
+                    sub_task_execution::Column::StartedTime,
+                    Expr::value(Option::<ChronoDateTimeUtc>::Some(time.into()))
+                );
             }
-            None => {
-                self.conn.execute(
-                    "UPDATE sub_task_execution SET status = ? WHERE id = ?",
-                    params![status, id],
-                )?;
-            }
-        }
+            
+            update
+                .filter(sub_task_execution::Column::Id.eq(id))
+                .exec(&conn)
+                .await?;
+            Ok(())
+        })?;
+        
         debug!("Updated execution status");
         Ok(())
     }
@@ -402,13 +575,30 @@ impl SubTaskDatabase {
         error_message: Option<&str>,
         token_stats: Option<(i32, i32, i32)>,
         finished_time: Option<DateTime<Utc>>,
-    ) -> Result<()> {
+    ) -> Result<(), DbErr> {
+        let status = status.to_string();
+        let result_content = result_content.map(|s| s.to_string());
+        let error_message = error_message.map(|s| s.to_string());
         let (token_count, input_tokens, output_tokens) = token_stats.unwrap_or((0, 0, 0));
-
-        self.conn.execute(
-            "UPDATE sub_task_execution SET status = ?, result_content = ?, error_message = ?, token_count = ?, input_token_count = ?, output_token_count = ?, finished_time = ? WHERE id = ?",
-            params![status, result_content, error_message, token_count, input_tokens, output_tokens, finished_time, id],
-        )?;
+        
+        self.with_runtime_conn(|conn| async move {
+            sub_task_execution::Entity::update_many()
+                .col_expr(sub_task_execution::Column::Status, Expr::value(status))
+                .col_expr(sub_task_execution::Column::ResultContent, Expr::value(result_content))
+                .col_expr(sub_task_execution::Column::ErrorMessage, Expr::value(error_message))
+                .col_expr(sub_task_execution::Column::TokenCount, Expr::value(token_count))
+                .col_expr(sub_task_execution::Column::InputTokenCount, Expr::value(input_tokens))
+                .col_expr(sub_task_execution::Column::OutputTokenCount, Expr::value(output_tokens))
+                .col_expr(
+                    sub_task_execution::Column::FinishedTime,
+                    Expr::value(finished_time.map(|dt| -> ChronoDateTimeUtc { dt.into() }))
+                )
+                .filter(sub_task_execution::Column::Id.eq(id))
+                .exec(&conn)
+                .await?;
+            Ok(())
+        })?;
+        
         debug!(token_count, input_tokens, output_tokens, "Updated execution result");
         Ok(())
     }
@@ -418,258 +608,296 @@ impl SubTaskDatabase {
         &self,
         parent_conversation_id: i64,
         source_id: Option<i64>,
-    ) -> Result<Vec<SubTaskExecutionSummary>> {
-        let mut query = String::from(
-            "SELECT ste.id, ste.task_code, ste.task_name, ste.task_prompt, ste.status, ste.created_time, ste.token_count 
-             FROM sub_task_execution ste
-             JOIN sub_task_definition std ON ste.task_definition_id = std.id
-             WHERE ste.parent_conversation_id = ?",
-        );
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(parent_conversation_id)];
-
-        if let Some(sid) = source_id {
-            query.push_str(" AND std.source_id = ?");
-            params.push(Box::new(sid));
+    ) -> Result<Vec<SubTaskExecutionSummary>, DbErr> {
+        // Use rusqlite for complex join query
+        let conn = self.get_connection().map_err(|e| DbErr::Custom(e))?;
+        
+        let mut sql = r#"
+            SELECT ste.id, ste.task_code, ste.task_name, ste.task_prompt, ste.status, ste.created_time, ste.token_count 
+            FROM sub_task_execution ste
+            JOIN sub_task_definition std ON ste.task_definition_id = std.id
+            WHERE ste.parent_conversation_id = ?
+        "#.to_string();
+        
+        if source_id.is_some() {
+            sql.push_str(" AND std.source_id = ?");
         }
-
-        query.push_str(" ORDER BY ste.created_time DESC");
-
-        let mut stmt = self.conn.prepare(&query)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt.query_map(&param_refs[..], |row| {
+        
+        sql.push_str(" ORDER BY ste.created_time DESC");
+        
+        let mut stmt = conn.prepare(&sql).map_err(|e| DbErr::Custom(e.to_string()))?;
+        
+        let mapper = |row: &rusqlite::Row| -> rusqlite::Result<SubTaskExecutionSummary> {
             Ok(SubTaskExecutionSummary {
                 id: row.get(0)?,
                 task_code: row.get(1)?,
                 task_name: row.get(2)?,
                 task_prompt: row.get(3)?,
                 status: row.get(4)?,
-                created_time: get_required_datetime_from_row(row, 5, "created_time")?,
+                created_time: row.get(5)?,
                 token_count: row.get(6)?,
             })
-        })?;
-        let items: Vec<SubTaskExecutionSummary> = rows.collect::<Result<Vec<_>>>()?;
-        debug!(count = items.len(), "Fetched executions by source filter");
-        Ok(items)
+        };
+        
+        let rows = if let Some(sid) = source_id {
+            stmt.query_map(rusqlite::params![parent_conversation_id, sid], mapper)
+                .map_err(|e| DbErr::Custom(e.to_string()))?
+        } else {
+            stmt.query_map(rusqlite::params![parent_conversation_id], mapper)
+                .map_err(|e| DbErr::Custom(e.to_string()))?
+        };
+        
+        let summaries = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| DbErr::Custom(e.to_string()))?;
+        
+        debug!(count = summaries.len(), "Fetched executions by source filter");
+        Ok(summaries)
     }
 
     #[instrument(level = "debug", skip(self, execution), fields(task_code = %execution.task_code, parent_conversation_id = execution.parent_conversation_id))]
     pub fn create_sub_task_execution(
         &self,
         execution: &SubTaskExecution,
-    ) -> Result<SubTaskExecution> {
-        // 使用 rusqlite::params! 宏来处理多个参数
-        self.conn.execute(
-            "INSERT INTO sub_task_execution (task_definition_id, task_code, task_name, task_prompt, parent_conversation_id, parent_message_id, status, result_content, error_message, mcp_result_json, llm_model_id, llm_model_name, token_count, input_token_count, output_token_count, started_time, finished_time, created_time) 
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-            rusqlite::params![
-                execution.task_definition_id,
-                execution.task_code,
-                execution.task_name,
-                execution.task_prompt,
-                execution.parent_conversation_id,
-                execution.parent_message_id,
-                execution.status,
-                execution.result_content,
-                execution.error_message,
-                execution.mcp_result_json,
-                execution.llm_model_id,
-                execution.llm_model_name,
-                execution.token_count,
-                execution.input_token_count,
-                execution.output_token_count,
-                execution.started_time,
-                execution.finished_time,
-                execution.created_time,
-            ],
-        )?;
-        let id = self.conn.last_insert_rowid();
+    ) -> Result<SubTaskExecution, DbErr> {
+        let task_definition_id = execution.task_definition_id;
+        let task_code = execution.task_code.clone();
+        let task_name = execution.task_name.clone();
+        let task_prompt = execution.task_prompt.clone();
+        let parent_conversation_id = execution.parent_conversation_id;
+        let parent_message_id = execution.parent_message_id;
+        let status = execution.status.clone();
+        let result_content = execution.result_content.clone();
+        let error_message = execution.error_message.clone();
+        let mcp_result_json = execution.mcp_result_json.clone();
+        let llm_model_id = execution.llm_model_id;
+        let llm_model_name = execution.llm_model_name.clone();
+        let token_count = execution.token_count;
+        let input_token_count = execution.input_token_count;
+        let output_token_count = execution.output_token_count;
+        let started_time = execution.started_time.map(|dt| dt.into());
+        let finished_time = execution.finished_time.map(|dt| dt.into());
+        let created_time = execution.created_time;
+        
+        let model = self.with_runtime_conn(|conn| async move {
+            let active_model = sub_task_execution::ActiveModel {
+                id: ActiveValue::NotSet,
+                task_definition_id: Set(task_definition_id),
+                task_code: Set(task_code),
+                task_name: Set(task_name),
+                task_prompt: Set(task_prompt),
+                parent_conversation_id: Set(parent_conversation_id),
+                parent_message_id: Set(parent_message_id),
+                status: Set(status),
+                result_content: Set(result_content),
+                error_message: Set(error_message),
+                mcp_result_json: Set(mcp_result_json),
+                llm_model_id: Set(llm_model_id),
+                llm_model_name: Set(llm_model_name),
+                token_count: Set(token_count),
+                input_token_count: Set(input_token_count),
+                output_token_count: Set(output_token_count),
+                started_time: Set(started_time),
+                finished_time: Set(finished_time),
+                created_time: Set(created_time.into()),
+            };
+            active_model.insert(&conn).await
+        })?;
+        
+        let id = model.id;
         debug!(id, "Inserted sub task execution row");
-        Ok(SubTaskExecution {
-            id,
-            task_definition_id: execution.task_definition_id,
-            task_code: execution.task_code.clone(),
-            task_name: execution.task_name.clone(),
-            task_prompt: execution.task_prompt.clone(),
-            parent_conversation_id: execution.parent_conversation_id,
-            parent_message_id: execution.parent_message_id,
-            status: execution.status.clone(),
-            result_content: execution.result_content.clone(),
-            error_message: execution.error_message.clone(),
-            mcp_result_json: execution.mcp_result_json.clone(),
-            llm_model_id: execution.llm_model_id,
-            llm_model_name: execution.llm_model_name.clone(),
-            token_count: execution.token_count,
-            input_token_count: execution.input_token_count,
-            output_token_count: execution.output_token_count,
-            started_time: execution.started_time,
-            finished_time: execution.finished_time,
-            created_time: execution.created_time,
-        })
+        Ok(model.into())
     }
 
     #[instrument(level = "debug", skip(self), fields(id))]
-    pub fn read_sub_task_execution(&self, id: i64) -> Result<Option<SubTaskExecution>> {
-        let exec = self.conn
-            .query_row(
-                "SELECT id, task_definition_id, task_code, task_name, task_prompt, parent_conversation_id, parent_message_id, status, result_content, error_message, mcp_result_json, llm_model_id, llm_model_name, token_count, input_token_count, output_token_count, started_time, finished_time, created_time FROM sub_task_execution WHERE id = ?",
-                [id],
-                |row| {
-                    Ok(SubTaskExecution {
-                        id: row.get(0)?,
-                        task_definition_id: row.get(1)?,
-                        task_code: row.get(2)?,
-                        task_name: row.get(3)?,
-                        task_prompt: row.get(4)?,
-                        parent_conversation_id: row.get(5)?,
-                        parent_message_id: row.get(6)?,
-                        status: row.get(7)?,
-                        result_content: row.get(8)?,
-                        error_message: row.get(9)?,
-                        mcp_result_json: row.get(10)?,
-                        llm_model_id: row.get(11)?,
-                        llm_model_name: row.get(12)?,
-                        token_count: row.get(13)?,
-                        input_token_count: row.get(14)?,
-                        output_token_count: row.get(15)?,
-                        started_time: get_datetime_from_row(row, 16)?,
-                        finished_time: get_datetime_from_row(row, 17)?,
-                        created_time: get_required_datetime_from_row(row, 18, "created_time")?,
-                    })
-                },
-            )
-            .optional()?;
-        debug!(found = exec.is_some(), "Read execution by id");
-        Ok(exec)
+    pub fn read_sub_task_execution(&self, id: i64) -> Result<Option<SubTaskExecution>, DbErr> {
+        let exec = self.with_runtime_conn(|conn| async move {
+            sub_task_execution::Entity::find_by_id(id)
+                .one(&conn)
+                .await
+        })?;
+        
+        let result = exec.map(|m| m.into());
+        debug!(found = result.is_some(), "Read execution by id");
+        Ok(result)
     }
 
     #[instrument(level = "debug", skip(self, execution), fields(id = execution.id))]
-    pub fn update_sub_task_execution(&self, execution: &SubTaskExecution) -> Result<()> {
-        self.conn.execute(
-            "UPDATE sub_task_execution SET task_prompt = ?1, status = ?2, result_content = ?3, error_message = ?4, mcp_result_json = ?5, token_count = ?6, input_token_count = ?7, output_token_count = ?8, finished_time = ?9 WHERE id = ?10",
-            params![execution.task_prompt, execution.status, execution.result_content, execution.error_message, execution.mcp_result_json, execution.token_count, execution.input_token_count, execution.output_token_count, execution.finished_time, execution.id],
-        )?;
+    pub fn update_sub_task_execution(&self, execution: &SubTaskExecution) -> Result<(), DbErr> {
+        let id = execution.id;
+        let task_prompt = execution.task_prompt.clone();
+        let status = execution.status.clone();
+        let result_content = execution.result_content.clone();
+        let error_message = execution.error_message.clone();
+        let mcp_result_json = execution.mcp_result_json.clone();
+        let token_count = execution.token_count;
+        let input_token_count = execution.input_token_count;
+        let output_token_count = execution.output_token_count;
+        let finished_time: Option<String> = execution.finished_time.map(|dt| dt.to_rfc3339());
+        
+        self.with_runtime_conn(|conn| async move {
+            sub_task_execution::Entity::update_many()
+                .col_expr(sub_task_execution::Column::TaskPrompt, Expr::value(task_prompt))
+                .col_expr(sub_task_execution::Column::Status, Expr::value(status))
+                .col_expr(sub_task_execution::Column::ResultContent, Expr::value(result_content))
+                .col_expr(sub_task_execution::Column::ErrorMessage, Expr::value(error_message))
+                .col_expr(sub_task_execution::Column::McpResultJson, Expr::value(mcp_result_json))
+                .col_expr(sub_task_execution::Column::TokenCount, Expr::value(token_count))
+                .col_expr(sub_task_execution::Column::InputTokenCount, Expr::value(input_token_count))
+                .col_expr(sub_task_execution::Column::OutputTokenCount, Expr::value(output_token_count))
+                .col_expr(sub_task_execution::Column::FinishedTime, Expr::value(finished_time))
+                .filter(sub_task_execution::Column::Id.eq(id))
+                .exec(&conn)
+                .await?;
+            Ok(())
+        })?;
+        
         debug!("Updated sub task execution row");
         Ok(())
     }
 
     /// Update only the mcp_result_json column for a given subtask execution
+    #[instrument(level = "debug", skip(self, mcp_result_json), fields(id))]
     pub fn set_execution_mcp_result_json(
         &self,
         id: i64,
         mcp_result_json: Option<&str>,
-    ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE sub_task_execution SET mcp_result_json = ?1 WHERE id = ?2",
-            params![mcp_result_json, id],
-        )?;
+    ) -> Result<(), DbErr> {
+        let mcp_result_json = mcp_result_json.map(|s| s.to_string());
+        
+        self.with_runtime_conn(|conn| async move {
+            sub_task_execution::Entity::update_many()
+                .col_expr(sub_task_execution::Column::McpResultJson, Expr::value(mcp_result_json))
+                .filter(sub_task_execution::Column::Id.eq(id))
+                .exec(&conn)
+                .await?;
+            Ok(())
+        })?;
+        
+        debug!("Updated execution mcp_result_json");
         Ok(())
     }
 
     #[instrument(level = "debug", skip(self), fields(id))]
-    pub fn delete_sub_task_execution_row(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM sub_task_execution WHERE id = ?", [id])?;
+    pub fn delete_sub_task_execution_row(&self, id: i64) -> Result<(), DbErr> {
+        self.with_runtime_conn(|conn| async move {
+            sub_task_execution::Entity::delete_many()
+                .filter(sub_task_execution::Column::Id.eq(id))
+                .exec(&conn)
+                .await?;
+            Ok(())
+        })?;
+        
         debug!("Deleted sub task execution row");
         Ok(())
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub fn create_tables(&self) -> rusqlite::Result<()> {
-        let conn = &self.conn;
+    pub fn create_tables(&self) -> Result<(), DbErr> {
+        let db_path = self.db_path.clone();
+        
+        self.with_runtime_conn(|conn| async move {
+            // 创建 sub_task_definition 表
+            conn.execute_unprepared(
+                "CREATE TABLE IF NOT EXISTS sub_task_definition (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    code TEXT NOT NULL UNIQUE,
+                    description TEXT NOT NULL,
+                    system_prompt TEXT NOT NULL,
+                    plugin_source TEXT NOT NULL,
+                    source_id INTEGER NOT NULL,
+                    is_enabled BOOLEAN NOT NULL DEFAULT 1,
+                    created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_time DATETIME DEFAULT CURRENT_TIMESTAMP
+                )"
+            ).await?;
 
-        // 创建 sub_task_definition 表
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS sub_task_definition (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                code TEXT NOT NULL UNIQUE,
-                description TEXT NOT NULL,
-                system_prompt TEXT NOT NULL,
-                plugin_source TEXT NOT NULL,
-                source_id INTEGER NOT NULL,
-                is_enabled BOOLEAN NOT NULL DEFAULT 1,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_time DATETIME DEFAULT CURRENT_TIMESTAMP
-            )",
-            [],
-        )?;
+            // 创建 sub_task_execution 表
+            conn.execute_unprepared(
+                "CREATE TABLE IF NOT EXISTS sub_task_execution (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_definition_id INTEGER NOT NULL,
+                    task_code TEXT NOT NULL,
+                    task_name TEXT NOT NULL,
+                    task_prompt TEXT NOT NULL,
+                    parent_conversation_id INTEGER NOT NULL,
+                    parent_message_id INTEGER,
+                    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'running', 'success', 'failed', 'cancelled')),
+                    result_content TEXT,
+                    error_message TEXT,
+                    mcp_result_json TEXT,
+                    
+                    llm_model_id INTEGER,
+                    llm_model_name TEXT,
+                    token_count INTEGER DEFAULT 0,
+                    input_token_count INTEGER DEFAULT 0,
+                    output_token_count INTEGER DEFAULT 0,
+                    
+                    started_time DATETIME,
+                    finished_time DATETIME,
+                    created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    
+                    FOREIGN KEY (task_definition_id) REFERENCES sub_task_definition(id) ON DELETE CASCADE
+                )"
+            ).await?;
 
-        // 创建 sub_task_execution 表
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS sub_task_execution (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_definition_id INTEGER NOT NULL,
-                task_code TEXT NOT NULL,
-                task_name TEXT NOT NULL,
-                task_prompt TEXT NOT NULL,
-                parent_conversation_id INTEGER NOT NULL,
-                parent_message_id INTEGER,
-                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'running', 'success', 'failed', 'cancelled')),
-                result_content TEXT,
-                error_message TEXT,
-                mcp_result_json TEXT,
-                
-                -- 消息消费相关字段
-                llm_model_id INTEGER,
-                llm_model_name TEXT,
-                token_count INTEGER DEFAULT 0,
-                input_token_count INTEGER DEFAULT 0,
-                output_token_count INTEGER DEFAULT 0,
-                
-                -- 时间字段
-                started_time DATETIME,
-                finished_time DATETIME,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-                
-                -- 外键约束
-                FOREIGN KEY (task_definition_id) REFERENCES sub_task_definition(id) ON DELETE CASCADE
-            )",
-            [],
-        )?;
-
-        // Migration: ensure mcp_result_json column exists
-        if let Ok(mut stmt) = conn.prepare("PRAGMA table_info(sub_task_execution)") {
+            // Migration: ensure mcp_result_json column exists
+            // Use rusqlite for PRAGMA query
+            let rusqlite_conn = rusqlite::Connection::open(&db_path)
+                .map_err(|e| DbErr::Custom(e.to_string()))?;
+            
+            let check_column_sql = "PRAGMA table_info(sub_task_execution)";
+            let mut stmt = rusqlite_conn.prepare(check_column_sql)
+                .map_err(|e| DbErr::Custom(e.to_string()))?;
+            
             let mut has_mcp_col = false;
-            let cols = stmt.query_map([], |row| Ok(row.get::<_, String>(1)?))?;
-            for c in cols {
-                if let Ok(name) = c {
-                    if name == "mcp_result_json" {
+            let rows = stmt.query_map([], |row| {
+                let col_name: String = row.get(1)?; // name is column 1 in PRAGMA table_info
+                Ok(col_name)
+            }).map_err(|e| DbErr::Custom(e.to_string()))?;
+            
+            for row in rows {
+                if let Ok(col_name) = row {
+                    if col_name == "mcp_result_json" {
                         has_mcp_col = true;
                         break;
                     }
                 }
             }
+            drop(stmt);
+            drop(rusqlite_conn);
+            
             if !has_mcp_col {
-                let _ = conn
-                    .execute("ALTER TABLE sub_task_execution ADD COLUMN mcp_result_json TEXT", []);
+                let _ = conn.execute_unprepared(
+                    "ALTER TABLE sub_task_execution ADD COLUMN mcp_result_json TEXT"
+                ).await;
             }
-        }
 
-        // 创建索引以优化查询性能
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sub_task_definition_code ON sub_task_definition(code)",
-            [],
-        )?;
+            // 创建索引以优化查询性能
+            conn.execute_unprepared(
+                "CREATE INDEX IF NOT EXISTS idx_sub_task_definition_code ON sub_task_definition(code)"
+            ).await?;
 
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sub_task_definition_source ON sub_task_definition(plugin_source, source_id)",
-            [],
-        )?;
+            conn.execute_unprepared(
+                "CREATE INDEX IF NOT EXISTS idx_sub_task_definition_source ON sub_task_definition(plugin_source, source_id)"
+            ).await?;
 
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sub_task_execution_conversation ON sub_task_execution(parent_conversation_id)",
-            [],
-        )?;
+            conn.execute_unprepared(
+                "CREATE INDEX IF NOT EXISTS idx_sub_task_execution_conversation ON sub_task_execution(parent_conversation_id)"
+            ).await?;
 
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sub_task_execution_message ON sub_task_execution(parent_message_id)",
-            [],
-        )?;
+            conn.execute_unprepared(
+                "CREATE INDEX IF NOT EXISTS idx_sub_task_execution_message ON sub_task_execution(parent_message_id)"
+            ).await?;
 
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sub_task_execution_status ON sub_task_execution(status)",
-            [],
-        )?;
+            conn.execute_unprepared(
+                "CREATE INDEX IF NOT EXISTS idx_sub_task_execution_status ON sub_task_execution(status)"
+            ).await?;
 
+            Ok(())
+        })?;
+        
         debug!("Sub task tables ensured");
         Ok(())
     }

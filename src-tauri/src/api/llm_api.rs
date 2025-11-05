@@ -38,7 +38,7 @@ pub struct LlmProviderConfig {
 
 #[tauri::command]
 pub async fn get_llm_providers(app_handle: tauri::AppHandle) -> Result<Vec<LlmProvider>, String> {
-    let db = LLMDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let providers = db.get_llm_providers().map_err(|e| e.to_string())?;
     let mut result = Vec::new();
     for (id, name, api_type, description, is_official, is_enabled) in providers {

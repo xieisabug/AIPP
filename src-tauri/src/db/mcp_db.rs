@@ -1,23 +1,176 @@
-use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
+use sea_orm::{
+    entity::prelude::*, Database, DatabaseConnection, DbErr, Set, ActiveValue, Expr,
+};
+use crate::db::get_db_path;
 
-use super::get_db_path;
+// ============ MCPServer Entity ============
+pub mod mcp_server {
+    use super::*;
 
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "mcp_server")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        #[sea_orm(unique)]
+        pub name: String,
+        pub description: String,
+        pub transport_type: String,
+        pub command: Option<String>,
+        pub environment_variables: Option<String>,
+        pub url: Option<String>,
+        pub timeout: Option<i32>,
+        pub is_long_running: bool,
+        pub is_enabled: bool,
+        pub is_builtin: bool,
+        pub created_time: Option<ChronoDateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+// ============ MCPServerTool Entity ============
+pub mod mcp_server_tool {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "mcp_server_tool")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub server_id: i64,
+        pub tool_name: String,
+        pub tool_description: Option<String>,
+        pub is_enabled: bool,
+        pub is_auto_run: bool,
+        pub parameters: Option<String>,
+        pub created_time: Option<ChronoDateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+// ============ MCPServerResource Entity ============
+pub mod mcp_server_resource {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "mcp_server_resource")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub server_id: i64,
+        pub resource_uri: String,
+        pub resource_name: String,
+        pub resource_type: String,
+        pub resource_description: Option<String>,
+        pub created_time: Option<ChronoDateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+// ============ MCPServerPrompt Entity ============
+pub mod mcp_server_prompt {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "mcp_server_prompt")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub server_id: i64,
+        pub prompt_name: String,
+        pub prompt_description: Option<String>,
+        pub is_enabled: bool,
+        pub arguments: Option<String>,
+        pub created_time: Option<ChronoDateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+// ============ MCPToolCall Entity ============
+pub mod mcp_tool_call {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "mcp_tool_call")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub conversation_id: i64,
+        pub message_id: Option<i64>,
+        pub server_id: i64,
+        pub server_name: String,
+        pub tool_name: String,
+        pub parameters: String,
+        pub status: String,
+        pub result: Option<String>,
+        pub error: Option<String>,
+        pub created_time: Option<ChronoDateTimeUtc>,
+        pub started_time: Option<ChronoDateTimeUtc>,
+        pub finished_time: Option<ChronoDateTimeUtc>,
+        pub llm_call_id: Option<String>,
+        pub assistant_message_id: Option<i64>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+// Legacy structs for backward compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MCPServer {
     pub id: i64,
     pub name: String,
     pub description: String,
-    pub transport_type: String, // stdio, sse, http, builtin
+    pub transport_type: String,
     pub command: Option<String>,
     pub environment_variables: Option<String>,
     pub url: Option<String>,
     pub timeout: Option<i32>,
     pub is_long_running: bool,
     pub is_enabled: bool,
-    pub is_builtin: bool, // 标识是否为内置服务器
+    pub is_builtin: bool,
     pub created_time: String,
+}
+
+impl From<mcp_server::Model> for MCPServer {
+    fn from(model: mcp_server::Model) -> Self {
+        Self {
+            id: model.id,
+            name: model.name,
+            description: model.description,
+            transport_type: model.transport_type,
+            command: model.command,
+            environment_variables: model.environment_variables,
+            url: model.url,
+            timeout: model.timeout,
+            is_long_running: model.is_long_running,
+            is_enabled: model.is_enabled,
+            is_builtin: model.is_builtin,
+            created_time: model.created_time
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,7 +181,21 @@ pub struct MCPServerTool {
     pub tool_description: Option<String>,
     pub is_enabled: bool,
     pub is_auto_run: bool,
-    pub parameters: Option<String>, // JSON string of tool parameters
+    pub parameters: Option<String>,
+}
+
+impl From<mcp_server_tool::Model> for MCPServerTool {
+    fn from(model: mcp_server_tool::Model) -> Self {
+        Self {
+            id: model.id,
+            server_id: model.server_id,
+            tool_name: model.tool_name,
+            tool_description: model.tool_description,
+            is_enabled: model.is_enabled,
+            is_auto_run: model.is_auto_run,
+            parameters: model.parameters,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -41,6 +208,19 @@ pub struct MCPServerResource {
     pub resource_description: Option<String>,
 }
 
+impl From<mcp_server_resource::Model> for MCPServerResource {
+    fn from(model: mcp_server_resource::Model) -> Self {
+        Self {
+            id: model.id,
+            server_id: model.server_id,
+            resource_uri: model.resource_uri,
+            resource_name: model.resource_name,
+            resource_type: model.resource_type,
+            resource_description: model.resource_description,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MCPServerPrompt {
     pub id: i64,
@@ -48,7 +228,20 @@ pub struct MCPServerPrompt {
     pub prompt_name: String,
     pub prompt_description: Option<String>,
     pub is_enabled: bool,
-    pub arguments: Option<String>, // JSON string of prompt arguments
+    pub arguments: Option<String>,
+}
+
+impl From<mcp_server_prompt::Model> for MCPServerPrompt {
+    fn from(model: mcp_server_prompt::Model) -> Self {
+        Self {
+            id: model.id,
+            server_id: model.server_id,
+            prompt_name: model.prompt_name,
+            prompt_description: model.prompt_description,
+            is_enabled: model.is_enabled,
+            arguments: model.arguments,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,34 +252,72 @@ pub struct MCPToolCall {
     pub server_id: i64,
     pub server_name: String,
     pub tool_name: String,
-    pub parameters: String,     // JSON string of parameters
-    pub status: String,         // pending, executing, success, failed
-    pub result: Option<String>, // JSON string of result
+    pub parameters: String,
+    pub status: String,
+    pub result: Option<String>,
     pub error: Option<String>,
     pub created_time: String,
     pub started_time: Option<String>,
     pub finished_time: Option<String>,
-    pub llm_call_id: Option<String>,       // LLM 原生 tool_call_id
-    pub assistant_message_id: Option<i64>, // 关联的 assistant 消息ID
+    pub llm_call_id: Option<String>,
+    pub assistant_message_id: Option<i64>,
+}
+
+impl From<mcp_tool_call::Model> for MCPToolCall {
+    fn from(model: mcp_tool_call::Model) -> Self {
+        Self {
+            id: model.id,
+            conversation_id: model.conversation_id,
+            message_id: model.message_id,
+            server_id: model.server_id,
+            server_name: model.server_name,
+            tool_name: model.tool_name,
+            parameters: model.parameters,
+            status: model.status,
+            result: model.result,
+            error: model.error,
+            created_time: model.created_time
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_default(),
+            started_time: model.started_time
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+            finished_time: model.finished_time
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+            llm_call_id: model.llm_call_id,
+            assistant_message_id: model.assistant_message_id,
+        }
+    }
 }
 
 pub struct MCPDatabase {
-    pub conn: Connection,
+    pub conn: DatabaseConnection,
 }
 
 impl MCPDatabase {
-    #[instrument(level = "debug", skip(app_handle), err)]
-    pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
-        let db_path = get_db_path(app_handle, "mcp.db");
-        let conn = Connection::open(db_path.unwrap())?;
+    #[instrument(level = "debug", skip(app_handle), fields(db = "mcp.db"))]
+    pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, DbErr> {
+        let db_path = get_db_path(app_handle, "mcp.db").map_err(|e| DbErr::Custom(e))?;
+        let url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
+        
+        let conn = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                tokio::task::block_in_place(|| handle.block_on(async { Database::connect(&url).await }))?
+            }
+            Err(_) => {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
+                rt.block_on(async { Database::connect(&url).await })?
+            }
+        };
+        
+        debug!("Opened MCP database");
         Ok(MCPDatabase { conn })
     }
 
-    #[instrument(level = "debug", skip(self), err)]
-    pub fn create_tables(&self) -> rusqlite::Result<()> {
-        // Create MCP servers table
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS mcp_server (
+    #[instrument(level = "debug", skip(self))]
+    pub fn create_tables(&self) -> Result<(), DbErr> {
+        let sql_mcp_server = r#"
+            CREATE TABLE IF NOT EXISTS mcp_server (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 description TEXT,
@@ -99,13 +330,11 @@ impl MCPDatabase {
                 is_enabled BOOLEAN NOT NULL DEFAULT 1,
                 is_builtin BOOLEAN NOT NULL DEFAULT 0,
                 created_time DATETIME DEFAULT CURRENT_TIMESTAMP
-            );",
-            [],
-        )?;
+            );
+        "#;
 
-        // Create MCP server tools table
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS mcp_server_tool (
+        let sql_mcp_server_tool = r#"
+            CREATE TABLE IF NOT EXISTS mcp_server_tool (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 server_id INTEGER NOT NULL,
                 tool_name TEXT NOT NULL,
@@ -116,13 +345,11 @@ impl MCPDatabase {
                 created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
                 UNIQUE(server_id, tool_name)
-            );",
-            [],
-        )?;
+            );
+        "#;
 
-        // Create MCP server resources table
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS mcp_server_resource (
+        let sql_mcp_server_resource = r#"
+            CREATE TABLE IF NOT EXISTS mcp_server_resource (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 server_id INTEGER NOT NULL,
                 resource_uri TEXT NOT NULL,
@@ -132,13 +359,11 @@ impl MCPDatabase {
                 created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
                 UNIQUE(server_id, resource_uri)
-            );",
-            [],
-        )?;
+            );
+        "#;
 
-        // Create MCP server prompts table
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS mcp_server_prompt (
+        let sql_mcp_server_prompt = r#"
+            CREATE TABLE IF NOT EXISTS mcp_server_prompt (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 server_id INTEGER NOT NULL,
                 prompt_name TEXT NOT NULL,
@@ -148,13 +373,11 @@ impl MCPDatabase {
                 created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
                 UNIQUE(server_id, prompt_name)
-            );",
-            [],
-        )?;
+            );
+        "#;
 
-        // Create MCP tool calls history table
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS mcp_tool_call (
+        let sql_mcp_tool_call = r#"
+            CREATE TABLE IF NOT EXISTS mcp_tool_call (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 conversation_id INTEGER NOT NULL,
                 message_id INTEGER,
@@ -171,127 +394,129 @@ impl MCPDatabase {
                 llm_call_id TEXT,
                 assistant_message_id INTEGER,
                 FOREIGN KEY (server_id) REFERENCES mcp_server(id) ON DELETE CASCADE
-            );",
-            [],
-        )?;
+            );
+        "#;
+
+        self.with_runtime(|conn| async move {
+            conn.execute_unprepared(sql_mcp_server).await?;
+            conn.execute_unprepared(sql_mcp_server_tool).await?;
+            conn.execute_unprepared(sql_mcp_server_resource).await?;
+            conn.execute_unprepared(sql_mcp_server_prompt).await?;
+            conn.execute_unprepared(sql_mcp_tool_call).await?;
+            Ok(())
+        })?;
 
         self.migrate_mcp_tool_call_table()?;
 
+        debug!("Created MCP tables");
         Ok(())
     }
 
     /// Migrate existing mcp_tool_call table to add new columns
-    #[instrument(level = "debug", skip(self), err)]
-    fn migrate_mcp_tool_call_table(&self) -> rusqlite::Result<()> {
+    #[instrument(level = "debug", skip(self))]
+    fn migrate_mcp_tool_call_table(&self) -> Result<(), DbErr> {
         // Check if llm_call_id column exists
-        let columns_result = self.conn.prepare("PRAGMA table_info(mcp_tool_call)");
+        let sql_check = "PRAGMA table_info(mcp_tool_call)";
+        
+        self.with_runtime(|conn| async move {
+            let result = conn.query_all(Statement::from_string(
+                conn.get_database_backend(),
+                sql_check.to_string()
+            )).await;
 
-        match columns_result {
-            Ok(mut stmt) => {
-                let column_info = stmt.query_map([], |row| {
-                    Ok(row.get::<_, String>(1)?) // column name is at index 1
-                })?;
+            match result {
+                Ok(rows) => {
+                    let mut has_llm_call_id = false;
+                    let mut has_assistant_message_id = false;
 
-                let mut has_llm_call_id = false;
-                let mut has_assistant_message_id = false;
-
-                for column in column_info {
-                    match column {
-                        Ok(name) => {
+                    for row in rows {
+                        if let Ok(name) = row.try_get::<String>("", "name") {
                             if name == "llm_call_id" {
                                 has_llm_call_id = true;
                             } else if name == "assistant_message_id" {
                                 has_assistant_message_id = true;
                             }
                         }
-                        Err(_) => continue,
+                    }
+
+                    // Add missing columns
+                    if !has_llm_call_id {
+                        conn.execute_unprepared(
+                            "ALTER TABLE mcp_tool_call ADD COLUMN llm_call_id TEXT"
+                        ).await?;
+                        debug!("Added llm_call_id column");
+                    }
+                    if !has_assistant_message_id {
+                        conn.execute_unprepared(
+                            "ALTER TABLE mcp_tool_call ADD COLUMN assistant_message_id INTEGER"
+                        ).await?;
+                        debug!("Added assistant_message_id column");
                     }
                 }
-
-                // Add missing columns
-                if !has_llm_call_id {
-                    self.conn
-                        .execute("ALTER TABLE mcp_tool_call ADD COLUMN llm_call_id TEXT", [])?;
-                }
-                if !has_assistant_message_id {
-                    self.conn.execute(
-                        "ALTER TABLE mcp_tool_call ADD COLUMN assistant_message_id INTEGER",
-                        [],
-                    )?;
+                Err(_) => {
+                    // Table might not exist yet, which is fine
+                    debug!("Table doesn't exist yet or can't read schema");
                 }
             }
-            Err(_) => {
-                // Table might not exist yet, which is fine
-            }
-        }
 
-        Ok(())
+            Ok(())
+        })
     }
 
-    pub fn get_mcp_servers(&self) -> rusqlite::Result<Vec<MCPServer>> {
-        debug!("query mcp servers");
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, description, transport_type, command, environment_variables, url, timeout, is_long_running, is_enabled, COALESCE(is_builtin, 0), created_time 
-             FROM mcp_server ORDER BY created_time DESC"
-        )?;
+    // Helper method to run async code in correct runtime context
+    fn with_runtime<F, Fut, T>(&self, f: F) -> Result<T, DbErr>
+    where
+        F: FnOnce(DatabaseConnection) -> Fut,
+        Fut: std::future::Future<Output = Result<T, DbErr>>,
+    {
+        let conn = self.conn.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f(conn))),
+            Err(_) => {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
+                rt.block_on(f(conn))
+            }
+        }
+    }
 
-        let servers = stmt.query_map([], |row| {
-            Ok(MCPServer {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                description: row.get(2)?,
-                transport_type: row.get(3)?,
-                command: row.get(4)?,
-                environment_variables: row.get(5)?,
-                url: row.get(6)?,
-                timeout: row.get(7)?,
-                is_long_running: row.get(8)?,
-                is_enabled: row.get(9)?,
-                is_builtin: row.get(10)?,
-                created_time: row.get(11)?,
-            })
+    #[instrument(level = "debug", skip(self))]
+    pub fn get_mcp_servers(&self) -> Result<Vec<MCPServer>, DbErr> {
+        debug!("query mcp servers");
+        let models = self.with_runtime(|conn| async move {
+            mcp_server::Entity::find()
+                .order_by_desc(mcp_server::Column::CreatedTime)
+                .all(&conn)
+                .await
         })?;
 
-        let mut result = Vec::new();
-        for server in servers {
-            result.push(server?);
-        }
-        Ok(result)
+        let servers: Vec<MCPServer> = models.into_iter().map(|m| m.into()).collect();
+        debug!(count = servers.len(), "Fetched MCP servers");
+        Ok(servers)
     }
 
-    pub fn get_mcp_server(&self, id: i64) -> rusqlite::Result<MCPServer> {
+    #[instrument(level = "debug", skip(self), fields(id))]
+    pub fn get_mcp_server(&self, id: i64) -> Result<MCPServer, DbErr> {
         debug!(id, "query single mcp server");
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, description, transport_type, command, environment_variables, url, timeout, is_long_running, is_enabled, COALESCE(is_builtin, 0), created_time 
-             FROM mcp_server WHERE id = ?"
-        )?;
+        let model = self.with_runtime(|conn| async move {
+            mcp_server::Entity::find_by_id(id)
+                .one(&conn)
+                .await
+        })?;
 
-        let server = stmt
-            .query_map([id], |row| {
-                Ok(MCPServer {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    description: row.get(2)?,
-                    transport_type: row.get(3)?,
-                    command: row.get(4)?,
-                    environment_variables: row.get(5)?,
-                    url: row.get(6)?,
-                    timeout: row.get(7)?,
-                    is_long_running: row.get(8)?,
-                    is_enabled: row.get(9)?,
-                    is_builtin: row.get(10)?,
-                    created_time: row.get(11)?,
-                })
-            })?
-            .next()
-            .transpose()?;
-
-        match server {
-            Some(server) => Ok(server),
-            None => Err(rusqlite::Error::QueryReturnedNoRows),
+        match model {
+            Some(m) => {
+                debug!(found = true, "Fetched MCP server");
+                Ok(m.into())
+            }
+            None => {
+                debug!(found = false, "MCP server not found");
+                Err(DbErr::RecordNotFound("MCP server not found".to_string()))
+            }
         }
     }
 
+    #[instrument(level = "debug", skip(self), fields(id, name, transport_type, is_enabled, is_builtin))]
     pub fn update_mcp_server_with_builtin(
         &self,
         id: i64,
@@ -305,31 +530,69 @@ impl MCPDatabase {
         is_long_running: bool,
         is_enabled: bool,
         is_builtin: bool,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<(), DbErr> {
         debug!(id, name, transport_type, is_enabled, is_builtin, "update mcp server");
-        self.conn.execute(
-            "UPDATE mcp_server SET name = ?, description = ?, transport_type = ?, command = ?, environment_variables = ?, url = ?, timeout = ?, is_long_running = ?, is_enabled = ?, is_builtin = ? WHERE id = ?",
-            params![name, description, transport_type, command, environment_variables, url, timeout, is_long_running, is_enabled, is_builtin, id],
-        )?;
+        let name = name.to_string();
+        let description = description.map(|s| s.to_string()).unwrap_or_default();
+        let transport_type = transport_type.to_string();
+        let command = command.map(|s| s.to_string());
+        let environment_variables = environment_variables.map(|s| s.to_string());
+        let url = url.map(|s| s.to_string());
+
+        self.with_runtime(|conn| async move {
+            mcp_server::Entity::update_many()
+                .col_expr(mcp_server::Column::Name, Expr::value(name))
+                .col_expr(mcp_server::Column::Description, Expr::value(description))
+                .col_expr(mcp_server::Column::TransportType, Expr::value(transport_type))
+                .col_expr(mcp_server::Column::Command, Expr::value(command))
+                .col_expr(mcp_server::Column::EnvironmentVariables, Expr::value(environment_variables))
+                .col_expr(mcp_server::Column::Url, Expr::value(url))
+                .col_expr(mcp_server::Column::Timeout, Expr::value(timeout))
+                .col_expr(mcp_server::Column::IsLongRunning, Expr::value(is_long_running))
+                .col_expr(mcp_server::Column::IsEnabled, Expr::value(is_enabled))
+                .col_expr(mcp_server::Column::IsBuiltin, Expr::value(is_builtin))
+                .filter(mcp_server::Column::Id.eq(id))
+                .exec(&conn)
+                .await?;
+            Ok(())
+        })?;
+
+        debug!("Updated MCP server");
         Ok(())
     }
 
-    pub fn delete_mcp_server(&self, id: i64) -> rusqlite::Result<()> {
+    #[instrument(level = "debug", skip(self), fields(id))]
+    pub fn delete_mcp_server(&self, id: i64) -> Result<(), DbErr> {
         debug!(id, "delete mcp server");
-        // Cascade delete will handle tools and resources
-        self.conn.execute("DELETE FROM mcp_server WHERE id = ?", params![id])?;
+        self.with_runtime(|conn| async move {
+            mcp_server::Entity::delete_many()
+                .filter(mcp_server::Column::Id.eq(id))
+                .exec(&conn)
+                .await?;
+            Ok(())
+        })?;
+
+        debug!("Deleted MCP server");
         Ok(())
     }
 
-    pub fn toggle_mcp_server(&self, id: i64, is_enabled: bool) -> rusqlite::Result<()> {
+    #[instrument(level = "debug", skip(self), fields(id, is_enabled))]
+    pub fn toggle_mcp_server(&self, id: i64, is_enabled: bool) -> Result<(), DbErr> {
         debug!(id, is_enabled, "toggle mcp server");
-        self.conn.execute(
-            "UPDATE mcp_server SET is_enabled = ? WHERE id = ?",
-            params![is_enabled, id],
-        )?;
+        self.with_runtime(|conn| async move {
+            mcp_server::Entity::update_many()
+                .col_expr(mcp_server::Column::IsEnabled, Expr::value(is_enabled))
+                .filter(mcp_server::Column::Id.eq(id))
+                .exec(&conn)
+                .await?;
+            Ok(())
+        })?;
+
+        debug!("Toggled MCP server");
         Ok(())
     }
 
+    #[instrument(level = "debug", skip(self), fields(name, transport_type, is_enabled, is_builtin))]
     pub fn upsert_mcp_server_with_builtin(
         &self,
         name: &str,
@@ -342,34 +605,29 @@ impl MCPDatabase {
         is_long_running: bool,
         is_enabled: bool,
         is_builtin: bool,
-    ) -> rusqlite::Result<i64> {
+    ) -> Result<i64, DbErr> {
         debug!(name, transport_type, is_enabled, is_builtin, "upsert mcp server");
+        let name_clone = name.to_string();
+        let description_str = description.map(|s| s.to_string()).unwrap_or_default();
+        let transport_type_str = transport_type.to_string();
+        let command_opt = command.map(|s| s.to_string());
+        let env_vars_opt = environment_variables.map(|s| s.to_string());
+        let url_opt = url.map(|s| s.to_string());
+
         // First try to get existing server by name
-        let existing_id = self
-            .conn
-            .prepare("SELECT id FROM mcp_server WHERE name = ?")?
-            .query_row([name], |row| row.get::<_, i64>(0))
-            .optional()?;
+        let existing = self.with_runtime(|conn| async move {
+            mcp_server::Entity::find()
+                .filter(mcp_server::Column::Name.eq(name_clone))
+                .one(&conn)
+                .await
+        })?;
 
-        match existing_id {
-            Some(id) => {
+        match existing {
+            Some(model) => {
+                let id = model.id;
                 // Update existing server
-                self.conn.execute(
-                    "UPDATE mcp_server SET description = ?, transport_type = ?, command = ?, 
-                     environment_variables = ?, url = ?, timeout = ?, is_long_running = ?, is_enabled = ?, is_builtin = ?
-                     WHERE id = ?",
-                    params![description, transport_type, command, environment_variables, url, timeout, is_long_running, is_enabled, is_builtin, id],
-                )?;
-                Ok(id)
-            }
-            None => {
-                // Insert new server
-                let mut stmt = self.conn.prepare(
-                    "INSERT INTO mcp_server (name, description, transport_type, command, environment_variables, url, timeout, is_long_running, is_enabled, is_builtin) 
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                )?;
-
-                stmt.execute(params![
+                self.update_mcp_server_with_builtin(
+                    id,
                     name,
                     description,
                     transport_type,
@@ -379,127 +637,161 @@ impl MCPDatabase {
                     timeout,
                     is_long_running,
                     is_enabled,
-                    is_builtin
-                ])?;
+                    is_builtin,
+                )?;
+                debug!(id, "Updated existing MCP server");
+                Ok(id)
+            }
+            None => {
+                // Insert new server
+                let model = mcp_server::ActiveModel {
+                    id: ActiveValue::NotSet,
+                    name: Set(name.to_string()),
+                    description: Set(description_str),
+                    transport_type: Set(transport_type_str),
+                    command: Set(command_opt),
+                    environment_variables: Set(env_vars_opt),
+                    url: Set(url_opt),
+                    timeout: Set(timeout),
+                    is_long_running: Set(is_long_running),
+                    is_enabled: Set(is_enabled),
+                    is_builtin: Set(is_builtin),
+                    created_time: ActiveValue::NotSet,
+                };
 
-                Ok(self.conn.last_insert_rowid())
+                let result = self.with_runtime(|conn| async move {
+                    model.insert(&conn).await
+                })?;
+
+                debug!(id = result.id, "Inserted new MCP server");
+                Ok(result.id)
             }
         }
     }
 
-    pub fn get_mcp_server_tools(&self, server_id: i64) -> rusqlite::Result<Vec<MCPServerTool>> {
+    #[instrument(level = "debug", skip(self), fields(server_id))]
+    pub fn get_mcp_server_tools(&self, server_id: i64) -> Result<Vec<MCPServerTool>, DbErr> {
         debug!(server_id, "query mcp server tools");
-        let mut stmt = self.conn.prepare(
-            "SELECT id, server_id, tool_name, tool_description, is_enabled, is_auto_run, parameters 
-             FROM mcp_server_tool WHERE server_id = ? ORDER BY tool_name"
-        )?;
-
-        let tools = stmt.query_map([server_id], |row| {
-            Ok(MCPServerTool {
-                id: row.get(0)?,
-                server_id: row.get(1)?,
-                tool_name: row.get(2)?,
-                tool_description: row.get(3)?,
-                is_enabled: row.get(4)?,
-                is_auto_run: row.get(5)?,
-                parameters: row.get(6)?,
-            })
+        let models = self.with_runtime(|conn| async move {
+            mcp_server_tool::Entity::find()
+                .filter(mcp_server_tool::Column::ServerId.eq(server_id))
+                .order_by_asc(mcp_server_tool::Column::ToolName)
+                .all(&conn)
+                .await
         })?;
 
-        let mut result = Vec::new();
-        for tool in tools {
-            result.push(tool?);
-        }
-        Ok(result)
+        let tools: Vec<MCPServerTool> = models.into_iter().map(|m| m.into()).collect();
+        debug!(count = tools.len(), "Fetched MCP server tools");
+        Ok(tools)
     }
 
+    #[instrument(level = "debug", skip(self), fields(id, is_enabled, is_auto_run))]
     pub fn update_mcp_server_tool(
         &self,
         id: i64,
         is_enabled: bool,
         is_auto_run: bool,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<(), DbErr> {
         debug!(id, is_enabled, is_auto_run, "update mcp server tool flags");
-        self.conn.execute(
-            "UPDATE mcp_server_tool SET is_enabled = ?, is_auto_run = ? WHERE id = ?",
-            params![is_enabled, is_auto_run, id],
-        )?;
+        self.with_runtime(|conn| async move {
+            mcp_server_tool::Entity::update_many()
+                .col_expr(mcp_server_tool::Column::IsEnabled, Expr::value(is_enabled))
+                .col_expr(mcp_server_tool::Column::IsAutoRun, Expr::value(is_auto_run))
+                .filter(mcp_server_tool::Column::Id.eq(id))
+                .exec(&conn)
+                .await?;
+            Ok(())
+        })?;
+
+        debug!("Updated MCP server tool");
         Ok(())
     }
 
+    #[instrument(level = "debug", skip(self), fields(server_id, tool_name))]
     pub fn upsert_mcp_server_tool(
         &self,
         server_id: i64,
         tool_name: &str,
         tool_description: Option<&str>,
         parameters: Option<&str>,
-    ) -> rusqlite::Result<i64> {
+    ) -> Result<i64, DbErr> {
         debug!(server_id, tool_name, "upsert mcp server tool");
-        // First try to get existing tool by server_id and tool_name
-        let existing_tool = self.conn.prepare(
-            "SELECT id, is_enabled, is_auto_run FROM mcp_server_tool WHERE server_id = ? AND tool_name = ?"
-        )?.query_row(params![server_id, tool_name], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?, row.get::<_, bool>(2)?))
-        }).optional()?;
+        let tool_name_clone = tool_name.to_string();
+        let tool_desc_opt = tool_description.map(|s| s.to_string());
+        let params_opt = parameters.map(|s| s.to_string());
 
-        match existing_tool {
-            Some((id, _, _)) => {
+        // First try to get existing tool by server_id and tool_name
+        let existing = self.with_runtime(|conn| async move {
+            mcp_server_tool::Entity::find()
+                .filter(mcp_server_tool::Column::ServerId.eq(server_id))
+                .filter(mcp_server_tool::Column::ToolName.eq(tool_name_clone))
+                .one(&conn)
+                .await
+        })?;
+
+        match existing {
+            Some(model) => {
+                let id = model.id;
                 // Update existing tool, preserve user settings
-                self.conn.execute(
-                    "UPDATE mcp_server_tool SET tool_description = ?, parameters = ? WHERE id = ?",
-                    params![tool_description, parameters, id],
-                )?;
+                let tool_desc_opt2 = tool_description.map(|s| s.to_string());
+                let params_opt2 = parameters.map(|s| s.to_string());
+                
+                self.with_runtime(|conn| async move {
+                    mcp_server_tool::Entity::update_many()
+                        .col_expr(mcp_server_tool::Column::ToolDescription, Expr::value(tool_desc_opt2))
+                        .col_expr(mcp_server_tool::Column::Parameters, Expr::value(params_opt2))
+                        .filter(mcp_server_tool::Column::Id.eq(id))
+                        .exec(&conn)
+                        .await?;
+                    Ok(())
+                })?;
+
+                debug!(id, "Updated existing MCP server tool");
                 Ok(id)
             }
             None => {
                 // Insert new tool with default settings
-                let mut stmt = self.conn.prepare(
-                    "INSERT INTO mcp_server_tool (server_id, tool_name, tool_description, is_enabled, is_auto_run, parameters) 
-                     VALUES (?, ?, ?, ?, ?, ?)"
-                )?;
+                let model = mcp_server_tool::ActiveModel {
+                    id: ActiveValue::NotSet,
+                    server_id: Set(server_id),
+                    tool_name: Set(tool_name.to_string()),
+                    tool_description: Set(tool_desc_opt),
+                    is_enabled: Set(true),
+                    is_auto_run: Set(false),
+                    parameters: Set(params_opt),
+                    created_time: ActiveValue::NotSet,
+                };
 
-                stmt.execute(params![
-                    server_id,
-                    tool_name,
-                    tool_description,
-                    true,  // Default enabled
-                    false, // Default not auto-run
-                    parameters
-                ])?;
+                let result = self.with_runtime(|conn| async move {
+                    model.insert(&conn).await
+                })?;
 
-                Ok(self.conn.last_insert_rowid())
+                debug!(id = result.id, "Inserted new MCP server tool");
+                Ok(result.id)
             }
         }
     }
 
+    #[instrument(level = "debug", skip(self), fields(server_id))]
     pub fn get_mcp_server_resources(
         &self,
         server_id: i64,
-    ) -> rusqlite::Result<Vec<MCPServerResource>> {
+    ) -> Result<Vec<MCPServerResource>, DbErr> {
         debug!(server_id, "query mcp server resources");
-        let mut stmt = self.conn.prepare(
-            "SELECT id, server_id, resource_uri, resource_name, resource_type, resource_description 
-             FROM mcp_server_resource WHERE server_id = ? ORDER BY resource_name"
-        )?;
-
-        let resources = stmt.query_map([server_id], |row| {
-            Ok(MCPServerResource {
-                id: row.get(0)?,
-                server_id: row.get(1)?,
-                resource_uri: row.get(2)?,
-                resource_name: row.get(3)?,
-                resource_type: row.get(4)?,
-                resource_description: row.get(5)?,
-            })
+        let models = self.with_runtime(|conn| async move {
+            mcp_server_resource::Entity::find()
+                .filter(mcp_server_resource::Column::ServerId.eq(server_id))
+                .order_by_asc(mcp_server_resource::Column::ResourceName)
+                .all(&conn)
+                .await
         })?;
 
-        let mut result = Vec::new();
-        for resource in resources {
-            result.push(resource?);
-        }
-        Ok(result)
+        let resources: Vec<MCPServerResource> = models.into_iter().map(|m| m.into()).collect();
+        debug!(count = resources.len(), "Fetched MCP server resources");
+        Ok(resources)
     }
 
+    #[instrument(level = "debug", skip(self), fields(server_id, resource_uri))]
     pub fn upsert_mcp_server_resource(
         &self,
         server_id: i64,
@@ -507,123 +799,164 @@ impl MCPDatabase {
         resource_name: &str,
         resource_type: &str,
         resource_description: Option<&str>,
-    ) -> rusqlite::Result<i64> {
+    ) -> Result<i64, DbErr> {
         debug!(server_id, resource_uri, "upsert mcp server resource");
-        // First try to get existing resource by server_id and resource_uri
-        let existing_id = self
-            .conn
-            .prepare("SELECT id FROM mcp_server_resource WHERE server_id = ? AND resource_uri = ?")?
-            .query_row(params![server_id, resource_uri], |row| row.get::<_, i64>(0))
-            .optional()?;
+        let resource_uri_clone = resource_uri.to_string();
+        let resource_name_str = resource_name.to_string();
+        let resource_type_str = resource_type.to_string();
+        let resource_desc_opt = resource_description.map(|s| s.to_string());
 
-        match existing_id {
-            Some(id) => {
+        // First try to get existing resource by server_id and resource_uri
+        let existing = self.with_runtime(|conn| async move {
+            mcp_server_resource::Entity::find()
+                .filter(mcp_server_resource::Column::ServerId.eq(server_id))
+                .filter(mcp_server_resource::Column::ResourceUri.eq(resource_uri_clone))
+                .one(&conn)
+                .await
+        })?;
+
+        match existing {
+            Some(model) => {
+                let id = model.id;
                 // Update existing resource
-                self.conn.execute(
-                    "UPDATE mcp_server_resource SET resource_name = ?, resource_type = ?, resource_description = ? WHERE id = ?",
-                    params![resource_name, resource_type, resource_description, id],
-                )?;
+                let resource_name_str2 = resource_name.to_string();
+                let resource_type_str2 = resource_type.to_string();
+                let resource_desc_opt2 = resource_description.map(|s| s.to_string());
+                
+                self.with_runtime(|conn| async move {
+                    mcp_server_resource::Entity::update_many()
+                        .col_expr(mcp_server_resource::Column::ResourceName, Expr::value(resource_name_str2))
+                        .col_expr(mcp_server_resource::Column::ResourceType, Expr::value(resource_type_str2))
+                        .col_expr(mcp_server_resource::Column::ResourceDescription, Expr::value(resource_desc_opt2))
+                        .filter(mcp_server_resource::Column::Id.eq(id))
+                        .exec(&conn)
+                        .await?;
+                    Ok(())
+                })?;
+
+                debug!(id, "Updated existing MCP server resource");
                 Ok(id)
             }
             None => {
                 // Insert new resource
-                let mut stmt = self.conn.prepare(
-                    "INSERT INTO mcp_server_resource (server_id, resource_uri, resource_name, resource_type, resource_description) 
-                     VALUES (?, ?, ?, ?, ?)"
-                )?;
+                let model = mcp_server_resource::ActiveModel {
+                    id: ActiveValue::NotSet,
+                    server_id: Set(server_id),
+                    resource_uri: Set(resource_uri.to_string()),
+                    resource_name: Set(resource_name_str),
+                    resource_type: Set(resource_type_str),
+                    resource_description: Set(resource_desc_opt),
+                    created_time: ActiveValue::NotSet,
+                };
 
-                stmt.execute(params![
-                    server_id,
-                    resource_uri,
-                    resource_name,
-                    resource_type,
-                    resource_description
-                ])?;
+                let result = self.with_runtime(|conn| async move {
+                    model.insert(&conn).await
+                })?;
 
-                Ok(self.conn.last_insert_rowid())
+                debug!(id = result.id, "Inserted new MCP server resource");
+                Ok(result.id)
             }
         }
     }
 
-    pub fn get_mcp_server_prompts(&self, server_id: i64) -> rusqlite::Result<Vec<MCPServerPrompt>> {
+    #[instrument(level = "debug", skip(self), fields(server_id))]
+    pub fn get_mcp_server_prompts(&self, server_id: i64) -> Result<Vec<MCPServerPrompt>, DbErr> {
         debug!(server_id, "query mcp server prompts");
-        let mut stmt = self.conn.prepare(
-            "SELECT id, server_id, prompt_name, prompt_description, is_enabled, arguments 
-             FROM mcp_server_prompt WHERE server_id = ? ORDER BY prompt_name",
-        )?;
-
-        let prompts = stmt.query_map([server_id], |row| {
-            Ok(MCPServerPrompt {
-                id: row.get(0)?,
-                server_id: row.get(1)?,
-                prompt_name: row.get(2)?,
-                prompt_description: row.get(3)?,
-                is_enabled: row.get(4)?,
-                arguments: row.get(5)?,
-            })
+        let models = self.with_runtime(|conn| async move {
+            mcp_server_prompt::Entity::find()
+                .filter(mcp_server_prompt::Column::ServerId.eq(server_id))
+                .order_by_asc(mcp_server_prompt::Column::PromptName)
+                .all(&conn)
+                .await
         })?;
 
-        let mut result = Vec::new();
-        for prompt in prompts {
-            result.push(prompt?);
-        }
-        Ok(result)
+        let prompts: Vec<MCPServerPrompt> = models.into_iter().map(|m| m.into()).collect();
+        debug!(count = prompts.len(), "Fetched MCP server prompts");
+        Ok(prompts)
     }
 
-    pub fn update_mcp_server_prompt(&self, id: i64, is_enabled: bool) -> rusqlite::Result<()> {
+    #[instrument(level = "debug", skip(self), fields(id, is_enabled))]
+    pub fn update_mcp_server_prompt(&self, id: i64, is_enabled: bool) -> Result<(), DbErr> {
         debug!(id, is_enabled, "update mcp server prompt");
-        self.conn.execute(
-            "UPDATE mcp_server_prompt SET is_enabled = ? WHERE id = ?",
-            params![is_enabled, id],
-        )?;
+        self.with_runtime(|conn| async move {
+            mcp_server_prompt::Entity::update_many()
+                .col_expr(mcp_server_prompt::Column::IsEnabled, Expr::value(is_enabled))
+                .filter(mcp_server_prompt::Column::Id.eq(id))
+                .exec(&conn)
+                .await?;
+            Ok(())
+        })?;
+
+        debug!("Updated MCP server prompt");
         Ok(())
     }
 
+    #[instrument(level = "debug", skip(self), fields(server_id, prompt_name))]
     pub fn upsert_mcp_server_prompt(
         &self,
         server_id: i64,
         prompt_name: &str,
         prompt_description: Option<&str>,
         arguments: Option<&str>,
-    ) -> rusqlite::Result<i64> {
+    ) -> Result<i64, DbErr> {
         debug!(server_id, prompt_name, "upsert mcp server prompt");
-        // First try to get existing prompt by server_id and prompt_name
-        let existing_prompt = self.conn.prepare(
-            "SELECT id, is_enabled FROM mcp_server_prompt WHERE server_id = ? AND prompt_name = ?"
-        )?.query_row(params![server_id, prompt_name], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
-        }).optional()?;
+        let prompt_name_clone = prompt_name.to_string();
+        let prompt_desc_opt = prompt_description.map(|s| s.to_string());
+        let args_opt = arguments.map(|s| s.to_string());
 
-        match existing_prompt {
-            Some((id, _is_enabled)) => {
+        // First try to get existing prompt by server_id and prompt_name
+        let existing = self.with_runtime(|conn| async move {
+            mcp_server_prompt::Entity::find()
+                .filter(mcp_server_prompt::Column::ServerId.eq(server_id))
+                .filter(mcp_server_prompt::Column::PromptName.eq(prompt_name_clone))
+                .one(&conn)
+                .await
+        })?;
+
+        match existing {
+            Some(model) => {
+                let id = model.id;
                 // Update existing prompt, preserve user settings
-                self.conn.execute(
-                    "UPDATE mcp_server_prompt SET prompt_description = ?, arguments = ? WHERE id = ?",
-                    params![prompt_description, arguments, id],
-                )?;
+                let prompt_desc_opt2 = prompt_description.map(|s| s.to_string());
+                let args_opt2 = arguments.map(|s| s.to_string());
+                
+                self.with_runtime(|conn| async move {
+                    mcp_server_prompt::Entity::update_many()
+                        .col_expr(mcp_server_prompt::Column::PromptDescription, Expr::value(prompt_desc_opt2))
+                        .col_expr(mcp_server_prompt::Column::Arguments, Expr::value(args_opt2))
+                        .filter(mcp_server_prompt::Column::Id.eq(id))
+                        .exec(&conn)
+                        .await?;
+                    Ok(())
+                })?;
+
+                debug!(id, "Updated existing MCP server prompt");
                 Ok(id)
             }
             None => {
                 // Insert new prompt with default settings
-                let mut stmt = self.conn.prepare(
-                    "INSERT INTO mcp_server_prompt (server_id, prompt_name, prompt_description, is_enabled, arguments) 
-                     VALUES (?, ?, ?, ?, ?)"
-                )?;
+                let model = mcp_server_prompt::ActiveModel {
+                    id: ActiveValue::NotSet,
+                    server_id: Set(server_id),
+                    prompt_name: Set(prompt_name.to_string()),
+                    prompt_description: Set(prompt_desc_opt),
+                    is_enabled: Set(true),
+                    arguments: Set(args_opt),
+                    created_time: ActiveValue::NotSet,
+                };
 
-                stmt.execute(params![
-                    server_id,
-                    prompt_name,
-                    prompt_description,
-                    true, // Default enabled
-                    arguments
-                ])?;
+                let result = self.with_runtime(|conn| async move {
+                    model.insert(&conn).await
+                })?;
 
-                Ok(self.conn.last_insert_rowid())
+                debug!(id = result.id, "Inserted new MCP server prompt");
+                Ok(result.id)
             }
         }
     }
 
     // MCP Tool Call methods
+    #[instrument(level = "debug", skip(self), fields(conversation_id, server_id, tool_name))]
     pub fn create_mcp_tool_call(
         &self,
         conversation_id: i64,
@@ -632,28 +965,35 @@ impl MCPDatabase {
         server_name: &str,
         tool_name: &str,
         parameters: &str,
-    ) -> rusqlite::Result<MCPToolCall> {
+    ) -> Result<MCPToolCall, DbErr> {
         debug!(conversation_id, server_id, tool_name, "create mcp tool call");
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO mcp_tool_call (conversation_id, message_id, server_id, server_name, tool_name, parameters)
-             VALUES (?, ?, ?, ?, ?, ?)"
-        )?;
+        let model = mcp_tool_call::ActiveModel {
+            id: ActiveValue::NotSet,
+            conversation_id: Set(conversation_id),
+            message_id: Set(message_id),
+            server_id: Set(server_id),
+            server_name: Set(server_name.to_string()),
+            tool_name: Set(tool_name.to_string()),
+            parameters: Set(parameters.to_string()),
+            status: Set("pending".to_string()),
+            result: Set(None),
+            error: Set(None),
+            created_time: ActiveValue::NotSet,
+            started_time: Set(None),
+            finished_time: Set(None),
+            llm_call_id: Set(None),
+            assistant_message_id: Set(None),
+        };
 
-        stmt.execute(params![
-            conversation_id,
-            message_id,
-            server_id,
-            server_name,
-            tool_name,
-            parameters
-        ])?;
+        let result = self.with_runtime(|conn| async move {
+            model.insert(&conn).await
+        })?;
 
-        let id = self.conn.last_insert_rowid();
-
-        // Return the created tool call
-        self.get_mcp_tool_call(id)
+        debug!(id = result.id, "Created MCP tool call");
+        self.get_mcp_tool_call(result.id)
     }
 
+    #[instrument(level = "debug", skip(self), fields(conversation_id, server_id, tool_name, llm_call_id, assistant_message_id))]
     pub fn create_mcp_tool_call_with_llm_id(
         &self,
         conversation_id: i64,
@@ -664,140 +1004,148 @@ impl MCPDatabase {
         parameters: &str,
         llm_call_id: Option<&str>,
         assistant_message_id: Option<i64>,
-    ) -> rusqlite::Result<MCPToolCall> {
+    ) -> Result<MCPToolCall, DbErr> {
         debug!(conversation_id, server_id, tool_name, llm_call_id = ?llm_call_id, assistant_message_id = ?assistant_message_id, "create mcp tool call with llm id");
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO mcp_tool_call (conversation_id, message_id, server_id, server_name, tool_name, parameters, llm_call_id, assistant_message_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-        )?;
+        let model = mcp_tool_call::ActiveModel {
+            id: ActiveValue::NotSet,
+            conversation_id: Set(conversation_id),
+            message_id: Set(message_id),
+            server_id: Set(server_id),
+            server_name: Set(server_name.to_string()),
+            tool_name: Set(tool_name.to_string()),
+            parameters: Set(parameters.to_string()),
+            status: Set("pending".to_string()),
+            result: Set(None),
+            error: Set(None),
+            created_time: ActiveValue::NotSet,
+            started_time: Set(None),
+            finished_time: Set(None),
+            llm_call_id: Set(llm_call_id.map(|s| s.to_string())),
+            assistant_message_id: Set(assistant_message_id),
+        };
 
-        stmt.execute(params![
-            conversation_id,
-            message_id,
-            server_id,
-            server_name,
-            tool_name,
-            parameters,
-            llm_call_id,
-            assistant_message_id
-        ])?;
+        let result = self.with_runtime(|conn| async move {
+            model.insert(&conn).await
+        })?;
 
-        let id = self.conn.last_insert_rowid();
-
-        // Return the created tool call
-        self.get_mcp_tool_call(id)
+        debug!(id = result.id, "Created MCP tool call with LLM ID");
+        self.get_mcp_tool_call(result.id)
     }
 
-    pub fn get_mcp_tool_call(&self, id: i64) -> rusqlite::Result<MCPToolCall> {
+    #[instrument(level = "debug", skip(self), fields(id))]
+    pub fn get_mcp_tool_call(&self, id: i64) -> Result<MCPToolCall, DbErr> {
         debug!(id, "get mcp tool call");
-        let mut stmt = self.conn.prepare(
-            "SELECT id, conversation_id, message_id, server_id, server_name, tool_name, 
-             parameters, status, result, error, created_time, started_time, finished_time, llm_call_id, assistant_message_id
-             FROM mcp_tool_call WHERE id = ?"
-        )?;
+        let model = self.with_runtime(|conn| async move {
+            mcp_tool_call::Entity::find_by_id(id)
+                .one(&conn)
+                .await
+        })?;
 
-        stmt.query_row([id], |row| {
-            Ok(MCPToolCall {
-                id: row.get(0)?,
-                conversation_id: row.get(1)?,
-                message_id: row.get(2)?,
-                server_id: row.get(3)?,
-                server_name: row.get(4)?,
-                tool_name: row.get(5)?,
-                parameters: row.get(6)?,
-                status: row.get(7)?,
-                result: row.get(8)?,
-                error: row.get(9)?,
-                created_time: row.get(10)?,
-                started_time: row.get(11)?,
-                finished_time: row.get(12)?,
-                llm_call_id: row.get(13)?,
-                assistant_message_id: row.get(14)?,
-            })
-        })
+        match model {
+            Some(m) => {
+                debug!(found = true, "Fetched MCP tool call");
+                Ok(m.into())
+            }
+            None => {
+                debug!(found = false, "MCP tool call not found");
+                Err(DbErr::RecordNotFound("MCP tool call not found".to_string()))
+            }
+        }
     }
 
+    #[instrument(level = "debug", skip(self), fields(id, status, has_result, has_error))]
     pub fn update_mcp_tool_call_status(
         &self,
         id: i64,
         status: &str,
         result: Option<&str>,
         error: Option<&str>,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<(), DbErr> {
         debug!(id, status, has_result = result.is_some(), has_error = error.is_some(), "update mcp tool call status");
-        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let now = chrono::Utc::now();
+        let status_str = status.to_string();
+        let result_opt = result.map(|s| s.to_string());
+        let error_opt = error.map(|s| s.to_string());
 
         match status {
             "executing" => {
-                self.conn.execute(
-                    "UPDATE mcp_tool_call SET status = ?, started_time = ? WHERE id = ?",
-                    params![status, now, id],
-                )?;
+                self.with_runtime(|conn| async move {
+                    mcp_tool_call::Entity::update_many()
+                        .col_expr(mcp_tool_call::Column::Status, Expr::value(status_str))
+                        .col_expr(mcp_tool_call::Column::StartedTime, Expr::value(now))
+                        .filter(mcp_tool_call::Column::Id.eq(id))
+                        .exec(&conn)
+                        .await?;
+                    Ok(())
+                })?;
             }
             "success" | "failed" => {
-                self.conn.execute(
-                    "UPDATE mcp_tool_call SET status = ?, result = ?, error = ?, finished_time = ? WHERE id = ?",
-                    params![status, result, error, now, id],
-                )?;
+                self.with_runtime(|conn| async move {
+                    mcp_tool_call::Entity::update_many()
+                        .col_expr(mcp_tool_call::Column::Status, Expr::value(status_str))
+                        .col_expr(mcp_tool_call::Column::Result, Expr::value(result_opt))
+                        .col_expr(mcp_tool_call::Column::Error, Expr::value(error_opt))
+                        .col_expr(mcp_tool_call::Column::FinishedTime, Expr::value(now))
+                        .filter(mcp_tool_call::Column::Id.eq(id))
+                        .exec(&conn)
+                        .await?;
+                    Ok(())
+                })?;
             }
             _ => {
-                self.conn.execute(
-                    "UPDATE mcp_tool_call SET status = ? WHERE id = ?",
-                    params![status, id],
-                )?;
+                self.with_runtime(|conn| async move {
+                    mcp_tool_call::Entity::update_many()
+                        .col_expr(mcp_tool_call::Column::Status, Expr::value(status_str))
+                        .filter(mcp_tool_call::Column::Id.eq(id))
+                        .exec(&conn)
+                        .await?;
+                    Ok(())
+                })?;
             }
         }
+
+        debug!("Updated MCP tool call status");
         Ok(())
     }
 
     /// Try to transition a tool call to executing state only if it is currently pending/failed and not yet started.
     /// Returns true if the transition happened, false if another executor already took it.
-    pub fn mark_mcp_tool_call_executing_if_pending(&self, id: i64) -> rusqlite::Result<bool> {
-        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        // 允许从 pending/failed 进入 executing；对于 failed 的重试，覆盖 started_time 即可
-        let rows = self.conn.execute(
-            "UPDATE mcp_tool_call SET status = 'executing', started_time = ? WHERE id = ? AND status IN ('pending', 'failed')",
-            params![now, id],
-        )?;
-        debug!(id, transitioned = rows > 0, "try mark executing");
-        Ok(rows > 0)
+    #[instrument(level = "debug", skip(self), fields(id))]
+    pub fn mark_mcp_tool_call_executing_if_pending(&self, id: i64) -> Result<bool, DbErr> {
+        let now = chrono::Utc::now();
+        
+        let rows = self.with_runtime(|conn| async move {
+            let result = mcp_tool_call::Entity::update_many()
+                .col_expr(mcp_tool_call::Column::Status, Expr::value("executing"))
+                .col_expr(mcp_tool_call::Column::StartedTime, Expr::value(now))
+                .filter(mcp_tool_call::Column::Id.eq(id))
+                .filter(mcp_tool_call::Column::Status.is_in(vec!["pending", "failed"]))
+                .exec(&conn)
+                .await?;
+            Ok::<u64, DbErr>(result.rows_affected)
+        })?;
+
+        let transitioned = rows > 0;
+        debug!(id, transitioned, "try mark executing");
+        Ok(transitioned)
     }
 
+    #[instrument(level = "debug", skip(self), fields(conversation_id))]
     pub fn get_mcp_tool_calls_by_conversation(
         &self,
         conversation_id: i64,
-    ) -> rusqlite::Result<Vec<MCPToolCall>> {
+    ) -> Result<Vec<MCPToolCall>, DbErr> {
         debug!(conversation_id, "query tool calls by conversation");
-        let mut stmt = self.conn.prepare(
-            "SELECT id, conversation_id, message_id, server_id, server_name, tool_name, 
-             parameters, status, result, error, created_time, started_time, finished_time, llm_call_id, assistant_message_id
-             FROM mcp_tool_call WHERE conversation_id = ? ORDER BY created_time DESC"
-        )?;
-
-        let calls = stmt.query_map([conversation_id], |row| {
-            Ok(MCPToolCall {
-                id: row.get(0)?,
-                conversation_id: row.get(1)?,
-                message_id: row.get(2)?,
-                server_id: row.get(3)?,
-                server_name: row.get(4)?,
-                tool_name: row.get(5)?,
-                parameters: row.get(6)?,
-                status: row.get(7)?,
-                result: row.get(8)?,
-                error: row.get(9)?,
-                created_time: row.get(10)?,
-                started_time: row.get(11)?,
-                finished_time: row.get(12)?,
-                llm_call_id: row.get(13)?,
-                assistant_message_id: row.get(14)?,
-            })
+        let models = self.with_runtime(|conn| async move {
+            mcp_tool_call::Entity::find()
+                .filter(mcp_tool_call::Column::ConversationId.eq(conversation_id))
+                .order_by_desc(mcp_tool_call::Column::CreatedTime)
+                .all(&conn)
+                .await
         })?;
 
-        let mut result = Vec::new();
-        for call in calls {
-            result.push(call?);
-        }
-        Ok(result)
+        let calls: Vec<MCPToolCall> = models.into_iter().map(|m| m.into()).collect();
+        debug!(count = calls.len(), "Fetched MCP tool calls by conversation");
+        Ok(calls)
     }
 }

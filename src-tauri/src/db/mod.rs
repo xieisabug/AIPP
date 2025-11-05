@@ -116,44 +116,42 @@ fn special_logic_0_0_2(
     llm_db: &LLMDatabase,
     assistant_db: &AssistantDatabase,
     _conversation_db: &ConversationDatabase,
-    _app_handle: &tauri::AppHandle,
+    app_handle: &tauri::AppHandle,
 ) -> Result<(), String> {
     info!("Running special_logic_0_0_2");
+    
+    // Get rusqlite connection for migrations
+    let conn = assistant_db.get_rusqlite_connection(app_handle)?;
+    
     // 开始事务
-    assistant_db
-        .conn
+    conn
         .execute("BEGIN TRANSACTION;", [])
         .map_err(|e| format!("添加字段model_code失败: {}", e.to_string()))?;
 
     // 添加新字段
-    assistant_db
-        .conn
+    conn
         .execute(
             "ALTER TABLE assistant_model ADD COLUMN provider_id INTEGER NOT NULL DEFAULT 0;",
             [],
         )
         .map_err(|e| format!("添加字段provider_id失败: {}", e.to_string()))?;
-    assistant_db
-        .conn
+    conn
         .execute("ALTER TABLE assistant_model ADD COLUMN model_code TEXT NOT NULL DEFAULT '';", [])
         .map_err(|e| format!("添加字段model_code失败: {}", e.to_string()))?;
-    assistant_db
-        .conn
+    conn
         .execute(
             "ALTER TABLE assistant_model_config ADD COLUMN value_type TEXT NOT NULL DEFAULT 'float';",
             [],
         )
         .map_err(|e| format!("添加字段value_type失败: {}", e.to_string()))?;
 
-    assistant_db
-        .conn
+    conn
         .execute(
             "UPDATE assistant_model_config SET value_type = 'boolean' WHERE name = 'stream';",
             [],
         )
         .map_err(|e| format!("更新stream类型失败: {}", e.to_string()))?;
-    assistant_db
-        .conn
+    conn
         .execute(
             "UPDATE assistant_model_config SET value_type = 'number' WHERE name = 'max_tokens';",
             [],
@@ -161,8 +159,7 @@ fn special_logic_0_0_2(
         .map_err(|e| format!("更新max_tokens类型失败: {}", e.to_string()))?;
 
     // 查询所有 model_id
-    let mut stmt = assistant_db
-        .conn
+    let mut stmt = conn
         .prepare("SELECT model_id FROM assistant_model")
         .map_err(|e| format!("查询助手模型失败: {}", e.to_string()))?;
     let model_ids_iter = stmt
@@ -175,8 +172,7 @@ fn special_logic_0_0_2(
         if let Ok(model) = llm_db.get_llm_model_detail_by_id(&model_id) {
             // 处理查询到的 model
             // 更新新字段
-            assistant_db
-                .conn
+            conn
                 .execute(
                     "UPDATE assistant_model SET provider_id = ?, model_code = ? WHERE model_id = ?;",
                     params![model.provider.id, model.model.code, model_id],
@@ -189,14 +185,12 @@ fn special_logic_0_0_2(
     }
 
     // 删除旧字段
-    assistant_db
-        .conn
+    conn
         .execute("ALTER TABLE assistant_model DROP COLUMN model_id;", [])
         .map_err(|e| format!("删除model_id字段失败: {}", e.to_string()))?;
 
     // 提交事务
-    assistant_db
-        .conn
+    conn
         .execute("COMMIT;", [])
         .map_err(|e| format!("事务提交失败: {}", e.to_string()))?;
     info!("special_logic_0_0_2 done");

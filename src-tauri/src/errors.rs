@@ -51,6 +51,12 @@ impl From<rusqlite::Error> for AppError {
     }
 }
 
+impl From<sea_orm::DbErr> for AppError {
+    fn from(err: sea_orm::DbErr) -> Self {
+        AppError::DatabaseError(err.to_string())
+    }
+}
+
 impl From<std::io::Error> for AppError {
     fn from(err: std::io::Error) -> Self {
         AppError::IoError(err.to_string())
@@ -84,5 +90,11 @@ impl From<Box<dyn StdError>> for AppError {
 impl From<anyhow::Error> for AppError {
     fn from(err: anyhow::Error) -> Self {
         AppError::Anyhow(err.to_string())
+    }
+}
+
+impl From<String> for AppError {
+    fn from(err: String) -> Self {
+        AppError::UnknownError(err)
     }
 }
