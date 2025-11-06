@@ -85,8 +85,8 @@ impl SystemDatabase {
         // Create a new Tokio runtime if we're not in one
         let conn = match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
-                // We're in a Tokio runtime, use it
-                handle.block_on(async { Database::connect(&url).await })?
+                // We're in a Tokio runtime; block in place to avoid nested-runtime panic
+                tokio::task::block_in_place(|| handle.block_on(async { Database::connect(&url).await }))?
             }
             Err(_) => {
                 // We're not in a Tokio runtime, create one
@@ -137,7 +137,7 @@ impl SystemDatabase {
     {
         let conn = self.conn.clone();
         match tokio::runtime::Handle::try_current() {
-            Ok(handle) => handle.block_on(f(conn)),
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f(conn))),
             Err(_) => {
                 let rt = tokio::runtime::Runtime::new()
                     .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
