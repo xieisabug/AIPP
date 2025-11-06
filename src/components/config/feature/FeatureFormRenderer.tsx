@@ -4,7 +4,7 @@ import { DisplayConfigForm } from "./forms/DisplayConfigForm";
 import { SummaryConfigForm } from "./forms/SummaryConfigForm";
 import { PreviewConfigForm } from "./forms/PreviewConfigForm";
 import { NetworkConfigForm } from "./forms/NetworkConfigForm";
-import { DataFolderConfigForm } from "./forms/DataFolderConfigForm";
+import { DataStorageConfigForm } from "./forms/DataStorageConfigForm";
 import { ShortcutsConfigForm } from "./forms/ShortcutsConfigForm";
 
 interface FeatureItem {
@@ -80,11 +80,7 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
                 />
             );
         case "data_folder":
-            return (
-                <DataFolderConfigForm
-                    form={forms.dataFolderForm}
-                />
-            );
+            return <DataStorageConfigForm />;
         case "network_config":
             return (
                 <NetworkConfigForm
