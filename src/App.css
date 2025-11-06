@@ -255,13 +255,12 @@ body {
 }
 
 .prose code {
-    @apply text-foreground bg-muted px-1 py-0.5 rounded text-sm;
+    @apply text-foreground px-1 py-0.5 rounded text-sm;
 }
 
 .prose pre {
-    @apply p-4 rounded-lg overflow-x-auto;
-    margin-top: 1.5em;
-    margin-bottom: 1.5em;
+    @apply p-2 rounded-lg overflow-x-auto;
+    margin-block: 0;
 }
 
 .prose pre code {

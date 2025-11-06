@@ -255,12 +255,21 @@ pub async fn ask_ai(
         // 动态判断是否有可用的工具
         let has_available_tools = is_native_toolcall && !mcp_info.enabled_servers.is_empty();
 
+        // 某些 OpenAI 兼容通道在使用 Gemini 模型时不会返回 usage（或返回 null），
+        // 而 genai 的 OpenAI 适配器会尝试严格反序列化 usage，从而在日志中出现错误。
+        // 为避免该无害错误噪音，这里对「provider_api_type=openai 且 model_code 含 gemini」的组合禁用 usage 捕获。
+        let provider_api_type_lc = provider_api_type.to_lowercase();
+        let model_code_lc = model_code.to_lowercase();
+        let is_openai_like = provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
+        let is_gemini = model_code_lc.contains("gemini");
+        let capture_usage = !(is_openai_like && is_gemini);
+
         let chat_config = ChatConfig {
             model_name,
             stream,
             chat_options: chat_options
                 .with_normalize_reasoning_content(true)
-                .with_capture_usage(true)
+                .with_capture_usage(capture_usage)
                 .with_capture_tool_calls(has_available_tools), // 动态设置
             client,
         };
@@ -269,6 +278,10 @@ pub async fn ask_ai(
             model = chat_config.model_name,
             stream = chat_config.stream,
             has_tools = has_available_tools,
+            provider_api_type = %provider_api_type,
+            capture_usage = capture_usage,
+            is_openai_like = is_openai_like,
+            is_gemini = is_gemini,
             "chat configuration established"
         );
 
@@ -411,6 +424,37 @@ pub async fn tool_result_continue_ask_ai(
         None,
     )?;
 
+    // Emit events so UI can render the tool_result immediately without manual refresh
+    // 1) message_add
+    let add_event = ConversationEvent {
+        r#type: "message_add".to_string(),
+        data: serde_json::to_value(MessageAddEvent {
+            message_id: tool_result_message.id,
+            message_type: "tool_result".to_string(),
+        })
+        .unwrap(),
+    };
+    let _ = window.emit(
+        format!("conversation_event_{}", conversation_id_i64).as_str(),
+        add_event,
+    );
+
+    // 2) message_update (is_done = true)
+    let update_event = ConversationEvent {
+        r#type: "message_update".to_string(),
+        data: serde_json::to_value(MessageUpdateEvent {
+            message_id: tool_result_message.id,
+            message_type: "tool_result".to_string(),
+            content: tool_result_message.content.clone(),
+            is_done: true,
+        })
+        .unwrap(),
+    };
+    let _ = window.emit(
+        format!("conversation_event_{}", conversation_id_i64).as_str(),
+        update_event,
+    );
+
     // Get all existing messages
     let all_messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id_i64)?;
 
@@ -541,15 +585,33 @@ pub async fn tool_result_continue_ask_ai(
         && !mcp_info.enabled_servers.is_empty()
         && !force_non_native_for_toolresult;
 
+    // 同 ask_ai：避免 OpenAI 兼容通道 + Gemini 模型导致的 usage 反序列化报错日志
+    let provider_api_type_lc = provider_api_type.to_lowercase();
+    let model_code_lc = model_code.to_lowercase();
+    let is_openai_like = provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
+    let is_gemini = model_code_lc.contains("gemini");
+    let capture_usage = !(is_openai_like && is_gemini);
+
     let chat_config = ChatConfig {
         model_name,
         stream,
         chat_options: chat_options
             .with_normalize_reasoning_content(true)
-            .with_capture_usage(true)
+            .with_capture_usage(capture_usage)
             .with_capture_tool_calls(has_available_tools), // 动态设置
         client,
     };
+
+    info!(
+        model = chat_config.model_name,
+        stream = chat_config.stream,
+        has_tools = has_available_tools,
+        provider_api_type = %provider_api_type,
+        capture_usage = capture_usage,
+        is_openai_like = is_openai_like,
+        is_gemini = is_gemini,
+        "chat configuration (tool_result_continue)"
+    );
 
     info!(
         model = chat_config.model_name,
@@ -948,15 +1010,33 @@ pub async fn regenerate_ai(
         // 动态判断是否有可用的工具
         let has_available_tools = is_native_toolcall && !mcp_info.enabled_servers.is_empty();
 
+        // 同 ask_ai：避免 OpenAI 兼容通道 + Gemini 模型导致的 usage 反序列化报错日志
+        let provider_api_type_lc = regenerate_provider_api_type.to_lowercase();
+        let model_code_lc = regenerate_model_code.to_lowercase();
+        let is_openai_like = provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
+        let is_gemini = model_code_lc.contains("gemini");
+        let capture_usage = !(is_openai_like && is_gemini);
+
         let chat_config = ChatConfig {
             model_name,
             stream,
             chat_options: chat_options
                 .with_normalize_reasoning_content(true)
-                .with_capture_usage(true)
+                .with_capture_usage(capture_usage)
                 .with_capture_tool_calls(has_available_tools), // 动态设置
             client,
         };
+
+        info!(
+            model = chat_config.model_name,
+            stream = chat_config.stream,
+            has_tools = has_available_tools,
+            provider_api_type = %regenerate_provider_api_type,
+            capture_usage = capture_usage,
+            is_openai_like = is_openai_like,
+            is_gemini = is_gemini,
+            "chat configuration (regenerate)"
+        );
 
         // 将历史消息转换为 ChatMessage：
         // - 原生 toolcall：按默认逻辑（tool_result -> ToolResponse）
@@ -1064,7 +1144,7 @@ pub async fn regenerate_ai(
     // Store the task handle for proper cancellation
     message_token_manager.store_task_handle(conversation_id, regenerate_task_handle).await;
 
-    info!("Regenerate AI end");
+    info!("Regenerate AI dispatched (background task started)");
 
     Ok(AiResponse { conversation_id, request_prompt_result_with_context: String::new() })
 }

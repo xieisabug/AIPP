@@ -246,19 +246,31 @@ pub async fn get_conversation_with_messages(
     name_cache_state: tauri::State<'_, NameCacheState>,
     conversation_id: i64,
 ) -> Result<ConversationWithMessages, String> {
+    use std::time::Instant;
+    let start_time = Instant::now();
+    
     let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    
+    // 查询 conversation
+    let conv_query_start = Instant::now();
     let conversation = db
         .conversation_repo()
         .unwrap()
         .read(conversation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Conversation not found".to_string())?;
+    let conv_query_duration = conv_query_start.elapsed();
+    println!("[PERF] 查询 conversation 耗时: {:?}", conv_query_duration);
 
+    // 查询 messages
+    let msg_query_start = Instant::now();
     let messages = db
         .message_repo()
         .unwrap()
         .list_by_conversation_id(conversation_id)
         .map_err(|e| e.to_string())?;
+    let msg_query_duration = msg_query_start.elapsed();
+    println!("[PERF] 查询 messages 耗时: {:?}, 消息数量: {}", msg_query_duration, messages.len());
 
     let mut message_details: Vec<MessageDetail> = Vec::new();
     let mut attachment_map: HashMap<i64, Vec<MessageAttachment>> = HashMap::new();
@@ -270,6 +282,7 @@ pub async fn get_conversation_with_messages(
     }
 
     // Convert messages to a HashMap to preserve it for the second pass
+    let process_start = Instant::now();
     let message_map: HashMap<i64, Message> =
         messages.clone().into_iter().map(|(message, _)| (message.id, message)).collect();
 
@@ -294,15 +307,23 @@ pub async fn get_conversation_with_messages(
             regenerate: Vec::new(),
         });
     }
+    let process_duration = process_start.elapsed();
+    println!("[PERF] 构建 MessageDetail 耗时: {:?}", process_duration);
 
     // 处理消息版本管理逻辑
+    let version_start = Instant::now();
     let final_messages = process_message_versions(message_details);
+    let version_duration = version_start.elapsed();
+    println!("[PERF] 处理消息版本管理耗时: {:?}", version_duration);
 
     let assistant_name_cache = name_cache_state.assistant_names.lock().await;
     let assistant_name = assistant_name_cache
         .get(&conversation.assistant_id.unwrap_or(0))
         .cloned()
         .unwrap_or_else(|| "未知".to_string());
+
+    let total_duration = start_time.elapsed();
+    println!("[PERF] get_conversation_with_messages 总耗时: {:?}", total_duration);
 
     Ok(ConversationWithMessages {
         conversation: ConversationResult {

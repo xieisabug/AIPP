@@ -221,6 +221,8 @@ export interface ListSubTaskExecutionsParams {
 export interface UseSubTaskManagerOptions {
     conversation_id: number;
     message_id?: number;
+    // 控制是否在挂载时自动刷新（默认 true），消息级别的 SubTask 建议禁用以减少渲染开销
+    autoRefreshOnMount?: boolean;
     // source_id 在UI层面不需要，只在MCP/plugin开发时需要
 }
 

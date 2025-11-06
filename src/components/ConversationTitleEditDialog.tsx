@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { Sparkles, X } from 'lucide-react';
 import { Button } from './ui/button';
+import { getErrorMessage, isInsufficientMessagesError } from "../utils/error";
 
 interface ConversationTitleEditDialogProps {
     isOpen: boolean;
@@ -55,18 +56,23 @@ const ConversationTitleEditDialog: React.FC<ConversationTitleEditDialogProps> = 
         setIsRegeneratingTitle(true);
 
         try {
+            const id = Number(conversationId);
+            if (!Number.isFinite(id)) {
+                throw new Error("无效的对话 ID");
+            }
             await invoke("regenerate_conversation_title", {
-                conversationId: conversationId,
+                conversation_id: id,
+                conversationId: id, // 兼容旧参数名
             });
             toast.success("标题已重新生成");
         } catch (error) {
             console.error("重新生成标题失败:", error);
             
             // 处理特定的错误类型，提供更友好的提示
-            if (error === "InsufficientMessages") {
+            if (isInsufficientMessagesError(error)) {
                 toast.error("对话内容不足，需要至少包含一条用户消息才能生成标题");
             } else {
-                toast.error("重新生成标题失败: " + error);
+                toast.error("重新生成标题失败: " + getErrorMessage(error));
             }
         } finally {
             setIsRegeneratingTitle(false);
@@ -75,17 +81,24 @@ const ConversationTitleEditDialog: React.FC<ConversationTitleEditDialogProps> = 
 
     // 提交表单处理
     const handleSubmit = useCallback(() => {
+        const id = Number(conversationId);
+        if (!Number.isFinite(id)) {
+            toast.error("无效的对话 ID");
+            return;
+        }
+        const name = title;
         invoke("update_conversation", {
-            conversationId: conversationId,
-            name: title,
+            conversation_id: id,
+            conversationId: id, // 兼容旧参数名
+            name,
         }).then(() => {
             if (onSave) {
-                onSave(title);
+                onSave(name);
             }
             onClose();
             toast.success("标题已更新");
         }).catch((error) => {
-            toast.error("更新标题失败: " + error);
+            toast.error("更新标题失败: " + getErrorMessage(error));
         });
     }, [conversationId, title, onSave, onClose]);
 

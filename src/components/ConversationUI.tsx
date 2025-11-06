@@ -204,7 +204,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         );
 
         // 滚动管理 - 移除依赖项，改为手动调用
-        const { messagesEndRef, scrollContainerRef, handleScroll, smartScroll } = useScrollManagement();
+        const { messagesEndRef, scrollContainerRef, handleScroll, smartScroll, scrollToUserMessage } = useScrollManagement();
 
         // 使用 useMemo 稳定 options 对象，避免频繁触发 useConversationEvents 内部的 useEffect
         const conversationEventsOptions = useMemo(() => {
@@ -261,6 +261,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             updateShiningMessages,
             updateFunctionMap,
             clearStreamingMessages,
+            clearShiningMessages,
         } = useConversationEvents(conversationEventsOptions);
 
         // 当 functionMap 变化时更新事件处理器
@@ -340,6 +341,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             onChangeConversationId,
             setShiningMessageIds,
             updateShiningMessages,
+            clearShiningMessages,
             assistantTypePluginMap,
             assistantRunApi,
         });
@@ -373,6 +375,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 setConversation(undefined);
                 // 清理流式消息和闪烁状态
                 clearStreamingMessages();
+                clearShiningMessages();
 
                 invoke<Array<AssistantListItem>>("get_assistants").then((assistantList) => {
                     setAssistants(assistantList);
@@ -392,18 +395,27 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             // 在切换对话时立即清理所有与前一个对话相关的状态
             setGroupMergeMap(new Map()); // 切换对话时清理组合并状态
             clearStreamingMessages(); // 清理流式消息
+            clearShiningMessages(); // 清理闪烁状态
+            // 立即清空当前消息与会话，避免先渲染旧数据再渲染新数据导致的双次渲染
+            setMessages([]);
+            setConversation(undefined);
 
-            console.log(`conversationId change : ${conversationId}`);
+            console.log(`[PERF-FRONTEND] conversationId change : ${conversationId}`);
+            const frontendStartTime = performance.now();
 
             invoke<ConversationWithMessages>("get_conversation_with_messages", {
                 conversationId: +conversationId,
             })
                 .then((res: ConversationWithMessages) => {
+                    const backendDuration = performance.now() - frontendStartTime;
+                    console.log(`[PERF-FRONTEND] 后端返回数据耗时: ${backendDuration.toFixed(2)}ms, 消息数: ${res.messages.length}`);
+                    
                     // 检查请求是否已被取消
                     if (currentLoadingRef.cancelled) {
                         return;
                     }
 
+                    const setStateStartTime = performance.now();
                     setMessages(res.messages);
                     setConversation(res.conversation);
                     setIsLoadingShow(false); // 这里会触发 useLayoutEffect 中的聚焦
@@ -413,6 +425,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             setShiningMessageIds((prev) => new Set([...prev, res.messages[1].id]));
                         }
                     }
+                    
+                    const setStateDuration = performance.now() - setStateStartTime;
+                    console.log(`[PERF-FRONTEND] 设置状态耗时: ${setStateDuration.toFixed(2)}ms`);
                 })
                 .catch((error) => {
                     if (!currentLoadingRef.cancelled) {
@@ -425,7 +440,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             return () => {
                 currentLoadingRef.cancelled = true;
             };
-        }, [conversationId, clearStreamingMessages]);
+        }, [conversationId, clearStreamingMessages, clearShiningMessages]);
 
         // 监听对话标题变化
         useEffect(() => {
@@ -482,6 +497,40 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             };
         }, [updateShiningMessages]);
 
+        // 在切换对话后，加载完成并渲染出消息后，强制滚动到底部
+        useEffect(() => {
+            // 必须有对话且不在加载中，且有可显示的消息时才执行
+            if (!conversationId) return;
+            if (isLoadingShow) return;
+            if (allDisplayMessages.length === 0) return;
+
+            const renderStartTime = performance.now();
+            console.log(`[PERF-FRONTEND] 开始渲染 ${allDisplayMessages.length} 条消息`);
+            
+            // 等待渲染与布局稳定后再滚动（双 rAF）
+            requestAnimationFrame(() =>
+                requestAnimationFrame(() => {
+                    const renderDuration = performance.now() - renderStartTime;
+                    console.log(`[PERF-FRONTEND] 消息渲染完成耗时: ${renderDuration.toFixed(2)}ms`);
+                    // 忽略"用户上滑"状态，切换话题后总是瞬时滚动到底部（无平滑动画）
+                    smartScroll(true, 'auto');
+                })
+            );
+        }, [conversationId, isLoadingShow, allDisplayMessages.length, smartScroll]);
+
+        // 监听消息变化，当用户发送消息时滚动到用户消息位置
+        useEffect(() => {
+            const lastMessage = allDisplayMessages[allDisplayMessages.length - 1];
+            if (lastMessage && lastMessage.message_type === 'user') {
+                // 在渲染和布局之后执行，避免时间竞态
+                requestAnimationFrame(() =>
+                    requestAnimationFrame(() => {
+                        scrollToUserMessage();
+                    })
+                );
+            }
+        }, [allDisplayMessages.length, scrollToUserMessage]);
+
         // ============= 组件渲染 =============
 
         return (
@@ -521,7 +570,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         assistants={assistants}
                         setSelectedAssistant={setSelectedAssistant}
                     />
-                    <div className="flex-none h-[120px]"></div>
                     <div ref={messagesEndRef} />
                 </div>
 

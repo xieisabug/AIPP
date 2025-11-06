@@ -48,23 +48,24 @@ uuid = { version = "1.0", features = ["v4"] }
 urlencoding = "2.1"
 tauri-plugin-dialog = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
 tauri-plugin-clipboard-manager = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
-tauri-plugin-shell = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
 tauri-plugin-fs = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
 tauri-plugin-opener = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
 genai = { git = "https://github.com/xieisabug/rust-genai.git", rev="eb4d013e2ffae80c2a2aa3b0c05943a030b8e62a" }
-rmcp = { version = "0.6.3", features = [
-    "client",
-    "transport-io",
-    "transport-sse-client",
-    "transport-sse-client-reqwest",
-    "transport-streamable-http-client",
-    "transport-streamable-http-client-reqwest",
-    "transport-child-process",
-    "reqwest"
+rmcp = { version = "0.8", features = [
+	"client",
+	"transport-io",
+	"transport-sse-client",
+	"transport-sse-client-reqwest",
+	"transport-streamable-http-client",
+	"transport-streamable-http-client-reqwest",
+	"transport-child-process",
+	"reqwest"
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tauri-plugin-notification = "2"
+syntect = "5.3.0"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 macos-accessibility-client = "0.0.1"
 

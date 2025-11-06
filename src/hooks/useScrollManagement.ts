@@ -4,7 +4,9 @@ export interface UseScrollManagementReturn {
     messagesEndRef: React.RefObject<HTMLDivElement | null>;
     scrollContainerRef: React.RefObject<HTMLDivElement | null>;
     handleScroll: () => void;
-    smartScroll: () => void;
+    // Allow overriding behavior for specific scenarios (e.g., instant on open)
+    smartScroll: (forceScroll?: boolean, behaviorOverride?: ScrollBehavior) => void;
+    scrollToUserMessage: () => void;
 }
 
 export function useScrollManagement(): UseScrollManagementReturn {
@@ -34,9 +36,12 @@ export function useScrollManagement(): UseScrollManagementReturn {
     }, []); // 依赖项为空，函数是稳定的
 
     // 智能滚动函数
-    const smartScroll = useCallback(() => {
+    const smartScroll = useCallback((forceScroll: boolean = false, behaviorOverride?: ScrollBehavior) => {
+        // 如果当前正处于程序触发的平滑滚动阶段，避免用 auto 覆盖动画
+        if (isAutoScrolling.current) return;
+
         // 从 Ref 读取状态，这总是最新的值
-        if (isUserScrolledUpRef.current) {
+        if ((!forceScroll && isUserScrolledUpRef.current) || !scrollContainerRef.current) {
             return;
         }
 
@@ -48,33 +53,67 @@ export function useScrollManagement(): UseScrollManagementReturn {
             resizeObserverRef.current.disconnect();
         }
 
-        resizeObserverRef.current = new ResizeObserver(() => {
+        const scrollToBottom = () => {
             // 再次从 Ref 检查，确保万无一失
-            if (isUserScrolledUpRef.current || !scrollContainerRef.current) {
+            if (isAutoScrolling.current || (!forceScroll && isUserScrolledUpRef.current) || !scrollContainerRef.current) {
                 if (resizeObserverRef.current) {
                     resizeObserverRef.current.disconnect();
                 }
                 return;
             }
+            const c = scrollContainerRef.current!;
+            const distanceToBottom = c.scrollHeight - c.scrollTop - c.clientHeight;
+            // 优先使用外部传入的行为；否则距离较大时使用平滑滚动，小距离使用 auto
+            const behavior: ScrollBehavior = behaviorOverride ?? (distanceToBottom > 120 ? 'smooth' : 'auto');
 
             isAutoScrolling.current = true;
-            scrollContainerRef.current.scrollTop =
-                scrollContainerRef.current.scrollHeight;
-
+            c.scrollTo({ top: c.scrollHeight, behavior });
             if (resizeObserverRef.current) {
                 resizeObserverRef.current.disconnect();
             }
-
             setTimeout(() => {
                 isAutoScrolling.current = false;
-            }, 100);
+            }, behavior === 'smooth' ? 500 : 100);
+        };
+
+        // 优先观察最后一组容器，其次观察最后一条消息元素
+        const lastReplyContainer = container.querySelector('#last-reply-container') as HTMLElement | null;
+        const messageItems = container.querySelectorAll('[data-message-item]');
+        const lastMessageItem = (messageItems.length > 0
+            ? (messageItems[messageItems.length - 1] as HTMLElement)
+            : null);
+        const observed: Element | null = lastReplyContainer || lastMessageItem || container.lastElementChild;
+
+        if (observed) {
+            resizeObserverRef.current = new ResizeObserver(() => {
+                scrollToBottom();
+            });
+            resizeObserverRef.current.observe(observed);
+        }
+
+        // 回退：若 ResizeObserver 未触发，下一帧也滚动一次
+        requestAnimationFrame(() => scrollToBottom());
+    }, []); // 依赖项为空，函数是稳定的
+
+    // 将最后的用户消息滚动到视口顶部（ChatGPT风格）
+    const scrollToUserMessage = useCallback(() => {
+        const container = scrollContainerRef.current;
+        if (!container) return;
+
+        isAutoScrolling.current = true;
+        // 重置用户滚动状态
+        isUserScrolledUpRef.current = false;
+        
+        // 直接滚动到容器底部（最底部位置）
+        container.scrollTo({
+            top: container.scrollHeight,
+            behavior: 'smooth'
         });
 
-        const lastMessageElement = container.lastElementChild;
-        if (lastMessageElement) {
-            resizeObserverRef.current.observe(lastMessageElement);
-        }
-    }, []); // 依赖项为空，函数是稳定的
+        setTimeout(() => {
+            isAutoScrolling.current = false;
+        }, 500); // 增加延迟以匹配平滑滚动时间
+    }, []);
 
     // 组件卸载时清理资源
     useEffect(() => {
@@ -91,5 +130,6 @@ export function useScrollManagement(): UseScrollManagementReturn {
         scrollContainerRef,
         handleScroll,
         smartScroll,
+        scrollToUserMessage,
     };
 }

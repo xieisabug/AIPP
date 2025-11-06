@@ -3,7 +3,7 @@ use crate::mcp::mcp_db::{
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::{warn, instrument};
+use tracing::{warn, info, instrument};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct McpToolInfo {
@@ -267,9 +267,11 @@ async fn test_stdio_connection(server: &MCPServer) -> Result<(), String> {
 async fn test_sse_connection(server: &MCPServer) -> Result<(), String> {
     use rmcp::{
         model::{ClientCapabilities, ClientInfo, Implementation},
-        transport::SseClientTransport,
+        transport::{sse_client::SseClientConfig, SseClientTransport},
         ServiceExt,
     };
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    use crate::mcp::util::parse_server_headers;
 
     let url = server.url.as_ref().ok_or("No URL specified for SSE transport")?;
 
@@ -277,13 +279,35 @@ async fn test_sse_connection(server: &MCPServer) -> Result<(), String> {
     let client_result = tokio::time::timeout(
         std::time::Duration::from_millis(5000), // 5秒超时
         async {
-            let transport = SseClientTransport::start(url.as_str()).await?;
+            // Build client with default headers if configured
+            let (_auth_header, all_headers) = parse_server_headers(server);
+            let transport = if let Some(hdrs) = all_headers {
+                let to_log = crate::mcp::util::sanitize_headers_for_log(&hdrs);
+                info!(server_id = server.id, headers = ?to_log, "Testing SSE with headers");
+                let mut header_map = HeaderMap::new();
+                for (k, v) in hdrs.iter() {
+                    if let (Ok(name), Ok(value)) =
+                        (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v.as_str()))
+                    {
+                        header_map.insert(name, value);
+                    }
+                }
+                let client = reqwest::Client::builder().default_headers(header_map).build()?;
+                SseClientTransport::start_with_client(
+                    client,
+                    SseClientConfig { sse_endpoint: url.as_str().into(), ..Default::default() },
+                )
+                .await?
+            } else {
+                SseClientTransport::start(url.as_str()).await?
+            };
             let client_info = ClientInfo {
                 protocol_version: Default::default(),
                 capabilities: ClientCapabilities::default(),
                 client_info: Implementation {
                     name: "AIPP MCP SSE Test Client".to_string(),
                     version: "0.1.0".to_string(),
+                    ..Default::default()
                 },
             };
             let client = client_info.serve(transport).await?;
@@ -309,11 +333,31 @@ async fn test_http_connection(server: &MCPServer) -> Result<(), String> {
         transport::StreamableHttpClientTransport,
         ServiceExt,
     };
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    use crate::mcp::util::parse_server_headers;
 
     let url = server.url.as_ref().ok_or("No URL specified for HTTP transport")?;
 
-    // 创建StreamableHttpClientTransport传输
-    let transport = StreamableHttpClientTransport::from_uri(url.as_str());
+    // 创建StreamableHttpClientTransport传输，注入自定义 headers
+    let (auth_header, all_headers) = parse_server_headers(server);
+    let transport = {
+        let mut header_map = HeaderMap::new();
+        if let Some(hdrs) = all_headers.as_ref() {
+            let to_log = crate::mcp::util::sanitize_headers_for_log(hdrs);
+            info!(server_id = server.id, headers = ?to_log, "Testing HTTP with headers");
+            for (k, v) in hdrs.iter() {
+                if let (Ok(name), Ok(value)) =
+                    (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v.as_str()))
+                {
+                    header_map.insert(name, value);
+                }
+            }
+        }
+        let client = reqwest::Client::builder().default_headers(header_map).build().map_err(|e| e.to_string())?;
+        let mut cfg = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url.as_str());
+        if let Some(auth) = auth_header.as_ref() { cfg = cfg.auth_header(auth.clone()); }
+        StreamableHttpClientTransport::with_client(client, cfg)
+    };
 
     // 创建客户端信息
     let client_info = ClientInfo {
@@ -322,6 +366,7 @@ async fn test_http_connection(server: &MCPServer) -> Result<(), String> {
         client_info: Implementation {
             name: "AIPP MCP Test Client".to_string(),
             version: "0.1.0".to_string(),
+            ..Default::default()
         },
     };
 
@@ -568,26 +613,51 @@ async fn get_sse_capabilities(
 ) -> Result<(), String> {
     use rmcp::{
         model::{ClientCapabilities, ClientInfo, Implementation},
-        transport::SseClientTransport,
+        transport::{sse_client::SseClientConfig, SseClientTransport},
         ServiceExt,
     };
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    use crate::mcp::util::parse_server_headers;
 
     let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
     // 获取URL，如果没有则返回错误
-    let url = server.url.ok_or("No URL specified for SSE transport")?;
+    let url = server.url.clone().ok_or("No URL specified for SSE transport")?;
 
     // 创建SSE传输和客户端
     let client_result = tokio::time::timeout(
         std::time::Duration::from_millis(server.timeout.unwrap_or(30000) as u64),
         async {
-            let transport = SseClientTransport::start(url.as_str()).await?;
+            let transport = {
+                let (_auth_header, all_headers) = parse_server_headers(&server);
+                if let Some(hdrs) = all_headers {
+                    let to_log = crate::mcp::util::sanitize_headers_for_log(&hdrs);
+                    info!(server_id = server.id, headers = ?to_log, "Fetching SSE capabilities with headers");
+                    let mut header_map = HeaderMap::new();
+                    for (k, v) in hdrs.iter() {
+                        if let (Ok(name), Ok(value)) =
+                            (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v.as_str()))
+                        {
+                            header_map.insert(name, value);
+                        }
+                    }
+                    let client = reqwest::Client::builder().default_headers(header_map).build()?;
+                    SseClientTransport::start_with_client(
+                        client,
+                        SseClientConfig { sse_endpoint: url.as_str().into(), ..Default::default() },
+                    )
+                    .await?
+                } else {
+                    SseClientTransport::start(url.as_str()).await?
+                }
+            };
             let client_info = ClientInfo {
                 protocol_version: Default::default(),
                 capabilities: ClientCapabilities::default(),
                 client_info: Implementation {
                     name: "AIPP MCP SSE Client".to_string(),
                     version: "0.1.0".to_string(),
+                    ..Default::default()
                 },
             };
             let client = client_info.serve(transport).await?;
@@ -695,17 +765,37 @@ async fn get_http_capabilities(
 ) -> Result<(), String> {
     use rmcp::{
         model::{ClientCapabilities, ClientInfo, Implementation},
-        transport::StreamableHttpClientTransport,
+        transport::{streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport},
         ServiceExt,
     };
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    use crate::mcp::util::parse_server_headers;
 
     let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
     // 获取URL，如果没有则返回错误
-    let url = server.url.ok_or("No URL specified for HTTP transport")?;
+    let url = server.url.clone().ok_or("No URL specified for HTTP transport")?;
 
-    // 创建StreamableHttpClientTransport传输
-    let transport = StreamableHttpClientTransport::from_uri(url.as_str());
+    // 创建带 headers 的 HTTP 传输
+    let transport = {
+        let (auth_header, all_headers) = parse_server_headers(&server);
+        let mut header_map = HeaderMap::new();
+        if let Some(hdrs) = all_headers.as_ref() {
+            let to_log = crate::mcp::util::sanitize_headers_for_log(hdrs);
+            info!(server_id = server.id, headers = ?to_log, "Fetching HTTP capabilities with headers");
+            for (k, v) in hdrs.iter() {
+                if let (Ok(name), Ok(value)) =
+                    (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v.as_str()))
+                {
+                    header_map.insert(name, value);
+                }
+            }
+        }
+        let client = reqwest::Client::builder().default_headers(header_map).build().map_err(|e| e.to_string())?;
+        let mut cfg = StreamableHttpClientTransportConfig::with_uri(url.as_str());
+        if let Some(auth) = auth_header.as_ref() { cfg = cfg.auth_header(auth.clone()); }
+        StreamableHttpClientTransport::with_client(client, cfg)
+    };
 
     // 创建客户端信息
     let client_info = ClientInfo {
@@ -714,6 +804,7 @@ async fn get_http_capabilities(
         client_info: Implementation {
             name: "AIPP MCP Client".to_string(),
             version: "0.1.0".to_string(),
+            ..Default::default()
         },
     };
 

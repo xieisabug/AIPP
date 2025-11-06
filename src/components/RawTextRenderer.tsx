@@ -56,21 +56,21 @@ const RawTextRenderer: React.FC<RawTextRendererProps> = ({ content }) => {
                 }
             }
 
-            // 处理自定义标签
-            parts.push(
-                <ReactMarkdown
-                    key={`tag-${tagMatch.index}`}
-                    children={tagMatch.content}
-                    remarkPlugins={[
-                        REMARK_PLUGINS.find(plugin => plugin.name === 'remarkCustomCompenent') || REMARK_PLUGINS[3]
-                    ].filter(Boolean) as any}
-                    rehypePlugins={[
-                        REHYPE_PLUGINS[0], // rehypeRaw
-                        REHYPE_PLUGINS[1], // rehypeSanitize
-                    ] as any}
-                    components={MARKDOWN_COMPONENTS_BASE as any}
-                />
-            );
+        // 处理自定义标签
+        parts.push(
+            <ReactMarkdown
+                key={`tag-${tagMatch.index}`}
+                children={tagMatch.content}
+                remarkPlugins={[
+                    REMARK_PLUGINS.find(plugin => plugin.name === 'remarkCustomCompenent') || REMARK_PLUGINS[3]
+                ].filter(Boolean) as any}
+                rehypePlugins={[
+                    REHYPE_PLUGINS[0], // rehypeRaw
+                    REHYPE_PLUGINS[1], // rehypeSanitize
+                ] as any}
+                components={MARKDOWN_COMPONENTS_BASE as any}
+            />
+        );
 
             currentIndex = tagMatch.index + tagMatch.length;
         });
@@ -93,11 +93,17 @@ const RawTextRenderer: React.FC<RawTextRendererProps> = ({ content }) => {
                     );
                 }
             } else if (textAfter) {
-                // 其他情况正常渲染
+                // 其他情况：用 ReactMarkdown 处理可能存在的自定义标签
                 parts.push(
-                    <span key={`text-${currentIndex}`} style={{ whiteSpace: 'pre-wrap' }}>
-                        {textAfter}
-                    </span>
+                    <ReactMarkdown
+                        key={`md-${currentIndex}`}
+                        children={textAfter}
+                        remarkPlugins={[
+                            REMARK_PLUGINS.find(plugin => plugin.name === 'remarkCustomCompenent') || REMARK_PLUGINS[3]
+                        ].filter(Boolean) as any}
+                        rehypePlugins={[REHYPE_PLUGINS[0], REHYPE_PLUGINS[1]] as any}
+                        components={MARKDOWN_COMPONENTS_BASE as any}
+                    />
                 );
             }
         }

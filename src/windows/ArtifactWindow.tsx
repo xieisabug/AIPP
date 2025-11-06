@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emitTo, once } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import mermaid from "mermaid";
@@ -509,6 +509,32 @@ export default function ArtifactWindow() {
         }
     };
 
+    // 在新窗口中查看 Mermaid（全屏/独立）
+    const handleOpenMermaidInNewWindow = async () => {
+        if (!mermaidContent) return;
+        try {
+            await invoke("open_artifact_preview_window");
+
+            // 优先直接发送（若窗口已打开，此时已在监听）
+            const payload = { type: "mermaid", original_code: mermaidContent } as any;
+            try {
+                await emitTo("artifact_preview", "artifact-preview-data", payload);
+            } catch (_) {
+                // 忽略直接发送失败，继续走就绪事件
+            }
+
+            // 监听就绪事件，再次发送，避免窗口尚未挂载时丢失事件
+            await once("artifact-preview-ready", () => {
+                emitTo("artifact_preview", "artifact-preview-data", payload);
+            });
+        } catch (error) {
+            setLogs((prev) => [
+                ...prev,
+                { type: "error", message: `打开预览窗口失败: ${String(error)}` },
+            ]);
+        }
+    };
+
     return (
         <div className="flex h-screen bg-background">
             <div className="flex flex-1 flex-col">
@@ -648,12 +674,20 @@ export default function ArtifactWindow() {
                                         <div className="text-sm text-muted-foreground">
                                             缩放: {Math.round(mermaidScale * 100)}% | 提示: 滚轮缩放，空格键+拖动
                                         </div>
-                                        <button
-                                            onClick={resetMermaidView}
-                                            className="px-3 py-1 bg-secondary hover:bg-secondary/80 text-secondary-foreground text-xs rounded transition-colors"
-                                        >
-                                            重置视图
-                                        </button>
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                onClick={handleOpenMermaidInNewWindow}
+                                                className="px-3 py-1 bg-primary hover:bg-primary/90 text-primary-foreground text-xs rounded transition-colors"
+                                            >
+                                                在新窗口打开
+                                            </button>
+                                            <button
+                                                onClick={resetMermaidView}
+                                                className="px-3 py-1 bg-secondary hover:bg-secondary/80 text-secondary-foreground text-xs rounded transition-colors"
+                                            >
+                                                重置视图
+                                            </button>
+                                        </div>
                                     </div>
                                     <div
                                         ref={mermaidContainerRef}

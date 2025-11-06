@@ -72,12 +72,14 @@ const MessageItem = React.memo<MessageItemProps>(
 
         // 统一的 Markdown 配置，根据用户消息类型和配置决定是否禁用 Markdown 语法
         const isUserMessage = message.message_type === "user";
+        const isStreaming = !!streamEvent && !streamEvent.is_done;
         const markdownConfig = useMarkdownConfig({
             onCodeRun,
             disableMarkdownSyntax: isUserMessage && !isUserMessageMarkdownEnabled,
+            isStreaming,
         });
 
-        const mcpProcessor = useMcpToolCallProcessor(markdownConfig, {
+        const { processContent } = useMcpToolCallProcessor(markdownConfig, {
             conversationId,
             messageId: message.id,
             mcpToolCallStates,
@@ -85,7 +87,7 @@ const MessageItem = React.memo<MessageItemProps>(
 
         // 处理自定义标签解析
         const markdownContent = useMemo(
-            () => measureSync(`markdown-parsing-${message.id}`, () => parseCustomTags(message.content), false),
+            () => measureSync(`markdown-parsing-${message.id}`, () => parseCustomTags(message.content), true),
             [message.content, parseCustomTags, message.id]
         );
 
@@ -106,17 +108,18 @@ const MessageItem = React.memo<MessageItemProps>(
                                 // 使用 noProseWrapper，避免嵌套重复 prose 容器
                                 noProseWrapper
                                 onCodeRun={onCodeRun}
+                                isStreaming={isStreaming}
                             >
                                 {markdownContent}
                             </UnifiedMarkdown>
                         );
 
                         // MCP 工具调用后处理
-                        return mcpProcessor.processContent(markdownContent, element);
+                        return processContent(markdownContent, element);
                     },
-                    false
+                    true
                 ),
-            [markdownContent, onCodeRun, mcpProcessor, message.id, isUserMessage, isUserMessageMarkdownEnabled]
+            [markdownContent, onCodeRun, processContent, message.id, isUserMessage, isUserMessageMarkdownEnabled]
         );
 
         // 早期返回：reasoning 类型消息
@@ -139,12 +142,13 @@ const MessageItem = React.memo<MessageItemProps>(
 
         // 常规消息渲染
         return (
-            <div className="flex flex-col">
+            <div className="flex flex-col" data-message-item data-message-type={message.message_type}>
                 {/* Message-level sub-tasks - shown at the top of each message */}
                 {conversationId && (
                     <SubTaskList
                         conversation_id={conversationId}
                         message_id={message.id}
+                        autoLoad={false}
                         onTaskDetailView={handleSubTaskDetailView}
                         className="mb-2"
                     />

@@ -1,6 +1,7 @@
 .input-area {
     box-sizing: border-box;
     position: relative;
+    z-index: 99;
 }
 
 .input-area.top {

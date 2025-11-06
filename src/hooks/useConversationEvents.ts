@@ -52,6 +52,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
     // 事件监听取消订阅引用
     const unsubscribeRef = useRef<Promise<() => void> | null>(null);
+    const hasUnsubscribedRef = useRef<boolean>(false);
 
     // 使用 ref 存储最新的回调函数，避免依赖项变化
     const callbacksRef = useRef(options);
@@ -324,22 +325,33 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             `Setting up conversation event listener for: conversation_event_${callbacksRef.current.conversationId}`,
         );
 
-        // 取消之前的事件监听
-        if (unsubscribeRef.current) {
+        // 取消之前的事件监听（只执行一次）
+        if (unsubscribeRef.current && !hasUnsubscribedRef.current) {
             console.log("Unsubscribing from previous event listener");
-            unsubscribeRef.current.then((f) => f());
+            const p = unsubscribeRef.current;
+            unsubscribeRef.current = null;
+            hasUnsubscribedRef.current = true;
+            p.then((f) => {
+                try { f(); } catch (e) { console.warn('unlisten failed (previous):', e); }
+            }).catch((e) => console.warn('unlisten rejected (previous):', e));
         }
 
         // 设置新的事件监听
+        hasUnsubscribedRef.current = false;
         unsubscribeRef.current = listen(
             `conversation_event_${callbacksRef.current.conversationId}`,
             handleConversationEvent,
         );
 
         return () => {
-            if (unsubscribeRef.current) {
+            if (unsubscribeRef.current && !hasUnsubscribedRef.current) {
                 console.log("unsubscribe conversation events");
-                unsubscribeRef.current.then((f) => f());
+                const p = unsubscribeRef.current;
+                unsubscribeRef.current = null;
+                hasUnsubscribedRef.current = true;
+                p.then((f) => {
+                    try { f(); } catch (e) { console.warn('unlisten failed (cleanup):', e); }
+                }).catch((e) => console.warn('unlisten rejected (cleanup):', e));
             }
         };
     }, [options.conversationId]); // 只依赖 conversationId

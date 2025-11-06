@@ -328,7 +328,9 @@ function AskWindow() {
                         response == "" ? (
                             <AskAIHint />
                         ) : (
-                            <UnifiedMarkdown onCodeRun={handleArtifact}>{displayResponse}</UnifiedMarkdown>
+                            <UnifiedMarkdown onCodeRun={handleArtifact} isStreaming={aiIsResponsing}>
+                                {displayResponse}
+                            </UnifiedMarkdown>
                         )
                     ) : (
                         <AskWindowPrepare selectedText={selectedText} />

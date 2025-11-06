@@ -10,7 +10,7 @@ export interface UseAssistantRuntimeProps {
     fileInfoList?: FileInfo[];
     setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
     onChangeConversationId: (conversationId: string) => void;
-    smartScroll: () => void;
+    smartScroll: (forceScroll?: boolean, behaviorOverride?: ScrollBehavior) => void;
     updateShiningMessages: () => void;
     setAiIsResponsing: (isResponsing: boolean) => void;
 }

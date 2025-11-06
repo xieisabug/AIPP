@@ -2,23 +2,25 @@ import { useMemo, useCallback } from 'react';
 import React from 'react';
 import { Components } from 'react-markdown';
 import { open } from '@tauri-apps/plugin-shell';
-import CodeBlock from '@/components/CodeBlock';
-import { 
-    REMARK_PLUGINS, 
-    REHYPE_PLUGINS, 
-    MARKDOWN_COMPONENTS_BASE 
+import {
+    REMARK_PLUGINS,
+    REHYPE_PLUGINS,
+    MARKDOWN_COMPONENTS_BASE,
 } from '@/constants/markdown';
+import CodeBlock from '@/components/RustCodeBlock';
 
 interface UseMarkdownConfigOptions {
     onCodeRun?: (lang: string, code: string) => void;
     disableMarkdownSyntax?: boolean;
+    // 是否处于流式输出中，用于代码块自动折叠的首次触发
+    isStreaming?: boolean;
 }
 
 interface CustomComponents extends Components {
     antthinking: React.ElementType;
 }
 
-export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: UseMarkdownConfigOptions = {}) => {
+export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false, isStreaming = false }: UseMarkdownConfigOptions = {}) => {
     // 换行处理函数 - 完全按原样展示文本，保留所有换行和空行
     const renderTextWithBreaks = useCallback((children: React.ReactNode): React.ReactNode => {
         if (typeof children === 'string') {
@@ -34,19 +36,19 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
             // 根据 disableMarkdownSyntax 决定如何渲染标准 Markdown 元素
             ...(disableMarkdownSyntax ? {
                 // 纯文本模式：重写标准 Markdown 组件为纯文本渲染，支持换行
-                h1: ({ children }) => <span>#{' '}{renderTextWithBreaks(children)}</span>,
-                h2: ({ children }) => <span>##{' '}{renderTextWithBreaks(children)}</span>,
-                h3: ({ children }) => <span>###{' '}{renderTextWithBreaks(children)}</span>,
-                h4: ({ children }) => <span>####{' '}{renderTextWithBreaks(children)}</span>,
-                h5: ({ children }) => <span>#####{' '}{renderTextWithBreaks(children)}</span>,
-                h6: ({ children }) => <span>######{' '}{renderTextWithBreaks(children)}</span>,
-                strong: ({ children }) => <span>**{children}**</span>,
-                em: ({ children }) => <span>*{children}*</span>,
-                blockquote: ({ children }) => <span>{'> '}{renderTextWithBreaks(children)}</span>,
-                ul: ({ children }) => <div>{children}</div>,
-                ol: ({ children }) => <div>{children}</div>,
-                li: ({ children }) => <div>- {renderTextWithBreaks(children)}</div>,
-                p: ({ children }) => <div>{renderTextWithBreaks(children)}</div>,
+                h1: ({ children }: any) => <span>#{' '}{renderTextWithBreaks(children)}</span>,
+                h2: ({ children }: any) => <span>##{' '}{renderTextWithBreaks(children)}</span>,
+                h3: ({ children }: any) => <span>###{' '}{renderTextWithBreaks(children)}</span>,
+                h4: ({ children }: any) => <span>####{' '}{renderTextWithBreaks(children)}</span>,
+                h5: ({ children }: any) => <span>#####{' '}{renderTextWithBreaks(children)}</span>,
+                h6: ({ children }: any) => <span>######{' '}{renderTextWithBreaks(children)}</span>,
+                strong: ({ children }: any) => <span>**{children}**</span>,
+                em: ({ children }: any) => <span>*{children}*</span>,
+                blockquote: ({ children }: any) => <span>{'> '}{renderTextWithBreaks(children)}</span>,
+                ul: ({ children }: any) => <div>{children}</div>,
+                ol: ({ children }: any) => <div>{children}</div>,
+                li: ({ children }: any) => <div>- {renderTextWithBreaks(children)}</div>,
+                p: ({ children }: any) => <div>{renderTextWithBreaks(children)}</div>,
                 br: () => <br />,
             } : {}),
             // antthinking自定义组件
@@ -78,8 +80,9 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
                     <CodeBlock
                         language={match[1]}
                         onCodeRun={onCodeRun || (() => {})}
+                        isStreaming={isStreaming}
                     >
-                        {children}
+                        {String(children).replace(/\n$/, '')}
                     </CodeBlock>
                 ) : (
                     <code
@@ -90,7 +93,7 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
                     </code>
                 );
             },
-            a: ({ href, children, ...props }) => {
+            a: ({ href, children, ...props }: any) => {
                 const handleClick = useCallback(
                     (e: React.MouseEvent) => {
                         e.preventDefault();
@@ -113,7 +116,7 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
                 );
             },
         }),
-        [onCodeRun, disableMarkdownSyntax, renderTextWithBreaks],
+        [onCodeRun, disableMarkdownSyntax, renderTextWithBreaks, isStreaming],
     );
 
     // 根据 disableMarkdownSyntax 决定使用哪些插件

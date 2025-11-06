@@ -7,6 +7,7 @@ pub mod genai_client;
 pub mod llm_api;
 pub mod sub_task_api;
 pub mod system_api;
+pub mod highlight_api;
 
 #[cfg(test)]
 mod tests;

@@ -61,6 +61,15 @@ pub async fn save_feature_config(
             .or_insert(HashMap::new())
             .insert(key.clone(), new_config);
     }
+    // 如果更新的是快捷键配置，则尝试重新注册全局快捷键（异步，避免阻塞 runtime）
+    #[cfg(desktop)]
+    if feature_code == "shortcuts" {
+        let app = app_handle.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::reconfigure_global_shortcuts_async(&app).await;
+        });
+    }
+
     Ok(())
 }
 
@@ -93,4 +102,32 @@ pub async fn get_bang_list() -> Result<Vec<(String, String, String, BangType)>, 
 pub async fn get_selected_text_api(state: tauri::State<'_, AppState>) -> Result<String, String> {
     let selected_text = state.selected_text.lock().await;
     Ok(selected_text.clone())
+}
+
+#[tauri::command]
+pub async fn set_shortcut_recording(state: tauri::State<'_, AppState>, active: bool) -> Result<(), String> {
+    let mut flag = state.recording_shortcut.lock().await;
+    *flag = active;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn suspend_global_shortcut(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_global_shortcut::GlobalShortcutExt;
+        if let Err(e) = app.global_shortcut().unregister_all() {
+            return Err(format!("无法暂停全局快捷键: {}", e));
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn resume_global_shortcut(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        crate::reconfigure_global_shortcuts_async(&app).await;
+    }
+    Ok(())
 }

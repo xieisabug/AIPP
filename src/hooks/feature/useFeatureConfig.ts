@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { getErrorMessage } from "@/utils/error";
 
 type FeatureConfig = Map<string, Map<string, string>>;
 
@@ -34,7 +35,7 @@ export const useFeatureConfig = () => {
                 return newFeatureConfig;
             })
             .catch((e) => {
-                toast.error("获取配置失败: " + e);
+                toast.error("获取配置失败: " + getErrorMessage(e));
                 throw e;
             })
             .finally(() => {
@@ -44,8 +45,10 @@ export const useFeatureConfig = () => {
 
     // 保存功能配置
     const saveFeatureConfig = useCallback((featureCode: string, config: Record<string, any>) => {
+        // Send both camelCase and snake_case for compatibility with Rust command arg names
         return invoke("save_feature_config", {
             featureCode,
+            feature_code: featureCode,
             config,
         }).then(() => {
             // 重新加载配置

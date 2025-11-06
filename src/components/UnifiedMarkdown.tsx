@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import ReactMarkdown, { Components } from 'react-markdown';
-import CodeBlock from './CodeBlock';
+import CodeBlock from './RustCodeBlock';
 import { useMarkdownConfig } from '../hooks/useMarkdownConfig';
 
 interface UnifiedMarkdownProps {
@@ -10,6 +10,8 @@ interface UnifiedMarkdownProps {
     disableMarkdownSyntax?: boolean;
     // 当为 true 时，不包裹默认的 prose 样式容器，便于父级自定义样式
     noProseWrapper?: boolean;
+    // 是否处于流式输出中，用于代码块自动折叠的首次触发
+    isStreaming?: boolean;
 }
 
 interface CustomComponents extends Components {
@@ -26,11 +28,13 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
     className = '',
     disableMarkdownSyntax = false,
     noProseWrapper = false,
+    isStreaming = false,
 }) => {
     // 使用统一的markdown配置
     const markdownConfig = useMarkdownConfig({
         onCodeRun,
-        disableMarkdownSyntax
+        disableMarkdownSyntax,
+        isStreaming,
     });
 
     // 自定义组件配置，包含antthinking组件
@@ -54,6 +58,7 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
                 <CodeBlock
                     language={match[1]}
                     onCodeRun={onCodeRun || (() => { })}
+                    isStreaming={isStreaming}
                 >
                     {String(children).replace(/\n$/, '')}
                 </CodeBlock>
@@ -103,4 +108,13 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
     );
 };
 
-export default UnifiedMarkdown;
+// 避免不必要的重渲染：仅在核心 props/children 变更时更新
+export default React.memo(UnifiedMarkdown, (prev, next) => {
+    return (
+        prev.children === next.children &&
+        prev.className === next.className &&
+        prev.disableMarkdownSyntax === next.disableMarkdownSyntax &&
+        prev.noProseWrapper === next.noProseWrapper &&
+        prev.onCodeRun === next.onCodeRun
+    );
+});

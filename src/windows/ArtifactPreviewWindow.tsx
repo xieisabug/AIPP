@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { listen, emit } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { open } from '@tauri-apps/plugin-shell';
@@ -81,6 +81,12 @@ export default function ArtifactPreviewWindow() {
         currentInputStrRef.current = currentInputStr;
     }, [currentLang, currentInputStr]);
 
+    // 通知其他窗口：预览窗口已准备就绪（避免事件丢失）
+    useEffect(() => {
+        // 仅在挂载后发一次就绪事件
+        emit('artifact-preview-ready');
+    }, []);
+
     // 初始化 mermaid - 根据主题动态配置
     useEffect(() => {
         // 检测当前主题
@@ -93,6 +99,10 @@ export default function ArtifactPreviewWindow() {
             fontFamily: 'monospace',
             themeVariables: {
                 darkMode: isDark,
+            },
+            // 确保 SVG 有明确的尺寸
+            flowchart: {
+                useMaxWidth: false,
             }
         });
     }, []);
@@ -130,15 +140,35 @@ export default function ArtifactPreviewWindow() {
 
                     // 渲染图表
                     const { svg } = await mermaid.render(id, mermaidContent.trim());
+                    
+                    // 设置 innerHTML 前先确保容器可见
+                    innerContainer.style.width = '100%';
+                    innerContainer.style.minHeight = '400px';
                     innerContainer.innerHTML = svg;
 
                     // 设置 SVG 样式以适应容器
                     const svgElement = innerContainer.querySelector('svg');
                     if (svgElement) {
-                        svgElement.style.maxWidth = 'none';
-                        svgElement.style.maxHeight = 'none';
-                        svgElement.style.width = 'auto';
+                        // 确保 SVG 可见：保留原始尺寸或设置默认尺寸
+                        const width = svgElement.getAttribute('width');
+                        const height = svgElement.getAttribute('height');
+                        const viewBox = svgElement.getAttribute('viewBox');
+                        
+                        // 如果没有 viewBox，尝试从 width/height 创建
+                        if (!viewBox && width && height) {
+                            svgElement.setAttribute('viewBox', `0 0 ${width} ${height}`);
+                        }
+                        
+                        // 移除固定的 width 和 height 属性，让 CSS 控制
+                        svgElement.removeAttribute('width');
+                        svgElement.removeAttribute('height');
+                        
+                        // 设置样式以确保 SVG 可见且响应式
+                        svgElement.style.width = '100%';
                         svgElement.style.height = 'auto';
+                        svgElement.style.maxWidth = '100%';
+                        svgElement.style.display = 'block';
+                        svgElement.style.margin = '0 auto';
                     }
                 } catch (error) {
                     const container = mermaidContainerRef.current;
@@ -669,7 +699,7 @@ export default function ArtifactPreviewWindow() {
                                                             {children}
                                                         </code>
                                                     );
-                                                }
+                                                },
                                             };
                                             return (
                                                 <ReactMarkdown

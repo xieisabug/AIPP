@@ -1,7 +1,8 @@
-import React, { useMemo } from "react";
+import React, { useMemo, Profiler } from "react";
 import MessageItem from "../MessageItem";
 import VersionPagination from "../VersionPagination";
 import { Message, StreamEvent } from "../../data/Conversation";
+import { onRenderCallback } from "../../hooks/usePerformanceMonitor";
 
 export interface MessageListProps {
     allDisplayMessages: Message[];
@@ -41,7 +42,8 @@ const MessageList: React.FC<MessageListProps> = ({
 }) => {
     // 将消息渲染逻辑拆分为更小的部分
     const messageElements = useMemo(() => {
-        return allDisplayMessages.map((message) => {
+        const t0 = performance.now();
+        const elements = allDisplayMessages.map((message) => {
             // 查找对应的流式消息信息（如果存在）
             const streamEvent = streamingMessages.get(message.id);
 
@@ -54,8 +56,8 @@ const MessageList: React.FC<MessageListProps> = ({
             return {
                 messageId: message.id,
                 messageElement: (
-                    <MemoizedMessageItem
-                        key={`message-${message.id}`}
+                    <Profiler id={`MessageItem-${message.id}`} onRender={onRenderCallback as any} key={`message-${message.id}`}>
+                        <MemoizedMessageItem
                         message={message}
                         streamEvent={streamEvent}
                         onCodeRun={onCodeRun}
@@ -75,11 +77,15 @@ const MessageList: React.FC<MessageListProps> = ({
                         conversationId={message.conversation_id}
                         // 传递 MCP 工具调用状态
                         mcpToolCallStates={mcpToolCallStates}
-                    />
+                        />
+                    </Profiler>
                 ),
                 groupControl,
             };
         });
+        const dt = performance.now() - t0;
+        console.log(`[PERF-FRONTEND] MessageList 构建元素耗时: ${dt.toFixed(2)}ms (count: ${elements.length})`);
+        return elements;
     }, [
         allDisplayMessages,
         streamingMessages,
@@ -112,6 +118,16 @@ const MessageList: React.FC<MessageListProps> = ({
                 </div>
             ));
     }, [messageElements, handleGenerationVersionChange]);
+
+    // 建立版本控制元素的快速索引映射，避免重复查找
+    const versionMap = useMemo(() => {
+        const map = new Map<string, React.ReactElement>();
+        versionControlElements.forEach((el) => {
+            const key = el.key != null ? String(el.key) : "";
+            if (key) map.set(key, el);
+        });
+        return map;
+    }, [versionControlElements]);
 
     // 优化占位符消息的渲染
     const placeholderElements = useMemo(() => {
@@ -157,32 +173,63 @@ const MessageList: React.FC<MessageListProps> = ({
         return placeholders;
     }, [generationGroups, selectedVersions, handleGenerationVersionChange]);
 
-    // 组合所有元素
+    // 组合所有元素，并将最后的 user + AI 响应包裹在带 min-height 的容器中
     const allElements = useMemo(() => {
         const elements: React.ReactElement[] = [];
-        
-        // 添加消息元素
-        messageElements.forEach(({ messageElement, groupControl }, index) => {
-            elements.push(messageElement);
-            
-            // 如果有版本控制，添加对应的版本控制元素
-            if (groupControl) {
-                const versionElement = versionControlElements.find(
-                    (element) => element.key === `version-${messageElements[index].messageId}`
-                );
-                if (versionElement) {
-                    elements.push(versionElement);
-                }
-            }
-        });
-        
-        // 添加占位符元素
-        elements.push(...placeholderElements);
-        
-        return elements;
-    }, [messageElements, versionControlElements, placeholderElements]);
 
-    return <>{allElements}</>;
+        // 查找最后一条 user 消息的索引
+        let lastUserMessageIndex = -1;
+        for (let i = allDisplayMessages.length - 1; i >= 0; i--) {
+            if (allDisplayMessages[i].message_type === 'user') {
+                lastUserMessageIndex = i;
+                break;
+            }
+        }
+
+        if (lastUserMessageIndex >= 0) {
+            const before = messageElements.slice(0, lastUserMessageIndex);
+            const last = messageElements.slice(lastUserMessageIndex);
+
+            // 渲染最后一组之前的消息及其版本控制
+            before.forEach((item, i) => {
+                elements.push(item.messageElement);
+                const ve = versionMap.get(`version-${messageElements[i].messageId}`);
+                if (ve) elements.push(ve);
+            });
+
+            // 渲染最后一组，放入容器中，保证最小高度
+            elements.push(
+                <div
+                    key="last-reply-container"
+                    id="last-reply-container"
+                    style={{ minHeight: 'calc(100dvh - 130px)' }}
+                    className="flex flex-col gap-4"
+                >
+                    {last.map((item, idx) => (
+                        <React.Fragment key={`last-group-${messageElements[lastUserMessageIndex + idx].messageId}`}>
+                            {item.messageElement}
+                            {versionMap.get(`version-${messageElements[lastUserMessageIndex + idx].messageId}`) || null}
+                        </React.Fragment>
+                    ))}
+                    {placeholderElements}
+                    <div className="flex-none h-[120px]"></div>
+                </div>
+            );
+        } else {
+            // 如果没有找到 user 消息（比如空对话），添加占位符
+            if (placeholderElements.length > 0) {
+                elements.push(...placeholderElements);
+            }
+        }
+
+        return elements;
+    }, [messageElements, versionMap, placeholderElements, allDisplayMessages]);
+
+    return (
+        <Profiler id="MessageList" onRender={onRenderCallback as any}>
+            {allElements}
+        </Profiler>
+    );
 };
 
 export default React.memo(MessageList);

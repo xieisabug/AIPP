@@ -1,5 +1,5 @@
 import React, { useCallback, useState, useMemo, useEffect } from "react";
-import { MessageSquare, Eye, FolderOpen, Settings, Wifi, Monitor } from "lucide-react";
+import { MessageSquare, Eye, FolderOpen, Settings, Wifi, Monitor, Keyboard } from "lucide-react";
 import { useForm } from "react-hook-form";
 
 // 导入公共组件
@@ -64,6 +64,13 @@ const FeatureAssistantConfig: React.FC = () => {
             icon: <Wifi className="h-5 w-5" />,
             code: "network_config",
         },
+        {
+            id: "shortcuts",
+            name: "快捷键",
+            description: "配置呼出窗口的快捷方式和回退组合键",
+            icon: <Keyboard className="h-5 w-5" />,
+            code: "shortcuts",
+        },
     ];
 
     const [selectedFeature, setSelectedFeature] = useState<FeatureItem>(featureList[0]);
@@ -111,6 +118,17 @@ const FeatureAssistantConfig: React.FC = () => {
     });
 
     const dataFolderForm = useForm({});
+    
+    // 根据平台设置快捷键默认值
+    const isMac = typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().indexOf('mac') !== -1;
+    const shortcutsForm = useForm({
+        defaultValues: {
+            // 新格式：标准 accelerator 字符串，例如 "Alt+Space"、"Ctrl+Shift+I"
+            shortcut: isMac ? "Option+Space" : "Alt+Space",
+            // 兼容旧字段
+            modifier_key: isMac ? "option" : "alt",
+        },
+    });
 
     // 监听 featureConfig 变化，更新表单值
     useEffect(() => {
@@ -136,7 +154,9 @@ const FeatureAssistantConfig: React.FC = () => {
                 const providerId = summaryConfig.get("provider_id") || "";
                 const modelCode = summaryConfig.get("model_code") || "";
                 summaryForm.reset({
-                    model: `${providerId}%%${modelCode}`,
+                    // ConfigForm's model-select uses value format: `${model.code}%%${model.llm_provider_id}`
+                    // Keep the same order here when restoring the form value
+                    model: `${modelCode}%%${providerId}`,
                     summary_length: summaryConfig.get("summary_length") || "100",
                     form_autofill_model: summaryConfig.get("form_autofill_model") || "",
                     prompt: summaryConfig.get("prompt") || "",
@@ -163,8 +183,27 @@ const FeatureAssistantConfig: React.FC = () => {
                     network_proxy: networkConfig.get("network_proxy") || "",
                 });
             }
+
+            // 更新 shortcuts 表单
+            const shortcutsConfig = featureConfig.get("shortcuts");
+            if (shortcutsConfig) {
+                const shortcut = shortcutsConfig.get("shortcut");
+                const modifier_key = shortcutsConfig.get("modifier_key") || (isMac ? "option" : "alt");
+                // 若无新字段，则按旧逻辑回退到 修饰键+Space
+                const fallbackShortcut = (() => {
+                    const mk = (modifier_key || "").toLowerCase();
+                    if (mk === "ctrl" || mk === "control") return "Ctrl+Space";
+                    if (mk === "shift") return "Shift+Space";
+                    if (mk === "cmd" || mk === "command" || mk === "super") return isMac ? "Command+Space" : "Super+Space";
+                    return isMac ? "Option+Space" : "Alt+Space";
+                })();
+                shortcutsForm.reset({
+                    shortcut: shortcut || fallbackShortcut,
+                    modifier_key,
+                });
+            }
         }
-    }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm]);
+    }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm]);
 
     // 选择功能
     const handleSelectFeature = useCallback((feature: FeatureItem) => {
@@ -186,7 +225,12 @@ const FeatureAssistantConfig: React.FC = () => {
 
     const handleSaveSummaryConfig = useCallback(async () => {
         const values = summaryForm.getValues();
-        const [provider_id, model_code] = (values.model as string).split("%%");
+        // model-select value format is `${model_code}%%${provider_id}`
+        const [model_code, provider_id] = (values.model as string).split("%%");
+        // Ensure provider_id is numeric string
+        if (!provider_id || isNaN(Number(provider_id))) {
+            throw new Error("provider_id 必须是数字，请重新选择模型");
+        }
         await saveFeatureConfig("conversation_summary", {
             provider_id,
             model_code,
@@ -204,6 +248,15 @@ const FeatureAssistantConfig: React.FC = () => {
             network_proxy: values.network_proxy,
         });
     }, [networkForm, saveFeatureConfig]);
+
+    const handleSaveShortcutsConfig = useCallback(async () => {
+        const v = shortcutsForm.getValues();
+        await saveFeatureConfig("shortcuts", {
+            // 保存新旧两种字段，后端优先读取 shortcut
+            shortcut: v.shortcut,
+            modifier_key: v.modifier_key,
+        });
+    }, [shortcutsForm, saveFeatureConfig]);
 
     // 下拉菜单选项
     const selectOptions: SelectOption[] = useMemo(
@@ -262,11 +315,13 @@ const FeatureAssistantConfig: React.FC = () => {
                     previewForm,
                     networkForm,
                     dataFolderForm,
+                    shortcutsForm,
                 }}
                 versionManager={versionManager}
                 onSaveDisplay={handleSaveDisplayConfig}
                 onSaveSummary={handleSaveSummaryConfig}
                 onSaveNetwork={handleSaveNetworkConfig}
+                onSaveShortcuts={handleSaveShortcutsConfig}
             />
         </div>
     );

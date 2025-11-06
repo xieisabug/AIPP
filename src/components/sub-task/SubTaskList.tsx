@@ -12,6 +12,8 @@ export interface SubTaskListProps {
     message_id?: number;
     className?: string;
     onTaskDetailView?: (execution: SubTaskExecutionSummary) => void;
+    // 控制是否自动加载与订阅事件（默认 true）。对消息级别子任务建议关闭以降低开销
+    autoLoad?: boolean;
 }
 
 const ITEMS_PER_PAGE = 5;
@@ -21,6 +23,7 @@ const SubTaskList: React.FC<SubTaskListProps> = ({
     message_id,
     className = "",
     onTaskDetailView,
+    autoLoad = true,
 }) => {
     const [currentPage, setCurrentPage] = useState(0);
 
@@ -33,21 +36,15 @@ const SubTaskList: React.FC<SubTaskListProps> = ({
     } = useSubTaskManager({
         conversation_id,
         message_id,
+        autoRefreshOnMount: autoLoad,
     });
 
-    // Listen to real-time events
+    // Listen to real-time events（始终调用 hook，但在 autoLoad=false 时提供空回调，避免触发刷新）
     useSubTaskEvents({
         conversation_id,
-        onStatusUpdate: () => {
-            // Refresh data when status updates
-            refresh();
-        },
-        onTaskCompleted: () => {
-            refresh();
-        },
-        onTaskFailed: () => {
-            refresh();
-        },
+        onStatusUpdate: autoLoad ? () => refresh() : undefined,
+        onTaskCompleted: autoLoad ? () => refresh() : undefined,
+        onTaskFailed: autoLoad ? () => refresh() : undefined,
     });
 
     // Handle task detail view

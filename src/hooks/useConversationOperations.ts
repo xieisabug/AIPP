@@ -27,6 +27,7 @@ export interface UseConversationOperationsProps {
     onChangeConversationId: (conversationId: string) => void;
     setShiningMessageIds: React.Dispatch<React.SetStateAction<Set<number>>>;
     updateShiningMessages: () => void;
+    clearShiningMessages: () => void;
     assistantTypePluginMap: Map<number, any>;
     assistantRunApi: any;
 }
@@ -69,6 +70,7 @@ export function useConversationOperations({
     onChangeConversationId,
     setShiningMessageIds,
     updateShiningMessages,
+    clearShiningMessages,
     assistantTypePluginMap,
     assistantRunApi,
 }: UseConversationOperationsProps): UseConversationOperationsReturn {
@@ -231,11 +233,21 @@ export function useConversationOperations({
             // AI正在响应时，点击取消
             console.log("Cancelling AI");
             console.log(conversation?.id);
-            invoke("cancel_ai", { conversationId: +(conversation?.id || 0) }).then(() => {
-                setAiIsResponsing(false);
-                // 使用智能边框控制
-                updateShiningMessages();
-            });
+            invoke("cancel_ai", { conversationId: +(conversation?.id || 0) })
+                .then(() => {
+                    setAiIsResponsing(false);
+                    // 立即清理本地闪烁状态，避免后端事件未到导致残留
+                    clearShiningMessages();
+                    // 再次触发智能边框更新，确保 UI 与状态一致
+                    updateShiningMessages();
+                })
+                .catch((err) => {
+                    console.error("cancel_ai invoke failed:", err);
+                    // 即使取消失败，也要确保本地 UI 清理，避免闪烁残留
+                    setAiIsResponsing(false);
+                    clearShiningMessages();
+                    updateShiningMessages();
+                });
         } else {
             // 正常发送消息流程
             if (inputText.trim() === "") {
