@@ -125,6 +125,7 @@ pub mod assistant_mcp_config {
         pub assistant_id: i64,
         pub mcp_server_id: i64,
         pub is_enabled: bool,
+        pub created_time: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -146,6 +147,7 @@ pub mod assistant_mcp_tool_config {
         pub mcp_tool_id: i64,
         pub is_enabled: bool,
         pub is_auto_run: bool,
+        pub created_time: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

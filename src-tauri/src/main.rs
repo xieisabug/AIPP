@@ -4,6 +4,7 @@
 mod api;
 mod artifacts;
 mod db;
+mod entity; // re-exported SeaORM entities
 mod errors;
 mod mcp;
 mod plugin;
@@ -22,13 +23,13 @@ use crate::api::assistant_api::{
     update_assistant_mcp_config, update_assistant_mcp_tool_config,
     update_assistant_model_config_value,
 };
-use crate::api::highlight_api::{highlight_code, list_syntect_themes};
 use crate::api::attachment_api::{add_attachment, open_attachment_with_default_app};
 use crate::api::conversation_api::{
     create_conversation_with_messages, create_message, delete_conversation, fork_conversation,
     get_conversation_with_messages, list_conversations, update_assistant_message,
     update_conversation, update_message_content,
 };
+use crate::api::highlight_api::{highlight_code, list_syntect_themes};
 use crate::api::llm_api::{
     add_llm_model, add_llm_provider, delete_llm_model, delete_llm_provider, export_llm_provider,
     fetch_model_list, get_llm_models, get_llm_provider_config, get_llm_providers,
@@ -38,14 +39,15 @@ use crate::api::llm_api::{
 use crate::api::sub_task_api::{
     cancel_sub_task_execution, cancel_sub_task_execution_for_ui, create_sub_task_execution,
     delete_sub_task_definition, get_sub_task_definition, get_sub_task_execution_detail,
-    get_sub_task_execution_detail_for_ui, get_sub_task_mcp_calls_for_ui, list_sub_task_definitions, list_sub_task_executions,
-    register_sub_task_definition, run_sub_task_sync, run_sub_task_with_mcp_loop, sub_task_regist,
-    update_sub_task_definition,
+    get_sub_task_execution_detail_for_ui, get_sub_task_mcp_calls_for_ui, list_sub_task_definitions,
+    list_sub_task_executions, register_sub_task_definition, run_sub_task_sync,
+    run_sub_task_with_mcp_loop, sub_task_regist, update_sub_task_definition,
 };
 use crate::api::system_api::{
-    get_all_feature_config, get_bang_list, get_selected_text_api, open_data_folder,
-    save_feature_config, set_shortcut_recording, suspend_global_shortcut, resume_global_shortcut,
-    save_data_storage_config, test_remote_storage_connection, upload_local_data,
+    get_all_feature_config, get_bang_list, get_data_storage_config, get_selected_text_api,
+    open_data_folder, resume_global_shortcut, save_data_storage_config, save_feature_config,
+    set_shortcut_recording, suspend_global_shortcut, test_remote_storage_connection,
+    upload_local_data,
 };
 use crate::artifacts::artifacts_db::ArtifactsDatabase;
 use crate::artifacts::collection_api::{
@@ -94,7 +96,6 @@ use crate::window::{
     open_artifact_collections_window, open_artifact_preview_window, open_chat_ui_window,
     open_config_window, open_plugin_store_window, open_plugin_window,
 };
-use chrono::Local;
 use db::conversation_db::ConversationDatabase;
 use db::database_upgrade;
 use db::plugin_db::PluginDatabase;
@@ -157,7 +158,7 @@ fn query_accessibility_permissions() -> bool {
 #[tauri::command]
 async fn get_selected() -> Result<String, String> {
     // First try native selected-text crate
-    let mut result = get_selected_text().unwrap_or_default();
+    let result = get_selected_text().unwrap_or_default();
 
     // Fallback on macOS: simulate Cmd+C and read from clipboard, then restore clipboard
     #[cfg(target_os = "macos")]
@@ -186,15 +187,16 @@ async fn get_config(state: tauri::State<'_, AppState>) -> Result<Config, String>
 #[cfg(target_os = "macos")]
 fn read_clipboard_text() -> Option<String> {
     use std::process::{Command, Stdio};
-    let output = Command::new("pbpaste")
-        .stdout(Stdio::piped())
-        .output()
-        .ok()?;
+    let output = Command::new("pbpaste").stdout(Stdio::piped()).output().ok()?;
     if !output.status.success() {
         return None;
     }
     let s = String::from_utf8_lossy(&output.stdout).to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -223,7 +225,7 @@ fn copy_selection_via_clipboard_fallback() -> Option<String> {
     // Ask the frontmost app to copy selection
     let t_apple = std::time::Instant::now();
     if let Err(e) = crate::artifacts::applescript::run_applescript(
-        "tell application \"System Events\" to keystroke \"c\" using {command down}"
+        "tell application \"System Events\" to keystroke \"c\" using {command down}",
     ) {
         debug!(error=%format!("{:?}", e), "AppleScript copy failed");
     }
@@ -245,7 +247,11 @@ fn copy_selection_via_clipboard_fallback() -> Option<String> {
     let total_ms = t_total.elapsed().as_millis();
     info!(total_ms=%total_ms, read_prev_ms=%prev_ms, apple_copy_ms=%apple_ms, read_new_ms=%new_ms, restore_ms=%restore_ms, "Clipboard fallback timings");
 
-    if new_clip.is_empty() || new_clip == previous { None } else { Some(new_clip) }
+    if new_clip.is_empty() || new_clip == previous {
+        None
+    } else {
+        Some(new_clip)
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -329,7 +335,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             Ok(())
         })
-        .manage(AppState { selected_text: TokioMutex::new(String::new()), recording_shortcut: TokioMutex::new(false) })
+        .manage(AppState {
+            selected_text: TokioMutex::new(String::new()),
+            recording_shortcut: TokioMutex::new(false),
+        })
         .manage(MessageTokenManager::new())
         .invoke_handler(tauri::generate_handler![
             ask_ai,
@@ -348,6 +357,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             get_config,
             get_all_feature_config,
             save_feature_config,
+            get_data_storage_config,
             save_data_storage_config,
             test_remote_storage_connection,
             upload_local_data,
@@ -460,7 +470,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             get_sub_task_execution_detail,
             get_sub_task_execution_detail_for_ui,
             cancel_sub_task_execution,
-               get_sub_task_mcp_calls_for_ui, cancel_sub_task_execution_for_ui,
+            get_sub_task_mcp_calls_for_ui,
+            cancel_sub_task_execution_for_ui,
             highlight_code,
             ensure_hidden_search_window,
             list_syntect_themes
@@ -662,9 +673,13 @@ pub(crate) fn register_global_shortcuts(app_handle: &tauri::AppHandle) {
                     .map(|c| c.value.clone())
                     .unwrap_or_else(|| {
                         #[cfg(target_os = "macos")]
-                        { "option".to_string() }
+                        {
+                            "option".to_string()
+                        }
                         #[cfg(not(target_os = "macos"))]
-                        { "alt".to_string() }
+                        {
+                            "alt".to_string()
+                        }
                     });
                 let mk = modifier.to_lowercase();
                 let mod_token = if mk == "ctrl" || mk == "control" {
@@ -673,16 +688,24 @@ pub(crate) fn register_global_shortcuts(app_handle: &tauri::AppHandle) {
                     "Shift"
                 } else if mk == "cmd" || mk == "command" || mk == "super" {
                     #[cfg(target_os = "macos")]
-                    { "Command" }
+                    {
+                        "Command"
+                    }
                     #[cfg(not(target_os = "macos"))]
-                    { "Super" }
+                    {
+                        "Super"
+                    }
                 } else if mk == "option" || mk == "alt" {
                     "Alt"
                 } else {
                     #[cfg(target_os = "macos")]
-                    { "Option" }
+                    {
+                        "Option"
+                    }
                     #[cfg(not(target_os = "macos"))]
-                    { "Alt" }
+                    {
+                        "Alt"
+                    }
                 };
                 (format!("{}+Space", mod_token), true)
             }
@@ -735,9 +758,13 @@ pub(crate) async fn reconfigure_global_shortcuts_async(app_handle: &tauri::AppHa
                     .map(|c| c.value.clone())
                     .unwrap_or_else(|| {
                         #[cfg(target_os = "macos")]
-                        { "option".to_string() }
+                        {
+                            "option".to_string()
+                        }
                         #[cfg(not(target_os = "macos"))]
-                        { "alt".to_string() }
+                        {
+                            "alt".to_string()
+                        }
                     });
                 let mk = modifier.to_lowercase();
                 let mod_token = if mk == "ctrl" || mk == "control" {
@@ -746,16 +773,24 @@ pub(crate) async fn reconfigure_global_shortcuts_async(app_handle: &tauri::AppHa
                     "Shift"
                 } else if mk == "cmd" || mk == "command" || mk == "super" {
                     #[cfg(target_os = "macos")]
-                    { "Command" }
+                    {
+                        "Command"
+                    }
                     #[cfg(not(target_os = "macos"))]
-                    { "Super" }
+                    {
+                        "Super"
+                    }
                 } else if mk == "option" || mk == "alt" {
                     "Alt"
                 } else {
                     #[cfg(target_os = "macos")]
-                    { "Option" }
+                    {
+                        "Option"
+                    }
                     #[cfg(not(target_os = "macos"))]
-                    { "Alt" }
+                    {
+                        "Alt"
+                    }
                 };
                 format!("{}+Space", mod_token)
             }
@@ -775,6 +810,8 @@ pub(crate) async fn reconfigure_global_shortcuts_async(app_handle: &tauri::AppHa
     }
     match app_handle.global_shortcut().register(shortcut_str.as_str()) {
         Ok(_) => info!("✓ 成功注册全局快捷键: {}", shortcut_str),
-        Err(e) => warn!(error=%e, shortcut=%shortcut_str, "无法注册全局快捷键 (可能格式无效或被占用)"),
+        Err(e) => {
+            warn!(error=%e, shortcut=%shortcut_str, "无法注册全局快捷键 (可能格式无效或被占用)")
+        }
     }
 }

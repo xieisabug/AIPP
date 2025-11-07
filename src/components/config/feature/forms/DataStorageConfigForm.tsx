@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -35,28 +35,36 @@ export const DataStorageConfigForm: React.FC = () => {
     // Supabase handlers
     const [supabaseUrl, setSupabaseUrl] = useState("");
     const [supabaseKey, setSupabaseKey] = useState("");
+    const [supabaseDbHost, setSupabaseDbHost] = useState("");
+    const [supabaseDbPassword, setSupabaseDbPassword] = useState("");
+    const [uploadProgress, setUploadProgress] = useState("");
 
     const handleSaveSupabaseConfig = useCallback(async () => {
         if (!supabaseUrl || !supabaseKey) {
-            toast.error("请填写完整的 Supabase 配置");
+            toast.error("请填写 Supabase URL 和 Anon Key");
             return;
         }
         try {
+            const payload: Record<string, string> = {
+                supabase_url: supabaseUrl,
+                supabase_key: supabaseKey,
+            };
+            // 可选的数据库连接信息
+            if (supabaseDbHost) payload.supabase_db_host = supabaseDbHost;
+            if (supabaseDbPassword) payload.supabase_db_password = supabaseDbPassword;
+
             await invoke("save_data_storage_config", {
                 storageMode: "remote",
                 storage_mode: "remote",
                 remoteType: "supabase",
                 remote_type: "supabase",
-                payload: {
-                    supabase_url: supabaseUrl,
-                    supabase_key: supabaseKey,
-                },
+                payload,
             });
             toast.success("Supabase 配置已保存");
         } catch (e: any) {
             toast.error("保存失败: " + (e?.toString?.() ?? e));
         }
-    }, [supabaseUrl, supabaseKey]);
+    }, [supabaseUrl, supabaseKey, supabaseDbHost, supabaseDbPassword]);
 
     const handleTestSupabase = useCallback(async () => {
         if (!supabaseUrl || !supabaseKey) {
@@ -80,9 +88,28 @@ export const DataStorageConfigForm: React.FC = () => {
 
     const handleUploadSupabase = useCallback(async () => {
         if (!supabaseUrl || !supabaseKey) {
-            toast.error("请先填写完整的 Supabase 配置");
+            toast.error("请先填写 Supabase URL 和 Anon Key");
             return;
         }
+        if (!supabaseDbHost || !supabaseDbPassword) {
+            toast.error("上传数据需要填写数据库连接信息（数据库主机地址和密码）。\n\n在 Supabase 项目设置 → Database → Connection string 中可以找到这些信息。", {
+                duration: 6000,
+            });
+            return;
+        }
+
+        setUploadProgress("开始上传...");
+
+        // 监听上传进度
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlisten = await listen<any>("upload-progress", (event) => {
+            const { stage, message } = event.payload;
+            setUploadProgress(message);
+            if (stage === "completed") {
+                toast.success("数据上传完成！");
+            }
+        });
+
         try {
             await invoke("upload_local_data", {
                 remoteType: "supabase",
@@ -90,13 +117,17 @@ export const DataStorageConfigForm: React.FC = () => {
                 payload: {
                     supabase_url: supabaseUrl,
                     supabase_key: supabaseKey,
+                    supabase_db_host: supabaseDbHost,
+                    supabase_db_password: supabaseDbPassword,
                 },
             });
-            toast.success("已提交上传请求（占位实现）");
         } catch (e: any) {
             toast.error("上传失败: " + (e?.toString?.() ?? e));
+            setUploadProgress("");
+        } finally {
+            unlisten();
         }
-    }, [supabaseUrl, supabaseKey]);
+    }, [supabaseUrl, supabaseKey, supabaseDbHost, supabaseDbPassword]);
 
     // PostgreSQL handlers
     const [pgHost, setPgHost] = useState("");
@@ -158,6 +189,18 @@ export const DataStorageConfigForm: React.FC = () => {
             toast.error("请先填写完整的 PostgreSQL 配置");
             return;
         }
+
+        setUploadProgress("开始上传...");
+
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlisten = await listen<any>("upload-progress", (event) => {
+            const { stage, message } = event.payload;
+            setUploadProgress(message);
+            if (stage === "completed") {
+                toast.success("数据上传完成！");
+            }
+        });
+
         try {
             await invoke("upload_local_data", {
                 remoteType: "postgresql",
@@ -170,9 +213,11 @@ export const DataStorageConfigForm: React.FC = () => {
                     pg_password: pgPassword,
                 },
             });
-            toast.success("已提交上传请求（占位实现）");
         } catch (e: any) {
             toast.error("上传失败: " + (e?.toString?.() ?? e));
+            setUploadProgress("");
+        } finally {
+            unlisten();
         }
     }, [pgHost, pgPort, pgDatabase, pgUsername, pgPassword]);
 
@@ -236,6 +281,18 @@ export const DataStorageConfigForm: React.FC = () => {
             toast.error("请先填写完整的 MySQL 配置");
             return;
         }
+
+        setUploadProgress("开始上传...");
+
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlisten = await listen<any>("upload-progress", (event) => {
+            const { stage, message } = event.payload;
+            setUploadProgress(message);
+            if (stage === "completed") {
+                toast.success("数据上传完成！");
+            }
+        });
+
         try {
             await invoke("upload_local_data", {
                 remoteType: "mysql",
@@ -248,11 +305,58 @@ export const DataStorageConfigForm: React.FC = () => {
                     mysql_password: mysqlPassword,
                 },
             });
-            toast.success("已提交上传请求（占位实现）");
         } catch (e: any) {
             toast.error("上传失败: " + (e?.toString?.() ?? e));
+            setUploadProgress("");
+        } finally {
+            unlisten();
         }
     }, [mysqlHost, mysqlPort, mysqlDatabase, mysqlUsername, mysqlPassword]);
+
+    // 初始化加载已保存配置并反显
+    useEffect(() => {
+        (async () => {
+            try {
+                const saved: Record<string, string> = await invoke("get_data_storage_config");
+                // storage_mode / storageMode 兼容
+                const mode = saved.storage_mode || saved.storageMode || "local";
+                if (mode === "remote") {
+                    setActiveTab("remote");
+                } else {
+                    setActiveTab("local");
+                }
+                const remoteType = saved.remote_type || saved.remoteType || "supabase";
+                setRemoteTab(remoteType);
+
+                // Supabase
+                if (remoteType === "supabase") {
+                    if (saved.supabase_url) setSupabaseUrl(saved.supabase_url);
+                    if (saved.supabase_key) setSupabaseKey(saved.supabase_key);
+                    if (saved.supabase_db_host) setSupabaseDbHost(saved.supabase_db_host);
+                    if (saved.supabase_db_password) setSupabaseDbPassword(saved.supabase_db_password);
+                }
+                // PostgreSQL
+                if (remoteType === "postgresql") {
+                    if (saved.pg_host) setPgHost(saved.pg_host);
+                    if (saved.pg_port) setPgPort(saved.pg_port);
+                    if (saved.pg_database) setPgDatabase(saved.pg_database);
+                    if (saved.pg_username) setPgUsername(saved.pg_username);
+                    if (saved.pg_password) setPgPassword(saved.pg_password);
+                }
+                // MySQL
+                if (remoteType === "mysql") {
+                    if (saved.mysql_host) setMysqlHost(saved.mysql_host);
+                    if (saved.mysql_port) setMysqlPort(saved.mysql_port);
+                    if (saved.mysql_database) setMysqlDatabase(saved.mysql_database);
+                    if (saved.mysql_username) setMysqlUsername(saved.mysql_username);
+                    if (saved.mysql_password) setMysqlPassword(saved.mysql_password);
+                }
+            } catch (e: any) {
+                // 忽略未保存或命令缺失错误
+                console.debug("加载数据存储配置失败", e);
+            }
+        })();
+    }, []);
 
     return (
         <Card className="shadow-md hover:shadow-lg transition-shadow border-l-4 border-l-primary">
@@ -365,7 +469,54 @@ export const DataStorageConfigForm: React.FC = () => {
                                                 className="focus:ring-ring/20 focus:border-ring"
                                             />
                                         </div>
+
+                                        <div className="p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg">
+                                            <p className="text-sm text-amber-700 dark:text-amber-300">
+                                                <strong>注意：</strong>上传本地数据需要数据库直连信息。
+                                            </p>
+                                            <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                                                在 Supabase 控制台：Project Settings → Database → Connection string 中，选择 "URI" 格式，可以看到类似：<br />
+                                                <code className="bg-amber-100 dark:bg-amber-900 px-1 py-0.5 rounded">
+                                                    postgresql://postgres:[YOUR-PASSWORD]@db.xxxxx.supabase.co:5432/postgres
+                                                </code><br />
+                                                从中提取主机地址（如 db.xxxxx.supabase.co）和密码。
+                                            </p>
+                                        </div>
+
+                                        <div className="space-y-2">
+                                            <Label htmlFor="supabase-db-host" className="font-semibold text-sm text-foreground">
+                                                数据库主机地址 <span className="text-muted-foreground text-xs">(上传数据时需要)</span>
+                                            </Label>
+                                            <Input
+                                                id="supabase-db-host"
+                                                type="text"
+                                                placeholder="db.xxx.supabase.co（可选）"
+                                                value={supabaseDbHost}
+                                                onChange={(e) => setSupabaseDbHost(e.target.value)}
+                                                className="focus:ring-ring/20 focus:border-ring"
+                                            />
+                                        </div>
+
+                                        <div className="space-y-2">
+                                            <Label htmlFor="supabase-db-password" className="font-semibold text-sm text-foreground">
+                                                数据库密码 <span className="text-muted-foreground text-xs">(上传数据时需要)</span>
+                                            </Label>
+                                            <Input
+                                                id="supabase-db-password"
+                                                type="password"
+                                                placeholder="输入数据库密码（可选）"
+                                                value={supabaseDbPassword}
+                                                onChange={(e) => setSupabaseDbPassword(e.target.value)}
+                                                className="focus:ring-ring/20 focus:border-ring"
+                                            />
+                                        </div>
                                     </div>
+
+                                    {uploadProgress && (
+                                        <div className="p-3 bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-800 rounded-lg">
+                                            <p className="text-sm text-blue-700 dark:text-blue-300">{uploadProgress}</p>
+                                        </div>
+                                    )}
 
                                     <div className="pt-4 border-t border-border flex gap-2">
                                         <Button
@@ -379,6 +530,7 @@ export const DataStorageConfigForm: React.FC = () => {
                                             onClick={handleUploadSupabase}
                                             variant="outline"
                                             className="hover:bg-muted hover:border-border"
+                                            disabled={!!uploadProgress}
                                         >
                                             上传本地数据
                                         </Button>
@@ -469,6 +621,12 @@ export const DataStorageConfigForm: React.FC = () => {
                                         </div>
                                     </div>
 
+                                    {uploadProgress && (
+                                        <div className="p-3 bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-800 rounded-lg">
+                                            <p className="text-sm text-blue-700 dark:text-blue-300">{uploadProgress}</p>
+                                        </div>
+                                    )}
+
                                     <div className="pt-4 border-t border-border flex gap-2">
                                         <Button
                                             onClick={handleTestPostgres}
@@ -481,6 +639,7 @@ export const DataStorageConfigForm: React.FC = () => {
                                             onClick={handleUploadPostgres}
                                             variant="outline"
                                             className="hover:bg-muted hover:border-border"
+                                            disabled={!!uploadProgress}
                                         >
                                             上传本地数据
                                         </Button>
@@ -571,6 +730,12 @@ export const DataStorageConfigForm: React.FC = () => {
                                         </div>
                                     </div>
 
+                                    {uploadProgress && (
+                                        <div className="p-3 bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-800 rounded-lg">
+                                            <p className="text-sm text-blue-700 dark:text-blue-300">{uploadProgress}</p>
+                                        </div>
+                                    )}
+
                                     <div className="pt-4 border-t border-border flex gap-2">
                                         <Button
                                             onClick={handleTestMysql}
@@ -583,6 +748,7 @@ export const DataStorageConfigForm: React.FC = () => {
                                             onClick={handleUploadMysql}
                                             variant="outline"
                                             className="hover:bg-muted hover:border-border"
+                                            disabled={!!uploadProgress}
                                         >
                                             上传本地数据
                                         </Button>

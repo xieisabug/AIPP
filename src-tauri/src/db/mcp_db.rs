@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
 use sea_orm::{
-    entity::prelude::*, Database, DatabaseConnection, DbErr, Set, ActiveValue, Expr,
+    entity::prelude::*, Database, DatabaseConnection, DbErr, Set, ActiveValue, QueryOrder, Statement,
 };
+use sea_orm::prelude::Expr;
 use crate::db::get_db_path;
 
 // ============ MCPServer Entity ============
@@ -20,6 +21,7 @@ pub mod mcp_server {
         pub transport_type: String,
         pub command: Option<String>,
         pub environment_variables: Option<String>,
+        pub headers: Option<String>,
         pub url: Option<String>,
         pub timeout: Option<i32>,
         pub is_long_running: bool,
@@ -127,6 +129,7 @@ pub mod mcp_tool_call {
         pub finished_time: Option<ChronoDateTimeUtc>,
         pub llm_call_id: Option<String>,
         pub assistant_message_id: Option<i64>,
+        pub subtask_id: Option<i64>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -412,53 +415,19 @@ impl MCPDatabase {
         Ok(())
     }
 
-    /// Migrate existing mcp_tool_call table to add new columns
+    /// Migrate existing mcp_tool_call table to add new columns (best-effort)
     #[instrument(level = "debug", skip(self))]
     fn migrate_mcp_tool_call_table(&self) -> Result<(), DbErr> {
-        // Check if llm_call_id column exists
-        let sql_check = "PRAGMA table_info(mcp_tool_call)";
-        
         self.with_runtime(|conn| async move {
-            let result = conn.query_all(Statement::from_string(
-                conn.get_database_backend(),
-                sql_check.to_string()
-            )).await;
-
-            match result {
-                Ok(rows) => {
-                    let mut has_llm_call_id = false;
-                    let mut has_assistant_message_id = false;
-
-                    for row in rows {
-                        if let Ok(name) = row.try_get::<String>("", "name") {
-                            if name == "llm_call_id" {
-                                has_llm_call_id = true;
-                            } else if name == "assistant_message_id" {
-                                has_assistant_message_id = true;
-                            }
-                        }
-                    }
-
-                    // Add missing columns
-                    if !has_llm_call_id {
-                        conn.execute_unprepared(
-                            "ALTER TABLE mcp_tool_call ADD COLUMN llm_call_id TEXT"
-                        ).await?;
-                        debug!("Added llm_call_id column");
-                    }
-                    if !has_assistant_message_id {
-                        conn.execute_unprepared(
-                            "ALTER TABLE mcp_tool_call ADD COLUMN assistant_message_id INTEGER"
-                        ).await?;
-                        debug!("Added assistant_message_id column");
-                    }
-                }
-                Err(_) => {
-                    // Table might not exist yet, which is fine
-                    debug!("Table doesn't exist yet or can't read schema");
-                }
-            }
-
+            // Try adding columns; ignore errors if they already exist
+            let _ = conn
+                .execute_unprepared("ALTER TABLE mcp_tool_call ADD COLUMN llm_call_id TEXT")
+                .await;
+            let _ = conn
+                .execute_unprepared(
+                    "ALTER TABLE mcp_tool_call ADD COLUMN assistant_message_id INTEGER",
+                )
+                .await;
             Ok(())
         })
     }
@@ -651,6 +620,7 @@ impl MCPDatabase {
                     transport_type: Set(transport_type_str),
                     command: Set(command_opt),
                     environment_variables: Set(env_vars_opt),
+                    headers: Set(None),
                     url: Set(url_opt),
                     timeout: Set(timeout),
                     is_long_running: Set(is_long_running),
@@ -983,6 +953,7 @@ impl MCPDatabase {
             finished_time: Set(None),
             llm_call_id: Set(None),
             assistant_message_id: Set(None),
+            subtask_id: Set(None),
         };
 
         let result = self.with_runtime(|conn| async move {
@@ -1022,6 +993,7 @@ impl MCPDatabase {
             finished_time: Set(None),
             llm_call_id: Set(llm_call_id.map(|s| s.to_string())),
             assistant_message_id: Set(assistant_message_id),
+            subtask_id: Set(None),
         };
 
         let result = self.with_runtime(|conn| async move {
