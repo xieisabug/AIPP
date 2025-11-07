@@ -1,10 +1,11 @@
+use crate::db::get_db_path;
+use rusqlite::{params, Connection};
+use sea_orm::{
+    entity::prelude::*, ActiveValue, Database, DatabaseConnection, DbErr, QueryFilter, QuerySelect,
+    Set,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, instrument};
-use sea_orm::{
-    entity::prelude::*, Database, DatabaseConnection, DbErr, Set, ActiveValue, QueryFilter, QuerySelect,
-};
-use rusqlite::{params, Connection};
-use crate::db::get_db_path;
 
 // ============ Assistant Entity ============
 pub mod assistant {
@@ -317,11 +318,11 @@ impl AssistantDatabase {
     pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, DbErr> {
         let db_path = get_db_path(app_handle, "assistant.db").map_err(|e| DbErr::Custom(e))?;
         let url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
-        
+
         let conn = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                tokio::task::block_in_place(|| handle.block_on(async { Database::connect(&url).await }))?
-            }
+            Ok(handle) => tokio::task::block_in_place(|| {
+                handle.block_on(async { Database::connect(&url).await })
+            })?,
             Err(_) => {
                 let rt = tokio::runtime::Runtime::new()
                     .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
@@ -332,7 +333,7 @@ impl AssistantDatabase {
         let mcp_db_path = get_db_path(app_handle, "mcp.db").map_err(|e| DbErr::Custom(e))?;
         let mcp_conn = Connection::open(mcp_db_path)
             .map_err(|e| DbErr::Custom(format!("Failed to open mcp.db: {}", e)))?;
-        
+
         debug!("Opened assistant database");
         Ok(AssistantDatabase { conn, mcp_conn, db_path })
     }
@@ -355,7 +356,10 @@ impl AssistantDatabase {
     }
 
     /// Get a rusqlite connection for migrations
-    pub fn get_rusqlite_connection(&self, _app_handle: &tauri::AppHandle) -> Result<Connection, String> {
+    pub fn get_rusqlite_connection(
+        &self,
+        _app_handle: &tauri::AppHandle,
+    ) -> Result<Connection, String> {
         Connection::open(&self.db_path).map_err(|e| e.to_string())
     }
 
@@ -465,7 +469,7 @@ impl AssistantDatabase {
     ) -> Result<i64, DbErr> {
         let name = name.to_string();
         let description = description.to_string();
-        
+
         let id = self.with_runtime(|conn| async move {
             let model = assistant::ActiveModel {
                 id: ActiveValue::NotSet,
@@ -478,7 +482,7 @@ impl AssistantDatabase {
             let result = model.insert(&conn).await?;
             Ok(result.id)
         })?;
-        
+
         debug!(assistant_id = id, "assistant inserted");
         Ok(id)
     }
@@ -487,7 +491,7 @@ impl AssistantDatabase {
     pub fn update_assistant(&self, id: i64, name: &str, description: &str) -> Result<(), DbErr> {
         let name = name.to_string();
         let description = description.to_string();
-        
+
         self.with_runtime(|conn| async move {
             assistant::Entity::update_many()
                 .col_expr(assistant::Column::Name, Expr::value(name))
@@ -497,7 +501,7 @@ impl AssistantDatabase {
                 .await?;
             Ok(())
         })?;
-        
+
         debug!("assistant updated");
         Ok(())
     }
@@ -511,7 +515,7 @@ impl AssistantDatabase {
                 .await?;
             Ok(())
         })?;
-        
+
         debug!("assistant deleted");
         Ok(())
     }
@@ -519,7 +523,7 @@ impl AssistantDatabase {
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
     pub fn add_assistant_prompt(&self, assistant_id: i64, prompt: &str) -> Result<i64, DbErr> {
         let prompt = prompt.to_string();
-        
+
         let id = self.with_runtime(|conn| async move {
             let model = assistant_prompt::ActiveModel {
                 id: ActiveValue::NotSet,
@@ -530,7 +534,7 @@ impl AssistantDatabase {
             let result = model.insert(&conn).await?;
             Ok(result.id)
         })?;
-        
+
         debug!(assistant_prompt_id = id, "assistant prompt inserted");
         Ok(id)
     }
@@ -538,7 +542,7 @@ impl AssistantDatabase {
     #[instrument(level = "debug", skip(self), fields(id = id))]
     pub fn update_assistant_prompt(&self, id: i64, prompt: &str) -> Result<(), DbErr> {
         let prompt = prompt.to_string();
-        
+
         self.with_runtime(|conn| async move {
             assistant_prompt::Entity::update_many()
                 .col_expr(assistant_prompt::Column::Prompt, Expr::value(prompt))
@@ -547,7 +551,7 @@ impl AssistantDatabase {
                 .await?;
             Ok(())
         })?;
-        
+
         debug!("assistant prompt updated");
         Ok(())
     }
@@ -561,7 +565,7 @@ impl AssistantDatabase {
                 .await?;
             Ok(())
         })?;
-        
+
         debug!("assistant prompts deleted by assistant_id");
         Ok(())
     }
@@ -576,7 +580,7 @@ impl AssistantDatabase {
     ) -> Result<i64, DbErr> {
         let model_code = model_code.to_string();
         let alias = alias.to_string();
-        
+
         let id = self.with_runtime(|conn| async move {
             let model = assistant_model::ActiveModel {
                 id: ActiveValue::NotSet,
@@ -588,7 +592,7 @@ impl AssistantDatabase {
             let result = model.insert(&conn).await?;
             Ok(result.id)
         })?;
-        
+
         debug!(assistant_model_id = id, "assistant model inserted");
         Ok(id)
     }
@@ -603,7 +607,7 @@ impl AssistantDatabase {
     ) -> Result<(), DbErr> {
         let model_code = model_code.to_string();
         let alias = alias.to_string();
-        
+
         self.with_runtime(|conn| async move {
             assistant_model::Entity::update_many()
                 .col_expr(assistant_model::Column::ModelCode, Expr::value(model_code))
@@ -614,7 +618,7 @@ impl AssistantDatabase {
                 .await?;
             Ok(())
         })?;
-        
+
         debug!("assistant model updated");
         Ok(())
     }
@@ -631,7 +635,7 @@ impl AssistantDatabase {
         let name = name.to_string();
         let value = value.to_string();
         let value_type = value_type.to_string();
-        
+
         let id = self.with_runtime(|conn| async move {
             let model = assistant_model_config::ActiveModel {
                 id: ActiveValue::NotSet,
@@ -644,16 +648,21 @@ impl AssistantDatabase {
             let result = model.insert(&conn).await?;
             Ok(result.id)
         })?;
-        
+
         debug!(assistant_model_config_id = id, "assistant model config inserted");
         Ok(id)
     }
 
     #[instrument(level = "debug", skip(self), fields(id = id, name = name))]
-    pub fn update_assistant_model_config(&self, id: i64, name: &str, value: &str) -> Result<(), DbErr> {
+    pub fn update_assistant_model_config(
+        &self,
+        id: i64,
+        name: &str,
+        value: &str,
+    ) -> Result<(), DbErr> {
         let name = name.to_string();
         let value = value.to_string();
-        
+
         self.with_runtime(|conn| async move {
             assistant_model_config::Entity::update_many()
                 .col_expr(assistant_model_config::Column::Name, Expr::value(name))
@@ -663,13 +672,16 @@ impl AssistantDatabase {
                 .await?;
             Ok(())
         })?;
-        
+
         debug!("assistant model config updated");
         Ok(())
     }
 
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
-    pub fn delete_assistant_model_config_by_assistant_id(&self, assistant_id: i64) -> Result<(), DbErr> {
+    pub fn delete_assistant_model_config_by_assistant_id(
+        &self,
+        assistant_id: i64,
+    ) -> Result<(), DbErr> {
         self.with_runtime(|conn| async move {
             assistant_model_config::Entity::delete_many()
                 .filter(assistant_model_config::Column::AssistantId.eq(assistant_id))
@@ -677,7 +689,7 @@ impl AssistantDatabase {
                 .await?;
             Ok(())
         })?;
-        
+
         debug!("assistant model configs deleted by assistant_id");
         Ok(())
     }
@@ -694,7 +706,7 @@ impl AssistantDatabase {
         let param_name = param_name.to_string();
         let param_type = param_type.to_string();
         let param_value = param_value.to_string();
-        
+
         self.with_runtime(|conn| async move {
             let model = assistant_prompt_param::ActiveModel {
                 id: ActiveValue::NotSet,
@@ -707,7 +719,7 @@ impl AssistantDatabase {
             model.insert(&conn).await?;
             Ok(())
         })?;
-        
+
         debug!("assistant prompt param inserted");
         Ok(())
     }
@@ -723,7 +735,7 @@ impl AssistantDatabase {
         let param_name = param_name.to_string();
         let param_type = param_type.to_string();
         let param_value = param_value.to_string();
-        
+
         self.with_runtime(|conn| async move {
             assistant_prompt_param::Entity::update_many()
                 .col_expr(assistant_prompt_param::Column::ParamName, Expr::value(param_name))
@@ -734,13 +746,16 @@ impl AssistantDatabase {
                 .await?;
             Ok(())
         })?;
-        
+
         debug!("assistant prompt param updated");
         Ok(())
     }
 
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
-    pub fn delete_assistant_prompt_param_by_assistant_id(&self, assistant_id: i64) -> Result<(), DbErr> {
+    pub fn delete_assistant_prompt_param_by_assistant_id(
+        &self,
+        assistant_id: i64,
+    ) -> Result<(), DbErr> {
         self.with_runtime(|conn| async move {
             assistant_prompt_param::Entity::delete_many()
                 .filter(assistant_prompt_param::Column::AssistantId.eq(assistant_id))
@@ -748,17 +763,16 @@ impl AssistantDatabase {
                 .await?;
             Ok(())
         })?;
-        
+
         debug!("assistant prompt params deleted by assistant_id");
         Ok(())
     }
 
     #[instrument(level = "debug", skip(self))]
     pub fn get_assistants(&self) -> Result<Vec<Assistant>, DbErr> {
-        let models = self.with_runtime(|conn| async move {
-            assistant::Entity::find().all(&conn).await
-        })?;
-        
+        let models =
+            self.with_runtime(|conn| async move { assistant::Entity::find().all(&conn).await })?;
+
         let assistants: Vec<Assistant> = models.into_iter().map(|m| m.into()).collect();
         Ok(assistants)
     }
@@ -771,10 +785,8 @@ impl AssistantDatabase {
                 .one(&conn)
                 .await
         })?;
-        
-        model
-            .map(|m| m.into())
-            .ok_or_else(|| DbErr::Custom("Assistant not found".to_string()))
+
+        model.map(|m| m.into()).ok_or_else(|| DbErr::Custom("Assistant not found".to_string()))
     }
 
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
@@ -785,7 +797,7 @@ impl AssistantDatabase {
                 .all(&conn)
                 .await
         })?;
-        
+
         let assistant_models: Vec<AssistantModel> = models.into_iter().map(|m| m.into()).collect();
         Ok(assistant_models)
     }
@@ -798,8 +810,9 @@ impl AssistantDatabase {
                 .all(&conn)
                 .await
         })?;
-        
-        let assistant_prompts: Vec<AssistantPrompt> = models.into_iter().map(|m| m.into()).collect();
+
+        let assistant_prompts: Vec<AssistantPrompt> =
+            models.into_iter().map(|m| m.into()).collect();
         Ok(assistant_prompts)
     }
 
@@ -814,8 +827,9 @@ impl AssistantDatabase {
                 .all(&conn)
                 .await
         })?;
-        
-        let assistant_model_configs: Vec<AssistantModelConfig> = models.into_iter().map(|m| m.into()).collect();
+
+        let assistant_model_configs: Vec<AssistantModelConfig> =
+            models.into_iter().map(|m| m.into()).collect();
         Ok(assistant_model_configs)
     }
 
@@ -832,8 +846,9 @@ impl AssistantDatabase {
                 .all(&conn)
                 .await
         })?;
-        
-        let assistant_model_configs: Vec<AssistantModelConfig> = models.into_iter().map(|m| m.into()).collect();
+
+        let assistant_model_configs: Vec<AssistantModelConfig> =
+            models.into_iter().map(|m| m.into()).collect();
         Ok(assistant_model_configs)
     }
 
@@ -848,8 +863,9 @@ impl AssistantDatabase {
                 .all(&conn)
                 .await
         })?;
-        
-        let assistant_prompt_params: Vec<AssistantPromptParam> = models.into_iter().map(|m| m.into()).collect();
+
+        let assistant_prompt_params: Vec<AssistantPromptParam> =
+            models.into_iter().map(|m| m.into()).collect();
         Ok(assistant_prompt_params)
     }
 
@@ -857,10 +873,7 @@ impl AssistantDatabase {
     pub fn init_assistant(&self) -> Result<(), DbErr> {
         // Check if assistant with id=1 already exists
         let exists = self.with_runtime(|conn| async move {
-            assistant::Entity::find()
-                .filter(assistant::Column::Id.eq(1))
-                .one(&conn)
-                .await
+            assistant::Entity::find().filter(assistant::Column::Id.eq(1)).one(&conn).await
         })?;
 
         if exists.is_some() {
@@ -881,21 +894,24 @@ impl AssistantDatabase {
         self.add_assistant_model_config(1, -1, "temperature", "0.75", "float")?;
         self.add_assistant_model_config(1, -1, "top_p", "1.0", "float")?;
         self.add_assistant_model_config(1, -1, "stream", "false", "boolean")?;
-        
+
         debug!("Initialized default assistant");
         Ok(())
     }
 
     // MCP Configuration Methods
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
-    pub fn get_assistant_mcp_configs(&self, assistant_id: i64) -> Result<Vec<AssistantMCPConfig>, DbErr> {
+    pub fn get_assistant_mcp_configs(
+        &self,
+        assistant_id: i64,
+    ) -> Result<Vec<AssistantMCPConfig>, DbErr> {
         let models = self.with_runtime(|conn| async move {
             assistant_mcp_config::Entity::find()
                 .filter(assistant_mcp_config::Column::AssistantId.eq(assistant_id))
                 .all(&conn)
                 .await
         })?;
-        
+
         let mcp_configs: Vec<AssistantMCPConfig> = models.into_iter().map(|m| m.into()).collect();
         Ok(mcp_configs)
     }
@@ -909,7 +925,7 @@ impl AssistantDatabase {
     ) -> Result<(), DbErr> {
         // Use raw SQL for INSERT OR REPLACE
         let sql = "INSERT OR REPLACE INTO assistant_mcp_config (assistant_id, mcp_server_id, is_enabled) VALUES (?, ?, ?)";
-        
+
         self.with_runtime(|conn| async move {
             conn.execute_unprepared(&format!(
                 "INSERT OR REPLACE INTO assistant_mcp_config (assistant_id, mcp_server_id, is_enabled) VALUES ({}, {}, {})",
@@ -917,7 +933,7 @@ impl AssistantDatabase {
             )).await?;
             Ok(())
         })?;
-        
+
         debug!("assistant mcp config upserted");
         Ok(())
     }
@@ -933,8 +949,9 @@ impl AssistantDatabase {
                 .all(&conn)
                 .await
         })?;
-        
-        let mcp_tool_configs: Vec<AssistantMCPToolConfig> = models.into_iter().map(|m| m.into()).collect();
+
+        let mcp_tool_configs: Vec<AssistantMCPToolConfig> =
+            models.into_iter().map(|m| m.into()).collect();
         Ok(mcp_tool_configs)
     }
 
@@ -954,7 +971,7 @@ impl AssistantDatabase {
             )).await?;
             Ok(())
         })?;
-        
+
         debug!("assistant mcp tool config upserted");
         Ok(())
     }
@@ -963,18 +980,22 @@ impl AssistantDatabase {
     pub fn get_assistant_mcp_servers_with_tools(
         &self,
         assistant_id: i64,
-    ) -> Result<Vec<(i64, String, bool, Vec<(i64, String, String, bool, bool, String)>)>, DbErr> {
+    ) -> Result<Vec<(i64, String, bool, Vec<(i64, String, String, bool, bool, String)>)>, DbErr>
+    {
         // This complex join query uses mcp_conn (rusqlite) for cross-database queries
         // 1. 获取所有启用的服务器及其配置状态
-        let mut server_stmt = self.mcp_conn.prepare(
-            "
+        let mut server_stmt = self
+            .mcp_conn
+            .prepare(
+                "
             SELECT s.id, s.name
             FROM mcp_server s
             WHERE s.is_enabled = 1
             ORDER BY s.name
         ",
-        ).map_err(|e| DbErr::Custom(format!("Failed to prepare server query: {}", e)))?;
-        
+            )
+            .map_err(|e| DbErr::Custom(format!("Failed to prepare server query: {}", e)))?;
+
         let servers: Vec<(i64, String)> = server_stmt
             .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
             .map_err(|e| DbErr::Custom(format!("Failed to execute server query: {}", e)))?
@@ -997,8 +1018,9 @@ impl AssistantDatabase {
         // Need to use rusqlite for assistant.db query in this cross-database operation
         let assistant_rusqlite_conn = Connection::open(&self.db_path)
             .map_err(|e| DbErr::Custom(format!("Failed to open assistant.db for query: {}", e)))?;
-        
-        let mut server_config_stmt = assistant_rusqlite_conn.prepare(&server_config_sql)
+
+        let mut server_config_stmt = assistant_rusqlite_conn
+            .prepare(&server_config_sql)
             .map_err(|e| DbErr::Custom(format!("Failed to prepare config query: {}", e)))?;
         let mut server_config_params = vec![assistant_id];
         server_config_params.extend(servers.iter().map(|(id, _)| *id));
@@ -1020,9 +1042,11 @@ impl AssistantDatabase {
             server_ids_placeholder
         );
 
-        let mut tools_stmt = self.mcp_conn.prepare(&tools_sql)
+        let mut tools_stmt = self
+            .mcp_conn
+            .prepare(&tools_sql)
             .map_err(|e| DbErr::Custom(format!("Failed to prepare tools query: {}", e)))?;
-        
+
         let all_tools: Vec<(i64, i64, String, String, String)> = tools_stmt
             .query_map(rusqlite::params_from_iter(servers.iter().map(|(id, _)| *id)), |row| {
                 Ok((
@@ -1050,8 +1074,10 @@ impl AssistantDatabase {
                 tool_ids_placeholder
             );
 
-            let mut tool_config_stmt = assistant_rusqlite_conn.prepare(&tool_config_sql)
-                .map_err(|e| DbErr::Custom(format!("Failed to prepare tool config query: {}", e)))?;
+            let mut tool_config_stmt =
+                assistant_rusqlite_conn.prepare(&tool_config_sql).map_err(|e| {
+                    DbErr::Custom(format!("Failed to prepare tool config query: {}", e))
+                })?;
             let mut tool_config_params = vec![assistant_id];
             tool_config_params.extend(all_tools.iter().map(|(id, _, _, _, _)| *id));
 

@@ -1,10 +1,11 @@
+use crate::db::get_db_path;
+use sea_orm::prelude::Expr;
+use sea_orm::{
+    entity::prelude::*, ActiveValue, Database, DatabaseConnection, DbErr, QueryOrder, Set,
+    Statement,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
-use sea_orm::{
-    entity::prelude::*, Database, DatabaseConnection, DbErr, Set, ActiveValue, QueryOrder, Statement,
-};
-use sea_orm::prelude::Expr;
-use crate::db::get_db_path;
 
 // ============ MCPServer Entity ============
 pub mod mcp_server {
@@ -169,7 +170,8 @@ impl From<mcp_server::Model> for MCPServer {
             is_long_running: model.is_long_running,
             is_enabled: model.is_enabled,
             is_builtin: model.is_builtin,
-            created_time: model.created_time
+            created_time: model
+                .created_time
                 .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                 .unwrap_or_default(),
         }
@@ -279,13 +281,12 @@ impl From<mcp_tool_call::Model> for MCPToolCall {
             status: model.status,
             result: model.result,
             error: model.error,
-            created_time: model.created_time
+            created_time: model
+                .created_time
                 .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                 .unwrap_or_default(),
-            started_time: model.started_time
-                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
-            finished_time: model.finished_time
-                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+            started_time: model.started_time.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+            finished_time: model.finished_time.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
             llm_call_id: model.llm_call_id,
             assistant_message_id: model.assistant_message_id,
         }
@@ -301,18 +302,18 @@ impl MCPDatabase {
     pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, DbErr> {
         let db_path = get_db_path(app_handle, "mcp.db").map_err(|e| DbErr::Custom(e))?;
         let url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
-        
+
         let conn = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                tokio::task::block_in_place(|| handle.block_on(async { Database::connect(&url).await }))?
-            }
+            Ok(handle) => tokio::task::block_in_place(|| {
+                handle.block_on(async { Database::connect(&url).await })
+            })?,
             Err(_) => {
                 let rt = tokio::runtime::Runtime::new()
                     .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
                 rt.block_on(async { Database::connect(&url).await })?
             }
         };
-        
+
         debug!("Opened MCP database");
         Ok(MCPDatabase { conn })
     }
@@ -468,9 +469,7 @@ impl MCPDatabase {
     pub fn get_mcp_server(&self, id: i64) -> Result<MCPServer, DbErr> {
         debug!(id, "query single mcp server");
         let model = self.with_runtime(|conn| async move {
-            mcp_server::Entity::find_by_id(id)
-                .one(&conn)
-                .await
+            mcp_server::Entity::find_by_id(id).one(&conn).await
         })?;
 
         match model {
@@ -485,7 +484,11 @@ impl MCPDatabase {
         }
     }
 
-    #[instrument(level = "debug", skip(self), fields(id, name, transport_type, is_enabled, is_builtin))]
+    #[instrument(
+        level = "debug",
+        skip(self),
+        fields(id, name, transport_type, is_enabled, is_builtin)
+    )]
     pub fn update_mcp_server_with_builtin(
         &self,
         id: i64,
@@ -514,7 +517,10 @@ impl MCPDatabase {
                 .col_expr(mcp_server::Column::Description, Expr::value(description))
                 .col_expr(mcp_server::Column::TransportType, Expr::value(transport_type))
                 .col_expr(mcp_server::Column::Command, Expr::value(command))
-                .col_expr(mcp_server::Column::EnvironmentVariables, Expr::value(environment_variables))
+                .col_expr(
+                    mcp_server::Column::EnvironmentVariables,
+                    Expr::value(environment_variables),
+                )
                 .col_expr(mcp_server::Column::Url, Expr::value(url))
                 .col_expr(mcp_server::Column::Timeout, Expr::value(timeout))
                 .col_expr(mcp_server::Column::IsLongRunning, Expr::value(is_long_running))
@@ -629,9 +635,7 @@ impl MCPDatabase {
                     created_time: ActiveValue::NotSet,
                 };
 
-                let result = self.with_runtime(|conn| async move {
-                    model.insert(&conn).await
-                })?;
+                let result = self.with_runtime(|conn| async move { model.insert(&conn).await })?;
 
                 debug!(id = result.id, "Inserted new MCP server");
                 Ok(result.id)
@@ -705,10 +709,13 @@ impl MCPDatabase {
                 // Update existing tool, preserve user settings
                 let tool_desc_opt2 = tool_description.map(|s| s.to_string());
                 let params_opt2 = parameters.map(|s| s.to_string());
-                
+
                 self.with_runtime(|conn| async move {
                     mcp_server_tool::Entity::update_many()
-                        .col_expr(mcp_server_tool::Column::ToolDescription, Expr::value(tool_desc_opt2))
+                        .col_expr(
+                            mcp_server_tool::Column::ToolDescription,
+                            Expr::value(tool_desc_opt2),
+                        )
                         .col_expr(mcp_server_tool::Column::Parameters, Expr::value(params_opt2))
                         .filter(mcp_server_tool::Column::Id.eq(id))
                         .exec(&conn)
@@ -732,9 +739,7 @@ impl MCPDatabase {
                     created_time: ActiveValue::NotSet,
                 };
 
-                let result = self.with_runtime(|conn| async move {
-                    model.insert(&conn).await
-                })?;
+                let result = self.with_runtime(|conn| async move { model.insert(&conn).await })?;
 
                 debug!(id = result.id, "Inserted new MCP server tool");
                 Ok(result.id)
@@ -792,12 +797,21 @@ impl MCPDatabase {
                 let resource_name_str2 = resource_name.to_string();
                 let resource_type_str2 = resource_type.to_string();
                 let resource_desc_opt2 = resource_description.map(|s| s.to_string());
-                
+
                 self.with_runtime(|conn| async move {
                     mcp_server_resource::Entity::update_many()
-                        .col_expr(mcp_server_resource::Column::ResourceName, Expr::value(resource_name_str2))
-                        .col_expr(mcp_server_resource::Column::ResourceType, Expr::value(resource_type_str2))
-                        .col_expr(mcp_server_resource::Column::ResourceDescription, Expr::value(resource_desc_opt2))
+                        .col_expr(
+                            mcp_server_resource::Column::ResourceName,
+                            Expr::value(resource_name_str2),
+                        )
+                        .col_expr(
+                            mcp_server_resource::Column::ResourceType,
+                            Expr::value(resource_type_str2),
+                        )
+                        .col_expr(
+                            mcp_server_resource::Column::ResourceDescription,
+                            Expr::value(resource_desc_opt2),
+                        )
                         .filter(mcp_server_resource::Column::Id.eq(id))
                         .exec(&conn)
                         .await?;
@@ -819,9 +833,7 @@ impl MCPDatabase {
                     created_time: ActiveValue::NotSet,
                 };
 
-                let result = self.with_runtime(|conn| async move {
-                    model.insert(&conn).await
-                })?;
+                let result = self.with_runtime(|conn| async move { model.insert(&conn).await })?;
 
                 debug!(id = result.id, "Inserted new MCP server resource");
                 Ok(result.id)
@@ -889,10 +901,13 @@ impl MCPDatabase {
                 // Update existing prompt, preserve user settings
                 let prompt_desc_opt2 = prompt_description.map(|s| s.to_string());
                 let args_opt2 = arguments.map(|s| s.to_string());
-                
+
                 self.with_runtime(|conn| async move {
                     mcp_server_prompt::Entity::update_many()
-                        .col_expr(mcp_server_prompt::Column::PromptDescription, Expr::value(prompt_desc_opt2))
+                        .col_expr(
+                            mcp_server_prompt::Column::PromptDescription,
+                            Expr::value(prompt_desc_opt2),
+                        )
                         .col_expr(mcp_server_prompt::Column::Arguments, Expr::value(args_opt2))
                         .filter(mcp_server_prompt::Column::Id.eq(id))
                         .exec(&conn)
@@ -915,9 +930,7 @@ impl MCPDatabase {
                     created_time: ActiveValue::NotSet,
                 };
 
-                let result = self.with_runtime(|conn| async move {
-                    model.insert(&conn).await
-                })?;
+                let result = self.with_runtime(|conn| async move { model.insert(&conn).await })?;
 
                 debug!(id = result.id, "Inserted new MCP server prompt");
                 Ok(result.id)
@@ -956,15 +969,17 @@ impl MCPDatabase {
             subtask_id: Set(None),
         };
 
-        let result = self.with_runtime(|conn| async move {
-            model.insert(&conn).await
-        })?;
+        let result = self.with_runtime(|conn| async move { model.insert(&conn).await })?;
 
         debug!(id = result.id, "Created MCP tool call");
         self.get_mcp_tool_call(result.id)
     }
 
-    #[instrument(level = "debug", skip(self), fields(conversation_id, server_id, tool_name, llm_call_id, assistant_message_id))]
+    #[instrument(
+        level = "debug",
+        skip(self),
+        fields(conversation_id, server_id, tool_name, llm_call_id, assistant_message_id)
+    )]
     pub fn create_mcp_tool_call_with_llm_id(
         &self,
         conversation_id: i64,
@@ -996,9 +1011,7 @@ impl MCPDatabase {
             subtask_id: Set(None),
         };
 
-        let result = self.with_runtime(|conn| async move {
-            model.insert(&conn).await
-        })?;
+        let result = self.with_runtime(|conn| async move { model.insert(&conn).await })?;
 
         debug!(id = result.id, "Created MCP tool call with LLM ID");
         self.get_mcp_tool_call(result.id)
@@ -1008,9 +1021,7 @@ impl MCPDatabase {
     pub fn get_mcp_tool_call(&self, id: i64) -> Result<MCPToolCall, DbErr> {
         debug!(id, "get mcp tool call");
         let model = self.with_runtime(|conn| async move {
-            mcp_tool_call::Entity::find_by_id(id)
-                .one(&conn)
-                .await
+            mcp_tool_call::Entity::find_by_id(id).one(&conn).await
         })?;
 
         match model {
@@ -1033,7 +1044,13 @@ impl MCPDatabase {
         result: Option<&str>,
         error: Option<&str>,
     ) -> Result<(), DbErr> {
-        debug!(id, status, has_result = result.is_some(), has_error = error.is_some(), "update mcp tool call status");
+        debug!(
+            id,
+            status,
+            has_result = result.is_some(),
+            has_error = error.is_some(),
+            "update mcp tool call status"
+        );
         let now = chrono::Utc::now();
         let status_str = status.to_string();
         let result_opt = result.map(|s| s.to_string());
@@ -1085,7 +1102,7 @@ impl MCPDatabase {
     #[instrument(level = "debug", skip(self), fields(id))]
     pub fn mark_mcp_tool_call_executing_if_pending(&self, id: i64) -> Result<bool, DbErr> {
         let now = chrono::Utc::now();
-        
+
         let rows = self.with_runtime(|conn| async move {
             let result = mcp_tool_call::Entity::update_many()
                 .col_expr(mcp_tool_call::Column::Status, Expr::value("executing"))
