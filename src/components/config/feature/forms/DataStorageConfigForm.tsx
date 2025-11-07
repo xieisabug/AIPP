@@ -17,39 +17,85 @@ export const DataStorageConfigForm: React.FC = () => {
         invoke("open_data_folder");
     }, []);
 
-    const handleSaveLocalConfig = useCallback(() => {
-        toast.success("本地存储配置已保存");
+    const handleSaveLocalConfig = useCallback(async () => {
+        try {
+            await invoke("save_data_storage_config", {
+                storageMode: "local",
+                storage_mode: "local", // 兼容 snake_case
+                remoteType: null,
+                remote_type: null,
+                payload: {},
+            });
+            toast.success("已切换为本地存储并保存配置");
+        } catch (e: any) {
+            toast.error("保存失败: " + (e?.toString?.() ?? e));
+        }
     }, []);
 
     // Supabase handlers
     const [supabaseUrl, setSupabaseUrl] = useState("");
     const [supabaseKey, setSupabaseKey] = useState("");
 
-    const handleSaveSupabaseConfig = useCallback(() => {
+    const handleSaveSupabaseConfig = useCallback(async () => {
         if (!supabaseUrl || !supabaseKey) {
             toast.error("请填写完整的 Supabase 配置");
             return;
         }
-        // TODO: Save Supabase config to backend
-        toast.info("Supabase 配置保存功能开发中");
+        try {
+            await invoke("save_data_storage_config", {
+                storageMode: "remote",
+                storage_mode: "remote",
+                remoteType: "supabase",
+                remote_type: "supabase",
+                payload: {
+                    supabase_url: supabaseUrl,
+                    supabase_key: supabaseKey,
+                },
+            });
+            toast.success("Supabase 配置已保存");
+        } catch (e: any) {
+            toast.error("保存失败: " + (e?.toString?.() ?? e));
+        }
     }, [supabaseUrl, supabaseKey]);
 
-    const handleTestSupabase = useCallback(() => {
+    const handleTestSupabase = useCallback(async () => {
         if (!supabaseUrl || !supabaseKey) {
             toast.error("请先填写完整的 Supabase 配置");
             return;
         }
-        // TODO: Test Supabase connection
-        toast.info("Supabase 连接测试功能开发中");
+        try {
+            await invoke("test_remote_storage_connection", {
+                remoteType: "supabase",
+                remote_type: "supabase",
+                payload: {
+                    supabase_url: supabaseUrl,
+                    supabase_key: supabaseKey,
+                },
+            });
+            toast.success("Supabase 连接正常");
+        } catch (e: any) {
+            toast.error("连接失败: " + (e?.toString?.() ?? e));
+        }
     }, [supabaseUrl, supabaseKey]);
 
-    const handleUploadSupabase = useCallback(() => {
+    const handleUploadSupabase = useCallback(async () => {
         if (!supabaseUrl || !supabaseKey) {
             toast.error("请先填写完整的 Supabase 配置");
             return;
         }
-        // TODO: Upload local data to Supabase
-        toast.info("上传本地数据到 Supabase 功能开发中");
+        try {
+            await invoke("upload_local_data", {
+                remoteType: "supabase",
+                remote_type: "supabase",
+                payload: {
+                    supabase_url: supabaseUrl,
+                    supabase_key: supabaseKey,
+                },
+            });
+            toast.success("已提交上传请求（占位实现）");
+        } catch (e: any) {
+            toast.error("上传失败: " + (e?.toString?.() ?? e));
+        }
     }, [supabaseUrl, supabaseKey]);
 
     // PostgreSQL handlers
@@ -59,32 +105,76 @@ export const DataStorageConfigForm: React.FC = () => {
     const [pgUsername, setPgUsername] = useState("");
     const [pgPassword, setPgPassword] = useState("");
 
-    const handleSavePostgresConfig = useCallback(() => {
+    const handleSavePostgresConfig = useCallback(async () => {
         if (!pgHost || !pgDatabase || !pgUsername || !pgPassword) {
             toast.error("请填写完整的 PostgreSQL 配置");
             return;
         }
-        // TODO: Save PostgreSQL config to backend
-        toast.info("PostgreSQL 配置保存功能开发中");
-    }, [pgHost, pgDatabase, pgUsername, pgPassword]);
+        try {
+            await invoke("save_data_storage_config", {
+                storageMode: "remote",
+                storage_mode: "remote",
+                remoteType: "postgresql",
+                remote_type: "postgresql",
+                payload: {
+                    pg_host: pgHost,
+                    pg_port: pgPort,
+                    pg_database: pgDatabase,
+                    pg_username: pgUsername,
+                    pg_password: pgPassword,
+                },
+            });
+            toast.success("PostgreSQL 配置已保存");
+        } catch (e: any) {
+            toast.error("保存失败: " + (e?.toString?.() ?? e));
+        }
+    }, [pgHost, pgPort, pgDatabase, pgUsername, pgPassword]);
 
-    const handleTestPostgres = useCallback(() => {
+    const handleTestPostgres = useCallback(async () => {
         if (!pgHost || !pgDatabase || !pgUsername || !pgPassword) {
             toast.error("请先填写完整的 PostgreSQL 配置");
             return;
         }
-        // TODO: Test PostgreSQL connection
-        toast.info("PostgreSQL 连接测试功能开发中");
-    }, [pgHost, pgDatabase, pgUsername, pgPassword]);
+        try {
+            await invoke("test_remote_storage_connection", {
+                remoteType: "postgresql",
+                remote_type: "postgresql",
+                payload: {
+                    pg_host: pgHost,
+                    pg_port: pgPort,
+                    pg_database: pgDatabase,
+                    pg_username: pgUsername,
+                    pg_password: pgPassword,
+                },
+            });
+            toast.success("PostgreSQL 连接正常");
+        } catch (e: any) {
+            toast.error("连接失败: " + (e?.toString?.() ?? e));
+        }
+    }, [pgHost, pgPort, pgDatabase, pgUsername, pgPassword]);
 
-    const handleUploadPostgres = useCallback(() => {
+    const handleUploadPostgres = useCallback(async () => {
         if (!pgHost || !pgDatabase || !pgUsername || !pgPassword) {
             toast.error("请先填写完整的 PostgreSQL 配置");
             return;
         }
-        // TODO: Upload local data to PostgreSQL
-        toast.info("上传本地数据到 PostgreSQL 功能开发中");
-    }, [pgHost, pgDatabase, pgUsername, pgPassword]);
+        try {
+            await invoke("upload_local_data", {
+                remoteType: "postgresql",
+                remote_type: "postgresql",
+                payload: {
+                    pg_host: pgHost,
+                    pg_port: pgPort,
+                    pg_database: pgDatabase,
+                    pg_username: pgUsername,
+                    pg_password: pgPassword,
+                },
+            });
+            toast.success("已提交上传请求（占位实现）");
+        } catch (e: any) {
+            toast.error("上传失败: " + (e?.toString?.() ?? e));
+        }
+    }, [pgHost, pgPort, pgDatabase, pgUsername, pgPassword]);
 
     // MySQL handlers
     const [mysqlHost, setMysqlHost] = useState("");
@@ -93,32 +183,76 @@ export const DataStorageConfigForm: React.FC = () => {
     const [mysqlUsername, setMysqlUsername] = useState("");
     const [mysqlPassword, setMysqlPassword] = useState("");
 
-    const handleSaveMysqlConfig = useCallback(() => {
+    const handleSaveMysqlConfig = useCallback(async () => {
         if (!mysqlHost || !mysqlDatabase || !mysqlUsername || !mysqlPassword) {
             toast.error("请填写完整的 MySQL 配置");
             return;
         }
-        // TODO: Save MySQL config to backend
-        toast.info("MySQL 配置保存功能开发中");
-    }, [mysqlHost, mysqlDatabase, mysqlUsername, mysqlPassword]);
+        try {
+            await invoke("save_data_storage_config", {
+                storageMode: "remote",
+                storage_mode: "remote",
+                remoteType: "mysql",
+                remote_type: "mysql",
+                payload: {
+                    mysql_host: mysqlHost,
+                    mysql_port: mysqlPort,
+                    mysql_database: mysqlDatabase,
+                    mysql_username: mysqlUsername,
+                    mysql_password: mysqlPassword,
+                },
+            });
+            toast.success("MySQL 配置已保存");
+        } catch (e: any) {
+            toast.error("保存失败: " + (e?.toString?.() ?? e));
+        }
+    }, [mysqlHost, mysqlPort, mysqlDatabase, mysqlUsername, mysqlPassword]);
 
-    const handleTestMysql = useCallback(() => {
+    const handleTestMysql = useCallback(async () => {
         if (!mysqlHost || !mysqlDatabase || !mysqlUsername || !mysqlPassword) {
             toast.error("请先填写完整的 MySQL 配置");
             return;
         }
-        // TODO: Test MySQL connection
-        toast.info("MySQL 连接测试功能开发中");
-    }, [mysqlHost, mysqlDatabase, mysqlUsername, mysqlPassword]);
+        try {
+            await invoke("test_remote_storage_connection", {
+                remoteType: "mysql",
+                remote_type: "mysql",
+                payload: {
+                    mysql_host: mysqlHost,
+                    mysql_port: mysqlPort,
+                    mysql_database: mysqlDatabase,
+                    mysql_username: mysqlUsername,
+                    mysql_password: mysqlPassword,
+                },
+            });
+            toast.success("MySQL 连接正常");
+        } catch (e: any) {
+            toast.error("连接失败: " + (e?.toString?.() ?? e));
+        }
+    }, [mysqlHost, mysqlPort, mysqlDatabase, mysqlUsername, mysqlPassword]);
 
-    const handleUploadMysql = useCallback(() => {
+    const handleUploadMysql = useCallback(async () => {
         if (!mysqlHost || !mysqlDatabase || !mysqlUsername || !mysqlPassword) {
             toast.error("请先填写完整的 MySQL 配置");
             return;
         }
-        // TODO: Upload local data to MySQL
-        toast.info("上传本地数据到 MySQL 功能开发中");
-    }, [mysqlHost, mysqlDatabase, mysqlUsername, mysqlPassword]);
+        try {
+            await invoke("upload_local_data", {
+                remoteType: "mysql",
+                remote_type: "mysql",
+                payload: {
+                    mysql_host: mysqlHost,
+                    mysql_port: mysqlPort,
+                    mysql_database: mysqlDatabase,
+                    mysql_username: mysqlUsername,
+                    mysql_password: mysqlPassword,
+                },
+            });
+            toast.success("已提交上传请求（占位实现）");
+        } catch (e: any) {
+            toast.error("上传失败: " + (e?.toString?.() ?? e));
+        }
+    }, [mysqlHost, mysqlPort, mysqlDatabase, mysqlUsername, mysqlPassword]);
 
     return (
         <Card className="shadow-md hover:shadow-lg transition-shadow border-l-4 border-l-primary">

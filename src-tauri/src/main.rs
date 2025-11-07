@@ -45,6 +45,7 @@ use crate::api::sub_task_api::{
 use crate::api::system_api::{
     get_all_feature_config, get_bang_list, get_selected_text_api, open_data_folder,
     save_feature_config, set_shortcut_recording, suspend_global_shortcut, resume_global_shortcut,
+    save_data_storage_config, test_remote_storage_connection, upload_local_data,
 };
 use crate::artifacts::artifacts_db::ArtifactsDatabase;
 use crate::artifacts::collection_api::{
@@ -347,6 +348,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             get_config,
             get_all_feature_config,
             save_feature_config,
+            save_data_storage_config,
+            test_remote_storage_connection,
+            upload_local_data,
             open_data_folder,
             get_llm_providers,
             update_llm_provider,
