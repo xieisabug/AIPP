@@ -323,9 +323,27 @@ impl AssistantDatabase {
 
         // 检查是否配置了远程存储
         if let Some(ds_state) = app_handle.try_state::<crate::DataStorageState>() {
-            let flat = ds_state.flat.blocking_lock();
-            if let Some((dsn, _)) = build_remote_dsn(&flat) {
+            let flat = match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    tokio::task::block_in_place(|| handle.block_on(async {
+                        ds_state.flat.lock().await.clone()
+                    }))
+                }
+                Err(_) => {
+                    let rt = tokio::runtime::Runtime::new()
+                        .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
+                    rt.block_on(async { ds_state.flat.lock().await.clone() })
+                }
+            };
+            if let Some((dsn, backend)) = build_remote_dsn(&flat) {
                 url = dsn;
+                match backend {
+                    DatabaseBackend::Postgres => debug!("Assistant DB using remote PostgreSQL"),
+                    DatabaseBackend::MySql => debug!("Assistant DB using remote MySQL"),
+                    _ => debug!("Assistant DB using local SQLite"),
+                }
+            } else {
+                debug!("Assistant DB using local SQLite (no remote config or incomplete)");
             }
         }
 

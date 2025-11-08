@@ -324,6 +324,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 // 默认 storage_mode = local
                 ds_flat.entry("storage_mode".to_string()).or_insert("local".to_string());
+
+                // Log a sanitized snapshot of data storage config to help diagnose remote vs local
+                {
+                    let storage_mode = ds_flat.get("storage_mode").cloned().unwrap_or_else(|| "local".into());
+                    let remote_type = ds_flat.get("remote_type").cloned().unwrap_or_default();
+                    let (host_key, port_key, db_key, user_key) = match remote_type.as_str() {
+                        "postgresql" => ("pg_host", "pg_port", "pg_database", "pg_username"),
+                        "mysql" => ("mysql_host", "mysql_port", "mysql_database", "mysql_username"),
+                        _ => ("", "", "", ""),
+                    };
+                    let host = host_key.is_empty().then(|| "".to_string()).unwrap_or_else(|| ds_flat.get(host_key).cloned().unwrap_or_default());
+                    let port = port_key.is_empty().then(|| "".to_string()).unwrap_or_else(|| ds_flat.get(port_key).cloned().unwrap_or_default());
+                    let database = db_key.is_empty().then(|| "".to_string()).unwrap_or_else(|| ds_flat.get(db_key).cloned().unwrap_or_default());
+                    let username_set = if user_key.is_empty() { false } else { ds_flat.get(user_key).is_some() };
+                    debug!(storage_mode=%storage_mode, remote_type=%remote_type, host=%host, port=%port, database=%database, username_set=%username_set, "Data storage config snapshot");
+                }
                 let data_storage_state =
                     DataStorageState { flat: Arc::new(TokioMutex::new(ds_flat)) };
                 app.manage(data_storage_state.clone());

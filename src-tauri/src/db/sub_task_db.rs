@@ -190,9 +190,27 @@ impl SubTaskDatabase {
         let db_path = get_db_path(app_handle, "conversation.db").map_err(|e| DbErr::Custom(e))?;
         let mut url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
         if let Some(ds_state) = app_handle.try_state::<crate::DataStorageState>() {
-            let flat = ds_state.flat.blocking_lock();
-            if let Some((dsn, _)) = build_remote_dsn(&flat) {
+            let flat = match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    tokio::task::block_in_place(|| handle.block_on(async {
+                        ds_state.flat.lock().await.clone()
+                    }))
+                }
+                Err(_) => {
+                    let rt = tokio::runtime::Runtime::new()
+                        .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
+                    rt.block_on(async { ds_state.flat.lock().await.clone() })
+                }
+            };
+            if let Some((dsn, backend)) = build_remote_dsn(&flat) {
                 url = dsn;
+                match backend {
+                    DatabaseBackend::Postgres => debug!("SubTask DB using remote PostgreSQL"),
+                    DatabaseBackend::MySql => debug!("SubTask DB using remote MySQL"),
+                    _ => debug!("SubTask DB using local SQLite"),
+                }
+            } else {
+                debug!("SubTask DB using local SQLite (no remote config or incomplete)");
             }
         }
 
