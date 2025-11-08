@@ -627,21 +627,30 @@ impl LLMDatabase {
     #[instrument(level = "debug", skip(self))]
     pub fn get_models_for_select(&self) -> Result<Vec<(String, String, i64, i64)>, String> {
         self.with_runtime(|conn| async move {
+            // 一次性查询所有启用的 providers，避免 N+1 查询
+            let providers = llm_provider::Entity::find()
+                .filter(llm_provider::Column::IsEnabled.eq(true))
+                .all(&conn)
+                .await?;
+            
+            // 构建 provider id 到 provider 的映射
+            let provider_map: std::collections::HashMap<i64, llm_provider::Model> = 
+                providers.into_iter().map(|p| (p.id, p)).collect();
+            
+            // 查询所有模型
             let models = llm_model::Entity::find().all(&conn).await?;
             
-            let mut result = Vec::new();
-            for model in models {
-                let provider = llm_provider::Entity::find_by_id(model.llm_provider_id)
-                    .one(&conn)
-                    .await?;
-                
-                if let Some(provider) = provider {
-                    if provider.is_enabled {
+            // 过滤并构建结果
+            let result = models
+                .into_iter()
+                .filter_map(|model| {
+                    provider_map.get(&model.llm_provider_id).map(|provider| {
                         let name = format!("{} / {}", provider.name, model.name);
-                        result.push((name, model.code.clone(), model.id, model.llm_provider_id));
-                    }
-                }
-            }
+                        (name, model.code.clone(), model.id, model.llm_provider_id)
+                    })
+                })
+                .collect();
+            
             Ok(result)
         }).map_err(|e: DbErr| e.to_string())
     }
