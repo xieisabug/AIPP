@@ -86,10 +86,21 @@ function AskWindow() {
     });
 
     useEffect(() => {
-        invoke<string>("get_selected_text_api").then((text) => {
-            console.log("get_selected_text_api", text);
-            setSelectedText(text);
-        });
+        const withTimeout = <T,>(p: Promise<T>, ms = 1000): Promise<T> => {
+            return new Promise<T>((resolve, reject) => {
+                const t = setTimeout(() => reject(new Error('get_selected_text_api timeout')), ms);
+                p.then(v => { clearTimeout(t); resolve(v); })
+                 .catch(e => { clearTimeout(t); reject(e); });
+            });
+        };
+        withTimeout(invoke<string>("get_selected_text_api"), 1000)
+            .then((text) => {
+                console.log("get_selected_text_api", text);
+                setSelectedText(text);
+            })
+            .catch(() => {
+                // 超时或错误时忽略，等待后续事件同步
+            });
 
         listen<string>("get_selected_text_event", (event) => {
             console.log("get_selected_text_event", event.payload);

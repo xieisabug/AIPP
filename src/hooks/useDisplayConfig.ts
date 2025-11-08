@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 interface DisplayConfig {
     theme: string;
@@ -34,12 +35,21 @@ export const useDisplayConfig = () => {
         try {
             setState(prev => ({ ...prev, isLoading: true, error: null }));
             
-            const featureConfigList = await invoke<Array<{
+            // 为避免极端情况下 invoke 被卡住，添加 2s 超时兜底
+            const withTimeout = <T,>(p: Promise<T>, ms = 2000): Promise<T> => {
+                return new Promise<T>((resolve, reject) => {
+                    const t = setTimeout(() => reject(new Error('get_all_feature_config timeout')), ms);
+                    p.then(v => { clearTimeout(t); resolve(v); })
+                     .catch(e => { clearTimeout(t); reject(e); });
+                });
+            };
+
+            const featureConfigList = await withTimeout(invoke<Array<{
                 id: number;
                 feature_code: string;
                 key: string;
                 value: string;
-            }>>('get_all_feature_config');
+            }>>('get_all_feature_config'));
             
             // 提取显示配置
             const displayConfigMap = new Map<string, string>();
@@ -73,7 +83,27 @@ export const useDisplayConfig = () => {
     }, []);
 
     useEffect(() => {
-        loadConfig();
+        let didLoad = false;
+        // 优先等待后端完成 setup，避免过早 invoke 被阻塞
+        const unlistenPromise = listen('backend-ready', () => {
+            if (!didLoad) {
+                didLoad = true;
+                loadConfig();
+            }
+        });
+
+        // 兜底：若事件未到达，1.5s 后仍触发一次加载，避免卡住 UI
+        const fallbackTimer = setTimeout(() => {
+            if (!didLoad) {
+                didLoad = true;
+                loadConfig();
+            }
+        }, 1500);
+
+        return () => {
+            clearTimeout(fallbackTimer);
+            unlistenPromise.then(f => f());
+        };
     }, [loadConfig]);
 
     const isUserMessageMarkdownEnabled = state.config?.user_message_markdown_render === 'enabled';

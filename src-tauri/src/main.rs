@@ -69,70 +69,100 @@ use crate::artifacts::react_preview::{
 use crate::artifacts::vue_preview::{
     close_vue_preview, create_vue_preview, create_vue_preview_for_artifact,
 };
-use crate::artifacts::{
-    react_runner::{close_react_artifact, run_react_artifact},
-    vue_runner::{close_vue_artifact, run_vue_artifact},
-};
-use crate::db::assistant_db::AssistantDatabase;
-use crate::db::llm_db::LLMDatabase;
-use crate::db::mcp_db::MCPDatabase;
-use crate::db::sub_task_db::SubTaskDatabase;
-use crate::db::system_db::SystemDatabase;
-use crate::mcp::builtin_mcp::{
-    add_or_update_aipp_builtin_server, execute_aipp_builtin_tool, list_aipp_builtin_templates,
-};
-use crate::mcp::execution_api::{
-    create_mcp_tool_call, execute_mcp_tool_call, get_mcp_tool_call,
-    get_mcp_tool_calls_by_conversation,
-};
-use crate::mcp::registry_api::{
-    add_mcp_server, build_mcp_prompt, delete_mcp_server, get_mcp_provider, get_mcp_server,
-    get_mcp_server_prompts, get_mcp_server_resources, get_mcp_server_tools, get_mcp_servers,
-    refresh_mcp_server_capabilities, test_mcp_connection, toggle_mcp_server, update_mcp_server,
-    update_mcp_server_prompt, update_mcp_server_tool,
-};
-use crate::window::{
-    awaken_aipp, create_ask_window, ensure_hidden_search_window, handle_open_ask_window,
-    open_artifact_collections_window, open_artifact_preview_window, open_chat_ui_window,
-    open_config_window, open_plugin_store_window, open_plugin_window,
-};
-use db::conversation_db::ConversationDatabase;
-use db::database_upgrade;
-use db::plugin_db::PluginDatabase;
-use db::system_db::FeatureConfig;
-use get_selected_text::get_selected_text;
-use serde::{Deserialize, Serialize};
-use state::message_token::MessageTokenManager;
+// ==== Added foundational imports for state and utilities ====
 use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::path::BaseDirectory;
-use tauri::Emitter;
-use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder},
-    Manager, RunEvent,
-};
 use tokio::sync::Mutex as TokioMutex;
+use serde::{Serialize, Deserialize};
 use tracing::{debug, info, warn};
-use tracing_subscriber::{EnvFilter, FmtSubscriber};
+use tracing_subscriber::{FmtSubscriber, EnvFilter};
+use tauri::{RunEvent, Manager, Emitter};
+use get_selected_text::get_selected_text;
 
-struct AppState {
-    selected_text: TokioMutex<String>,
-    recording_shortcut: TokioMutex<bool>,
+// Databases & upgrade helpers
+use crate::db::{
+    database_upgrade,
+    system_db::SystemDatabase,
+    llm_db::LLMDatabase,
+    assistant_db::AssistantDatabase,
+    conversation_db::ConversationDatabase,
+    plugin_db::PluginDatabase,
+    mcp_db::MCPDatabase,
+    sub_task_db::SubTaskDatabase,
+};
+
+// Window helpers
+use crate::window::{
+    create_ask_window,
+    handle_open_ask_window,
+    awaken_aipp,
+    open_config_window,
+    open_chat_ui_window,
+    open_plugin_window,
+    open_plugin_store_window,
+    open_artifact_preview_window,
+    open_artifact_collections_window,
+    ensure_hidden_search_window,
+};
+use crate::artifacts::react_runner::{run_react_artifact, close_react_artifact};
+use crate::artifacts::vue_runner::{run_vue_artifact, close_vue_artifact};
+
+// Message token manager
+use crate::state::message_token::MessageTokenManager;
+
+// MCP APIs
+use crate::mcp::registry_api::{
+    get_mcp_servers,
+    get_mcp_server,
+    get_mcp_provider,
+    build_mcp_prompt,
+    add_mcp_server,
+    update_mcp_server,
+    delete_mcp_server,
+    toggle_mcp_server,
+    get_mcp_server_tools,
+    update_mcp_server_tool,
+    get_mcp_server_resources,
+    get_mcp_server_prompts,
+    update_mcp_server_prompt,
+    test_mcp_connection,
+    refresh_mcp_server_capabilities,
+};
+use crate::mcp::execution_api::{
+    create_mcp_tool_call,
+    execute_mcp_tool_call,
+    get_mcp_tool_call,
+    get_mcp_tool_calls_by_conversation,
+};
+use crate::mcp::builtin_mcp::{
+    list_aipp_builtin_templates,
+    add_or_update_aipp_builtin_server,
+    execute_aipp_builtin_tool,
+};
+
+// Menu & path utilities
+use tauri::menu::{MenuItemBuilder, MenuBuilder};
+use tauri::path::BaseDirectory;
+
+// FeatureConfig type
+use crate::db::system_db::FeatureConfig;
+
+// ===== Application state structs =====
+pub struct AppState {
+    pub selected_text: TokioMutex<String>,
+    pub recording_shortcut: TokioMutex<bool>,
 }
 
 #[derive(Clone)]
-struct FeatureConfigState {
-    configs: Arc<TokioMutex<Vec<FeatureConfig>>>,
-    config_feature_map: Arc<TokioMutex<HashMap<String, HashMap<String, FeatureConfig>>>>,
+pub struct DataStorageState {
+    pub flat: Arc<TokioMutex<HashMap<String, String>>>,
 }
 
-// 数据存储配置的启动时缓存，用于在各个 db new() 时决定采用本地还是远程数据库
-#[derive(Clone, Debug)]
-struct DataStorageState {
-    // 展平后的配置项，例如 storage_mode, remote_type, pg_host, pg_port...
-    flat: Arc<TokioMutex<HashMap<String, String>>>,
+#[derive(Clone)]
+pub struct FeatureConfigState {
+    pub configs: Arc<TokioMutex<Vec<FeatureConfig>>>,
+    pub config_feature_map: Arc<TokioMutex<HashMap<String, HashMap<String, FeatureConfig>>>>,
 }
-
 #[derive(Clone)]
 struct NameCacheState {
     assistant_names: Arc<TokioMutex<HashMap<i64, String>>>,
@@ -279,6 +309,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let t_setup_start = std::time::Instant::now();
+            info!("=== Application setup started ===");
+            
             // 创建 Tokio runtime 用于所有数据库操作，避免重复创建临时 runtime
             let rt = tokio::runtime::Runtime::new()
                 .map_err(|e| format!("Failed to create Tokio runtime: {}", e))?;
@@ -311,11 +344,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // 在共享的 Tokio runtime 中执行所有数据库操作
             rt.block_on(async {
+                let t_system_new = std::time::Instant::now();
                 let system_db = SystemDatabase::new(&app_handle)?;
+                info!(elapsed_ms=%t_system_new.elapsed().as_millis(), "SystemDatabase::new() completed");
+                
                 // system_db 一定使用本地 SQLite，先创建它的表
+                let t_system_table = std::time::Instant::now();
                 system_db.create_tables()?;
+                info!(elapsed_ms=%t_system_table.elapsed().as_millis(), "SystemDatabase::create_tables() completed");
 
                 // 读取 data_storage 配置（如果存在）并缓存到状态中
+                let t_config = std::time::Instant::now();
                 let mut ds_flat: HashMap<String, String> = HashMap::new();
                 if let Ok(items) = system_db.get_feature_config_by_feature_code("data_storage") {
                     for c in items.into_iter() {
@@ -324,6 +363,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 // 默认 storage_mode = local
                 ds_flat.entry("storage_mode".to_string()).or_insert("local".to_string());
+                info!(elapsed_ms=%t_config.elapsed().as_millis(), "Loading data_storage config completed");
 
                 // Log a sanitized snapshot of data storage config to help diagnose remote vs local
                 {
@@ -346,23 +386,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // 依次创建其它数据库；它们的 new() 会根据 DataStorageState 决定连接
                 // 创建一次连接并复用，避免重复创建连接导致池耗尽
+                let t_llm_new = std::time::Instant::now();
                 let llm_db = LLMDatabase::new(&app_handle)?;
+                info!(elapsed_ms=%t_llm_new.elapsed().as_millis(), "LLMDatabase::new() completed");
+                
+                let t_assistant_new = std::time::Instant::now();
                 let assistant_db = AssistantDatabase::new(&app_handle)?;
+                info!(elapsed_ms=%t_assistant_new.elapsed().as_millis(), "AssistantDatabase::new() completed");
+                
+                let t_conversation_new = std::time::Instant::now();
                 let conversation_db = ConversationDatabase::new(&app_handle)?;
+                info!(elapsed_ms=%t_conversation_new.elapsed().as_millis(), "ConversationDatabase::new() completed");
+                
+                let t_plugin_new = std::time::Instant::now();
                 let plugin_db = PluginDatabase::new(&app_handle)?;
+                info!(elapsed_ms=%t_plugin_new.elapsed().as_millis(), "PluginDatabase::new() completed");
+                
+                let t_mcp_new = std::time::Instant::now();
                 let mcp_db = MCPDatabase::new(&app_handle)?;
+                info!(elapsed_ms=%t_mcp_new.elapsed().as_millis(), "MCPDatabase::new() completed");
+                
+                let t_subtask_new = std::time::Instant::now();
                 let sub_task_db = SubTaskDatabase::new(&app_handle)?;
+                info!(elapsed_ms=%t_subtask_new.elapsed().as_millis(), "SubTaskDatabase::new() completed");
+                
+                let t_artifacts_new = std::time::Instant::now();
                 let artifacts_db = ArtifactsDatabase::new(&app_handle)?;
+                info!(elapsed_ms=%t_artifacts_new.elapsed().as_millis(), "ArtifactsDatabase::new() completed");
 
                 // 顺序执行 create_tables，避免并发竞争
+                let t_llm_table = std::time::Instant::now();
                 llm_db.create_tables()?;
+                info!(elapsed_ms=%t_llm_table.elapsed().as_millis(), "LLMDatabase::create_tables() completed");
+                
+                let t_assistant_table = std::time::Instant::now();
                 assistant_db.create_tables()?;
+                info!(elapsed_ms=%t_assistant_table.elapsed().as_millis(), "AssistantDatabase::create_tables() completed");
+                
+                let t_conversation_table = std::time::Instant::now();
                 conversation_db.create_tables()?;
+                info!(elapsed_ms=%t_conversation_table.elapsed().as_millis(), "ConversationDatabase::create_tables() completed");
+                
+                let t_plugin_table = std::time::Instant::now();
                 plugin_db.create_tables()?;
+                info!(elapsed_ms=%t_plugin_table.elapsed().as_millis(), "PluginDatabase::create_tables() completed");
+                
+                let t_mcp_table = std::time::Instant::now();
                 mcp_db.create_tables()?;
+                info!(elapsed_ms=%t_mcp_table.elapsed().as_millis(), "MCPDatabase::create_tables() completed");
+                
+                let t_subtask_table = std::time::Instant::now();
                 sub_task_db.create_tables()?;
+                info!(elapsed_ms=%t_subtask_table.elapsed().as_millis(), "SubTaskDatabase::create_tables() completed");
+                
+                let t_artifacts_table = std::time::Instant::now();
                 artifacts_db.create_tables()?;
+                info!(elapsed_ms=%t_artifacts_table.elapsed().as_millis(), "ArtifactsDatabase::create_tables() completed");
 
+                let t_upgrade = std::time::Instant::now();
                 let _ = database_upgrade(
                     &app_handle,
                     &system_db,
@@ -370,25 +451,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &assistant_db,
                     &conversation_db,
                 );
+                info!(elapsed_ms=%t_upgrade.elapsed().as_millis(), "database_upgrade() completed");
 
                 // 无需启动时初始化内置服务器，改为使用模板创建
 
-                app.manage(initialize_state(&app_handle));
+                let t_state = std::time::Instant::now();
+                app.manage(initialize_state_with_db(&system_db));
+                info!(elapsed_ms=%t_state.elapsed().as_millis(), "initialize_state() completed");
+                
+                let t_cache = std::time::Instant::now();
                 app.manage(initialize_name_cache_state_with_dbs(&assistant_db, &llm_db));
+                info!(elapsed_ms=%t_cache.elapsed().as_millis(), "initialize_name_cache_state_with_dbs() completed");
 
                 Ok::<(), Box<dyn std::error::Error>>(())
             })?;
 
-            // 注册全局快捷键（必须在 state 初始化之后）
+            // 安装全局快捷键插件（同步，尽早安装，但不读取配置、不注册具体按键）
             #[cfg(desktop)]
             {
-                register_global_shortcuts(&app_handle);
+                install_global_shortcut_plugin(&app_handle);
+            }
+
+            // 注册全局快捷键（在 setup 完成后异步执行，仅做 unregister/register，不安装插件）
+            #[cfg(desktop)]
+            {
+                let app_clone = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let t_shortcut = std::time::Instant::now();
+                    register_global_shortcuts_async(&app_clone).await;
+                    info!(elapsed_ms=%t_shortcut.elapsed().as_millis(), "register_global_shortcuts_async() completed");
+                });
             }
 
             if app.get_webview_window("main").is_none() {
                 create_ask_window(&app_handle)
             }
 
+            // 通知前端：后端已就绪
+            let _ = app_handle.emit("backend-ready", true);
+
+            let total_setup_time = t_setup_start.elapsed().as_millis();
+            info!(total_ms=%total_setup_time, "=== Application setup completed ===");
+            
             Ok(())
         })
         .manage(AppState {
@@ -549,8 +653,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn initialize_state(app_handle: &tauri::AppHandle) -> FeatureConfigState {
-    let db = SystemDatabase::new(app_handle).expect("Failed to connect to database");
+fn initialize_state_with_db(db: &SystemDatabase) -> FeatureConfigState {
     let configs = db.get_all_feature_config().expect("Failed to load feature configs");
     let mut configs_map = HashMap::new();
     for config in configs.clone().into_iter() {
@@ -589,13 +692,65 @@ fn initialize_name_cache_state_with_dbs(
     }
 }
 
+// 兼容接口：为了保持向后兼容，保留原有函数签名
+#[allow(dead_code)]
+fn initialize_state(app_handle: &tauri::AppHandle) -> FeatureConfigState {
+    let db = SystemDatabase::new(app_handle).expect("Failed to connect to database");
+    initialize_state_with_db(&db)
+}
+
 #[cfg(desktop)]
-pub(crate) fn register_global_shortcuts(app_handle: &tauri::AppHandle) {
+fn install_global_shortcut_plugin(app_handle: &tauri::AppHandle) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt as _;
+    // 仅安装插件，不注册处理逻辑（处理逻辑在按键释放时需要）
+    let _ = app_handle.plugin(
+        tauri_plugin_global_shortcut::Builder::new()
+            .with_handler(|_app, _shortcut, event| {
+                use tauri_plugin_global_shortcut::ShortcutState;
+                if event.state() == ShortcutState::Released {
+                    // 仅处理唤醒逻辑 / 选中文本逻辑（保持原先实现）
+                    // 避免在 UI 线程阻塞，使用 try_lock 获取标志；若失败则跳过本次事件
+                    if let Some(state) = _app.try_state::<AppState>() {
+                        match state.recording_shortcut.try_lock() {
+                            Ok(flag) => {
+                                if *flag { return; }
+                            }
+                            Err(_) => {
+                                return;
+                            }
+                        }
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        if let Ok(text) = get_selected_text() {
+                            if !text.is_empty() {
+                                let _ = _app.emit("get_selected_text_event", text.clone());
+                                let app_handle = _app.clone();
+                                let text_clone = text.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    if let Some(app_state) = app_handle.try_state::<AppState>() {
+                                        let mut guard = app_state.selected_text.lock().await;
+                                        *guard = text_clone;
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    handle_open_ask_window(_app);
+                }
+            })
+            .build(),
+    );
+    info!("global_shortcut plugin installed (sync)");
+}
+
+#[cfg(desktop)]
+async fn register_global_shortcuts_async(app_handle: &tauri::AppHandle) {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
-    info!("开始注册全局快捷键...");
+    info!("开始注册全局快捷键(异步) - computing shortcut string...");
 
-    // 先安装插件（只安装一次即可）。若已安装会返回错误，忽略即可。
+    // 处理按键事件（插件已安装时才会触发）
     let _ = app_handle.plugin(
         tauri_plugin_global_shortcut::Builder::new()
             .with_handler(|_app, _shortcut, event| {
@@ -603,11 +758,19 @@ pub(crate) fn register_global_shortcuts(app_handle: &tauri::AppHandle) {
                 if event.state() == ShortcutState::Released {
                     let t_event = std::time::Instant::now();
                     info!("Global shortcut released: start handling");
-                    // 如果正在录入快捷键，忽略全局事件
+                    // 如果正在录入快捷键，忽略全局事件（使用 try_lock 避免阻塞 UI 线程）
                     if let Some(state) = _app.try_state::<AppState>() {
-                        if *state.recording_shortcut.blocking_lock() {
-                            debug!("正在录入快捷键，忽略全局快捷键事件");
-                            return;
+                        match state.recording_shortcut.try_lock() {
+                            Ok(flag) => {
+                                if *flag {
+                                    debug!("正在录入快捷键，忽略全局快捷键事件");
+                                    return;
+                                }
+                            }
+                            Err(_) => {
+                                // 锁被占用时跳过，避免阻塞
+                                return;
+                            }
                         }
                     }
 
@@ -655,7 +818,11 @@ pub(crate) fn register_global_shortcuts(app_handle: &tauri::AppHandle) {
                             if !new_clip.is_empty() && new_clip != previous {
                                 let _ = app_handle.emit("get_selected_text_event", new_clip.clone());
                                 if let Some(state) = app_handle.try_state::<AppState>() {
-                                    *state.selected_text.blocking_lock() = new_clip;
+                                    let text_clone = new_clip.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        let mut g = state.selected_text.lock().await;
+                                        *g = text_clone;
+                                    });
                                 }
                             } else {
                                 debug!("Copy-first worker: no new selection or same as previous");
@@ -699,9 +866,14 @@ pub(crate) fn register_global_shortcuts(app_handle: &tauri::AppHandle) {
                         if let Some(text) = immediate {
                             if !text.is_empty() {
                                 let _ = _app.emit("get_selected_text_event", text.clone());
-                                if let Some(state) = _app.try_state::<AppState>() {
-                                    *state.selected_text.blocking_lock() = text;
-                                }
+                                let app_handle = _app.clone();
+                                let text_clone = text.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    if let Some(state) = app_handle.try_state::<AppState>() {
+                                        let mut guard = state.selected_text.lock().await;
+                                        *guard = text_clone;
+                                    }
+                                });
                                 let dt_total = t_event.elapsed().as_millis();
                                 info!(elapsed_ms=%dt_total, "Global shortcut handling done (no fallback needed)");
                                 return;
@@ -719,7 +891,7 @@ pub(crate) fn register_global_shortcuts(app_handle: &tauri::AppHandle) {
     // 根据配置计算需要注册的快捷键字符串（global-hotkey 解析格式）
     let (shortcut_str, from_fallback) = {
         let state = app_handle.state::<FeatureConfigState>();
-        let config_feature_map = state.config_feature_map.blocking_lock();
+        let config_feature_map = state.config_feature_map.lock().await;
         if let Some(shortcuts_cfg) = config_feature_map.get("shortcuts") {
             if let Some(sc) = shortcuts_cfg.get("shortcut") {
                 (sc.value.clone(), false)
@@ -776,24 +948,30 @@ pub(crate) fn register_global_shortcuts(app_handle: &tauri::AppHandle) {
         }
     };
 
-    // 先清空旧注册，再注册新快捷键
-    if let Err(e) = app_handle.global_shortcut().unregister_all() {
-        debug!(error=%e, "卸载旧全局快捷键失败或未注册，继续");
-    }
-
-    match app_handle.global_shortcut().register(shortcut_str.as_str()) {
-        Ok(_) => {
-            if from_fallback {
-                info!("✓ 成功注册全局快捷键(回退): {}", shortcut_str);
-            } else {
-                info!("✓ 成功注册全局快捷键: {}", shortcut_str);
-            }
+    // 先清空旧注册，再注册新快捷键（带重试）
+    for attempt in 1..=3 {
+        if let Err(e) = app_handle.global_shortcut().unregister_all() {
+            debug!(attempt=%attempt, error=%e, "卸载旧全局快捷键失败或未注册，继续");
         }
-        Err(e) => {
-            warn!(error=%e, shortcut=%shortcut_str, "无法注册全局快捷键 (可能格式无效或被占用)");
+        match app_handle.global_shortcut().register(shortcut_str.as_str()) {
+            Ok(_) => {
+                if from_fallback {
+                    info!(attempt=%attempt, "✓ 成功注册全局快捷键(回退): {}", shortcut_str);
+                } else {
+                    info!(attempt=%attempt, "✓ 成功注册全局快捷键: {}", shortcut_str);
+                }
+                break;
+            }
+            Err(e) => {
+                warn!(attempt=%attempt, error=%e, shortcut=%shortcut_str, "注册全局快捷键失败");
+                if attempt == 3 { warn!("放弃注册全局快捷键"); }
+                else { std::thread::sleep(std::time::Duration::from_millis(150)); }
+            }
         }
     }
 }
+
+// 已不再需要同步版本（避免在 runtime 中 block_in_place 嵌套）
 
 #[cfg(desktop)]
 pub(crate) async fn reconfigure_global_shortcuts_async(app_handle: &tauri::AppHandle) {
