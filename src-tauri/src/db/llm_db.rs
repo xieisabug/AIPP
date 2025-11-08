@@ -1,11 +1,11 @@
-use sea_orm::{
-    entity::prelude::*, Database, DatabaseBackend, DatabaseConnection, DbErr, Set, ActiveValue,
-};
-use sea_orm::Schema;
-use serde::{Deserialize, Serialize};
-use tracing::{debug, instrument, warn};
-use tauri::Manager; // for try_state
 use crate::utils::db_utils::build_remote_dsn;
+use sea_orm::Schema;
+use sea_orm::{
+    entity::prelude::*, ActiveValue, Database, DatabaseBackend, DatabaseConnection, DbErr, Set,
+};
+use serde::{Deserialize, Serialize};
+use tauri::Manager; // for try_state
+use tracing::{debug, instrument, warn};
 
 use super::get_db_path;
 
@@ -176,14 +176,13 @@ impl LLMDatabase {
             // If we are inside a Tokio runtime, use block_in_place + await the lock.
             // Otherwise, spin up a short-lived runtime to await the lock.
             let flat = match tokio::runtime::Handle::try_current() {
-                Ok(handle) => {
-                    tokio::task::block_in_place(|| handle.block_on(async {
-                        ds_state.flat.lock().await.clone()
-                    }))
-                }
+                Ok(handle) => tokio::task::block_in_place(|| {
+                    handle.block_on(async { ds_state.flat.lock().await.clone() })
+                }),
                 Err(_) => {
-                    let rt = tokio::runtime::Runtime::new()
-                        .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
+                    let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                        DbErr::Custom(format!("Failed to create Tokio runtime: {}", e))
+                    })?;
                     rt.block_on(async { ds_state.flat.lock().await.clone() })
                 }
             };
@@ -198,18 +197,18 @@ impl LLMDatabase {
                 debug!("LLM DB using local SQLite (no remote config or incomplete)");
             }
         }
-        
+
         let conn = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                tokio::task::block_in_place(|| handle.block_on(async { Database::connect(&url).await }))?
-            }
+            Ok(handle) => tokio::task::block_in_place(|| {
+                handle.block_on(async { Database::connect(&url).await })
+            })?,
             Err(_) => {
                 let rt = tokio::runtime::Runtime::new()
                     .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
                 rt.block_on(async { Database::connect(&url).await })?
             }
         };
-        
+
         debug!("Opened llm database");
         Ok(LLMDatabase { conn })
     }
@@ -334,14 +333,27 @@ impl LLMDatabase {
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub fn get_llm_providers(&self) -> Result<Vec<(i64, String, String, String, bool, bool)>, String> {
+    pub fn get_llm_providers(
+        &self,
+    ) -> Result<Vec<(i64, String, String, String, bool, bool)>, String> {
         self.with_runtime(|conn| async move {
             let providers = llm_provider::Entity::find().all(&conn).await?;
-            
-            Ok(providers.into_iter().map(|p| {
-                (p.id, p.name, p.api_type, p.description.unwrap_or_default(), p.is_official, p.is_enabled)
-            }).collect())
-        }).map_err(|e: DbErr| e.to_string())
+
+            Ok(providers
+                .into_iter()
+                .map(|p| {
+                    (
+                        p.id,
+                        p.name,
+                        p.api_type,
+                        p.description.unwrap_or_default(),
+                        p.is_official,
+                        p.is_enabled,
+                    )
+                })
+                .collect())
+        })
+        .map_err(|e: DbErr| e.to_string())
     }
 
     #[instrument(level = "debug", skip(self), fields(id))]
@@ -351,7 +363,7 @@ impl LLMDatabase {
                 .one(&conn)
                 .await?
                 .ok_or(DbErr::RecordNotFound("Provider not found".to_string()))?;
-            
+
             Ok(provider.into())
         })
     }
@@ -389,27 +401,28 @@ impl LLMDatabase {
                 .filter(llm_provider_config::Column::LlmProviderId.eq(id))
                 .exec(&conn)
                 .await?;
-            
+
             llm_model::Entity::delete_many()
                 .filter(llm_model::Column::LlmProviderId.eq(id))
                 .exec(&conn)
                 .await?;
-            
-            llm_provider::Entity::delete_by_id(id)
-                .exec(&conn)
-                .await?;
+
+            llm_provider::Entity::delete_by_id(id).exec(&conn).await?;
             Ok(())
         })
     }
 
     #[instrument(level = "debug", skip(self), fields(llm_provider_id))]
-    pub fn get_llm_provider_config(&self, llm_provider_id: i64) -> Result<Vec<LLMProviderConfig>, DbErr> {
+    pub fn get_llm_provider_config(
+        &self,
+        llm_provider_id: i64,
+    ) -> Result<Vec<LLMProviderConfig>, DbErr> {
         self.with_runtime(|conn| async move {
             let configs = llm_provider_config::Entity::find()
                 .filter(llm_provider_config::Column::LlmProviderId.eq(llm_provider_id))
                 .all(&conn)
                 .await?;
-            
+
             Ok(configs.into_iter().map(|c| c.into()).collect())
         })
     }
@@ -516,34 +529,69 @@ impl LLMDatabase {
         })
     }
 
-    pub fn get_all_llm_models(&self) -> Result<Vec<(i64, String, i64, String, String, bool, bool, bool)>, String> {
+    pub fn get_all_llm_models(
+        &self,
+    ) -> Result<Vec<(i64, String, i64, String, String, bool, bool, bool)>, String> {
         self.with_runtime(|conn| async move {
             let models = llm_model::Entity::find().all(&conn).await?;
-            
-            Ok(models.into_iter().map(|m| {
-                (m.id, m.name, m.llm_provider_id, m.code, m.description.unwrap_or_default(), 
-                 m.vision_support, m.audio_support, m.video_support)
-            }).collect())
-        }).map_err(|e: DbErr| e.to_string())
+
+            Ok(models
+                .into_iter()
+                .map(|m| {
+                    (
+                        m.id,
+                        m.name,
+                        m.llm_provider_id,
+                        m.code,
+                        m.description.unwrap_or_default(),
+                        m.vision_support,
+                        m.audio_support,
+                        m.video_support,
+                    )
+                })
+                .collect())
+        })
+        .map_err(|e: DbErr| e.to_string())
     }
 
-    pub fn get_llm_models(&self, provider_id: String) -> Result<Vec<(i64, String, i64, String, String, bool, bool, bool)>, String> {
-        let provider_id: i64 = provider_id.parse().map_err(|e| format!("Invalid provider_id: {}", e))?;
-        
+    pub fn get_llm_models(
+        &self,
+        provider_id: String,
+    ) -> Result<Vec<(i64, String, i64, String, String, bool, bool, bool)>, String> {
+        let provider_id: i64 =
+            provider_id.parse().map_err(|e| format!("Invalid provider_id: {}", e))?;
+
         self.with_runtime(|conn| async move {
             let models = llm_model::Entity::find()
                 .filter(llm_model::Column::LlmProviderId.eq(provider_id))
-                .all(&conn).await?;
-            
-            Ok(models.into_iter().map(|m| {
-                (m.id, m.name, m.llm_provider_id, m.code, m.description.unwrap_or_default(),
-                 m.vision_support, m.audio_support, m.video_support)
-            }).collect())
-        }).map_err(|e: DbErr| e.to_string())
+                .all(&conn)
+                .await?;
+
+            Ok(models
+                .into_iter()
+                .map(|m| {
+                    (
+                        m.id,
+                        m.name,
+                        m.llm_provider_id,
+                        m.code,
+                        m.description.unwrap_or_default(),
+                        m.vision_support,
+                        m.audio_support,
+                        m.video_support,
+                    )
+                })
+                .collect())
+        })
+        .map_err(|e: DbErr| e.to_string())
     }
 
     #[instrument(level = "debug", skip(self), fields(provider_id, model_code))]
-    pub fn get_llm_model_detail(&self, provider_id: &i64, model_code: &String) -> Result<ModelDetail, DbErr> {
+    pub fn get_llm_model_detail(
+        &self,
+        provider_id: &i64,
+        model_code: &String,
+    ) -> Result<ModelDetail, DbErr> {
         let provider_id = *provider_id;
         let model_code = model_code.clone();
 
@@ -632,14 +680,14 @@ impl LLMDatabase {
                 .filter(llm_provider::Column::IsEnabled.eq(true))
                 .all(&conn)
                 .await?;
-            
+
             // 构建 provider id 到 provider 的映射
-            let provider_map: std::collections::HashMap<i64, llm_provider::Model> = 
+            let provider_map: std::collections::HashMap<i64, llm_provider::Model> =
                 providers.into_iter().map(|p| (p.id, p)).collect();
-            
+
             // 查询所有模型
             let models = llm_model::Entity::find().all(&conn).await?;
-            
+
             // 过滤并构建结果
             let result = models
                 .into_iter()
@@ -650,9 +698,10 @@ impl LLMDatabase {
                     })
                 })
                 .collect();
-            
+
             Ok(result)
-        }).map_err(|e: DbErr| e.to_string())
+        })
+        .map_err(|e: DbErr| e.to_string())
     }
 
     #[instrument(level = "debug", skip(self))]
