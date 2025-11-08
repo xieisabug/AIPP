@@ -13,7 +13,7 @@ use crate::{
     db::conversation_db::{ConversationDatabase, MessageAttachment},
     errors::AppError,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 #[derive(Serialize)]
 pub struct AttachmentResult {

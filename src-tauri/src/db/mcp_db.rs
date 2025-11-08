@@ -1,9 +1,11 @@
 use crate::db::get_db_path;
 use sea_orm::prelude::Expr;
 use sea_orm::{
-    entity::prelude::*, ActiveValue, Database, DatabaseConnection, DbErr, QueryOrder, Set,
-    Statement,
+    entity::prelude::*, ActiveValue, Database, DatabaseBackend, DatabaseConnection, DbErr, QueryOrder, Set,
 };
+use sea_orm::Schema;
+use tauri::Manager; // for try_state
+use crate::utils::db_utils::build_remote_dsn;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
 
@@ -148,6 +150,7 @@ pub struct MCPServer {
     pub transport_type: String,
     pub command: Option<String>,
     pub environment_variables: Option<String>,
+    pub headers: Option<String>,
     pub url: Option<String>,
     pub timeout: Option<i32>,
     pub is_long_running: bool,
@@ -165,6 +168,7 @@ impl From<mcp_server::Model> for MCPServer {
             transport_type: model.transport_type,
             command: model.command,
             environment_variables: model.environment_variables,
+            headers: model.headers,
             url: model.url,
             timeout: model.timeout,
             is_long_running: model.is_long_running,
@@ -301,7 +305,11 @@ impl MCPDatabase {
     #[instrument(level = "debug", skip(app_handle), fields(db = "mcp.db"))]
     pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, DbErr> {
         let db_path = get_db_path(app_handle, "mcp.db").map_err(|e| DbErr::Custom(e))?;
-        let url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
+        let mut url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
+        if let Some(ds_state) = app_handle.try_state::<crate::DataStorageState>() {
+            let flat = ds_state.flat.blocking_lock();
+            if let Some((dsn, _)) = build_remote_dsn(&flat) { url = dsn; }
+        }
 
         let conn = match tokio::runtime::Handle::try_current() {
             Ok(handle) => tokio::task::block_in_place(|| {
@@ -320,118 +328,117 @@ impl MCPDatabase {
 
     #[instrument(level = "debug", skip(self))]
     pub fn create_tables(&self) -> Result<(), DbErr> {
-        let sql_mcp_server = r#"
-            CREATE TABLE IF NOT EXISTS mcp_server (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                description TEXT,
-                transport_type TEXT NOT NULL,
-                command TEXT,
-                environment_variables TEXT,
-                url TEXT,
-                timeout INTEGER DEFAULT 30000,
-                is_long_running BOOLEAN NOT NULL DEFAULT 0,
-                is_enabled BOOLEAN NOT NULL DEFAULT 1,
-                is_builtin BOOLEAN NOT NULL DEFAULT 0,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-        "#;
-
-        let sql_mcp_server_tool = r#"
-            CREATE TABLE IF NOT EXISTS mcp_server_tool (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                tool_name TEXT NOT NULL,
-                tool_description TEXT,
-                is_enabled BOOLEAN NOT NULL DEFAULT 1,
-                is_auto_run BOOLEAN NOT NULL DEFAULT 0,
-                parameters TEXT,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
-                UNIQUE(server_id, tool_name)
-            );
-        "#;
-
-        let sql_mcp_server_resource = r#"
-            CREATE TABLE IF NOT EXISTS mcp_server_resource (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                resource_uri TEXT NOT NULL,
-                resource_name TEXT NOT NULL,
-                resource_type TEXT NOT NULL,
-                resource_description TEXT,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
-                UNIQUE(server_id, resource_uri)
-            );
-        "#;
-
-        let sql_mcp_server_prompt = r#"
-            CREATE TABLE IF NOT EXISTS mcp_server_prompt (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                prompt_name TEXT NOT NULL,
-                prompt_description TEXT,
-                is_enabled BOOLEAN NOT NULL DEFAULT 1,
-                arguments TEXT,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
-                UNIQUE(server_id, prompt_name)
-            );
-        "#;
-
-        let sql_mcp_tool_call = r#"
-            CREATE TABLE IF NOT EXISTS mcp_tool_call (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation_id INTEGER NOT NULL,
-                message_id INTEGER,
-                server_id INTEGER NOT NULL,
-                server_name TEXT NOT NULL,
-                tool_name TEXT NOT NULL,
-                parameters TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'executing', 'success', 'failed')),
-                result TEXT,
-                error TEXT,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-                started_time DATETIME,
-                finished_time DATETIME,
-                llm_call_id TEXT,
-                assistant_message_id INTEGER,
-                FOREIGN KEY (server_id) REFERENCES mcp_server(id) ON DELETE CASCADE
-            );
-        "#;
+        let backend = self.conn.get_database_backend();
+        let schema = Schema::new(backend);
+        let sql_mcp_server = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(mcp_server::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(mcp_server::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(mcp_server::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(mcp_server::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_mcp_server_tool = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(mcp_server_tool::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(mcp_server_tool::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(mcp_server_tool::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(mcp_server_tool::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_mcp_server_resource = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(mcp_server_resource::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(mcp_server_resource::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(mcp_server_resource::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(mcp_server_resource::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_mcp_server_prompt = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(mcp_server_prompt::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(mcp_server_prompt::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(mcp_server_prompt::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(mcp_server_prompt::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_mcp_tool_call = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(mcp_tool_call::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(mcp_tool_call::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(mcp_tool_call::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(mcp_tool_call::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
 
         self.with_runtime(|conn| async move {
-            conn.execute_unprepared(sql_mcp_server).await?;
-            conn.execute_unprepared(sql_mcp_server_tool).await?;
-            conn.execute_unprepared(sql_mcp_server_resource).await?;
-            conn.execute_unprepared(sql_mcp_server_prompt).await?;
-            conn.execute_unprepared(sql_mcp_tool_call).await?;
+            conn.execute_unprepared(&sql_mcp_server).await?;
+            conn.execute_unprepared(&sql_mcp_server_tool).await?;
+            conn.execute_unprepared(&sql_mcp_server_resource).await?;
+            conn.execute_unprepared(&sql_mcp_server_prompt).await?;
+            conn.execute_unprepared(&sql_mcp_tool_call).await?;
+            // Composite uniques via indexes
+            conn.execute_unprepared("CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_server_tool_unique ON mcp_server_tool(server_id, tool_name)").await?;
+            conn.execute_unprepared("CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_server_resource_unique ON mcp_server_resource(server_id, resource_uri)").await?;
+            conn.execute_unprepared("CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_server_prompt_unique ON mcp_server_prompt(server_id, prompt_name)").await?;
             Ok(())
         })?;
-
-        self.migrate_mcp_tool_call_table()?;
 
         debug!("Created MCP tables");
         Ok(())
     }
 
-    /// Migrate existing mcp_tool_call table to add new columns (best-effort)
-    #[instrument(level = "debug", skip(self))]
-    fn migrate_mcp_tool_call_table(&self) -> Result<(), DbErr> {
-        self.with_runtime(|conn| async move {
-            // Try adding columns; ignore errors if they already exist
-            let _ = conn
-                .execute_unprepared("ALTER TABLE mcp_tool_call ADD COLUMN llm_call_id TEXT")
-                .await;
-            let _ = conn
-                .execute_unprepared(
-                    "ALTER TABLE mcp_tool_call ADD COLUMN assistant_message_id INTEGER",
-                )
-                .await;
-            Ok(())
-        })
-    }
+    // Legacy migration helpers removed in favor of initial schema creation via SeaORM
 
     // Helper method to run async code in correct runtime context
     fn with_runtime<F, Fut, T>(&self, f: F) -> Result<T, DbErr>
@@ -497,6 +504,7 @@ impl MCPDatabase {
         transport_type: &str,
         command: Option<&str>,
         environment_variables: Option<&str>,
+        headers: Option<&str>,
         url: Option<&str>,
         timeout: Option<i32>,
         is_long_running: bool,
@@ -509,6 +517,7 @@ impl MCPDatabase {
         let transport_type = transport_type.to_string();
         let command = command.map(|s| s.to_string());
         let environment_variables = environment_variables.map(|s| s.to_string());
+        let headers = headers.map(|s| s.to_string());
         let url = url.map(|s| s.to_string());
 
         self.with_runtime(|conn| async move {
@@ -521,6 +530,7 @@ impl MCPDatabase {
                     mcp_server::Column::EnvironmentVariables,
                     Expr::value(environment_variables),
                 )
+                .col_expr(mcp_server::Column::Headers, Expr::value(headers))
                 .col_expr(mcp_server::Column::Url, Expr::value(url))
                 .col_expr(mcp_server::Column::Timeout, Expr::value(timeout))
                 .col_expr(mcp_server::Column::IsLongRunning, Expr::value(is_long_running))
@@ -575,6 +585,7 @@ impl MCPDatabase {
         transport_type: &str,
         command: Option<&str>,
         environment_variables: Option<&str>,
+        headers: Option<&str>,
         url: Option<&str>,
         timeout: Option<i32>,
         is_long_running: bool,
@@ -587,6 +598,7 @@ impl MCPDatabase {
         let transport_type_str = transport_type.to_string();
         let command_opt = command.map(|s| s.to_string());
         let env_vars_opt = environment_variables.map(|s| s.to_string());
+        let headers_opt = headers.map(|s| s.to_string());
         let url_opt = url.map(|s| s.to_string());
 
         // First try to get existing server by name
@@ -608,6 +620,7 @@ impl MCPDatabase {
                     transport_type,
                     command,
                     environment_variables,
+                    headers,
                     url,
                     timeout,
                     is_long_running,
@@ -626,7 +639,7 @@ impl MCPDatabase {
                     transport_type: Set(transport_type_str),
                     command: Set(command_opt),
                     environment_variables: Set(env_vars_opt),
-                    headers: Set(None),
+                    headers: Set(headers_opt),
                     url: Set(url_opt),
                     timeout: Set(timeout),
                     is_long_running: Set(is_long_running),
@@ -1017,6 +1030,47 @@ impl MCPDatabase {
         self.get_mcp_tool_call(result.id)
     }
 
+    /// Create MCP tool call specifically for subtask execution
+    #[instrument(
+        level = "debug",
+        skip(self),
+        fields(conversation_id, server_id, tool_name, subtask_id)
+    )]
+    pub fn create_mcp_tool_call_for_subtask(
+        &self,
+        conversation_id: i64,
+        subtask_id: i64,
+        server_id: i64,
+        server_name: &str,
+        tool_name: &str,
+        parameters: &str,
+        llm_call_id: Option<&str>,
+    ) -> Result<MCPToolCall, DbErr> {
+        let model = mcp_tool_call::ActiveModel {
+            id: ActiveValue::NotSet,
+            conversation_id: Set(conversation_id),
+            message_id: Set(None),
+            server_id: Set(server_id),
+            server_name: Set(server_name.to_string()),
+            tool_name: Set(tool_name.to_string()),
+            parameters: Set(parameters.to_string()),
+            status: Set("pending".to_string()),
+            result: Set(None),
+            error: Set(None),
+            created_time: ActiveValue::NotSet,
+            started_time: Set(None),
+            finished_time: Set(None),
+            llm_call_id: Set(llm_call_id.map(|s| s.to_string())),
+            assistant_message_id: Set(None),
+            subtask_id: Set(Some(subtask_id)),
+        };
+
+        let result = self.with_runtime(|conn| async move { model.insert(&conn).await })?;
+
+        debug!(id = result.id, "Created MCP tool call for subtask");
+        self.get_mcp_tool_call(result.id)
+    }
+
     #[instrument(level = "debug", skip(self), fields(id))]
     pub fn get_mcp_tool_call(&self, id: i64) -> Result<MCPToolCall, DbErr> {
         debug!(id, "get mcp tool call");
@@ -1135,6 +1189,22 @@ impl MCPDatabase {
 
         let calls: Vec<MCPToolCall> = models.into_iter().map(|m| m.into()).collect();
         debug!(count = calls.len(), "Fetched MCP tool calls by conversation");
+        Ok(calls)
+    }
+
+    /// Fetch MCP tool calls linked to a specific subtask execution
+    #[instrument(level = "debug", skip(self), fields(subtask_id))]
+    pub fn get_mcp_tool_calls_by_subtask(&self, subtask_id: i64) -> Result<Vec<MCPToolCall>, DbErr> {
+        let models = self.with_runtime(|conn| async move {
+            mcp_tool_call::Entity::find()
+                .filter(mcp_tool_call::Column::SubtaskId.eq(subtask_id))
+                .order_by_asc(mcp_tool_call::Column::CreatedTime)
+                .all(&conn)
+                .await
+        })?;
+
+        let calls: Vec<MCPToolCall> = models.into_iter().map(|m| m.into()).collect();
+        debug!(count = calls.len(), "Fetched MCP tool calls by subtask");
         Ok(calls)
     }
 }

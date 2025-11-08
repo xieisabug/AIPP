@@ -1,9 +1,9 @@
 use std::sync::OnceLock;
 
+use crate::FeatureConfigState;
 use syntect::highlighting::ThemeSet;
 use syntect::html::highlighted_html_for_string;
 use syntect::parsing::SyntaxSet;
-use crate::FeatureConfigState;
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
@@ -47,11 +47,7 @@ fn pick_theme(is_dark: bool) -> &'static syntect::highlighting::Theme {
         "base16-eighties.dark",
         "base16-mocha.dark",
     ];
-    let candidates_light = [
-        "Solarized (light)",
-        "base16-ocean.light",
-        "base16-eighties.light",
-    ];
+    let candidates_light = ["Solarized (light)", "base16-ocean.light", "base16-eighties.light"];
     if is_dark {
         for name in candidates_dark.iter() {
             if let Some(theme) = ts.themes.get(*name) {
@@ -122,8 +118,7 @@ pub fn highlight_code(
         .unwrap_or_else(|| ss.find_syntax_plain_text());
 
     // Use helper to generate inline-styled HTML within <pre><code> ... </code></pre>
-    let html = highlighted_html_for_string(&code, ss, syntax, theme)
-        .map_err(|e| e.to_string())?;
+    let html = highlighted_html_for_string(&code, ss, syntax, theme).map_err(|e| e.to_string())?;
 
     Ok(html)
 }

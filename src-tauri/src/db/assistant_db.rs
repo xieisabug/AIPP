@@ -1,10 +1,12 @@
 use crate::db::get_db_path;
-use rusqlite::{params, Connection};
+use crate::utils::db_utils::build_remote_dsn;
+use sea_orm::Schema;
 use sea_orm::{
-    entity::prelude::*, ActiveValue, Database, DatabaseConnection, DbErr, QueryFilter, QuerySelect,
-    Set,
+    entity::prelude::*, ActiveValue, Database, DatabaseBackend, DatabaseConnection, DbErr,
+    QueryFilter, QueryOrder, Set,
 };
 use serde::{Deserialize, Serialize};
+use tauri::Manager; // for try_state
 use tracing::{debug, error, instrument};
 
 // ============ Assistant Entity ============
@@ -309,15 +311,23 @@ impl From<assistant_mcp_tool_config::Model> for AssistantMCPToolConfig {
 
 pub struct AssistantDatabase {
     pub conn: DatabaseConnection,
-    pub mcp_conn: Connection, // Keep rusqlite for complex join queries
     db_path: std::path::PathBuf,
 }
 
 impl AssistantDatabase {
     #[instrument(level = "debug", skip(app_handle), fields(db = "assistant.db"))]
     pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, DbErr> {
+        // 默认本地路径
         let db_path = get_db_path(app_handle, "assistant.db").map_err(|e| DbErr::Custom(e))?;
-        let url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
+        let mut url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
+
+        // 检查是否配置了远程存储
+        if let Some(ds_state) = app_handle.try_state::<crate::DataStorageState>() {
+            let flat = ds_state.flat.blocking_lock();
+            if let Some((dsn, _)) = build_remote_dsn(&flat) {
+                url = dsn;
+            }
+        }
 
         let conn = match tokio::runtime::Handle::try_current() {
             Ok(handle) => tokio::task::block_in_place(|| {
@@ -330,12 +340,8 @@ impl AssistantDatabase {
             }
         };
 
-        let mcp_db_path = get_db_path(app_handle, "mcp.db").map_err(|e| DbErr::Custom(e))?;
-        let mcp_conn = Connection::open(mcp_db_path)
-            .map_err(|e| DbErr::Custom(format!("Failed to open mcp.db: {}", e)))?;
-
         debug!("Opened assistant database");
-        Ok(AssistantDatabase { conn, mcp_conn, db_path })
+        Ok(AssistantDatabase { conn, db_path })
     }
 
     // Helper method to run async code in correct runtime context
@@ -355,99 +361,174 @@ impl AssistantDatabase {
         }
     }
 
-    /// Get a rusqlite connection for migrations
-    pub fn get_rusqlite_connection(
-        &self,
-        _app_handle: &tauri::AppHandle,
-    ) -> Result<Connection, String> {
-        Connection::open(&self.db_path).map_err(|e| e.to_string())
+    // Open SeaORM connection to MCP database for cross-db queries
+    fn open_mcp_conn(&self) -> Result<DatabaseConnection, DbErr> {
+        let mcp_db_path = self
+            .db_path
+            .parent()
+            .map(|p| p.join("mcp.db"))
+            .ok_or_else(|| DbErr::Custom("Invalid assistant db path".to_string()))?;
+        let url = format!("sqlite:{}?mode=rwc", mcp_db_path.to_string_lossy());
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| {
+                handle.block_on(async { Database::connect(&url).await })
+            }),
+            Err(_) => {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
+                rt.block_on(async { Database::connect(&url).await })
+            }
+        }
     }
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn create_tables(&self) -> Result<(), DbErr> {
-        let sql1 = r#"
-            CREATE TABLE IF NOT EXISTS assistant (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                description TEXT,
-                assistant_type INTEGER NOT NULL DEFAULT 0,
-                is_addition BOOLEAN NOT NULL DEFAULT 0,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-        "#;
-        let sql2 = r#"
-            CREATE TABLE IF NOT EXISTS assistant_model (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                assistant_id INTEGER NOT NULL,
-                provider_id INTEGER NOT NULL,
-                model_code TEXT NOT NULL,
-                alias TEXT
-            );
-        "#;
-        let sql3 = r#"
-            CREATE TABLE IF NOT EXISTS assistant_prompt (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                assistant_id INTEGER,
-                prompt TEXT NOT NULL,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (assistant_id) REFERENCES assistant(id)
-            );
-        "#;
-        let sql4 = r#"
-            CREATE TABLE IF NOT EXISTS assistant_model_config (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                assistant_id INTEGER,
-                assistant_model_id INTEGER,
-                name TEXT NOT NULL,
-                value TEXT,
-                value_type TEXT default 'float' not null,
-                FOREIGN KEY (assistant_id) REFERENCES assistant(id)
-            );
-        "#;
-        let sql5 = r#"
-            CREATE TABLE IF NOT EXISTS assistant_prompt_param (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                assistant_id INTEGER,
-                assistant_prompt_id INTEGER,
-                param_name TEXT NOT NULL,
-                param_type TEXT,
-                param_value TEXT,
-                FOREIGN KEY (assistant_id) REFERENCES assistant(id),
-                FOREIGN KEY (assistant_prompt_id) REFERENCES assistant_prompt(id)
-            );
-        "#;
-        let sql6 = r#"
-            CREATE TABLE IF NOT EXISTS assistant_mcp_config (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                assistant_id INTEGER NOT NULL,
-                mcp_server_id INTEGER NOT NULL,
-                is_enabled BOOLEAN NOT NULL DEFAULT 1,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (assistant_id) REFERENCES assistant(id) ON DELETE CASCADE,
-                UNIQUE(assistant_id, mcp_server_id)
-            );
-        "#;
-        let sql7 = r#"
-            CREATE TABLE IF NOT EXISTS assistant_mcp_tool_config (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                assistant_id INTEGER NOT NULL,
-                mcp_tool_id INTEGER NOT NULL,
-                is_enabled BOOLEAN NOT NULL DEFAULT 1,
-                is_auto_run BOOLEAN NOT NULL DEFAULT 0,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (assistant_id) REFERENCES assistant(id) ON DELETE CASCADE,
-                UNIQUE(assistant_id, mcp_tool_id)
-            );
-        "#;
+        let backend = self.conn.get_database_backend();
+        let schema = Schema::new(backend);
+        let sql_assistant = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(assistant::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(assistant::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(assistant::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(assistant::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_assistant_model = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(assistant_model::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(assistant_model::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(assistant_model::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(assistant_model::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_assistant_prompt = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(assistant_prompt::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(assistant_prompt::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(assistant_prompt::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(assistant_prompt::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_assistant_model_config = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(assistant_model_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(assistant_model_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(assistant_model_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(assistant_model_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_assistant_prompt_param = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(assistant_prompt_param::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(assistant_prompt_param::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(assistant_prompt_param::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(assistant_prompt_param::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_assistant_mcp_config = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(assistant_mcp_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(assistant_mcp_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(assistant_mcp_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(assistant_mcp_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_assistant_mcp_tool_config = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(assistant_mcp_tool_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(assistant_mcp_tool_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(assistant_mcp_tool_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(assistant_mcp_tool_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
 
         self.with_runtime(|conn| async move {
-            conn.execute_unprepared(sql1).await?;
-            conn.execute_unprepared(sql2).await?;
-            conn.execute_unprepared(sql3).await?;
-            conn.execute_unprepared(sql4).await?;
-            conn.execute_unprepared(sql5).await?;
-            conn.execute_unprepared(sql6).await?;
-            conn.execute_unprepared(sql7).await?;
+            conn.execute_unprepared(&sql_assistant).await?;
+            conn.execute_unprepared(&sql_assistant_model).await?;
+            conn.execute_unprepared(&sql_assistant_prompt).await?;
+            conn.execute_unprepared(&sql_assistant_model_config).await?;
+            conn.execute_unprepared(&sql_assistant_prompt_param).await?;
+            conn.execute_unprepared(&sql_assistant_mcp_config).await?;
+            conn.execute_unprepared(&sql_assistant_mcp_tool_config).await?;
+            // Composite unique constraints mirrored via unique indexes
+            conn.execute_unprepared(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_assistant_mcp_cfg_unique ON assistant_mcp_config(assistant_id, mcp_server_id)",
+            )
+            .await?;
+            conn.execute_unprepared(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_assistant_mcp_tool_cfg_unique ON assistant_mcp_tool_config(assistant_id, mcp_tool_id)",
+            )
+            .await?;
             Ok(())
         })?;
 
@@ -924,7 +1005,7 @@ impl AssistantDatabase {
         is_enabled: bool,
     ) -> Result<(), DbErr> {
         // Use raw SQL for INSERT OR REPLACE
-        let sql = "INSERT OR REPLACE INTO assistant_mcp_config (assistant_id, mcp_server_id, is_enabled) VALUES (?, ?, ?)";
+        // legacy sql variable removed (unused)
 
         self.with_runtime(|conn| async move {
             conn.execute_unprepared(&format!(
@@ -982,127 +1063,107 @@ impl AssistantDatabase {
         assistant_id: i64,
     ) -> Result<Vec<(i64, String, bool, Vec<(i64, String, String, bool, bool, String)>)>, DbErr>
     {
-        // This complex join query uses mcp_conn (rusqlite) for cross-database queries
-        // 1. 获取所有启用的服务器及其配置状态
-        let mut server_stmt = self
-            .mcp_conn
-            .prepare(
-                "
-            SELECT s.id, s.name
-            FROM mcp_server s
-            WHERE s.is_enabled = 1
-            ORDER BY s.name
-        ",
-            )
-            .map_err(|e| DbErr::Custom(format!("Failed to prepare server query: {}", e)))?;
-
-        let servers: Vec<(i64, String)> = server_stmt
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
-            .map_err(|e| DbErr::Custom(format!("Failed to execute server query: {}", e)))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| DbErr::Custom(format!("Failed to collect servers: {}", e)))?;
+        // 通过 SeaORM 查询两个数据库并在内存中组装
+        // 1. 从 mcp.db 读取启用的服务器及其工具
+        let mcp_conn = self.open_mcp_conn()?;
+        let servers = {
+            use crate::db::mcp_db::mcp_server;
+            let mcp_conn2 = mcp_conn.clone();
+            self.with_runtime(|_| async move {
+                let models = mcp_server::Entity::find()
+                    .filter(mcp_server::Column::IsEnabled.eq(true))
+                    .order_by_asc(mcp_server::Column::Name)
+                    .all(&mcp_conn2)
+                    .await?;
+                Ok::<Vec<(i64, String)>, DbErr>(
+                    models.into_iter().map(|m| (m.id, m.name)).collect(),
+                )
+            })?
+        };
 
         if servers.is_empty() {
             return Ok(Vec::new());
         }
 
-        // 2. 批量获取所有服务器的配置状态
-        let server_ids: Vec<String> = servers.iter().map(|(id, _)| id.to_string()).collect();
-        let server_ids_placeholder = vec!["?"; server_ids.len()].join(",");
-        let server_config_sql = format!(
-            "SELECT mcp_server_id, is_enabled FROM assistant_mcp_config 
-             WHERE assistant_id = ? AND mcp_server_id IN ({})",
-            server_ids_placeholder
-        );
+        let server_ids: Vec<i64> = servers.iter().map(|(id, _)| *id).collect();
 
-        // Need to use rusqlite for assistant.db query in this cross-database operation
-        let assistant_rusqlite_conn = Connection::open(&self.db_path)
-            .map_err(|e| DbErr::Custom(format!("Failed to open assistant.db for query: {}", e)))?;
+        // 2. 从 assistant.db 读取服务器配置状态
+        let server_configs: std::collections::HashMap<i64, bool> = {
+            use crate::db::assistant_db::assistant_mcp_config;
+            let server_ids_clone = server_ids.clone();
+            self.with_runtime(|conn| async move {
+                let models = assistant_mcp_config::Entity::find()
+                    .filter(assistant_mcp_config::Column::AssistantId.eq(assistant_id))
+                    .filter(assistant_mcp_config::Column::McpServerId.is_in(server_ids_clone))
+                    .all(&conn)
+                    .await?;
+                Ok::<_, DbErr>(
+                    models.into_iter().map(|m| (m.mcp_server_id, m.is_enabled)).collect(),
+                )
+            })?
+        };
 
-        let mut server_config_stmt = assistant_rusqlite_conn
-            .prepare(&server_config_sql)
-            .map_err(|e| DbErr::Custom(format!("Failed to prepare config query: {}", e)))?;
-        let mut server_config_params = vec![assistant_id];
-        server_config_params.extend(servers.iter().map(|(id, _)| *id));
+        // 3. 从 mcp.db 读取所有启用的工具
+        let all_tools: Vec<(i64, i64, String, String, String)> = {
+            use crate::db::mcp_db::mcp_server_tool;
+            let server_ids_clone = server_ids.clone();
+            let mcp_conn2 = mcp_conn.clone();
+            self.with_runtime(|_| async move {
+                let models = mcp_server_tool::Entity::find()
+                    .filter(mcp_server_tool::Column::ServerId.is_in(server_ids_clone))
+                    .filter(mcp_server_tool::Column::IsEnabled.eq(true))
+                    .order_by_asc(mcp_server_tool::Column::ServerId)
+                    .order_by_asc(mcp_server_tool::Column::ToolName)
+                    .all(&mcp_conn2)
+                    .await?;
+                Ok::<_, DbErr>(
+                    models
+                        .into_iter()
+                        .map(|m| {
+                            (
+                                m.id,
+                                m.server_id,
+                                m.tool_name,
+                                m.tool_description.unwrap_or_default(),
+                                m.parameters.unwrap_or_default(),
+                            )
+                        })
+                        .collect(),
+                )
+            })?
+        };
 
-        let server_configs: std::collections::HashMap<i64, bool> = server_config_stmt
-            .query_map(rusqlite::params_from_iter(server_config_params), |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
-            })
-            .map_err(|e| DbErr::Custom(format!("Failed to execute config query: {}", e)))?
-            .collect::<Result<std::collections::HashMap<_, _>, _>>()
-            .map_err(|e| DbErr::Custom(format!("Failed to collect configs: {}", e)))?;
+        // 4. 从 assistant.db 读取工具配置状态
+        let tool_configs: std::collections::HashMap<i64, (bool, bool)> = if all_tools.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            let tool_ids: Vec<i64> = all_tools.iter().map(|(id, _, _, _, _)| *id).collect();
+            self.with_runtime(|conn| async move {
+                use crate::db::assistant_db::assistant_mcp_tool_config;
+                let models = assistant_mcp_tool_config::Entity::find()
+                    .filter(assistant_mcp_tool_config::Column::AssistantId.eq(assistant_id))
+                    .filter(assistant_mcp_tool_config::Column::McpToolId.is_in(tool_ids.clone()))
+                    .all(&conn)
+                    .await?;
+                Ok::<_, DbErr>(
+                    models
+                        .into_iter()
+                        .map(|m| (m.mcp_tool_id, (m.is_enabled, m.is_auto_run)))
+                        .collect(),
+                )
+            })?
+        };
 
-        // 3. 获取所有工具信息（一次性获取所有服务器的工具）
-        let tools_sql = format!(
-            "SELECT t.id, t.server_id, t.tool_name, t.tool_description, t.parameters
-             FROM mcp_server_tool t
-             WHERE t.server_id IN ({}) AND t.is_enabled = 1
-             ORDER BY t.server_id, t.tool_name",
-            server_ids_placeholder
-        );
-
-        let mut tools_stmt = self
-            .mcp_conn
-            .prepare(&tools_sql)
-            .map_err(|e| DbErr::Custom(format!("Failed to prepare tools query: {}", e)))?;
-
-        let all_tools: Vec<(i64, i64, String, String, String)> = tools_stmt
-            .query_map(rusqlite::params_from_iter(servers.iter().map(|(id, _)| *id)), |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            })
-            .map_err(|e| DbErr::Custom(format!("Failed to execute tools query: {}", e)))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| DbErr::Custom(format!("Failed to collect tools: {}", e)))?;
-
-        // 4. 批量获取工具配置状态
-        let mut tool_configs: std::collections::HashMap<i64, (bool, bool)> =
-            std::collections::HashMap::new();
-        if !all_tools.is_empty() {
-            let tool_ids: Vec<String> =
-                all_tools.iter().map(|(id, _, _, _, _)| id.to_string()).collect();
-            let tool_ids_placeholder = vec!["?"; tool_ids.len()].join(",");
-            let tool_config_sql = format!(
-                "SELECT mcp_tool_id, is_enabled, is_auto_run FROM assistant_mcp_tool_config 
-                 WHERE assistant_id = ? AND mcp_tool_id IN ({})",
-                tool_ids_placeholder
-            );
-
-            let mut tool_config_stmt =
-                assistant_rusqlite_conn.prepare(&tool_config_sql).map_err(|e| {
-                    DbErr::Custom(format!("Failed to prepare tool config query: {}", e))
-                })?;
-            let mut tool_config_params = vec![assistant_id];
-            tool_config_params.extend(all_tools.iter().map(|(id, _, _, _, _)| *id));
-
-            tool_configs = tool_config_stmt
-                .query_map(rusqlite::params_from_iter(tool_config_params), |row| {
-                    Ok((row.get::<_, i64>(0)?, (row.get::<_, bool>(1)?, row.get::<_, bool>(2)?)))
-                })
-                .map_err(|e| DbErr::Custom(format!("Failed to execute tool config query: {}", e)))?
-                .collect::<Result<std::collections::HashMap<_, _>, _>>()
-                .map_err(|e| DbErr::Custom(format!("Failed to collect tool configs: {}", e)))?;
-        }
-
-        // 5. 组织数据结构
+        // 5. 组装结果
         let mut result = Vec::new();
         for (server_id, server_name) in servers {
             let server_is_enabled = server_configs.get(&server_id).copied().unwrap_or(false);
-
-            // 获取该服务器的所有工具
             let server_tools: Vec<(i64, String, String, bool, bool, String)> = all_tools
                 .iter()
                 .filter(|(_, sid, _, _, _)| *sid == server_id)
                 .map(|(tool_id, _, tool_name, tool_description, tool_parameters)| {
                     let (tool_is_enabled, tool_is_auto_run) =
                         tool_configs.get(tool_id).copied().unwrap_or((true, false));
-
                     (
                         *tool_id,
                         tool_name.clone(),

@@ -45,11 +45,7 @@ pub enum AppError {
     InternalError(String),
 }
 
-impl From<rusqlite::Error> for AppError {
-    fn from(err: rusqlite::Error) -> Self {
-        AppError::DatabaseError(err.to_string())
-    }
-}
+
 
 impl From<sea_orm::DbErr> for AppError {
     fn from(err: sea_orm::DbErr) -> Self {

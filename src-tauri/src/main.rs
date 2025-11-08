@@ -75,6 +75,7 @@ use crate::artifacts::{
 };
 use crate::db::assistant_db::AssistantDatabase;
 use crate::db::llm_db::LLMDatabase;
+use crate::db::mcp_db::MCPDatabase;
 use crate::db::sub_task_db::SubTaskDatabase;
 use crate::db::system_db::SystemDatabase;
 use crate::mcp::builtin_mcp::{
@@ -84,7 +85,6 @@ use crate::mcp::execution_api::{
     create_mcp_tool_call, execute_mcp_tool_call, get_mcp_tool_call,
     get_mcp_tool_calls_by_conversation,
 };
-use crate::mcp::mcp_db::MCPDatabase;
 use crate::mcp::registry_api::{
     add_mcp_server, build_mcp_prompt, delete_mcp_server, get_mcp_provider, get_mcp_server,
     get_mcp_server_prompts, get_mcp_server_resources, get_mcp_server_tools, get_mcp_servers,
@@ -124,6 +124,13 @@ struct AppState {
 struct FeatureConfigState {
     configs: Arc<TokioMutex<Vec<FeatureConfig>>>,
     config_feature_map: Arc<TokioMutex<HashMap<String, HashMap<String, FeatureConfig>>>>,
+}
+
+// 数据存储配置的启动时缓存，用于在各个 db new() 时决定采用本地还是远程数据库
+#[derive(Clone, Debug)]
+struct DataStorageState {
+    // 展平后的配置项，例如 storage_mode, remote_type, pg_host, pg_port...
+    flat: Arc<TokioMutex<HashMap<String, String>>>,
 }
 
 #[derive(Clone)]
@@ -272,6 +279,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // 创建 Tokio runtime 用于所有数据库操作，避免重复创建临时 runtime
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| format!("Failed to create Tokio runtime: {}", e))?;
+
             let app_handle = app.handle();
 
             // 系统托盘菜单和图标初始化
@@ -298,30 +309,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             debug!(?resource_path, "resource path");
 
-            let system_db = SystemDatabase::new(&app_handle)?;
-            let llm_db = LLMDatabase::new(&app_handle)?;
-            let assistant_db = AssistantDatabase::new(&app_handle)?;
-            let conversation_db = ConversationDatabase::new(&app_handle)?;
-            let plugin_db = PluginDatabase::new(&app_handle)?;
-            let mcp_db = MCPDatabase::new(&app_handle)?;
-            let sub_task_db = SubTaskDatabase::new(&app_handle)?;
-            let artifacts_db = ArtifactsDatabase::new(&app_handle)?;
+            // 在共享的 Tokio runtime 中执行所有数据库操作
+            rt.block_on(async {
+                let system_db = SystemDatabase::new(&app_handle)?;
+                // system_db 一定使用本地 SQLite，先创建它的表
+                system_db.create_tables()?;
 
-            system_db.create_tables()?;
-            llm_db.create_tables()?;
-            assistant_db.create_tables()?;
-            conversation_db.create_tables()?;
-            plugin_db.create_tables()?;
-            mcp_db.create_tables()?;
-            sub_task_db.create_tables()?;
-            artifacts_db.create_tables()?;
+                // 读取 data_storage 配置（如果存在）并缓存到状态中
+                let mut ds_flat: HashMap<String, String> = HashMap::new();
+                if let Ok(items) = system_db.get_feature_config_by_feature_code("data_storage") {
+                    for c in items.into_iter() {
+                        ds_flat.insert(c.key, c.value);
+                    }
+                }
+                // 默认 storage_mode = local
+                ds_flat.entry("storage_mode".to_string()).or_insert("local".to_string());
+                let data_storage_state =
+                    DataStorageState { flat: Arc::new(TokioMutex::new(ds_flat)) };
+                app.manage(data_storage_state.clone());
 
-            let _ = database_upgrade(&app_handle, system_db, llm_db, assistant_db, conversation_db);
+                // 依次创建其它数据库；它们的 new() 会根据 DataStorageState 决定连接
+                // 创建一次连接并复用，避免重复创建连接导致池耗尽
+                let llm_db = LLMDatabase::new(&app_handle)?;
+                let assistant_db = AssistantDatabase::new(&app_handle)?;
+                let conversation_db = ConversationDatabase::new(&app_handle)?;
+                let plugin_db = PluginDatabase::new(&app_handle)?;
+                let mcp_db = MCPDatabase::new(&app_handle)?;
+                let sub_task_db = SubTaskDatabase::new(&app_handle)?;
+                let artifacts_db = ArtifactsDatabase::new(&app_handle)?;
 
-            // 无需启动时初始化内置服务器，改为使用模板创建
+                // 顺序执行 create_tables，避免并发竞争
+                llm_db.create_tables()?;
+                assistant_db.create_tables()?;
+                conversation_db.create_tables()?;
+                plugin_db.create_tables()?;
+                mcp_db.create_tables()?;
+                sub_task_db.create_tables()?;
+                artifacts_db.create_tables()?;
 
-            app.manage(initialize_state(&app_handle));
-            app.manage(initialize_name_cache_state(&app_handle));
+                let _ = database_upgrade(
+                    &app_handle,
+                    &system_db,
+                    &llm_db,
+                    &assistant_db,
+                    &conversation_db,
+                );
+
+                // 无需启动时初始化内置服务器，改为使用模板创建
+
+                app.manage(initialize_state(&app_handle));
+                app.manage(initialize_name_cache_state_with_dbs(&assistant_db, &llm_db));
+
+                Ok::<(), Box<dyn std::error::Error>>(())
+            })?;
 
             // 注册全局快捷键（必须在 state 初始化之后）
             #[cfg(desktop)]
@@ -360,7 +400,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             get_data_storage_config,
             save_data_storage_config,
             test_remote_storage_connection,
-            upload_local_data,
             open_data_folder,
             get_llm_providers,
             update_llm_provider,
@@ -474,7 +513,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cancel_sub_task_execution_for_ui,
             highlight_code,
             ensure_hidden_search_window,
-            list_syntect_themes
+            list_syntect_themes,
+            upload_local_data
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -511,15 +551,16 @@ fn initialize_state(app_handle: &tauri::AppHandle) -> FeatureConfigState {
     }
 }
 
-fn initialize_name_cache_state(app_handle: &tauri::AppHandle) -> NameCacheState {
-    let assistant_db = AssistantDatabase::new(app_handle).expect("Failed to connect to database");
+fn initialize_name_cache_state_with_dbs(
+    assistant_db: &AssistantDatabase,
+    llm_db: &LLMDatabase,
+) -> NameCacheState {
     let assistants = assistant_db.get_assistants().expect("Failed to load assistants");
     let mut assistant_names = HashMap::new();
     for assistant in assistants.clone().into_iter() {
         assistant_names.insert(assistant.id, assistant.name.clone());
     }
 
-    let llm_db = LLMDatabase::new(app_handle).expect("Failed to connect to database");
     let models = llm_db.get_models_for_select().expect("Failed to load models");
     let mut model_names = HashMap::new();
     for model in models.clone().into_iter() {

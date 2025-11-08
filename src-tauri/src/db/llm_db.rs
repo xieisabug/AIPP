@@ -1,8 +1,11 @@
 use sea_orm::{
-    entity::prelude::*, Database, DatabaseConnection, DbErr, Set, ActiveValue,
+    entity::prelude::*, Database, DatabaseBackend, DatabaseConnection, DbErr, Set, ActiveValue,
 };
+use sea_orm::Schema;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument, warn};
+use tauri::Manager; // for try_state
+use crate::utils::db_utils::build_remote_dsn;
 
 use super::get_db_path;
 
@@ -166,7 +169,12 @@ impl LLMDatabase {
     #[instrument(level = "debug", skip(app_handle), fields(db = "llm.db"))]
     pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, DbErr> {
         let db_path = get_db_path(app_handle, "llm.db").map_err(|e| DbErr::Custom(e))?;
-        let url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
+        let mut url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
+
+        if let Some(ds_state) = app_handle.try_state::<crate::DataStorageState>() {
+            let flat = ds_state.flat.blocking_lock();
+            if let Some((dsn, _)) = build_remote_dsn(&flat) { url = dsn; }
+        }
         
         let conn = match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
@@ -201,47 +209,67 @@ impl LLMDatabase {
 
     #[instrument(level = "debug", skip(self))]
     pub fn create_tables(&self) -> Result<(), DbErr> {
-        let sql1 = r#"
-            CREATE TABLE IF NOT EXISTS llm_provider (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                api_type TEXT NOT NULL,
-                description TEXT,
-                is_official BOOLEAN NOT NULL DEFAULT 0,
-                is_enabled BOOLEAN NOT NULL DEFAULT 0,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-        "#;
-        let sql2 = r#"
-            CREATE TABLE IF NOT EXISTS llm_model (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                llm_provider_id INTEGER NOT NULL,
-                code TEXT NOT NULL,
-                description TEXT,
-                vision_support BOOLEAN NOT NULL DEFAULT 0,
-                audio_support BOOLEAN NOT NULL DEFAULT 0,
-                video_support BOOLEAN NOT NULL DEFAULT 0,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (llm_provider_id) REFERENCES llm_provider(id)
-            );
-        "#;
-        let sql3 = r#"
-            CREATE TABLE IF NOT EXISTS llm_provider_config (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                llm_provider_id INTEGER NOT NULL,
-                value TEXT,
-                append_location TEXT DEFAULT 'header',
-                is_addition BOOLEAN NOT NULL DEFAULT 0,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-        "#;
+        let backend = self.conn.get_database_backend();
+        let schema = Schema::new(backend);
+        let sql_provider = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(llm_provider::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(llm_provider::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(llm_provider::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(llm_provider::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_model = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(llm_model::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(llm_model::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(llm_model::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(llm_model::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_provider_config = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(llm_provider_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(llm_provider_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(llm_provider_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(llm_provider_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
 
         self.with_runtime(|conn| async move {
-            conn.execute_unprepared(sql1).await?;
-            conn.execute_unprepared(sql2).await?;
-            conn.execute_unprepared(sql3).await?;
+            conn.execute_unprepared(&sql_provider).await?;
+            conn.execute_unprepared(&sql_model).await?;
+            conn.execute_unprepared(&sql_provider_config).await?;
             Ok(())
         })?;
 

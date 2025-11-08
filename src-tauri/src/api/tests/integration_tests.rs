@@ -1,4 +1,4 @@
-use crate::db::conversation_db::{Conversation, Message, Repository};
+use crate::db::conversation_db::Message;
 use chrono::Utc;
 use uuid::Uuid;
 

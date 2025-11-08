@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
+use tauri::Manager; // for try_state
+use crate::utils::db_utils::build_remote_dsn;
 use sea_orm::{
-    entity::prelude::*, Database, DatabaseConnection, DbErr, Set, ActiveValue, QueryOrder,
+    entity::prelude::*, Database, DatabaseBackend, DatabaseConnection, DbErr, Set, ActiveValue, QueryOrder,
 };
+use sea_orm::Schema;
 use crate::db::get_db_path;
 
 // ============ Plugins Entity ============
@@ -191,7 +194,11 @@ impl PluginDatabase {
     #[instrument(level = "debug", skip(app_handle), fields(db = "plugin.db"))]
     pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, DbErr> {
         let db_path = get_db_path(app_handle, "plugin.db").map_err(|e| DbErr::Custom(e))?;
-        let url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
+        let mut url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
+        if let Some(ds_state) = app_handle.try_state::<crate::DataStorageState>() {
+            let flat = ds_state.flat.blocking_lock();
+            if let Some((dsn, _)) = build_remote_dsn(&flat) { url = dsn; }
+        }
         
         // Create a new Tokio runtime if we're not in one
         let conn = match tokio::runtime::Handle::try_current() {
@@ -213,57 +220,86 @@ impl PluginDatabase {
 
     #[instrument(level = "debug", skip(self))]
     pub fn create_tables(&self) -> Result<(), DbErr> {
-        let sql1 = r#"
-            CREATE TABLE IF NOT EXISTS Plugins (
-                plugin_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                version TEXT NOT NULL,
-                folder_name TEXT NOT NULL,
-                description TEXT,
-                author TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        "#;
-        
-        let sql2 = r#"
-            CREATE TABLE IF NOT EXISTS PluginStatus (
-                status_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                plugin_id INTEGER,
-                is_active INTEGER DEFAULT 1,
-                last_run TIMESTAMP,
-                FOREIGN KEY (plugin_id) REFERENCES Plugins(plugin_id)
-            );
-        "#;
-        
-        let sql3 = r#"
-            CREATE TABLE IF NOT EXISTS PluginConfigurations (
-                config_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                plugin_id INTEGER,
-                config_key TEXT NOT NULL,
-                config_value TEXT,
-                FOREIGN KEY (plugin_id) REFERENCES Plugins(plugin_id)
-            );
-        "#;
-        
-        let sql4 = r#"
-            CREATE TABLE IF NOT EXISTS PluginData (
-                data_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                plugin_id INTEGER,
-                session_id TEXT NOT NULL,
-                data_key TEXT NOT NULL,
-                data_value TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (plugin_id) REFERENCES Plugins(plugin_id)
-            );
-        "#;
+        let backend = self.conn.get_database_backend();
+        let schema = Schema::new(backend);
+        let sql_plugins = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(plugins::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(plugins::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(plugins::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(plugins::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_plugin_status = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(plugin_status::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(plugin_status::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(plugin_status::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(plugin_status::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_plugin_configurations = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(plugin_configurations::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(plugin_configurations::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(plugin_configurations::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(plugin_configurations::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_plugin_data = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(plugin_data::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(plugin_data::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(plugin_data::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(plugin_data::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
 
         self.with_runtime(|conn| async move {
-            conn.execute_unprepared(sql1).await?;
-            conn.execute_unprepared(sql2).await?;
-            conn.execute_unprepared(sql3).await?;
-            conn.execute_unprepared(sql4).await?;
+            conn.execute_unprepared(&sql_plugins).await?;
+            conn.execute_unprepared(&sql_plugin_status).await?;
+            conn.execute_unprepared(&sql_plugin_configurations).await?;
+            conn.execute_unprepared(&sql_plugin_data).await?;
             Ok(())
         })
     }

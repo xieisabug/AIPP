@@ -1,6 +1,15 @@
 use crate::db::get_db_path;
-use rusqlite::{params, Connection, Result};
+use sea_orm::entity::prelude::*;
+use sea_orm::sea_query::{Cond, Expr};
+use sea_orm::ExprTrait;
+use sea_orm::{
+    ActiveValue, Database, DatabaseBackend, DatabaseConnection, DbErr, QueryFilter, QueryOrder,
+    QuerySelect, Set,
+};
 use serde::{Deserialize, Serialize};
+use tracing::instrument;
+use tauri::Manager; // for try_state
+use crate::utils::db_utils::build_remote_dsn;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ArtifactCollection {
@@ -35,244 +44,238 @@ pub struct UpdateArtifactCollection {
     pub tags: Option<String>,
 }
 
+// Reuse SeaORM entity defined under db module
+use crate::db::artifacts_db::artifacts_collection as entity;
+
 pub struct ArtifactsDatabase {
-    pub conn: Connection,
+    pub conn: DatabaseConnection,
 }
 
 impl ArtifactsDatabase {
-    pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
-        let db_path = get_db_path(app_handle, "artifacts.db");
-        let conn = Connection::open(db_path.unwrap())?;
-
-        Ok(ArtifactsDatabase { conn })
+    #[instrument(level = "debug", skip(app_handle))]
+    pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, DbErr> {
+        let db_path = get_db_path(app_handle, "artifacts.db").map_err(|e| DbErr::Custom(e))?;
+        let mut url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
+        if let Some(ds_state) = app_handle.try_state::<crate::DataStorageState>() {
+            let flat = ds_state.flat.blocking_lock();
+            if let Some((dsn, _)) = build_remote_dsn(&flat) { url = dsn; }
+        }
+        let conn = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| {
+                handle.block_on(async { Database::connect(&url).await })
+            })?,
+            Err(_) => {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
+                rt.block_on(async { Database::connect(&url).await })?
+            }
+        };
+        Ok(Self { conn })
     }
 
-    pub fn create_tables(&self) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS artifacts_collection (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                icon TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                artifact_type TEXT NOT NULL CHECK (artifact_type IN ('vue', 'react', 'html', 'svg', 'xml', 'markdown', 'mermaid')),
-                code TEXT NOT NULL,
-                tags TEXT, -- JSON string for flexible tag storage
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-                last_used_time DATETIME,
-                use_count INTEGER NOT NULL DEFAULT 0
-            );",
-            [],
-        )?;
-
-        // Create index for faster searching
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_artifacts_collection_type ON artifacts_collection(artifact_type);",
-            [],
-        )?;
-
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_artifacts_collection_name ON artifacts_collection(name);",
-            [],
-        )?;
-
+    pub fn create_tables(&self) -> Result<(), DbErr> {
+        use sea_orm::Schema;
+        let backend = self.conn.get_database_backend();
+        let schema = Schema::new(backend);
+        // Re-generate SQL per branch to avoid temporary borrow lifetime issues (E0716)
+        let sql = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(entity::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(entity::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(entity::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(entity::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        self.with_runtime(|conn| async move {
+            conn.execute_unprepared(&sql).await?;
+            conn.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_artifacts_collection_type ON artifacts_collection(artifact_type);").await?;
+            conn.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_artifacts_collection_name ON artifacts_collection(name);").await?;
+            Ok(())
+        })?;
         Ok(())
     }
 
     /// Save a new artifact to collection
-    pub fn save_artifact(&self, artifact: NewArtifactCollection) -> Result<i64> {
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO artifacts_collection (name, icon, description, artifact_type, code, tags) 
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )?;
-
-        stmt.execute(params![
-            artifact.name,
-            artifact.icon,
-            artifact.description,
-            artifact.artifact_type,
-            artifact.code,
-            artifact.tags
-        ])?;
-
-        Ok(self.conn.last_insert_rowid())
+    pub fn save_artifact(&self, artifact: NewArtifactCollection) -> Result<i64, DbErr> {
+        let model = entity::ActiveModel {
+            id: ActiveValue::NotSet,
+            name: Set(artifact.name),
+            icon: Set(artifact.icon),
+            description: Set(artifact.description),
+            artifact_type: Set(artifact.artifact_type),
+            code: Set(artifact.code),
+            tags: Set(artifact.tags),
+            created_time: ActiveValue::NotSet,
+            last_used_time: ActiveValue::NotSet,
+            use_count: ActiveValue::NotSet,
+        };
+        let res =
+            self.with_runtime(|conn| async move { model.insert(&conn).await }).map(|m| m.id)?;
+        Ok(res)
     }
 
     /// Get all artifacts with optional type filter
-    pub fn get_artifacts(&self, artifact_type: Option<&str>) -> Result<Vec<ArtifactCollection>> {
-        let query = if let Some(_) = artifact_type {
-            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count 
-             FROM artifacts_collection 
-             WHERE artifact_type = ? 
-             ORDER BY use_count DESC, last_used_time DESC, created_time DESC"
-        } else {
-            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count 
-             FROM artifacts_collection 
-             ORDER BY use_count DESC, last_used_time DESC, created_time DESC"
-        };
-
-        let mut stmt = self.conn.prepare(query)?;
-
-        let row_mapper = |row: &rusqlite::Row| {
-            Ok(ArtifactCollection {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                icon: row.get(2)?,
-                description: row.get(3)?,
-                artifact_type: row.get(4)?,
-                code: row.get(5)?,
-                tags: row.get(6)?,
-                created_time: row.get(7)?,
-                last_used_time: row.get(8)?,
-                use_count: row.get(9)?,
-            })
-        };
-
-        let rows = if let Some(type_filter) = artifact_type {
-            stmt.query_map([type_filter], row_mapper)?
-        } else {
-            stmt.query_map([], row_mapper)?
-        };
-
-        let mut artifacts = Vec::new();
-        for artifact_result in rows {
-            artifacts.push(artifact_result?);
-        }
-
-        Ok(artifacts)
+    pub fn get_artifacts(
+        &self,
+        artifact_type: Option<&str>,
+    ) -> Result<Vec<ArtifactCollection>, DbErr> {
+        let models = self.with_runtime(|conn| async move {
+            let mut sel = entity::Entity::find();
+            if let Some(t) = artifact_type {
+                sel = sel.filter(entity::Column::ArtifactType.eq(t));
+            }
+            sel.order_by_desc(entity::Column::UseCount)
+                .order_by_desc(entity::Column::LastUsedTime)
+                .order_by_desc(entity::Column::CreatedTime)
+                .all(&conn)
+                .await
+        })?;
+        Ok(models.into_iter().map(map_model_to_artifact).collect())
     }
 
     /// Get artifact by ID
-    pub fn get_artifact_by_id(&self, id: i64) -> Result<Option<ArtifactCollection>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count 
-             FROM artifacts_collection 
-             WHERE id = ?"
-        )?;
-
-        let mut rows = stmt.query_map([id], |row| {
-            Ok(ArtifactCollection {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                icon: row.get(2)?,
-                description: row.get(3)?,
-                artifact_type: row.get(4)?,
-                code: row.get(5)?,
-                tags: row.get(6)?,
-                created_time: row.get(7)?,
-                last_used_time: row.get(8)?,
-                use_count: row.get(9)?,
-            })
-        })?;
-
-        if let Some(artifact_result) = rows.next() {
-            Ok(Some(artifact_result?))
-        } else {
-            Ok(None)
-        }
+    pub fn get_artifact_by_id(&self, id: i64) -> Result<Option<ArtifactCollection>, DbErr> {
+        let model = self
+            .with_runtime(|conn| async move { entity::Entity::find_by_id(id).one(&conn).await })?;
+        Ok(model.map(map_model_to_artifact))
     }
 
     /// Search artifacts by name, description, or tags
-    pub fn search_artifacts(&self, query: &str) -> Result<Vec<ArtifactCollection>> {
-        let search_pattern = format!("%{}%", query.to_lowercase());
-
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count 
-             FROM artifacts_collection 
-             WHERE LOWER(name) LIKE ? OR LOWER(description) LIKE ? OR LOWER(tags) LIKE ?
-             ORDER BY use_count DESC, last_used_time DESC, created_time DESC"
-        )?;
-
-        let rows = stmt.query_map([&search_pattern, &search_pattern, &search_pattern], |row| {
-            Ok(ArtifactCollection {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                icon: row.get(2)?,
-                description: row.get(3)?,
-                artifact_type: row.get(4)?,
-                code: row.get(5)?,
-                tags: row.get(6)?,
-                created_time: row.get(7)?,
-                last_used_time: row.get(8)?,
-                use_count: row.get(9)?,
-            })
+    pub fn search_artifacts(&self, query: &str) -> Result<Vec<ArtifactCollection>, DbErr> {
+        use sea_orm::sea_query::Func;
+        let q = query.to_lowercase();
+        let models = self.with_runtime(|conn| async move {
+            entity::Entity::find()
+                .filter(
+                    Cond::any()
+                        .add(Func::lower(Expr::col(entity::Column::Name)).like(format!("%{}%", q)))
+                        .add(
+                            Func::lower(Expr::col(entity::Column::Description))
+                                .like(format!("%{}%", q)),
+                        )
+                        .add(Func::lower(Expr::col(entity::Column::Tags)).like(format!("%{}%", q))),
+                )
+                .order_by_desc(entity::Column::UseCount)
+                .order_by_desc(entity::Column::LastUsedTime)
+                .order_by_desc(entity::Column::CreatedTime)
+                .all(&conn)
+                .await
         })?;
-
-        let mut artifacts = Vec::new();
-        for artifact_result in rows {
-            artifacts.push(artifact_result?);
-        }
-
-        Ok(artifacts)
+        Ok(models.into_iter().map(map_model_to_artifact).collect())
     }
 
     /// Update artifact metadata (name, icon, description, tags)
-    pub fn update_artifact(&self, update: UpdateArtifactCollection) -> Result<()> {
-        let mut query_parts = Vec::new();
-        let mut params = Vec::new();
-
-        if let Some(name) = &update.name {
-            query_parts.push("name = ?");
-            params.push(name.as_str());
+    pub fn update_artifact(&self, update: UpdateArtifactCollection) -> Result<(), DbErr> {
+        use sea_orm::EntityTrait;
+        let model_opt = self.with_runtime(|conn| async move {
+            entity::Entity::find_by_id(update.id).one(&conn).await
+        })?;
+        if let Some(mut model) = model_opt.map(|m| entity::ActiveModel::from(m)) {
+            if let Some(name) = update.name {
+                model.name = Set(name);
+            }
+            if let Some(icon) = update.icon {
+                model.icon = Set(icon);
+            }
+            if let Some(description) = update.description {
+                model.description = Set(description);
+            }
+            if let Some(tags) = update.tags {
+                model.tags = Set(Some(tags));
+            }
+            self.with_runtime(|conn| async move { model.update(&conn).await.map(|_| ()) })?;
         }
-        if let Some(icon) = &update.icon {
-            query_parts.push("icon = ?");
-            params.push(icon.as_str());
-        }
-        if let Some(description) = &update.description {
-            query_parts.push("description = ?");
-            params.push(description.as_str());
-        }
-        if let Some(tags) = &update.tags {
-            query_parts.push("tags = ?");
-            params.push(tags.as_str());
-        }
-
-        if query_parts.is_empty() {
-            return Ok(()); // Nothing to update
-        }
-
-        let query =
-            format!("UPDATE artifacts_collection SET {} WHERE id = ?", query_parts.join(", "));
-
-        let id_string = update.id.to_string();
-        params.push(&id_string);
-
-        self.conn.execute(&query, rusqlite::params_from_iter(params))?;
         Ok(())
     }
 
     /// Delete artifact by ID
-    pub fn delete_artifact(&self, id: i64) -> Result<bool> {
-        let rows_affected =
-            self.conn.execute("DELETE FROM artifacts_collection WHERE id = ?", [id])?;
-
-        Ok(rows_affected > 0)
+    pub fn delete_artifact(&self, id: i64) -> Result<bool, DbErr> {
+        let res = self.with_runtime(|conn| async move {
+            entity::Entity::delete_many().filter(entity::Column::Id.eq(id)).exec(&conn).await
+        })?;
+        Ok(res.rows_affected > 0)
     }
 
     /// Increment use count and update last used time
-    pub fn increment_use_count(&self, id: i64) -> Result<()> {
-        self.conn.execute(
-            "UPDATE artifacts_collection 
-             SET use_count = use_count + 1, last_used_time = CURRENT_TIMESTAMP 
-             WHERE id = ?",
-            [id],
-        )?;
-
-        Ok(())
+    pub fn increment_use_count(&self, id: i64) -> Result<(), DbErr> {
+        use sea_orm::sea_query::Expr as SExpr;
+        self.with_runtime(|conn| async move {
+            entity::Entity::update_many()
+                .col_expr(entity::Column::UseCount, SExpr::col(entity::Column::UseCount).add(1))
+                .col_expr(
+                    entity::Column::LastUsedTime,
+                    // set to now
+                    Expr::value(Option::<ChronoDateTimeUtc>::Some(chrono::Utc::now().into())),
+                )
+                .filter(entity::Column::Id.eq(id))
+                .exec(&conn)
+                .await?;
+            Ok(())
+        })
     }
 
     /// Get artifacts statistics
-    pub fn get_statistics(&self) -> Result<(i64, i64)> {
-        let total_count: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM artifacts_collection", [], |row| row.get(0))?;
-
-        let total_uses: i64 = self.conn.query_row(
-            "SELECT COALESCE(SUM(use_count), 0) FROM artifacts_collection",
-            [],
-            |row| row.get(0),
-        )?;
-
+    pub fn get_statistics(&self) -> Result<(i64, i64), DbErr> {
+        // total count
+        let total_count = self
+            .with_runtime(|conn| async move { entity::Entity::find().count(&conn).await })?
+            as i64;
+        // manual sum of use_count to avoid custom derive issues if any
+        let total_uses = self.with_runtime(|conn| async move {
+            let models = entity::Entity::find()
+                .select_only()
+                .column(entity::Column::UseCount)
+                .all(&conn)
+                .await?;
+            Ok::<i64, DbErr>(models.into_iter().map(|m| m.use_count).sum())
+        })?;
         Ok((total_count, total_uses))
     }
+
+    fn with_runtime<F, Fut, T>(&self, f: F) -> Result<T, DbErr>
+    where
+        F: FnOnce(DatabaseConnection) -> Fut,
+        Fut: std::future::Future<Output = Result<T, DbErr>>,
+    {
+        let conn = self.conn.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f(conn))),
+            Err(_) => {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
+                rt.block_on(f(conn))
+            }
+        }
+    }
 }
+
+fn fmt_dt(dt: Option<ChronoDateTimeUtc>) -> Option<String> {
+    dt.map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
+}
+
+fn map_model_to_artifact(m: entity::Model) -> ArtifactCollection {
+    ArtifactCollection {
+        id: m.id,
+        name: m.name,
+        icon: m.icon,
+        description: m.description,
+        artifact_type: m.artifact_type,
+        code: m.code,
+        tags: m.tags,
+        created_time: fmt_dt(m.created_time).unwrap_or_default(),
+        last_used_time: fmt_dt(m.last_used_time),
+        use_count: m.use_count,
+    }
+}
+
+// Removed TotalUse helper; using manual sum approach in get_statistics

@@ -41,7 +41,7 @@ pub async fn collect_mcp_info_for_assistant(
     // - 如果提供了 ID 列表，就按该列表精确选择对应服务器（忽略助手层面的启用状态）
     // - 如果未提供，则只保留助手配置里启用的服务器
     let enabled_servers: Vec<MCPServerWithTools> = if let Some(filters) = enabled_servers_filter {
-        if !filters.is_empty() {
+            if !filters.is_empty() {
             use std::collections::HashSet;
             let filter_set: HashSet<&String> = filters.iter().collect();
 
@@ -78,15 +78,12 @@ pub async fn collect_mcp_info_for_assistant(
 
             if !extra_ids.is_empty() {
                 trace!(?extra_ids, "Fetching extra servers by id (filter not in assistant set)");
-                if let Ok(db) = crate::mcp::mcp_db::MCPDatabase::new(app_handle) {
-                    if let Ok(pairs) = db.get_mcp_servers_with_tools_by_ids(&extra_ids) {
-                        for (srv, tools_raw) in pairs {
-                            if existing_id_set.contains(&srv.id) {
-                                continue;
-                            }
-                            // 只保留启用工具
-                            let tools_converted: Vec<crate::api::assistant_api::MCPToolInfo> =
-                                tools_raw
+                    if let Ok(db) = crate::db::mcp_db::MCPDatabase::new(app_handle) {
+                    for idv in extra_ids {
+                        if existing_id_set.contains(&idv) { continue; }
+                        if let Ok(srv) = db.get_mcp_server(idv) {
+                            if let Ok(tools_raw) = db.get_mcp_server_tools(idv) {
+                                let tools_converted: Vec<crate::api::assistant_api::MCPToolInfo> = tools_raw
                                     .into_iter()
                                     .filter(|t| t.is_enabled)
                                     .map(|t| crate::api::assistant_api::MCPToolInfo {
@@ -95,18 +92,12 @@ pub async fn collect_mcp_info_for_assistant(
                                         description: t.tool_description.unwrap_or_default(),
                                         is_enabled: t.is_enabled,
                                         is_auto_run: t.is_auto_run,
-                                        parameters: t
-                                            .parameters
-                                            .unwrap_or_else(|| "{}".to_string()),
+                                        parameters: t.parameters.unwrap_or_else(|| "{}".to_string()),
                                     })
                                     .collect();
-                            picked.push(MCPServerWithTools {
-                                id: srv.id,
-                                name: srv.name,
-                                is_enabled: srv.is_enabled,
-                                tools: tools_converted,
-                            });
-                            existing_id_set.insert(srv.id);
+                                picked.push(MCPServerWithTools { id: srv.id, name: srv.name, is_enabled: srv.is_enabled, tools: tools_converted });
+                                existing_id_set.insert(srv.id);
+                            }
                         }
                     }
                 }

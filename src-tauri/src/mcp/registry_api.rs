@@ -1,4 +1,4 @@
-use crate::mcp::mcp_db::{
+use crate::db::mcp_db::{
     MCPDatabase, MCPServer, MCPServerPrompt, MCPServerResource, MCPServerTool,
 };
 use anyhow::Result;
@@ -53,7 +53,7 @@ pub struct MCPToolConfig {
 #[tauri::command]
 #[instrument(level = "debug", skip(app_handle))]
 pub async fn get_mcp_servers(app_handle: tauri::AppHandle) -> Result<Vec<MCPServer>, String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let servers = db.get_mcp_servers().map_err(|e| e.to_string())?;
     Ok(servers)
 }
@@ -61,7 +61,7 @@ pub async fn get_mcp_servers(app_handle: tauri::AppHandle) -> Result<Vec<MCPServ
 #[tauri::command]
 #[instrument(level = "debug", skip(app_handle), fields(id))]
 pub async fn get_mcp_server(app_handle: tauri::AppHandle, id: i64) -> Result<MCPServer, String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let server = db.get_mcp_server(id).map_err(|e| e.to_string())?;
     Ok(server)
 }
@@ -72,7 +72,7 @@ pub async fn add_mcp_server(
     app_handle: tauri::AppHandle,
     request: MCPServerRequest,
 ) -> Result<i64, String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
     let server_id = db
         .upsert_mcp_server_with_builtin(
@@ -100,7 +100,7 @@ pub async fn update_mcp_server(
     id: i64,
     request: MCPServerRequest,
 ) -> Result<(), String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
     db.update_mcp_server_with_builtin(
         id,
@@ -124,7 +124,7 @@ pub async fn update_mcp_server(
 #[tauri::command]
 #[instrument(level = "debug", skip(app_handle), fields(id))]
 pub async fn delete_mcp_server(app_handle: tauri::AppHandle, id: i64) -> Result<(), String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.delete_mcp_server(id).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -136,7 +136,7 @@ pub async fn toggle_mcp_server(
     id: i64,
     is_enabled: bool,
 ) -> Result<(), String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.toggle_mcp_server(id, is_enabled).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -147,7 +147,7 @@ pub async fn get_mcp_server_tools(
     app_handle: tauri::AppHandle,
     server_id: i64,
 ) -> Result<Vec<MCPServerTool>, String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let tools = db.get_mcp_server_tools(server_id).map_err(|e| e.to_string())?;
     Ok(tools)
 }
@@ -160,7 +160,7 @@ pub async fn update_mcp_server_tool(
     is_enabled: bool,
     is_auto_run: bool,
 ) -> Result<(), String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.update_mcp_server_tool(tool_id, is_enabled, is_auto_run).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -171,7 +171,7 @@ pub async fn get_mcp_server_resources(
     app_handle: tauri::AppHandle,
     server_id: i64,
 ) -> Result<Vec<MCPServerResource>, String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let resources = db.get_mcp_server_resources(server_id).map_err(|e| e.to_string())?;
     Ok(resources)
 }
@@ -182,7 +182,7 @@ pub async fn test_mcp_connection(
     app_handle: tauri::AppHandle,
     server_id: i64,
 ) -> Result<bool, String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let server = db.get_mcp_server(server_id).map_err(|e| e.to_string())?;
 
     // 测试实际的MCP连接
@@ -393,7 +393,7 @@ pub async fn get_mcp_server_prompts(
     app_handle: tauri::AppHandle,
     server_id: i64,
 ) -> Result<Vec<MCPServerPrompt>, String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let prompts = db.get_mcp_server_prompts(server_id).map_err(|e| e.to_string())?;
     Ok(prompts)
 }
@@ -404,7 +404,7 @@ pub async fn update_mcp_server_prompt(
     prompt_id: i64,
     is_enabled: bool,
 ) -> Result<(), String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.update_mcp_server_prompt(prompt_id, is_enabled).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -414,7 +414,7 @@ pub async fn refresh_mcp_server_capabilities(
     app_handle: tauri::AppHandle,
     server_id: i64,
 ) -> Result<(Vec<MCPServerTool>, Vec<MCPServerResource>, Vec<MCPServerPrompt>), String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let server = db.get_mcp_server(server_id).map_err(|e| e.to_string())?;
 
     // Use incremental updates instead of clearing existing data
@@ -908,7 +908,7 @@ pub async fn get_mcp_provider(
     app_handle: tauri::AppHandle,
     provider_id: String,
 ) -> Result<Option<McpProviderInfo>, String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
     // Parse provider_id as server ID
     let server_id: i64 =
@@ -917,8 +917,14 @@ pub async fn get_mcp_provider(
     // Get server information
     let server = match db.get_mcp_server(server_id) {
         Ok(server) => server,
-        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-        Err(e) => return Err(e.to_string()),
+        Err(e) => {
+            let es = e.to_string();
+            if es.to_lowercase().contains("no row") || es.to_lowercase().contains("not found") {
+                return Ok(None);
+            }
+            return Err(es);
+        }
+        // no second Err arm; previous match arms already handle errors
     };
 
     // Get server tools
@@ -957,7 +963,7 @@ pub async fn build_mcp_prompt(
     use crate::api::assistant_api::{MCPServerWithTools, MCPToolInfo};
     use crate::mcp::format_mcp_prompt;
 
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
     let mut enabled_servers = Vec::new();
 

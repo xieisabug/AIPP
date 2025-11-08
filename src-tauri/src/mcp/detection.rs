@@ -21,7 +21,7 @@ pub async fn detect_and_process_mcp_calls_for_subtask(
     content: &str,
     enabled_servers: &[String],
     enabled_tools: &Option<HashMap<String, Vec<String>>>,
-) -> Result<Vec<crate::mcp::mcp_db::MCPToolCall>, anyhow::Error> {
+) -> Result<Vec<crate::db::mcp_db::MCPToolCall>, anyhow::Error> {
     debug!("Detecting MCP calls for subtask in conversation");
     let mcp_regex = regex::Regex::new(r"<mcp_tool_call>\s*<server_name>([^<]*)</server_name>\s*<tool_name>([^<]*)</tool_name>\s*<parameters>([\s\S]*?)</parameters>\s*</mcp_tool_call>").unwrap();
 
@@ -46,7 +46,7 @@ pub async fn detect_and_process_mcp_calls_for_subtask(
         }
 
         // 查找服务器（复用原逻辑）
-        let mcp_db = crate::mcp::mcp_db::MCPDatabase::new(app_handle)?;
+        let mcp_db = crate::db::mcp_db::MCPDatabase::new(app_handle)?;
         let servers = mcp_db.get_mcp_servers()?;
         let server_opt = servers.iter().find(|s| s.name == server_name && s.is_enabled);
 
@@ -59,6 +59,7 @@ pub async fn detect_and_process_mcp_calls_for_subtask(
             }
 
             // 创建工具调用记录（用于子任务）
+            // Create tool call and attach subtask id via helper
             let tool_call = mcp_db.create_mcp_tool_call_for_subtask(
                 conversation_id,
                 subtask_id,
@@ -173,7 +174,7 @@ pub async fn detect_and_process_mcp_calls(
 
             // 避免重复：若已存在相同 message_id/server/tool/parameters 的 pending/failed/success 记录，则复用
             let existing_call_opt = {
-                let db = crate::mcp::mcp_db::MCPDatabase::new(app_handle).ok();
+                let db = crate::db::mcp_db::MCPDatabase::new(app_handle).ok();
                 db.and_then(|db| db.get_mcp_tool_calls_by_conversation(conversation_id).ok())
                     .and_then(|calls| {
                         calls.into_iter().find(|c| {

@@ -13,7 +13,7 @@ use genai::chat::{ChatMessage, ChatRequest};
 use std::collections::HashMap;
 use tauri::Emitter;
 use tokio::time::{sleep, Duration};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 pub async fn generate_title(
     app_handle: &tauri::AppHandle,

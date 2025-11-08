@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tauri::Emitter;
 
-use crate::mcp::mcp_db::MCPDatabase;
+use crate::db::mcp_db::MCPDatabase;
 use crate::{
     api::{
         ai::{
@@ -23,11 +23,11 @@ use crate::{
             SubTaskDatabase, SubTaskDefinition, SubTaskExecution, SubTaskExecutionSummary,
         },
     },
-    mcp::{
+        mcp::{
         detection::detect_and_process_mcp_calls_for_subtask,
-        mcp_db::MCPToolCall,
         prompt::{collect_mcp_info_for_assistant, format_mcp_prompt_with_filters},
     },
+    db::mcp_db::MCPToolCall,
     FeatureConfigState,
 };
 use genai::chat::{ChatOptions, ChatRequest};
@@ -212,6 +212,7 @@ pub async fn cancel_sub_task_execution_for_ui(
 }
 
 #[tauri::command]
+#[allow(unused_assignments)]
 #[instrument(skip(app_handle, feature_config_state, task_prompt), fields(code=%code, conversation_id=conversation_id, assistant_id=assistant_id))]
 pub async fn run_sub_task_sync(
     app_handle: tauri::AppHandle,
@@ -406,7 +407,7 @@ pub async fn run_sub_task_sync(
         // 执行AI调用（带重试）
         let max_retry_attempts = get_retry_attempts_from_config(&config_map);
         let mut attempts: u32 = 0;
-        let mut last_err: Option<String> = None;
+        let mut last_err: Option<String> = None; // track last error for logging
         loop {
             attempts += 1;
             let ai_start = std::time::Instant::now();
@@ -523,6 +524,7 @@ pub async fn run_sub_task_sync(
 }
 
 #[tauri::command]
+#[allow(unused_assignments)]
 #[instrument(skip(app_handle, feature_config_state, task_prompt, options), fields(code=%code, conversation_id=conversation_id, assistant_id=assistant_id))]
 pub async fn run_sub_task_with_mcp_loop(
     app_handle: tauri::AppHandle,
@@ -1297,7 +1299,7 @@ async fn execute_mcp_loop(
     let mut raw_model_output = String::new();
     let loop_start_time = std::time::Instant::now();
     // 终止原因（达到最大循环数 / 无工具调用 / 其他）
-    let mut abort_reason: Option<String> = None;
+    let mut abort_reason: Option<String> = None; // reason for loop termination
 
     if let Some(ref mut log) = debug_log {
         log.push(format!("MCP 提示词注入模式: {}", injection_mode));
@@ -1702,7 +1704,7 @@ async fn validate_source_permission(
 ) -> Result<bool, String> {
     let result = match plugin_source {
         "mcp" => {
-            let mcp_db = crate::mcp::mcp_db::MCPDatabase::new(app_handle).map_err(|e| {
+            let mcp_db = crate::db::mcp_db::MCPDatabase::new(app_handle).map_err(|e| {
                 error!(error=%e, source_id=source_id, "create MCP db failed");
                 format!("创建MCP数据库连接失败: {}", e)
             })?;

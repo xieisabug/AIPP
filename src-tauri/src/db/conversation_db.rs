@@ -1,12 +1,15 @@
 use std::path::PathBuf;
+use tauri::Manager; // for try_state
+use crate::utils::db_utils::build_remote_dsn;
 
 use chrono::{DateTime, Utc};
+use sea_orm::Schema;
+use sea_orm::{
+    entity::prelude::*, ActiveValue, Database, DatabaseBackend, DatabaseConnection, DbErr,
+    QueryOrder, QuerySelect, Set,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
-use sea_orm::{
-    entity::prelude::*, Database, DatabaseConnection, DbErr, Set, ActiveValue,
-    QueryOrder, QuerySelect,
-};
 
 use crate::errors::AppError;
 
@@ -128,7 +131,10 @@ impl From<conversation::Model> for Conversation {
             id: model.id,
             name: model.name,
             assistant_id: model.assistant_id,
-            created_time: model.created_time.map(|dt| dt.naive_utc().and_utc()).unwrap_or_else(Utc::now),
+            created_time: model
+                .created_time
+                .map(|dt| dt.naive_utc().and_utc())
+                .unwrap_or_else(Utc::now),
         }
     }
 }
@@ -161,7 +167,10 @@ impl From<message::Model> for Message {
             content: model.content,
             llm_model_id: model.llm_model_id,
             llm_model_name: model.llm_model_name,
-            created_time: model.created_time.map(|dt| dt.naive_utc().and_utc()).unwrap_or_else(Utc::now),
+            created_time: model
+                .created_time
+                .map(|dt| dt.naive_utc().and_utc())
+                .unwrap_or_else(Utc::now),
             start_time: model.start_time.map(|dt| dt.naive_utc().and_utc()),
             finish_time: model.finish_time.map(|dt| dt.naive_utc().and_utc()),
             token_count: model.token_count,
@@ -208,7 +217,8 @@ impl From<message_attachment::Model> for MessageAttachment {
         Self {
             id: model.id,
             message_id: model.message_id,
-            attachment_type: AttachmentType::try_from(model.attachment_type).unwrap_or(AttachmentType::Text),
+            attachment_type: AttachmentType::try_from(model.attachment_type)
+                .unwrap_or(AttachmentType::Text),
             attachment_url: model.attachment_url,
             attachment_content: model.attachment_content,
             attachment_hash: model.attachment_hash,
@@ -245,10 +255,13 @@ impl ConversationRepository {
     {
         let conn = self.conn.clone();
         match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f(conn))).map_err(AppError::from),
+            Ok(handle) => {
+                tokio::task::block_in_place(|| handle.block_on(f(conn))).map_err(AppError::from)
+            }
             Err(_) => {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| AppError::from(format!("Failed to create Tokio runtime: {}", e)))?;
+                let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                    AppError::from(format!("Failed to create Tokio runtime: {}", e))
+                })?;
                 rt.block_on(f(conn)).map_err(AppError::from)
             }
         }
@@ -395,10 +408,13 @@ impl MessageRepository {
     {
         let conn = self.conn.clone();
         match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f(conn))).map_err(AppError::from),
+            Ok(handle) => {
+                tokio::task::block_in_place(|| handle.block_on(f(conn))).map_err(AppError::from)
+            }
             Err(_) => {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| AppError::from(format!("Failed to create Tokio runtime: {}", e)))?;
+                let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                    AppError::from(format!("Failed to create Tokio runtime: {}", e))
+                })?;
                 rt.block_on(f(conn)).map_err(AppError::from)
             }
         }
@@ -420,7 +436,7 @@ impl MessageRepository {
         })?;
 
         let message_ids: Vec<i64> = messages.iter().map(|m| m.id).collect();
-        
+
         let attachments = if !message_ids.is_empty() {
             self.with_runtime(|conn| async move {
                 message_attachment::Entity::find()
@@ -433,7 +449,8 @@ impl MessageRepository {
         };
 
         // Create a map of message_id -> attachments
-        let mut attachment_map: std::collections::HashMap<i64, Vec<MessageAttachment>> = std::collections::HashMap::new();
+        let mut attachment_map: std::collections::HashMap<i64, Vec<MessageAttachment>> =
+            std::collections::HashMap::new();
         for attachment_model in attachments {
             let attachment: MessageAttachment = attachment_model.into();
             attachment_map.entry(attachment.message_id).or_insert_with(Vec::new).push(attachment);
@@ -461,7 +478,10 @@ impl MessageRepository {
 
         self.with_runtime(|conn| async move {
             message::Entity::update_many()
-                .col_expr(message::Column::FinishTime, Expr::value(Some::<ChronoDateTimeUtc>(now.into())))
+                .col_expr(
+                    message::Column::FinishTime,
+                    Expr::value(Some::<ChronoDateTimeUtc>(now.into())),
+                )
                 .filter(message::Column::Id.eq(id))
                 .exec(&conn)
                 .await?;
@@ -533,9 +553,8 @@ impl Repository<Message> for MessageRepository {
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
     fn read(&self, id: i64) -> Result<Option<Message>, AppError> {
-        let result = self.with_runtime(|conn| async move {
-            message::Entity::find_by_id(id).one(&conn).await
-        })?;
+        let result = self
+            .with_runtime(|conn| async move { message::Entity::find_by_id(id).one(&conn).await })?;
 
         let message = result.map(|m| m.into());
         debug!(found = message.is_some(), "Fetched message");
@@ -603,10 +622,13 @@ impl MessageAttachmentRepository {
     {
         let conn = self.conn.clone();
         match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f(conn))).map_err(AppError::from),
+            Ok(handle) => {
+                tokio::task::block_in_place(|| handle.block_on(f(conn))).map_err(AppError::from)
+            }
             Err(_) => {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| AppError::from(format!("Failed to create Tokio runtime: {}", e)))?;
+                let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                    AppError::from(format!("Failed to create Tokio runtime: {}", e))
+                })?;
                 rt.block_on(f(conn)).map_err(AppError::from)
             }
         }
@@ -733,34 +755,33 @@ impl ConversationDatabase {
     pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, AppError> {
         let db_path = get_db_path(app_handle, "conversation.db")
             .map_err(|e| AppError::from(format!("Failed to get db path: {}", e)))?;
-        
-        let url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
-        
+        let mut url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
+
+        // 尝试远程存储
+        if let Some(ds_state) = app_handle.try_state::<crate::DataStorageState>() {
+            let flat = ds_state.flat.blocking_lock();
+            if let Some((dsn, _)) = build_remote_dsn(&flat) { url = dsn; }
+        }
+
         // Create a new Tokio runtime if we're not in one. If already in a runtime,
         // use block_in_place to safely block without panicking.
         let conn = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                tokio::task::block_in_place(|| {
-                    handle
-                        .block_on(async { Database::connect(&url).await })
-                        .map_err(|e| AppError::from(format!("Failed to connect to database: {}", e)))
-                })?
-            }
+            Ok(handle) => tokio::task::block_in_place(|| {
+                handle
+                    .block_on(async { Database::connect(&url).await })
+                    .map_err(|e| AppError::from(format!("Failed to connect to database: {}", e)))
+            })?,
             Err(_) => {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| AppError::from(format!("Failed to create Tokio runtime: {}", e)))?;
+                let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                    AppError::from(format!("Failed to create Tokio runtime: {}", e))
+                })?;
                 rt.block_on(async { Database::connect(&url).await })
                     .map_err(|e| AppError::from(format!("Failed to connect to database: {}", e)))?
             }
         };
-        
+
         debug!("Opened conversation database");
         Ok(ConversationDatabase { db_path, conn })
-    }
-
-    /// Get a rusqlite connection for migrations
-    pub fn get_connection(&self) -> Result<rusqlite::Connection, rusqlite::Error> {
-        rusqlite::Connection::open(&self.db_path)
     }
 
     #[instrument(level = "debug", skip(self), err)]
@@ -786,10 +807,13 @@ impl ConversationDatabase {
     {
         let conn = self.conn.clone();
         match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f(conn))).map_err(AppError::from),
+            Ok(handle) => {
+                tokio::task::block_in_place(|| handle.block_on(f(conn))).map_err(AppError::from)
+            }
             Err(_) => {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| AppError::from(format!("Failed to create Tokio runtime: {}", e)))?;
+                let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                    AppError::from(format!("Failed to create Tokio runtime: {}", e))
+                })?;
                 rt.block_on(f(conn)).map_err(AppError::from)
             }
         }
@@ -797,57 +821,74 @@ impl ConversationDatabase {
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn create_tables(&self) -> Result<(), AppError> {
-        let sql1 = r#"
-            CREATE TABLE IF NOT EXISTS conversation (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                assistant_id INTEGER,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        "#;
-        
-        let sql2 = r#"
-            CREATE TABLE IF NOT EXISTS message (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation_id INTEGER NOT NULL,
-                message_type    TEXT    NOT NULL,
-                content         TEXT    NOT NULL,
-                llm_model_id    INTEGER,
-                created_time    DATETIME DEFAULT CURRENT_TIMESTAMP,
-                token_count     INTEGER,
-                parent_id       INTEGER,
-                start_time      DATETIME,
-                finish_time     DATETIME,
-                llm_model_name  TEXT,
-                generation_group_id TEXT,
-                parent_group_id TEXT,
-                tool_calls_json TEXT
-            )
-        "#;
+        let backend = self.conn.get_database_backend();
+        let schema = Schema::new(backend);
+        let sql_conversation = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(conversation::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(conversation::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(conversation::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(conversation::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_message = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(message::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(message::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(message::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(message::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql_message_attachment = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(message_attachment::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(message_attachment::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(message_attachment::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(message_attachment::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
 
-        let sql3 = r#"
-            CREATE TABLE IF NOT EXISTS message_attachment (
-                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-                message_id         INTEGER,
-                attachment_type    INTEGER           NOT NULL,
-                attachment_url     TEXT,
-                attachment_hash    TEXT,
-                attachment_content TEXT,
-                use_vector         BOOLEAN DEFAULT 0 NOT NULL,
-                token_count        INTEGER
-            )
-        "#;
-
-        // Create indexes
-        let idx1 = "CREATE INDEX IF NOT EXISTS idx_message_conversation_id ON message(conversation_id)";
+        // Indexes to preserve performance characteristics
+        let idx1 =
+            "CREATE INDEX IF NOT EXISTS idx_message_conversation_id ON message(conversation_id)";
         let idx2 = "CREATE INDEX IF NOT EXISTS idx_message_conversation_created ON message(conversation_id, created_time)";
         let idx3 = "CREATE INDEX IF NOT EXISTS idx_message_parent_id ON message(parent_id)";
         let idx4 = "CREATE INDEX IF NOT EXISTS idx_message_attachment_message_id ON message_attachment(message_id)";
 
         self.with_runtime(|conn| async move {
-            conn.execute_unprepared(sql1).await?;
-            conn.execute_unprepared(sql2).await?;
-            conn.execute_unprepared(sql3).await?;
+            conn.execute_unprepared(&sql_conversation).await?;
+            conn.execute_unprepared(&sql_message).await?;
+            conn.execute_unprepared(&sql_message_attachment).await?;
             conn.execute_unprepared(idx1).await?;
             conn.execute_unprepared(idx2).await?;
             conn.execute_unprepared(idx3).await?;
@@ -857,5 +898,10 @@ impl ConversationDatabase {
 
         debug!("Created conversation tables and indexes");
         Ok(())
+    }
+
+    // Public accessor for raw DatabaseConnection (read-only style usage for export scenarios)
+    pub fn get_conn(&self) -> DatabaseConnection {
+        self.conn.clone()
     }
 }

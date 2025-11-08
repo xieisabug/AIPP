@@ -2,6 +2,8 @@ use sea_orm::{
     entity::prelude::*, ActiveValue, Database, DatabaseBackend, DatabaseConnection, DbErr, Set,
 };
 use serde::{Deserialize, Serialize};
+use tauri::Manager; // for try_state
+use crate::utils::db_utils::build_remote_dsn;
 use tracing::{debug, instrument};
 
 use super::get_db_path;
@@ -44,7 +46,11 @@ impl ArtifactsDatabase {
     #[instrument(level = "debug", skip(app_handle), fields(db = "artifacts.db"))]
     pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, DbErr> {
         let db_path = get_db_path(app_handle, "artifacts.db").map_err(|e| DbErr::Custom(e))?;
-        let url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
+        let mut url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
+        if let Some(ds_state) = app_handle.try_state::<crate::DataStorageState>() {
+            let flat = ds_state.flat.blocking_lock();
+            if let Some((dsn, _)) = build_remote_dsn(&flat) { url = dsn; }
+        }
         let conn = match tokio::runtime::Handle::try_current() {
             Ok(handle) => tokio::task::block_in_place(|| {
                 handle.block_on(async { Database::connect(&url).await })
@@ -81,12 +87,23 @@ impl ArtifactsDatabase {
         // Create table from Entity to keep column defaults
         use sea_orm::Schema;
         let schema = Schema::new(self.conn.get_database_backend());
-        let stmt = schema.create_table_from_entity(artifacts_collection::Entity);
         let sql = match self.conn.get_database_backend() {
-            DatabaseBackend::Sqlite => stmt.to_string(sea_orm::sea_query::SqliteQueryBuilder),
-            DatabaseBackend::Postgres => stmt.to_string(sea_orm::sea_query::PostgresQueryBuilder),
-            DatabaseBackend::MySql => stmt.to_string(sea_orm::sea_query::MysqlQueryBuilder),
-            _ => stmt.to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(artifacts_collection::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(artifacts_collection::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(artifacts_collection::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(artifacts_collection::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
         };
         self.with_runtime(|conn| async move {
             conn.execute_unprepared(&sql).await?;

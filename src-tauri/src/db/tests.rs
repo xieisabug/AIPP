@@ -1,30 +1,24 @@
-use super::*;
+// removed unused wildcard import
 use crate::db::conversation_db::*;
 use chrono::Utc;
-use rusqlite::Connection;
 use uuid::Uuid;
 
 /// 创建内存测试数据库并初始化表结构
-fn create_test_db() -> Connection {
-    let conn = Connection::open_in_memory().unwrap();
+use sea_orm::{Database, DatabaseConnection, ConnectionTrait};
 
-    // 禁用外键约束检查，简化测试
-    conn.execute("PRAGMA foreign_keys = OFF", []).unwrap();
-
-    // 创建对话表
-    conn.execute(
+async fn create_test_db_async() -> DatabaseConnection {
+    let conn = Database::connect("sqlite::memory:").await.unwrap();
+    conn.execute_unprepared(
         "CREATE TABLE conversation (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             assistant_id INTEGER,
-            created_time TEXT NOT NULL
+            created_time DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
-        [],
     )
+    .await
     .unwrap();
-
-    // 创建消息表
-    conn.execute(
+    conn.execute_unprepared(
         "CREATE TABLE message (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             parent_id INTEGER,
@@ -33,19 +27,18 @@ fn create_test_db() -> Connection {
             content TEXT NOT NULL,
             llm_model_id INTEGER,
             llm_model_name TEXT,
-            created_time TEXT NOT NULL,
-            start_time TEXT,
-            finish_time TEXT,
+            created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            start_time DATETIME,
+            finish_time DATETIME,
             token_count INTEGER DEFAULT 0,
             generation_group_id TEXT,
-            parent_group_id TEXT
+            parent_group_id TEXT,
+            tool_calls_json TEXT
         )",
-        [],
     )
+    .await
     .unwrap();
-
-    // 创建消息附件表
-    conn.execute(
+    conn.execute_unprepared(
         "CREATE TABLE message_attachment (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             message_id INTEGER NOT NULL,
@@ -56,10 +49,9 @@ fn create_test_db() -> Connection {
             use_vector BOOLEAN DEFAULT 0,
             token_count INTEGER
         )",
-        [],
     )
+    .await
     .unwrap();
-
     conn
 }
 
@@ -101,35 +93,19 @@ fn create_test_message(
 }
 
 /// 创建共享的测试数据库连接，包含对话和消息表
-fn create_shared_test_db() -> (Connection, ConversationRepository, MessageRepository, Conversation)
-{
-    let conn = create_test_db();
-    let conv_repo = ConversationRepository::new(Connection::open_in_memory().unwrap());
-    let msg_repo = MessageRepository::new(Connection::open_in_memory().unwrap());
-
-    // 创建一个共享的测试数据库用于对话和消息
-    let shared_conn = create_test_db();
-    let shared_conv_repo = ConversationRepository::new(Connection::open_in_memory().unwrap());
-
-    // 在同一个连接中创建对话
-    shared_conn
-        .execute(
-            "INSERT INTO conversation (name, assistant_id, created_time) VALUES (?, ?, ?)",
-            (&"Test Conversation", &Some(1i64), &Utc::now().to_rfc3339()),
-        )
-        .unwrap();
-    let conversation_id = shared_conn.last_insert_rowid();
-
+async fn create_shared_test_db_async() -> (ConversationRepository, MessageRepository, Conversation) {
+    let conn = create_test_db_async().await;
     let conversation = Conversation {
-        id: conversation_id,
+        id: 0,
         name: "Test Conversation".to_string(),
         assistant_id: Some(1),
         created_time: Utc::now(),
     };
-
-    let shared_msg_repo = MessageRepository::new(shared_conn);
-
-    (conn, conv_repo, shared_msg_repo, conversation)
+    // Insert conversation via repository to get id
+    let conv_repo = ConversationRepository::new(conn.clone());
+    let inserted = conv_repo.create(&conversation).unwrap();
+    let msg_repo = MessageRepository::new(conn.clone());
+    (conv_repo, msg_repo, inserted)
 }
 
 #[cfg(test)]
@@ -138,7 +114,8 @@ mod conversation_repository_tests {
 
     #[test]
     fn test_conversation_crud() {
-        let conn = create_test_db();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let conn = rt.block_on(create_test_db_async());
         let repo = ConversationRepository::new(conn);
 
         // Test create
@@ -172,7 +149,8 @@ mod message_repository_tests {
 
     #[test]
     fn test_message_crud() {
-        let (_, _, msg_repo, conversation) = create_shared_test_db();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (conv_repo, msg_repo, conversation) = rt.block_on(create_shared_test_db_async());
 
         // Test create message
         let message = create_test_message(
@@ -207,7 +185,8 @@ mod message_repository_tests {
 
     #[test]
     fn test_list_messages_by_conversation_id() {
-        let (_, _, msg_repo, conversation) = create_shared_test_db();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (conv_repo, msg_repo, conversation) = rt.block_on(create_shared_test_db_async());
 
         // 创建多条消息
         let messages = vec![
@@ -257,7 +236,8 @@ mod version_management_tests {
 
     #[test]
     fn test_generation_group_id_management() {
-        let (_, _, msg_repo, conversation) = create_shared_test_db();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (_conv_repo, msg_repo, conversation) = rt.block_on(create_shared_test_db_async());
 
         let group_id = Uuid::new_v4().to_string();
 
@@ -291,7 +271,8 @@ mod version_management_tests {
 
     #[test]
     fn test_parent_child_relationships() {
-        let (_, _, msg_repo, conversation) = create_shared_test_db();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (_conv_repo, msg_repo, conversation) = rt.block_on(create_shared_test_db_async());
 
         // 创建消息链：用户消息 -> AI回复 -> 用户回复 -> AI回复
         let user_msg1 = create_test_message(
@@ -343,7 +324,8 @@ mod version_management_tests {
 
     #[test]
     fn test_message_regeneration_scenarios() {
-        let (_, _, msg_repo, conversation) = create_shared_test_db();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (_conv_repo, msg_repo, conversation) = rt.block_on(create_shared_test_db_async());
 
         let original_group_id = Uuid::new_v4().to_string();
 

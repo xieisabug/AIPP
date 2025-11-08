@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
 use sea_orm::{
-    entity::prelude::*, Database, DatabaseConnection, DbErr, Set, ActiveValue,
+    entity::prelude::*, Database, DatabaseBackend, DatabaseConnection, DbErr, Set, ActiveValue,
 };
+use sea_orm::Schema;
 use crate::db::get_db_path;
 
 // ============ SystemConfig Entity ============
@@ -102,29 +103,53 @@ impl SystemDatabase {
 
     #[instrument(level = "debug", skip(self))]
     pub fn create_tables(&self) -> Result<(), DbErr> {
-        let sql1 = r#"
-            CREATE TABLE IF NOT EXISTS system_config (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                key TEXT NOT NULL UNIQUE,
-                value TEXT NOT NULL,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-        "#;
-        let sql2 = r#"
-            CREATE TABLE IF NOT EXISTS feature_config (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                feature_code TEXT NOT NULL,
-                key TEXT NOT NULL,
-                value TEXT,
-                data_type TEXT,
-                description TEXT,
-                UNIQUE(feature_code, key)
-            );
-        "#;
+        let backend = self.conn.get_database_backend();
+        let schema = Schema::new(backend);
+        let sql1 = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(system_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(system_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(system_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(system_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
+        let sql2 = match backend {
+            DatabaseBackend::Sqlite => schema
+                .create_table_from_entity(feature_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+            DatabaseBackend::Postgres => schema
+                .create_table_from_entity(feature_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            DatabaseBackend::MySql => schema
+                .create_table_from_entity(feature_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::MysqlQueryBuilder),
+            _ => schema
+                .create_table_from_entity(feature_config::Entity)
+                .if_not_exists()
+                .to_string(sea_orm::sea_query::SqliteQueryBuilder),
+        };
 
         self.with_runtime(|conn| async move {
-            conn.execute_unprepared(sql1).await?;
-            conn.execute_unprepared(sql2).await?;
+            conn.execute_unprepared(&sql1).await?;
+            conn.execute_unprepared(&sql2).await?;
+            // Composite uniqueness for feature_config(feature_code, key)
+            conn.execute_unprepared(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_config_unique ON feature_config(feature_code, key)",
+            )
+            .await?;
             Ok(())
         })
     }
@@ -307,9 +332,9 @@ impl SystemDatabase {
         Ok(config)
     }
 
-    // 查询特定模块的所有配置
+    // 查询特定模块( feature_code )的所有配置 - 对外公开，供启动时缓存 data_storage 使用
     #[instrument(level = "debug", skip(self), fields(feature_code))]
-    fn get_feature_config_by_module(&self, feature_code: &str) -> Result<Vec<FeatureConfig>, DbErr> {
+    pub fn get_feature_config_by_feature_code(&self, feature_code: &str) -> Result<Vec<FeatureConfig>, DbErr> {
         let feature_code = feature_code.to_string();
         
         let models = self.with_runtime(|conn| async move {

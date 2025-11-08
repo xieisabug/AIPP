@@ -4,6 +4,7 @@ use super::engines::base::SearchEngineBase;
 use super::fetcher::{ContentFetcher, FetchConfig};
 use super::types::{SearchRequest, SearchResponse, SearchResultType};
 use anyhow::Result;
+use sea_orm::{EntityTrait, QueryFilter, ColumnTrait};
 use std::collections::HashMap;
 use tauri::AppHandle;
 use tracing::{debug, error, info, instrument};
@@ -215,21 +216,32 @@ impl SearchHandler {
 
     /// 从数据库加载搜索配置
     fn load_search_config(&self) -> Result<HashMap<String, String>, String> {
-        use crate::mcp::mcp_db::MCPDatabase;
+        use crate::db::mcp_db::{MCPDatabase, mcp_server};
         let db = MCPDatabase::new(&self.app_handle).map_err(|e| e.to_string())?;
-        let mut stmt = db.conn.prepare(
-            "SELECT environment_variables FROM mcp_server WHERE command = ? AND is_builtin = 1 LIMIT 1"
-        ).map_err(|e| format!("Database prepare error: {}", e))?;
-
-        let env_text: Option<String> =
-            stmt.query_row(["aipp:search"], |row| row.get::<_, Option<String>>(0)).unwrap_or(None);
+        let env_text = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(async {
+                mcp_server::Entity::find()
+                    .filter(mcp_server::Column::Command.eq("aipp:search"))
+                    .filter(mcp_server::Column::IsBuiltin.eq(true))
+                    .one(&db.conn)
+                    .await
+            })),
+            Err(_) => {
+                let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+                rt.block_on(async {
+                    mcp_server::Entity::find()
+                        .filter(mcp_server::Column::Command.eq("aipp:search"))
+                        .filter(mcp_server::Column::IsBuiltin.eq(true))
+                        .one(&db.conn)
+                        .await
+                })
+            }
+        }.map_err(|e| e.to_string())?.and_then(|m| m.environment_variables);
         let mut config = HashMap::new();
         if let Some(text) = env_text {
             for line in text.lines() {
                 let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
+                if line.is_empty() || line.starts_with('#') { continue; }
                 if let Some((k, v)) = line.split_once('=') {
                     config.insert(k.trim().to_string(), v.trim().to_string());
                 }
