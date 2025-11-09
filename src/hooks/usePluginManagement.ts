@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { registerSubTaskIconComponent } from "../data/SubTask";
-import { invoke } from "@tauri-apps/api/core";
+import { registerSubTask } from "@/lib/subTaskRegistry";
 
 // 用于存储AskAssistantApi中对应的处理函数
 interface AskAssistantApiFunctions {
@@ -29,6 +29,9 @@ export function usePluginManagement(pluginList: any[]): UsePluginManagementRetur
 
     // 插件函数映射表，用于存储每个消息对应的处理函数
     const [functionMap, setFunctionMap] = useState<Map<number, AskAssistantApiFunctions>>(new Map());
+
+    // 跟踪哪些插件已经初始化过，避免重复调用
+    const initializedPluginsRef = useRef<Set<any>>(new Set());
 
     // 助手类型API接口，提供给插件使用 - 使用 useMemo 避免重复创建
     const assistantTypeApi: AssistantTypeApi = useMemo(
@@ -81,41 +84,48 @@ export function usePluginManagement(pluginList: any[]): UsePluginManagementRetur
         pluginList
             .filter((plugin: any) => plugin.pluginType.includes("assistantType"))
             .forEach((plugin: any) => {
-                if (plugin.instance) {
-                    // initialize assistantType plugin
-                    // 为每个插件创建一个包含插件ID的assistantTypeApi
-                    const pluginAwareApi = {
-                        ...assistantTypeApi,
-                        subTaskRegist: async (options: SubTaskRegistOptions) => {
-                            // 先进行前端图标注册，确保 UI 立即可见；后端失败也不影响图标展示
-                            if (options.iconComponent) {
-                                try {
-                                    registerSubTaskIconComponent(options.code, options.iconComponent);
-                                } catch { /* noop */ }
-                            }
+                // 检查该插件实例是否已经初始化过
+                if (!plugin.instance || initializedPluginsRef.current.has(plugin.instance)) {
+                    return; // 跳过未加载或已初始化的插件
+                }
 
+                // 标记该插件实例已初始化
+                initializedPluginsRef.current.add(plugin.instance);
+
+                // initialize assistantType plugin
+                // 为每个插件创建一个包含插件ID的assistantTypeApi
+                const pluginAwareApi = {
+                    ...assistantTypeApi,
+                    subTaskRegist: async (options: SubTaskRegistOptions) => {
+                        // 先进行前端图标注册，确保 UI 立即可见；后端失败也不影响图标展示
+                        if (options.iconComponent) {
                             try {
-                                await invoke("sub_task_regist", {
-                                    code: options.code,
-                                    name: options.name,
-                                    description: options.description,
-                                    systemPrompt: options.systemPrompt,
-                                    pluginSource: "plugin",
-                                    sourceId: plugin.id || 0, // 使用插件的ID，如果没有则使用0
-                                });
-                            } catch (error) {
-                                console.error(`Failed to register sub task '${options.code}':`, error);
-                            }
+                                registerSubTaskIconComponent(options.code, options.iconComponent);
+                            } catch { /* noop */ }
                         }
-                    };
-                    try {
-                        plugin.instance?.onAssistantTypeInit(pluginAwareApi);
-                    } catch (e) {
-                        console.error(`[PluginManagement] onAssistantTypeInit failed for '${plugin.code}':`, e);
+
+                        // 使用全局注册表，防止跨窗口重复注册
+                        try {
+                            await registerSubTask(
+                                options.code,
+                                options.name,
+                                options.description,
+                                options.systemPrompt,
+                                "plugin",
+                                plugin.id || 0
+                            );
+                        } catch (error) {
+                            console.error(`Failed to register sub task '${options.code}':`, error);
+                        }
                     }
+                };
+                try {
+                    plugin.instance.onAssistantTypeInit(pluginAwareApi);
+                } catch (e) {
+                    console.error(`[PluginManagement] onAssistantTypeInit failed for '${plugin.code}':`, e);
                 }
             });
-    }, [pluginList, assistantTypeApi]);
+    }, [pluginList]); // 移除 assistantTypeApi 依赖，因为它是稳定的 (useMemo with [])
 
     return {
         assistantTypePluginMap,

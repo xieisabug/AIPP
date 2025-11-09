@@ -85,7 +85,10 @@ function ConfigWindow() {
 
         const initPlugin = async () => {
             const dirPath = await appDataDir();
-            pluginLoadList.forEach(async (plugin) => {
+            let loadedCount = 0;
+            const updatedPlugins = [...pluginLoadList]; // 创建一个新数组副本
+
+            pluginLoadList.forEach(async (plugin, index) => {
                 const convertFilePath = dirPath + "/plugin/" + plugin.code + "/dist/main.js";
 
                 // 加载脚本
@@ -99,7 +102,8 @@ function ConfigWindow() {
                     if (PluginCtor) {
                         try {
                             const instance = new PluginCtor();
-                            plugin.instance = instance;
+                            // 更新副本中的实例，而不是直接修改原对象
+                            updatedPlugins[index] = { ...plugin, instance };
                             console.debug(`[PluginLoader][Config] '${plugin.code}' instance created`);
                         } catch (e) {
                             console.error(`[PluginLoader][Config] Failed to instantiate '${plugin.code}':`, e);
@@ -111,11 +115,16 @@ function ConfigWindow() {
                             )}`
                         );
                     }
+
+                    // 每次加载完成后检查是否所有插件都已加载
+                    loadedCount++;
+                    if (loadedCount === pluginLoadList.length) {
+                        // 所有插件都加载完成后，一次性更新状态
+                        setPluginList(updatedPlugins);
+                    }
                 };
                 document.body.appendChild(script);
             });
-
-            setPluginList(pluginLoadList);
         };
 
         initPlugin();
