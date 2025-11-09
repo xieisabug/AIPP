@@ -348,14 +348,14 @@ pub async fn upload_local_data(app_handle: tauri::AppHandle, state: State<'_, Fe
         let sql = match backend { DatabaseBackend::Postgres => schema.create_table_from_entity(system_config::Entity).if_not_exists().to_string(PostgresQueryBuilder), DatabaseBackend::MySql => schema.create_table_from_entity(system_config::Entity).if_not_exists().to_string(MysqlQueryBuilder), _ => schema.create_table_from_entity(system_config::Entity).if_not_exists().to_string(SqliteQueryBuilder) };
         remote_conn.execute_unprepared(&sql).await.map_err(|e| e.to_string())?;
         truncate_table(&remote_conn, "system_config").await?;
-        upload_by_pk::<system_config::Entity>(&app_handle, &system_db.conn, &remote_conn, system_config::Column::Id, "system_config", batch_size).await?;
+        upload_by_pk::<system_config::Entity>(&app_handle, system_db.get_conn(), &remote_conn, system_config::Column::Id, "system_config", batch_size).await?;
     }
     {
         let schema = Schema::new(backend);
         let sql = match backend { DatabaseBackend::Postgres => schema.create_table_from_entity(feature_config::Entity).if_not_exists().to_string(PostgresQueryBuilder), DatabaseBackend::MySql => schema.create_table_from_entity(feature_config::Entity).if_not_exists().to_string(MysqlQueryBuilder), _ => schema.create_table_from_entity(feature_config::Entity).if_not_exists().to_string(SqliteQueryBuilder) };
         remote_conn.execute_unprepared(&sql).await.map_err(|e| e.to_string())?;
         truncate_table(&remote_conn, "feature_config").await?;
-        upload_by_pk::<feature_config::Entity>(&app_handle, &system_db.conn, &remote_conn, feature_config::Column::Id, "feature_config", batch_size).await?;
+        upload_by_pk::<feature_config::Entity>(&app_handle, system_db.get_conn(), &remote_conn, feature_config::Column::Id, "feature_config", batch_size).await?;
     }
 
     Ok(serde_json::json!({"status": "ok"}))
@@ -395,9 +395,9 @@ pub async fn save_feature_config(
     config: HashMap<String, String>,
 ) -> Result<(), String> {
     let db = SystemDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let _ = db.delete_feature_config_by_feature_code(feature_code.as_str());
+    let _ = db.delete_feature_config_by_feature_code(&app_handle, feature_code.as_str());
     for (key, value) in config.iter() {
-        db.add_feature_config(&FeatureConfigModel {
+        db.add_feature_config(&app_handle, &FeatureConfigModel {
             id: None,
             feature_code: feature_code.clone(),
             key: key.clone(),
@@ -474,9 +474,9 @@ pub async fn save_data_storage_config(
 
     // Persist by replacing feature_code = data_storage
     let feature_code = "data_storage".to_string();
-    let _ = db.delete_feature_config_by_feature_code(&feature_code);
+    let _ = db.delete_feature_config_by_feature_code(&app_handle, &feature_code);
     for (key, value) in config.iter() {
-        db.add_feature_config(&FeatureConfigModel {
+        db.add_feature_config(&app_handle, &FeatureConfigModel {
             id: None,
             feature_code: feature_code.clone(),
             key: key.clone(),

@@ -181,52 +181,17 @@ impl SubTaskDefinition {
 
 pub struct SubTaskDatabase {
     pub conn: DatabaseConnection,
-    pub db_path: PathBuf,
 }
 
 impl SubTaskDatabase {
     #[instrument(level = "debug", skip(app_handle), fields(db = "conversation.db"))]
     pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, DbErr> {
-        let db_path = get_db_path(app_handle, "conversation.db").map_err(|e| DbErr::Custom(e))?;
-        let mut url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
-        if let Some(ds_state) = app_handle.try_state::<crate::DataStorageState>() {
-            let flat = match tokio::runtime::Handle::try_current() {
-                Ok(handle) => {
-                    tokio::task::block_in_place(|| handle.block_on(async {
-                        ds_state.flat.lock().await.clone()
-                    }))
-                }
-                Err(_) => {
-                    let rt = tokio::runtime::Runtime::new()
-                        .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
-                    rt.block_on(async { ds_state.flat.lock().await.clone() })
-                }
-            };
-            if let Some((dsn, backend)) = build_remote_dsn(&flat) {
-                url = dsn;
-                match backend {
-                    DatabaseBackend::Postgres => debug!("SubTask DB using remote PostgreSQL"),
-                    DatabaseBackend::MySql => debug!("SubTask DB using remote MySQL"),
-                    _ => debug!("SubTask DB using local SQLite"),
-                }
-            } else {
-                debug!("SubTask DB using local SQLite (no remote config or incomplete)");
-            }
-        }
-
-        let conn = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| {
-                handle.block_on(async { Database::connect(&url).await })
-            })?,
-            Err(_) => {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
-                rt.block_on(async { Database::connect(&url).await })?
-            }
-        };
-
-        debug!("Opened sub task database");
-        Ok(SubTaskDatabase { conn, db_path })
+        // 从全局状态获取共享连接，而不是创建新连接
+        let conn_arc = crate::db::conn_helper::get_db_conn(app_handle)?;
+        let conn = (*conn_arc).clone(); // DatabaseConnection 内部是 Arc，clone 很轻量
+        
+        debug!("Acquired shared database connection for SubTask");
+        Ok(SubTaskDatabase { conn })
     }
 
     // removed rusqlite connection helper
@@ -816,9 +781,10 @@ impl SubTaskDatabase {
         Ok(())
     }
 
-    #[instrument(level = "debug", skip(self))]
-    pub fn create_tables(&self) -> Result<(), DbErr> {
-        let backend = self.conn.get_database_backend();
+    #[instrument(level = "debug", skip(app_handle), err)]
+    pub fn create_tables(app_handle: &tauri::AppHandle) -> Result<(), DbErr> {
+        let db = Self::new(app_handle)?;
+        let backend = db.conn.get_database_backend();
         let schema = Schema::new(backend);
         let sql_def = match backend {
             DatabaseBackend::Sqlite => schema
@@ -857,7 +823,7 @@ impl SubTaskDatabase {
                 .to_string(sea_orm::sea_query::SqliteQueryBuilder),
         };
 
-        self.with_runtime_conn(|conn| async move {
+        db.with_runtime_conn(|conn| async move {
             conn.execute_unprepared(&sql_def).await?;
             conn.execute_unprepared(&sql_exec).await?;
             // Indexes equivalent to previous definitions

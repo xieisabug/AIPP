@@ -1,7 +1,6 @@
-use crate::utils::db_utils::build_remote_dsn;
 use sea_orm::Schema;
 use sea_orm::{
-    entity::prelude::*, ActiveValue, Database, DatabaseBackend, DatabaseConnection, DbErr, Set,
+    entity::prelude::*, ActiveValue, DatabaseBackend, DatabaseConnection, DbErr, Set,
 };
 use serde::{Deserialize, Serialize};
 use tauri::Manager; // for try_state
@@ -168,51 +167,14 @@ pub struct LLMDatabase {
 impl LLMDatabase {
     #[instrument(level = "debug", skip(app_handle), fields(db = "llm.db"))]
     pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, DbErr> {
-        let db_path = get_db_path(app_handle, "llm.db").map_err(|e| DbErr::Custom(e))?;
-        let mut url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
-
-        if let Some(ds_state) = app_handle.try_state::<crate::DataStorageState>() {
-            // Lock the async mutex without blocking the runtime thread
-            // If we are inside a Tokio runtime, use block_in_place + await the lock.
-            // Otherwise, spin up a short-lived runtime to await the lock.
-            let flat = match tokio::runtime::Handle::try_current() {
-                Ok(handle) => tokio::task::block_in_place(|| {
-                    handle.block_on(async { ds_state.flat.lock().await.clone() })
-                }),
-                Err(_) => {
-                    let rt = tokio::runtime::Runtime::new().map_err(|e| {
-                        DbErr::Custom(format!("Failed to create Tokio runtime: {}", e))
-                    })?;
-                    rt.block_on(async { ds_state.flat.lock().await.clone() })
-                }
-            };
-            if let Some((dsn, backend)) = build_remote_dsn(&flat) {
-                url = dsn;
-                match backend {
-                    DatabaseBackend::Postgres => debug!("LLM DB using remote PostgreSQL"),
-                    DatabaseBackend::MySql => debug!("LLM DB using remote MySQL"),
-                    _ => debug!("LLM DB using local SQLite"),
-                }
-            } else {
-                debug!("LLM DB using local SQLite (no remote config or incomplete)");
-            }
-        }
-
-        let conn = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| {
-                handle.block_on(async { Database::connect(&url).await })
-            })?,
-            Err(_) => {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
-                rt.block_on(async { Database::connect(&url).await })?
-            }
-        };
-
-        debug!("Opened llm database");
+        // 从全局状态获取共享连接，而不是创建新连接
+        let conn_arc = crate::db::conn_helper::get_db_conn(app_handle)?;
+        let conn = (*conn_arc).clone(); // DatabaseConnection 内部是 Arc，clone 很轻量
+        
+        debug!("Acquired shared database connection for LLM");
         Ok(LLMDatabase { conn })
     }
-
+    
     fn with_runtime<F, Fut, T>(&self, f: F) -> Result<T, DbErr>
     where
         F: FnOnce(DatabaseConnection) -> Fut,
@@ -229,9 +191,10 @@ impl LLMDatabase {
         }
     }
 
-    #[instrument(level = "debug", skip(self))]
-    pub fn create_tables(&self) -> Result<(), DbErr> {
-        let backend = self.conn.get_database_backend();
+    #[instrument(level = "debug", skip(app_handle))]
+    pub fn create_tables(app_handle: &tauri::AppHandle) -> Result<(), DbErr> {
+        let db = Self::new(app_handle)?;
+        let backend = db.conn.get_database_backend();
         let schema = Schema::new(backend);
         let sql_provider = match backend {
             DatabaseBackend::Sqlite => schema
@@ -288,14 +251,14 @@ impl LLMDatabase {
                 .to_string(sea_orm::sea_query::SqliteQueryBuilder),
         };
 
-        self.with_runtime(|conn| async move {
+        db.with_runtime(|conn| async move {
             conn.execute_unprepared(&sql_provider).await?;
             conn.execute_unprepared(&sql_model).await?;
             conn.execute_unprepared(&sql_provider_config).await?;
             Ok(())
         })?;
 
-        if let Err(err) = self.init_llm_provider() {
+        if let Err(err) = db.init_llm_provider() {
             warn!(error = ?err, "init_llm_provider failed (may already be initialized)");
         }
         Ok(())

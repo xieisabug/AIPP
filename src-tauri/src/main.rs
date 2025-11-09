@@ -147,10 +147,18 @@ use tauri::path::BaseDirectory;
 // FeatureConfig type
 use crate::db::system_db::FeatureConfig;
 
+// SeaORM database connection
+use sea_orm::DatabaseConnection;
+
 // ===== Application state structs =====
 pub struct AppState {
     pub selected_text: TokioMutex<String>,
     pub recording_shortcut: TokioMutex<bool>,
+}
+
+#[derive(Clone)]
+pub struct DatabaseState {
+    pub conn: Arc<DatabaseConnection>,
 }
 
 #[derive(Clone)]
@@ -344,28 +352,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // 在共享的 Tokio runtime 中执行所有数据库操作
             rt.block_on(async {
+                // 1. 首先使用本地 SQLite system.db 读取 data_storage 配置
                 let t_system_new = std::time::Instant::now();
                 let system_db = SystemDatabase::new(&app_handle)?;
                 info!(elapsed_ms=%t_system_new.elapsed().as_millis(), "SystemDatabase::new() completed");
                 
-                // system_db 一定使用本地 SQLite，先创建它的表
                 let t_system_table = std::time::Instant::now();
-                system_db.create_tables()?;
+                system_db.create_tables(&app_handle)?;
                 info!(elapsed_ms=%t_system_table.elapsed().as_millis(), "SystemDatabase::create_tables() completed");
 
-                // 读取 data_storage 配置（如果存在）并缓存到状态中
+                // 2. 读取 data_storage 配置
                 let t_config = std::time::Instant::now();
                 let mut ds_flat: HashMap<String, String> = HashMap::new();
-                if let Ok(items) = system_db.get_feature_config_by_feature_code("data_storage") {
+                if let Ok(items) = system_db.get_feature_config_by_feature_code(&app_handle, "data_storage") {
                     for c in items.into_iter() {
                         ds_flat.insert(c.key, c.value);
                     }
                 }
-                // 默认 storage_mode = local
                 ds_flat.entry("storage_mode".to_string()).or_insert("local".to_string());
                 info!(elapsed_ms=%t_config.elapsed().as_millis(), "Loading data_storage config completed");
 
-                // Log a sanitized snapshot of data storage config to help diagnose remote vs local
                 {
                     let storage_mode = ds_flat.get("storage_mode").cloned().unwrap_or_else(|| "local".into());
                     let remote_type = ds_flat.get("remote_type").cloned().unwrap_or_default();
@@ -380,87 +386,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let username_set = if user_key.is_empty() { false } else { ds_flat.get(user_key).is_some() };
                     debug!(storage_mode=%storage_mode, remote_type=%remote_type, host=%host, port=%port, database=%database, username_set=%username_set, "Data storage config snapshot");
                 }
-                let data_storage_state =
-                    DataStorageState { flat: Arc::new(TokioMutex::new(ds_flat)) };
+                
+                let data_storage_state = DataStorageState { flat: Arc::new(TokioMutex::new(ds_flat.clone())) };
                 app.manage(data_storage_state.clone());
 
-                // 依次创建其它数据库；它们的 new() 会根据 DataStorageState 决定连接
-                // 创建一次连接并复用，避免重复创建连接导致池耗尽
-                let t_llm_new = std::time::Instant::now();
-                let llm_db = LLMDatabase::new(&app_handle)?;
-                info!(elapsed_ms=%t_llm_new.elapsed().as_millis(), "LLMDatabase::new() completed");
+                // 3. 根据配置建立全局数据库连接
+                let t_conn = std::time::Instant::now();
+                let db_conn = crate::utils::db_utils::initialize_database_connection(&app_handle, &ds_flat).await?;
+                info!(elapsed_ms=%t_conn.elapsed().as_millis(), "Initialize global database connection completed");
                 
-                let t_assistant_new = std::time::Instant::now();
-                let assistant_db = AssistantDatabase::new(&app_handle)?;
-                info!(elapsed_ms=%t_assistant_new.elapsed().as_millis(), "AssistantDatabase::new() completed");
-                
-                let t_conversation_new = std::time::Instant::now();
-                let conversation_db = ConversationDatabase::new(&app_handle)?;
-                info!(elapsed_ms=%t_conversation_new.elapsed().as_millis(), "ConversationDatabase::new() completed");
-                
-                let t_plugin_new = std::time::Instant::now();
-                let plugin_db = PluginDatabase::new(&app_handle)?;
-                info!(elapsed_ms=%t_plugin_new.elapsed().as_millis(), "PluginDatabase::new() completed");
-                
-                let t_mcp_new = std::time::Instant::now();
-                let mcp_db = MCPDatabase::new(&app_handle)?;
-                info!(elapsed_ms=%t_mcp_new.elapsed().as_millis(), "MCPDatabase::new() completed");
-                
-                let t_subtask_new = std::time::Instant::now();
-                let sub_task_db = SubTaskDatabase::new(&app_handle)?;
-                info!(elapsed_ms=%t_subtask_new.elapsed().as_millis(), "SubTaskDatabase::new() completed");
-                
-                let t_artifacts_new = std::time::Instant::now();
-                let artifacts_db = ArtifactsDatabase::new(&app_handle)?;
-                info!(elapsed_ms=%t_artifacts_new.elapsed().as_millis(), "ArtifactsDatabase::new() completed");
+                let db_state = DatabaseState { conn: Arc::new(db_conn) };
+                app.manage(db_state.clone());
 
-                // 顺序执行 create_tables，避免并发竞争
-                let t_llm_table = std::time::Instant::now();
-                llm_db.create_tables()?;
-                info!(elapsed_ms=%t_llm_table.elapsed().as_millis(), "LLMDatabase::create_tables() completed");
+                // 4. 创建所有表
+                let t_tables = std::time::Instant::now();
+                LLMDatabase::create_tables(&app_handle)?;
+                info!("LLMDatabase::create_tables() completed");
                 
-                let t_assistant_table = std::time::Instant::now();
-                assistant_db.create_tables()?;
-                info!(elapsed_ms=%t_assistant_table.elapsed().as_millis(), "AssistantDatabase::create_tables() completed");
+                AssistantDatabase::create_tables(&app_handle)?;
+                info!("AssistantDatabase::create_tables() completed");
                 
-                let t_conversation_table = std::time::Instant::now();
-                conversation_db.create_tables()?;
-                info!(elapsed_ms=%t_conversation_table.elapsed().as_millis(), "ConversationDatabase::create_tables() completed");
+                ConversationDatabase::create_tables(&app_handle)?;
+                info!("ConversationDatabase::create_tables() completed");
                 
-                let t_plugin_table = std::time::Instant::now();
-                plugin_db.create_tables()?;
-                info!(elapsed_ms=%t_plugin_table.elapsed().as_millis(), "PluginDatabase::create_tables() completed");
+                PluginDatabase::create_tables(&app_handle)?;
+                info!("PluginDatabase::create_tables() completed");
                 
-                let t_mcp_table = std::time::Instant::now();
-                mcp_db.create_tables()?;
-                info!(elapsed_ms=%t_mcp_table.elapsed().as_millis(), "MCPDatabase::create_tables() completed");
+                MCPDatabase::create_tables(&app_handle)?;
+                info!("MCPDatabase::create_tables() completed");
                 
-                let t_subtask_table = std::time::Instant::now();
-                sub_task_db.create_tables()?;
-                info!(elapsed_ms=%t_subtask_table.elapsed().as_millis(), "SubTaskDatabase::create_tables() completed");
+                SubTaskDatabase::create_tables(&app_handle)?;
+                info!("SubTaskDatabase::create_tables() completed");
                 
-                let t_artifacts_table = std::time::Instant::now();
-                artifacts_db.create_tables()?;
-                info!(elapsed_ms=%t_artifacts_table.elapsed().as_millis(), "ArtifactsDatabase::create_tables() completed");
+                ArtifactsDatabase::create_tables(&app_handle)?;
+                info!(elapsed_ms=%t_tables.elapsed().as_millis(), "All create_tables() completed");
 
+                // 5. 数据库升级
                 let t_upgrade = std::time::Instant::now();
-                let _ = database_upgrade(
-                    &app_handle,
-                    &system_db,
-                    &llm_db,
-                    &assistant_db,
-                    &conversation_db,
-                );
+                let _ = database_upgrade(&app_handle);
                 info!(elapsed_ms=%t_upgrade.elapsed().as_millis(), "database_upgrade() completed");
 
-                // 无需启动时初始化内置服务器，改为使用模板创建
-
+                // 6. 初始化其他状态
                 let t_state = std::time::Instant::now();
-                app.manage(initialize_state_with_db(&system_db));
+                app.manage(initialize_state_with_db(&app_handle));
                 info!(elapsed_ms=%t_state.elapsed().as_millis(), "initialize_state() completed");
                 
                 let t_cache = std::time::Instant::now();
-                app.manage(initialize_name_cache_state_with_dbs(&assistant_db, &llm_db));
+                app.manage(initialize_name_cache_state_with_dbs(&app_handle));
                 info!(elapsed_ms=%t_cache.elapsed().as_millis(), "initialize_name_cache_state_with_dbs() completed");
 
                 Ok::<(), Box<dyn std::error::Error>>(())
@@ -653,8 +625,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn initialize_state_with_db(db: &SystemDatabase) -> FeatureConfigState {
-    let configs = db.get_all_feature_config().expect("Failed to load feature configs");
+fn initialize_state_with_db(app_handle: &tauri::AppHandle) -> FeatureConfigState {
+    let db = SystemDatabase::new(app_handle).expect("Failed to connect to system database");
+    let configs = db.get_all_feature_config(app_handle).expect("Failed to load feature configs");
     let mut configs_map = HashMap::new();
     for config in configs.clone().into_iter() {
         let feature_code = config.feature_code.clone();
@@ -670,10 +643,10 @@ fn initialize_state_with_db(db: &SystemDatabase) -> FeatureConfigState {
     }
 }
 
-fn initialize_name_cache_state_with_dbs(
-    assistant_db: &AssistantDatabase,
-    llm_db: &LLMDatabase,
-) -> NameCacheState {
+fn initialize_name_cache_state_with_dbs(app_handle: &tauri::AppHandle) -> NameCacheState {
+    let assistant_db = AssistantDatabase::new(app_handle).expect("Failed to connect to assistant database");
+    let llm_db = LLMDatabase::new(app_handle).expect("Failed to connect to llm database");
+    
     let assistants = assistant_db.get_assistants().expect("Failed to load assistants");
     let mut assistant_names = HashMap::new();
     for assistant in assistants.clone().into_iter() {
@@ -695,8 +668,7 @@ fn initialize_name_cache_state_with_dbs(
 // 兼容接口：为了保持向后兼容，保留原有函数签名
 #[allow(dead_code)]
 fn initialize_state(app_handle: &tauri::AppHandle) -> FeatureConfigState {
-    let db = SystemDatabase::new(app_handle).expect("Failed to connect to database");
-    initialize_state_with_db(&db)
+    initialize_state_with_db(app_handle)
 }
 
 #[cfg(desktop)]

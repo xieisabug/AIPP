@@ -11,6 +11,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 pub mod artifacts_db;
 pub mod assistant_db;
+pub mod conn_helper;
 pub mod conversation_db;
 pub mod llm_db;
 pub mod mcp_db;
@@ -30,22 +31,23 @@ pub(crate) fn get_db_path(app_handle: &tauri::AppHandle, db_name: &str) -> Resul
     Ok(db_path.join(db_name))
 }
 
-#[instrument(level = "info", skip(app_handle, system_db, llm_db, assistant_db, conversation_db))]
-pub fn database_upgrade(
-    app_handle: &tauri::AppHandle,
-    system_db: &SystemDatabase,
-    llm_db: &LLMDatabase,
-    assistant_db: &AssistantDatabase,
-    conversation_db: &ConversationDatabase,
-) -> Result<(), String> {
+#[instrument(level = "info", skip(app_handle))]
+pub fn database_upgrade(app_handle: &tauri::AppHandle) -> Result<(), String> {
     info!(target_version = CURRENT_VERSION, "Starting database upgrade check");
-    let system_version = system_db.get_config("system_version");
+    
+    // 创建数据库实例（它们会复用全局连接）
+    let system_db = SystemDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let llm_db = LLMDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let assistant_db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conversation_db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    
+    let system_version = system_db.get_config(app_handle, "system_version");
     match system_version {
         Ok(version) => {
             if version.is_empty() {
-                let _ = system_db.add_system_config("system_version", CURRENT_VERSION);
+                let _ = system_db.add_system_config(app_handle, "system_version", CURRENT_VERSION);
                 info!("Initialized system_version to current version");
-                if let Err(err) = system_db.init_feature_config() {
+                if let Err(err) = system_db.init_feature_config(app_handle) {
                     error!(error = ?err, "init_feature_config failed");
                 } else {
                     info!("Feature configs initialized");
@@ -54,8 +56,8 @@ pub fn database_upgrade(
                 // 临时逻辑
                 let now_version;
                 if version == "0.1" {
-                    let _ = system_db.delete_system_config("system_version");
-                    let _ = system_db.add_system_config("system_version", "0.0.1");
+                    let _ = system_db.delete_system_config(app_handle, "system_version");
+                    let _ = system_db.add_system_config(app_handle, "system_version", "0.0.1");
                     now_version = "0.0.1";
                 } else {
                     now_version = version.as_str();
@@ -86,7 +88,7 @@ pub fn database_upgrade(
                     if current_version < version {
                         info!(target = version_str, "Executing special logic for version");
                         let start = std::time::Instant::now();
-                        match logic(system_db, llm_db, assistant_db, conversation_db, app_handle) {
+                        match logic(&system_db, &llm_db, &assistant_db, &conversation_db, app_handle) {
                             Ok(_) => {
                                 info!(
                                     target = version_str,
@@ -107,7 +109,7 @@ pub fn database_upgrade(
                     }
                 }
 
-                let _ = system_db.update_system_config("system_version", CURRENT_VERSION);
+                let _ = system_db.update_system_config(app_handle, "system_version", CURRENT_VERSION);
                 info!("System version updated to current");
             }
         }
@@ -167,12 +169,8 @@ fn special_logic_0_0_5(
 ) -> Result<(), String> {
     info!("special_logic_0_0_5: 创建 sub task 相关表");
 
-    // 创建 SubTaskDatabase 实例
-    let sub_task_db = SubTaskDatabase::new(app_handle)
-        .map_err(|e| format!("创建 SubTaskDatabase 失败: {}", e.to_string()))?;
-
-    // 创建 sub task 相关表
-    sub_task_db.create_tables().map_err(|e| format!("创建 sub task 表失败: {}", e.to_string()))?;
+    // 创建 sub task 相关表（现在是静态方法）
+    SubTaskDatabase::create_tables(app_handle).map_err(|e| format!("创建 sub task 表失败: {}", e.to_string()))?;
 
     info!("special_logic_0_0_5 done: sub task 表创建完成");
     Ok(())

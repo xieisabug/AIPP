@@ -1,19 +1,13 @@
-use std::path::PathBuf;
-use tauri::Manager; // for try_state
-use crate::utils::db_utils::build_remote_dsn;
-
 use chrono::{DateTime, Utc};
 use sea_orm::Schema;
 use sea_orm::{
-    entity::prelude::*, ActiveValue, Database, DatabaseBackend, DatabaseConnection, DbErr,
+    entity::prelude::*, ActiveValue, DatabaseBackend, DatabaseConnection, DbErr,
     QueryOrder, QuerySelect, Set,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
 
 use crate::errors::AppError;
-
-use super::get_db_path;
 
 // ============ AttachmentType Enum ============
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
@@ -746,62 +740,19 @@ impl Repository<MessageAttachment> for MessageAttachmentRepository {
 
 // ============ ConversationDatabase ============
 pub struct ConversationDatabase {
-    db_path: PathBuf,
     conn: DatabaseConnection,
 }
 
 impl ConversationDatabase {
     #[instrument(level = "debug", skip(app_handle), fields(db = "conversation.db"))]
     pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, AppError> {
-        let db_path = get_db_path(app_handle, "conversation.db")
-            .map_err(|e| AppError::from(format!("Failed to get db path: {}", e)))?;
-        let mut url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
-
-        // 尝试远程存储
-        if let Some(ds_state) = app_handle.try_state::<crate::DataStorageState>() {
-            let flat = match tokio::runtime::Handle::try_current() {
-                Ok(handle) => {
-                    tokio::task::block_in_place(|| handle.block_on(async {
-                        ds_state.flat.lock().await.clone()
-                    }))
-                }
-                Err(_) => {
-                    let rt = tokio::runtime::Runtime::new()
-                        .map_err(|e| AppError::from(format!("Failed to create Tokio runtime: {}", e)))?;
-                    rt.block_on(async { ds_state.flat.lock().await.clone() })
-                }
-            };
-            if let Some((dsn, backend)) = build_remote_dsn(&flat) {
-                url = dsn;
-                match backend {
-                    DatabaseBackend::Postgres => debug!("Conversation DB using remote PostgreSQL"),
-                    DatabaseBackend::MySql => debug!("Conversation DB using remote MySQL"),
-                    _ => debug!("Conversation DB using local SQLite"),
-                }
-            } else {
-                debug!("Conversation DB using local SQLite (no remote config or incomplete)");
-            }
-        }
-
-        // Create a new Tokio runtime if we're not in one. If already in a runtime,
-        // use block_in_place to safely block without panicking.
-        let conn = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| {
-                handle
-                    .block_on(async { Database::connect(&url).await })
-                    .map_err(|e| AppError::from(format!("Failed to connect to database: {}", e)))
-            })?,
-            Err(_) => {
-                let rt = tokio::runtime::Runtime::new().map_err(|e| {
-                    AppError::from(format!("Failed to create Tokio runtime: {}", e))
-                })?;
-                rt.block_on(async { Database::connect(&url).await })
-                    .map_err(|e| AppError::from(format!("Failed to connect to database: {}", e)))?
-            }
-        };
-
-        debug!("Opened conversation database");
-        Ok(ConversationDatabase { db_path, conn })
+        // 从全局状态获取共享连接，而不是创建新连接
+        let conn_arc = crate::db::conn_helper::get_db_conn(app_handle)
+            .map_err(|e| AppError::from(format!("Failed to get database connection: {}", e)))?;
+        let conn = (*conn_arc).clone(); // DatabaseConnection 内部是 Arc，clone 很轻量
+        
+        debug!("Acquired shared database connection for Conversation");
+        Ok(ConversationDatabase { conn })
     }
 
     #[instrument(level = "debug", skip(self), err)]
@@ -839,9 +790,10 @@ impl ConversationDatabase {
         }
     }
 
-    #[instrument(level = "debug", skip(self), err)]
-    pub fn create_tables(&self) -> Result<(), AppError> {
-        let backend = self.conn.get_database_backend();
+    #[instrument(level = "debug", skip(app_handle), err)]
+    pub fn create_tables(app_handle: &tauri::AppHandle) -> Result<(), AppError> {
+        let db = Self::new(app_handle)?;
+        let backend = db.conn.get_database_backend();
         let schema = Schema::new(backend);
         let sql_conversation = match backend {
             DatabaseBackend::Sqlite => schema
@@ -905,7 +857,7 @@ impl ConversationDatabase {
         let idx3 = "CREATE INDEX IF NOT EXISTS idx_message_parent_id ON message(parent_id)";
         let idx4 = "CREATE INDEX IF NOT EXISTS idx_message_attachment_message_id ON message_attachment(message_id)";
 
-        self.with_runtime(|conn| async move {
+        db.with_runtime(|conn| async move {
             conn.execute_unprepared(&sql_conversation).await?;
             conn.execute_unprepared(&sql_message).await?;
             conn.execute_unprepared(&sql_message_attachment).await?;

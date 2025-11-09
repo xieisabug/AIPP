@@ -193,54 +193,18 @@ pub struct PluginDatabase {
 impl PluginDatabase {
     #[instrument(level = "debug", skip(app_handle), fields(db = "plugin.db"))]
     pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, DbErr> {
-        let db_path = get_db_path(app_handle, "plugin.db").map_err(|e| DbErr::Custom(e))?;
-        let mut url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
-        if let Some(ds_state) = app_handle.try_state::<crate::DataStorageState>() {
-            let flat = match tokio::runtime::Handle::try_current() {
-                Ok(handle) => {
-                    tokio::task::block_in_place(|| handle.block_on(async {
-                        ds_state.flat.lock().await.clone()
-                    }))
-                }
-                Err(_) => {
-                    let rt = tokio::runtime::Runtime::new()
-                        .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
-                    rt.block_on(async { ds_state.flat.lock().await.clone() })
-                }
-            };
-            if let Some((dsn, backend)) = build_remote_dsn(&flat) {
-                url = dsn;
-                match backend {
-                    DatabaseBackend::Postgres => debug!("Plugin DB using remote PostgreSQL"),
-                    DatabaseBackend::MySql => debug!("Plugin DB using remote MySQL"),
-                    _ => debug!("Plugin DB using local SQLite"),
-                }
-            } else {
-                debug!("Plugin DB using local SQLite (no remote config or incomplete)");
-            }
-        }
+        // 从全局状态获取共享连接，而不是创建新连接
+        let conn_arc = crate::db::conn_helper::get_db_conn(app_handle)?;
+        let conn = (*conn_arc).clone(); // DatabaseConnection 内部是 Arc，clone 很轻量
         
-        // Create a new Tokio runtime if we're not in one
-        let conn = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                // We're in a Tokio runtime, use a blocking section to avoid panic
-                tokio::task::block_in_place(|| handle.block_on(async { Database::connect(&url).await }))?
-            }
-            Err(_) => {
-                // We're not in a Tokio runtime, create one
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
-                rt.block_on(async { Database::connect(&url).await })?
-            }
-        };
-        
-        debug!("Opened plugin database");
+        debug!("Acquired shared database connection for Plugin");
         Ok(PluginDatabase { conn })
     }
 
-    #[instrument(level = "debug", skip(self))]
-    pub fn create_tables(&self) -> Result<(), DbErr> {
-        let backend = self.conn.get_database_backend();
+    #[instrument(level = "debug", skip(app_handle))]
+    pub fn create_tables(app_handle: &tauri::AppHandle) -> Result<(), DbErr> {
+        let db = Self::new(app_handle)?;
+        let backend = db.conn.get_database_backend();
         let schema = Schema::new(backend);
         let sql_plugins = match backend {
             DatabaseBackend::Sqlite => schema
@@ -315,7 +279,7 @@ impl PluginDatabase {
                 .to_string(sea_orm::sea_query::SqliteQueryBuilder),
         };
 
-        self.with_runtime(|conn| async move {
+        db.with_runtime(|conn| async move {
             conn.execute_unprepared(&sql_plugins).await?;
             conn.execute_unprepared(&sql_plugin_status).await?;
             conn.execute_unprepared(&sql_plugin_configurations).await?;

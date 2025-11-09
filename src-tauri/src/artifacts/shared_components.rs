@@ -209,13 +209,13 @@ impl SharedPreviewUtils {
             "🔍 [SharedCache] 查询文件哈希配置: feature_code='template_cache', key='{}'",
             files_hash_key
         );
-        let files_hash_config = db.get_feature_config("template_cache", &files_hash_key)?;
+        let files_hash_config = db.get_feature_config(&self.app_handle, "template_cache", &files_hash_key)?;
 
         println!(
             "🔍 [SharedCache] 查询依赖哈希配置: feature_code='template_cache', key='{}'",
             deps_hash_key
         );
-        let deps_hash_config = db.get_feature_config("template_cache", &deps_hash_key)?;
+        let deps_hash_config = db.get_feature_config(&self.app_handle, "template_cache", &deps_hash_key)?;
 
         match (&files_hash_config, &deps_hash_config) {
             (Some(files_config), Some(deps_config)) => {
@@ -272,13 +272,13 @@ impl SharedPreviewUtils {
 
         // 尝试插入或更新文件哈希
         println!("💾 [SharedCache] 尝试插入文件哈希配置...");
-        match db.add_feature_config(&files_hash_config) {
+        match db.add_feature_config(&self.app_handle, &files_hash_config) {
             Ok(_) => {
                 println!("✅ [SharedCache] 文件哈希配置插入成功");
             }
             Err(add_err) => {
                 println!("⚠️ [SharedCache] 文件哈希配置插入失败: {}, 尝试更新现有记录", add_err);
-                match db.update_feature_config(&files_hash_config) {
+                match db.update_feature_config(&self.app_handle, &files_hash_config) {
                     Ok(_) => {
                         println!("✅ [SharedCache] 文件哈希配置更新成功");
                     }
@@ -292,13 +292,13 @@ impl SharedPreviewUtils {
 
         // 尝试插入或更新依赖哈希
         println!("💾 [SharedCache] 尝试插入依赖哈希配置...");
-        match db.add_feature_config(&deps_hash_config) {
+        match db.add_feature_config(&self.app_handle, &deps_hash_config) {
             Ok(_) => {
                 println!("✅ [SharedCache] 依赖哈希配置插入成功");
             }
             Err(add_err) => {
                 println!("⚠️ [SharedCache] 依赖哈希配置插入失败: {}, 尝试更新现有记录", add_err);
-                match db.update_feature_config(&deps_hash_config) {
+                match db.update_feature_config(&self.app_handle, &deps_hash_config) {
                     Ok(_) => {
                         println!("✅ [SharedCache] 依赖哈希配置更新成功");
                     }

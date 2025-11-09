@@ -1,12 +1,9 @@
-use crate::db::get_db_path;
-use crate::utils::db_utils::build_remote_dsn;
 use sea_orm::Schema;
 use sea_orm::{
-    entity::prelude::*, ActiveValue, Database, DatabaseBackend, DatabaseConnection, DbErr,
+    entity::prelude::*, ActiveValue, DatabaseBackend, DatabaseConnection, DbErr,
     QueryFilter, QueryOrder, Set,
 };
 use serde::{Deserialize, Serialize};
-use tauri::Manager; // for try_state
 use tracing::{debug, error, instrument};
 
 // ============ Assistant Entity ============
@@ -311,55 +308,17 @@ impl From<assistant_mcp_tool_config::Model> for AssistantMCPToolConfig {
 
 pub struct AssistantDatabase {
     pub conn: DatabaseConnection,
-    db_path: std::path::PathBuf,
 }
 
 impl AssistantDatabase {
     #[instrument(level = "debug", skip(app_handle), fields(db = "assistant.db"))]
     pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, DbErr> {
-        // 默认本地路径
-        let db_path = get_db_path(app_handle, "assistant.db").map_err(|e| DbErr::Custom(e))?;
-        let mut url = format!("sqlite:{}?mode=rwc", db_path.to_string_lossy());
-
-        // 检查是否配置了远程存储
-        if let Some(ds_state) = app_handle.try_state::<crate::DataStorageState>() {
-            let flat = match tokio::runtime::Handle::try_current() {
-                Ok(handle) => {
-                    tokio::task::block_in_place(|| handle.block_on(async {
-                        ds_state.flat.lock().await.clone()
-                    }))
-                }
-                Err(_) => {
-                    let rt = tokio::runtime::Runtime::new()
-                        .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
-                    rt.block_on(async { ds_state.flat.lock().await.clone() })
-                }
-            };
-            if let Some((dsn, backend)) = build_remote_dsn(&flat) {
-                url = dsn;
-                match backend {
-                    DatabaseBackend::Postgres => debug!("Assistant DB using remote PostgreSQL"),
-                    DatabaseBackend::MySql => debug!("Assistant DB using remote MySQL"),
-                    _ => debug!("Assistant DB using local SQLite"),
-                }
-            } else {
-                debug!("Assistant DB using local SQLite (no remote config or incomplete)");
-            }
-        }
-
-        let conn = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| {
-                handle.block_on(async { Database::connect(&url).await })
-            })?,
-            Err(_) => {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
-                rt.block_on(async { Database::connect(&url).await })?
-            }
-        };
-
-        debug!("Opened assistant database");
-        Ok(AssistantDatabase { conn, db_path })
+        // 从全局状态获取共享连接，而不是创建新连接
+        let conn_arc = crate::db::conn_helper::get_db_conn(app_handle)?;
+        let conn = (*conn_arc).clone(); // DatabaseConnection 内部是 Arc，clone 很轻量
+        
+        debug!("Acquired shared database connection for Assistant");
+        Ok(AssistantDatabase { conn })
     }
 
     // Helper method to run async code in correct runtime context
@@ -379,29 +338,10 @@ impl AssistantDatabase {
         }
     }
 
-    // Open SeaORM connection to MCP database for cross-db queries
-    fn open_mcp_conn(&self) -> Result<DatabaseConnection, DbErr> {
-        let mcp_db_path = self
-            .db_path
-            .parent()
-            .map(|p| p.join("mcp.db"))
-            .ok_or_else(|| DbErr::Custom("Invalid assistant db path".to_string()))?;
-        let url = format!("sqlite:{}?mode=rwc", mcp_db_path.to_string_lossy());
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| {
-                handle.block_on(async { Database::connect(&url).await })
-            }),
-            Err(_) => {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| DbErr::Custom(format!("Failed to create Tokio runtime: {}", e)))?;
-                rt.block_on(async { Database::connect(&url).await })
-            }
-        }
-    }
-
-    #[instrument(level = "debug", skip(self), err)]
-    pub fn create_tables(&self) -> Result<(), DbErr> {
-        let backend = self.conn.get_database_backend();
+    #[instrument(level = "debug", skip(app_handle), err)]
+    pub fn create_tables(app_handle: &tauri::AppHandle) -> Result<(), DbErr> {
+        let db = Self::new(app_handle)?;
+        let backend = db.conn.get_database_backend();
         let schema = Schema::new(backend);
         let sql_assistant = match backend {
             DatabaseBackend::Sqlite => schema
@@ -530,7 +470,7 @@ impl AssistantDatabase {
                 .to_string(sea_orm::sea_query::SqliteQueryBuilder),
         };
 
-        self.with_runtime(|conn| async move {
+        db.with_runtime(|conn| async move {
             conn.execute_unprepared(&sql_assistant).await?;
             conn.execute_unprepared(&sql_assistant_model).await?;
             conn.execute_unprepared(&sql_assistant_prompt).await?;
@@ -550,7 +490,7 @@ impl AssistantDatabase {
             Ok(())
         })?;
 
-        if let Err(err) = self.init_assistant() {
+        if let Err(err) = db.init_assistant() {
             error!(error = ?err, "init_assistant failed during create_tables");
         } else {
             debug!("assistant default initialization succeeded");
@@ -1081,17 +1021,15 @@ impl AssistantDatabase {
         assistant_id: i64,
     ) -> Result<Vec<(i64, String, bool, Vec<(i64, String, String, bool, bool, String)>)>, DbErr>
     {
-        // 通过 SeaORM 查询两个数据库并在内存中组装
-        // 1. 从 mcp.db 读取启用的服务器及其工具
-        let mcp_conn = self.open_mcp_conn()?;
+        // 现在所有数据都在同一个数据库中
+        // 1. 读取启用的服务器及其工具
         let servers = {
             use crate::db::mcp_db::mcp_server;
-            let mcp_conn2 = mcp_conn.clone();
-            self.with_runtime(|_| async move {
+            self.with_runtime(|conn| async move {
                 let models = mcp_server::Entity::find()
                     .filter(mcp_server::Column::IsEnabled.eq(true))
                     .order_by_asc(mcp_server::Column::Name)
-                    .all(&mcp_conn2)
+                    .all(&conn)
                     .await?;
                 Ok::<Vec<(i64, String)>, DbErr>(
                     models.into_iter().map(|m| (m.id, m.name)).collect(),
@@ -1121,18 +1059,17 @@ impl AssistantDatabase {
             })?
         };
 
-        // 3. 从 mcp.db 读取所有启用的工具
+        // 3. 读取所有启用的工具
         let all_tools: Vec<(i64, i64, String, String, String)> = {
             use crate::db::mcp_db::mcp_server_tool;
             let server_ids_clone = server_ids.clone();
-            let mcp_conn2 = mcp_conn.clone();
-            self.with_runtime(|_| async move {
+            self.with_runtime(|conn| async move {
                 let models = mcp_server_tool::Entity::find()
                     .filter(mcp_server_tool::Column::ServerId.is_in(server_ids_clone))
                     .filter(mcp_server_tool::Column::IsEnabled.eq(true))
                     .order_by_asc(mcp_server_tool::Column::ServerId)
                     .order_by_asc(mcp_server_tool::Column::ToolName)
-                    .all(&mcp_conn2)
+                    .all(&conn)
                     .await?;
                 Ok::<_, DbErr>(
                     models

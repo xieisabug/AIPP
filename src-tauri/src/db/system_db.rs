@@ -73,8 +73,9 @@ impl From<feature_config::Model> for FeatureConfig {
     }
 }
 
+// SystemDatabase 内部维护自己的本地 SQLite 连接，因为它必须始终使用本地存储
 pub struct SystemDatabase {
-    pub conn: DatabaseConnection,
+    conn: DatabaseConnection,
 }
 
 impl SystemDatabase {
@@ -100,10 +101,15 @@ impl SystemDatabase {
         debug!("Opened system database");
         Ok(SystemDatabase { conn })
     }
+    
+    // 获取内部连接的引用（公开方法）
+    pub fn get_conn(&self) -> &DatabaseConnection {
+        &self.conn
+    }
 
-    #[instrument(level = "debug", skip(self))]
-    pub fn create_tables(&self) -> Result<(), DbErr> {
-        let backend = self.conn.get_database_backend();
+    #[instrument(level = "debug", skip(self, _app_handle))]
+    pub fn create_tables(&self, _app_handle: &tauri::AppHandle) -> Result<(), DbErr> {
+        let backend = self.get_conn().get_database_backend();
         let schema = Schema::new(backend);
         let sql1 = match backend {
             DatabaseBackend::Sqlite => schema
@@ -160,7 +166,7 @@ impl SystemDatabase {
         F: FnOnce(DatabaseConnection) -> Fut,
         Fut: std::future::Future<Output = Result<T, DbErr>>,
     {
-        let conn = self.conn.clone();
+        let conn = self.get_conn().clone();
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f(conn))),
             Err(_) => {
@@ -171,8 +177,8 @@ impl SystemDatabase {
         }
     }
 
-    #[instrument(level = "debug", skip(self, value), fields(key))]
-    pub fn add_system_config(&self, key: &str, value: &str) -> Result<(), DbErr> {
+    #[instrument(level = "debug", skip(self, _app_handle, value), fields(key))]
+    pub fn add_system_config(&self, _app_handle: &tauri::AppHandle, key: &str, value: &str) -> Result<(), DbErr> {
         let key = key.to_string();
         let value = value.to_string();
         
@@ -191,8 +197,8 @@ impl SystemDatabase {
         Ok(())
     }
 
-    #[instrument(level = "debug", skip(self), fields(key))]
-    pub fn get_config(&self, key: &str) -> Result<String, DbErr> {
+    #[instrument(level = "debug", skip(self, _app_handle), fields(key))]
+    pub fn get_config(&self, _app_handle: &tauri::AppHandle, key: &str) -> Result<String, DbErr> {
         let key = key.to_string();
         
         let result = self.with_runtime(|conn| async move {
@@ -211,8 +217,8 @@ impl SystemDatabase {
         }
     }
 
-    #[instrument(level = "debug", skip(self, value), fields(key))]
-    pub fn update_system_config(&self, key: &str, value: &str) -> Result<(), DbErr> {
+    #[instrument(level = "debug", skip(self, _app_handle, value), fields(key))]
+    pub fn update_system_config(&self, _app_handle: &tauri::AppHandle, key: &str, value: &str) -> Result<(), DbErr> {
         let key = key.to_string();
         let value = value.to_string();
         
@@ -229,8 +235,8 @@ impl SystemDatabase {
         Ok(())
     }
 
-    #[instrument(level = "debug", skip(self), fields(key))]
-    pub fn delete_system_config(&self, key: &str) -> Result<(), DbErr> {
+    #[instrument(level = "debug", skip(self, _app_handle), fields(key))]
+    pub fn delete_system_config(&self, _app_handle: &tauri::AppHandle, key: &str) -> Result<(), DbErr> {
         let key = key.to_string();
         
         self.with_runtime(|conn| async move {
@@ -245,8 +251,8 @@ impl SystemDatabase {
         Ok(())
     }
 
-    #[instrument(level = "debug", skip(self, config), fields(feature_code = %config.feature_code, key = %config.key))]
-    pub fn add_feature_config(&self, config: &FeatureConfig) -> Result<(), DbErr> {
+    #[instrument(level = "debug", skip(self, _app_handle, config), fields(feature_code = %config.feature_code, key = %config.key))]
+    pub fn add_feature_config(&self, _app_handle: &tauri::AppHandle, config: &FeatureConfig) -> Result<(), DbErr> {
         let feature_code = config.feature_code.clone();
         let key = config.key.clone();
         let value = config.value.clone();
@@ -270,8 +276,8 @@ impl SystemDatabase {
         Ok(())
     }
 
-    #[instrument(level = "debug", skip(self, config), fields(feature_code = %config.feature_code, key = %config.key))]
-    pub fn update_feature_config(&self, config: &FeatureConfig) -> Result<(), DbErr> {
+    #[instrument(level = "debug", skip(self, _app_handle, config), fields(feature_code = %config.feature_code, key = %config.key))]
+    pub fn update_feature_config(&self, _app_handle: &tauri::AppHandle, config: &FeatureConfig) -> Result<(), DbErr> {
         let feature_code = config.feature_code.clone();
         let key = config.key.clone();
         let value = config.value.clone();
@@ -294,8 +300,8 @@ impl SystemDatabase {
         Ok(())
     }
 
-    #[instrument(level = "debug", skip(self), fields(feature_code))]
-    pub fn delete_feature_config_by_feature_code(&self, feature_code: &str) -> Result<(), DbErr> {
+    #[instrument(level = "debug", skip(self, _app_handle), fields(feature_code))]
+    pub fn delete_feature_config_by_feature_code(&self, _app_handle: &tauri::AppHandle, feature_code: &str) -> Result<(), DbErr> {
         let feature_code = feature_code.to_string();
         
         self.with_runtime(|conn| async move {
@@ -310,9 +316,10 @@ impl SystemDatabase {
         Ok(())
     }
 
-    #[instrument(level = "debug", skip(self), fields(feature_code, key))]
+    #[instrument(level = "debug", skip(self, _app_handle), fields(feature_code, key))]
     pub fn get_feature_config(
         &self,
+        _app_handle: &tauri::AppHandle,
         feature_code: &str,
         key: &str,
     ) -> Result<Option<FeatureConfig>, DbErr> {
@@ -333,8 +340,8 @@ impl SystemDatabase {
     }
 
     // 查询特定模块( feature_code )的所有配置 - 对外公开，供启动时缓存 data_storage 使用
-    #[instrument(level = "debug", skip(self), fields(feature_code))]
-    pub fn get_feature_config_by_feature_code(&self, feature_code: &str) -> Result<Vec<FeatureConfig>, DbErr> {
+    #[instrument(level = "debug", skip(self, _app_handle), fields(feature_code))]
+    pub fn get_feature_config_by_feature_code(&self, _app_handle: &tauri::AppHandle, feature_code: &str) -> Result<Vec<FeatureConfig>, DbErr> {
         let feature_code = feature_code.to_string();
         
         let models = self.with_runtime(|conn| async move {
@@ -350,8 +357,8 @@ impl SystemDatabase {
     }
 
     // 查询特定模块的所有配置
-    #[instrument(level = "debug", skip(self))]
-    pub fn get_all_feature_config(&self) -> Result<Vec<FeatureConfig>, DbErr> {
+    #[instrument(level = "debug", skip(self, _app_handle))]
+    pub fn get_all_feature_config(&self, _app_handle: &tauri::AppHandle) -> Result<Vec<FeatureConfig>, DbErr> {
         let models = self.with_runtime(|conn| async move {
             feature_config::Entity::find().all(&conn).await
         })?;
@@ -361,9 +368,9 @@ impl SystemDatabase {
         Ok(configs)
     }
 
-    #[instrument(level = "debug", skip(self))]
-    pub fn init_feature_config(&self) -> Result<(), DbErr> {
-        self.add_feature_config(&FeatureConfig {
+    #[instrument(level = "debug", skip(self, app_handle))]
+    pub fn init_feature_config(&self, app_handle: &tauri::AppHandle) -> Result<(), DbErr> {
+        self.add_feature_config(app_handle, &FeatureConfig {
             id: None,
             feature_code: "conversation_summary".to_string(),
             key: "summary_length".to_string(),
@@ -371,7 +378,7 @@ impl SystemDatabase {
             data_type: "string".to_string(),
             description: Some("对话总结使用长度".to_string()),
         })?;
-        self.add_feature_config(&FeatureConfig {
+        self.add_feature_config(app_handle, &FeatureConfig {
             id: None,
             feature_code: "conversation_summary".to_string(),
             key: "prompt".to_string(),
