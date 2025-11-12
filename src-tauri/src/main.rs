@@ -203,7 +203,7 @@ fn query_accessibility_permissions() -> bool {
 #[tauri::command]
 async fn get_selected() -> Result<String, String> {
     // First try native selected-text crate
-    let result = get_selected_text().unwrap_or_default();
+    let mut result = get_selected_text().unwrap_or_default();
 
     // Fallback on macOS: simulate Cmd+C and read from clipboard, then restore clipboard
     #[cfg(target_os = "macos")]
@@ -438,21 +438,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok::<(), Box<dyn std::error::Error>>(())
             })?;
 
-            // 安装全局快捷键插件（同步，尽早安装，但不读取配置、不注册具体按键）
+            // 注册全局快捷键（必须在 state 初始化之后）
             #[cfg(desktop)]
             {
-                install_global_shortcut_plugin(&app_handle);
-            }
-
-            // 注册全局快捷键（在 setup 完成后异步执行，仅做 unregister/register，不安装插件）
-            #[cfg(desktop)]
-            {
-                let app_clone = app_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    let t_shortcut = std::time::Instant::now();
-                    register_global_shortcuts_async(&app_clone).await;
-                    info!(elapsed_ms=%t_shortcut.elapsed().as_millis(), "register_global_shortcuts_async() completed");
-                });
+                register_global_shortcuts(&app_handle);
             }
 
             if app.get_webview_window("main").is_none() {
@@ -672,57 +661,12 @@ fn initialize_state(app_handle: &tauri::AppHandle) -> FeatureConfigState {
 }
 
 #[cfg(desktop)]
-fn install_global_shortcut_plugin(app_handle: &tauri::AppHandle) {
-    use tauri_plugin_global_shortcut::GlobalShortcutExt as _;
-    // 仅安装插件，不注册处理逻辑（处理逻辑在按键释放时需要）
-    let _ = app_handle.plugin(
-        tauri_plugin_global_shortcut::Builder::new()
-            .with_handler(|_app, _shortcut, event| {
-                use tauri_plugin_global_shortcut::ShortcutState;
-                if event.state() == ShortcutState::Released {
-                    // 仅处理唤醒逻辑 / 选中文本逻辑（保持原先实现）
-                    // 避免在 UI 线程阻塞，使用 try_lock 获取标志；若失败则跳过本次事件
-                    if let Some(state) = _app.try_state::<AppState>() {
-                        match state.recording_shortcut.try_lock() {
-                            Ok(flag) => {
-                                if *flag { return; }
-                            }
-                            Err(_) => {
-                                return;
-                            }
-                        }
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        if let Ok(text) = get_selected_text() {
-                            if !text.is_empty() {
-                                let _ = _app.emit("get_selected_text_event", text.clone());
-                                let app_handle = _app.clone();
-                                let text_clone = text.clone();
-                                tauri::async_runtime::spawn(async move {
-                                    if let Some(app_state) = app_handle.try_state::<AppState>() {
-                                        let mut guard = app_state.selected_text.lock().await;
-                                        *guard = text_clone;
-                                    }
-                                });
-                            }
-                        }
-                    }
-                    handle_open_ask_window(_app);
-                }
-            })
-            .build(),
-    );
-    info!("global_shortcut plugin installed (sync)");
-}
-
-#[cfg(desktop)]
-async fn register_global_shortcuts_async(app_handle: &tauri::AppHandle) {
+pub(crate) fn register_global_shortcuts(app_handle: &tauri::AppHandle) {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
-    info!("开始注册全局快捷键(异步) - computing shortcut string...");
+    info!("开始注册全局快捷键...");
 
-    // 处理按键事件（插件已安装时才会触发）
+    // 先安装插件（只安装一次即可）。若已安装会返回错误，忽略即可。
     let _ = app_handle.plugin(
         tauri_plugin_global_shortcut::Builder::new()
             .with_handler(|_app, _shortcut, event| {
@@ -730,23 +674,15 @@ async fn register_global_shortcuts_async(app_handle: &tauri::AppHandle) {
                 if event.state() == ShortcutState::Released {
                     let t_event = std::time::Instant::now();
                     info!("Global shortcut released: start handling");
-                    // 如果正在录入快捷键，忽略全局事件（使用 try_lock 避免阻塞 UI 线程）
+                    // 如果正在录入快捷键，忽略全局事件
                     if let Some(state) = _app.try_state::<AppState>() {
-                        match state.recording_shortcut.try_lock() {
-                            Ok(flag) => {
-                                if *flag {
-                                    debug!("正在录入快捷键，忽略全局快捷键事件");
-                                    return;
-                                }
-                            }
-                            Err(_) => {
-                                // 锁被占用时跳过，避免阻塞
-                                return;
-                            }
+                        if *state.recording_shortcut.blocking_lock() {
+                            debug!("正在录入快捷键，忽略全局快捷键事件");
+                            return;
                         }
                     }
 
-                    // macOS：使用“先复制，再延迟聚焦，再后台读取剪贴板”的策略，绕过慢速 crate
+                    // macOS：使用"先复制，再延迟聚焦，再后台读取剪贴板"的策略，绕过慢速 crate
                     #[cfg(target_os = "macos")]
                     {
                         use std::thread;
@@ -790,11 +726,7 @@ async fn register_global_shortcuts_async(app_handle: &tauri::AppHandle) {
                             if !new_clip.is_empty() && new_clip != previous {
                                 let _ = app_handle.emit("get_selected_text_event", new_clip.clone());
                                 if let Some(state) = app_handle.try_state::<AppState>() {
-                                    let text_clone = new_clip.clone();
-                                    tauri::async_runtime::spawn(async move {
-                                        let mut g = state.selected_text.lock().await;
-                                        *g = text_clone;
-                                    });
+                                    *state.selected_text.blocking_lock() = new_clip;
                                 }
                             } else {
                                 debug!("Copy-first worker: no new selection or same as previous");
@@ -863,7 +795,7 @@ async fn register_global_shortcuts_async(app_handle: &tauri::AppHandle) {
     // 根据配置计算需要注册的快捷键字符串（global-hotkey 解析格式）
     let (shortcut_str, from_fallback) = {
         let state = app_handle.state::<FeatureConfigState>();
-        let config_feature_map = state.config_feature_map.lock().await;
+        let config_feature_map = state.config_feature_map.blocking_lock();
         if let Some(shortcuts_cfg) = config_feature_map.get("shortcuts") {
             if let Some(sc) = shortcuts_cfg.get("shortcut") {
                 (sc.value.clone(), false)
