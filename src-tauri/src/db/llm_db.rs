@@ -427,20 +427,21 @@ impl LLMDatabase {
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn init_llm_provider(&self) -> rusqlite::Result<()> {
+        // 使用 INSERT OR IGNORE 避免重复初始化时触发 UNIQUE 约束错误
         self.conn.execute(
-            "INSERT INTO llm_provider (id, name, api_type, description, is_official) VALUES (1, 'OpenAI', 'openai_api', 'OpenAI API', 1)",
+            "INSERT OR IGNORE INTO llm_provider (id, name, api_type, description, is_official) VALUES (1, 'OpenAI', 'openai_api', 'OpenAI API', 1)",
             [],
         )?;
         self.conn.execute(
-            "INSERT INTO llm_provider (id, name, api_type, description, is_official) VALUES (10, 'Ollama', 'ollama', 'Ollama API', 1)",
+            "INSERT OR IGNORE INTO llm_provider (id, name, api_type, description, is_official) VALUES (10, 'Ollama', 'ollama', 'Ollama API', 1)",
             [],
         )?;
         self.conn.execute(
-            "INSERT INTO llm_provider (id, name, api_type, description, is_official) VALUES (20, 'Anthropic', 'anthropic', 'Anthropic API', 1);",
+            "INSERT OR IGNORE INTO llm_provider (id, name, api_type, description, is_official) VALUES (20, 'Anthropic', 'anthropic', 'Anthropic API', 1);",
             [],
         )?;
         self.conn.execute(
-            "INSERT INTO llm_provider (id, name, api_type, description, is_official) VALUES (30, 'DeepSeek', 'deepseek', 'DeepSeek API', 1);",
+            "INSERT OR IGNORE INTO llm_provider (id, name, api_type, description, is_official) VALUES (30, 'DeepSeek', 'deepseek', 'DeepSeek API', 1);",
             [],
         )?;
 

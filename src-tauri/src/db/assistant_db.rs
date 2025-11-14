@@ -513,8 +513,9 @@ impl AssistantDatabase {
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn init_assistant(&self) -> Result<()> {
+        // 使用 INSERT OR IGNORE 避免重复初始化时触发 UNIQUE 约束错误
         self.conn.execute(
-            "INSERT INTO assistant (id, name, description, is_addition) VALUES (1, '快速使用助手', '快捷键呼出的快速使用助手', 0)",
+            "INSERT OR IGNORE INTO assistant (id, name, description, is_addition) VALUES (1, '快速使用助手', '快捷键呼出的快速使用助手', 0)",
             [],
         )?;
         self.add_assistant_prompt(1, "You are a helpful assistant.")?;
