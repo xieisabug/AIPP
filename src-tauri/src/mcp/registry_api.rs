@@ -3,7 +3,7 @@ use crate::mcp::mcp_db::{
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::{warn, info, instrument};
+use tracing::{debug, warn, info, instrument};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct McpToolInfo {
@@ -547,9 +547,19 @@ async fn get_stdio_capabilities(
         }
     };
 
+    // 收集远端的名称/URI，用于后续 diff 删除
+    let mut remote_tool_names: Vec<String> = Vec::new();
+    let mut remote_resource_uris: Vec<String> = Vec::new();
+    let mut remote_prompt_names: Vec<String> = Vec::new();
+
     // 处理工具
     if let Ok(tools) = tools_result {
         for tool in tools {
+            // 调试：打印远端返回的工具名，方便对比
+            info!(server_id, tool_name = %tool.name, "Fetched MCP tool from remote server");
+
+            remote_tool_names.push(tool.name.to_string());
+
             let params_json =
                 serde_json::to_string(&tool.input_schema).unwrap_or_else(|_| "{}".to_string());
 
@@ -562,11 +572,18 @@ async fn get_stdio_capabilities(
                 warn!(tool = %tool.name, error = %e, "Failed to upsert tool");
             }
         }
+
+        // 删除远端已不存在的工具
+        if let Err(e) = db.delete_mcp_server_tools_not_in(server_id, &remote_tool_names) {
+            warn!(server_id, error = %e, "Failed to delete stale tools for server");
+        }
     }
 
     // 处理资源
     if let Ok(resources) = resources_result {
         for resource in resources {
+            remote_resource_uris.push(resource.uri.to_string());
+
             if let Err(e) = db.upsert_mcp_server_resource(
                 server_id,
                 &resource.uri,
@@ -577,11 +594,17 @@ async fn get_stdio_capabilities(
                 warn!(resource = %resource.name, error = %e, "Failed to upsert resource");
             }
         }
+
+        if let Err(e) = db.delete_mcp_server_resources_not_in(server_id, &remote_resource_uris) {
+            warn!(server_id, error = %e, "Failed to delete stale resources for server");
+        }
     }
 
     // 处理提示
     if let Ok(prompts) = prompts_result {
         for prompt in prompts {
+            remote_prompt_names.push(prompt.name.to_string());
+
             let args_json = if let Some(args) = prompt.arguments {
                 serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
             } else {
@@ -596,6 +619,10 @@ async fn get_stdio_capabilities(
             ) {
                 warn!(prompt = %prompt.name, error = %e, "Failed to upsert prompt");
             }
+        }
+
+        if let Err(e) = db.delete_mcp_server_prompts_not_in(server_id, &remote_prompt_names) {
+            warn!(server_id, error = %e, "Failed to delete stale prompts for server");
         }
     }
 
@@ -613,7 +640,7 @@ async fn get_sse_capabilities(
 ) -> Result<(), String> {
     use rmcp::{
         model::{ClientCapabilities, ClientInfo, Implementation},
-        transport::{sse_client::SseClientConfig, SseClientTransport},
+        transport::SseClientTransport,
         ServiceExt,
     };
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -624,33 +651,35 @@ async fn get_sse_capabilities(
     // 获取URL，如果没有则返回错误
     let url = server.url.clone().ok_or("No URL specified for SSE transport")?;
 
-    // 创建SSE传输和客户端
+    // 创建SSE传输和客户端（复用与 test_sse_connection 相同的模式，仅增加能力同步逻辑）
     let client_result = tokio::time::timeout(
         std::time::Duration::from_millis(server.timeout.unwrap_or(30000) as u64),
         async {
-            let transport = {
-                let (_auth_header, all_headers) = parse_server_headers(&server);
-                if let Some(hdrs) = all_headers {
-                    let to_log = crate::mcp::util::sanitize_headers_for_log(&hdrs);
-                    info!(server_id = server.id, headers = ?to_log, "Fetching SSE capabilities with headers");
-                    let mut header_map = HeaderMap::new();
-                    for (k, v) in hdrs.iter() {
-                        if let (Ok(name), Ok(value)) =
-                            (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v.as_str()))
-                        {
-                            header_map.insert(name, value);
-                        }
+            let (_auth_header, all_headers) = parse_server_headers(&server);
+            let transport = if let Some(hdrs) = all_headers {
+                let to_log = crate::mcp::util::sanitize_headers_for_log(&hdrs);
+                info!(server_id = server.id, headers = ?to_log, "Fetching SSE capabilities with headers");
+                let mut header_map = HeaderMap::new();
+                for (k, v) in hdrs.iter() {
+                    if let (Ok(name), Ok(value)) =
+                        (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v.as_str()))
+                    {
+                        header_map.insert(name, value);
                     }
-                    let client = reqwest::Client::builder().default_headers(header_map).build()?;
-                    SseClientTransport::start_with_client(
-                        client,
-                        SseClientConfig { sse_endpoint: url.as_str().into(), ..Default::default() },
-                    )
-                    .await?
-                } else {
-                    SseClientTransport::start(url.as_str()).await?
                 }
+                let client = reqwest::Client::builder().default_headers(header_map).build()?;
+                SseClientTransport::start_with_client(
+                    client,
+                    rmcp::transport::sse_client::SseClientConfig {
+                        sse_endpoint: url.as_str().into(),
+                        ..Default::default()
+                    },
+                )
+                .await?
+            } else {
+                SseClientTransport::start(url.as_str()).await?
             };
+
             let client_info = ClientInfo {
                 protocol_version: Default::default(),
                 capabilities: ClientCapabilities::default(),
@@ -681,11 +710,11 @@ async fn get_sse_capabilities(
 
     // 获取能力
     let capabilities_result = tokio::time::timeout(
-        std::time::Duration::from_millis(10000), // 10秒超时
+        std::time::Duration::from_millis(10000),
         async {
-            let tools_result = client.list_tools(Default::default()).await;
-            let resources_result = client.list_resources(Default::default()).await;
-            let prompts_result = client.list_prompts(Default::default()).await;
+            let tools_result = client.list_all_tools().await;
+            let resources_result = client.list_all_resources().await;
+            let prompts_result = client.list_all_prompts().await;
 
             (tools_result, resources_result, prompts_result)
         },
@@ -695,13 +724,22 @@ async fn get_sse_capabilities(
     let (tools_result, resources_result, prompts_result) = match capabilities_result {
         Ok(results) => results,
         Err(_) => {
-            return Err("Timeout while getting MCP SSE server capabilities".to_string());
+            return Err("Timeout while getting SSE server capabilities".to_string());
         }
     };
 
+    // 收集远端的名称/URI，用于后续 diff 删除
+    let mut remote_tool_names: Vec<String> = Vec::new();
+    let mut remote_resource_uris: Vec<String> = Vec::new();
+    let mut remote_prompt_names: Vec<String> = Vec::new();
+
     // 处理工具
-    if let Ok(tools_response) = tools_result {
-        for tool in tools_response.tools {
+    if let Ok(tools) = tools_result {
+        for tool in tools {
+            info!(server_id, tool_name = %tool.name, "Fetched MCP tool from SSE server");
+
+            remote_tool_names.push(tool.name.to_string());
+
             let params_json =
                 serde_json::to_string(&tool.input_schema).unwrap_or_else(|_| "{}".to_string());
 
@@ -711,14 +749,20 @@ async fn get_sse_capabilities(
                 tool.description.as_deref(),
                 Some(&params_json),
             ) {
-                warn!(tool = %tool.name, error = %e, "Failed to upsert tool");
+                warn!(tool = %tool.name, error = %e, "Failed to upsert SSE tool");
             }
+        }
+
+        if let Err(e) = db.delete_mcp_server_tools_not_in(server_id, &remote_tool_names) {
+            warn!(server_id, error = %e, "Failed to delete stale SSE tools for server");
         }
     }
 
     // 处理资源
-    if let Ok(resources_response) = resources_result {
-        for resource in resources_response.resources {
+    if let Ok(resources) = resources_result {
+        for resource in resources {
+            remote_resource_uris.push(resource.uri.to_string());
+
             if let Err(e) = db.upsert_mcp_server_resource(
                 server_id,
                 &resource.uri,
@@ -726,14 +770,20 @@ async fn get_sse_capabilities(
                 &resource.mime_type.as_ref().unwrap_or(&"unknown".to_string()),
                 resource.description.as_deref(),
             ) {
-                warn!(resource = %resource.name, error = %e, "Failed to upsert resource");
+                warn!(resource = %resource.name, error = %e, "Failed to upsert SSE resource");
             }
+        }
+
+        if let Err(e) = db.delete_mcp_server_resources_not_in(server_id, &remote_resource_uris) {
+            warn!(server_id, error = %e, "Failed to delete stale SSE resources for server");
         }
     }
 
     // 处理提示
-    if let Ok(prompts_response) = prompts_result {
-        for prompt in prompts_response.prompts {
+    if let Ok(prompts) = prompts_result {
+        for prompt in prompts {
+            remote_prompt_names.push(prompt.name.to_string());
+
             let args_json = if let Some(args) = prompt.arguments {
                 serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
             } else {
@@ -746,8 +796,12 @@ async fn get_sse_capabilities(
                 prompt.description.as_deref(),
                 Some(&args_json),
             ) {
-                warn!(prompt = %prompt.name, error = %e, "Failed to upsert prompt");
+                warn!(prompt = %prompt.name, error = %e, "Failed to upsert SSE prompt");
             }
+        }
+
+        if let Err(e) = db.delete_mcp_server_prompts_not_in(server_id, &remote_prompt_names) {
+            warn!(server_id, error = %e, "Failed to delete stale SSE prompts for server");
         }
     }
 
@@ -765,7 +819,7 @@ async fn get_http_capabilities(
 ) -> Result<(), String> {
     use rmcp::{
         model::{ClientCapabilities, ClientInfo, Implementation},
-        transport::{streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport},
+        transport::StreamableHttpClientTransport,
         ServiceExt,
     };
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -776,49 +830,54 @@ async fn get_http_capabilities(
     // 获取URL，如果没有则返回错误
     let url = server.url.clone().ok_or("No URL specified for HTTP transport")?;
 
-    // 创建带 headers 的 HTTP 传输
-    let transport = {
-        let (auth_header, all_headers) = parse_server_headers(&server);
-        let mut header_map = HeaderMap::new();
-        if let Some(hdrs) = all_headers.as_ref() {
-            let to_log = crate::mcp::util::sanitize_headers_for_log(hdrs);
-            info!(server_id = server.id, headers = ?to_log, "Fetching HTTP capabilities with headers");
-            for (k, v) in hdrs.iter() {
-                if let (Ok(name), Ok(value)) =
-                    (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v.as_str()))
-                {
-                    header_map.insert(name, value);
-                }
-            }
-        }
-        let client = reqwest::Client::builder().default_headers(header_map).build().map_err(|e| e.to_string())?;
-        let mut cfg = StreamableHttpClientTransportConfig::with_uri(url.as_str());
-        if let Some(auth) = auth_header.as_ref() { cfg = cfg.auth_header(auth.clone()); }
-        StreamableHttpClientTransport::with_client(client, cfg)
-    };
-
-    // 创建客户端信息
-    let client_info = ClientInfo {
-        protocol_version: Default::default(),
-        capabilities: ClientCapabilities::default(),
-        client_info: Implementation {
-            name: "AIPP MCP Client".to_string(),
-            version: "0.1.0".to_string(),
-            ..Default::default()
-        },
-    };
-
-    // 创建MCP客户端 - 使用正确的API模式
+    // 创建HTTP传输和客户端（复用 test_http_connection 中的模式，仅增加能力同步逻辑）
     let client_result = tokio::time::timeout(
         std::time::Duration::from_millis(server.timeout.unwrap_or(30000) as u64),
-        async { client_info.serve(transport).await },
+        async {
+            let (auth_header, all_headers) = parse_server_headers(&server);
+            let transport = {
+                let mut header_map = HeaderMap::new();
+                if let Some(hdrs) = all_headers.as_ref() {
+                    let to_log = crate::mcp::util::sanitize_headers_for_log(hdrs);
+                    info!(server_id = server.id, headers = ?to_log, "Fetching HTTP capabilities with headers");
+                    for (k, v) in hdrs.iter() {
+                        if let (Ok(name), Ok(value)) =
+                            (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v.as_str()))
+                        {
+                            header_map.insert(name, value);
+                        }
+                    }
+                }
+                let client = reqwest::Client::builder()
+                    .default_headers(header_map)
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("Failed to build reqwest client for HTTP: {}", e))?;
+                let mut cfg = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url.as_str());
+                if let Some(auth) = auth_header.as_ref() {
+                    cfg = cfg.auth_header(auth.clone());
+                }
+                StreamableHttpClientTransport::with_client(client, cfg)
+            };
+
+            let client_info = ClientInfo {
+                protocol_version: Default::default(),
+                capabilities: ClientCapabilities::default(),
+                client_info: Implementation {
+                    name: "AIPP MCP HTTP Client".to_string(),
+                    version: "0.1.0".to_string(),
+                    ..Default::default()
+                },
+            };
+            let client = client_info.serve(transport).await?;
+            Ok::<_, anyhow::Error>(client)
+        },
     )
     .await;
 
     let client = match client_result {
         Ok(Ok(client)) => client,
         Ok(Err(e)) => {
-            return Err(format!("Failed to create MCP client: {}", e));
+            return Err(format!("Failed to create MCP HTTP client: {}", e));
         }
         Err(_) => {
             return Err("Timeout while connecting to HTTP server".to_string());
@@ -828,25 +887,38 @@ async fn get_http_capabilities(
     // 获取服务器信息
     let _server_info = client.peer_info();
 
-    // 获取能力 - 使用正确的API
+    // 获取能力
     let capabilities_result = tokio::time::timeout(
-        std::time::Duration::from_millis(10000), // 10秒超时
+        std::time::Duration::from_millis(10000),
         async {
-            let tools_result = client.list_tools(Default::default()).await;
-            let resources_result = client.list_resources(Default::default()).await;
-            let prompts_result = client.list_prompts(Default::default()).await;
+            let tools_result = client.list_all_tools().await;
+            let resources_result = client.list_all_resources().await;
+            let prompts_result = client.list_all_prompts().await;
 
             (tools_result, resources_result, prompts_result)
         },
     )
-    .await
-    .map_err(|_| "Timeout while getting MCP server capabilities".to_string())?;
+    .await;
 
-    let (tools_result, resources_result, prompts_result) = capabilities_result;
+    let (tools_result, resources_result, prompts_result) = match capabilities_result {
+        Ok(results) => results,
+        Err(_) => {
+            return Err("Timeout while getting HTTP server capabilities".to_string());
+        }
+    };
+
+    // 收集远端的名称/URI，用于后续 diff 删除
+    let mut remote_tool_names: Vec<String> = Vec::new();
+    let mut remote_resource_uris: Vec<String> = Vec::new();
+    let mut remote_prompt_names: Vec<String> = Vec::new();
 
     // 处理工具
-    if let Ok(tools_response) = tools_result {
-        for tool in tools_response.tools {
+    if let Ok(tools) = tools_result {
+        for tool in tools {
+            info!(server_id, tool_name = %tool.name, "Fetched MCP tool from HTTP server");
+
+            remote_tool_names.push(tool.name.to_string());
+
             let params_json =
                 serde_json::to_string(&tool.input_schema).unwrap_or_else(|_| "{}".to_string());
 
@@ -856,14 +928,20 @@ async fn get_http_capabilities(
                 tool.description.as_deref(),
                 Some(&params_json),
             ) {
-                warn!(tool = %tool.name, error = %e, "Failed to upsert tool");
+                warn!(tool = %tool.name, error = %e, "Failed to upsert HTTP tool");
             }
+        }
+
+        if let Err(e) = db.delete_mcp_server_tools_not_in(server_id, &remote_tool_names) {
+            warn!(server_id, error = %e, "Failed to delete stale HTTP tools for server");
         }
     }
 
     // 处理资源
-    if let Ok(resources_response) = resources_result {
-        for resource in resources_response.resources {
+    if let Ok(resources) = resources_result {
+        for resource in resources {
+            remote_resource_uris.push(resource.uri.to_string());
+
             if let Err(e) = db.upsert_mcp_server_resource(
                 server_id,
                 &resource.uri,
@@ -871,14 +949,20 @@ async fn get_http_capabilities(
                 &resource.mime_type.as_ref().unwrap_or(&"unknown".to_string()),
                 resource.description.as_deref(),
             ) {
-                warn!(resource = %resource.name, error = %e, "Failed to upsert resource");
+                warn!(resource = %resource.name, error = %e, "Failed to upsert HTTP resource");
             }
+        }
+
+        if let Err(e) = db.delete_mcp_server_resources_not_in(server_id, &remote_resource_uris) {
+            warn!(server_id, error = %e, "Failed to delete stale HTTP resources for server");
         }
     }
 
     // 处理提示
-    if let Ok(prompts_response) = prompts_result {
-        for prompt in prompts_response.prompts {
+    if let Ok(prompts) = prompts_result {
+        for prompt in prompts {
+            remote_prompt_names.push(prompt.name.to_string());
+
             let args_json = if let Some(args) = prompt.arguments {
                 serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
             } else {
@@ -891,8 +975,12 @@ async fn get_http_capabilities(
                 prompt.description.as_deref(),
                 Some(&args_json),
             ) {
-                warn!(prompt = %prompt.name, error = %e, "Failed to upsert prompt");
+                warn!(prompt = %prompt.name, error = %e, "Failed to upsert HTTP prompt");
             }
+        }
+
+        if let Err(e) = db.delete_mcp_server_prompts_not_in(server_id, &remote_prompt_names) {
+            warn!(server_id, error = %e, "Failed to delete stale HTTP prompts for server");
         }
     }
 

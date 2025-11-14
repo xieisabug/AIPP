@@ -524,6 +524,43 @@ impl MCPDatabase {
         Ok(result)
     }
 
+    /// 删除指定服务器下所有、或指定名称集合之外的工具
+    pub fn delete_mcp_server_tools_not_in(
+        &self,
+        server_id: i64,
+        keep_names: &[String],
+    ) -> rusqlite::Result<usize> {
+        if keep_names.is_empty() {
+            // 如果没有需要保留的工具，直接删除该服务器下所有工具
+            let rows = self.conn.execute(
+                "DELETE FROM mcp_server_tool WHERE server_id = ?",
+                params![server_id],
+            )?;
+            return Ok(rows as usize);
+        }
+
+        // 构造 NOT IN (?, ?, ...) 语句
+        let mut sql = String::from(
+            "DELETE FROM mcp_server_tool WHERE server_id = ? AND tool_name NOT IN (",
+        );
+        for (i, _) in keep_names.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            sql.push('?');
+        }
+        sql.push(')');
+
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1 + keep_names.len());
+        params_vec.push(&server_id);
+        for name in keep_names {
+            params_vec.push(name);
+        }
+
+        let rows = self.conn.execute(&sql, params_vec.as_slice())?;
+        Ok(rows as usize)
+    }
+
     pub fn update_mcp_server_tool(
         &self,
         id: i64,
@@ -613,6 +650,41 @@ impl MCPDatabase {
         Ok(result)
     }
 
+    /// 删除指定服务器下所有、或指定 URI 集合之外的资源
+    pub fn delete_mcp_server_resources_not_in(
+        &self,
+        server_id: i64,
+        keep_uris: &[String],
+    ) -> rusqlite::Result<usize> {
+        if keep_uris.is_empty() {
+            let rows = self.conn.execute(
+                "DELETE FROM mcp_server_resource WHERE server_id = ?",
+                params![server_id],
+            )?;
+            return Ok(rows as usize);
+        }
+
+        let mut sql = String::from(
+            "DELETE FROM mcp_server_resource WHERE server_id = ? AND resource_uri NOT IN (",
+        );
+        for (i, _) in keep_uris.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            sql.push('?');
+        }
+        sql.push(')');
+
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1 + keep_uris.len());
+        params_vec.push(&server_id);
+        for uri in keep_uris {
+            params_vec.push(uri);
+        }
+
+        let rows = self.conn.execute(&sql, params_vec.as_slice())?;
+        Ok(rows as usize)
+    }
+
     pub fn upsert_mcp_server_resource(
         &self,
         server_id: i64,
@@ -679,6 +751,41 @@ impl MCPDatabase {
             result.push(prompt?);
         }
         Ok(result)
+    }
+
+    /// 删除指定服务器下所有、或指定名称集合之外的提示
+    pub fn delete_mcp_server_prompts_not_in(
+        &self,
+        server_id: i64,
+        keep_names: &[String],
+    ) -> rusqlite::Result<usize> {
+        if keep_names.is_empty() {
+            let rows = self.conn.execute(
+                "DELETE FROM mcp_server_prompt WHERE server_id = ?",
+                params![server_id],
+            )?;
+            return Ok(rows as usize);
+        }
+
+        let mut sql = String::from(
+            "DELETE FROM mcp_server_prompt WHERE server_id = ? AND prompt_name NOT IN (",
+        );
+        for (i, _) in keep_names.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            sql.push('?');
+        }
+        sql.push(')');
+
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1 + keep_names.len());
+        params_vec.push(&server_id);
+        for name in keep_names {
+            params_vec.push(name);
+        }
+
+        let rows = self.conn.execute(&sql, params_vec.as_slice())?;
+        Ok(rows as usize)
     }
 
     pub fn update_mcp_server_prompt(&self, id: i64, is_enabled: bool) -> rusqlite::Result<()> {
