@@ -75,6 +75,8 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         useState<ModelSelectionResponse | null>(null);
     const [isUpdatingModels, setIsUpdatingModels] = useState<boolean>(false);
 
+    const isCopilotProvider = apiType === "GitHub Copilot" || apiType === "github_copilot";
+
     const defaultValues = useMemo(
         () => ({
             endpoint: "",
@@ -138,15 +140,18 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         });
         setTags([]);
 
-        invoke<Array<LLMProviderConfig>>("get_llm_provider_config", {
-            id,
-        }).then((configArray) => {
-            const newConfig: Record<string, string> = {};
-            configArray.forEach((item) => {
-                newConfig[item.name] = item.value;
+        // Copilot Provider 目前不需要读取 endpoint/api_key 等配置
+        if (!isCopilotProvider) {
+            invoke<Array<LLMProviderConfig>>("get_llm_provider_config", {
+                id,
+            }).then((configArray) => {
+                const newConfig: Record<string, string> = {};
+                configArray.forEach((item) => {
+                    newConfig[item.name] = item.value;
+                });
+                form.reset(newConfig);
             });
-            form.reset(newConfig);
-        });
+        }
 
         invoke<Array<LLMModel>>("get_llm_models", {
             llmProviderId: "" + id,
@@ -155,7 +160,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             // 调用子组件的方法，更新 tags
             setTags(newTags);
         });
-    }, [id]);
+    }, [id, isCopilotProvider]);
 
     // 处理模型选择确认
     const handleModelSelectionConfirm = useCallback(
@@ -205,8 +210,53 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     );
 
     // 表单字段定义
-    const configFields = useMemo(
-        () => [
+    const configFields = useMemo(() => {
+        // GitHub Copilot 提供商：特殊表单
+        if (isCopilotProvider) {
+            return [
+                {
+                    key: "apiType",
+                    config: {
+                        type: "static" as const,
+                        label: "提供商类型",
+                        value: "GitHub Copilot",
+                    },
+                },
+                {
+                    key: "copilot_auth",
+                    config: {
+                        type: "custom" as const,
+                        label: "授权状态",
+                        value: "",
+                        customRender: () => (
+                            <div className="flex flex-col gap-3">
+                                <div className="text-sm text-muted-foreground">
+                                    需要先完成 GitHub Copilot 授权才能使用模型。点击下方按钮开始 Device Flow 授权。
+                                </div>
+                                <div>
+                                    <Button
+                                        type="button"
+                                        className="bg-primary hover:bg-primary/90 text-primary-foreground"
+                                        // TODO: 接入实际 device flow 授权逻辑
+                                        onClick={() => {
+                                            toast.info("暂未接入后端，模拟触发 GitHub Copilot 授权流程");
+                                        }}
+                                    >
+                                        去授权 GitHub Copilot
+                                    </Button>
+                                </div>
+                                <div className="text-xs text-muted-foreground">
+                                    授权完成后，这里将展示 GitHub 账户信息和授权有效期等基础信息。
+                                </div>
+                            </div>
+                        ),
+                    },
+                },
+            ];
+        }
+
+        // 其它提供商：保持原有表单
+        return [
             {
                 key: "apiType",
                 config: {
@@ -260,11 +310,10 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                         高级配置
                                     </span>
                                     <ChevronDown
-                                        className={`h-4 w-4 transition-transform ${
-                                            isAdvancedConfigExpanded
+                                        className={`h-4 w-4 transition-transform ${isAdvancedConfigExpanded
                                                 ? "rotate-180"
                                                 : ""
-                                        }`}
+                                            }`}
                                     />
                                 </Button>
                             </CollapsibleTrigger>
@@ -299,9 +348,8 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     ),
                 },
             },
-        ],
-        [tagInputRender, isAdvancedConfigExpanded, form, updateField, proxyEnabled],
-    );
+        ];
+    }, [apiType, isCopilotProvider, tagInputRender, isAdvancedConfigExpanded, form, updateField, proxyEnabled]);
 
     const extraButtons = useMemo(
         () => (
@@ -326,7 +374,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         )}
                     </div>
                 )}
-                
+
                 {!isOffical && (
                     <Button
                         variant="ghost"

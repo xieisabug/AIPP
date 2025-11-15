@@ -84,6 +84,7 @@ const LLMProviderConfig: React.FC = () => {
         { value: 'anthropic', label: 'Anthropic API' },
         { value: 'cohere', label: 'Cohere API' },
         { value: 'deepseek', label: 'DeepSeek API' },
+        { value: 'github_copilot', label: 'GitHub Copilot' },
     ]
 
     const openNewProviderDialog = useCallback(() => {
@@ -149,9 +150,9 @@ const LLMProviderConfig: React.FC = () => {
     // 确认导出（设置密码后）
     const handleConfirmExport = useCallback(async (password: string) => {
         if (!selectedProvider) return;
-        
+
         try {
-            const code = await invoke<string>('export_llm_provider', { 
+            const code = await invoke<string>('export_llm_provider', {
                 providerId: selectedProvider.id,
                 password
             });
@@ -165,20 +166,20 @@ const LLMProviderConfig: React.FC = () => {
 
     // 导入提供商
     const handleImportProvider = useCallback(async (
-        shareCode: string, 
-        password?: string, 
+        shareCode: string,
+        password?: string,
         newName?: string
     ) => {
         if (!password) {
             throw new Error('请输入密码');
         }
-        
+
         await invoke('import_llm_provider', {
             shareCode,
             password,
             newName
         });
-        
+
         // 导入成功后重新获取提供商列表
         getLLMProviderList();
     }, [getLLMProviderList]);
@@ -273,7 +274,7 @@ const LLMProviderConfig: React.FC = () => {
                         />
                     }
                 />
-                
+
                 {/* 导入对话框 */}
                 <ImportDialog
                     title="提供商配置"
