@@ -1,9 +1,67 @@
 use crate::mcp::mcp_db::{
     MCPDatabase, MCPServer, MCPServerPrompt, MCPServerResource, MCPServerTool,
 };
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn, info, instrument};
+use tracing::{warn, info, instrument};
+use std::time::Duration;
+
+// 超时常量集中定义，避免魔法数字分散
+const STDIO_TEST_TIMEOUT: Duration = Duration::from_secs(5);
+const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT_DEFAULT_MS: u64 = 30_000; // 连接阶段默认毫秒
+
+// 简单的命令行解析，支持双引号/单引号与反斜杠转义，不依赖额外 crate
+fn split_command_line(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut buf = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escape = false;
+    for c in input.chars() {
+        if escape {
+            buf.push(c);
+            escape = false;
+            continue;
+        }
+        match c {
+            '\\' => {
+                escape = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            ' ' | '\t' | '\n' if !in_single && !in_double => {
+                if !buf.is_empty() {
+                    parts.push(buf.clone());
+                    buf.clear();
+                }
+            }
+            _ => buf.push(c),
+        }
+    }
+    if !buf.is_empty() {
+        parts.push(buf);
+    }
+    parts
+}
+
+// 环境变量解析：忽略空行与以#开头的注释，只处理 KEY=VALUE 形式
+fn parse_env_vars(env: &str) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    for line in env.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        if let Some((k, v)) = line.split_once('=') {
+            let key = k.trim();
+            if key.is_empty() { continue; }
+            result.push((key.to_string(), v.trim().to_string()));
+        }
+    }
+    result
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct McpToolInfo {
@@ -43,17 +101,103 @@ pub struct MCPServerRequest {
     pub is_builtin: Option<bool>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MCPToolConfig {
-    pub tool_name: String,
-    pub is_enabled: bool,
-    pub is_auto_run: bool,
+// 打开数据库的辅助函数，减少重复样板代码
+fn open_db(app_handle: &tauri::AppHandle) -> Result<MCPDatabase, String> {
+    MCPDatabase::new(app_handle).map_err(|e: rusqlite::Error| e.to_string())
+}
+
+// 简化后的能力实体，用于统一持久化逻辑
+struct SimpleTool {
+    name: String,
+    description: Option<String>,
+    params_json: String,
+}
+
+struct SimpleResource {
+    uri: String,
+    name: String,
+    mime_type: String,
+    description: Option<String>,
+}
+
+struct SimplePrompt {
+    name: String,
+    description: Option<String>,
+    args_json: String,
+}
+
+// 持久化工具/资源/提示，带删除缺失项；只在成功获取对应类别时才做删除，避免失败覆盖旧数据
+fn persist_capability_sets(
+    db: &MCPDatabase,
+    server_id: i64,
+    label: &str,
+    tools_opt: Option<Vec<SimpleTool>>,
+    resources_opt: Option<Vec<SimpleResource>>,
+    prompts_opt: Option<Vec<SimplePrompt>>,
+) -> Result<(), String> {
+    if let Some(tools) = tools_opt {
+        let remote_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+        info!(server_id, tool_count = remote_names.len(), label, "Persisting tools");
+        for t in &tools {
+            info!(server_id, tool_name = %t.name, label, "Fetched MCP tool");
+            if let Err(e) = db.upsert_mcp_server_tool(
+                server_id,
+                &t.name,
+                t.description.as_deref(),
+                Some(&t.params_json),
+            ) {
+                warn!(server_id, tool = %t.name, error = %e, "Failed to upsert tool");
+            }
+        }
+        if let Err(e) = db.delete_mcp_server_tools_not_in(server_id, &remote_names) {
+            warn!(server_id, error = %e, label, "Failed to delete stale tools");
+        }
+    }
+
+    if let Some(resources) = resources_opt {
+        let remote_uris: Vec<String> = resources.iter().map(|r| r.uri.clone()).collect();
+        info!(server_id, resource_count = remote_uris.len(), label, "Persisting resources");
+        for r in &resources {
+            if let Err(e) = db.upsert_mcp_server_resource(
+                server_id,
+                &r.uri,
+                &r.name,
+                &r.mime_type,
+                r.description.as_deref(),
+            ) {
+                warn!(server_id, resource = %r.name, error = %e, "Failed to upsert resource");
+            }
+        }
+        if let Err(e) = db.delete_mcp_server_resources_not_in(server_id, &remote_uris) {
+            warn!(server_id, error = %e, label, "Failed to delete stale resources");
+        }
+    }
+
+    if let Some(prompts) = prompts_opt {
+        let remote_names: Vec<String> = prompts.iter().map(|p| p.name.clone()).collect();
+        info!(server_id, prompt_count = remote_names.len(), label, "Persisting prompts");
+        for p in &prompts {
+            if let Err(e) = db.upsert_mcp_server_prompt(
+                server_id,
+                &p.name,
+                p.description.as_deref(),
+                Some(&p.args_json),
+            ) {
+                warn!(server_id, prompt = %p.name, error = %e, "Failed to upsert prompt");
+            }
+        }
+        if let Err(e) = db.delete_mcp_server_prompts_not_in(server_id, &remote_names) {
+            warn!(server_id, error = %e, label, "Failed to delete stale prompts");
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
 #[instrument(level = "debug", skip(app_handle))]
 pub async fn get_mcp_servers(app_handle: tauri::AppHandle) -> Result<Vec<MCPServer>, String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = open_db(&app_handle)?;
     let servers = db.get_mcp_servers().map_err(|e| e.to_string())?;
     Ok(servers)
 }
@@ -61,7 +205,7 @@ pub async fn get_mcp_servers(app_handle: tauri::AppHandle) -> Result<Vec<MCPServ
 #[tauri::command]
 #[instrument(level = "debug", skip(app_handle), fields(id))]
 pub async fn get_mcp_server(app_handle: tauri::AppHandle, id: i64) -> Result<MCPServer, String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = open_db(&app_handle)?;
     let server = db.get_mcp_server(id).map_err(|e| e.to_string())?;
     Ok(server)
 }
@@ -72,7 +216,7 @@ pub async fn add_mcp_server(
     app_handle: tauri::AppHandle,
     request: MCPServerRequest,
 ) -> Result<i64, String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = open_db(&app_handle)?;
 
     let server_id = db
         .upsert_mcp_server_with_builtin(
@@ -100,7 +244,7 @@ pub async fn update_mcp_server(
     id: i64,
     request: MCPServerRequest,
 ) -> Result<(), String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = open_db(&app_handle)?;
 
     db.update_mcp_server_with_builtin(
         id,
@@ -124,7 +268,7 @@ pub async fn update_mcp_server(
 #[tauri::command]
 #[instrument(level = "debug", skip(app_handle), fields(id))]
 pub async fn delete_mcp_server(app_handle: tauri::AppHandle, id: i64) -> Result<(), String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = open_db(&app_handle)?;
     db.delete_mcp_server(id).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -136,7 +280,7 @@ pub async fn toggle_mcp_server(
     id: i64,
     is_enabled: bool,
 ) -> Result<(), String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = open_db(&app_handle)?;
     db.toggle_mcp_server(id, is_enabled).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -147,7 +291,7 @@ pub async fn get_mcp_server_tools(
     app_handle: tauri::AppHandle,
     server_id: i64,
 ) -> Result<Vec<MCPServerTool>, String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = open_db(&app_handle)?;
     let tools = db.get_mcp_server_tools(server_id).map_err(|e| e.to_string())?;
     Ok(tools)
 }
@@ -160,7 +304,7 @@ pub async fn update_mcp_server_tool(
     is_enabled: bool,
     is_auto_run: bool,
 ) -> Result<(), String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = open_db(&app_handle)?;
     db.update_mcp_server_tool(tool_id, is_enabled, is_auto_run).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -171,7 +315,7 @@ pub async fn get_mcp_server_resources(
     app_handle: tauri::AppHandle,
     server_id: i64,
 ) -> Result<Vec<MCPServerResource>, String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = open_db(&app_handle)?;
     let resources = db.get_mcp_server_resources(server_id).map_err(|e| e.to_string())?;
     Ok(resources)
 }
@@ -182,7 +326,7 @@ pub async fn test_mcp_connection(
     app_handle: tauri::AppHandle,
     server_id: i64,
 ) -> Result<bool, String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = open_db(&app_handle)?;
     let server = db.get_mcp_server(server_id).map_err(|e| e.to_string())?;
 
     // 测试实际的MCP连接
@@ -222,29 +366,20 @@ async fn test_stdio_connection(server: &MCPServer) -> Result<(), String> {
     use tokio::process::Command;
 
     let command = server.command.as_ref().ok_or("No command specified for stdio transport")?;
-    let parts: Vec<&str> = command.split_whitespace().collect();
+    let parts = split_command_line(command);
     if parts.is_empty() {
         return Err("Empty command".to_string());
     }
 
     // 简短的连接测试，超时时间更短
     let client_result = tokio::time::timeout(
-        std::time::Duration::from_millis(5000), // 5秒超时
+        STDIO_TEST_TIMEOUT,
         async {
             let client = ()
-                .serve(TokioChildProcess::new(Command::new(parts[0]).configure(|cmd| {
-                    // 添加命令参数
-                    if parts.len() > 1 {
-                        cmd.args(&parts[1..]);
-                    }
-
-                    // 设置环境变量
+                .serve(TokioChildProcess::new(Command::new(&parts[0]).configure(|cmd| {
+                    if parts.len() > 1 { cmd.args(&parts[1..]); }
                     if let Some(env_vars) = &server.environment_variables {
-                        for line in env_vars.lines() {
-                            if let Some((key, value)) = line.split_once('=') {
-                                cmd.env(key.trim(), value.trim());
-                            }
-                        }
+                        for (k,v) in parse_env_vars(env_vars) { cmd.env(k, v); }
                     }
                 }))?)
                 .await?;
@@ -277,7 +412,7 @@ async fn test_sse_connection(server: &MCPServer) -> Result<(), String> {
 
     // 简短的连接测试，超时时间更短
     let client_result = tokio::time::timeout(
-        std::time::Duration::from_millis(5000), // 5秒超时
+        STDIO_TEST_TIMEOUT,
         async {
             // Build client with default headers if configured
             let (_auth_header, all_headers) = parse_server_headers(server);
@@ -393,7 +528,7 @@ pub async fn get_mcp_server_prompts(
     app_handle: tauri::AppHandle,
     server_id: i64,
 ) -> Result<Vec<MCPServerPrompt>, String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = open_db(&app_handle)?;
     let prompts = db.get_mcp_server_prompts(server_id).map_err(|e| e.to_string())?;
     Ok(prompts)
 }
@@ -404,7 +539,7 @@ pub async fn update_mcp_server_prompt(
     prompt_id: i64,
     is_enabled: bool,
 ) -> Result<(), String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = open_db(&app_handle)?;
     db.update_mcp_server_prompt(prompt_id, is_enabled).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -414,7 +549,7 @@ pub async fn refresh_mcp_server_capabilities(
     app_handle: tauri::AppHandle,
     server_id: i64,
 ) -> Result<(Vec<MCPServerTool>, Vec<MCPServerResource>, Vec<MCPServerPrompt>), String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = open_db(&app_handle)?;
     let server = db.get_mcp_server(server_id).map_err(|e| e.to_string())?;
 
     // Use incremental updates instead of clearing existing data
@@ -425,7 +560,7 @@ pub async fn refresh_mcp_server_capabilities(
             // If aipp builtin server, register tools directly
             if let Some(cmd) = &server.command {
                 if crate::mcp::builtin_mcp::is_builtin_mcp_call(cmd) {
-                    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+                    let db = open_db(&app_handle)?;
                     for tool in crate::mcp::builtin_mcp::get_builtin_tools_for_command(cmd) {
                         let params_json = tool.input_schema.to_string();
                         let _ = db.upsert_mcp_server_tool(
@@ -476,35 +611,26 @@ async fn get_stdio_capabilities(
     };
     use tokio::process::Command;
 
-    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let db = open_db(&app_handle)?;
 
     // 获取命令，如果没有则返回错误
     let command = server.command.ok_or("No command specified for stdio transport")?;
 
     // 解析命令和参数
-    let parts: Vec<&str> = command.split_whitespace().collect();
+    let parts = split_command_line(&command);
     if parts.is_empty() {
         return Err("Empty command".to_string());
     }
 
     // 创建MCP客户端 - 使用正确的API模式
     let client_result = tokio::time::timeout(
-        std::time::Duration::from_millis(server.timeout.unwrap_or(30000) as u64),
+        std::time::Duration::from_millis(server.timeout.unwrap_or(CONNECT_TIMEOUT_DEFAULT_MS as i32) as u64),
         async {
             let client = ()
-                .serve(TokioChildProcess::new(Command::new(parts[0]).configure(|cmd| {
-                    // 添加命令参数
-                    if parts.len() > 1 {
-                        cmd.args(&parts[1..]);
-                    }
-
-                    // 设置环境变量
+                .serve(TokioChildProcess::new(Command::new(&parts[0]).configure(|cmd| {
+                    if parts.len() > 1 { cmd.args(&parts[1..]); }
                     if let Some(env_vars) = &server.environment_variables {
-                        for line in env_vars.lines() {
-                            if let Some((key, value)) = line.split_once('=') {
-                                cmd.env(key.trim(), value.trim());
-                            }
-                        }
+                        for (k,v) in parse_env_vars(env_vars) { cmd.env(k, v); }
                     }
                 }))?)
                 .await?;
@@ -527,14 +653,15 @@ async fn get_stdio_capabilities(
     // 获取服务器信息
     let _server_info = client.peer_info();
 
-    // 获取能力 - 使用便捷方法
+    // 获取能力 - 并发请求工具/资源/提示
     let capabilities_result = tokio::time::timeout(
-        std::time::Duration::from_millis(10000), // 10秒超时
+        CAPABILITY_TIMEOUT,
         async {
-            let tools_result = client.list_all_tools().await;
-            let resources_result = client.list_all_resources().await;
-            let prompts_result = client.list_all_prompts().await;
-
+            let (tools_result, resources_result, prompts_result) = tokio::join!(
+                client.list_all_tools(),
+                client.list_all_resources(),
+                client.list_all_prompts()
+            );
             (tools_result, resources_result, prompts_result)
         },
     )
@@ -547,84 +674,48 @@ async fn get_stdio_capabilities(
         }
     };
 
-    // 收集远端的名称/URI，用于后续 diff 删除
-    let mut remote_tool_names: Vec<String> = Vec::new();
-    let mut remote_resource_uris: Vec<String> = Vec::new();
-    let mut remote_prompt_names: Vec<String> = Vec::new();
+    // 转换结果为简化结构，失败则保持为 None（不做删除）
+    let tools_simple = tools_result.ok().map(|tools| {
+        tools
+            .into_iter()
+            .map(|tool| SimpleTool {
+                name: tool.name.to_string(),
+                description: tool.description.as_ref().map(|d| d.to_string()),
+                params_json: serde_json::to_string(&tool.input_schema)
+                    .unwrap_or_else(|_| "{}".to_string()),
+            })
+            .collect::<Vec<_>>()
+    });
+    let resources_simple = resources_result.ok().map(|resources| {
+        resources
+            .into_iter()
+            .map(|r| SimpleResource {
+                uri: r.uri.to_string(),
+                name: r.name.to_string(),
+                mime_type: r.mime_type.as_deref().unwrap_or("unknown").to_string(),
+                description: r.description.as_ref().map(|d| d.to_string()),
+            })
+            .collect::<Vec<_>>()
+    });
+    let prompts_simple = prompts_result.ok().map(|prompts| {
+        prompts
+            .into_iter()
+            .map(|p| {
+                let args_json = if let Some(args) = p.arguments {
+                    serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
+                } else {
+                    "{}".to_string()
+                };
+                SimplePrompt {
+                    name: p.name.to_string(),
+                    description: p.description.as_ref().map(|d| d.to_string()),
+                    args_json,
+                }
+            })
+            .collect::<Vec<_>>()
+    });
 
-    // 处理工具
-    if let Ok(tools) = tools_result {
-        for tool in tools {
-            // 调试：打印远端返回的工具名，方便对比
-            info!(server_id, tool_name = %tool.name, "Fetched MCP tool from remote server");
-
-            remote_tool_names.push(tool.name.to_string());
-
-            let params_json =
-                serde_json::to_string(&tool.input_schema).unwrap_or_else(|_| "{}".to_string());
-
-            if let Err(e) = db.upsert_mcp_server_tool(
-                server_id,
-                &tool.name,
-                tool.description.as_deref(),
-                Some(&params_json),
-            ) {
-                warn!(tool = %tool.name, error = %e, "Failed to upsert tool");
-            }
-        }
-
-        // 删除远端已不存在的工具
-        if let Err(e) = db.delete_mcp_server_tools_not_in(server_id, &remote_tool_names) {
-            warn!(server_id, error = %e, "Failed to delete stale tools for server");
-        }
-    }
-
-    // 处理资源
-    if let Ok(resources) = resources_result {
-        for resource in resources {
-            remote_resource_uris.push(resource.uri.to_string());
-
-            if let Err(e) = db.upsert_mcp_server_resource(
-                server_id,
-                &resource.uri,
-                &resource.name,
-                &resource.mime_type.as_ref().unwrap_or(&"unknown".to_string()),
-                resource.description.as_deref(),
-            ) {
-                warn!(resource = %resource.name, error = %e, "Failed to upsert resource");
-            }
-        }
-
-        if let Err(e) = db.delete_mcp_server_resources_not_in(server_id, &remote_resource_uris) {
-            warn!(server_id, error = %e, "Failed to delete stale resources for server");
-        }
-    }
-
-    // 处理提示
-    if let Ok(prompts) = prompts_result {
-        for prompt in prompts {
-            remote_prompt_names.push(prompt.name.to_string());
-
-            let args_json = if let Some(args) = prompt.arguments {
-                serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
-            } else {
-                "{}".to_string()
-            };
-
-            if let Err(e) = db.upsert_mcp_server_prompt(
-                server_id,
-                &prompt.name,
-                prompt.description.as_deref(),
-                Some(&args_json),
-            ) {
-                warn!(prompt = %prompt.name, error = %e, "Failed to upsert prompt");
-            }
-        }
-
-        if let Err(e) = db.delete_mcp_server_prompts_not_in(server_id, &remote_prompt_names) {
-            warn!(server_id, error = %e, "Failed to delete stale prompts for server");
-        }
-    }
+    persist_capability_sets(&db, server_id, "stdio", tools_simple, resources_simple, prompts_simple)?;
 
     // 取消客户端连接
     let _ = client.cancel().await;
@@ -646,14 +737,14 @@ async fn get_sse_capabilities(
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
     use crate::mcp::util::parse_server_headers;
 
-    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let db = open_db(&app_handle)?;
 
     // 获取URL，如果没有则返回错误
     let url = server.url.clone().ok_or("No URL specified for SSE transport")?;
 
     // 创建SSE传输和客户端（复用与 test_sse_connection 相同的模式，仅增加能力同步逻辑）
     let client_result = tokio::time::timeout(
-        std::time::Duration::from_millis(server.timeout.unwrap_or(30000) as u64),
+        std::time::Duration::from_millis(server.timeout.unwrap_or(CONNECT_TIMEOUT_DEFAULT_MS as i32) as u64),
         async {
             let (_auth_header, all_headers) = parse_server_headers(&server);
             let transport = if let Some(hdrs) = all_headers {
@@ -710,12 +801,13 @@ async fn get_sse_capabilities(
 
     // 获取能力
     let capabilities_result = tokio::time::timeout(
-        std::time::Duration::from_millis(10000),
+        CAPABILITY_TIMEOUT,
         async {
-            let tools_result = client.list_all_tools().await;
-            let resources_result = client.list_all_resources().await;
-            let prompts_result = client.list_all_prompts().await;
-
+            let (tools_result, resources_result, prompts_result) = tokio::join!(
+                client.list_all_tools(),
+                client.list_all_resources(),
+                client.list_all_prompts()
+            );
             (tools_result, resources_result, prompts_result)
         },
     )
@@ -728,82 +820,40 @@ async fn get_sse_capabilities(
         }
     };
 
-    // 收集远端的名称/URI，用于后续 diff 删除
-    let mut remote_tool_names: Vec<String> = Vec::new();
-    let mut remote_resource_uris: Vec<String> = Vec::new();
-    let mut remote_prompt_names: Vec<String> = Vec::new();
-
-    // 处理工具
-    if let Ok(tools) = tools_result {
-        for tool in tools {
-            info!(server_id, tool_name = %tool.name, "Fetched MCP tool from SSE server");
-
-            remote_tool_names.push(tool.name.to_string());
-
-            let params_json =
-                serde_json::to_string(&tool.input_schema).unwrap_or_else(|_| "{}".to_string());
-
-            if let Err(e) = db.upsert_mcp_server_tool(
-                server_id,
-                &tool.name,
-                tool.description.as_deref(),
-                Some(&params_json),
-            ) {
-                warn!(tool = %tool.name, error = %e, "Failed to upsert SSE tool");
-            }
-        }
-
-        if let Err(e) = db.delete_mcp_server_tools_not_in(server_id, &remote_tool_names) {
-            warn!(server_id, error = %e, "Failed to delete stale SSE tools for server");
-        }
-    }
-
-    // 处理资源
-    if let Ok(resources) = resources_result {
-        for resource in resources {
-            remote_resource_uris.push(resource.uri.to_string());
-
-            if let Err(e) = db.upsert_mcp_server_resource(
-                server_id,
-                &resource.uri,
-                &resource.name,
-                &resource.mime_type.as_ref().unwrap_or(&"unknown".to_string()),
-                resource.description.as_deref(),
-            ) {
-                warn!(resource = %resource.name, error = %e, "Failed to upsert SSE resource");
-            }
-        }
-
-        if let Err(e) = db.delete_mcp_server_resources_not_in(server_id, &remote_resource_uris) {
-            warn!(server_id, error = %e, "Failed to delete stale SSE resources for server");
-        }
-    }
-
-    // 处理提示
-    if let Ok(prompts) = prompts_result {
-        for prompt in prompts {
-            remote_prompt_names.push(prompt.name.to_string());
-
-            let args_json = if let Some(args) = prompt.arguments {
-                serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
-            } else {
-                "{}".to_string()
-            };
-
-            if let Err(e) = db.upsert_mcp_server_prompt(
-                server_id,
-                &prompt.name,
-                prompt.description.as_deref(),
-                Some(&args_json),
-            ) {
-                warn!(prompt = %prompt.name, error = %e, "Failed to upsert SSE prompt");
-            }
-        }
-
-        if let Err(e) = db.delete_mcp_server_prompts_not_in(server_id, &remote_prompt_names) {
-            warn!(server_id, error = %e, "Failed to delete stale SSE prompts for server");
-        }
-    }
+    let tools_simple = tools_result.ok().map(|tools| {
+        tools
+            .into_iter()
+            .map(|tool| SimpleTool {
+                name: tool.name.to_string(),
+                description: tool.description.as_ref().map(|d| d.to_string()),
+                params_json: serde_json::to_string(&tool.input_schema)
+                    .unwrap_or_else(|_| "{}".to_string()),
+            })
+            .collect::<Vec<_>>()
+    });
+    let resources_simple = resources_result.ok().map(|resources| {
+        resources
+            .into_iter()
+            .map(|r| SimpleResource {
+                uri: r.uri.to_string(),
+                name: r.name.to_string(),
+                mime_type: r.mime_type.as_deref().unwrap_or("unknown").to_string(),
+                description: r.description.as_ref().map(|d| d.to_string()),
+            })
+            .collect::<Vec<_>>()
+    });
+    let prompts_simple = prompts_result.ok().map(|prompts| {
+        prompts
+            .into_iter()
+            .map(|p| {
+                let args_json = if let Some(args) = p.arguments {
+                    serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
+                } else { "{}".to_string() };
+                SimplePrompt { name: p.name.to_string(), description: p.description.as_ref().map(|d| d.to_string()), args_json }
+            })
+            .collect::<Vec<_>>()
+    });
+    persist_capability_sets(&db, server_id, "sse", tools_simple, resources_simple, prompts_simple)?;
 
     // 取消客户端连接
     let _ = client.cancel().await;
@@ -825,14 +875,14 @@ async fn get_http_capabilities(
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
     use crate::mcp::util::parse_server_headers;
 
-    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let db = open_db(&app_handle)?;
 
     // 获取URL，如果没有则返回错误
     let url = server.url.clone().ok_or("No URL specified for HTTP transport")?;
 
     // 创建HTTP传输和客户端（复用 test_http_connection 中的模式，仅增加能力同步逻辑）
     let client_result = tokio::time::timeout(
-        std::time::Duration::from_millis(server.timeout.unwrap_or(30000) as u64),
+        std::time::Duration::from_millis(server.timeout.unwrap_or(CONNECT_TIMEOUT_DEFAULT_MS as i32) as u64),
         async {
             let (auth_header, all_headers) = parse_server_headers(&server);
             let transport = {
@@ -889,12 +939,13 @@ async fn get_http_capabilities(
 
     // 获取能力
     let capabilities_result = tokio::time::timeout(
-        std::time::Duration::from_millis(10000),
+        CAPABILITY_TIMEOUT,
         async {
-            let tools_result = client.list_all_tools().await;
-            let resources_result = client.list_all_resources().await;
-            let prompts_result = client.list_all_prompts().await;
-
+            let (tools_result, resources_result, prompts_result) = tokio::join!(
+                client.list_all_tools(),
+                client.list_all_resources(),
+                client.list_all_prompts()
+            );
             (tools_result, resources_result, prompts_result)
         },
     )
@@ -907,82 +958,40 @@ async fn get_http_capabilities(
         }
     };
 
-    // 收集远端的名称/URI，用于后续 diff 删除
-    let mut remote_tool_names: Vec<String> = Vec::new();
-    let mut remote_resource_uris: Vec<String> = Vec::new();
-    let mut remote_prompt_names: Vec<String> = Vec::new();
-
-    // 处理工具
-    if let Ok(tools) = tools_result {
-        for tool in tools {
-            info!(server_id, tool_name = %tool.name, "Fetched MCP tool from HTTP server");
-
-            remote_tool_names.push(tool.name.to_string());
-
-            let params_json =
-                serde_json::to_string(&tool.input_schema).unwrap_or_else(|_| "{}".to_string());
-
-            if let Err(e) = db.upsert_mcp_server_tool(
-                server_id,
-                &tool.name,
-                tool.description.as_deref(),
-                Some(&params_json),
-            ) {
-                warn!(tool = %tool.name, error = %e, "Failed to upsert HTTP tool");
-            }
-        }
-
-        if let Err(e) = db.delete_mcp_server_tools_not_in(server_id, &remote_tool_names) {
-            warn!(server_id, error = %e, "Failed to delete stale HTTP tools for server");
-        }
-    }
-
-    // 处理资源
-    if let Ok(resources) = resources_result {
-        for resource in resources {
-            remote_resource_uris.push(resource.uri.to_string());
-
-            if let Err(e) = db.upsert_mcp_server_resource(
-                server_id,
-                &resource.uri,
-                &resource.name,
-                &resource.mime_type.as_ref().unwrap_or(&"unknown".to_string()),
-                resource.description.as_deref(),
-            ) {
-                warn!(resource = %resource.name, error = %e, "Failed to upsert HTTP resource");
-            }
-        }
-
-        if let Err(e) = db.delete_mcp_server_resources_not_in(server_id, &remote_resource_uris) {
-            warn!(server_id, error = %e, "Failed to delete stale HTTP resources for server");
-        }
-    }
-
-    // 处理提示
-    if let Ok(prompts) = prompts_result {
-        for prompt in prompts {
-            remote_prompt_names.push(prompt.name.to_string());
-
-            let args_json = if let Some(args) = prompt.arguments {
-                serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
-            } else {
-                "{}".to_string()
-            };
-
-            if let Err(e) = db.upsert_mcp_server_prompt(
-                server_id,
-                &prompt.name,
-                prompt.description.as_deref(),
-                Some(&args_json),
-            ) {
-                warn!(prompt = %prompt.name, error = %e, "Failed to upsert HTTP prompt");
-            }
-        }
-
-        if let Err(e) = db.delete_mcp_server_prompts_not_in(server_id, &remote_prompt_names) {
-            warn!(server_id, error = %e, "Failed to delete stale HTTP prompts for server");
-        }
-    }
+    let tools_simple = tools_result.ok().map(|tools| {
+        tools
+            .into_iter()
+            .map(|tool| SimpleTool {
+                name: tool.name.to_string(),
+                description: tool.description.as_ref().map(|d| d.to_string()),
+                params_json: serde_json::to_string(&tool.input_schema)
+                    .unwrap_or_else(|_| "{}".to_string()),
+            })
+            .collect::<Vec<_>>()
+    });
+    let resources_simple = resources_result.ok().map(|resources| {
+        resources
+            .into_iter()
+            .map(|r| SimpleResource {
+                uri: r.uri.to_string(),
+                name: r.name.to_string(),
+                mime_type: r.mime_type.as_deref().unwrap_or("unknown").to_string(),
+                description: r.description.as_ref().map(|d| d.to_string()),
+            })
+            .collect::<Vec<_>>()
+    });
+    let prompts_simple = prompts_result.ok().map(|prompts| {
+        prompts
+            .into_iter()
+            .map(|p| {
+                let args_json = if let Some(args) = p.arguments {
+                    serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
+                } else { "{}".to_string() };
+                SimplePrompt { name: p.name.to_string(), description: p.description.as_ref().map(|d| d.to_string()), args_json }
+            })
+            .collect::<Vec<_>>()
+    });
+    persist_capability_sets(&db, server_id, "http", tools_simple, resources_simple, prompts_simple)?;
 
     // 取消客户端连接
     let _ = client.cancel().await;
@@ -996,7 +1005,7 @@ pub async fn get_mcp_provider(
     app_handle: tauri::AppHandle,
     provider_id: String,
 ) -> Result<Option<McpProviderInfo>, String> {
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = open_db(&app_handle)?;
 
     // Parse provider_id as server ID
     let server_id: i64 =
@@ -1045,7 +1054,7 @@ pub async fn build_mcp_prompt(
     use crate::api::assistant_api::{MCPServerWithTools, MCPToolInfo};
     use crate::mcp::format_mcp_prompt;
 
-    let db = MCPDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = open_db(&app_handle)?;
 
     let mut enabled_servers = Vec::new();
 
