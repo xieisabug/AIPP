@@ -128,6 +128,19 @@ impl AssistantDatabase {
             );",
             [],
         )?;
+        // 在创建唯一索引之前清理历史重复数据，保留 (assistant_id, name) 下最小 id 的记录
+        let _ = self.conn.execute(
+            "DELETE FROM assistant_model_config
+             WHERE id NOT IN (
+               SELECT MIN(id) FROM assistant_model_config GROUP BY assistant_id, name
+             );",
+            [],
+        );
+        // 为常见查询语义增加唯一索引，防止同一助手下同名配置被重复插入
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_assistant_model_config_unique ON assistant_model_config(assistant_id, name);",
+            [],
+        )?;
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS assistant_prompt_param (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -285,7 +298,7 @@ impl AssistantDatabase {
         value_type: &str,
     ) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO assistant_model_config (assistant_id, assistant_model_id, name, value, value_type) VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO assistant_model_config (assistant_id, assistant_model_id, name, value, value_type) VALUES (?, ?, ?, ?, ?)",
             params![assistant_id, assistant_model_id, name, value, value_type],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -513,16 +526,45 @@ impl AssistantDatabase {
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn init_assistant(&self) -> Result<()> {
-        // 使用 INSERT OR IGNORE 避免重复初始化时触发 UNIQUE 约束错误
+        // 1) 初始化默认助手（幂等）
         self.conn.execute(
             "INSERT OR IGNORE INTO assistant (id, name, description, is_addition) VALUES (1, '快速使用助手', '快捷键呼出的快速使用助手', 0)",
             [],
         )?;
-        self.add_assistant_prompt(1, "You are a helpful assistant.")?;
-        self.add_assistant_model_config(1, -1, "max_tokens", "1000", "number")?;
-        self.add_assistant_model_config(1, -1, "temperature", "0.75", "float")?;
-        self.add_assistant_model_config(1, -1, "top_p", "1.0", "float")?;
-        self.add_assistant_model_config(1, -1, "stream", "false", "boolean")?;
+
+        // 2) 默认 prompt：仅当该助手没有任何 prompt 时再插入
+        let prompts = self.get_assistant_prompt(1)?;
+        if prompts.is_empty() {
+            self.add_assistant_prompt(1, "You are a helpful assistant.")?;
+        }
+
+        // 3) 确保存在一个默认 model
+        let mut models = self.get_assistant_model(1)?;
+        if models.is_empty() {
+            let model_id = self.add_assistant_model(1, 0, "", "")?;
+            // 重新读取，供下面使用
+            models = vec![AssistantModel { id: model_id, assistant_id: 1, provider_id: 0, model_code: "".to_string(), alias: "".to_string() }];
+        }
+        let model_id = models[0].id;
+
+        // 4) 默认配置：仅当同名配置不存在时插入（按助手维度去重）
+        let existing_configs = self.get_assistant_model_configs(1)?;
+        let mut existing_names: std::collections::HashSet<String> = existing_configs.into_iter().map(|c| c.name).collect();
+
+        let defaults = vec![
+            ("max_tokens", "1000", "number"),
+            ("temperature", "0.75", "float"),
+            ("top_p", "1.0", "float"),
+            ("stream", "false", "boolean"),
+        ];
+
+        for (name, value, value_type) in defaults {
+            if !existing_names.contains(name) {
+                let _ = self.add_assistant_model_config(1, model_id, name, value, value_type)?;
+                existing_names.insert(name.to_string());
+            }
+        }
+
         Ok(())
     }
 

@@ -191,7 +191,7 @@ pub async fn save_assistant(
             let result_id = assistant_db
                 .add_assistant_model_config(
                     config.assistant_id,
-                    config.id,
+                    config.assistant_model_id,
                     &config.name,
                     config.value.as_deref().unwrap_or(""),
                     &config.value_type,

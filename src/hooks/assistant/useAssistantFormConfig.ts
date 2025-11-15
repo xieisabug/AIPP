@@ -56,7 +56,14 @@ export const useAssistantFormConfig = ({
     const formConfig: AssistantFormConfig[] = useMemo(() => {
         if (!currentAssistant) return [];
 
-        console.log((currentAssistant?.model_configs ?? []))
+        // 去重：同名配置只保留最后一次（避免界面重复渲染同一字段）
+        const uniqueModelConfigs = (() => {
+            const map = new Map<string, typeof currentAssistant.model_configs[number]>();
+            for (const cfg of currentAssistant.model_configs ?? []) {
+                map.set(cfg.name, cfg);
+            }
+            return Array.from(map.values());
+        })();
 
         let baseConfigs: AssistantFormConfig[] = [
             {
@@ -79,7 +86,7 @@ export const useAssistantFormConfig = ({
                     onChange: handleModelChange,
                 },
             },
-            ...(currentAssistant?.model_configs ?? [])
+            ...(uniqueModelConfigs ?? [])
                 .filter(
                     (config) =>
                         !assistantTypeHideField.includes(config.name) &&
