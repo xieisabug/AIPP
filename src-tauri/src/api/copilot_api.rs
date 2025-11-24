@@ -1,7 +1,9 @@
+use crate::api::ai::config::get_network_proxy_from_config;
 use crate::db::llm_db::LLMDatabase;
+use crate::FeatureConfigState;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
 
@@ -50,6 +52,7 @@ pub struct CopilotAuthResult {
 /// 调用 GitHub API 获取真实的 device code，并自动打开浏览器让用户授权
 #[tauri::command]
 pub async fn start_github_copilot_device_flow(
+    app_handle: AppHandle,
     llm_provider_id: i64,
 ) -> Result<CopilotDeviceFlowStartResponse, String> {
     info!(llm_provider_id, "[Copilot] start_github_copilot_device_flow called");
@@ -60,8 +63,24 @@ pub async fn start_github_copilot_device_flow(
 
     info!("[Copilot] Requesting device code from GitHub...");
 
+    // 获取网络代理配置
+    let feature_config_state = app_handle.state::<FeatureConfigState>();
+    let config_feature_map = feature_config_state.config_feature_map.lock().await;
+    let network_proxy = get_network_proxy_from_config(&config_feature_map);
+    drop(config_feature_map);
+
     // 1. 请求 device code
-    let client = reqwest::Client::new();
+    let client = if let Some(proxy_url) = &network_proxy {
+        info!(proxy_url = %proxy_url, "[Copilot] Using network proxy");
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|e| format!("代理配置失败: {}", e))?;
+        reqwest::Client::builder()
+            .proxy(proxy)
+            .build()
+            .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?
+    } else {
+        reqwest::Client::new()
+    };
     let response = client
         .post("https://github.com/login/device/code")
         .header("Accept", "application/json")
@@ -142,7 +161,24 @@ pub async fn poll_github_copilot_token(
     );
 
     let client_id = "Iv1.b507a08c87ecfe98";
-    let client = reqwest::Client::new();
+
+    // 获取网络代理配置
+    let feature_config_state = app_handle.state::<FeatureConfigState>();
+    let config_feature_map = feature_config_state.config_feature_map.lock().await;
+    let network_proxy = get_network_proxy_from_config(&config_feature_map);
+    drop(config_feature_map);
+
+    let client = if let Some(proxy_url) = &network_proxy {
+        info!(proxy_url = %proxy_url, "[Copilot] Using network proxy for polling");
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|e| format!("代理配置失败: {}", e))?;
+        reqwest::Client::builder()
+            .proxy(proxy)
+            .build()
+            .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?
+    } else {
+        reqwest::Client::new()
+    };
 
     // 最多轮询 15 分钟 (900秒 / interval)
     let max_attempts = 900 / interval.max(5);
