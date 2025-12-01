@@ -50,7 +50,7 @@ tauri-plugin-dialog = { git = "https://github.com/tauri-apps/plugins-workspace",
 tauri-plugin-clipboard-manager = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
 tauri-plugin-fs = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
 tauri-plugin-opener = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
-genai = { git = "https://github.com/xieisabug/rust-genai.git", rev="c1c2933939eedd5bcbb98a2f7dc36b305a27ac52" }
+genai = { git = "https://github.com/xieisabug/rust-genai.git", rev="7795980fa35d4476b835228df133f7357c124933" }
 rmcp = { version = "0.8", features = [
 	"client",
 	"transport-io",
