@@ -359,6 +359,65 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         ),
                     },
                 }] : []),
+                // GitHub Copilot 高级配置（代理设置）
+                {
+                    key: "advanced_config",
+                    config: {
+                        type: "custom" as const,
+                        label: "",
+                        value: "",
+                        customRender: () => (
+                            <Collapsible
+                                open={isAdvancedConfigExpanded}
+                                onOpenChange={setIsAdvancedConfigExpanded}
+                            >
+                                <CollapsibleTrigger asChild>
+                                    <Button
+                                        variant="ghost"
+                                        className="w-full justify-between p-2 h-auto text-left hover:bg-muted"
+                                    >
+                                        <span className="text-sm font-medium text-foreground">
+                                            高级配置
+                                        </span>
+                                        <ChevronDown
+                                            className={`h-4 w-4 transition-transform ${isAdvancedConfigExpanded
+                                                ? "rotate-180"
+                                                : ""
+                                                }`}
+                                        />
+                                    </Button>
+                                </CollapsibleTrigger>
+                                <CollapsibleContent className="mt-2">
+                                    <div className="p-3 border border-border rounded-lg bg-muted">
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex flex-col">
+                                                <label className="text-sm font-medium text-foreground">
+                                                    使用网络代理进行请求
+                                                </label>
+                                                <span className="text-xs text-muted-foreground">
+                                                    启用后将使用全局网络代理配置进行模型请求
+                                                </span>
+                                            </div>
+                                            <Switch
+                                                checked={proxyEnabled === "true"}
+                                                onCheckedChange={(checked) => {
+                                                    form.setValue(
+                                                        "proxy_enabled",
+                                                        checked ? "true" : "false",
+                                                    );
+                                                    updateField(
+                                                        "proxy_enabled",
+                                                        checked ? "true" : "false",
+                                                    );
+                                                }}
+                                            />
+                                        </div>
+                                    </div>
+                                </CollapsibleContent>
+                            </Collapsible>
+                        ),
+                    },
+                },
             ];
         }
 
