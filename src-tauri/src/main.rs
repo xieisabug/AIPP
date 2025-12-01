@@ -29,6 +29,11 @@ use crate::api::conversation_api::{
     update_conversation, update_message_content,
 };
 use crate::api::copilot_api::{poll_github_copilot_token, start_github_copilot_device_flow};
+use crate::api::copilot_lsp::{
+    check_copilot_status, get_copilot_lsp_status, get_copilot_oauth_token_from_config,
+    sign_in_confirm, sign_in_initiate, sign_out_copilot, start_copilot_lsp, stop_copilot_lsp,
+    CopilotLspState,
+};
 use crate::api::highlight_api::{highlight_code, list_syntect_themes};
 use crate::api::llm_api::{
     add_llm_model, add_llm_provider, delete_llm_model, delete_llm_provider, export_llm_provider,
@@ -339,6 +344,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             recording_shortcut: TokioMutex::new(false),
         })
         .manage(MessageTokenManager::new())
+        .manage(CopilotLspState::default())
         .invoke_handler(tauri::generate_handler![
             ask_ai,
             tool_result_continue_ask_ai,
@@ -447,6 +453,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             update_assistant_model_config_value,
             start_github_copilot_device_flow,
             poll_github_copilot_token,
+            // Copilot LSP commands
+            start_copilot_lsp,
+            stop_copilot_lsp,
+            check_copilot_status,
+            sign_in_initiate,
+            sign_in_confirm,
+            sign_out_copilot,
+            get_copilot_lsp_status,
+            get_copilot_oauth_token_from_config,
             create_mcp_tool_call,
             execute_mcp_tool_call,
             get_mcp_tool_call,

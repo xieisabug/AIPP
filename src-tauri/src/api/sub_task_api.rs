@@ -419,19 +419,7 @@ pub async fn run_sub_task_sync(
             match client.exec_chat(model_name, chat_request.clone(), Some(&chat_options)).await {
                 Ok(response) => {
                     let ai_latency_ms = ai_start.elapsed().as_millis() as u64;
-                    let content = if response.content.is_empty() {
-                        String::new()
-                    } else {
-                        response
-                            .content
-                            .into_iter()
-                            .map(|c| match c {
-                                genai::chat::MessageContent::Text(text) => text,
-                                _ => String::new(),
-                            })
-                            .collect::<Vec<_>>()
-                            .join("")
-                    };
+                    let content = response.content.into_joined_texts().unwrap_or_default();
                     let token_usage = response.usage;
                     let token_stats = {
                         let total = token_usage.total_tokens.unwrap_or(0) as i32;
@@ -1417,19 +1405,7 @@ async fn execute_mcp_loop(
             let ai_start = std::time::Instant::now();
             match client.exec_chat(model_name, chat_request.clone(), Some(&chat_options)).await {
                 Ok(response) => {
-                    let content = if response.content.is_empty() {
-                        String::new()
-                    } else {
-                        response
-                            .content
-                            .into_iter()
-                            .map(|c| match c {
-                                genai::chat::MessageContent::Text(text) => text,
-                                _ => String::new(),
-                            })
-                            .collect::<Vec<_>>()
-                            .join("")
-                    };
+                    let content = response.content.into_joined_texts().unwrap_or_default();
                     let ai_latency_ms = ai_start.elapsed().as_millis() as u64;
                     debug!(subtask_id=subtask_id, iteration=loops_count, attempt=attempt, ai_latency_ms=ai_latency_ms, response_chars=content.chars().count(), preview=%content.chars().take(120).collect::<String>(), "mcp loop AI call success");
                     break (content, ai_latency_ms);

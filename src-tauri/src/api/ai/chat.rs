@@ -1113,33 +1113,36 @@ async fn attempt_stream_chat(
     for (i, msg) in chat_request.messages.iter().enumerate() {
     debug!(message_index = i, role = ?msg.role, "stream message");
         match &msg.role {
-            genai::chat::ChatRole::Assistant => match &msg.content {
-                genai::chat::MessageContent::Text(text) => {
+            genai::chat::ChatRole::Assistant => {
+                if let Some(text) = msg.content.first_text() {
                     debug!(preview = %text.chars().take(100).collect::<String>(), "assistant content");
-                }
-                genai::chat::MessageContent::ToolCalls(tool_calls) => {
+                } else if msg.content.contains_tool_call() {
+                    let tool_calls = msg.content.tool_calls();
                     debug!(tool_calls_count = tool_calls.len(), "assistant tool calls");
                     for tc in tool_calls {
                         debug!(call_id = %tc.call_id, fn_name = %tc.fn_name, "tool call item");
                     }
+                } else {
+                    debug!("assistant content other type");
                 }
-                _ => debug!("assistant content other type"),
-            },
-            genai::chat::ChatRole::Tool => match &msg.content {
-                genai::chat::MessageContent::Text(text) => {
+            }
+            genai::chat::ChatRole::Tool => {
+                if let Some(text) = msg.content.first_text() {
                     debug!(
                         "    Tool response content: {}",
                         text.chars().take(100).collect::<String>()
                     );
+                } else {
+                    debug!("tool response other type");
                 }
-                _ => debug!("tool response other type"),
-            },
-            _ => match &msg.content {
-                genai::chat::MessageContent::Text(text) => {
+            }
+            _ => {
+                if let Some(text) = msg.content.first_text() {
                     debug!(preview = %text.chars().take(100).collect::<String>(), "other content");
+                } else {
+                    debug!("other content other type");
                 }
-                _ => debug!("other content other type"),
-            },
+            }
         }
     }
 
@@ -1612,33 +1615,36 @@ pub async fn handle_non_stream_chat(
     for (i, msg) in chat_request.messages.iter().enumerate() {
     debug!(message_index = i, role = ?msg.role, "non stream message");
         match &msg.role {
-            genai::chat::ChatRole::Assistant => match &msg.content {
-                genai::chat::MessageContent::Text(text) => {
+            genai::chat::ChatRole::Assistant => {
+                if let Some(text) = msg.content.first_text() {
                     debug!(preview = %text.chars().take(100).collect::<String>(), "assistant content non stream");
-                }
-                genai::chat::MessageContent::ToolCalls(tool_calls) => {
+                } else if msg.content.contains_tool_call() {
+                    let tool_calls = msg.content.tool_calls();
                     debug!(tool_calls_count = tool_calls.len(), "assistant tool calls non stream");
                     for tc in tool_calls {
                         debug!(call_id = %tc.call_id, fn_name = %tc.fn_name, "tool call item non stream");
                     }
+                } else {
+                    debug!("assistant content other type non stream");
                 }
-                _ => debug!("assistant content other type non stream"),
-            },
-            genai::chat::ChatRole::Tool => match &msg.content {
-                genai::chat::MessageContent::Text(text) => {
+            }
+            genai::chat::ChatRole::Tool => {
+                if let Some(text) = msg.content.first_text() {
                     debug!(
                         "    Tool response content: {}",
                         text.chars().take(100).collect::<String>()
                     );
+                } else {
+                    debug!("tool response other type non stream");
                 }
-                _ => debug!("tool response other type non stream"),
-            },
-            _ => match &msg.content {
-                genai::chat::MessageContent::Text(text) => {
+            }
+            _ => {
+                if let Some(text) = msg.content.first_text() {
                     debug!(preview = %text.chars().take(100).collect::<String>(), "other content non stream");
+                } else {
+                    debug!("other content other type non stream");
                 }
-                _ => debug!("other content other type non stream"),
-            },
+            }
         }
     }
 

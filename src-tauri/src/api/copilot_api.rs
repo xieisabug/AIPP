@@ -86,8 +86,7 @@ pub async fn start_github_copilot_device_flow(
         .header("Accept", "application/json")
         .header("User-Agent", "AIPP-Copilot-Client")
         .json(&serde_json::json!({
-            "client_id": client_id,
-            "scope": "user:email"
+            "client_id": client_id
         }))
         .send()
         .await
@@ -144,8 +143,8 @@ pub async fn start_github_copilot_device_flow(
     Ok(resp)
 }
 
-/// 轮询 GitHub Copilot 授权结果，并在成功后将 access_token 存入 llm_provider_config 表的 `api_key` 字段。
-/// 真实调用 GitHub API 进行轮询，直到用户完成授权或超时
+/// 轮询 GitHub Copilot 授权结果，并在成功后将 OAuth token (gho_ 开头) 存入 llm_provider_config 表的 `api_key` 字段。
+/// genai 客户端会自动处理 token 交换。
 #[tauri::command]
 pub async fn poll_github_copilot_token(
     app_handle: AppHandle,
@@ -224,29 +223,30 @@ pub async fn poll_github_copilot_token(
 
         // 尝试解析为成功响应
         if let Ok(token_response) = serde_json::from_str::<GitHubTokenResponse>(&body) {
-            info!(attempt, "[Copilot] Authorization successful! Access token obtained.");
+            info!(attempt, "[Copilot] Authorization successful! OAuth token obtained.");
 
             let access_token = token_response.access_token;
             let token_type = token_response.token_type;
             let scope = token_response.scope;
 
-            // 保存 token 到数据库
+            // 保存 OAuth token (gho_ 开头) 到数据库的 api_key 字段
+            // genai 客户端会自动使用此 token 进行 token 交换
             let db = LLMDatabase::new(&app_handle)
                 .map_err(|e| format!("创建 LLM 数据库连接失败: {}", e))?;
 
             if let Err(e) = db.update_llm_provider_config(llm_provider_id, "api_key", &access_token)
             {
                 error!(llm_provider_id, error = ?e, "[Copilot] Failed to save api_key");
-                return Err(format!("保存 Copilot 授权信息失败: {}", e));
+                return Err(format!("保存 GitHub OAuth token 失败: {}", e));
             }
 
-            info!(llm_provider_id, "[Copilot] Access token saved to database successfully");
+            info!(llm_provider_id, "[Copilot] OAuth token saved to api_key successfully");
 
             let result = CopilotAuthResult {
                 llm_provider_id,
                 access_token,
                 token_type,
-                expires_at: None, // GitHub token 一般不会过期
+                expires_at: None, // GitHub OAuth token 不会过期
                 scope: Some(scope),
             };
 

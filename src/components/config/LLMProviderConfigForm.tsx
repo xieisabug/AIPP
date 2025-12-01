@@ -2,6 +2,7 @@ import React, { useEffect, useCallback, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import debounce from "lodash/debounce";
 import TagInputContainer from "./TagInputContainer";
+import ReadOnlyModelList from "./ReadOnlyModelList";
 import ModelSelectionDialog from "./ModelSelectionDialog";
 import ConfigForm from "../ConfigForm";
 import { useForm } from "react-hook-form";
@@ -14,6 +15,7 @@ import {
     CollapsibleTrigger,
 } from "../ui/collapsible";
 import { Trash2, ChevronDown, Share, Copy } from "lucide-react";
+import { useCopilot } from "@/hooks/useCopilot";
 
 interface LLMProviderConfig {
     name: string;
@@ -74,14 +76,40 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const [modelSelectionData, setModelSelectionData] =
         useState<ModelSelectionResponse | null>(null);
     const [isUpdatingModels, setIsUpdatingModels] = useState<boolean>(false);
-    const [copilotAuthInfo, setCopilotAuthInfo] = useState<{
-        userCode?: string;
-        verificationUri?: string;
-        isAuthorizing: boolean;
-    }>({ isAuthorizing: false });
     const [hasApiKey, setHasApiKey] = useState<boolean>(false);
 
-    const isCopilotProvider = apiType === "GitHub Copilot" || apiType === "github_copilot";
+    const isCopilotProvider = apiType === "github_copilot";
+
+    // API 类型显示标签映射
+    const apiTypeLabels: Record<string, string> = {
+        'openai_api': 'OpenAI API',
+        'ollama': 'Ollama API',
+        'anthropic': 'Anthropic API',
+        'cohere': 'Cohere API',
+        'deepseek': 'DeepSeek API',
+        'github_copilot': 'GitHub Copilot',
+    };
+    const apiTypeLabel = apiTypeLabels[apiType] || apiType;
+
+    // GitHub Copilot 授权管理
+    const copilot = useCopilot({
+        llmProviderId: id,
+        onAuthSuccess: () => {
+            // 授权成功后刷新配置
+            invoke<Array<LLMProviderConfig>>("get_llm_provider_config", { id })
+                .then((configArray) => {
+                    const newConfig: Record<string, string> = {};
+                    configArray.forEach((item) => {
+                        newConfig[item.name] = item.value;
+                    });
+                    form.reset(newConfig);
+                    setHasApiKey(!!newConfig.api_key);
+                })
+                .catch((e) => {
+                    console.error("[Copilot] refresh provider config failed", e);
+                });
+        },
+    });
 
     const defaultValues = useMemo(
         () => ({
@@ -248,30 +276,9 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                         <Button
                                             type="button"
                                             variant="destructive"
-                                            onClick={async () => {
-                                                try {
-                                                    await invoke("update_llm_provider_config", {
-                                                        llmProviderId: parseInt(id, 10),
-                                                        name: "api_key",
-                                                        value: "",
-                                                    });
-                                                    setHasApiKey(false);
-                                                    toast.success("已取消 GitHub Copilot 授权");
-
-                                                    // 刷新配置
-                                                    const configArray = await invoke<Array<LLMProviderConfig>>(
-                                                        "get_llm_provider_config",
-                                                        { id },
-                                                    );
-                                                    const newConfig: Record<string, string> = {};
-                                                    configArray.forEach((item) => {
-                                                        newConfig[item.name] = item.value;
-                                                    });
-                                                    form.reset(newConfig);
-                                                } catch (e) {
-                                                    console.error("[Copilot] Revoke failed", e);
-                                                    toast.error("取消授权失败: " + e);
-                                                }
+                                            onClick={() => {
+                                                copilot.cancelAuthorization();
+                                                setHasApiKey(false);
                                             }}
                                         >
                                             取消授权
@@ -280,25 +287,25 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                 ) : (
                                     <>
                                         <div className="text-sm text-muted-foreground">
-                                            需要先完成 GitHub Copilot 授权才能使用模型。点击下方按钮开始 Device Flow 授权。
+                                            使用 Copilot Language Server 进行授权。如果你已经在其他编辑器（如 VS Code）中授权过 GitHub Copilot，可以直接复用已有授权。
                                         </div>
 
-                                        {copilotAuthInfo.userCode && (
+                                        {copilot.authInfo.userCode && (
                                             <div className="p-3 border border-border rounded-lg bg-muted">
                                                 <div className="text-xs text-muted-foreground mb-2">
                                                     授权码 (User Code):
                                                 </div>
                                                 <div className="flex items-center gap-2">
                                                     <code className="flex-1 text-lg font-mono font-bold bg-background px-3 py-2 rounded border border-border">
-                                                        {copilotAuthInfo.userCode}
+                                                        {copilot.authInfo.userCode}
                                                     </code>
                                                     <Button
                                                         type="button"
                                                         variant="outline"
                                                         size="sm"
                                                         onClick={() => {
-                                                            if (copilotAuthInfo.userCode) {
-                                                                navigator.clipboard.writeText(copilotAuthInfo.userCode);
+                                                            if (copilot.authInfo.userCode) {
+                                                                navigator.clipboard.writeText(copilot.authInfo.userCode);
                                                                 toast.success("授权码已复制到剪贴板");
                                                             }
                                                         }}
@@ -315,79 +322,17 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                         <Button
                                             type="button"
                                             className="bg-primary hover:bg-primary/90 text-primary-foreground"
-                                            disabled={copilotAuthInfo.isAuthorizing}
-                                            onClick={async () => {
-                                                try {
-                                                    setCopilotAuthInfo({ isAuthorizing: true });
-
-                                                    // 1. 启动 device flow
-                                                    const startResp = await invoke<{
-                                                        device_code: string;
-                                                        user_code: string;
-                                                        verification_uri: string;
-                                                        expires_in: number;
-                                                        interval: number;
-                                                    }>("start_github_copilot_device_flow", {
-                                                        llmProviderId: parseInt(id, 10),
-                                                    } as any);
-
-                                                    console.info("[Copilot] Device flow started", startResp);
-
-                                                    // 显示授权码
-                                                    setCopilotAuthInfo({
-                                                        userCode: startResp.user_code,
-                                                        verificationUri: startResp.verification_uri,
-                                                        isAuthorizing: true,
-                                                    });
-
-                                                    toast.info(
-                                                        `浏览器将自动打开授权页面，请输入授权码: ${startResp.user_code}`,
-                                                        { duration: 8000 },
-                                                    );
-
-                                                    // 2. 轮询授权结果
-                                                    const authResult = await invoke<{
-                                                        access_token: string;
-                                                        token_type: string;
-                                                    }>("poll_github_copilot_token", {
-                                                        llmProviderId: parseInt(id, 10),
-                                                        deviceCode: startResp.device_code,
-                                                        interval: startResp.interval,
-                                                    } as any);
-
-                                                    console.info("[Copilot] Device flow authorized", authResult);
-
-                                                    toast.success("GitHub Copilot 授权成功");
-
-                                                    setCopilotAuthInfo({ isAuthorizing: false });
-                                                    setHasApiKey(true);
-
-                                                    // 授权成功后刷新一次配置
-                                                    try {
-                                                        const configArray = await invoke<Array<LLMProviderConfig>>(
-                                                            "get_llm_provider_config",
-                                                            { id },
-                                                        );
-                                                        const newConfig: Record<string, string> = {};
-                                                        configArray.forEach((item) => {
-                                                            newConfig[item.name] = item.value;
-                                                        });
-                                                        form.reset(newConfig);
-                                                    } catch (e) {
-                                                        console.error("[Copilot] refresh provider config failed", e);
-                                                    }
-                                                } catch (e) {
-                                                    console.error("[Copilot] Device flow failed", e);
-                                                    toast.error("GitHub Copilot 授权失败: " + e);
-                                                    setCopilotAuthInfo({ isAuthorizing: false });
-                                                }
+                                            disabled={copilot.isAuthorizing}
+                                            onClick={() => {
+                                                copilot.startAuthorization();
                                             }}
                                         >
-                                            {copilotAuthInfo.isAuthorizing ? "授权中..." : "去授权 GitHub Copilot"}
+                                            {copilot.isAuthorizing ? "授权中..." : "去授权 GitHub Copilot"}
                                         </Button>
 
-                                        <div className="text-xs text-muted-foreground">
-                                            授权完成后，Access Token 会保存到当前提供商的 API Key 配置中，可直接用于调用 Copilot 模型。
+                                        <div className="text-xs text-muted-foreground mt-2">
+                                            <p>授权需要 Bun 运行环境。如果未安装，请先在「预览配置」中安装 Bun。</p>
+                                            <p className="mt-1">授权成功后，Token 会自动保存并用于 Copilot API 调用。</p>
                                         </div>
                                     </>
                                 )}
@@ -395,6 +340,25 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         ),
                     },
                 },
+                ...(hasApiKey ? [{
+                    key: "copilot_models",
+                    config: {
+                        type: "custom" as const,
+                        label: "模型列表",
+                        value: "",
+                        customRender: () => (
+                            <ReadOnlyModelList
+                                llmProviderId={id}
+                                tags={tags}
+                                onTagsChange={onTagsChange}
+                                onFetchModels={(modelData) => {
+                                    setModelSelectionData(modelData);
+                                    setModelSelectionDialogOpen(true);
+                                }}
+                            />
+                        ),
+                    },
+                }] : []),
             ];
         }
 
@@ -405,7 +369,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 config: {
                     type: "static" as const,
                     label: "API类型",
-                    value: apiType,
+                    value: apiTypeLabel,
                 },
             },
             {
@@ -492,7 +456,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 },
             },
         ];
-    }, [apiType, isCopilotProvider, tagInputRender, isAdvancedConfigExpanded, form, updateField, proxyEnabled, hasApiKey, copilotAuthInfo, id]);
+    }, [apiType, apiTypeLabel, isCopilotProvider, tagInputRender, isAdvancedConfigExpanded, form, updateField, proxyEnabled, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.startAuthorization, copilot.cancelAuthorization, id, tags, onTagsChange]);
 
     const extraButtons = useMemo(
         () => (

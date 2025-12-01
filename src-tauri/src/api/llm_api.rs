@@ -1,8 +1,11 @@
+use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::genai_client;
 use crate::db::llm_db::LLMDatabase;
 use crate::utils::share_utils::{decrypt_provider_data, encrypt_provider_data, ProviderShareData};
+use crate::FeatureConfigState;
 use genai::Modality;
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 
 #[derive(Serialize, Deserialize)]
 pub struct LlmProvider {
@@ -159,13 +162,19 @@ pub async fn fetch_model_list(
     let llm_provider_config =
         db.get_llm_provider_config(llm_provider_id).map_err(|e| e.to_string())?;
 
+    // 获取代理配置
+    let feature_config_state = app_handle.state::<FeatureConfigState>();
+    let config_feature_map = feature_config_state.config_feature_map.lock().await;
+    let network_proxy = get_network_proxy_from_config(&config_feature_map);
+    let proxy_enabled = network_proxy.is_some();
+
     // 使用共用的客户端创建函数
     let client = genai_client::create_client_with_config(
         &llm_provider_config,
         "",
         &llm_provider.api_type,
-        None,
-        false,
+        network_proxy.as_deref(),
+        proxy_enabled,
         None,
     )
     .map_err(|e| e.to_string())?;
@@ -277,18 +286,32 @@ pub async fn preview_model_list(
     let existing_model_codes: std::collections::HashSet<String> =
         existing_models.iter().map(|(_, _, _, code, _, _, _, _)| code.clone()).collect();
 
+    // 获取代理配置
+    let feature_config_state = app_handle.state::<FeatureConfigState>();
+    let config_feature_map = feature_config_state.config_feature_map.lock().await;
+    let network_proxy = get_network_proxy_from_config(&config_feature_map);
+    let proxy_enabled = network_proxy.is_some();
+    tracing::info!(
+        llm_provider_id,
+        ?network_proxy,
+        proxy_enabled,
+        "preview_model_list proxy config"
+    );
+
     // 使用共用的客户端创建函数
     let client = genai_client::create_client_with_config(
         &llm_provider_config,
         "",
         &llm_provider.api_type,
-        None,
-        false,
+        network_proxy.as_deref(),
+        proxy_enabled,
         None,
     )
     .map_err(|e| e.to_string())?;
+    tracing::info!(llm_provider_id, "created client for preview_model_list: {:?}", client);
 
     let adapter_kind = genai_client::infer_adapter_kind_simple(&llm_provider.api_type);
+    tracing::info!(llm_provider_id, "preview_model_list with adapter_kind: {:?}", adapter_kind);
 
     match client.all_models(adapter_kind).await {
         Ok(models) => {
@@ -319,6 +342,7 @@ pub async fn preview_model_list(
             Ok(ModelSelectionResponse { available_models, missing_models })
         }
         Err(e) => {
+            tracing::error!(error = ?e, "获取模型列表错误（详细）");
             tracing::error!(error = %e, "获取模型列表错误");
             Err(e.to_string())
         }

@@ -11,6 +11,7 @@ use crate::api::ai::events::{ConversationEvent, MessageAddEvent, MessageUpdateEv
 use crate::api::ai::title::generate_title;
 use crate::api::ai::types::{AiRequest, AiResponse, McpOverrideConfig};
 use crate::api::assistant_api::{get_assistant, get_assistants};
+
 use crate::api::genai_client;
 use crate::db::conversation_db::{AttachmentType, Repository};
 use crate::db::conversation_db::{ConversationDatabase, Message, MessageAttachment};
@@ -357,7 +358,7 @@ pub async fn ask_ai(
             .await?;
         }
 
-        Ok::<(), Error>(())
+        Ok::<(), anyhow::Error>(())
     });
 
     // Store the task handle for proper cancellation
@@ -670,12 +671,11 @@ pub async fn tool_result_continue_ask_ai(
                         chat_messages.push(assistant_with_calls.clone());
 
                         // 立即添加对应的 Tool 响应
-                        if let genai::chat::MessageContent::ToolCalls(tool_calls) = &assistant_with_calls.content {
-                            for tool_call in tool_calls {
-                                if let Some(response_content) = tool_call_to_response.get(&tool_call.call_id) {
-                                    let tool_response = genai::chat::ToolResponse::new(tool_call.call_id.clone(), response_content.clone());
-                                    chat_messages.push(genai::chat::ChatMessage::from(tool_response));
-                                }
+                        let tool_calls = assistant_with_calls.content.tool_calls();
+                        for tool_call in tool_calls {
+                            if let Some(response_content) = tool_call_to_response.get(&tool_call.call_id) {
+                                let tool_response = genai::chat::ToolResponse::new(tool_call.call_id.clone(), response_content.clone());
+                                chat_messages.push(genai::chat::ChatMessage::from(tool_response));
                             }
                         }
                     } else {
@@ -1138,7 +1138,7 @@ pub async fn regenerate_ai(
             .await?;
         }
 
-        Ok::<(), Error>(())
+        Ok::<(), anyhow::Error>(())
     });
 
     // Store the task handle for proper cancellation
