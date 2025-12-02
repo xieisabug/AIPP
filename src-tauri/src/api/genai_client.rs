@@ -15,7 +15,7 @@ pub const DEFAULT_ENDPOINTS: &[(AdapterKind, &str)] = &[
     (AdapterKind::Xai, "https://api.x.ai/v1/"),
     (AdapterKind::DeepSeek, "https://api.deepseek.com/"),
     (AdapterKind::Ollama, "http://localhost:11434/v1/"),
-    (AdapterKind::Copilot, "https://api.githubcopilot.com"),
+    (AdapterKind::Copilot, "https://api.individual.githubcopilot.com"),
 ];
 
 /// 推断适配器类型
