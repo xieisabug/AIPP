@@ -15,17 +15,8 @@ interface CopilotLspStatus {
     error?: string;
 }
 
-interface SignInInitiateResult {
-    status: "AlreadySignedIn" | "PromptUserDeviceFlow";
-    user?: string;
-    user_code?: string;
-    verification_uri?: string;
-}
-
-interface SignInStatus {
-    status: "OK" | "AlreadySignedIn" | "MaybeOk" | "NotAuthorized" | "NotSignedIn";
-    user?: string;
-}
+// 授权方式类型
+export type CopilotAuthMethod = "scan_config" | "oauth_flow" | "manual_token";
 
 interface UseCopilotProps {
     llmProviderId: string;
@@ -40,6 +31,10 @@ interface UseCopilotReturn {
     cancelAuthorization: () => Promise<void>;
     useLspAuth: boolean;
     setUseLspAuth: (value: boolean) => void;
+    // 新增：三种授权方式
+    scanConfigAuth: () => Promise<void>;
+    oauthFlowAuth: () => Promise<void>;
+    manualTokenAuth: (token: string) => Promise<void>;
 }
 
 export const useCopilot = ({
@@ -69,12 +64,12 @@ export const useCopilot = ({
         checkLspStatus();
     }, [checkLspStatus]);
 
-    // 使用 LSP 进行授权
-    const startLspAuthorization = useCallback(async () => {
+    // 方式1: 扫描 apps.json 配置文件
+    const scanConfigAuth = useCallback(async () => {
         try {
             setAuthInfo({ isAuthorizing: true });
 
-            // 1. 先尝试从 apps.json 读取已有的 OAuth token
+            // 尝试从 apps.json 读取已有的 OAuth token
             const existingToken = await invoke<string | null>("get_copilot_oauth_token_from_config");
             if (existingToken) {
                 console.info("[Copilot] Found existing OAuth token in apps.json");
@@ -89,93 +84,24 @@ export const useCopilot = ({
                 toast.success("使用已有的 Copilot 授权配置成功！");
                 setAuthInfo({ isAuthorizing: false });
                 onAuthSuccess?.();
-                return;
-            }
-
-            // 2. 启动 LSP
-            toast.info("正在启动 Copilot Language Server...");
-            await invoke("start_copilot_lsp");
-
-            // 3. 发起登录
-            const signInResult = await invoke<SignInInitiateResult>("sign_in_initiate");
-            console.info("[Copilot] Sign in initiate result", signInResult);
-
-            if (signInResult.status === "AlreadySignedIn") {
-                // 已经登录，获取 OAuth token
-                toast.success(`已使用 ${signInResult.user} 登录 GitHub Copilot`);
-
-                // 从 apps.json 读取 token 并保存到 api_key
-                const oauthToken = await invoke<string | null>("get_copilot_oauth_token_from_config");
-                if (oauthToken) {
-                    await invoke("update_llm_provider_config", {
-                        llmProviderId: llmProviderId,
-                        name: "api_key",
-                        value: oauthToken,
-                    });
-
-                    toast.success("GitHub Copilot 配置完成！");
-                }
-
+            } else {
+                toast.error("未在 apps.json 中找到已有的授权配置，请尝试其他授权方式");
                 setAuthInfo({ isAuthorizing: false });
-                onAuthSuccess?.();
-                return;
-            }
-
-            // 4. 需要 Device Flow 授权
-            if (signInResult.status === "PromptUserDeviceFlow" && signInResult.user_code) {
-                setAuthInfo({
-                    userCode: signInResult.user_code,
-                    verificationUri: signInResult.verification_uri,
-                    isAuthorizing: true,
-                });
-
-                toast.info(
-                    `浏览器将自动打开授权页面，请输入授权码: ${signInResult.user_code}`,
-                    { duration: 10000 }
-                );
-
-                // 5. 等待用户完成授权并确认
-                const confirmResult = await invoke<SignInStatus>("sign_in_confirm", {
-                    userCode: signInResult.user_code,
-                });
-
-                console.info("[Copilot] Sign in confirm result", confirmResult);
-
-                if (confirmResult.status === "OK" || confirmResult.status === "AlreadySignedIn" || confirmResult.status === "MaybeOk") {
-                    toast.success("GitHub Copilot 授权成功！");
-
-                    // 从 apps.json 读取 token 并保存到 api_key
-                    const oauthToken = await invoke<string | null>("get_copilot_oauth_token_from_config");
-                    if (oauthToken) {
-                        await invoke("update_llm_provider_config", {
-                            llmProviderId: llmProviderId,
-                            name: "api_key",
-                            value: oauthToken,
-                        });
-
-                        toast.success("GitHub Copilot 配置完成！");
-                    }
-
-                    setAuthInfo({ isAuthorizing: false });
-                    onAuthSuccess?.();
-                } else {
-                    toast.error("GitHub Copilot 授权失败: " + confirmResult.status);
-                    setAuthInfo({ isAuthorizing: false });
-                }
             }
         } catch (e) {
-            console.error("[Copilot] LSP authorization failed", e);
-            toast.error("GitHub Copilot 授权失败: " + e);
+            console.error("[Copilot] Scan config failed", e);
+            toast.error("扫描配置失败: " + e);
             setAuthInfo({ isAuthorizing: false });
         }
     }, [llmProviderId, onAuthSuccess]);
 
-    // 使用 Device Flow 进行授权（传统方式）
-    const startDeviceFlowAuthorization = useCallback(async () => {
+    // 方式2: 使用 OAuth Device Flow 进行授权（直接调用 GitHub API，不需要 LSP）
+    const oauthFlowAuth = useCallback(async () => {
         try {
             setAuthInfo({ isAuthorizing: true });
 
-            // 1. 启动 device flow
+            // 启动 device flow（直接调用 GitHub API）
+            toast.info("正在启动 GitHub 授权流程...");
             const startResp = await invoke<{
                 device_code: string;
                 user_code: string;
@@ -197,10 +123,10 @@ export const useCopilot = ({
 
             toast.info(
                 `浏览器将自动打开授权页面，请输入授权码: ${startResp.user_code}`,
-                { duration: 8000 }
+                { duration: 10000 }
             );
 
-            // 2. 轮询授权结果（OAuth token 会被自动保存到 api_key）
+            // 轮询授权结果（OAuth token 会被自动保存到 api_key）
             const authResult = await invoke<{
                 access_token: string;
                 token_type: string;
@@ -214,23 +140,53 @@ export const useCopilot = ({
             toast.success("GitHub Copilot 配置完成，可以开始使用了！");
 
             setAuthInfo({ isAuthorizing: false });
-
-            // 调用成功回调
             onAuthSuccess?.();
         } catch (e) {
-            console.error("[Copilot] Device flow failed", e);
-            toast.error("GitHub Copilot 授权失败: " + e);
+            console.error("[Copilot] OAuth flow failed", e);
+            toast.error("OAuth 授权失败: " + e);
             setAuthInfo({ isAuthorizing: false });
         }
     }, [llmProviderId, onAuthSuccess]);
 
-    const startAuthorization = useCallback(async () => {
-        if (useLspAuth) {
-            await startLspAuthorization();
-        } else {
-            await startDeviceFlowAuthorization();
+    // 方式3: 手动输入 OAuth Token
+    const manualTokenAuth = useCallback(async (token: string) => {
+        try {
+            setAuthInfo({ isAuthorizing: true });
+
+            if (!token || token.trim().length === 0) {
+                toast.error("请输入有效的 OAuth Token");
+                setAuthInfo({ isAuthorizing: false });
+                return;
+            }
+
+            const trimmedToken = token.trim();
+
+            // 保存 OAuth token 到 api_key
+            await invoke("update_llm_provider_config", {
+                llmProviderId: llmProviderId,
+                name: "api_key",
+                value: trimmedToken,
+            });
+
+            toast.success("OAuth Token 已保存！");
+            setAuthInfo({ isAuthorizing: false });
+            onAuthSuccess?.();
+        } catch (e) {
+            console.error("[Copilot] Manual token auth failed", e);
+            toast.error("保存 Token 失败: " + e);
+            setAuthInfo({ isAuthorizing: false });
         }
-    }, [useLspAuth, startLspAuthorization, startDeviceFlowAuthorization]);
+    }, [llmProviderId, onAuthSuccess]);
+
+    // 保留原有的 startLspAuthorization 方法用于兼容（现在使用直接的 Device Flow）
+    const startLspAuthorization = useCallback(async () => {
+        await oauthFlowAuth();
+    }, [oauthFlowAuth]);
+
+    const startAuthorization = useCallback(async () => {
+        // 统一使用 Device Flow 方式
+        await oauthFlowAuth();
+    }, [oauthFlowAuth]);
 
     const cancelAuthorization = useCallback(async () => {
         try {
@@ -265,5 +221,9 @@ export const useCopilot = ({
         cancelAuthorization,
         useLspAuth,
         setUseLspAuth,
+        // 新增：三种授权方式
+        scanConfigAuth,
+        oauthFlowAuth,
+        manualTokenAuth,
     };
 };

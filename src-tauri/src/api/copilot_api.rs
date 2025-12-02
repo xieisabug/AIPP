@@ -143,8 +143,9 @@ pub async fn start_github_copilot_device_flow(
     Ok(resp)
 }
 
-/// 轮询 GitHub Copilot 授权结果，并在成功后将 OAuth token (gho_ 开头) 存入 llm_provider_config 表的 `api_key` 字段。
-/// genai 客户端会自动处理 token 交换。
+/// 轮询 GitHub Copilot 授权结果，并在成功后将 OAuth token (ghu_ 开头) 存入 llm_provider_config 表的 `api_key` 字段。
+/// GitHub Device Flow 返回的是 ghu_ 开头的 User Access Token。
+/// genai 客户端会直接使用此 token 进行 API 调用。
 #[tauri::command]
 pub async fn poll_github_copilot_token(
     app_handle: AppHandle,
@@ -229,8 +230,8 @@ pub async fn poll_github_copilot_token(
             let token_type = token_response.token_type;
             let scope = token_response.scope;
 
-            // 保存 OAuth token (gho_ 开头) 到数据库的 api_key 字段
-            // genai 客户端会自动使用此 token 进行 token 交换
+            // 保存 OAuth token (ghu_ 开头) 到数据库的 api_key 字段
+            // genai 客户端会直接使用此 token 进行 Copilot API 调用
             let db = LLMDatabase::new(&app_handle)
                 .map_err(|e| format!("创建 LLM 数据库连接失败: {}", e))?;
 

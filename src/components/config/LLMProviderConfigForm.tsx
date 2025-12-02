@@ -14,7 +14,16 @@ import {
     CollapsibleContent,
     CollapsibleTrigger,
 } from "../ui/collapsible";
-import { Trash2, ChevronDown, Share, Copy } from "lucide-react";
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from "../ui/dialog";
+import { Input } from "../ui/input";
+import { Trash2, ChevronDown, Share, Copy, Search, KeyRound, Edit } from "lucide-react";
 import { useCopilot } from "@/hooks/useCopilot";
 
 interface LLMProviderConfig {
@@ -77,6 +86,8 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         useState<ModelSelectionResponse | null>(null);
     const [isUpdatingModels, setIsUpdatingModels] = useState<boolean>(false);
     const [hasApiKey, setHasApiKey] = useState<boolean>(false);
+    const [manualTokenDialogOpen, setManualTokenDialogOpen] = useState<boolean>(false);
+    const [manualToken, setManualToken] = useState<string>("");
 
     const isCopilotProvider = apiType === "github_copilot";
 
@@ -286,10 +297,11 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                     </>
                                 ) : (
                                     <>
-                                        <div className="text-sm text-muted-foreground">
-                                            使用 Copilot Language Server 进行授权。如果你已经在其他编辑器（如 VS Code）中授权过 GitHub Copilot，可以直接复用已有授权。
+                                        <div className="text-sm text-muted-foreground mb-2">
+                                            选择一种授权方式来接入 GitHub Copilot：
                                         </div>
 
+                                        {/* 授权码显示区域 */}
                                         {copilot.authInfo.userCode && (
                                             <div className="p-3 border border-border rounded-lg bg-muted">
                                                 <div className="text-xs text-muted-foreground mb-2">
@@ -319,19 +331,60 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                             </div>
                                         )}
 
-                                        <Button
-                                            type="button"
-                                            className="bg-primary hover:bg-primary/90 text-primary-foreground"
-                                            disabled={copilot.isAuthorizing}
-                                            onClick={() => {
-                                                copilot.startAuthorization();
-                                            }}
-                                        >
-                                            {copilot.isAuthorizing ? "授权中..." : "去授权 GitHub Copilot"}
-                                        </Button>
+                                        {/* 三种授权方式按钮 */}
+                                        <div className="flex flex-col gap-2">
+                                            {/* 方式1: 扫描已有配置 */}
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                className="justify-start gap-2"
+                                                disabled={copilot.isAuthorizing}
+                                                onClick={() => {
+                                                    copilot.scanConfigAuth();
+                                                }}
+                                            >
+                                                <Search className="h-4 w-4" />
+                                                <div className="flex flex-col items-start">
+                                                    <span>扫描已有授权</span>
+                                                </div>
+                                            </Button>
+
+                                            {/* 方式2: OAuth 授权 */}
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                className="justify-start gap-2"
+                                                disabled={copilot.isAuthorizing}
+                                                onClick={() => {
+                                                    copilot.oauthFlowAuth();
+                                                }}
+                                            >
+                                                <KeyRound className="h-4 w-4" />
+                                                <div className="flex flex-col items-start">
+                                                    <span>{copilot.isAuthorizing ? "授权中..." : "OAuth 授权"}</span>
+                                                </div>
+                                            </Button>
+
+                                            {/* 方式3: 手动输入 Token */}
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                className="justify-start gap-2"
+                                                disabled={copilot.isAuthorizing}
+                                                onClick={() => {
+                                                    setManualToken("");
+                                                    setManualTokenDialogOpen(true);
+                                                }}
+                                            >
+                                                <Edit className="h-4 w-4" />
+                                                <div className="flex flex-col items-start">
+                                                    <span>手动输入 Token</span>
+                                                </div>
+                                            </Button>
+                                        </div>
 
                                         <div className="text-xs text-muted-foreground mt-2">
-                                            <p>授权需要 Bun 运行环境。如果未安装，请先在「预览配置」中安装 Bun。</p>
+                                            <p>OAuth 授权将通过浏览器进行 GitHub Device Flow 授权。</p>
                                             <p className="mt-1">授权成功后，Token 会自动保存并用于 Copilot API 调用。</p>
                                         </div>
                                     </>
@@ -515,7 +568,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 },
             },
         ];
-    }, [apiType, apiTypeLabel, isCopilotProvider, tagInputRender, isAdvancedConfigExpanded, form, updateField, proxyEnabled, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.startAuthorization, copilot.cancelAuthorization, id, tags, onTagsChange]);
+    }, [apiType, apiTypeLabel, isCopilotProvider, tagInputRender, isAdvancedConfigExpanded, form, updateField, proxyEnabled, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange]);
 
     const extraButtons = useMemo(
         () => (
@@ -575,6 +628,42 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 onConfirm={handleModelSelectionConfirm}
                 loading={isUpdatingModels}
             />
+            {/* 手动输入 Token 对话框 */}
+            <Dialog open={manualTokenDialogOpen} onOpenChange={setManualTokenDialogOpen}>
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>输入 OAuth Token</DialogTitle>
+                        <DialogDescription>
+                            请输入 GitHub Copilot 的 OAuth Token (ghu_ 或 gho_ 开头)
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="flex flex-col gap-4 py-4">
+                        <Input
+                            placeholder="ghu_xxxxxxxxx 或 gho_xxxxxxxxx..."
+                            value={manualToken}
+                            onChange={(e) => setManualToken(e.target.value)}
+                            className="font-mono"
+                        />
+                    </div>
+                    <DialogFooter>
+                        <Button
+                            variant="outline"
+                            onClick={() => setManualTokenDialogOpen(false)}
+                        >
+                            取消
+                        </Button>
+                        <Button
+                            onClick={async () => {
+                                await copilot.manualTokenAuth(manualToken);
+                                setManualTokenDialogOpen(false);
+                            }}
+                            disabled={!manualToken.trim()}
+                        >
+                            保存
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </>
     );
 };
