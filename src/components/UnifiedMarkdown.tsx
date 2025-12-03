@@ -1,8 +1,9 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useEffect } from 'react';
 import ReactMarkdown, { Components } from 'react-markdown';
 import CodeBlock from './RustCodeBlock';
 import { useMarkdownConfig } from '../hooks/useMarkdownConfig';
 import { customUrlTransform } from '@/constants/markdown';
+import { transformInlineImages, releaseInlineImages } from '@/lib/inlineImageStore';
 
 interface UnifiedMarkdownProps {
     children: string;
@@ -88,9 +89,19 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
         },
     }), [markdownConfig.markdownComponents, onCodeRun, disableMarkdownSyntax]);
 
+    const { content: optimizedContent, inlineImageIds } = useMemo(() => transformInlineImages(children), [children]);
+
+    useEffect(() => {
+        return () => {
+            if (inlineImageIds.length) {
+                releaseInlineImages(inlineImageIds);
+            }
+        };
+    }, [inlineImageIds]);
+
     const markdownNode = (
         <ReactMarkdown
-            children={children}
+            children={optimizedContent}
             // 交由 useMarkdownConfig 统一管理插件，避免重复添加
             remarkPlugins={[...markdownConfig.remarkPlugins] as any}
             rehypePlugins={[...markdownConfig.rehypePlugins] as any}

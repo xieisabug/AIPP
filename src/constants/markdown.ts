@@ -9,6 +9,7 @@ import remarkCustomCompenent from "@/react-markdown/remarkCustomComponent";
 import TipsComponent from "@/react-markdown/components/TipsComponent";
 import MessageFileAttachment from "@/components/MessageFileAttachment";
 import MessageWebContent from "@/components/conversation/MessageWebContent";
+import LazyImage from "@/components/common/LazyImage";
 // highlight is disabled to avoid missing deps in this revert
 
 // ReactMarkdown 插件配置
@@ -39,6 +40,7 @@ export const SANITIZE_SCHEMA = {
         "bangweb",
         // 允许自定义 Tips 组件标签
         "tipscomponent",
+        "inlineimage",
     ],
     attributes: {
         ...(defaultSchema.attributes || {}),
@@ -58,6 +60,16 @@ export const SANITIZE_SCHEMA = {
         tipscomponent: [
             ...(defaultSchema.attributes?.tipscomponent || []),
             "text",
+        ],
+        inlineimage: [
+            ...(defaultSchema.attributes?.inlineimage || []),
+            "data-inline-id",
+            "data-inlineid",
+            "dataInlineId",
+            "data-alt",
+            "dataalt",
+            "dataAlt",
+            "className",
         ],
     },
     // 允许 data: URI 协议用于内联图片 (base64 图片)
@@ -79,4 +91,5 @@ export const MARKDOWN_COMPONENTS_BASE = {
     bangwebtomarkdown: MessageWebContent,
     bangweb: MessageWebContent,
     tipscomponent: TipsComponent,
+    inlineimage: LazyImage,
 } as const;
