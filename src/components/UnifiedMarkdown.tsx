@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import ReactMarkdown, { Components } from 'react-markdown';
 import CodeBlock from './RustCodeBlock';
 import { useMarkdownConfig } from '../hooks/useMarkdownConfig';
+import { customUrlTransform } from '@/constants/markdown';
 
 interface UnifiedMarkdownProps {
     children: string;
@@ -94,6 +95,7 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
             remarkPlugins={[...markdownConfig.remarkPlugins] as any}
             rehypePlugins={[...markdownConfig.rehypePlugins] as any}
             components={customComponents}
+            urlTransform={customUrlTransform}
         />
     );
 

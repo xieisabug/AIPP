@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import rehypeKatex from "rehype-katex";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import { defaultUrlTransform } from "react-markdown";
 import remarkCustomCompenent from "@/react-markdown/remarkCustomComponent";
 import TipsComponent from "@/react-markdown/components/TipsComponent";
 import MessageFileAttachment from "@/components/MessageFileAttachment";
@@ -17,6 +18,16 @@ export const REMARK_PLUGINS = [
     remarkGfm,
     remarkCustomCompenent,
 ] as const;
+
+// 自定义 URL 转换函数，允许 data: 协议（用于 base64 图片）
+export const customUrlTransform = (url: string): string => {
+    // 允许 data: URI（base64 图片等）
+    if (url.startsWith("data:")) {
+        return url;
+    }
+    // 其他 URL 使用默认转换
+    return defaultUrlTransform(url);
+};
 
 // 简化的清理配置 - 移除无用的 mcp_tool_call 相关配置
 export const SANITIZE_SCHEMA = {
@@ -48,6 +59,11 @@ export const SANITIZE_SCHEMA = {
             ...(defaultSchema.attributes?.tipscomponent || []),
             "text",
         ],
+    },
+    // 允许 data: URI 协议用于内联图片 (base64 图片)
+    protocols: {
+        ...defaultSchema.protocols,
+        src: ["http", "https", "data"],
     },
 };
 

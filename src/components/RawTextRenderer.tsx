@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { MARKDOWN_COMPONENTS_BASE, REMARK_PLUGINS, REHYPE_PLUGINS } from '@/constants/markdown';
+import { MARKDOWN_COMPONENTS_BASE, REMARK_PLUGINS, REHYPE_PLUGINS, customUrlTransform } from '@/constants/markdown';
 
 interface RawTextRendererProps {
     content: string;
@@ -69,6 +69,7 @@ const RawTextRenderer: React.FC<RawTextRendererProps> = ({ content }) => {
                     REHYPE_PLUGINS[1], // rehypeSanitize
                 ] as any}
                 components={MARKDOWN_COMPONENTS_BASE as any}
+                urlTransform={customUrlTransform}
             />
         );
 
@@ -103,6 +104,7 @@ const RawTextRenderer: React.FC<RawTextRendererProps> = ({ content }) => {
                         ].filter(Boolean) as any}
                         rehypePlugins={[REHYPE_PLUGINS[0], REHYPE_PLUGINS[1]] as any}
                         components={MARKDOWN_COMPONENTS_BASE as any}
+                        urlTransform={customUrlTransform}
                     />
                 );
             }
