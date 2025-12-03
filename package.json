@@ -100,8 +100,6 @@
     "@types/unist": "^3.0.3",
     "@vitejs/plugin-react": "^4.7.0",
     "react-devtools": "^6.1.5",
-    "react-scan": "^0.4.3",
-    "stats.js": "^0.17.0",
     "tailwindcss": "^4.1.11",
     "typescript": "^5.8.3",
     "vite": "^7.0.6",

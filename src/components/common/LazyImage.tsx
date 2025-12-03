@@ -28,7 +28,7 @@ const LazyImage: React.FC<LazyImageProps> = ({ src, alt = '', className = '', ..
     const [isInView, setIsInView] = useState(false);
     const [imageSrc, setImageSrc] = useState<string | undefined>(undefined);
     const imgRef = useRef<HTMLImageElement>(null);
-    const containerRef = useRef<HTMLDivElement>(null);
+    const containerRef = useRef<HTMLSpanElement>(null);
     const cleanupRef = useRef<(() => void) | null>(null);
 
     // 移除不需要传递到 DOM 的属性
@@ -40,6 +40,7 @@ const LazyImage: React.FC<LazyImageProps> = ({ src, alt = '', className = '', ..
         delete cloned['dataInlineid'];
         delete cloned['data-alt'];
         delete cloned['dataAlt'];
+        delete cloned['dataalt'];
         return cloned;
     }, [props]);
 
