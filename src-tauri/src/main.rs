@@ -49,8 +49,9 @@ use crate::api::sub_task_api::{
     run_sub_task_with_mcp_loop, sub_task_regist, update_sub_task_definition,
 };
 use crate::api::system_api::{
-    get_all_feature_config, get_bang_list, get_selected_text_api, open_data_folder,
-    resume_global_shortcut, save_feature_config, set_shortcut_recording, suspend_global_shortcut,
+    copy_image_to_clipboard, get_all_feature_config, get_bang_list, get_selected_text_api,
+    open_data_folder, open_image, resume_global_shortcut, save_feature_config,
+    set_shortcut_recording, suspend_global_shortcut,
 };
 use crate::artifacts::artifacts_db::ArtifactsDatabase;
 use crate::artifacts::collection_api::{
@@ -412,6 +413,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             set_shortcut_recording,
             suspend_global_shortcut,
             resume_global_shortcut,
+            copy_image_to_clipboard,
+            open_image,
             check_bun_version,
             check_uv_version,
             install_bun,

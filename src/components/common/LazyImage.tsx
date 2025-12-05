@@ -1,5 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { getInlineImage } from '@/lib/inlineImageStore';
+import {
+    ContextMenu,
+    ContextMenuTrigger,
+    ContextMenuContent,
+    ContextMenuItem,
+    ContextMenuSeparator,
+} from '@/components/ui/context-menu';
+import { invoke } from '@tauri-apps/api/core';
 
 interface LazyImageProps {
     src?: string;
@@ -183,6 +191,74 @@ const LazyImage: React.FC<LazyImageProps> = ({ src, alt = '', className = '', ..
         setIsLoaded(true);
     }, []);
 
+    const getBlobForCopyOrSave = useCallback(async (): Promise<Blob | null> => {
+        try {
+            const target = imageSrc ?? resolvedSrc;
+            if (!target) return null;
+            // Prefer fetching from the original resolvedSrc to avoid cross-origin issues
+            const response = await fetch(resolvedSrc ?? target);
+            if (!response.ok) return null;
+            const blob = await response.blob();
+            return blob;
+        } catch {
+            return null;
+        }
+    }, [imageSrc, resolvedSrc]);
+
+    const handleOpen = useCallback(async () => {
+        const target = resolvedSrc ?? imageSrc;
+        if (!target) return;
+        try {
+            // 获取 conversationId 和 messageId 用于生成固定的临时文件名
+            const container = containerRef.current;
+            const host = container?.closest('[data-conversation-id]') as HTMLElement | null;
+            const convId = host?.getAttribute('data-conversation-id') || '';
+            const msgId = host?.getAttribute('data-message-id') || '';
+            // 使用 Tauri 后端 API 打开图片
+            await invoke('open_image', { 
+                imageData: target,
+                conversationId: convId || undefined,
+                messageId: msgId || undefined,
+            });
+        } catch (e) {
+            console.error('Open image failed', e);
+        }
+    }, [resolvedSrc, imageSrc]);
+
+    const handleCopyImage = useCallback(async () => {
+        const target = resolvedSrc ?? imageSrc;
+        if (!target) return;
+        try {
+            // 使用 Tauri 后端 API 复制图片到剪贴板
+            await invoke('copy_image_to_clipboard', { imageData: target });
+        } catch (e) {
+            console.error('Copy image failed', e);
+        }
+    }, [resolvedSrc, imageSrc]);
+
+    const handleSaveImage = useCallback(async () => {
+        const blob = await getBlobForCopyOrSave();
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        try {
+            const a = document.createElement('a');
+            a.href = url;
+            // Derive filename: conversationId-messageId.ext
+            const container = containerRef.current;
+            const host = container?.closest('[data-conversation-id]') as HTMLElement | null;
+            const convId = host?.getAttribute('data-conversation-id') || '';
+            const msgId = host?.getAttribute('data-message-id') || '';
+            const defaultNameBase = convId && msgId ? `${convId}-${msgId}` : (inlineAlt || 'image').replace(/[^a-zA-Z0-9_\-\.]+/g, '_');
+            const ext = (blob.type && blob.type.split('/')[1]) || 'png';
+            a.download = `${defaultNameBase}.${ext}`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        } finally {
+            URL.revokeObjectURL(url);
+        }
+    }, [getBlobForCopyOrSave, inlineAlt]);
+
     // 如果没有 src，不渲染
     if (!resolvedSrc) return null;
 
@@ -219,23 +295,34 @@ const LazyImage: React.FC<LazyImageProps> = ({ src, alt = '', className = '', ..
             
             {/* 实际图片 */}
             {imageSrc && (
-                <img
-                    ref={imgRef}
-                    src={imageSrc}
-                    alt={inlineAlt}
-                    className={`${className} transition-opacity duration-300`}
-                    style={{
-                        opacity: isLoaded ? 1 : 0,
-                        maxWidth: '100%',
-                        height: 'auto',
-                        // 加载完成前隐藏
-                        position: isLoaded ? 'relative' : 'absolute',
-                    }}
-                    onLoad={handleLoad}
-                    loading="lazy"
-                    decoding="async"
-                    {...forwardedProps}
-                />
+                <ContextMenu>
+                    <ContextMenuTrigger asChild>
+                        <img
+                            ref={imgRef}
+                            src={imageSrc}
+                            alt={inlineAlt}
+                            className={`${className} transition-opacity duration-300 cursor-pointer`}
+                            style={{
+                                opacity: isLoaded ? 1 : 0,
+                                maxWidth: '100%',
+                                height: 'auto',
+                                // 加载完成前隐藏
+                                position: isLoaded ? 'relative' : 'absolute',
+                            }}
+                            onLoad={handleLoad}
+                            onClick={handleOpen}
+                            loading="lazy"
+                            decoding="async"
+                            {...forwardedProps}
+                        />
+                    </ContextMenuTrigger>
+                    <ContextMenuContent>
+                        <ContextMenuItem onClick={handleOpen}>打开图片</ContextMenuItem>
+                        <ContextMenuSeparator />
+                        <ContextMenuItem onClick={handleCopyImage}>复制图片</ContextMenuItem>
+                        <ContextMenuItem onClick={handleSaveImage}>保存图片</ContextMenuItem>
+                    </ContextMenuContent>
+                </ContextMenu>
             )}
         </span>
     );

@@ -1,6 +1,7 @@
 use std::cmp::Ord;
 use std::collections::HashMap;
 use tauri::{Manager, State};
+use base64::Engine;
 
 use crate::template_engine::{BangType, TemplateEngine};
 use crate::AppState;
@@ -129,5 +130,117 @@ pub async fn resume_global_shortcut(app: tauri::AppHandle) -> Result<(), String>
     {
         crate::reconfigure_global_shortcuts_async(&app).await;
     }
+    Ok(())
+}
+
+/// 复制图片到剪贴板
+/// image_data: base64 编码的图片数据（可以包含或不包含 data:image/xxx;base64, 前缀）
+#[tauri::command]
+pub async fn copy_image_to_clipboard(image_data: String) -> Result<(), String> {
+    // 移除 data URL 前缀（如果存在）
+    let base64_data = if image_data.contains(",") {
+        image_data.split(",").last().unwrap_or(&image_data)
+    } else {
+        &image_data
+    };
+
+    // 解码 base64
+    let image_bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_data)
+        .map_err(|e| format!("Failed to decode base64: {}", e))?;
+
+    // 使用 image crate 解码图片
+    let img = image::load_from_memory(&image_bytes)
+        .map_err(|e| format!("Failed to load image: {}", e))?;
+    
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    
+    // 使用 arboard 复制到剪贴板
+    let mut clipboard = arboard::Clipboard::new()
+        .map_err(|e| format!("Failed to access clipboard: {}", e))?;
+    
+    let img_data = arboard::ImageData {
+        width: width as usize,
+        height: height as usize,
+        bytes: std::borrow::Cow::Owned(rgba.into_raw()),
+    };
+    
+    clipboard.set_image(img_data)
+        .map_err(|e| format!("Failed to copy image to clipboard: {}", e))?;
+    
+    Ok(())
+}
+
+/// 打开图片（支持 base64 和 URL）
+/// 对于 base64 图片，会保存到临时文件后用系统默认应用打开
+/// 对于 URL，直接用系统默认应用打开
+/// conversation_id 和 message_id 用于生成固定的文件名，避免重复创建临时文件
+#[tauri::command]
+pub async fn open_image(
+    image_data: String,
+    conversation_id: Option<String>,
+    message_id: Option<String>,
+) -> Result<(), String> {
+    // 如果是 base64 图片，保存到临时文件
+    if image_data.starts_with("data:") {
+        // 解析 MIME 类型
+        let mime_type = image_data
+            .strip_prefix("data:")
+            .and_then(|s| s.split(';').next())
+            .unwrap_or("image/png");
+        
+        // 确定文件扩展名
+        let ext = match mime_type {
+            "image/png" => "png",
+            "image/jpeg" | "image/jpg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            "image/svg+xml" => "svg",
+            "image/bmp" => "bmp",
+            _ => "png",
+        };
+        
+        // 移除 data URL 前缀
+        let base64_data = image_data
+            .split(',')
+            .last()
+            .ok_or("Invalid data URL format")?;
+        
+        // 解码 base64
+        let image_bytes = base64::engine::general_purpose::STANDARD
+            .decode(base64_data)
+            .map_err(|e| format!("Failed to decode base64: {}", e))?;
+        
+        // 创建临时文件，使用 conversationId 和 messageId 生成固定文件名
+        let temp_dir = std::env::temp_dir();
+        let filename = match (&conversation_id, &message_id) {
+            (Some(conv_id), Some(msg_id)) if !conv_id.is_empty() && !msg_id.is_empty() => {
+                format!("aipp_image_{}_{}.{}", conv_id, msg_id, ext)
+            }
+            _ => {
+                // 如果没有 id，使用图片内容的哈希值作为文件名
+                use sha2::{Sha256, Digest};
+                let mut hasher = Sha256::new();
+                hasher.update(&image_bytes);
+                let hash = hex::encode(&hasher.finalize()[..8]);
+                format!("aipp_image_{}.{}", hash, ext)
+            }
+        };
+        let temp_path = temp_dir.join(filename);
+        
+        // 写入文件
+        std::fs::write(&temp_path, &image_bytes)
+            .map_err(|e| format!("Failed to write temp file: {}", e))?;
+        
+        // 用系统默认应用打开
+        open::that(&temp_path)
+            .map_err(|e| format!("Failed to open image: {}", e))?;
+    } else {
+        // 直接打开 URL
+        open::that(&image_data)
+            .map_err(|e| format!("Failed to open URL: {}", e))?;
+    }
+    
     Ok(())
 }
