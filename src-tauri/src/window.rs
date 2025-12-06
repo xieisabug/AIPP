@@ -3,13 +3,15 @@ use serde::{Deserialize, Serialize};
 use tauri::webview::DownloadEvent;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri::{LogicalPosition, LogicalSize};
-use tracing::{debug, error, info, warn};
 use tauri_plugin_notification::NotificationExt;
+use tracing::{debug, error, info, warn};
 
 /// 当按照显示器大小调整窗口尺寸时保留的屏幕占比（90%）
+#[cfg(desktop)]
 const SCREEN_MARGIN_RATIO: f64 = 0.9;
 
 // 获取合适的窗口大小和位置
+#[cfg(desktop)]
 fn get_window_size_and_position(
     app: &AppHandle,
     default_width: f64,
@@ -108,6 +110,8 @@ fn get_window_size_and_position(
 
 pub fn create_ask_window(app: &AppHandle) {
     let t_build_total = std::time::Instant::now();
+
+    #[cfg(desktop)]
     let window_builder =
         WebviewWindowBuilder::new(app, "ask", WebviewUrl::App("index.html".into()))
             .title("Aipp")
@@ -117,187 +121,247 @@ pub fn create_ask_window(app: &AppHandle) {
             .decorations(false)
             .center();
 
+    #[cfg(desktop)]
     #[cfg(not(target_os = "macos"))]
     let window_builder = window_builder.transparent(true);
+
+    #[cfg(mobile)]
+    let window_builder =
+        WebviewWindowBuilder::new(app, "ask", WebviewUrl::App("index.html".into()));
 
     match window_builder.build() {
         Ok(window) => {
             let dt = t_build_total.elapsed().as_millis();
             info!(elapsed_ms=%dt, "Ask window built (first creation)");
-            let window_clone = window.clone();
-            window.on_window_event(move |event| {
-                if let WindowEvent::CloseRequested { .. } = event {
-                    window_clone.hide().unwrap();
-                }
-            });
+            #[cfg(desktop)]
+            {
+                let window_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { .. } = event {
+                        window_clone.hide().unwrap();
+                    }
+                });
+            }
         }
         Err(e) => error!(error=%e, "Failed to build window"),
     }
 }
 
 pub fn create_config_window(app: &AppHandle) {
-    let (window_size, window_position) =
-        get_window_size_and_position(app, 1300.0, 1000.0, &["ask", "chat_ui"]);
+    #[cfg(desktop)]
+    {
+        let (window_size, window_position) =
+            get_window_size_and_position(app, 1300.0, 1000.0, &["ask", "chat_ui"]);
 
-    let mut window_builder =
-        WebviewWindowBuilder::new(app, "config", WebviewUrl::App("index.html".into()))
-            .title("Aipp")
-            .inner_size(window_size.width, window_size.height)
-            .fullscreen(false)
-            .resizable(true)
-            .decorations(true);
+        let mut window_builder =
+            WebviewWindowBuilder::new(app, "config", WebviewUrl::App("index.html".into()))
+                .title("Aipp")
+                .inner_size(window_size.width, window_size.height)
+                .fullscreen(false)
+                .resizable(true)
+                .decorations(true);
 
-    // macOS 若仍有偏差可考虑额外使用 parent(&window) 方案
+        // macOS 若仍有偏差可考虑额外使用 parent(&window) 方案
 
-    if let Some(position) = window_position {
-        window_builder = window_builder.position(position.x, position.y);
-    } else {
-        window_builder = window_builder.center();
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    let window_builder = window_builder.transparent(false);
-
-    match window_builder.build() {
-        Ok(window) => {
-            let window_clone = window.clone();
-            window.on_window_event(move |event| {
-                if let WindowEvent::CloseRequested { .. } = event {
-                    window_clone.hide().unwrap();
-                }
-            });
+        if let Some(position) = window_position {
+            window_builder = window_builder.position(position.x, position.y);
+        } else {
+            window_builder = window_builder.center();
         }
-        Err(e) => error!(error=%e, "Failed to build window"),
+
+        #[cfg(not(target_os = "macos"))]
+        let window_builder = window_builder.transparent(false);
+
+        match window_builder.build() {
+            Ok(window) => {
+                let window_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { .. } = event {
+                        window_clone.hide().unwrap();
+                    }
+                });
+            }
+            Err(e) => error!(error=%e, "Failed to build window"),
+        }
+    }
+    #[cfg(mobile)]
+    {
+        let window_builder =
+            WebviewWindowBuilder::new(app, "config", WebviewUrl::App("index.html".into()));
+        if let Err(e) = window_builder.build() {
+            error!(error=%e, "Failed to build window");
+        }
     }
 }
 
 pub fn create_chat_ui_window(app: &AppHandle) {
-    let (window_size, window_position) = get_window_size_and_position(app, 1000.0, 800.0, &["ask"]);
+    #[cfg(desktop)]
+    {
+        let (window_size, window_position) =
+            get_window_size_and_position(app, 1000.0, 800.0, &["ask"]);
 
-    let mut window_builder =
-        WebviewWindowBuilder::new(app, "chat_ui", WebviewUrl::App("index.html".into()))
-            .title("Aipp")
-            .inner_size(window_size.width, window_size.height)
-            .fullscreen(false)
-            .resizable(true)
-            .decorations(true)
-            .on_download(|webview, event| { 
-                let download_path = webview
-                            .app_handle()
-                            .path()
-                            .download_dir()
-                            .unwrap_or_default();
-                        
-                match event {
-                    DownloadEvent::Requested { url, destination } => {
-                        debug!("downloading {} to {}", url, download_path.clone().to_string_lossy());
-                        *destination = download_path.join(&mut *destination);
-                    }
-                    DownloadEvent::Finished { url, path, success } => {
-                        debug!("downloaded {} to {:?}, success: {}", url, path, success);
-                        if success {
-                            let title = "下载完成";
-                            let body = format!("文件已保存到：{:?}", download_path);
-                            if let Err(e) = webview
-                                .app_handle()
-                                .notification()
-                                .builder()
-                                .title(title)
-                                .body(&body)
-                                .show()
-                            {
-                                warn!(error = %e, "failed to show download notification");
+        let mut window_builder =
+            WebviewWindowBuilder::new(app, "chat_ui", WebviewUrl::App("index.html".into()))
+                .title("Aipp")
+                .inner_size(window_size.width, window_size.height)
+                .fullscreen(false)
+                .resizable(true)
+                .decorations(true)
+                .on_download(|webview, event| {
+                    let download_path =
+                        webview.app_handle().path().download_dir().unwrap_or_default();
+
+                    match event {
+                        DownloadEvent::Requested { url, destination } => {
+                            debug!(
+                                "downloading {} to {}",
+                                url,
+                                download_path.clone().to_string_lossy()
+                            );
+                            *destination = download_path.join(&mut *destination);
+                        }
+                        DownloadEvent::Finished { url, path, success } => {
+                            debug!("downloaded {} to {:?}, success: {}", url, path, success);
+                            if success {
+                                let title = "下载完成";
+                                let body = format!("文件已保存到：{:?}", download_path);
+                                if let Err(e) = webview
+                                    .app_handle()
+                                    .notification()
+                                    .builder()
+                                    .title(title)
+                                    .body(&body)
+                                    .show()
+                                {
+                                    warn!(error = %e, "failed to show download notification");
+                                }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
-                }
-                true 
-            })
-            .disable_drag_drop_handler();
+                    true
+                })
+                .disable_drag_drop_handler();
 
-    // macOS 若仍有偏差可考虑额外使用 parent(&window) 方案
+        // macOS 若仍有偏差可考虑额外使用 parent(&window) 方案
 
-    if let Some(position) = window_position {
-        window_builder = window_builder.position(position.x, position.y);
-    } else {
-        window_builder = window_builder.center();
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    let window_builder = window_builder.transparent(false);
-
-    match window_builder.build() {
-        Ok(window) => {
-            let window_clone = window.clone();
-            window.on_window_event(move |event| {
-                if let WindowEvent::CloseRequested { .. } = event {
-                    window_clone.hide().unwrap();
-                }
-            });
-            let _ = window.maximize();
+        if let Some(position) = window_position {
+            window_builder = window_builder.position(position.x, position.y);
+        } else {
+            window_builder = window_builder.center();
         }
-        Err(e) => error!(error=%e, "Failed to build window"),
+
+        #[cfg(not(target_os = "macos"))]
+        let window_builder = window_builder.transparent(false);
+
+        match window_builder.build() {
+            Ok(window) => {
+                let window_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { .. } = event {
+                        window_clone.hide().unwrap();
+                    }
+                });
+                let _ = window.maximize();
+            }
+            Err(e) => error!(error=%e, "Failed to build window"),
+        }
+    }
+    #[cfg(mobile)]
+    {
+        let window_builder =
+            WebviewWindowBuilder::new(app, "chat_ui", WebviewUrl::App("index.html".into()));
+        if let Err(e) = window_builder.build() {
+            error!(error=%e, "Failed to build window");
+        }
     }
 }
 
 pub fn create_plugin_window(app: &AppHandle) {
-    let window_builder =
-        WebviewWindowBuilder::new(app, "plugin", WebviewUrl::App("index.html".into()))
-            .title("Aipp")
-            .inner_size(1000.0, 800.0)
-            .fullscreen(false)
-            .resizable(true)
-            .decorations(true)
-            .center();
+    #[cfg(desktop)]
+    {
+        let window_builder =
+            WebviewWindowBuilder::new(app, "plugin", WebviewUrl::App("index.html".into()))
+                .title("Aipp")
+                .inner_size(1000.0, 800.0)
+                .fullscreen(false)
+                .resizable(true)
+                .decorations(true)
+                .center();
 
-    #[cfg(not(target_os = "macos"))]
-    let window_builder = window_builder.transparent(false);
+        #[cfg(not(target_os = "macos"))]
+        let window_builder = window_builder.transparent(false);
 
-    match window_builder.build() {
-        Ok(window) => {
-            let window_clone = window.clone();
-            window.on_window_event(move |event| {
-                if let WindowEvent::CloseRequested { .. } = event {
-                    window_clone.hide().unwrap();
-                }
-            });
+        match window_builder.build() {
+            Ok(window) => {
+                let window_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { .. } = event {
+                        window_clone.hide().unwrap();
+                    }
+                });
+            }
+            Err(e) => error!(error=%e, "Failed to build window"),
         }
-        Err(e) => error!(error=%e, "Failed to build window"),
+    }
+    #[cfg(mobile)]
+    {
+        let window_builder =
+            WebviewWindowBuilder::new(app, "plugin", WebviewUrl::App("index.html".into()));
+        if let Err(e) = window_builder.build() {
+            error!(error=%e, "Failed to build window");
+        }
     }
 }
 
 pub fn create_artifact_preview_window(app: &AppHandle) {
-    let (window_size, window_position) =
-        get_window_size_and_position(app, 1000.0, 800.0, &["ask", "chat_ui"]);
+    #[cfg(desktop)]
+    {
+        let (window_size, window_position) =
+            get_window_size_and_position(app, 1000.0, 800.0, &["ask", "chat_ui"]);
 
-    let mut window_builder =
-        WebviewWindowBuilder::new(app, "artifact_preview", WebviewUrl::App("index.html".into()))
-            .title("Artifact Preview - Aipp")
-            .inner_size(window_size.width, window_size.height)
-            .fullscreen(false)
-            .resizable(true)
-            .decorations(true);
+        let mut window_builder = WebviewWindowBuilder::new(
+            app,
+            "artifact_preview",
+            WebviewUrl::App("index.html".into()),
+        )
+        .title("Artifact Preview - Aipp")
+        .inner_size(window_size.width, window_size.height)
+        .fullscreen(false)
+        .resizable(true)
+        .decorations(true);
 
-    if let Some(position) = window_position {
-        window_builder = window_builder.position(position.x, position.y);
-    } else {
-        window_builder = window_builder.center();
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    let window_builder = window_builder.transparent(false);
-
-    match window_builder.build() {
-        Ok(window) => {
-            let window_clone = window.clone();
-            window.on_window_event(move |event| {
-                if let WindowEvent::CloseRequested { .. } = event {
-                    window_clone.hide().unwrap();
-                }
-            });
+        if let Some(position) = window_position {
+            window_builder = window_builder.position(position.x, position.y);
+        } else {
+            window_builder = window_builder.center();
         }
-        Err(e) => error!(error=%e, "Failed to build window"),
+
+        #[cfg(not(target_os = "macos"))]
+        let window_builder = window_builder.transparent(false);
+
+        match window_builder.build() {
+            Ok(window) => {
+                let window_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { .. } = event {
+                        window_clone.hide().unwrap();
+                    }
+                });
+            }
+            Err(e) => error!(error=%e, "Failed to build window"),
+        }
+    }
+    #[cfg(mobile)]
+    {
+        let window_builder = WebviewWindowBuilder::new(
+            app,
+            "artifact_preview",
+            WebviewUrl::App("index.html".into()),
+        );
+        if let Err(e) = window_builder.build() {
+            error!(error=%e, "Failed to build window");
+        }
     }
 }
 
@@ -309,11 +373,14 @@ pub async fn open_artifact_preview_window(app_handle: AppHandle) -> Result<(), S
         create_artifact_preview_window(&app_handle);
     } else if let Some(window) = app_handle.get_webview_window("artifact_preview") {
         debug!("Showing artifact preview window");
-        if window.is_minimized().unwrap_or(false) {
-            window.unminimize().unwrap();
+        #[cfg(desktop)]
+        {
+            if window.is_minimized().unwrap_or(false) {
+                window.unminimize().unwrap();
+            }
+            window.show().unwrap();
+            window.set_focus().unwrap();
         }
-        window.show().unwrap();
-        window.set_focus().unwrap();
     }
     Ok(())
 }
@@ -326,11 +393,14 @@ pub async fn open_config_window(app_handle: AppHandle) -> Result<(), String> {
         create_config_window(&app_handle)
     } else if let Some(window) = app_handle.get_webview_window("config") {
         debug!("Showing window");
-        if window.is_minimized().unwrap_or(false) {
-            window.unminimize().unwrap();
+        #[cfg(desktop)]
+        {
+            if window.is_minimized().unwrap_or(false) {
+                window.unminimize().unwrap();
+            }
+            window.show().unwrap();
+            window.set_focus().unwrap();
         }
-        window.show().unwrap();
-        window.set_focus().unwrap();
     }
     Ok(())
 }
@@ -341,15 +411,19 @@ pub async fn open_chat_ui_window(app_handle: AppHandle) -> Result<(), String> {
         debug!("Creating window");
 
         create_chat_ui_window(&app_handle);
+        #[cfg(desktop)]
         app_handle.get_webview_window("ask").unwrap().hide().unwrap();
     } else if let Some(window) = app_handle.get_webview_window("chat_ui") {
         debug!("Showing window");
-        if window.is_minimized().unwrap_or(false) {
-            window.unminimize().unwrap();
+        #[cfg(desktop)]
+        {
+            if window.is_minimized().unwrap_or(false) {
+                window.unminimize().unwrap();
+            }
+            window.show().unwrap();
+            window.set_focus().unwrap();
+            app_handle.get_webview_window("ask").unwrap().hide().unwrap();
         }
-        window.show().unwrap();
-        window.set_focus().unwrap();
-        app_handle.get_webview_window("ask").unwrap().hide().unwrap();
     }
     Ok(())
 }
@@ -362,11 +436,14 @@ pub async fn open_plugin_window(app_handle: AppHandle) -> Result<(), String> {
         create_plugin_window(&app_handle);
     } else if let Some(window) = app_handle.get_webview_window("plugin") {
         debug!("Showing window");
-        if window.is_minimized().unwrap_or(false) {
-            window.unminimize().unwrap();
+        #[cfg(desktop)]
+        {
+            if window.is_minimized().unwrap_or(false) {
+                window.unminimize().unwrap();
+            }
+            window.show().unwrap();
+            window.set_focus().unwrap();
         }
-        window.show().unwrap();
-        window.set_focus().unwrap();
     }
     Ok(())
 }
@@ -392,19 +469,22 @@ pub fn handle_open_ask_window(app_handle: &AppHandle) {
         }
         Some(window) => {
             debug!(ts=%Local::now().to_string(), "Focusing ask window");
-            let t_focus = std::time::Instant::now();
-            if window.is_minimized().unwrap_or(false) {
-                let t_unmin = std::time::Instant::now();
-                window.unminimize().unwrap();
-                info!(elapsed_ms=%t_unmin.elapsed().as_millis(), "ask window unminimize");
+            #[cfg(desktop)]
+            {
+                let t_focus = std::time::Instant::now();
+                if window.is_minimized().unwrap_or(false) {
+                    let t_unmin = std::time::Instant::now();
+                    window.unminimize().unwrap();
+                    info!(elapsed_ms=%t_unmin.elapsed().as_millis(), "ask window unminimize");
+                }
+                let t_show = std::time::Instant::now();
+                window.show().unwrap();
+                let show_ms = t_show.elapsed().as_millis();
+                let t_setf = std::time::Instant::now();
+                window.set_focus().unwrap();
+                let focus_ms = t_setf.elapsed().as_millis();
+                info!(show_ms=%show_ms, focus_ms=%focus_ms, total_ms=%t_focus.elapsed().as_millis(), "ask window show+focus timings");
             }
-            let t_show = std::time::Instant::now();
-            window.show().unwrap();
-            let show_ms = t_show.elapsed().as_millis();
-            let t_setf = std::time::Instant::now();
-            window.set_focus().unwrap();
-            let focus_ms = t_setf.elapsed().as_millis();
-            info!(show_ms=%show_ms, focus_ms=%focus_ms, total_ms=%t_focus.elapsed().as_millis(), "ask window show+focus timings");
         }
     }
     info!(elapsed_ms=%t_handle.elapsed().as_millis(), "handle_open_ask_window done");
@@ -419,22 +499,28 @@ pub fn awaken_aipp(app_handle: &AppHandle) {
     // 优先检查 chat_ui 窗口
     if let Some(window) = chat_ui_window {
         debug!(ts=%Local::now().to_string(), "Focusing chat_ui window");
-        if window.is_minimized().unwrap_or(false) {
-            window.unminimize().unwrap();
+        #[cfg(desktop)]
+        {
+            if window.is_minimized().unwrap_or(false) {
+                window.unminimize().unwrap();
+            }
+            window.show().unwrap();
+            window.set_focus().unwrap();
         }
-        window.show().unwrap();
-        window.set_focus().unwrap();
         return;
     }
 
     // 其次检查 ask 窗口
     if let Some(window) = ask_window {
         debug!(ts=%Local::now().to_string(), "Focusing ask window");
-        if window.is_minimized().unwrap_or(false) {
-            window.unminimize().unwrap();
+        #[cfg(desktop)]
+        {
+            if window.is_minimized().unwrap_or(false) {
+                window.unminimize().unwrap();
+            }
+            window.show().unwrap();
+            window.set_focus().unwrap();
         }
-        window.show().unwrap();
-        window.set_focus().unwrap();
         return;
     }
 
@@ -445,32 +531,46 @@ pub fn awaken_aipp(app_handle: &AppHandle) {
 
 // Create artifact collections window to manage saved artifacts
 fn create_artifact_collections_window(app_handle: &AppHandle) {
-    let (window_size, window_position) =
-        get_window_size_and_position(app_handle, 1200.0, 800.0, &["chat_ui", "ask", "config"]);
+    #[cfg(desktop)]
+    {
+        let (window_size, window_position) =
+            get_window_size_and_position(app_handle, 1200.0, 800.0, &["chat_ui", "ask", "config"]);
 
-    let builder = WebviewWindowBuilder::new(
-        app_handle,
-        "artifact_collections",
-        WebviewUrl::App("artifacts_collections.html".into()),
-    )
-    .title("Artifacts 合集管理")
-    .inner_size(window_size.width, window_size.height)
-    .resizable(true)
-    .minimizable(true)
-    .maximizable(true)
-    .center();
+        let builder = WebviewWindowBuilder::new(
+            app_handle,
+            "artifact_collections",
+            WebviewUrl::App("artifacts_collections.html".into()),
+        )
+        .title("Artifacts 合集管理")
+        .inner_size(window_size.width, window_size.height)
+        .resizable(true)
+        .minimizable(true)
+        .maximizable(true)
+        .center();
 
-    let builder = if let Some(position) = window_position {
-        builder.position(position.x, position.y)
-    } else {
-        builder.center()
-    };
+        let builder = if let Some(position) = window_position {
+            builder.position(position.x, position.y)
+        } else {
+            builder.center()
+        };
 
-    match builder.build() {
-        Ok(_window) => {
-            info!("Artifact collections window created successfully");
+        match builder.build() {
+            Ok(_window) => {
+                info!("Artifact collections window created successfully");
+            }
+            Err(e) => {
+                error!(error=%e, "Failed to create artifact collections window");
+            }
         }
-        Err(e) => {
+    }
+    #[cfg(mobile)]
+    {
+        let builder = WebviewWindowBuilder::new(
+            app_handle,
+            "artifact_collections",
+            WebviewUrl::App("artifacts_collections.html".into()),
+        );
+        if let Err(e) = builder.build() {
             error!(error=%e, "Failed to create artifact collections window");
         }
     }
@@ -480,34 +580,51 @@ fn create_artifact_collections_window(app_handle: &AppHandle) {
 fn create_artifact_window(app_handle: &AppHandle, artifact: &ArtifactCollection) {
     let window_label = "artifact";
 
-    let (window_size, window_position) = get_window_size_and_position(
-        app_handle,
-        1000.0,
-        700.0,
-        &["artifact_collections", "ask", "chat_ui"],
-    );
+    #[cfg(desktop)]
+    {
+        let (window_size, window_position) = get_window_size_and_position(
+            app_handle,
+            1000.0,
+            700.0,
+            &["artifact_collections", "ask", "chat_ui"],
+        );
 
-    let builder =
-        WebviewWindowBuilder::new(app_handle, window_label, WebviewUrl::App("index.html".into()))
-            .title(artifact.name.clone())
-            .inner_size(window_size.width, window_size.height)
-            .resizable(true)
-            .minimizable(true)
-            .maximizable(true)
-            .center();
+        let builder = WebviewWindowBuilder::new(
+            app_handle,
+            window_label,
+            WebviewUrl::App("index.html".into()),
+        )
+        .title(artifact.name.clone())
+        .inner_size(window_size.width, window_size.height)
+        .resizable(true)
+        .minimizable(true)
+        .maximizable(true)
+        .center();
 
-    let builder = if let Some(position) = window_position {
-        builder.position(position.x, position.y)
-    } else {
-        builder.center()
-    };
+        let builder = if let Some(position) = window_position {
+            builder.position(position.x, position.y)
+        } else {
+            builder.center()
+        };
 
-    match builder.build() {
-        Ok(_window) => {
-            info!(label=%window_label, "Artifact window created successfully");
-            // 窗口会根据自己的 label 自动加载对应的 artifact 数据
+        match builder.build() {
+            Ok(_window) => {
+                info!(label=%window_label, "Artifact window created successfully");
+                // 窗口会根据自己的 label 自动加载对应的 artifact 数据
+            }
+            Err(e) => {
+                error!(error=%e, "Failed to create artifact window");
+            }
         }
-        Err(e) => {
+    }
+    #[cfg(mobile)]
+    {
+        let builder = WebviewWindowBuilder::new(
+            app_handle,
+            window_label,
+            WebviewUrl::App("index.html".into()),
+        );
+        if let Err(e) = builder.build() {
             error!(error=%e, "Failed to create artifact window");
         }
     }
@@ -521,11 +638,14 @@ pub async fn open_artifact_collections_window(app_handle: AppHandle) -> Result<(
         create_artifact_collections_window(&app_handle);
     } else if let Some(window) = app_handle.get_webview_window("artifact_collections") {
         debug!("Showing artifact collections window");
-        if window.is_minimized().unwrap_or(false) {
-            window.unminimize().unwrap();
+        #[cfg(desktop)]
+        {
+            if window.is_minimized().unwrap_or(false) {
+                window.unminimize().unwrap();
+            }
+            window.show().unwrap();
+            window.set_focus().unwrap();
         }
-        window.show().unwrap();
-        window.set_focus().unwrap();
     }
     Ok(())
 }
@@ -541,40 +661,60 @@ pub async fn open_artifact_window(
         create_artifact_window(&app_handle, &artifact);
     } else if let Some(window) = app_handle.get_webview_window(&window_label) {
         debug!(label=%window_label, "Showing artifact window");
-        if window.is_minimized().unwrap_or(false) {
-            window.unminimize().unwrap();
+        #[cfg(desktop)]
+        {
+            if window.is_minimized().unwrap_or(false) {
+                window.unminimize().unwrap();
+            }
+            window.show().unwrap();
+            window.set_focus().unwrap();
         }
-        window.show().unwrap();
-        window.set_focus().unwrap();
     }
     Ok(())
 }
 
 // Create plugin store window
 fn create_plugin_store_window(app_handle: &AppHandle) {
-    let (window_size, window_position) =
-        get_window_size_and_position(app_handle, 1200.0, 800.0, &["chat_ui", "ask", "config"]);
+    #[cfg(desktop)]
+    {
+        let (window_size, window_position) =
+            get_window_size_and_position(app_handle, 1200.0, 800.0, &["chat_ui", "ask", "config"]);
 
-    let builder =
-        WebviewWindowBuilder::new(app_handle, "plugin_store", WebviewUrl::App("index.html".into()))
-            .title("插件商店")
-            .inner_size(window_size.width, window_size.height)
-            .resizable(true)
-            .minimizable(true)
-            .maximizable(true)
-            .center();
+        let builder = WebviewWindowBuilder::new(
+            app_handle,
+            "plugin_store",
+            WebviewUrl::App("index.html".into()),
+        )
+        .title("插件商店")
+        .inner_size(window_size.width, window_size.height)
+        .resizable(true)
+        .minimizable(true)
+        .maximizable(true)
+        .center();
 
-    let builder = if let Some(position) = window_position {
-        builder.position(position.x, position.y)
-    } else {
-        builder.center()
-    };
+        let builder = if let Some(position) = window_position {
+            builder.position(position.x, position.y)
+        } else {
+            builder.center()
+        };
 
-    match builder.build() {
-        Ok(_window) => {
-            info!("Plugin store window created successfully");
+        match builder.build() {
+            Ok(_window) => {
+                info!("Plugin store window created successfully");
+            }
+            Err(e) => {
+                error!(error=%e, "Failed to create plugin store window");
+            }
         }
-        Err(e) => {
+    }
+    #[cfg(mobile)]
+    {
+        let builder = WebviewWindowBuilder::new(
+            app_handle,
+            "plugin_store",
+            WebviewUrl::App("index.html".into()),
+        );
+        if let Err(e) = builder.build() {
             error!(error=%e, "Failed to create plugin store window");
         }
     }
@@ -588,51 +728,70 @@ pub async fn open_plugin_store_window(app_handle: AppHandle) -> Result<(), Strin
         create_plugin_store_window(&app_handle);
     } else if let Some(window) = app_handle.get_webview_window("plugin_store") {
         debug!("Showing plugin store window");
-        if window.is_minimized().unwrap_or(false) {
-            window.unminimize().unwrap();
+        #[cfg(desktop)]
+        {
+            if window.is_minimized().unwrap_or(false) {
+                window.unminimize().unwrap();
+            }
+            window.show().unwrap();
+            window.set_focus().unwrap();
         }
-        window.show().unwrap();
-        window.set_focus().unwrap();
     }
     Ok(())
 }
 
 // Create hidden search window for builtin MCP tools
 fn create_hidden_search_window(app_handle: &AppHandle) {
-    let builder = WebviewWindowBuilder::new(
-        app_handle,
-        "hidden_search",
-        WebviewUrl::External("about:blank".parse().unwrap()),
-    )
-    .title("Search Window")
-    .inner_size(800.0, 600.0)
-    .resizable(false)
-    .minimizable(true)
-    .maximizable(false)
-    .closable(false)
-    .visible(true) // 改为可见，但会立即最小化
-    .skip_taskbar(false) // 允许在任务栏显示
-    .decorations(true);
+    #[cfg(desktop)]
+    {
+        let builder = WebviewWindowBuilder::new(
+            app_handle,
+            "hidden_search",
+            WebviewUrl::External("about:blank".parse().unwrap()),
+        )
+        .title("Search Window")
+        .inner_size(800.0, 600.0)
+        .resizable(false)
+        .minimizable(true)
+        .maximizable(false)
+        .closable(false)
+        .visible(true) // 改为可见，但会立即最小化
+        .skip_taskbar(false) // 允许在任务栏显示
+        .decorations(true);
 
-    match builder.build() {
-        Ok(window) => {
-            info!("Search window created successfully");
+        match builder.build() {
+            Ok(window) => {
+                info!("Search window created successfully");
 
-            // 立即最小化窗口，让用户看不到但JavaScript仍可执行
-            if let Err(e) = window.minimize() {
-                warn!(error=%e, "Failed to minimize search window");
+                // 立即最小化窗口，让用户看不到但JavaScript仍可执行
+                if let Err(e) = window.minimize() {
+                    warn!(error=%e, "Failed to minimize search window");
+                }
+
+                // 测试JavaScript执行能力
+                if let Err(e) =
+                    window.eval("console.log('JavaScript execution test in search window');")
+                {
+                    warn!(error=%e, "JavaScript execution failed in search window");
+                } else {
+                    debug!("JavaScript execution test successful in search window");
+                }
             }
-
-            // 测试JavaScript执行能力
-            if let Err(e) =
-                window.eval("console.log('JavaScript execution test in search window');")
-            {
-                warn!(error=%e, "JavaScript execution failed in search window");
-            } else {
-                debug!("JavaScript execution test successful in search window");
+            Err(e) => {
+                error!(error=%e, "Failed to create search window");
             }
         }
-        Err(e) => {
+    }
+    #[cfg(mobile)]
+    {
+        // Mobile doesn't support hidden windows or multiple windows easily in the same way
+        // But we can try creating a window
+        let builder = WebviewWindowBuilder::new(
+            app_handle,
+            "hidden_search",
+            WebviewUrl::External("about:blank".parse().unwrap()),
+        );
+        if let Err(e) = builder.build() {
             error!(error=%e, "Failed to create search window");
         }
     }

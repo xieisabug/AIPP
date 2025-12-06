@@ -436,6 +436,7 @@ impl VuePreviewManager {
         let url = format!("http://localhost:{}", port);
         println!("🪟 [VueWindow] 准备打开预览窗口: {}", url);
 
+        #[cfg(desktop)]
         let window = WebviewWindowBuilder::new(
             app_handle,
             format!("vue-preview-{}", preview_id),
@@ -445,6 +446,14 @@ impl VuePreviewManager {
         .inner_size(1024.0, 768.0)
         .center()
         .resizable(true)
+        .build();
+
+        #[cfg(mobile)]
+        let window = WebviewWindowBuilder::new(
+            app_handle,
+            format!("vue-preview-{}", preview_id),
+            WebviewUrl::External(url.parse().unwrap()),
+        )
         .build();
 
         match window {

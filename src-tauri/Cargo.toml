@@ -7,6 +7,10 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lib]
+name = "aipp_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -16,14 +20,12 @@ dirs = "5.0.1"
 tauri = { version = "2", features = [ "test", "protocol-asset", "tray-icon", "devtools"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12.5", features = ["json", "stream", "blocking"] }
+reqwest = { version = "0.12.5", default-features = false, features = ["json", "stream", "blocking", "rustls-tls"] }
 htmd = "0.1"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7.11" }
 which = "6"
-playwright = "0.0.20"
 rusqlite = { version = "0.31.0", features = ["bundled", "chrono"] }
-get-selected-text = "0.1.6"
 config = "0.14.0"
 futures = "0.3.30"
 chrono = { version = "0.4", features = ["serde"] }
@@ -42,7 +44,6 @@ flate2 = "1.0"
 rand = "0.8"
 fastrand = "2.0"
 mockito = "0.31"
-screenshots = "0.8"
 image = "0.25"
 uuid = { version = "1.0", features = ["v4"] }
 urlencoding = "2.1"
@@ -71,6 +72,8 @@ macos-accessibility-client = "0.0.1"
 
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
 tauri-plugin-global-shortcut =  { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
+playwright = "0.0.20"
+get-selected-text = "0.1.6"
 
 [dev-dependencies]
 rstest = "0.18"
