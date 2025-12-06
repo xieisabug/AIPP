@@ -113,13 +113,16 @@ function ConversationList({
     }, [conversationId, conversations]);
 
     useEffect(() => {
+        // conversationId 为空时不触发 onSelectConversation，避免移动端抽屉在初次加载时立刻关闭
+        if (!conversationId) return;
+
         const index = conversations.findIndex(
             (c) => conversationId == c.id.toString(),
         );
         if (index === -1) {
             onSelectConversation("");
         }
-    }, [conversations]);
+    }, [conversations, conversationId, onSelectConversation]);
 
     const [menuShow, setMenuShow] = useState(false);
 
