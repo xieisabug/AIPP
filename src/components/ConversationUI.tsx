@@ -590,6 +590,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     handleSend={handleSend}
                     aiIsResponsing={aiIsResponsing}
                     placement="bottom"
+                    isMobile={isMobile}
                 />
 
                 <ConversationTitleEditDialog

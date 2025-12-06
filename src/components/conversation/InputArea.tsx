@@ -82,6 +82,7 @@ interface InputAreaProps {
     handleSend: () => void;
     aiIsResponsing: boolean;
     placement?: "top" | "bottom";
+    isMobile?: boolean;
 }
 const IMAGE_AREA_HEIGHT = 80;
 
@@ -98,6 +99,7 @@ const InputArea = React.memo(
                 handleSend,
                 aiIsResponsing,
                 placement = "bottom",
+                isMobile = false,
             },
             ref
         ) => {
@@ -804,7 +806,7 @@ const InputArea = React.memo(
             }, [textareaRef]);
 
             return (
-                <div className={`input-area ${placement}`}>
+                <div className={`input-area ${placement} ${isMobile ? 'mobile' : ''}`}>
                     <div className="input-area-textarea-container">
                         <div className="input-area-img-container" onClick={handleImageContainerClick}>
                             {renderFiles()}

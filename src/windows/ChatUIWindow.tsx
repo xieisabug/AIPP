@@ -7,7 +7,7 @@ import ChatUIInfomation from "../components/ChatUIInfomation";
 import ConversationUI, { ConversationUIRef } from "../components/ConversationUI";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
-import { Sheet, SheetContent, SheetTitle, SheetDescription, SheetTrigger } from "../components/ui/sheet";
+import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
 import { Menu } from "lucide-react";
 

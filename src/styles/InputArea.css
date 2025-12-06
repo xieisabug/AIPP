@@ -102,41 +102,39 @@
     transition: height 0.2s;
 }
 
-/* 移动端输入框样式 */
-@media (max-width: 767px) {
-    .bottom .input-area-textarea-container {
-        left: 12px;
-        right: 12px;
-        bottom: 12px;
-        min-height: 50px;
-        border-radius: 25px;
-        padding: 0 55px 0 45px;
-    }
+/* 移动端输入框样式 - 使用 .mobile 类控制 */
+.input-area.mobile.bottom .input-area-textarea-container {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    min-height: 50px;
+    border-radius: 25px;
+    padding: 0 55px 0 45px;
+}
 
-    .input-area-textarea {
-        padding: 12px 5px 8px 5px;
-        font-size: 15px;
-        height: 50px;
-    }
+.input-area.mobile .input-area-textarea {
+    padding: 12px 5px 8px 5px;
+    font-size: 15px;
+    height: 50px;
+}
 
-    /* 移动端发送按钮 - 覆盖 large 尺寸，改为更小的尺寸 */
-    .bottom .input-area-send-button {
-        bottom: 12px;
-        right: 18px;
-        height: 44px !important;
-        width: 44px !important;
-        border-radius: 22px !important;
-    }
+/* 移动端发送按钮 - 覆盖 large 尺寸，改为更小的尺寸 */
+.input-area.mobile.bottom .input-area-send-button {
+    bottom: 48px;
+    right: 18px;
+    height: 44px !important;
+    width: 44px !important;
+    border-radius: 22px !important;
+}
 
-    /* 移动端添加按钮 */
-    .bottom .input-area-add-button {
-        bottom: 23px;
-        left: 18px;
-        right: auto;
-        height: 28px !important;
-        width: 28px !important;
-        border-radius: 14px !important;
-    }
+/* 移动端添加按钮 */
+.input-area.mobile.bottom .input-area-add-button {
+    bottom: 54px;
+    left: 20px;
+    right: auto;
+    height: 28px !important;
+    width: 28px !important;
+    border-radius: 14px !important;
 }
 
 .input-area-textarea {
