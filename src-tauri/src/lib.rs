@@ -89,9 +89,9 @@ use crate::mcp::registry_api::{
     update_mcp_server_prompt, update_mcp_server_tool,
 };
 use crate::window::{
-    awaken_aipp, create_ask_window, ensure_hidden_search_window, handle_open_ask_window,
-    open_artifact_collections_window, open_artifact_preview_window, open_chat_ui_window,
-    open_config_window, open_plugin_store_window, open_plugin_window,
+    awaken_aipp, create_ask_window, create_chat_ui_window, ensure_hidden_search_window,
+    handle_open_ask_window, open_artifact_collections_window, open_artifact_preview_window,
+    open_chat_ui_window, open_config_window, open_plugin_store_window, open_plugin_window,
 };
 use chrono::Local;
 use db::conversation_db::ConversationDatabase;
@@ -343,7 +343,15 @@ pub fn run() {
             }
 
             if app.get_webview_window("main").is_none() {
-                create_ask_window(&app_handle)
+                // 移动端直接启动 chat_ui 窗口
+                #[cfg(mobile)]
+                {
+                    create_chat_ui_window(&app_handle);
+                }
+                #[cfg(desktop)]
+                {
+                    create_ask_window(&app_handle);
+                }
             }
 
             Ok(())

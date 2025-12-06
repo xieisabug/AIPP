@@ -53,10 +53,11 @@ interface ConversationUIProps {
     conversationId: string;
     onChangeConversationId: (conversationId: string) => void;
     pluginList: any[];
+    isMobile?: boolean;
 }
 
 const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
-    ({ conversationId, onChangeConversationId, pluginList }, ref) => {
+    ({ conversationId, onChangeConversationId, pluginList, isMobile = false }, ref) => {
         // ============= 基础状态管理 =============
 
         // 当前对话信息和助手列表
@@ -391,7 +392,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
             // 加载指定对话的消息和信息
             setIsLoadingShow(true);
-            
+
             // 在切换对话时立即清理所有与前一个对话相关的状态
             setGroupMergeMap(new Map()); // 切换对话时清理组合并状态
             clearStreamingMessages(); // 清理流式消息
@@ -409,7 +410,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 .then((res: ConversationWithMessages) => {
                     const backendDuration = performance.now() - frontendStartTime;
                     console.log(`[PERF-FRONTEND] 后端返回数据耗时: ${backendDuration.toFixed(2)}ms, 消息数: ${res.messages.length}`);
-                    
+
                     // 检查请求是否已被取消
                     if (currentLoadingRef.cancelled) {
                         return;
@@ -425,7 +426,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             setShiningMessageIds((prev) => new Set([...prev, res.messages[1].id]));
                         }
                     }
-                    
+
                     const setStateDuration = performance.now() - setStateStartTime;
                     console.log(`[PERF-FRONTEND] 设置状态耗时: ${setStateDuration.toFixed(2)}ms`);
                 })
@@ -506,7 +507,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
             const renderStartTime = performance.now();
             console.log(`[PERF-FRONTEND] 开始渲染 ${allDisplayMessages.length} 条消息`);
-            
+
             // 等待渲染与布局稳定后再滚动（双 rAF）
             requestAnimationFrame(() =>
                 requestAnimationFrame(() => {
@@ -534,18 +535,21 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // ============= 组件渲染 =============
 
         return (
-            <div ref={dropRef} className="h-full relative flex flex-col bg-background rounded-xl">
-                <ConversationHeader
-                    conversationId={conversationId}
-                    conversation={conversation}
-                    onEdit={openTitleEditDialog}
-                    onDelete={handleDeleteConversationSuccess}
-                />
+            <div ref={dropRef} className={`h-full relative flex flex-col bg-background ${isMobile ? '' : 'rounded-xl'}`}>
+                {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}
+                {!isMobile && (
+                    <ConversationHeader
+                        conversationId={conversationId}
+                        conversation={conversation}
+                        onEdit={openTitleEditDialog}
+                        onDelete={handleDeleteConversationSuccess}
+                    />
+                )}
 
                 <div
                     ref={scrollContainerRef}
                     onScroll={handleScroll}
-                    className="h-full flex-1 overflow-y-auto flex flex-col p-6 box-border gap-4"
+                    className={`h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
                 >
                     <ConversationContent
                         conversationId={conversationId}

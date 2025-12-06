@@ -6,6 +6,10 @@ import ConversationList from "../components/ConversationList";
 import ChatUIInfomation from "../components/ChatUIInfomation";
 import ConversationUI, { ConversationUIRef } from "../components/ConversationUI";
 import { useTheme } from "../hooks/useTheme";
+import { useIsMobile } from "../hooks/use-mobile";
+import { Sheet, SheetContent, SheetTitle, SheetDescription, SheetTrigger } from "../components/ui/sheet";
+import { Button } from "../components/ui/button";
+import { Menu } from "lucide-react";
 
 import { appDataDir } from "@tauri-apps/api/path";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -15,10 +19,30 @@ function ChatUIWindow() {
     // 集成主题系统
     useTheme();
 
+    // 检测移动端
+    const isMobile = useIsMobile();
+    const [sidebarOpen, setSidebarOpen] = useState(false);
+
     const [pluginList, setPluginList] = useState<any[]>([]);
 
     const [selectedConversation, setSelectedConversation] = useState<string>("");
     const conversationUIRef = useRef<ConversationUIRef>(null);
+
+    // 移动端选择对话后自动关闭侧边栏
+    const handleSelectConversation = (conversationId: string) => {
+        setSelectedConversation(conversationId);
+        if (isMobile) {
+            setSidebarOpen(false);
+        }
+    };
+
+    // 移动端新对话后自动关闭侧边栏
+    const handleNewConversation = () => {
+        setSelectedConversation("");
+        if (isMobile) {
+            setSidebarOpen(false);
+        }
+    };
 
     // 组件挂载完成后，发送窗口加载事件，通知 AskWindow
     useEffect(() => {
@@ -119,6 +143,47 @@ function ChatUIWindow() {
         initPlugin();
     }, []);
 
+    // 移动端布局
+    if (isMobile) {
+        return (
+            <div className="flex flex-col h-screen bg-background">
+                {/* 移动端顶部栏 */}
+                <div className="flex-none flex items-center justify-between px-4 py-3 bg-secondary border-b border-border">
+                    <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
+                        <SheetTrigger asChild>
+                            <Button variant="ghost" size="icon">
+                                <Menu className="h-5 w-5" />
+                            </Button>
+                        </SheetTrigger>
+                        <SheetContent side="left" className="w-[280px] p-0 flex flex-col" aria-describedby={undefined}>
+                            <SheetTitle className="sr-only">导航菜单</SheetTitle>
+                            <ChatUIInfomation />
+                            <ChatUIToolbar onNewConversation={handleNewConversation} />
+                            <ConversationList
+                                conversationId={selectedConversation}
+                                onSelectConversation={handleSelectConversation}
+                            />
+                        </SheetContent>
+                    </Sheet>
+                    <span className="font-medium text-sm truncate flex-1 text-center">Aipp</span>
+                    <div className="w-10" /> {/* 占位，保持标题居中 */}
+                </div>
+
+                {/* 主内容区域 */}
+                <div className="flex-1 overflow-hidden">
+                    <ConversationUI
+                        ref={conversationUIRef}
+                        pluginList={pluginList}
+                        conversationId={selectedConversation}
+                        onChangeConversationId={setSelectedConversation}
+                        isMobile={true}
+                    />
+                </div>
+            </div>
+        );
+    }
+
+    // 桌面端布局
     return (
         <div className="flex h-screen bg-background">
             <div className="flex-none w-[280px] flex flex-col shadow-lg box-border rounded-r-xl mb-2 mr-2">
