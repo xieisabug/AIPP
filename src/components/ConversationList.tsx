@@ -113,8 +113,8 @@ function ConversationList({
     }, [conversationId, conversations]);
 
     useEffect(() => {
-        // conversationId 为空时不触发 onSelectConversation，避免移动端抽屉在初次加载时立刻关闭
-        if (!conversationId) return;
+        // conversationId 为空或列表尚未加载完成时，不触发 onSelectConversation，避免移动端抽屉被误关闭
+        if (!conversationId || isLoading || conversations.length === 0) return;
 
         const index = conversations.findIndex(
             (c) => conversationId == c.id.toString(),
@@ -122,7 +122,7 @@ function ConversationList({
         if (index === -1) {
             onSelectConversation("");
         }
-    }, [conversations, conversationId, onSelectConversation]);
+    }, [conversations, conversationId, onSelectConversation, isLoading]);
 
     const [menuShow, setMenuShow] = useState(false);
 
