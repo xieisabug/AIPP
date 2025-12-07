@@ -7,9 +7,11 @@ import { Button } from "./ui/button";
 interface ChatUIInfomationProps {
     showArtifacts?: boolean;
     showPluginStore?: boolean;
+    /** 移动端模式，使用内部视图切换而非多窗口 */
+    isMobile?: boolean;
 }
 
-function ChatUIInfomation({ showArtifacts = true, showPluginStore = true }: ChatUIInfomationProps) {
+function ChatUIInfomation({ showArtifacts = true, showPluginStore = true, isMobile = false }: ChatUIInfomationProps) {
     const {
         state: logoState,
         showHappy,
@@ -22,6 +24,17 @@ function ChatUIInfomation({ showArtifacts = true, showPluginStore = true }: Chat
     });
 
     const openConfig = async () => {
+        // 移动端使用内部视图切换
+        if (isMobile) {
+            const switchWindow = (window as any).__setAppWindow as ((label: string) => void) | undefined;
+            if (switchWindow) {
+                switchWindow("config");
+                showHappy();
+                return;
+            }
+        }
+
+        // 桌面端使用多窗口
         try {
             await invoke("open_config_window");
             showHappy();

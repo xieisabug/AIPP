@@ -170,7 +170,7 @@ function ChatUIWindow() {
                             hideCloseButton
                         >
                             <SheetTitle className="sr-only">导航菜单</SheetTitle>
-                            <ChatUIInfomation showArtifacts={false} showPluginStore={false} />
+                            <ChatUIInfomation showArtifacts={false} showPluginStore={false} isMobile={true} />
                             <ChatUIToolbar onNewConversation={handleNewConversation} />
                             <ConversationList
                                 conversationId={selectedConversation}

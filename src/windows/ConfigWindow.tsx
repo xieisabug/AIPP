@@ -5,13 +5,14 @@ import AssistantConfig from "../components/config/AssistantConfig";
 import FeatureAssistantConfig from "../components/config/FeatureAssistantConfig";
 import MCPConfig from "../components/config/MCPConfig";
 import { appDataDir } from "@tauri-apps/api/path";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Blocks, Bot, ServerCrash, Settings } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
-import { Menu } from "lucide-react";
+import { Home, Menu } from "lucide-react";
 
 interface MenuItem {
     id: string;
@@ -168,6 +169,28 @@ function ConfigWindow() {
         </div>
     );
 
+    const handleBackHome = async () => {
+        // 移动端优先在单 webview 内直接切换视图，避免多窗口体验割裂
+        if (isMobile) {
+            const switchWindow = (window as any).__setAppWindow as ((label: string) => void) | undefined;
+            if (switchWindow) {
+                switchWindow("chat_ui");
+                return;
+            }
+        }
+
+        // 桌面端保持原先多窗口逻辑
+        try {
+            await invoke("open_chat_ui_window");
+
+            // 关闭当前设置窗口以返回 Chat UI（比 hide 更可靠，适配移动端）
+            const current = getCurrentWebviewWindow();
+            await current.close();
+        } catch (error) {
+            console.error("Failed to open chat UI window:", error);
+        }
+    };
+
     // 移动端布局：顶部栏 + 侧滑菜单
     if (isMobile) {
         return (
@@ -182,7 +205,12 @@ function ConfigWindow() {
                                 <Menu className="h-5 w-5" />
                             </Button>
                         </SheetTrigger>
-                        <SheetContent side="left" className="w-[280px] p-0 flex flex-col" aria-describedby={undefined}>
+                        <SheetContent
+                            side="left"
+                            className="w-[280px] p-0 flex flex-col"
+                            aria-describedby={undefined}
+                            hideCloseButton
+                        >
                             <SheetTitle className="sr-only">设置导航</SheetTitle>
                             <div className="bg-muted/30 border-border border-b px-3 py-4 overflow-y-auto">
                                 {renderMenuItems((id) => {
@@ -193,7 +221,9 @@ function ConfigWindow() {
                         </SheetContent>
                     </Sheet>
                     <span className="font-medium text-sm truncate flex-1 text-center">设置</span>
-                    <div className="w-10" />
+                    <Button variant="ghost" size="icon" onClick={handleBackHome} aria-label="返回首页">
+                        <Home className="h-5 w-5" />
+                    </Button>
                 </div>
 
                 <div className="flex-1 overflow-auto bg-card px-4 py-4">

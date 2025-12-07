@@ -28,6 +28,17 @@ function App() {
             console.error("Failed to get current webview window label, fallback to chat_ui", err);
             setWinLabel("chat_ui");
         }
+
+        // 提供可切换窗口的全局方法，便于移动端在单 webview 内切换视图
+        (window as any).__setAppWindow = (label: string) => {
+            setWinLabel(label);
+        };
+
+        return () => {
+            if ((window as any).__setAppWindow) {
+                delete (window as any).__setAppWindow;
+            }
+        };
     }, []);
 
     const WindowComponent = useMemo(() => {
