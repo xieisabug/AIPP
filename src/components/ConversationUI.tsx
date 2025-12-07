@@ -54,10 +54,11 @@ interface ConversationUIProps {
     onChangeConversationId: (conversationId: string) => void;
     pluginList: any[];
     isMobile?: boolean;
+    onConversationChange?: (conversation?: Conversation) => void;
 }
 
 const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
-    ({ conversationId, onChangeConversationId, pluginList, isMobile = false }, ref) => {
+    ({ conversationId, onChangeConversationId, pluginList, isMobile = false, onConversationChange }, ref) => {
         // ============= 基础状态管理 =============
 
         // 当前对话信息和助手列表
@@ -367,6 +368,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 inputAreaRef.current.focus();
             }
         }, [conversationId, isLoadingShow]); // 监听对话ID和加载状态变化
+
+        // 通知父组件当前对话信息变化，用于移动端标题展示
+        useEffect(() => {
+            if (onConversationChange) {
+                onConversationChange(conversation);
+            }
+        }, [conversation, onConversationChange]);
 
         // 对话加载和管理逻辑
         useEffect(() => {

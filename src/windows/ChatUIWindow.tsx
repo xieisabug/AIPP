@@ -1,15 +1,16 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useCallback, useEffect, useState, useRef } from "react";
 import ReactDOM from "react-dom";
 import { emit } from "@tauri-apps/api/event";
 import ChatUIToolbar from "../components/ChatUIToolbar";
 import ConversationList from "../components/ConversationList";
 import ChatUIInfomation from "../components/ChatUIInfomation";
 import ConversationUI, { ConversationUIRef } from "../components/ConversationUI";
+import { Conversation } from "../data/Conversation";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
-import { Menu } from "lucide-react";
+import { Menu, Plus } from "lucide-react";
 
 import { appDataDir } from "@tauri-apps/api/path";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -22,6 +23,7 @@ function ChatUIWindow() {
     // 检测移动端
     const isMobile = useIsMobile();
     const [sidebarOpen, setSidebarOpen] = useState(false);
+    const [conversationTitle, setConversationTitle] = useState("");
 
     const [pluginList, setPluginList] = useState<any[]>([]);
 
@@ -43,6 +45,10 @@ function ChatUIWindow() {
             setSidebarOpen(false);
         }
     };
+
+    const handleConversationChange = useCallback((conv?: Conversation) => {
+        setConversationTitle(conv?.name || "");
+    }, []);
 
     // 组件挂载完成后，发送窗口加载事件，通知 AskWindow
     useEffect(() => {
@@ -145,6 +151,8 @@ function ChatUIWindow() {
 
     // 移动端布局
     if (isMobile) {
+        const mobileTitle = conversationTitle || "新会话";
+
         return (
             <div className="flex flex-col h-screen bg-background">
                 {/* 移动端顶部栏 */}
@@ -155,9 +163,14 @@ function ChatUIWindow() {
                                 <Menu className="h-5 w-5" />
                             </Button>
                         </SheetTrigger>
-                        <SheetContent side="left" className="w-[280px] p-0 flex flex-col" aria-describedby={undefined}>
+                        <SheetContent
+                            side="left"
+                            className="w-[280px] p-0 flex flex-col"
+                            aria-describedby={undefined}
+                            hideCloseButton
+                        >
                             <SheetTitle className="sr-only">导航菜单</SheetTitle>
-                            <ChatUIInfomation />
+                            <ChatUIInfomation showArtifacts={false} showPluginStore={false} />
                             <ChatUIToolbar onNewConversation={handleNewConversation} />
                             <ConversationList
                                 conversationId={selectedConversation}
@@ -165,8 +178,10 @@ function ChatUIWindow() {
                             />
                         </SheetContent>
                     </Sheet>
-                    <span className="font-medium text-sm truncate flex-1 text-center">Aipp</span>
-                    <div className="w-10" /> {/* 占位，保持标题居中 */}
+                    <span className="font-medium text-sm truncate flex-1 text-center mx-3">{mobileTitle}</span>
+                    <Button variant="ghost" size="icon" onClick={handleNewConversation} aria-label="新建对话">
+                        <Plus className="h-5 w-5" />
+                    </Button>
                 </div>
 
                 {/* 主内容区域 */}
@@ -177,6 +192,7 @@ function ChatUIWindow() {
                         conversationId={selectedConversation}
                         onChangeConversationId={setSelectedConversation}
                         isMobile={true}
+                        onConversationChange={handleConversationChange}
                     />
                 </div>
             </div>

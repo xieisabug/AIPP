@@ -4,7 +4,12 @@ import AnimatedLogo from "./AnimatedLogo";
 import { useLogoState } from "../hooks/useLogoState";
 import { Button } from "./ui/button";
 
-function ChatUIInfomation() {
+interface ChatUIInfomationProps {
+    showArtifacts?: boolean;
+    showPluginStore?: boolean;
+}
+
+function ChatUIInfomation({ showArtifacts = true, showPluginStore = true }: ChatUIInfomationProps) {
     const {
         state: logoState,
         showHappy,
@@ -52,12 +57,16 @@ function ChatUIInfomation() {
                 <Button onClick={openConfig} variant={"ghost"}>
                     <Settings />
                 </Button>
-                <Button onClick={openArtifactsCollections} variant={"ghost"}>
-                    <PackageOpen />
-                </Button>
-                <Button onClick={openPluginStore} variant={"ghost"}>
-                    <Store />
-                </Button>
+                {showArtifacts && (
+                    <Button onClick={openArtifactsCollections} variant={"ghost"}>
+                        <PackageOpen />
+                    </Button>
+                )}
+                {showPluginStore && (
+                    <Button onClick={openPluginStore} variant={"ghost"}>
+                        <Store />
+                    </Button>
+                )}
             </div>
         </div>
     );
