@@ -4,6 +4,8 @@ pub mod assistant_api;
 pub mod attachment_api;
 pub mod conversation_api;
 pub mod copilot_api;
+#[cfg(desktop)]
+pub mod copilot_lsp;
 pub mod genai_client;
 pub mod highlight_api;
 pub mod llm_api;

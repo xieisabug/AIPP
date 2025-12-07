@@ -320,7 +320,7 @@ const LLMProviderConfig: React.FC = () => {
             <LLMProviderConfigForm
                 id={selectedProvider.id}
                 index={LLMProviders.findIndex(p => p.id === selectedProvider.id)}
-                apiType={selectedProviderApiType}
+                apiType={selectedProvider.api_type}
                 name={selectedProvider.name}
                 description={selectedProvider.description || `${selectedProviderApiType} 提供商配置`}
                 isOffical={selectedProvider.is_official}

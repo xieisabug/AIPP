@@ -2,6 +2,7 @@ import React, { useEffect, useCallback, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import debounce from "lodash/debounce";
 import TagInputContainer from "./TagInputContainer";
+import ReadOnlyModelList from "./ReadOnlyModelList";
 import ModelSelectionDialog from "./ModelSelectionDialog";
 import ConfigForm from "../ConfigForm";
 import { useForm } from "react-hook-form";
@@ -13,7 +14,17 @@ import {
     CollapsibleContent,
     CollapsibleTrigger,
 } from "../ui/collapsible";
-import { Trash2, ChevronDown, Share, Copy } from "lucide-react";
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from "../ui/dialog";
+import { Input } from "../ui/input";
+import { Trash2, ChevronDown, Share, Copy, Search, KeyRound, Edit } from "lucide-react";
+import { useCopilot } from "@/hooks/useCopilot";
 
 interface LLMProviderConfig {
     name: string;
@@ -74,14 +85,42 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const [modelSelectionData, setModelSelectionData] =
         useState<ModelSelectionResponse | null>(null);
     const [isUpdatingModels, setIsUpdatingModels] = useState<boolean>(false);
-    const [copilotAuthInfo, setCopilotAuthInfo] = useState<{
-        userCode?: string;
-        verificationUri?: string;
-        isAuthorizing: boolean;
-    }>({ isAuthorizing: false });
     const [hasApiKey, setHasApiKey] = useState<boolean>(false);
+    const [manualTokenDialogOpen, setManualTokenDialogOpen] = useState<boolean>(false);
+    const [manualToken, setManualToken] = useState<string>("");
 
-    const isCopilotProvider = apiType === "GitHub Copilot" || apiType === "github_copilot";
+    const isCopilotProvider = apiType === "github_copilot";
+
+    // API 类型显示标签映射
+    const apiTypeLabels: Record<string, string> = {
+        'openai_api': 'OpenAI API',
+        'ollama': 'Ollama API',
+        'anthropic': 'Anthropic API',
+        'cohere': 'Cohere API',
+        'deepseek': 'DeepSeek API',
+        'github_copilot': 'GitHub Copilot',
+    };
+    const apiTypeLabel = apiTypeLabels[apiType] || apiType;
+
+    // GitHub Copilot 授权管理
+    const copilot = useCopilot({
+        llmProviderId: id,
+        onAuthSuccess: () => {
+            // 授权成功后刷新配置
+            invoke<Array<LLMProviderConfig>>("get_llm_provider_config", { id })
+                .then((configArray) => {
+                    const newConfig: Record<string, string> = {};
+                    configArray.forEach((item) => {
+                        newConfig[item.name] = item.value;
+                    });
+                    form.reset(newConfig);
+                    setHasApiKey(!!newConfig.api_key);
+                })
+                .catch((e) => {
+                    console.error("[Copilot] refresh provider config failed", e);
+                });
+        },
+    });
 
     const defaultValues = useMemo(
         () => ({
@@ -248,30 +287,9 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                         <Button
                                             type="button"
                                             variant="destructive"
-                                            onClick={async () => {
-                                                try {
-                                                    await invoke("update_llm_provider_config", {
-                                                        llmProviderId: parseInt(id, 10),
-                                                        name: "api_key",
-                                                        value: "",
-                                                    });
-                                                    setHasApiKey(false);
-                                                    toast.success("已取消 GitHub Copilot 授权");
-
-                                                    // 刷新配置
-                                                    const configArray = await invoke<Array<LLMProviderConfig>>(
-                                                        "get_llm_provider_config",
-                                                        { id },
-                                                    );
-                                                    const newConfig: Record<string, string> = {};
-                                                    configArray.forEach((item) => {
-                                                        newConfig[item.name] = item.value;
-                                                    });
-                                                    form.reset(newConfig);
-                                                } catch (e) {
-                                                    console.error("[Copilot] Revoke failed", e);
-                                                    toast.error("取消授权失败: " + e);
-                                                }
+                                            onClick={() => {
+                                                copilot.cancelAuthorization();
+                                                setHasApiKey(false);
                                             }}
                                         >
                                             取消授权
@@ -279,26 +297,27 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                     </>
                                 ) : (
                                     <>
-                                        <div className="text-sm text-muted-foreground">
-                                            需要先完成 GitHub Copilot 授权才能使用模型。点击下方按钮开始 Device Flow 授权。
+                                        <div className="text-sm text-muted-foreground mb-2">
+                                            选择一种授权方式来接入 GitHub Copilot：
                                         </div>
 
-                                        {copilotAuthInfo.userCode && (
+                                        {/* 授权码显示区域 */}
+                                        {copilot.authInfo.userCode && (
                                             <div className="p-3 border border-border rounded-lg bg-muted">
                                                 <div className="text-xs text-muted-foreground mb-2">
                                                     授权码 (User Code):
                                                 </div>
                                                 <div className="flex items-center gap-2">
                                                     <code className="flex-1 text-lg font-mono font-bold bg-background px-3 py-2 rounded border border-border">
-                                                        {copilotAuthInfo.userCode}
+                                                        {copilot.authInfo.userCode}
                                                     </code>
                                                     <Button
                                                         type="button"
                                                         variant="outline"
                                                         size="sm"
                                                         onClick={() => {
-                                                            if (copilotAuthInfo.userCode) {
-                                                                navigator.clipboard.writeText(copilotAuthInfo.userCode);
+                                                            if (copilot.authInfo.userCode) {
+                                                                navigator.clipboard.writeText(copilot.authInfo.userCode);
                                                                 toast.success("授权码已复制到剪贴板");
                                                             }
                                                         }}
@@ -312,86 +331,143 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                             </div>
                                         )}
 
-                                        <Button
-                                            type="button"
-                                            className="bg-primary hover:bg-primary/90 text-primary-foreground"
-                                            disabled={copilotAuthInfo.isAuthorizing}
-                                            onClick={async () => {
-                                                try {
-                                                    setCopilotAuthInfo({ isAuthorizing: true });
+                                        {/* 三种授权方式按钮 */}
+                                        <div className="flex flex-col gap-2">
+                                            {/* 方式1: 扫描已有配置 */}
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                className="justify-start gap-2"
+                                                disabled={copilot.isAuthorizing}
+                                                onClick={() => {
+                                                    copilot.scanConfigAuth();
+                                                }}
+                                            >
+                                                <Search className="h-4 w-4" />
+                                                <div className="flex flex-col items-start">
+                                                    <span>扫描已有授权</span>
+                                                </div>
+                                            </Button>
 
-                                                    // 1. 启动 device flow
-                                                    const startResp = await invoke<{
-                                                        device_code: string;
-                                                        user_code: string;
-                                                        verification_uri: string;
-                                                        expires_in: number;
-                                                        interval: number;
-                                                    }>("start_github_copilot_device_flow", {
-                                                        llmProviderId: parseInt(id, 10),
-                                                    } as any);
+                                            {/* 方式2: OAuth 授权 */}
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                className="justify-start gap-2"
+                                                disabled={copilot.isAuthorizing}
+                                                onClick={() => {
+                                                    copilot.oauthFlowAuth();
+                                                }}
+                                            >
+                                                <KeyRound className="h-4 w-4" />
+                                                <div className="flex flex-col items-start">
+                                                    <span>{copilot.isAuthorizing ? "授权中..." : "OAuth 授权"}</span>
+                                                </div>
+                                            </Button>
 
-                                                    console.info("[Copilot] Device flow started", startResp);
+                                            {/* 方式3: 手动输入 Token */}
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                className="justify-start gap-2"
+                                                disabled={copilot.isAuthorizing}
+                                                onClick={() => {
+                                                    setManualToken("");
+                                                    setManualTokenDialogOpen(true);
+                                                }}
+                                            >
+                                                <Edit className="h-4 w-4" />
+                                                <div className="flex flex-col items-start">
+                                                    <span>手动输入 Token</span>
+                                                </div>
+                                            </Button>
+                                        </div>
 
-                                                    // 显示授权码
-                                                    setCopilotAuthInfo({
-                                                        userCode: startResp.user_code,
-                                                        verificationUri: startResp.verification_uri,
-                                                        isAuthorizing: true,
-                                                    });
-
-                                                    toast.info(
-                                                        `浏览器将自动打开授权页面，请输入授权码: ${startResp.user_code}`,
-                                                        { duration: 8000 },
-                                                    );
-
-                                                    // 2. 轮询授权结果
-                                                    const authResult = await invoke<{
-                                                        access_token: string;
-                                                        token_type: string;
-                                                    }>("poll_github_copilot_token", {
-                                                        llmProviderId: parseInt(id, 10),
-                                                        deviceCode: startResp.device_code,
-                                                        interval: startResp.interval,
-                                                    } as any);
-
-                                                    console.info("[Copilot] Device flow authorized", authResult);
-
-                                                    toast.success("GitHub Copilot 授权成功");
-
-                                                    setCopilotAuthInfo({ isAuthorizing: false });
-                                                    setHasApiKey(true);
-
-                                                    // 授权成功后刷新一次配置
-                                                    try {
-                                                        const configArray = await invoke<Array<LLMProviderConfig>>(
-                                                            "get_llm_provider_config",
-                                                            { id },
-                                                        );
-                                                        const newConfig: Record<string, string> = {};
-                                                        configArray.forEach((item) => {
-                                                            newConfig[item.name] = item.value;
-                                                        });
-                                                        form.reset(newConfig);
-                                                    } catch (e) {
-                                                        console.error("[Copilot] refresh provider config failed", e);
-                                                    }
-                                                } catch (e) {
-                                                    console.error("[Copilot] Device flow failed", e);
-                                                    toast.error("GitHub Copilot 授权失败: " + e);
-                                                    setCopilotAuthInfo({ isAuthorizing: false });
-                                                }
-                                            }}
-                                        >
-                                            {copilotAuthInfo.isAuthorizing ? "授权中..." : "去授权 GitHub Copilot"}
-                                        </Button>
-
-                                        <div className="text-xs text-muted-foreground">
-                                            授权完成后，Access Token 会保存到当前提供商的 API Key 配置中，可直接用于调用 Copilot 模型。
+                                        <div className="text-xs text-muted-foreground mt-2">
+                                            <p>OAuth 授权将通过浏览器进行 GitHub Device Flow 授权。</p>
+                                            <p className="mt-1">授权成功后，Token 会自动保存并用于 Copilot API 调用。</p>
                                         </div>
                                     </>
                                 )}
                             </div>
+                        ),
+                    },
+                },
+                ...(hasApiKey ? [{
+                    key: "copilot_models",
+                    config: {
+                        type: "custom" as const,
+                        label: "模型列表",
+                        value: "",
+                        customRender: () => (
+                            <ReadOnlyModelList
+                                llmProviderId={id}
+                                tags={tags}
+                                onTagsChange={onTagsChange}
+                                onFetchModels={(modelData) => {
+                                    setModelSelectionData(modelData);
+                                    setModelSelectionDialogOpen(true);
+                                }}
+                            />
+                        ),
+                    },
+                }] : []),
+                // GitHub Copilot 高级配置（代理设置）
+                {
+                    key: "advanced_config",
+                    config: {
+                        type: "custom" as const,
+                        label: "",
+                        value: "",
+                        customRender: () => (
+                            <Collapsible
+                                open={isAdvancedConfigExpanded}
+                                onOpenChange={setIsAdvancedConfigExpanded}
+                            >
+                                <CollapsibleTrigger asChild>
+                                    <Button
+                                        variant="ghost"
+                                        className="w-full justify-between p-2 h-auto text-left hover:bg-muted"
+                                    >
+                                        <span className="text-sm font-medium text-foreground">
+                                            高级配置
+                                        </span>
+                                        <ChevronDown
+                                            className={`h-4 w-4 transition-transform ${isAdvancedConfigExpanded
+                                                ? "rotate-180"
+                                                : ""
+                                                }`}
+                                        />
+                                    </Button>
+                                </CollapsibleTrigger>
+                                <CollapsibleContent className="mt-2">
+                                    <div className="p-3 border border-border rounded-lg bg-muted">
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex flex-col">
+                                                <label className="text-sm font-medium text-foreground">
+                                                    使用网络代理进行请求
+                                                </label>
+                                                <span className="text-xs text-muted-foreground">
+                                                    启用后将使用全局网络代理配置进行模型请求
+                                                </span>
+                                            </div>
+                                            <Switch
+                                                checked={proxyEnabled === "true"}
+                                                onCheckedChange={(checked) => {
+                                                    form.setValue(
+                                                        "proxy_enabled",
+                                                        checked ? "true" : "false",
+                                                    );
+                                                    updateField(
+                                                        "proxy_enabled",
+                                                        checked ? "true" : "false",
+                                                    );
+                                                }}
+                                            />
+                                        </div>
+                                    </div>
+                                </CollapsibleContent>
+                            </Collapsible>
                         ),
                     },
                 },
@@ -405,7 +481,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 config: {
                     type: "static" as const,
                     label: "API类型",
-                    value: apiType,
+                    value: apiTypeLabel,
                 },
             },
             {
@@ -492,7 +568,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 },
             },
         ];
-    }, [apiType, isCopilotProvider, tagInputRender, isAdvancedConfigExpanded, form, updateField, proxyEnabled]);
+    }, [apiType, apiTypeLabel, isCopilotProvider, tagInputRender, isAdvancedConfigExpanded, form, updateField, proxyEnabled, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange]);
 
     const extraButtons = useMemo(
         () => (
@@ -552,6 +628,42 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 onConfirm={handleModelSelectionConfirm}
                 loading={isUpdatingModels}
             />
+            {/* 手动输入 Token 对话框 */}
+            <Dialog open={manualTokenDialogOpen} onOpenChange={setManualTokenDialogOpen}>
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>输入 OAuth Token</DialogTitle>
+                        <DialogDescription>
+                            请输入 GitHub Copilot 的 OAuth Token (ghu_ 或 gho_ 开头)
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="flex flex-col gap-4 py-4">
+                        <Input
+                            placeholder="ghu_xxxxxxxxx 或 gho_xxxxxxxxx..."
+                            value={manualToken}
+                            onChange={(e) => setManualToken(e.target.value)}
+                            className="font-mono"
+                        />
+                    </div>
+                    <DialogFooter>
+                        <Button
+                            variant="outline"
+                            onClick={() => setManualTokenDialogOpen(false)}
+                        >
+                            取消
+                        </Button>
+                        <Button
+                            onClick={async () => {
+                                await copilot.manualTokenAuth(manualToken);
+                                setManualTokenDialogOpen(false);
+                            }}
+                            disabled={!manualToken.trim()}
+                        >
+                            保存
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </>
     );
 };

@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "arboard",
  "base64 0.22.1",
  "chrono",
  "config",
@@ -2134,8 +2135,8 @@ dependencies = [
 
 [[package]]
 name = "genai"
-version = "0.4.0-alpha.13-WIP"
-source = "git+https://github.com/xieisabug/rust-genai.git?rev=eb4d013e2ffae80c2a2aa3b0c05943a030b8e62a#eb4d013e2ffae80c2a2aa3b0c05943a030b8e62a"
+version = "0.4.5-WIP"
+source = "git+https://github.com/xieisabug/rust-genai.git?rev=c7cbd1c976c73fad48c15ba73d8d1a5ded6f520d#c7cbd1c976c73fad48c15ba73d8d1a5ded6f520d"
 dependencies = [
  "bytes",
  "derive_more 2.0.1",

@@ -15,6 +15,7 @@ pub const DEFAULT_ENDPOINTS: &[(AdapterKind, &str)] = &[
     (AdapterKind::Xai, "https://api.x.ai/v1/"),
     (AdapterKind::DeepSeek, "https://api.deepseek.com/"),
     (AdapterKind::Ollama, "http://localhost:11434/v1/"),
+    (AdapterKind::Copilot, "https://api.individual.githubcopilot.com"),
 ];
 
 /// 推断适配器类型
@@ -30,6 +31,7 @@ pub fn infer_adapter_kind(model_name: &str, api_type: &str) -> AdapterKind {
         "xai" => AdapterKind::Xai,
         "deepseek" => AdapterKind::DeepSeek,
         "ollama" => AdapterKind::Ollama,
+        "github_copilot" => AdapterKind::Copilot, // Copilot 使用 OpenAI 兼容 API
         _ => {
             // 根据模型名称推断
             let model_lower = model_name.to_lowercase();
@@ -60,6 +62,7 @@ pub fn infer_adapter_kind_simple(api_type: &str) -> AdapterKind {
         "xai" => AdapterKind::Xai,
         "deepseek" => AdapterKind::DeepSeek,
         "ollama" => AdapterKind::Ollama,
+        "github_copilot" => AdapterKind::Copilot, // Copilot 使用 OpenAI 兼容 API
         _ => AdapterKind::OpenAI, // 默认
     }
 }

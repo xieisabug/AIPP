@@ -12,6 +12,7 @@ import remarkCustomCompenent from "@/react-markdown/remarkCustomComponent";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import TipsComponent from "@/react-markdown/components/TipsComponent";
+import { customUrlTransform } from "@/constants/markdown";
 import "../styles/ArtifactPreviewWIndow.css";
 import "katex/dist/katex.min.css";
 import EnvironmentInstallDialog from "../components/EnvironmentInstallDialog";
@@ -751,6 +752,7 @@ export default function ArtifactWindow() {
                                                     remarkPlugins={[remarkMath, remarkBreaks, remarkCustomCompenent]}
                                                     rehypePlugins={[rehypeKatex, rehypeRaw]}
                                                     components={mdComponents}
+                                                    urlTransform={customUrlTransform}
                                                 >
                                                     {markdownContent}
                                                 </ReactMarkdown>

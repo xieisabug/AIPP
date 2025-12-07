@@ -44,7 +44,7 @@ pub fn build_chat_messages_with_context(
                                 if content.starts_with("data:") {
                                     if let Some((mime, b64)) = parse_data_url(content) {
                                         parts.push(genai::chat::ContentPart::from_binary_base64(
-                                            None, mime, b64,
+                                            mime, b64, None,
                                         ));
                                         continue;
                                     }
@@ -59,9 +59,9 @@ pub fn build_chat_messages_with_context(
                                 {
                                     let mime = infer_media_type_from_url(url);
                                     parts.push(genai::chat::ContentPart::from_binary_url(
-                                        None,
                                         mime,
                                         url.clone(),
+                                        None,
                                     ));
                                     continue;
                                 }
@@ -70,7 +70,7 @@ pub fn build_chat_messages_with_context(
                                 if url_lower.starts_with("data:") {
                                     if let Some((mime, b64)) = parse_data_url(url) {
                                         parts.push(genai::chat::ContentPart::from_binary_base64(
-                                            None, mime, b64,
+                                            mime, b64, None,
                                         ));
                                         continue;
                                     }
@@ -89,7 +89,7 @@ pub fn build_chat_messages_with_context(
                                     let b64 =
                                         base64::engine::general_purpose::STANDARD.encode(bytes);
                                     parts.push(genai::chat::ContentPart::from_binary_base64(
-                                        None, mime, b64,
+                                        mime, b64, None,
                                     ));
                                     continue;
                                 } else {

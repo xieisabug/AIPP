@@ -2,6 +2,7 @@ import React, { useCallback } from 'react';
 import ReactMarkdown, { Components } from 'react-markdown';
 import McpToolCall from '@/components/McpToolCall';
 import { MCPToolCallUpdateEvent } from '@/data/Conversation';
+import { customUrlTransform } from '@/constants/markdown';
 
 interface McpProcessorOptions {
     remarkPlugins: readonly any[];
@@ -49,6 +50,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
                             remarkPlugins={[...remarkPlugins]}
                             rehypePlugins={[...rehypePlugins]}
                             components={markdownComponents}
+                            urlTransform={customUrlTransform}
                         />
                     );
                 }
@@ -83,6 +85,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
                     remarkPlugins={[...remarkPlugins]}
                     rehypePlugins={[...rehypePlugins]}
                     components={markdownComponents}
+                    urlTransform={customUrlTransform}
                 />
             );
         }

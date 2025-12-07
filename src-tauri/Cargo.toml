@@ -51,7 +51,7 @@ tauri-plugin-dialog = { git = "https://github.com/tauri-apps/plugins-workspace",
 tauri-plugin-clipboard-manager = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
 tauri-plugin-fs = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
 tauri-plugin-opener = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
-genai = { git = "https://github.com/xieisabug/rust-genai.git", rev="eb4d013e2ffae80c2a2aa3b0c05943a030b8e62a" }
+genai = { git = "https://github.com/xieisabug/rust-genai.git", rev="c7cbd1c976c73fad48c15ba73d8d1a5ded6f520d" }
 rmcp = { version = "0.8", features = [
 	"client",
 	"transport-io",
@@ -74,6 +74,7 @@ macos-accessibility-client = "0.0.1"
 tauri-plugin-global-shortcut =  { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
 playwright = "0.0.20"
 get-selected-text = "0.1.6"
+arboard = { version = "3.4", features = ["image-data"] }
 
 [dev-dependencies]
 rstest = "0.18"

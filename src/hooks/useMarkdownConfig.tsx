@@ -8,6 +8,7 @@ import {
     MARKDOWN_COMPONENTS_BASE,
 } from '@/constants/markdown';
 import CodeBlock from '@/components/RustCodeBlock';
+import LazyImage from '@/components/common/LazyImage';
 
 interface UseMarkdownConfigOptions {
     onCodeRun?: (lang: string, code: string) => void;
@@ -114,6 +115,10 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false, is
                         {children}
                     </a>
                 );
+            },
+            // 图片组件：使用懒加载和异步解码
+            img: ({ src, alt, ...props }: any) => {
+                return <LazyImage src={src} alt={alt} {...props} />;
             },
         }),
         [onCodeRun, disableMarkdownSyntax, renderTextWithBreaks, isStreaming],

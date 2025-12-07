@@ -28,6 +28,12 @@ use crate::api::conversation_api::{
     update_conversation, update_message_content,
 };
 use crate::api::copilot_api::{poll_github_copilot_token, start_github_copilot_device_flow};
+#[cfg(desktop)]
+use crate::api::copilot_lsp::{
+    check_copilot_status, get_copilot_lsp_status, get_copilot_oauth_token_from_config,
+    sign_in_confirm, sign_in_initiate, sign_out_copilot, start_copilot_lsp, stop_copilot_lsp,
+    CopilotLspState,
+};
 use crate::api::highlight_api::{highlight_code, list_syntect_themes};
 use crate::api::llm_api::{
     add_llm_model, add_llm_provider, delete_llm_model, delete_llm_provider, export_llm_provider,
@@ -43,8 +49,9 @@ use crate::api::sub_task_api::{
     run_sub_task_with_mcp_loop, sub_task_regist, update_sub_task_definition,
 };
 use crate::api::system_api::{
-    get_all_feature_config, get_bang_list, get_selected_text_api, open_data_folder,
-    resume_global_shortcut, save_feature_config, set_shortcut_recording, suspend_global_shortcut,
+    copy_image_to_clipboard, get_all_feature_config, get_bang_list, get_selected_text_api,
+    open_data_folder, open_image, resume_global_shortcut, save_feature_config,
+    set_shortcut_recording, suspend_global_shortcut,
 };
 use crate::artifacts::artifacts_db::ArtifactsDatabase;
 use crate::artifacts::collection_api::{
@@ -360,7 +367,10 @@ pub fn run() {
             selected_text: TokioMutex::new(String::new()),
             recording_shortcut: TokioMutex::new(false),
         })
-        .manage(MessageTokenManager::new())
+        .manage(MessageTokenManager::new());
+    #[cfg(desktop)]
+    let app = app.manage(CopilotLspState::default());
+    let app = app
         .invoke_handler(tauri::generate_handler![
             ask_ai,
             tool_result_continue_ask_ai,
@@ -428,6 +438,8 @@ pub fn run() {
             set_shortcut_recording,
             suspend_global_shortcut,
             resume_global_shortcut,
+            copy_image_to_clipboard,
+            open_image,
             check_bun_version,
             check_uv_version,
             install_bun,
