@@ -1,8 +1,9 @@
+use chrono::Timelike;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use playwright::api::browser_type::PersistentContextLauncher;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use chrono::Timelike;
-use playwright::api::browser_type::PersistentContextLauncher;
 
 // 指纹配置接口
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,9 +11,9 @@ pub struct FingerprintConfig {
     pub device_name: String,
     pub locale: String,
     pub timezone_id: String,
-    pub color_scheme: String, // "dark" | "light"
+    pub color_scheme: String,   // "dark" | "light"
     pub reduced_motion: String, // "reduce" | "no-preference"
-    pub forced_colors: String, // "active" | "none"
+    pub forced_colors: String,  // "active" | "none"
     pub user_agent: String,
     pub viewport_width: i32,
     pub viewport_height: i32,
@@ -41,13 +42,11 @@ pub struct FingerprintManager {
 
 impl FingerprintManager {
     pub fn new(app_data_dir: &Path) -> Self {
-        let state_file_path = app_data_dir.join("search_fingerprint_state.json").to_string_lossy().to_string();
+        let state_file_path =
+            app_data_dir.join("search_fingerprint_state.json").to_string_lossy().to_string();
         let saved_state = Self::load_saved_state(&state_file_path);
-        
-        Self {
-            state_file_path,
-            saved_state,
-        }
+
+        Self { state_file_path, saved_state }
     }
 
     /// 获取或生成稳定的指纹配置
@@ -59,7 +58,7 @@ impl FingerprintManager {
             self.saved_state.last_update = Some(chrono::Utc::now().timestamp());
             self.save_state();
         }
-        
+
         self.saved_state.fingerprint.as_ref().unwrap()
     }
 
@@ -120,7 +119,7 @@ impl FingerprintManager {
             3600 => "Europe/Berlin".to_string(),         // UTC+1 欧洲
             -18000 => "America/New_York".to_string(),    // UTC-5 美国东部
             -28800 => "America/Los_Angeles".to_string(), // UTC-8 美国西部
-            _ => "Asia/Shanghai".to_string(),             // 默认
+            _ => "Asia/Shanghai".to_string(),            // 默认
         }
     }
 
@@ -197,13 +196,14 @@ impl FingerprintManager {
     }
 
     /// 应用指纹配置到浏览器上下文  
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn apply_fingerprint_to_context<'a>(
         &self,
         mut launcher: PersistentContextLauncher<'a, 'a, 'a, 'a, 'a, 'a, 'a, 'a, 'a, 'a, 'a>,
         config: &'a FingerprintConfig,
     ) -> PersistentContextLauncher<'a, 'a, 'a, 'a, 'a, 'a, 'a, 'a, 'a, 'a, 'a> {
         use playwright::api::Viewport;
-        
+
         launcher = launcher
             .user_agent(&config.user_agent)
             .locale(&config.locale)
@@ -224,9 +224,9 @@ impl FingerprintManager {
 
         // 注意：暂时移除extra_http_headers调用以避免API兼容性问题
         // 将来可以通过页面级别的set_extra_http_headers来设置
-        // 
+        //
         // 其他指纹伪装功能（反检测脚本、人性化行为等）仍然有效
-        
+
         launcher
     }
 
@@ -238,32 +238,26 @@ impl FingerprintManager {
             "--no-default-browser-check".to_string(),
             "--disable-dev-shm-usage".to_string(),
             "--disable-extensions".to_string(),
-            
             // 重要：移除自动化控制标识
             "--disable-blink-features=AutomationControlled".to_string(),
             "--disable-features=VizDisplayCompositor".to_string(),
-            
             // 禁用各种检测
             "--disable-background-timer-throttling".to_string(),
             "--disable-backgrounding-occluded-windows".to_string(),
             "--disable-renderer-backgrounding".to_string(),
             "--disable-feature-policy".to_string(),
             "--disable-ipc-flooding-protection".to_string(),
-            
             // 模拟正常用户行为
             "--enable-features=NetworkService".to_string(),
             "--use-mock-keychain".to_string(),
             "--disable-component-update".to_string(),
-            
             // 内存和性能优化
             "--max_old_space_size=4096".to_string(),
             "--memory-pressure-off".to_string(),
-            
             // 禁用日志和错误报告
             "--disable-logging".to_string(),
             "--log-level=3".to_string(),
             "--silent".to_string(),
-            
             // 网络优化
             "--aggressive-cache-discard".to_string(),
             "--enable-features=NetworkServiceInProcess".to_string(),
@@ -288,12 +282,8 @@ impl FingerprintManager {
                 return state;
             }
         }
-        
-        SavedState {
-            fingerprint: None,
-            google_domain: None,
-            last_update: None,
-        }
+
+        SavedState { fingerprint: None, google_domain: None, last_update: None }
     }
 
     /// 保存状态到文件
@@ -305,7 +295,6 @@ impl FingerprintManager {
             let _ = fs::write(&self.state_file_path, content);
         }
     }
-
 }
 
 #[derive(Debug, Clone)]

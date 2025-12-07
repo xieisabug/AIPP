@@ -14,8 +14,17 @@ export default defineConfig(async () => ({
 	clearScreen: false,
 	// 2. tauri expects a fixed port, fail if that port is not available
 	server: {
+		host: '0.0.0.0',
 		port: 3000,
 		strictPort: true,
+		// HMR 配置 - 用于 Android 开发
+		hmr: {
+			// 使用环境变量或默认使用 localhost
+			// Android 开发时需要设置 TAURI_DEV_HOST 为开发机器的局域网 IP
+			host: process.env.TAURI_DEV_HOST || 'localhost',
+			protocol: 'ws',
+			port: 3000,
+		},
 		watch: {
 			// 3. tell vite to ignore watching `src-tauri`
 			ignored: ["**/src-tauri/**", '**/target/**'],

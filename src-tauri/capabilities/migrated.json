@@ -5,9 +5,7 @@
   "platforms": [
     "linux",
     "macOS",
-    "windows",
-    "android",
-    "iOS"
+    "windows"
   ],
   "windows": [
     "main",

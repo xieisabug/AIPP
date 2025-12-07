@@ -1,6 +1,7 @@
 use super::browser::BrowserManager;
 use super::engine_manager::SearchEngine;
 use super::fingerprint::{FingerprintConfig, FingerprintManager, TimingConfig};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use playwright::Playwright;
 use std::fs;
 use std::path::PathBuf;
@@ -66,6 +67,7 @@ impl ContentFetcher {
         info!(%url, "Starting content fetch");
 
         // 策略1: Playwright（最优，支持复杂动态内容）
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         match self.fetch_with_playwright(url, browser_manager).await {
             Ok(html) => {
                 info!(strategy = "playwright", bytes = html.len(), "Fetched content");
@@ -112,6 +114,7 @@ impl ContentFetcher {
         info!(%query, engine = ?search_engine, "Starting search content fetch");
 
         // 使用Playwright执行搜索流程
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         match self.fetch_search_with_playwright(query, search_engine, browser_manager).await {
             Ok(html) => {
                 info!(strategy = "playwright_search", bytes = html.len(), "Fetched search content");
@@ -131,6 +134,7 @@ impl ContentFetcher {
     }
 
     /// 使用Playwright执行搜索流程
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     async fn fetch_search_with_playwright(
         &mut self,
         query: &str,
@@ -202,6 +206,7 @@ impl ContentFetcher {
     }
 
     /// 使用Playwright抓取内容
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     async fn fetch_with_playwright(
         &mut self,
         url: &str,
@@ -279,6 +284,7 @@ impl ContentFetcher {
     }
 
     /// 等待页面内容加载
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     async fn wait_for_content(&self, page: &playwright::api::Page) -> Result<(), String> {
         if self.config.wait_selectors.is_empty() {
             page.wait_for_timeout(800.0).await;
@@ -438,6 +444,7 @@ impl ContentFetcher {
     }
 
     /// 注入反检测脚本
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     async fn inject_anti_detection_scripts(
         &self,
         page: &playwright::api::Page,
@@ -526,6 +533,7 @@ impl ContentFetcher {
     }
 
     /// 在页面级别设置HTTP头
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     async fn set_page_http_headers(
         &self,
         page: &playwright::api::Page,
@@ -554,6 +562,7 @@ impl ContentFetcher {
     }
 
     /// 执行人性化的搜索流程
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     async fn perform_humanized_search(
         &self,
         page: &playwright::api::Page,
@@ -594,6 +603,7 @@ impl ContentFetcher {
     }
 
     /// 带重试机制的HTML提取
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     async fn extract_page_html_with_retry(
         &self,
         page: &playwright::api::Page,
@@ -652,6 +662,7 @@ impl ContentFetcher {
     }
 
     /// 检查页面是否准备就绪
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     async fn check_page_ready(&self, page: &playwright::api::Page) -> Result<bool, String> {
         // 检查document是否存在
         // let doc_ready: bool = page
@@ -692,6 +703,7 @@ impl ContentFetcher {
     }
 
     /// 带重试机制的页面导航
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     async fn navigate_with_retry(
         &self,
         page: &playwright::api::Page,
@@ -750,6 +762,7 @@ impl ContentFetcher {
     }
 
     /// 人性化的搜索输入处理
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     async fn humanized_search_input(
         &self,
         page: &playwright::api::Page,
@@ -1000,6 +1013,7 @@ impl ContentFetcher {
     }
 
     /// 人性化的搜索提交
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     async fn humanized_search_submit(
         &self,
         page: &playwright::api::Page,
@@ -1055,6 +1069,7 @@ impl ContentFetcher {
     }
 
     /// 等待搜索结果，带超时处理
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     async fn wait_for_results_with_timeout(
         &self,
         page: &playwright::api::Page,

@@ -4,7 +4,14 @@ import AnimatedLogo from "./AnimatedLogo";
 import { useLogoState } from "../hooks/useLogoState";
 import { Button } from "./ui/button";
 
-function ChatUIInfomation() {
+interface ChatUIInfomationProps {
+    showArtifacts?: boolean;
+    showPluginStore?: boolean;
+    /** 移动端模式，使用内部视图切换而非多窗口 */
+    isMobile?: boolean;
+}
+
+function ChatUIInfomation({ showArtifacts = true, showPluginStore = true, isMobile = false }: ChatUIInfomationProps) {
     const {
         state: logoState,
         showHappy,
@@ -17,6 +24,17 @@ function ChatUIInfomation() {
     });
 
     const openConfig = async () => {
+        // 移动端使用内部视图切换
+        if (isMobile) {
+            const switchWindow = (window as any).__setAppWindow as ((label: string) => void) | undefined;
+            if (switchWindow) {
+                switchWindow("config");
+                showHappy();
+                return;
+            }
+        }
+
+        // 桌面端使用多窗口
         try {
             await invoke("open_config_window");
             showHappy();
@@ -52,12 +70,16 @@ function ChatUIInfomation() {
                 <Button onClick={openConfig} variant={"ghost"}>
                     <Settings />
                 </Button>
-                <Button onClick={openArtifactsCollections} variant={"ghost"}>
-                    <PackageOpen />
-                </Button>
-                <Button onClick={openPluginStore} variant={"ghost"}>
-                    <Store />
-                </Button>
+                {showArtifacts && (
+                    <Button onClick={openArtifactsCollections} variant={"ghost"}>
+                        <PackageOpen />
+                    </Button>
+                )}
+                {showPluginStore && (
+                    <Button onClick={openPluginStore} variant={"ghost"}>
+                        <Store />
+                    </Button>
+                )}
             </div>
         </div>
     );

@@ -1,11 +1,16 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useCallback, useEffect, useState, useRef } from "react";
 import ReactDOM from "react-dom";
 import { emit } from "@tauri-apps/api/event";
 import ChatUIToolbar from "../components/ChatUIToolbar";
 import ConversationList from "../components/ConversationList";
 import ChatUIInfomation from "../components/ChatUIInfomation";
 import ConversationUI, { ConversationUIRef } from "../components/ConversationUI";
+import { Conversation } from "../data/Conversation";
 import { useTheme } from "../hooks/useTheme";
+import { useIsMobile } from "../hooks/use-mobile";
+import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
+import { Button } from "../components/ui/button";
+import { Menu, Plus } from "lucide-react";
 
 import { appDataDir } from "@tauri-apps/api/path";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -15,10 +20,35 @@ function ChatUIWindow() {
     // 集成主题系统
     useTheme();
 
+    // 检测移动端
+    const isMobile = useIsMobile();
+    const [sidebarOpen, setSidebarOpen] = useState(false);
+    const [conversationTitle, setConversationTitle] = useState("");
+
     const [pluginList, setPluginList] = useState<any[]>([]);
 
     const [selectedConversation, setSelectedConversation] = useState<string>("");
     const conversationUIRef = useRef<ConversationUIRef>(null);
+
+    // 移动端选择对话后自动关闭侧边栏
+    const handleSelectConversation = (conversationId: string) => {
+        setSelectedConversation(conversationId);
+        if (isMobile) {
+            setSidebarOpen(false);
+        }
+    };
+
+    // 移动端新对话后自动关闭侧边栏
+    const handleNewConversation = () => {
+        setSelectedConversation("");
+        if (isMobile) {
+            setSidebarOpen(false);
+        }
+    };
+
+    const handleConversationChange = useCallback((conv?: Conversation) => {
+        setConversationTitle(conv?.name || "");
+    }, []);
 
     // 组件挂载完成后，发送窗口加载事件，通知 AskWindow
     useEffect(() => {
@@ -119,6 +149,57 @@ function ChatUIWindow() {
         initPlugin();
     }, []);
 
+    // 移动端布局
+    if (isMobile) {
+        const mobileTitle = conversationTitle || "新会话";
+
+        return (
+            <div className="flex flex-col h-screen bg-background">
+                {/* 移动端顶部栏 */}
+                <div className="flex-none flex items-center justify-between px-4 py-3 bg-secondary border-b border-border">
+                    <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
+                        <SheetTrigger asChild>
+                            <Button variant="ghost" size="icon">
+                                <Menu className="h-5 w-5" />
+                            </Button>
+                        </SheetTrigger>
+                        <SheetContent
+                            side="left"
+                            className="w-[280px] p-0 flex flex-col"
+                            aria-describedby={undefined}
+                            hideCloseButton
+                        >
+                            <SheetTitle className="sr-only">导航菜单</SheetTitle>
+                            <ChatUIInfomation showArtifacts={false} showPluginStore={false} isMobile={true} />
+                            <ChatUIToolbar onNewConversation={handleNewConversation} />
+                            <ConversationList
+                                conversationId={selectedConversation}
+                                onSelectConversation={handleSelectConversation}
+                            />
+                        </SheetContent>
+                    </Sheet>
+                    <span className="font-medium text-sm truncate flex-1 text-center mx-3">{mobileTitle}</span>
+                    <Button variant="ghost" size="icon" onClick={handleNewConversation} aria-label="新建对话">
+                        <Plus className="h-5 w-5" />
+                    </Button>
+                </div>
+
+                {/* 主内容区域 */}
+                <div className="flex-1 overflow-hidden">
+                    <ConversationUI
+                        ref={conversationUIRef}
+                        pluginList={pluginList}
+                        conversationId={selectedConversation}
+                        onChangeConversationId={setSelectedConversation}
+                        isMobile={true}
+                        onConversationChange={handleConversationChange}
+                    />
+                </div>
+            </div>
+        );
+    }
+
+    // 桌面端布局
     return (
         <div className="flex h-screen bg-background">
             <div className="flex-none w-[280px] flex flex-col shadow-lg box-border rounded-r-xl mb-2 mr-2">

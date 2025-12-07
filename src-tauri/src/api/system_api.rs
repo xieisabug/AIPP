@@ -135,6 +135,7 @@ pub async fn resume_global_shortcut(app: tauri::AppHandle) -> Result<(), String>
 
 /// 复制图片到剪贴板
 /// image_data: base64 编码的图片数据（可以包含或不包含 data:image/xxx;base64, 前缀）
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 pub async fn copy_image_to_clipboard(image_data: String) -> Result<(), String> {
     // 移除 data URL 前缀（如果存在）
@@ -170,6 +171,13 @@ pub async fn copy_image_to_clipboard(image_data: String) -> Result<(), String> {
         .map_err(|e| format!("Failed to copy image to clipboard: {}", e))?;
     
     Ok(())
+}
+
+/// 复制图片到剪贴板 - 移动端不支持
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub async fn copy_image_to_clipboard(_image_data: String) -> Result<(), String> {
+    Err("Clipboard image copy is not supported on mobile platforms".to_string())
 }
 
 /// 打开图片（支持 base64 和 URL）
