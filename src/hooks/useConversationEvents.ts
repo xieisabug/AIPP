@@ -310,7 +310,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
     // 设置和清理事件监听
     useEffect(() => {
-        if (!callbacksRef.current.conversationId) {
+        if (!options.conversationId) {
             // 清理状态
             setStreamingMessages(new Map());
             setShiningMessageIds(new Set());
@@ -322,7 +322,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         }
 
         console.log(
-            `Setting up conversation event listener for: conversation_event_${callbacksRef.current.conversationId}`,
+            `Setting up conversation event listener for: conversation_event_${options.conversationId}`,
         );
 
         // 取消之前的事件监听（只执行一次）
@@ -339,7 +339,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         // 设置新的事件监听
         hasUnsubscribedRef.current = false;
         unsubscribeRef.current = listen(
-            `conversation_event_${callbacksRef.current.conversationId}`,
+            `conversation_event_${options.conversationId}`,
             handleConversationEvent,
         );
 

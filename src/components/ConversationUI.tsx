@@ -78,6 +78,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 输入相关状态
         const [inputText, setInputText] = useState("");
         const inputAreaRef = useRef<InputAreaRef>(null);
+        // 加载请求标识，避免旧请求覆盖最新状态（StrictMode 双调用等场景）
+        const loadRequestIdRef = useRef<number>(0);
 
         // ============= 使用新创建的 hooks =============
 
@@ -377,7 +379,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, [conversation, onConversationChange]);
 
         // 对话加载和管理逻辑
+        // 注意：为避免 React StrictMode 下的双调用导致“取消”标记错误触发，使用 requestId 跳过过期请求
         useEffect(() => {
+            // 仅依赖 conversationId，保持函数引用稳定
             if (!conversationId) {
                 // 无对话 ID时，清理状态并加载助手列表
                 setMessages([]);
@@ -395,11 +399,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 return;
             }
 
-            // 防止重复请求
-            const currentLoadingRef = { cancelled: false };
+            // 使用递增的 requestId 避免旧请求覆盖最新状态
+            const requestId = (loadRequestIdRef.current || 0) + 1;
+            loadRequestIdRef.current = requestId;
 
             // 加载指定对话的消息和信息
             setIsLoadingShow(true);
+            console.log(`[DEBUG] Starting to load conversation: ${conversationId}, requestId: ${requestId}`);
 
             // 在切换对话时立即清理所有与前一个对话相关的状态
             setGroupMergeMap(new Map()); // 切换对话时清理组合并状态
@@ -416,13 +422,14 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 conversationId: +conversationId,
             })
                 .then((res: ConversationWithMessages) => {
-                    const backendDuration = performance.now() - frontendStartTime;
-                    console.log(`[PERF-FRONTEND] 后端返回数据耗时: ${backendDuration.toFixed(2)}ms, 消息数: ${res.messages.length}`);
-
-                    // 检查请求是否已被取消
-                    if (currentLoadingRef.cancelled) {
+                    // 仅处理最新请求
+                    if (loadRequestIdRef.current !== requestId) {
+                        console.log(`[DEBUG] Skip stale response for conversationId: ${conversationId}, requestId: ${requestId}`);
                         return;
                     }
+
+                    const backendDuration = performance.now() - frontendStartTime;
+                    console.log(`[PERF-FRONTEND] 后端返回数据耗时: ${backendDuration.toFixed(2)}ms, 消息数: ${res.messages.length}`);
 
                     const setStateStartTime = performance.now();
                     setMessages(res.messages);
@@ -439,17 +446,16 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     console.log(`[PERF-FRONTEND] 设置状态耗时: ${setStateDuration.toFixed(2)}ms`);
                 })
                 .catch((error) => {
-                    if (!currentLoadingRef.cancelled) {
-                        console.error("Failed to load conversation:", error);
-                        setIsLoadingShow(false);
+                    if (loadRequestIdRef.current !== requestId) {
+                        console.log(`[DEBUG] Skip stale error for conversationId: ${conversationId}, requestId: ${requestId}`);
+                        return;
                     }
+                    console.error("Failed to load conversation:", error);
+                    setIsLoadingShow(false);
                 });
 
-            // 清理函数，防止组件卸载时的状态更新
-            return () => {
-                currentLoadingRef.cancelled = true;
-            };
-        }, [conversationId, clearStreamingMessages, clearShiningMessages]);
+            // 不使用清理函数的取消标记，依赖 requestId 判定最新请求
+        }, [conversationId]);
 
         // 监听对话标题变化
         useEffect(() => {
