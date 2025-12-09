@@ -1512,6 +1512,24 @@ async fn attempt_stream_chat(
                         )
                         .await;
 
+                        // 无论是否产生内容，都向前端发送一个流式完成事件，确保 UI 能正确退出接收状态
+                        let stream_complete_event = ConversationEvent {
+                            r#type: "stream_complete".to_string(),
+                            data: serde_json::json!({
+                                "conversation_id": conversation_id,
+                                "response_message_id": response_message_id,
+                                "reasoning_message_id": reasoning_message_id,
+                                "has_response": response_message_id.is_some(),
+                                "has_reasoning": reasoning_message_id.is_some(),
+                                "response_length": response_content.len(),
+                                "reasoning_length": reasoning_content.len(),
+                            }),
+                        };
+                        let _ = window.emit(
+                            format!("conversation_event_{}", conversation_id).as_str(),
+                            stream_complete_event,
+                        );
+
                         return Ok(());
                     }
                 }

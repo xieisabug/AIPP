@@ -7,6 +7,7 @@ import {
     GroupMergeEvent,
     MCPToolCallUpdateEvent,
     ConversationCancelEvent,
+    StreamCompleteEvent,
 } from "../data/Conversation";
 
 export interface UseConversationEventsOptions {
@@ -303,6 +304,20 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 
                 // 调用外部的取消处理函数
                 callbacksRef.current.onConversationCancel?.(cancelData);
+            } else if (conversationEvent.type === "stream_complete") {
+                // 处理流式完成事件（包括空响应场景）
+                const completionData = conversationEvent.data as StreamCompleteEvent;
+                console.log("Received stream_complete event:", completionData);
+
+                // 清理流式与闪烁状态，避免 UI 长时间处于接收中
+                setStreamingMessages(new Map());
+                setShiningMessageIds(new Set());
+                setStreamingAssistantMessageIds(new Set());
+                setActiveMcpCallIds(new Set());
+                setPendingUserMessageId(null);
+
+                // 通知外部响应已完成（即便没有 response chunk）
+                callbacksRef.current.onAiResponseComplete?.();
             }
         },
         [], // 不再依赖 options，因为我们使用 callbacksRef

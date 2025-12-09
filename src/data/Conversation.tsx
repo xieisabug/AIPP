@@ -88,6 +88,16 @@ export interface ConversationCancelEvent {
     cancelled_at: Date;
 }
 
+export interface StreamCompleteEvent {
+    conversation_id: number;
+    response_message_id?: number | null;
+    reasoning_message_id?: number | null;
+    has_response: boolean;
+    has_reasoning: boolean;
+    response_length?: number;
+    reasoning_length?: number;
+}
+
 // 消息类型枚举
 export type MessageType = 'system' | 'user' | 'assistant' | 'reasoning' | 'response' | 'error';
 
