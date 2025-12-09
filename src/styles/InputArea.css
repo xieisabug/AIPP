@@ -120,8 +120,8 @@
 
 /* 移动端发送按钮 - 覆盖 large 尺寸，改为更小的尺寸 */
 .input-area.mobile.bottom .input-area-send-button {
-    bottom: 48px;
-    right: 18px;
+    bottom: 45px;
+    right: 16px;
     height: 44px !important;
     width: 44px !important;
     border-radius: 22px !important;

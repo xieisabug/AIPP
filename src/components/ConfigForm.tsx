@@ -335,7 +335,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                 control={useFormReturn.control}
                 name={name}
                 render={({ field: fieldRenderData }: { field: any }) => (
-                    <FormItem className={`space-y-3 mb-6 ${field.hidden ? "hidden" : ""}`}>
+                    <FormItem className={`mb-6 ${field.hidden ? "hidden" : ""}`}>
                         <FormLabel className="flex items-center font-semibold text-sm text-foreground">
                             {field.label}
                             {field.tooltip && (
