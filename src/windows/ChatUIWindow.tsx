@@ -31,20 +31,23 @@ function ChatUIWindow() {
     const conversationUIRef = useRef<ConversationUIRef>(null);
 
     // 移动端选择对话后自动关闭侧边栏
-    const handleSelectConversation = (conversationId: string) => {
-        setSelectedConversation(conversationId);
-        if (isMobile) {
-            setSidebarOpen(false);
-        }
-    };
+    const handleSelectConversation = useCallback(
+        (conversationId: string) => {
+            setSelectedConversation(conversationId);
+            if (isMobile) {
+                setSidebarOpen(false);
+            }
+        },
+        [isMobile]
+    );
 
     // 移动端新对话后自动关闭侧边栏
-    const handleNewConversation = () => {
+    const handleNewConversation = useCallback(() => {
         setSelectedConversation("");
         if (isMobile) {
             setSidebarOpen(false);
         }
-    };
+    }, [isMobile]);
 
     const handleConversationChange = useCallback((conv?: Conversation) => {
         setConversationTitle(conv?.name || "");
@@ -204,10 +207,10 @@ function ChatUIWindow() {
         <div className="flex h-screen bg-background">
             <div className="flex-none w-[280px] flex flex-col shadow-lg box-border rounded-r-xl mb-2 mr-2">
                 <ChatUIInfomation />
-                <ChatUIToolbar onNewConversation={() => setSelectedConversation("")} />
+                <ChatUIToolbar onNewConversation={handleNewConversation} />
                 <ConversationList
                     conversationId={selectedConversation}
-                    onSelectConversation={setSelectedConversation}
+                    onSelectConversation={handleSelectConversation}
                 />
             </div>
 

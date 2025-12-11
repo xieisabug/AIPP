@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import AnimatedLogo from "./AnimatedLogo";
 import { useLogoState } from "../hooks/useLogoState";
 import { Button } from "./ui/button";
+import React, { memo } from "react";
 
 interface ChatUIInfomationProps {
     showArtifacts?: boolean;
@@ -11,7 +12,11 @@ interface ChatUIInfomationProps {
     isMobile?: boolean;
 }
 
-function ChatUIInfomation({ showArtifacts = true, showPluginStore = true, isMobile = false }: ChatUIInfomationProps) {
+const ChatUIInfomation = memo(function ChatUIInfomation({
+    showArtifacts = true,
+    showPluginStore = true,
+    isMobile = false,
+}: ChatUIInfomationProps) {
     const {
         state: logoState,
         showHappy,
@@ -83,6 +88,8 @@ function ChatUIInfomation({ showArtifacts = true, showPluginStore = true, isMobi
             </div>
         </div>
     );
-}
+});
+
+ChatUIInfomation.displayName = "ChatUIInfomation";
 
 export default ChatUIInfomation;

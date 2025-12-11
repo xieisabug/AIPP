@@ -1,11 +1,12 @@
 import { message } from "@tauri-apps/plugin-dialog";
 import { Button } from "./ui/button";
+import React, { memo } from "react";
 
 interface ChatUIToolbarProps {
     onNewConversation: () => void;
 }
 
-function ChatUIToolbar({ onNewConversation }: ChatUIToolbarProps) {
+const ChatUIToolbar = memo(function ChatUIToolbar({ onNewConversation }: ChatUIToolbarProps) {
     const onSearch = async () => {
         message("暂未实现", "很抱歉");
     };
@@ -23,6 +24,8 @@ function ChatUIToolbar({ onNewConversation }: ChatUIToolbarProps) {
             </Button>
         </div>
     );
-}
+});
+
+ChatUIToolbar.displayName = "ChatUIToolbar";
 
 export default ChatUIToolbar;

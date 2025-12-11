@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, memo } from "react";
 import { listen } from "@tauri-apps/api/event";
 import MenuIcon from "../assets/menu.svg?react";
 import ConversationTitleEditDialog from "./ConversationTitleEditDialog";
@@ -18,7 +18,7 @@ interface ConversationListProps {
     conversationId: string;
 }
 
-function ConversationList({
+const ConversationList = memo(function ConversationList({
     onSelectConversation,
     conversationId,
 }: ConversationListProps) {
@@ -338,6 +338,8 @@ function ConversationList({
             />
         </div>
     );
-}
+});
+
+ConversationList.displayName = "ConversationList";
 
 export default ConversationList;
