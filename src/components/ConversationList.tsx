@@ -13,6 +13,68 @@ import {
 import { Button } from "./ui/button";
 import ConfirmDialog from "./ConfirmDialog";
 
+interface ConversationItemProps {
+    conversation: Conversation;
+    isSelected: boolean;
+    onSelect: (id: string) => void;
+    onOpenTitleEdit: (id: number, title: string) => void;
+    onOpenDelete: (id: string, name: string) => void;
+}
+
+const ConversationItem = memo(function ConversationItem({
+    conversation,
+    isSelected,
+    onSelect,
+    onOpenTitleEdit,
+    onOpenDelete,
+}: ConversationItemProps) {
+    return (
+        <li
+            className={`group h-16 w-full mx-0 mb-2 text-sm border-0 rounded-xl cursor-pointer select-none flex flex-col justify-center p-3 box-border relative transition-all duration-200 ${isSelected ? "font-bold text-primary bg-primary-foreground" : "bg-transparent hover:bg-muted hover:translate-x-0.5"}`}
+            onClick={() => {
+                onSelect(conversation.id.toString());
+            }}
+        >
+            <div className="overflow-hidden text-ellipsis whitespace-nowrap font-medium">
+                {conversation.name}
+            </div>
+            <div className="text-xs overflow-hidden text-ellipsis whitespace-nowrap text-muted-foreground">
+                {conversation.assistant_name}
+            </div>
+
+            <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                    <Button
+                        variant="link"
+                        className="invisible absolute right-2 top-4 group-hover:visible transition-opacity duration-200"
+                    >
+                        <MenuIcon className="fill-foreground" />
+                    </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent>
+                    <DropdownMenuItem
+                        onClick={() => {
+                            onOpenTitleEdit(conversation.id, conversation.name);
+                        }}
+                    >
+                        修改标题
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                        onClick={() => {
+                            onOpenDelete(
+                                conversation.id.toString(),
+                                conversation.name,
+                            );
+                        }}
+                    >
+                        删除
+                    </DropdownMenuItem>
+                </DropdownMenuContent>
+            </DropdownMenu>
+        </li>
+    );
+});
+
 interface ConversationListProps {
     onSelectConversation: (conversation: string) => void;
     conversationId: string;
@@ -111,22 +173,6 @@ const ConversationList = memo(function ConversationList({
             });
         }
     }, [conversationId, conversations]);
-
-    const [menuShow, setMenuShow] = useState(false);
-
-    useEffect(() => {
-        const handleOutsideClick = () => {
-            if (menuShow) {
-                setMenuShow(false);
-            }
-        };
-
-        document.addEventListener("click", handleOutsideClick);
-
-        return () => {
-            document.removeEventListener("click", handleOutsideClick);
-        };
-    }, [menuShow]);
 
     const [titleEditDialogIsOpen, setTitleEditDialogIsOpen] =
         useState<boolean>(false);
@@ -241,55 +287,14 @@ const ConversationList = memo(function ConversationList({
         >
             <ul className="list-none p-0 m-0">
                 {conversations.map((conversation) => (
-                    <li
-                        className={`group h-16 w-full mx-0 mb-2 text-sm border-0 rounded-xl cursor-pointer select-none flex flex-col justify-center p-3 box-border relative transition-all duration-200 ${conversationId == conversation.id.toString() ? "font-bold text-primary bg-primary-foreground" : "bg-transparent hover:bg-muted hover:translate-x-0.5"}`}
+                    <ConversationItem
                         key={conversation.id}
-                        onClick={() => {
-                            onSelectConversation(conversation.id.toString());
-                        }}
-                    >
-                        <div className="overflow-hidden text-ellipsis whitespace-nowrap font-medium">
-                            {conversation.name}
-                        </div>
-                        <div className="text-xs overflow-hidden text-ellipsis whitespace-nowrap text-muted-foreground">
-                            {conversation.assistant_name}
-                        </div>
-
-                        <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                                <Button
-                                    variant="link"
-                                    className="invisible absolute right-2 top-4 group-hover:visible transition-opacity duration-200"
-                                >
-                                    <MenuIcon className="fill-foreground" />
-                                </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent>
-                                <DropdownMenuItem
-                                    onClick={() => {
-                                        setMenuShow(false);
-                                        openTitleEditDialog(
-                                            conversation.id,
-                                            conversation.name,
-                                        );
-                                    }}
-                                >
-                                    修改标题
-                                </DropdownMenuItem>
-                                <DropdownMenuItem
-                                    onClick={() => {
-                                        setMenuShow(false);
-                                        openDeleteDialog(
-                                            conversation.id.toString(),
-                                            conversation.name,
-                                        );
-                                    }}
-                                >
-                                    删除
-                                </DropdownMenuItem>
-                            </DropdownMenuContent>
-                        </DropdownMenu>
-                    </li>
+                        conversation={conversation}
+                        isSelected={conversationId === conversation.id.toString()}
+                        onSelect={onSelectConversation}
+                        onOpenTitleEdit={openTitleEditDialog}
+                        onOpenDelete={openDeleteDialog}
+                    />
                 ))}
             </ul>
 
