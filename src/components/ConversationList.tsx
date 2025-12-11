@@ -134,6 +134,14 @@ const ConversationList = memo(function ConversationList({
         useState<number>(0);
     const [editingConversationTitle, setEditingConversationTitle] =
         useState<string>("");
+    const editingDialogStateRef = useRef({ id: 0, isOpen: false });
+
+    useEffect(() => {
+        editingDialogStateRef.current = {
+            id: editingConversationId,
+            isOpen: titleEditDialogIsOpen,
+        };
+    }, [editingConversationId, titleEditDialogIsOpen]);
 
     const openTitleEditDialog = useCallback((id: number, title: string) => {
         setEditingConversationId(id);
@@ -149,39 +157,45 @@ const ConversationList = memo(function ConversationList({
 
     // 监听标题变化事件
     useEffect(() => {
-        const unsubscribe = listen("title_change", (event) => {
-            const [conversationIdFromEvent, title] = event.payload as [
-                number,
-                string,
-            ];
+        let unlisten: (() => void) | undefined;
 
-            const index = conversations.findIndex(
-                (conversation) => conversation.id === conversationIdFromEvent,
-            );
-            if (index !== -1) {
-                const newConversations = [...conversations];
-                newConversations[index] = {
-                    ...newConversations[index],
-                    name: title,
-                };
-                setConversations(newConversations);
+        const setupListener = async () => {
+            unlisten = await listen("title_change", (event) => {
+                const [conversationIdFromEvent, title] = event.payload as [
+                    number,
+                    string,
+                ];
 
-                // 如果当前正在编辑这个对话的标题，也更新编辑状态
-                if (
-                    editingConversationId === conversationIdFromEvent &&
-                    titleEditDialogIsOpen
-                ) {
+                setConversations((prev) => {
+                    const index = prev.findIndex(
+                        (conversation) =>
+                            conversation.id === conversationIdFromEvent,
+                    );
+                    if (index === -1) return prev;
+
+                    const updated = [...prev];
+                    updated[index] = {
+                        ...updated[index],
+                        name: title,
+                    };
+                    return updated;
+                });
+
+                const { id, isOpen } = editingDialogStateRef.current;
+                if (isOpen && id === conversationIdFromEvent) {
                     setEditingConversationTitle(title);
                 }
-            }
-        });
+            });
+        };
+
+        setupListener();
 
         return () => {
-            if (unsubscribe) {
-                unsubscribe.then((f) => f());
+            if (unlisten) {
+                unlisten();
             }
         };
-    }, [conversations, editingConversationId, titleEditDialogIsOpen]);
+    }, []);
 
     // 监听对话删除事件
     useEffect(() => {
