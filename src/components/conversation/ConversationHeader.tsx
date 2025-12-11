@@ -1,4 +1,4 @@
-import React from "react";
+import React, { memo } from "react";
 import ConversationTitle from "./ConversationTitle";
 import { Conversation } from "../../data/Conversation";
 
@@ -9,12 +9,7 @@ export interface ConversationHeaderProps {
     onDelete: () => void;
 }
 
-const ConversationHeader: React.FC<ConversationHeaderProps> = ({
-    conversationId,
-    conversation,
-    onEdit,
-    onDelete,
-}) => {
+const ConversationHeader: React.FC<ConversationHeaderProps> = memo(({ conversationId, conversation, onEdit, onDelete }) => {
     if (!conversationId) {
         return null;
     }
@@ -26,6 +21,8 @@ const ConversationHeader: React.FC<ConversationHeaderProps> = ({
             conversation={conversation}
         />
     );
-};
+});
+
+ConversationHeader.displayName = "ConversationHeader";
 
 export default ConversationHeader;

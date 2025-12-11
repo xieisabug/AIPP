@@ -1,4 +1,4 @@
-import React, { useState, Profiler } from "react";
+import React, { useState, Profiler, memo } from "react";
 import MessageList from "./MessageList";
 import { onRenderCallback } from "../../hooks/usePerformanceMonitor";
 import NewChatComponent from "../NewChatComponent";
@@ -31,7 +31,7 @@ export interface ConversationContentProps {
     setSelectedAssistant: (assistantId: number) => void;
 }
 
-const ConversationContent: React.FC<ConversationContentProps> = ({
+const ConversationContent: React.FC<ConversationContentProps> = memo(({
     conversationId,
     // MessageList props
     allDisplayMessages,
@@ -125,6 +125,8 @@ const ConversationContent: React.FC<ConversationContentProps> = ({
             setSelectedAssistant={setSelectedAssistant}
         />
     );
-};
+});
+
+ConversationContent.displayName = "ConversationContent";
 
 export default ConversationContent;
