@@ -88,9 +88,7 @@ pub struct CopilotLspState {
 
 impl Default for CopilotLspState {
     fn default() -> Self {
-        Self {
-            server: Arc::new(Mutex::new(None)),
-        }
+        Self { server: Arc::new(Mutex::new(None)) }
     }
 }
 
@@ -112,11 +110,11 @@ async fn install_copilot_lsp(app_handle: &AppHandle) -> Result<PathBuf, String> 
         .join("copilot-lsp");
 
     // 创建目录
-    std::fs::create_dir_all(&install_dir)
-        .map_err(|e| format!("创建安装目录失败: {}", e))?;
+    std::fs::create_dir_all(&install_dir).map_err(|e| format!("创建安装目录失败: {}", e))?;
 
     // 检查是否已安装
-    let server_path = install_dir.join("node_modules/@github/copilot-language-server/dist/language-server.js");
+    let server_path =
+        install_dir.join("node_modules/@github/copilot-language-server/dist/language-server.js");
     if server_path.exists() {
         info!(server_path = ?server_path, "[CopilotLSP] Server already installed");
         return Ok(server_path);
@@ -214,15 +212,19 @@ pub async fn start_copilot_lsp(app_handle: AppHandle) -> Result<CopilotLspStatus
     };
 
     // 发送 initialize 请求
-    let init_result = send_lsp_request(&mut server, "initialize", serde_json::json!({
-        "processId": std::process::id(),
-        "clientInfo": {
-            "name": "AIPP",
-            "version": env!("CARGO_PKG_VERSION")
-        },
-        "capabilities": {},
-        "rootUri": null
-    }))?;
+    let init_result = send_lsp_request(
+        &mut server,
+        "initialize",
+        serde_json::json!({
+            "processId": std::process::id(),
+            "clientInfo": {
+                "name": "AIPP",
+                "version": env!("CARGO_PKG_VERSION")
+            },
+            "capabilities": {},
+            "rootUri": null
+        }),
+    )?;
 
     debug!(init_result = ?init_result, "[CopilotLSP] Initialize response");
 
@@ -249,12 +251,7 @@ pub async fn start_copilot_lsp(app_handle: AppHandle) -> Result<CopilotLspStatus
 
     *server_guard = Some(server);
 
-    Ok(CopilotLspStatus {
-        is_running: true,
-        is_authorized: false,
-        user: None,
-        error: None,
-    })
+    Ok(CopilotLspStatus { is_running: true, is_authorized: false, user: None, error: None })
 }
 
 /// 停止 Copilot LSP 服务器
@@ -289,18 +286,20 @@ pub async fn check_copilot_status(app_handle: AppHandle) -> Result<CheckStatusRe
     let state = app_handle.state::<CopilotLspState>();
     let mut server_guard = state.server.lock().await;
 
-    let server = server_guard
-        .as_mut()
-        .ok_or("Copilot LSP 未启动，请先启动服务")?;
+    let server = server_guard.as_mut().ok_or("Copilot LSP 未启动，请先启动服务")?;
 
-    let result = send_lsp_request(server, "checkStatus", serde_json::json!({
-        "localChecksOnly": false
-    }))?;
+    let result = send_lsp_request(
+        server,
+        "checkStatus",
+        serde_json::json!({
+            "localChecksOnly": false
+        }),
+    )?;
 
     debug!(result = ?result, "[CopilotLSP] checkStatus response");
 
-    let status: CheckStatusResult = serde_json::from_value(result)
-        .map_err(|e| format!("解析状态响应失败: {}", e))?;
+    let status: CheckStatusResult =
+        serde_json::from_value(result).map_err(|e| format!("解析状态响应失败: {}", e))?;
 
     info!(status = ?status, "[CopilotLSP] Status checked");
 
@@ -315,16 +314,14 @@ pub async fn sign_in_initiate(app_handle: AppHandle) -> Result<SignInInitiateRes
     let state = app_handle.state::<CopilotLspState>();
     let mut server_guard = state.server.lock().await;
 
-    let server = server_guard
-        .as_mut()
-        .ok_or("Copilot LSP 未启动，请先启动服务")?;
+    let server = server_guard.as_mut().ok_or("Copilot LSP 未启动，请先启动服务")?;
 
     let result = send_lsp_request(server, "signInInitiate", serde_json::json!({}))?;
 
     debug!(result = ?result, "[CopilotLSP] signInInitiate response");
 
-    let sign_in_result: SignInInitiateResult = serde_json::from_value(result)
-        .map_err(|e| format!("解析登录响应失败: {}", e))?;
+    let sign_in_result: SignInInitiateResult =
+        serde_json::from_value(result).map_err(|e| format!("解析登录响应失败: {}", e))?;
 
     // 如果是 device flow，自动打开浏览器
     if let SignInInitiateResult::PromptUserDeviceFlow(ref prompt) = sign_in_result {
@@ -353,18 +350,20 @@ pub async fn sign_in_confirm(
     let state = app_handle.state::<CopilotLspState>();
     let mut server_guard = state.server.lock().await;
 
-    let server = server_guard
-        .as_mut()
-        .ok_or("Copilot LSP 未启动，请先启动服务")?;
+    let server = server_guard.as_mut().ok_or("Copilot LSP 未启动，请先启动服务")?;
 
-    let result = send_lsp_request(server, "signInConfirm", serde_json::json!({
-        "userCode": user_code
-    }))?;
+    let result = send_lsp_request(
+        server,
+        "signInConfirm",
+        serde_json::json!({
+            "userCode": user_code
+        }),
+    )?;
 
     debug!(result = ?result, "[CopilotLSP] signInConfirm response");
 
-    let status: SignInStatus = serde_json::from_value(result)
-        .map_err(|e| format!("解析确认响应失败: {}", e))?;
+    let status: SignInStatus =
+        serde_json::from_value(result).map_err(|e| format!("解析确认响应失败: {}", e))?;
 
     info!(status = ?status, "[CopilotLSP] Sign in confirmed");
 
@@ -379,9 +378,7 @@ pub async fn sign_out_copilot(app_handle: AppHandle) -> Result<(), String> {
     let state = app_handle.state::<CopilotLspState>();
     let mut server_guard = state.server.lock().await;
 
-    let server = server_guard
-        .as_mut()
-        .ok_or("Copilot LSP 未启动，请先启动服务")?;
+    let server = server_guard.as_mut().ok_or("Copilot LSP 未启动，请先启动服务")?;
 
     let _ = send_lsp_request(server, "signOut", serde_json::json!({}))?;
 
@@ -418,12 +415,7 @@ pub async fn get_copilot_lsp_status(app_handle: AppHandle) -> Result<CopilotLspS
                 CheckStatusResult::NotSignedIn => (false, None),
             };
 
-            Ok(CopilotLspStatus {
-                is_running: true,
-                is_authorized,
-                user,
-                error: None,
-            })
+            Ok(CopilotLspStatus { is_running: true, is_authorized, user, error: None })
         }
         Err(e) => Ok(CopilotLspStatus {
             is_running: true,
@@ -439,17 +431,21 @@ pub async fn get_copilot_lsp_status(app_handle: AppHandle) -> Result<CopilotLspS
 pub async fn get_copilot_oauth_token_from_config() -> Result<Option<String>, String> {
     info!("[CopilotLSP] Reading OAuth token from config...");
 
-    // Copilot 官方 client_id
-    let client_id = "Iv1.b507a08c87ecfe98";
-    let key = format!("github.com:{}", client_id);
-
     // 获取配置文件路径
-    // GitHub Copilot 使用 ~/.config/github-copilot/apps.json
-    let config_path = dirs::home_dir()
-        .ok_or("无法获取用户主目录")?
-        .join(".config")
-        .join("github-copilot")
-        .join("apps.json");
+    // Windows: %LOCALAPPDATA%\github-copilot\apps.json
+    // macOS/Linux: ~/.config/github-copilot/apps.json
+    let config_path = if cfg!(target_os = "windows") {
+        dirs::data_local_dir()
+            .ok_or("无法获取 LocalAppData 目录")?
+            .join("github-copilot")
+            .join("apps.json")
+    } else {
+        dirs::home_dir()
+            .ok_or("无法获取用户主目录")?
+            .join(".config")
+            .join("github-copilot")
+            .join("apps.json")
+    };
 
     info!(config_path = ?config_path, "[CopilotLSP] Looking for apps.json");
 
@@ -458,20 +454,27 @@ pub async fn get_copilot_oauth_token_from_config() -> Result<Option<String>, Str
         return Ok(None);
     }
 
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("读取 apps.json 失败: {}", e))?;
+    let content =
+        std::fs::read_to_string(&config_path).map_err(|e| format!("读取 apps.json 失败: {}", e))?;
 
-    let apps: HashMap<String, serde_json::Value> = serde_json::from_str(&content)
-        .map_err(|e| format!("解析 apps.json 失败: {}", e))?;
+    let apps: HashMap<String, serde_json::Value> =
+        serde_json::from_str(&content).map_err(|e| format!("解析 apps.json 失败: {}", e))?;
 
-    if let Some(app) = apps.get(&key) {
-        if let Some(oauth_token) = app.get("oauth_token").and_then(|v| v.as_str()) {
-            info!("[CopilotLSP] Found OAuth token in apps.json");
-            return Ok(Some(oauth_token.to_string()));
+    // 遍历所有以 "github.com:" 开头的 key，查找包含 oauth_token 的配置
+    // 不同的 Copilot 客户端使用不同的 client_id:
+    // - VS Code: Iv1.b507a08c87ecfe98
+    // - JetBrains: Iv23ctfURkiMfJ4xr5mv
+    // - 其他客户端可能使用其他 ID
+    for (key, app) in apps.iter() {
+        if key.starts_with("github.com:") {
+            if let Some(oauth_token) = app.get("oauth_token").and_then(|v| v.as_str()) {
+                info!(key = %key, "[CopilotLSP] Found OAuth token in apps.json");
+                return Ok(Some(oauth_token.to_string()));
+            }
         }
     }
 
-    info!("[CopilotLSP] No OAuth token found for client_id {}", client_id);
+    info!("[CopilotLSP] No OAuth token found in apps.json");
     Ok(None)
 }
 
@@ -490,22 +493,16 @@ fn send_lsp_request(
         "params": params
     });
 
-    let request_str = serde_json::to_string(&request)
-        .map_err(|e| format!("序列化请求失败: {}", e))?;
+    let request_str =
+        serde_json::to_string(&request).map_err(|e| format!("序列化请求失败: {}", e))?;
 
     let message = format!("Content-Length: {}\r\n\r\n{}", request_str.len(), request_str);
 
     debug!(method = method, id = id, "[CopilotLSP] Sending request");
 
-    server
-        .stdin
-        .write_all(message.as_bytes())
-        .map_err(|e| format!("发送请求失败: {}", e))?;
+    server.stdin.write_all(message.as_bytes()).map_err(|e| format!("发送请求失败: {}", e))?;
 
-    server
-        .stdin
-        .flush()
-        .map_err(|e| format!("刷新缓冲区失败: {}", e))?;
+    server.stdin.flush().map_err(|e| format!("刷新缓冲区失败: {}", e))?;
 
     // 读取响应
     read_lsp_response(server, id)
@@ -523,26 +520,16 @@ fn send_lsp_notification(
         "params": params
     });
 
-    let notification_str = serde_json::to_string(&notification)
-        .map_err(|e| format!("序列化通知失败: {}", e))?;
+    let notification_str =
+        serde_json::to_string(&notification).map_err(|e| format!("序列化通知失败: {}", e))?;
 
-    let message = format!(
-        "Content-Length: {}\r\n\r\n{}",
-        notification_str.len(),
-        notification_str
-    );
+    let message = format!("Content-Length: {}\r\n\r\n{}", notification_str.len(), notification_str);
 
     debug!(method = method, "[CopilotLSP] Sending notification");
 
-    server
-        .stdin
-        .write_all(message.as_bytes())
-        .map_err(|e| format!("发送通知失败: {}", e))?;
+    server.stdin.write_all(message.as_bytes()).map_err(|e| format!("发送通知失败: {}", e))?;
 
-    server
-        .stdin
-        .flush()
-        .map_err(|e| format!("刷新缓冲区失败: {}", e))?;
+    server.stdin.flush().map_err(|e| format!("刷新缓冲区失败: {}", e))?;
 
     Ok(())
 }
@@ -584,30 +571,25 @@ fn read_lsp_response(
         std::io::Read::read_exact(&mut server.stdout_reader, &mut content)
             .map_err(|e| format!("读取响应内容失败: {}", e))?;
 
-        let content_str = String::from_utf8(content)
-            .map_err(|e| format!("响应内容不是有效的 UTF-8: {}", e))?;
+        let content_str =
+            String::from_utf8(content).map_err(|e| format!("响应内容不是有效的 UTF-8: {}", e))?;
 
         debug!(content = %content_str, "[CopilotLSP] Received message");
 
-        let message: serde_json::Value = serde_json::from_str(&content_str)
-            .map_err(|e| format!("解析响应 JSON 失败: {}", e))?;
+        let message: serde_json::Value =
+            serde_json::from_str(&content_str).map_err(|e| format!("解析响应 JSON 失败: {}", e))?;
 
         // 检查是否是我们期望的响应
         if let Some(id) = message.get("id").and_then(|v| v.as_u64()) {
             if id == expected_id {
                 // 检查是否有错误
                 if let Some(error) = message.get("error") {
-                    let error_message = error
-                        .get("message")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("未知错误");
+                    let error_message =
+                        error.get("message").and_then(|v| v.as_str()).unwrap_or("未知错误");
                     return Err(format!("LSP 错误: {}", error_message));
                 }
 
-                return message
-                    .get("result")
-                    .cloned()
-                    .ok_or("响应中没有 result 字段".to_string());
+                return message.get("result").cloned().ok_or("响应中没有 result 字段".to_string());
             }
         }
 
