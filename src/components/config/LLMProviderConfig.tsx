@@ -141,6 +141,30 @@ const LLMProviderConfig: React.FC = () => {
     const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
     const [shareCode, setShareCode] = useState('');
 
+    // 重命名提供商
+    const handleRenameProvider = useCallback(async (newName: string) => {
+        if (!selectedProvider) return;
+
+        try {
+            await invoke('update_llm_provider', {
+                id: selectedProvider.id,
+                name: newName,
+                apiType: selectedProvider.api_type,
+                description: selectedProvider.description,
+                isEnabled: selectedProvider.is_enabled
+            });
+            toast.success('重命名成功');
+
+            // 立即更新 selectedProvider 的名称
+            setSelectedProvider(prev => prev ? { ...prev, name: newName } : null);
+
+            // 同时更新列表
+            getLLMProviderList();
+        } catch (error) {
+            toast.error('重命名失败: ' + error);
+        }
+    }, [selectedProvider, getLLMProviderList]);
+
     // 分享提供商
     const handleShareProvider = useCallback(async () => {
         if (!selectedProvider) return;
@@ -328,6 +352,7 @@ const LLMProviderConfig: React.FC = () => {
                 onToggleEnabled={handleToggle}
                 onDelete={() => openConfirmDialog(selectedProvider.id)}
                 onShare={handleShareProvider}
+                onRename={handleRenameProvider}
             />
         </div>
     ) : (

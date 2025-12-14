@@ -61,6 +61,7 @@ interface LLMProviderConfigFormProps {
     onToggleEnabled: any;
     onDelete: any;
     onShare?: () => void;
+    onRename?: (newName: string) => void;
 }
 
 const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
@@ -74,6 +75,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     onDelete,
     onToggleEnabled,
     onShare,
+    onRename,
 }) => {
     const [tags, setTags] = useState<string[]>([]);
     const [isModelListExpanded, setIsModelListExpanded] =
@@ -88,6 +90,8 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const [hasApiKey, setHasApiKey] = useState<boolean>(false);
     const [manualTokenDialogOpen, setManualTokenDialogOpen] = useState<boolean>(false);
     const [manualToken, setManualToken] = useState<string>("");
+    const [renameDialogOpen, setRenameDialogOpen] = useState<boolean>(false);
+    const [newProviderName, setNewProviderName] = useState<string>("");
 
     const isCopilotProvider = apiType === "github_copilot";
 
@@ -570,6 +574,20 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         ];
     }, [apiType, apiTypeLabel, isCopilotProvider, tagInputRender, isAdvancedConfigExpanded, form, updateField, proxyEnabled, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange]);
 
+    // 打开改名对话框
+    const handleOpenRenameDialog = useCallback(() => {
+        setNewProviderName(name);
+        setRenameDialogOpen(true);
+    }, [name]);
+
+    // 确认改名
+    const handleConfirmRename = useCallback(() => {
+        if (newProviderName.trim() && onRename) {
+            onRename(newProviderName.trim());
+            setRenameDialogOpen(false);
+        }
+    }, [newProviderName, onRename]);
+
     const extraButtons = useMemo(
         () => (
             <div className="flex items-center gap-2">
@@ -620,6 +638,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 classNames="bottom-space"
                 extraButtons={extraButtons}
                 useFormReturn={form}
+                onTitleClick={onRename ? handleOpenRenameDialog : undefined}
             />
             <ModelSelectionDialog
                 open={modelSelectionDialogOpen}
@@ -664,6 +683,43 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     </DialogFooter>
                 </DialogContent>
             </Dialog>
+            {/* 改名对话框 */}
+            <Dialog open={renameDialogOpen} onOpenChange={setRenameDialogOpen}>
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>重命名提供商</DialogTitle>
+                        <DialogDescription>
+                            请输入新的提供商名称
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="flex flex-col gap-4 py-4">
+                        <Input
+                            placeholder="请输入提供商名称"
+                            value={newProviderName}
+                            onChange={(e) => setNewProviderName(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' && newProviderName.trim()) {
+                                    handleConfirmRename();
+                                }
+                            }}
+                        />
+                    </div>
+                    <DialogFooter>
+                        <Button
+                            variant="outline"
+                            onClick={() => setRenameDialogOpen(false)}
+                        >
+                            取消
+                        </Button>
+                        <Button
+                            onClick={handleConfirmRename}
+                            disabled={!newProviderName.trim()}
+                        >
+                            确定
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </>
     );
 };
@@ -677,6 +733,7 @@ export default React.memo(LLMProviderConfigForm, (prevProps, nextProps) => {
         prevProps.isOffical === nextProps.isOffical &&
         prevProps.enabled === nextProps.enabled &&
         prevProps.onToggleEnabled === nextProps.onToggleEnabled &&
-        prevProps.onDelete === nextProps.onDelete
+        prevProps.onDelete === nextProps.onDelete &&
+        prevProps.onRename === nextProps.onRename
     );
 });

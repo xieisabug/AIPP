@@ -16,18 +16,18 @@ import { useMcpServers } from "../hooks/useMcpServers";
 
 interface ConfigField {
     type:
-        | "select"
-        | "textarea"
-        | "input"
-        | "password"
-        | "checkbox"
-        | "radio"
-        | "static"
-        | "custom"
-        | "button"
-        | "switch"
-        | "model-select"
-        | "mcp-select";
+    | "select"
+    | "textarea"
+    | "input"
+    | "password"
+    | "checkbox"
+    | "radio"
+    | "static"
+    | "custom"
+    | "button"
+    | "switch"
+    | "model-select"
+    | "mcp-select";
     label: string;
     className?: string;
     options?: { value: string; label: string; tooltip?: string }[];
@@ -55,6 +55,7 @@ interface ConfigFormProps {
     onCopy?: () => void;
     onDelete?: () => void;
     onEdit?: () => void;
+    onTitleClick?: () => void;
     extraButtons?: React.ReactNode;
 }
 
@@ -72,6 +73,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
     onCopy,
     onDelete,
     onEdit,
+    onTitleClick,
     extraButtons,
 }) => {
     const [isExpanded, setIsExpanded] = useState<boolean>(defaultExpanded);
@@ -89,7 +91,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
 
     // 条件获取模型数据用于 model-select 类型
     const { models, loading: modelsLoading, error: modelsError } = useModels(hasModelSelect);
-    
+
     // 条件获取MCP服务器数据用于 mcp-select 类型
     const { mcpServers, loading: mcpServersLoading, error: mcpServersError } = useMcpServers(hasMcpSelect);
 
@@ -145,7 +147,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
             }
             return [];
         }, [field.type, models]);
-        
+
         // 生成MCP服务器选项用于 mcp-select 类型
         const mcpOptions = useMemo(() => {
             if (field.type === "mcp-select" && mcpServers) {
@@ -213,7 +215,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                             </SelectTrigger>
                             <SelectContent>
                                 {mcpOptions.map((option) => (
-                                    <SelectItem key={option.value} value={option.value? option.value.toString() : ""}>
+                                    <SelectItem key={option.value} value={option.value ? option.value.toString() : ""}>
                                         {option.label}
                                     </SelectItem>
                                 ))}
@@ -299,9 +301,8 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                 case "static":
                     return (
                         <div
-                            className={`text-sm text-muted-foreground px-3 py-2 bg-muted rounded-md break-words whitespace-pre-wrap ${
-                                field.className || ""
-                            }`}
+                            className={`text-sm text-muted-foreground px-3 py-2 bg-muted rounded-md break-words whitespace-pre-wrap ${field.className || ""
+                                }`}
                         >
                             {field.value}
                         </div>
@@ -415,9 +416,8 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
         <Card className={`shadow-md hover:shadow-lg transition-shadow border-l-4 border-l-primary ${classNames || ""}`}>
             <CardHeader
                 onClick={toggleExpand}
-                className={`flex flex-row items-center ${
-                    enableExpand ? "cursor-pointer hover:bg-muted" : ""
-                } transition-colors rounded-t-lg`}
+                className={`flex flex-row items-center ${enableExpand ? "cursor-pointer hover:bg-muted" : ""
+                    } transition-colors rounded-t-lg`}
             >
                 <div className="flex items-center flex-1 min-w-0">
                     {enableExpand && (
@@ -426,7 +426,17 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                         </div>
                     )}
                     <div className="flex-1 min-w-0">
-                        <CardTitle className="text-lg font-semibold text-foreground truncate">{title}</CardTitle>
+                        <CardTitle
+                            className={`text-lg font-semibold text-foreground truncate ${onTitleClick ? 'cursor-pointer hover:text-primary transition-colors' : ''}`}
+                            onClick={(e) => {
+                                if (onTitleClick) {
+                                    e.stopPropagation();
+                                    onTitleClick();
+                                }
+                            }}
+                        >
+                            {title}
+                        </CardTitle>
                         {description && (
                             <CardDescription className="text-sm text-muted-foreground mt-1 truncate">
                                 {description}
@@ -471,9 +481,8 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
 
             <CardContent
                 ref={contentRef}
-                className={`transition-all duration-300 ease-in-out ${
-                    isExpanded ? "max-h-none opacity-100" : "max-h-0 opacity-0 overflow-hidden"
-                }`}
+                className={`transition-all duration-300 ease-in-out ${isExpanded ? "max-h-none opacity-100" : "max-h-0 opacity-0 overflow-hidden"
+                    }`}
             >
                 <Form {...useFormReturn}>
                     {renderContent()}
