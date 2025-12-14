@@ -31,8 +31,7 @@ use crate::api::copilot_api::{poll_github_copilot_token, start_github_copilot_de
 #[cfg(desktop)]
 use crate::api::copilot_lsp::{
     check_copilot_status, get_copilot_lsp_status, get_copilot_oauth_token_from_config,
-    sign_in_confirm, sign_in_initiate, sign_out_copilot, start_copilot_lsp, stop_copilot_lsp,
-    CopilotLspState,
+    sign_in_confirm, sign_in_initiate, sign_out_copilot, stop_copilot_lsp, CopilotLspState,
 };
 use crate::api::highlight_api::{highlight_code, list_syntect_themes};
 use crate::api::llm_api::{
@@ -482,7 +481,6 @@ pub fn run() {
             start_github_copilot_device_flow,
             poll_github_copilot_token,
             // Copilot LSP commands
-            start_copilot_lsp,
             stop_copilot_lsp,
             check_copilot_status,
             sign_in_initiate,
