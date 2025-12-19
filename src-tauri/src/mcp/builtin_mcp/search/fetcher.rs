@@ -11,6 +11,13 @@ use tokio::process::Command as TokioCommand;
 use tokio::time::sleep;
 use tracing::{debug, info, trace, warn};
 
+/// ========== 调试开关 ==========
+/// 设置为 true 时会保存获取到的HTML到 /tmp 目录
+/// 调试完成后请设置为 false
+const DEBUG_SAVE_HTML: bool = false;
+/// 调试HTML保存目录
+const DEBUG_HTML_DIR: &str = "~/tmp";
+
 #[derive(Debug, Clone)]
 pub struct FetchConfig {
     pub user_data_dir: Option<String>,
@@ -56,6 +63,36 @@ impl ContentFetcher {
         let timing_config = FingerprintManager::get_timing_config();
 
         Self { app_handle, config, fingerprint_manager, timing_config }
+    }
+
+    /// 保存调试HTML到文件（仅在 DEBUG_SAVE_HTML 为 true 时生效）
+    fn save_debug_html(html: &str, prefix: &str) {
+        if !DEBUG_SAVE_HTML {
+            return;
+        }
+        
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S%.3f");
+        let filename = format!("{}_{}.html", prefix, timestamp);
+        let filepath = PathBuf::from(DEBUG_HTML_DIR).join(&filename);
+        
+        // 确保目录存在
+        if let Err(e) = fs::create_dir_all(DEBUG_HTML_DIR) {
+            warn!(error = %e, dir = DEBUG_HTML_DIR, "Failed to create debug HTML directory");
+            return;
+        }
+        
+        match fs::write(&filepath, html) {
+            Ok(_) => {
+                info!(
+                    path = %filepath.display(),
+                    bytes = html.len(),
+                    "🔍 Debug HTML saved"
+                );
+            }
+            Err(e) => {
+                warn!(error = %e, path = %filepath.display(), "Failed to save debug HTML");
+            }
+        }
     }
 
     /// 主要的内容抓取方法，按优先级尝试不同策略
@@ -172,16 +209,35 @@ impl ContentFetcher {
             launcher = launcher.bypass_csp(true);
         }
 
-        if let Some(ref proxy) = self.config.proxy_server {
-            use playwright::api::ProxySettings;
-            let proxy_settings = ProxySettings {
-                server: proxy.clone(),
-                bypass: None,
-                username: None,
-                password: None,
-            };
-            launcher = launcher.proxy(proxy_settings);
-        }
+        // 处理代理配置
+        let use_proxy = if let Some(ref proxy) = self.config.proxy_server {
+            if !proxy.trim().is_empty() {
+                info!(proxy = %proxy, "Checking proxy availability for search");
+                match Self::check_proxy_available(proxy).await {
+                    Ok(_) => {
+                        use playwright::api::ProxySettings;
+                        let proxy_settings = ProxySettings {
+                            server: proxy.clone(),
+                            bypass: None,
+                            username: None,
+                            password: None,
+                        };
+                        launcher = launcher.proxy(proxy_settings);
+                        info!(proxy = %proxy, "✅ Proxy configured for search");
+                        true
+                    }
+                    Err(e) => {
+                        warn!(proxy = %proxy, error = %e, "⚠️ Proxy not available, continuing without proxy");
+                        false
+                    }
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        debug!(use_proxy, "Proxy decision made");
 
         let context =
             launcher.launch().await.map_err(|e| format!("Playwright launch error: {}", e))?;
@@ -243,15 +299,27 @@ impl ContentFetcher {
             launcher = launcher.bypass_csp(true);
         }
 
+        // 处理代理配置
         if let Some(ref proxy) = self.config.proxy_server {
-            use playwright::api::ProxySettings;
-            let proxy_settings = ProxySettings {
-                server: proxy.clone(),
-                bypass: None,
-                username: None,
-                password: None,
-            };
-            launcher = launcher.proxy(proxy_settings);
+            if !proxy.trim().is_empty() {
+                info!(proxy = %proxy, "Checking proxy availability for fetch");
+                match Self::check_proxy_available(proxy).await {
+                    Ok(_) => {
+                        use playwright::api::ProxySettings;
+                        let proxy_settings = ProxySettings {
+                            server: proxy.clone(),
+                            bypass: None,
+                            username: None,
+                            password: None,
+                        };
+                        launcher = launcher.proxy(proxy_settings);
+                        info!(proxy = %proxy, "✅ Proxy configured for fetch");
+                    }
+                    Err(e) => {
+                        warn!(proxy = %proxy, error = %e, "⚠️ Proxy not available, continuing without proxy");
+                    }
+                }
+            }
         }
 
         let context =
@@ -374,6 +442,41 @@ impl ContentFetcher {
         Ok(stdout)
     }
 
+    /// 检查代理是否可用（快速TCP连接测试）
+    async fn check_proxy_available(proxy_url: &str) -> Result<(), String> {
+        use std::net::ToSocketAddrs;
+        
+        // 解析代理URL获取主机和端口
+        let url = proxy_url.trim();
+        let url = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")).unwrap_or(url);
+        let url = url.strip_prefix("socks5://").unwrap_or(url);
+        
+        // 移除可能的路径部分
+        let host_port = url.split('/').next().unwrap_or(url);
+        
+        // 尝试解析地址
+        let addr = host_port
+            .to_socket_addrs()
+            .map_err(|e| format!("Failed to resolve proxy address '{}': {}", host_port, e))?
+            .next()
+            .ok_or_else(|| format!("No address found for proxy: {}", host_port))?;
+        
+        // 尝试TCP连接，超时3秒
+        let timeout = Duration::from_secs(3);
+        match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
+            Ok(Ok(_stream)) => {
+                debug!(proxy = %proxy_url, "Proxy is reachable");
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                Err(format!("Failed to connect to proxy {}: {}", proxy_url, e))
+            }
+            Err(_) => {
+                Err(format!("Proxy connection timeout ({}s): {}", timeout.as_secs(), proxy_url))
+            }
+        }
+    }
+
     /// 使用HTTP直接请求
     async fn fetch_with_http(&self, url: &str) -> Result<String, String> {
         let user_agent = self.config.user_agent.as_deref().unwrap_or(
@@ -443,92 +546,215 @@ impl ContentFetcher {
         }
     }
 
-    /// 注入反检测脚本
+    /// 注入反检测脚本（增强版）
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     async fn inject_anti_detection_scripts(
         &self,
         page: &playwright::api::Page,
     ) -> Result<(), String> {
-        // 移除webdriver标识
         let anti_detection_script = r#"
-            // 移除webdriver属性
+            // ========== 1. 核心webdriver检测绕过 ==========
             Object.defineProperty(navigator, 'webdriver', {
-                get: () => false,
+                get: () => undefined,
+                configurable: true
+            });
+            
+            // 删除可能存在的自动化标识
+            delete navigator.__proto__.webdriver;
+            
+            // ========== 2. Chrome对象完整模拟 ==========
+            if (!window.chrome) {
+                window.chrome = {};
+            }
+            window.chrome.runtime = {
+                connect: function() { return { onMessage: { addListener: function() {} }, postMessage: function() {}, disconnect: function() {} }; },
+                sendMessage: function(msg, cb) { if(cb) cb(); },
+                onMessage: { addListener: function() {}, removeListener: function() {} },
+                onConnect: { addListener: function() {} },
+                id: undefined
+            };
+            window.chrome.loadTimes = function() {
+                return {
+                    commitLoadTime: Date.now() / 1000 - Math.random() * 100,
+                    finishDocumentLoadTime: Date.now() / 1000 - Math.random() * 50,
+                    finishLoadTime: Date.now() / 1000 - Math.random() * 20,
+                    firstPaintAfterLoadTime: 0,
+                    firstPaintTime: Date.now() / 1000 - Math.random() * 30,
+                    navigationType: "Other",
+                    npnNegotiatedProtocol: "h2",
+                    requestTime: Date.now() / 1000 - Math.random() * 200,
+                    startLoadTime: Date.now() / 1000 - Math.random() * 300,
+                    connectionInfo: "h2",
+                    wasFetchedViaSpdy: true,
+                    wasNpnNegotiated: true
+                };
+            };
+            window.chrome.csi = function() {
+                return {
+                    startE: Date.now() - Math.random() * 1000,
+                    onloadT: Date.now() - Math.random() * 500,
+                    pageT: Date.now() - Math.random() * 300,
+                    tran: Math.floor(Math.random() * 20)
+                };
+            };
+            window.chrome.app = {
+                isInstalled: false,
+                InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+                RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' }
+            };
+
+            // ========== 3. 插件模拟 ==========
+            const pluginData = [
+                { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: 'Portable Document Format' },
+                { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+            ];
+            const pluginArray = pluginData.map(p => {
+                const plugin = Object.create(Plugin.prototype);
+                Object.defineProperties(plugin, {
+                    name: { value: p.name, enumerable: true },
+                    filename: { value: p.filename, enumerable: true },
+                    description: { value: p.description, enumerable: true },
+                    length: { value: 1, enumerable: true }
+                });
+                return plugin;
+            });
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => {
+                    const arr = Object.create(PluginArray.prototype);
+                    pluginArray.forEach((p, i) => arr[i] = p);
+                    arr.length = pluginArray.length;
+                    arr.item = (i) => arr[i];
+                    arr.namedItem = (name) => pluginArray.find(p => p.name === name);
+                    arr.refresh = () => {};
+                    return arr;
+                },
+                configurable: true
             });
 
-            // 覆盖Chrome对象
-            window.chrome = {
-                runtime: {},
-                loadTimes: function() {
-                    return {
-                        commitLoadTime: Date.now() / 1000 - Math.random() * 100,
-                        finishDocumentLoadTime: Date.now() / 1000 - Math.random() * 50,
-                        finishLoadTime: Date.now() / 1000 - Math.random() * 20,
-                        firstPaintAfterLoadTime: 0,
-                        firstPaintTime: Date.now() / 1000 - Math.random() * 30,
-                        navigationType: "Other",
-                        npnNegotiatedProtocol: "http/1.1",
-                        requestTime: Date.now() / 1000 - Math.random() * 200,
-                        startLoadTime: Date.now() / 1000 - Math.random() * 300,
-                        connectionInfo: "http/1.1",
-                        wasFetchedViaSpdy: false,
-                        wasNpnNegotiated: false
-                    };
-                },
-                csi: function() {
-                    return {
-                        startE: Date.now() - Math.random() * 1000,
-                        onloadT: Date.now() - Math.random() * 500,
-                        pageT: Date.now() - Math.random() * 300,
-                        tran: Math.floor(Math.random() * 20)
-                    };
+            // ========== 4. languages数组 ==========
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['zh-CN', 'zh', 'en-US', 'en'],
+                configurable: true
+            });
+
+            // ========== 5. 权限API ==========
+            const originalQuery = navigator.permissions.query.bind(navigator.permissions);
+            navigator.permissions.query = (parameters) => {
+                if (parameters.name === 'notifications') {
+                    return Promise.resolve({ state: Notification.permission, onchange: null });
+                }
+                return originalQuery(parameters).catch(() => ({ state: 'prompt', onchange: null }));
+            };
+
+            // ========== 6. 硬件并发数 ==========
+            Object.defineProperty(navigator, 'hardwareConcurrency', {
+                get: () => 8,
+                configurable: true
+            });
+
+            // ========== 7. 设备内存 ==========
+            Object.defineProperty(navigator, 'deviceMemory', {
+                get: () => 8,
+                configurable: true
+            });
+
+            // ========== 8. 连接信息 ==========
+            if (navigator.connection) {
+                Object.defineProperty(navigator.connection, 'rtt', { get: () => 50 + Math.floor(Math.random() * 50) });
+            }
+
+            // ========== 9. WebGL指纹随机化 ==========
+            const getParameterProxyHandler = {
+                apply: function(target, thisArg, args) {
+                    const param = args[0];
+                    const gl = thisArg;
+                    // UNMASKED_VENDOR_WEBGL
+                    if (param === 37445) {
+                        return 'Google Inc. (NVIDIA)';
+                    }
+                    // UNMASKED_RENDERER_WEBGL
+                    if (param === 37446) {
+                        return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                    }
+                    return Reflect.apply(target, thisArg, args);
                 }
             };
+            try {
+                const canvas = document.createElement('canvas');
+                const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+                if (gl) {
+                    gl.getParameter = new Proxy(gl.getParameter.bind(gl), getParameterProxyHandler);
+                }
+                const gl2 = canvas.getContext('webgl2');
+                if (gl2) {
+                    gl2.getParameter = new Proxy(gl2.getParameter.bind(gl2), getParameterProxyHandler);
+                }
+            } catch(e) {}
 
-            // 模拟真实的插件信息
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [
-                    {
-                        0: {type: "application/x-google-chrome-pdf", suffixes: "pdf", description: "Portable Document Format"},
-                        description: "Portable Document Format",
-                        filename: "internal-pdf-viewer",
-                        length: 1,
-                        name: "Chrome PDF Plugin"
-                    },
-                    {
-                        0: {type: "application/pdf", suffixes: "pdf", description: "Portable Document Format"},
-                        description: "Portable Document Format", 
-                        filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai",
-                        length: 1,
-                        name: "Chrome PDF Viewer"
+            // ========== 10. Canvas指纹噪声 ==========
+            const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+            HTMLCanvasElement.prototype.toDataURL = function(type) {
+                if (this.width > 16 && this.height > 16) {
+                    const ctx = this.getContext('2d');
+                    if (ctx) {
+                        const imageData = ctx.getImageData(0, 0, this.width, this.height);
+                        const data = imageData.data;
+                        for (let i = 0; i < data.length; i += 4) {
+                            data[i] = data[i] ^ (Math.random() > 0.5 ? 1 : 0);
+                        }
+                        ctx.putImageData(imageData, 0, 0);
                     }
-                ]
-            });
-
-            // 覆盖权限查询
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                Promise.resolve({ state: Notification.permission }) :
-                originalQuery(parameters)
-            );
-
-            // 添加一些随机的性能噪音
-            const originalGetEntriesByType = performance.getEntriesByType;
-            performance.getEntriesByType = function(type) {
-                const entries = originalGetEntriesByType.call(this, type);
-                return entries.map(entry => ({
-                    ...entry,
-                    startTime: entry.startTime + Math.random() * 2 - 1,
-                    duration: entry.duration + Math.random() * 0.5 - 0.25
-                }));
+                }
+                return originalToDataURL.apply(this, arguments);
             };
+
+            // ========== 11. 性能API噪声 ==========
+            const originalGetEntriesByType = performance.getEntriesByType.bind(performance);
+            performance.getEntriesByType = function(type) {
+                const entries = originalGetEntriesByType(type);
+                if (type === 'navigation' || type === 'resource') {
+                    return entries.map(entry => {
+                        const clone = {};
+                        for (let key in entry) {
+                            if (typeof entry[key] === 'number') {
+                                clone[key] = entry[key] + (Math.random() * 2 - 1);
+                            } else {
+                                clone[key] = entry[key];
+                            }
+                        }
+                        return clone;
+                    });
+                }
+                return entries;
+            };
+
+            // ========== 12. 自动化检测函数 ==========
+            // 移除Playwright/Puppeteer注入的函数
+            delete window.__playwright;
+            delete window.__pw_manual;
+            delete window.__PW_inspect;
+            delete window.callPhantom;
+            delete window._phantom;
+            delete window.phantom;
+            delete window.__nightmare;
+            delete window.domAutomation;
+            delete window.domAutomationController;
+            
+            // ========== 13. 屏幕信息 ==========
+            if (screen.availWidth === 0 || screen.availHeight === 0) {
+                Object.defineProperty(screen, 'availWidth', { get: () => screen.width });
+                Object.defineProperty(screen, 'availHeight', { get: () => screen.height - 40 });
+            }
+            
+            console.log('[AIPP] Anti-detection scripts injected successfully');
         "#;
 
         page.add_init_script(anti_detection_script)
             .await
             .map_err(|e| format!("Failed to inject anti-detection script: {}", e))?;
-
+        
+        info!("Anti-detection scripts injected");
         Ok(())
     }
 
@@ -599,6 +825,10 @@ impl ContentFetcher {
         let html = self.extract_page_html_with_retry(page).await?;
 
         debug!("Successfully retrieved {} bytes", html.len());
+        
+        // 保存调试HTML
+        Self::save_debug_html(&html, "search_result");
+        
         Ok(html)
     }
 
@@ -610,42 +840,62 @@ impl ContentFetcher {
     ) -> Result<String, String> {
         let max_retries = 3;
         let mut last_error = String::new();
+        let mut last_html: Option<String> = None;
 
         for attempt in 1..=max_retries {
-            debug!(attempt, max_retries, "Attempting HTML extraction");
+            info!(attempt, max_retries, "Attempting HTML extraction");
 
             // 等待页面稳定
             sleep(Duration::from_millis(1000 + fastrand::u64(0..1000))).await;
 
+            // 获取当前页面URL用于调试
+            let current_url: String = page
+                .eval("() => window.location.href")
+                .await
+                .unwrap_or_else(|_| "unknown".to_string());
+            debug!(attempt, %current_url, "Current page URL");
+
             // 检查页面是否准备就绪
             match self.check_page_ready(page).await {
                 Ok(true) => {
+                    info!(attempt, "Page ready check passed");
                     // 页面准备就绪，尝试提取HTML
                     match page.eval("() => document.documentElement.outerHTML").await {
                         Ok(html) => {
                             let html_str: String = html;
+                            last_html = Some(html_str.clone());
+                            
                             if html_str.len() > 1000 {
                                 // 确保HTML内容足够丰富
-                                info!(attempt, "HTML extraction successful");
+                                info!(attempt, bytes = html_str.len(), "HTML extraction successful");
                                 return Ok(html_str);
                             } else {
                                 last_error = format!("HTML too short ({} bytes)", html_str.len());
-                                debug!(len = html_str.len(), "HTML too short, retrying");
+                                warn!(len = html_str.len(), attempt, "HTML too short, retrying");
+                                // 保存短HTML用于调试
+                                Self::save_debug_html(&html_str, &format!("short_html_attempt{}", attempt));
                             }
                         }
                         Err(e) => {
                             last_error = format!("HTML extraction error: {}", e);
-                            debug!(error = %e, "HTML extraction failed");
+                            warn!(error = %e, attempt, "HTML extraction failed");
                         }
                     }
                 }
                 Ok(false) => {
                     last_error = "Page not ready".to_string();
-                    trace!("Page not ready, waiting");
+                    warn!(attempt, "Page not ready, waiting");
+                    
+                    // 获取页面状态信息用于调试
+                    let page_info: serde_json::Value = page
+                        .eval("() => ({ readyState: document.readyState, bodyChildren: document.body ? document.body.children.length : 0, title: document.title })")
+                        .await
+                        .unwrap_or_default();
+                    debug!(attempt, ?page_info, "Page state info");
                 }
                 Err(e) => {
                     last_error = format!("Page check error: {}", e);
-                    debug!(error = %e, "Page check error");
+                    warn!(error = %e, attempt, "Page check error");
                 }
             }
 
@@ -653,6 +903,11 @@ impl ContentFetcher {
             if attempt < max_retries {
                 sleep(Duration::from_millis(2000)).await;
             }
+        }
+
+        // 如果有获取到HTML但被认为太短，也保存下来用于分析
+        if let Some(html) = last_html {
+            Self::save_debug_html(&html, "failed_extraction");
         }
 
         Err(format!(
@@ -816,24 +1071,84 @@ impl ContentFetcher {
         // 优先尝试关闭可能阻挡输入框的 Consent / Cookie 弹窗（特别是 Google）
         // 这些弹窗会导致 querySelector 找不到真正可见的输入框或输入失败
         let consent_dismiss_scripts = [
-            // Google 同意弹窗按钮："同意" / "接受全部" / "全部接受" / 英文 "Accept all" / "I agree"
-            "() => { const btns = Array.from(document.querySelectorAll('button, div[role=button]')); const patterns = [/同意/, /接受全部/, /全部接受/, /Allow all/i, /Accept all/i, /I agree/i]; for (const b of btns){ const t=b.textContent||''; if(patterns.some(p=>p.test(t))){ b.click(); return true; } } return false; }",
+            // Google 新版同意弹窗（更精确的选择器）
+            r#"() => { 
+                const btns = document.querySelectorAll('button[jsname], div[role="button"][jsname]');
+                for (const b of btns) {
+                    const t = (b.textContent || '').toLowerCase();
+                    if (t.includes('accept all') || t.includes('接受全部') || t.includes('全部接受') || t.includes('同意')) {
+                        b.click();
+                        return { dismissed: true, text: t };
+                    }
+                }
+                return { dismissed: false };
+            }"#,
+            // Google 同意弹窗按钮：支持更多语言
+            r#"() => { 
+                const btns = Array.from(document.querySelectorAll('button, div[role=button]')); 
+                const patterns = [/同意/, /接受全部/, /全部接受/, /Allow all/i, /Accept all/i, /I agree/i, /Akzeptieren/i, /Accepter/i, /Aceptar/i];
+                for (const b of btns) { 
+                    const t = b.textContent || ''; 
+                    if (patterns.some(p => p.test(t))) { 
+                        b.click(); 
+                        return { dismissed: true, text: t }; 
+                    } 
+                } 
+                return { dismissed: false }; 
+            }"#,
             // Google "拒绝全部" 也可关闭遮罩
-            "() => { const btns = Array.from(document.querySelectorAll('button, div[role=button]')); const patterns = [/拒绝/, /拒絕/, /Reject all/i, /Decline/i]; for (const b of btns){ const t=b.textContent||''; if(patterns.some(p=>p.test(t))){ b.click(); return true; } } return false; }",
+            r#"() => { 
+                const btns = Array.from(document.querySelectorAll('button, div[role=button]')); 
+                const patterns = [/拒绝/, /拒絕/, /Reject all/i, /Decline/i, /Ablehnen/i, /Refuser/i];
+                for (const b of btns) { 
+                    const t = b.textContent || ''; 
+                    if (patterns.some(p => p.test(t))) { 
+                        b.click(); 
+                        return { dismissed: true, text: t }; 
+                    } 
+                } 
+                return { dismissed: false }; 
+            }"#,
             // 直接点击同意框内的第一个可点击按钮（退而求其次）
-            r#"() => { const dlg = document.querySelector('form[action*=consent], div[role=dialog]'); if(!dlg) return false; const btn = dlg.querySelector('button, div[role=button], input[type=submit]'); if(btn){ btn.click(); return true; } return false; }"#,
+            r#"() => { 
+                const dlg = document.querySelector('form[action*=consent], div[role=dialog], [class*=consent], [id*=consent]'); 
+                if (!dlg) return { dismissed: false, reason: 'no_dialog' }; 
+                const btn = dlg.querySelector('button, div[role=button], input[type=submit]'); 
+                if (btn) { 
+                    btn.click(); 
+                    return { dismissed: true, method: 'dialog_button' }; 
+                } 
+                return { dismissed: false, reason: 'no_button_in_dialog' }; 
+            }"#,
+            // Bing cookie同意
+            r#"() => {
+                const btn = document.querySelector('#bnp_btn_accept, .bnp_btn_accept, button[id*="accept"]');
+                if (btn) {
+                    btn.click();
+                    return { dismissed: true, method: 'bing_accept' };
+                }
+                return { dismissed: false };
+            }"#,
         ];
-        debug!("Checking for consent/cookie dialogs");
+        info!("Checking for consent/cookie dialogs");
 
         // 等待页面完全加载和JavaScript执行
         sleep(Duration::from_millis(1500)).await;
+        
+        // 先保存一次当前页面HTML用于调试（在处理consent之前）
+        if DEBUG_SAVE_HTML {
+            if let Ok(html) = page.eval::<String>("() => document.documentElement.outerHTML").await {
+                Self::save_debug_html(&html, "before_consent");
+            }
+        }
 
         for (idx, script) in consent_dismiss_scripts.iter().enumerate() {
-            let dismissed: bool = page.eval(script).await.unwrap_or(false);
-            debug!(script_index = idx + 1, dismissed, "Consent script executed");
+            let result: serde_json::Value = page.eval(script).await.unwrap_or_default();
+            let dismissed = result.get("dismissed").and_then(|v| v.as_bool()).unwrap_or(false);
+            info!(script_index = idx + 1, dismissed, ?result, "Consent script executed");
             if dismissed {
-                info!("Dismissed a consent/cookie dialog");
-                sleep(Duration::from_millis(500)).await;
+                info!("✅ Dismissed a consent/cookie dialog");
+                sleep(Duration::from_millis(800)).await;
                 break;
             }
         }
@@ -1007,7 +1322,12 @@ impl ContentFetcher {
             )
             .await
             .unwrap_or_default();
-        trace!(?input_elements, "Found input elements");
+        warn!(?input_elements, "Found input elements (none worked)");
+        
+        // 保存失败时的页面HTML用于调试
+        if let Ok(html) = page.eval::<String>("() => document.documentElement.outerHTML").await {
+            Self::save_debug_html(&html, "input_failed");
+        }
 
         Err("Could not find or fill any search input".to_string())
     }
@@ -1081,8 +1401,24 @@ impl ContentFetcher {
 
         let selectors = search_engine.default_wait_selectors();
         let selectors_json = serde_json::to_string(&selectors).unwrap_or("[]".to_string());
+        
+        info!(
+            engine = search_engine.as_str(),
+            timeout_ms,
+            selectors = ?selectors,
+            "Waiting for search results"
+        );
 
+        let mut check_count = 0;
         loop {
+            check_count += 1;
+            
+            // 检查当前URL，确认已经跳转到搜索结果页
+            let current_url: String = page
+                .eval("() => window.location.href")
+                .await
+                .unwrap_or_else(|_| "unknown".to_string());
+            
             // 检查是否有任何结果选择器匹配
             let found_selector_script = format!(
                 "() => {{ const sels = {}; for (const s of sels) {{ if (document.querySelector(s)) return s; }} return null; }}",
@@ -1092,15 +1428,47 @@ impl ContentFetcher {
             let found: Option<String> = page.eval(&found_selector_script).await.unwrap_or(None);
 
             if let Some(sel) = found {
-                info!(selector = %sel, "Results loaded");
+                info!(
+                    selector = %sel, 
+                    check_count, 
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    %current_url,
+                    "✅ Results loaded"
+                );
                 // 额外等待一点时间确保内容完全渲染
                 sleep(Duration::from_millis(500 + fastrand::u64(0..500))).await;
                 return Ok(());
             }
 
             if start.elapsed() >= timeout {
-                warn!("Results wait timeout, continuing anyway");
+                // 超时时获取页面状态
+                let page_state: serde_json::Value = page
+                    .eval("() => ({ url: window.location.href, title: document.title, readyState: document.readyState, bodyLength: document.body ? document.body.innerHTML.length : 0 })")
+                    .await
+                    .unwrap_or_default();
+                    
+                warn!(
+                    timeout_ms,
+                    check_count,
+                    ?page_state,
+                    "⚠️ Results wait timeout, continuing anyway"
+                );
+                
+                // 保存超时时的页面HTML
+                if let Ok(html) = page.eval::<String>("() => document.documentElement.outerHTML").await {
+                    Self::save_debug_html(&html, "wait_timeout");
+                }
                 break;
+            }
+
+            // 每5次检查输出一次状态
+            if check_count % 5 == 0 {
+                debug!(
+                    check_count,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    %current_url,
+                    "Still waiting for results..."
+                );
             }
 
             sleep(Duration::from_millis(250)).await;
