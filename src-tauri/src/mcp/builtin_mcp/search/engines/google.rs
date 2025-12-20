@@ -1,5 +1,7 @@
 use crate::mcp::builtin_mcp::search::types::{SearchItem, SearchResults};
 use scraper::{Html, Selector};
+use htmd::HtmlToMarkdown;
+use tracing::debug;
 
 /// Google搜索引擎实现
 pub struct GoogleEngine;
@@ -87,6 +89,27 @@ impl GoogleEngine {
 
     /// 解析Google搜索结果HTML，提取结构化信息（HTML解析器版）
     pub fn parse_search_results(html: &str, query: &str) -> SearchResults {
+        // 使用 htmd 解析并打印 Markdown 结果，返回值仍按原逻辑构造
+        let converter = HtmlToMarkdown::builder()
+            .skip_tags(vec!["script", "style"])
+            .build();
+        match converter.convert(html) {
+            Ok(markdown) => {
+                let trimmed = markdown.trim();
+                let preview: String = trimmed
+                    .chars()
+                    .collect();
+
+                debug!(
+                    google_htmd_preview = %preview,
+                    "htmd parsed Google search HTML"
+                );
+            }
+            Err(err) => {
+                debug!(error = %err, "htmd failed to parse Google search HTML to markdown");
+            }
+        }
+
         let mut items = Vec::new();
         let document = Html::parse_document(html);
 
