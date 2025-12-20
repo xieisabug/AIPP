@@ -95,11 +95,22 @@ function AskWindow() {
             console.log("get_selected_text_event", event.payload);
             setSelectedText(event.payload);
         });
+    }, []);
 
-        // 监听错误通知事件
-        const unsubscribe = listen("conversation-window-error-notification", (event) => {
-            const errorMsg = event.payload as string;
-            console.error("Received error notification in AskWindow:", errorMsg);
+    // 单独监听错误通知事件，依赖 conversationId
+    useEffect(() => {
+        const unsubscribe = listen<{ conversation_id: number | null, error_message: string }>("conversation-window-error-notification", (event) => {
+            const { conversation_id: errorConversationId, error_message: errorMsg } = event.payload;
+            console.log("Received error notification in AskWindow:", { errorConversationId, errorMsg, currentConversationId: conversationId });
+
+            // 只处理匹配当前 conversation 的错误
+            // 如果 errorConversationId 为 null，说明是通用错误，也需要处理
+            if (errorConversationId !== null && conversationId && errorConversationId.toString() !== conversationId) {
+                console.log("Ignoring error notification for different conversation");
+                return;
+            }
+
+            console.error("Processing error notification in AskWindow:", errorMsg);
 
             // 重置AI响应状态
             setAiIsResponsing(false);
@@ -114,7 +125,7 @@ function AskWindow() {
                 unsubscribe.then((f) => f());
             }
         };
-    }, []);
+    }, [conversationId]);
 
     const handleSubmit = () => {
         if (aiIsResponsing) {

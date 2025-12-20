@@ -45,5 +45,12 @@ pub struct ConversationCancelEvent {
     pub cancelled_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// 错误通知事件的 payload 结构
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorNotificationPayload {
+    pub conversation_id: Option<i64>,
+    pub error_message: String,
+}
+
 pub const TITLE_CHANGE_EVENT: &str = "title_change";
 pub const ERROR_NOTIFICATION_EVENT: &str = "conversation-window-error-notification";
