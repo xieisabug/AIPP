@@ -1,6 +1,6 @@
 use crate::mcp::builtin_mcp::search::types::{SearchItem, SearchResults};
+use htmd::{element_handler::Handlers, Element, HtmlToMarkdown};
 use scraper::{Html, Selector};
-use htmd::HtmlToMarkdown;
 use tracing::debug;
 
 /// Google搜索引擎实现
@@ -92,13 +92,18 @@ impl GoogleEngine {
         // 使用 htmd 解析并打印 Markdown 结果，返回值仍按原逻辑构造
         let converter = HtmlToMarkdown::builder()
             .skip_tags(vec!["script", "style"])
+            .add_handler(vec!["svg"], |_handlers: &dyn Handlers, _: Element| {
+                Some("[Svg Image]".into())
+            })
+            .add_handler(vec!["del"], |handlers: &dyn Handlers, element: Element| {
+                let content = handlers.walk_children(&element.node).content;
+                Some(format!("~~{}~~", content).into())
+            })
             .build();
         match converter.convert(html) {
             Ok(markdown) => {
                 let trimmed = markdown.trim();
-                let preview: String = trimmed
-                    .chars()
-                    .collect();
+                let preview: String = trimmed.chars().collect();
 
                 debug!(
                     google_htmd_preview = %preview,

@@ -60,31 +60,48 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
     const [selectedId, setSelectedId] = useState<string>("search");
     const [envValues, setEnvValues] = useState<Record<string, string>>({});
     const [busy, setBusy] = useState(false);
+    const [initialized, setInitialized] = useState(false);
 
     const selected = useMemo(() => templates.find((t) => t.id === selectedId), [templates, selectedId]);
 
-    // Parse initial envText to envValues
+    // Parse initial envText to envValues, and merge with default values from template
     useEffect(() => {
-        if (!initialEnvText) {
-            setEnvValues({});
-            return;
+        // Only run once when dialog opens and template is loaded
+        if (!isOpen || initialized) return;
+        if (editing && !selected) return; // Wait for template to load in editing mode
+
+        // Parse the initial env text
+        const parsedEnvs: Record<string, string> = {};
+        if (initialEnvText) {
+            initialEnvText
+                .split("\n")
+                .map((l) => l.trim())
+                .filter(Boolean)
+                .forEach((line) => {
+                    const idx = line.indexOf("=");
+                    if (idx > 0) {
+                        const k = line.slice(0, idx).trim();
+                        const v = line.slice(idx + 1).trim();
+                        if (k) parsedEnvs[k] = v;
+                    }
+                });
         }
 
-        const envs: Record<string, string> = {};
-        initialEnvText
-            .split("\n")
-            .map((l) => l.trim())
-            .filter(Boolean)
-            .forEach((line) => {
-                const idx = line.indexOf("=");
-                if (idx > 0) {
-                    const k = line.slice(0, idx).trim();
-                    const v = line.slice(idx + 1).trim();
-                    if (k) envs[k] = v;
+        // In editing mode, merge with default values for fields that don't have a saved value
+        if (editing && selected) {
+            const defaultValues: Record<string, string> = {};
+            selected.required_envs.forEach((env) => {
+                if (env.default_value && parsedEnvs[env.key] === undefined) {
+                    defaultValues[env.key] = env.default_value;
                 }
             });
-        setEnvValues(envs);
-    }, [initialEnvText]);
+            setEnvValues({ ...defaultValues, ...parsedEnvs });
+            setInitialized(true);
+        } else if (!editing) {
+            setEnvValues(parsedEnvs);
+            // Don't set initialized here for non-editing mode, let the other effect handle defaults
+        }
+    }, [isOpen, initialEnvText, editing, selected, initialized]);
 
     // Set default values when template changes (non-editing mode only)
     useEffect(() => {
@@ -97,26 +114,35 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
             }
         });
         setEnvValues(defaultValues);
+        setInitialized(true);
     }, [selected, editing]);
+
+    // Reset state when dialog closes
+    useEffect(() => {
+        if (!isOpen) {
+            setInitialized(false);
+            setEnvValues({});
+        }
+    }, [isOpen]);
 
     useEffect(() => {
         if (!isOpen) return;
         // Always fetch templates, even in editing mode for field definitions
         invoke<BuiltinTemplate[]>("list_aipp_builtin_templates")
             .then(setTemplates)
-            .catch(() => {});
+            .catch(() => { });
     }, [isOpen]);
 
-    // Convert envValues to string format for onEnvChange callback (non-editing mode only)
+    // Convert envValues to string format for onEnvChange callback (only after initialization)
     useEffect(() => {
-        if (onEnvChange && !editing) {
-            const envText = Object.entries(envValues)
-                .filter(([_, value]) => value !== "")
-                .map(([key, value]) => `${key}=${value}`)
-                .join("\n");
-            onEnvChange(envText);
-        }
-    }, [envValues, onEnvChange, editing]);
+        if (!initialized || !onEnvChange) return;
+
+        const envText = Object.entries(envValues)
+            .filter(([_, value]) => value !== "")
+            .map(([key, value]) => `${key}=${value}`)
+            .join("\n");
+        onEnvChange(envText);
+    }, [envValues, onEnvChange, initialized]);
 
     const handleEnvValueChange = (key: string, value: string) => {
         setEnvValues((prev) => ({

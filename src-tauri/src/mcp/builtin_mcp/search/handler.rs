@@ -185,34 +185,6 @@ impl SearchHandler {
         }
     }
 
-    /// 抓取指定URL的内容（保持向后兼容）
-    #[instrument(skip(self), fields(url = %url))]
-    pub async fn fetch_url(&self, url: &str) -> Result<serde_json::Value, String> {
-        debug!("Fetching URL (legacy)");
-
-        let config = self.load_search_config()?;
-        let browser_manager = BrowserManager::new(config.get("BROWSER_TYPE").map(|s| s.as_str()));
-
-        let fetch_config = self.build_general_fetch_config(&config)?;
-        let mut fetcher = ContentFetcher::new(self.app_handle.clone(), fetch_config);
-
-        match fetcher.fetch_content(url, &browser_manager).await {
-            Ok(html) => {
-                info!("Successfully fetched URL content");
-                Ok(serde_json::json!({
-                    "url": url,
-                    "status": "success",
-                    "html_content": html,
-                    "message": "URL fetched successfully",
-                }))
-            }
-            Err(e) => {
-                error!(error = %e, "Failed to fetch URL");
-                Err(format!("Failed to fetch URL: {}", e))
-            }
-        }
-    }
-
     /// 从数据库加载搜索配置
     fn load_search_config(&self) -> Result<HashMap<String, String>, String> {
         use crate::mcp::mcp_db::MCPDatabase;
@@ -254,7 +226,7 @@ impl SearchHandler {
             proxy_server: config.get("PROXY_SERVER").cloned(),
             headless: config
                 .get("HEADLESS")
-                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
+                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
                 .unwrap_or(true),
             user_agent: None,
             bypass_csp: false,
@@ -287,7 +259,7 @@ impl SearchHandler {
             proxy_server: config.get("PROXY_SERVER").cloned(),
             headless: config
                 .get("HEADLESS")
-                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
+                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
                 .unwrap_or(true),
             user_agent: None,
             bypass_csp: false,
