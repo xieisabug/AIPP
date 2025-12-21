@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, startTransition } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
     StreamEvent,
@@ -9,6 +10,7 @@ import {
     ConversationCancelEvent,
     StreamCompleteEvent,
 } from "../data/Conversation";
+import { MCPToolCall } from "@/data/MCPToolCall";
 
 export interface UseConversationEventsOptions {
     conversationId: string | number;
@@ -370,6 +372,55 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             }
         };
     }, [options.conversationId]); // 只依赖 conversationId
+
+    // 初始化获取已存在的 MCP 调用状态
+    useEffect(() => {
+        if (!options.conversationId) {
+            return;
+        }
+
+        const conversationIdNum = Number(options.conversationId);
+        if (Number.isNaN(conversationIdNum)) {
+            return;
+        }
+
+        let cancelled = false;
+        invoke<MCPToolCall[]>("get_mcp_tool_calls_by_conversation", {
+            conversationId: conversationIdNum,
+        })
+            .then((calls) => {
+                if (cancelled) return;
+
+                const stateMap = new Map<number, MCPToolCallUpdateEvent>();
+                const activeSet = new Set<number>();
+
+                calls.forEach((call) => {
+                    const update: MCPToolCallUpdateEvent = {
+                        call_id: call.id,
+                        conversation_id: call.conversation_id,
+                        status: call.status,
+                        result: call.result,
+                        error: call.error,
+                        started_time: call.started_time ? new Date(call.started_time) : undefined,
+                        finished_time: call.finished_time ? new Date(call.finished_time) : undefined,
+                    };
+                    stateMap.set(call.id, update);
+                    if (call.status === "executing" || call.status === "pending") {
+                        activeSet.add(call.id);
+                    }
+                });
+
+                setMCPToolCallStates(stateMap);
+                setActiveMcpCallIds(activeSet);
+            })
+            .catch((error) => {
+                console.warn("Failed to preload MCP tool calls", error);
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [options.conversationId]);
 
     // 清理函数
     const clearStreamingMessages = useCallback(() => {
