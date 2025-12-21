@@ -52,6 +52,10 @@ const ReasoningMessage = React.memo(
             () => parseCustomTags(displayedContent),
             [displayedContent, parseCustomTags],
         );
+        const hasMcpToolCall = useMemo(
+            () => /<!--\s*MCP_TOOL_CALL:/.test(parsedContent),
+            [parsedContent],
+        );
 
         // Markdown 配置与 MCP 处理（保持与普通消息一致的处理方式）
         const markdownConfig = useMarkdownConfig({ isStreaming: isThinking });
@@ -210,6 +214,11 @@ const ReasoningMessage = React.memo(
                             点击展开
                         </span>
                     </div>
+                    {hasMcpToolCall && (
+                        <div className="mt-2 text-sm text-gray-600 whitespace-pre-wrap font-mono">
+                            {renderedPreviewContent}
+                        </div>
+                    )}
                 </div>
             );
         }
