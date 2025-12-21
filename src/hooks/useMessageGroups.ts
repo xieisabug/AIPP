@@ -48,6 +48,19 @@ export function useMessageGroups({
         Map<string, number>
     >(new Map());
     const userSwitchRef = useRef(false);
+    const getOrderValue = useCallback((msg: Message): number => {
+        const tryParse = (value: any) => {
+            const ts = value ? new Date(value as any).getTime() : NaN;
+            return Number.isFinite(ts) ? ts : null;
+        };
+        // 优先 created_time，其次 start/finish_time，最后退回 id，避免时间解析失败导致排序回退到极小的 id
+        return (
+            tryParse(msg.created_time) ??
+            tryParse(msg.start_time) ??
+            tryParse(msg.finish_time) ??
+            msg.id
+        );
+    }, []);
 
     // =================================================================================
     // 优化点 1: 核心计算逻辑重构
@@ -124,17 +137,21 @@ export function useMessageGroups({
             if (topLevelVersions.length > 0) {
                 // 使用顶层父分组的最小消息 ID
                 for (const version of topLevelVersions) {
-                    const minId = Math.min(...version.messages.map(m => m.id));
-                    if (minId > 0 && minId < groupBaseId) {
-                        groupBaseId = minId;
+                    const minOrder = Math.min(
+                        ...version.messages.map(getOrderValue),
+                    );
+                    if (Number.isFinite(minOrder) && minOrder < groupBaseId) {
+                        groupBaseId = minOrder;
                     }
                 }
             } else {
                 // 如果没有顶层版本（理论上不应该发生），使用所有版本的最小 ID
                 for (const version of allVersionsInGroup) {
-                    const minId = Math.min(...version.messages.map(m => m.id));
-                    if (minId > 0 && minId < groupBaseId) {
-                        groupBaseId = minId;
+                    const minOrder = Math.min(
+                        ...version.messages.map(getOrderValue),
+                    );
+                    if (Number.isFinite(minOrder) && minOrder < groupBaseId) {
+                        groupBaseId = minOrder;
                     }
                 }
             }
@@ -148,7 +165,7 @@ export function useMessageGroups({
             const rootId = findRoot(versionId);
             const group = groups.get(rootId) ?? { versions: [] };
             
-            // 使用分组的根消息ID作为所有版本的基准，确保分组排序稳定
+            // 使用分组的根时间戳/ID作为所有版本的基准，确保分组排序稳定
             const groupBaseMessageId = groupRootMessageIds.get(rootId) || 0;
             
             group.versions.push({
@@ -167,19 +184,25 @@ export function useMessageGroups({
                 if (a.parentGroupId && !b.parentGroupId) return 1;
                 
                 // 都是根版本或都是子版本时，按消息的最小 ID 排序（ID 是自增的，更可靠）
-                const aMinId = Math.min(...a.messages.map((m) => m.id));
-                const bMinId = Math.min(...b.messages.map((m) => m.id));
+                const aMinId = Math.min(
+                    ...a.messages.map(getOrderValue),
+                );
+                const bMinId = Math.min(
+                    ...b.messages.map(getOrderValue),
+                );
                 
                 return aMinId - bMinId;
             });
             
             group.versions.forEach(version => {
-                version.messages.sort((a, b) => a.id - b.id);
+                version.messages.sort(
+                    (a, b) => getOrderValue(a) - getOrderValue(b),
+                );
             });
         });
 
         return { groups, groupRootMessageIds };
-    }, [allDisplayMessages, groupMergeMap]);
+    }, [allDisplayMessages, groupMergeMap, getOrderValue]);
 
     const pureGenerationGroups = pureGenerationGroupsAndTimestamps.groups;
     const groupRootMessageIds = pureGenerationGroupsAndTimestamps.groupRootMessageIds;

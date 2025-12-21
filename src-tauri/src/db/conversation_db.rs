@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use chrono::prelude::*;
+use chrono::{prelude::*, SecondsFormat};
 use rusqlite::{Connection, OptionalExtension, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use tracing::{debug, instrument};
 
 use crate::errors::AppError;
@@ -42,11 +42,33 @@ impl TryFrom<i64> for AttachmentType {
         }
     }
 }
+
+fn serialize_datetime_millis<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&dt.to_rfc3339_opts(SecondsFormat::Millis, true))
+}
+
+fn serialize_option_datetime_millis<S>(
+    dt: &Option<DateTime<Utc>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match dt {
+        Some(value) => serializer.serialize_str(&value.to_rfc3339_opts(SecondsFormat::Millis, true)),
+        None => serializer.serialize_none(),
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Conversation {
     pub id: i64,
     pub name: String,
     pub assistant_id: Option<i64>,
+    #[serde(serialize_with = "serialize_datetime_millis")]
     pub created_time: DateTime<Utc>,
 }
 
@@ -59,8 +81,11 @@ pub struct Message {
     pub content: String,
     pub llm_model_id: Option<i64>,
     pub llm_model_name: Option<String>,
+    #[serde(serialize_with = "serialize_datetime_millis")]
     pub created_time: DateTime<Utc>,
+    #[serde(serialize_with = "serialize_option_datetime_millis")]
     pub start_time: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "serialize_option_datetime_millis")]
     pub finish_time: Option<DateTime<Utc>>,
     pub token_count: i32,
     pub generation_group_id: Option<String>,
@@ -76,8 +101,11 @@ pub struct MessageDetail {
     pub message_type: String,
     pub content: String,
     pub llm_model_id: Option<i64>,
+    #[serde(serialize_with = "serialize_datetime_millis")]
     pub created_time: DateTime<Utc>,
+    #[serde(serialize_with = "serialize_option_datetime_millis")]
     pub start_time: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "serialize_option_datetime_millis")]
     pub finish_time: Option<DateTime<Utc>>,
     pub token_count: i32,
     pub generation_group_id: Option<String>,
