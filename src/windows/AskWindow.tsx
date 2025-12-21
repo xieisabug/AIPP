@@ -66,7 +66,7 @@ function AskWindow() {
         onMessageUpdate: (streamEvent: StreamEvent) => {
             // 处理错误消息类型
             if (streamEvent.message_type === "error") {
-                setErrorMessage(streamEvent.content);
+                console.error("Stream error in AskWindow:", streamEvent, "conversation Id:", conversationId);
                 setAiIsResponsing(false);
                 setShouldShowShineBorder(false); // AI 响应完成时关闭边框
                 return;
@@ -102,10 +102,9 @@ function AskWindow() {
         const unsubscribe = listen<{ conversation_id: number | null, error_message: string }>("conversation-window-error-notification", (event) => {
             const { conversation_id: errorConversationId, error_message: errorMsg } = event.payload;
             console.log("Received error notification in AskWindow:", { errorConversationId, errorMsg, currentConversationId: conversationId });
-
             // 只处理匹配当前 conversation 的错误
             // 如果 errorConversationId 为 null，说明是通用错误，也需要处理
-            if (errorConversationId !== null && conversationId && errorConversationId.toString() !== conversationId) {
+            if (errorConversationId !== null && (!conversationId || errorConversationId.toString() !== conversationId)) {
                 console.log("Ignoring error notification for different conversation");
                 return;
             }
