@@ -131,6 +131,8 @@ const MessageItem = React.memo<MessageItemProps>(
                     displayedContent={message.content}
                     isReasoningExpanded={isReasoningExpanded}
                     onToggleReasoningExpand={onToggleReasoningExpand}
+                    conversationId={conversationId}
+                    mcpToolCallStates={mcpToolCallStates}
                 />
             );
         }
