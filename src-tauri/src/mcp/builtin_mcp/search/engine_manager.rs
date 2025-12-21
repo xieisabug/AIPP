@@ -101,7 +101,7 @@ impl SearchEngineManager {
         Self { preferred_engine }
     }
 
-    /// 获取可用的搜索引擎，使用降级策略：Google -> Bing
+    /// 获取可用的搜索引擎（默认使用 Google）
     pub fn get_search_engine(&self) -> SearchEngine {
         // 先尝试用户配置的搜索引擎（或默认Google）
         let primary_engine = self.preferred_engine.as_ref().unwrap_or(&SearchEngine::Google);
@@ -125,17 +125,4 @@ impl SearchEngineManager {
         }
     }
 
-    /// 尝试降级到备用搜索引擎
-    pub fn get_fallback_engine(&self, current: &SearchEngine) -> Option<SearchEngine> {
-        let fb = match current {
-            SearchEngine::Google => Some(SearchEngine::Bing),
-            SearchEngine::Bing => None, // Bing是最后的降级选项
-            SearchEngine::DuckDuckGo => Some(SearchEngine::Bing),
-            SearchEngine::Kagi => Some(SearchEngine::Google),
-        };
-        if let Some(ref f) = fb {
-            debug!(current = current.as_str(), fallback = f.as_str(), "Calculated fallback engine");
-        }
-        fb
-    }
 }

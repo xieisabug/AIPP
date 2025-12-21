@@ -46,31 +46,8 @@ impl SearchHandler {
                 self.process_html_by_type(html, &request, &search_engine)
             }
             Err(e) => {
-                // 尝试降级到其他搜索引擎
-                if let Some(fallback_engine) = engine_manager.get_fallback_engine(&search_engine) {
-                    info!(fallback_engine = fallback_engine.as_str(), "Trying fallback engine");
-
-                    match self
-                        .fetch_search_html(
-                            &request.query,
-                            &fallback_engine,
-                            &browser_manager,
-                            &config,
-                        )
-                        .await
-                    {
-                        Ok(html) => self.process_html_by_type(html, &request, &fallback_engine),
-                        Err(fallback_error) => {
-                            error!(error = %fallback_error, "Fallback engine failed");
-                            Err(format!(
-                                "Search failed: {} (fallback also failed: {})",
-                                e, fallback_error
-                            ))
-                        }
-                    }
-                } else {
-                    Err(format!("Search failed: {}", e))
-                }
+                error!(error = %e, engine = search_engine.as_str(), "Search failed");
+                Err(format!("Search failed: {}", e))
             }
         }
     }
