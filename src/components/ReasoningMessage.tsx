@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Message, StreamEvent } from "../data/Conversation";
-import { usePerformanceMonitor } from "../hooks/usePerformanceMonitor";
+import ReactMarkdown from "react-markdown";
+import { Message, StreamEvent, MCPToolCallUpdateEvent } from "../data/Conversation";
+import { useMcpToolCallProcessor } from "../hooks/useMcpToolCallProcessor";
+import { useMarkdownConfig } from "../hooks/useMarkdownConfig";
+import { useCustomTagParser } from "../hooks/useCustomTagParser";
 
 interface ReasoningMessageProps {
     message: Message;
@@ -8,6 +11,8 @@ interface ReasoningMessageProps {
     displayedContent: string;
     isReasoningExpanded: boolean;
     onToggleReasoningExpand?: () => void;
+    conversationId?: number;
+    mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>;
 }
 
 const ReasoningMessage = React.memo(
@@ -17,27 +22,33 @@ const ReasoningMessage = React.memo(
         displayedContent,
         isReasoningExpanded,
         onToggleReasoningExpand,
+        conversationId,
+        mcpToolCallStates,
     }: ReasoningMessageProps) => {
-        // 性能监控
-        usePerformanceMonitor(
-            "ReasoningMessage",
-            [
-                message.id,
-                message.start_time,
-                message.finish_time,
-                streamEvent?.is_done,
-                isReasoningExpanded,
-                displayedContent,
-            ],
-            false,
-        );
-
         const [currentTime, setCurrentTime] = useState(new Date());
 
         // 使用 start_time 和 finish_time 来判断思考状态，也考虑 streamEvent 的状态
         const isComplete =
             message.finish_time !== null || streamEvent?.is_done === true;
         const isThinking = message.start_time !== null && !isComplete;
+
+        const { parseCustomTags } = useCustomTagParser();
+        const parsedContent = useMemo(
+            () => parseCustomTags(displayedContent),
+            [displayedContent, parseCustomTags],
+        );
+        const hasMcpToolCall = useMemo(
+            () => /<!--\s*MCP_TOOL_CALL:/.test(parsedContent),
+            [parsedContent],
+        );
+
+        // Markdown 配置与 MCP 处理（保持与普通消息一致的处理方式）
+        const markdownConfig = useMarkdownConfig({ isStreaming: isThinking });
+        const { processContent } = useMcpToolCallProcessor(markdownConfig, {
+            conversationId,
+            messageId: message.id,
+            mcpToolCallStates,
+        });
 
         // 为正在思考的消息添加定时器，实时更新显示时间 - 优化更新频率
         useEffect(() => {
@@ -127,13 +138,48 @@ const ReasoningMessage = React.memo(
 
         // 缓存内容分割结果
         const contentLines = useMemo(() => {
-            const lines = displayedContent.split("\n");
+            const lines = parsedContent.split("\n");
             return {
                 lines,
                 previewLines: lines.slice(-3), // 思考中时显示最后3行
                 hasMoreThanThreeLines: lines.length > 3,
             };
-        }, [displayedContent]);
+        }, [parsedContent]);
+
+        // 渲染内容（统一使用 useMcpToolCallProcessor，避免重复实现）
+        const renderedContent = useMemo(
+            () =>
+                processContent(
+                    parsedContent,
+                    (
+                        <ReactMarkdown
+                            remarkPlugins={markdownConfig.remarkPlugins as any}
+                            rehypePlugins={markdownConfig.rehypePlugins as any}
+                            components={markdownConfig.markdownComponents}
+                        >
+                            {parsedContent}
+                        </ReactMarkdown>
+                    ),
+                ),
+            [processContent, parsedContent, markdownConfig.remarkPlugins, markdownConfig.rehypePlugins, markdownConfig.markdownComponents]
+        );
+
+        // 渲染预览内容（思考中显示最后 3 行，同样支持 MCP）
+        const renderedPreviewContent = useMemo(() => {
+            const previewText = contentLines.previewLines.join("\n");
+            return processContent(
+                previewText,
+                (
+                    <ReactMarkdown
+                        remarkPlugins={markdownConfig.remarkPlugins as any}
+                        rehypePlugins={markdownConfig.rehypePlugins as any}
+                        components={markdownConfig.markdownComponents}
+                    >
+                        {previewText}
+                    </ReactMarkdown>
+                ),
+            );
+        }, [contentLines.previewLines, processContent, markdownConfig.remarkPlugins, markdownConfig.rehypePlugins, markdownConfig.markdownComponents]);
 
         // 思考完成时的小模块展示
         if (isComplete && !isReasoningExpanded) {
@@ -153,6 +199,11 @@ const ReasoningMessage = React.memo(
                             点击展开
                         </span>
                     </div>
+                    {hasMcpToolCall && (
+                        <div className="mt-2 text-sm text-gray-600 whitespace-pre-wrap font-mono">
+                            {renderedPreviewContent}
+                        </div>
+                    )}
                 </div>
             );
         }
@@ -172,16 +223,16 @@ const ReasoningMessage = React.memo(
                 </div>
                 <div className="text-sm text-gray-600 whitespace-pre-wrap font-mono">
                     {isThinking &&
-                    contentLines.hasMoreThanThreeLines &&
-                    !isReasoningExpanded ? (
+                        contentLines.hasMoreThanThreeLines &&
+                        !isReasoningExpanded ? (
                         <>
                             <div className="text-gray-400 text-xs mb-1">
                                 ...
                             </div>
-                            {contentLines.previewLines.join("\n")}
+                            {renderedPreviewContent}
                         </>
                     ) : (
-                        displayedContent
+                        renderedContent
                     )}
                 </div>
                 {/* 思考中时的展开按钮 */}
@@ -237,6 +288,10 @@ const ReasoningMessage = React.memo(
             nextProps.onToggleReasoningExpand
         )
             return false;
+
+        // MCP 相关属性比较
+        if (prevProps.conversationId !== nextProps.conversationId) return false;
+        if (prevProps.mcpToolCallStates !== nextProps.mcpToolCallStates) return false;
 
         return true; // 所有关键属性都相同，不需要重新渲染
     },

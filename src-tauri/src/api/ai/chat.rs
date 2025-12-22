@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use tauri::{Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tokio::time::{sleep, Duration};
-use tracing::{debug, info, warn, error};
+use tracing::{debug, error, info, warn};
 
 /// 删除会话中最后一条错误消息（如果最后一条是 error）
 async fn cleanup_last_error_message(
@@ -31,11 +31,7 @@ async fn cleanup_last_error_message(
         .context("failed to list messages for cleanup")?;
 
     // 找到 id 最大的消息
-    if let Some((last_msg, _)) = messages
-        .iter()
-        .max_by_key(|(m, _)| m.id)
-        .cloned()
-    {
+    if let Some((last_msg, _)) = messages.iter().max_by_key(|(m, _)| m.id).cloned() {
         if last_msg.message_type == "error" {
             // 删除该错误消息
             let _ = conversation_db
@@ -457,7 +453,7 @@ async fn try_fetch_error_body_advanced(
             "messages": []
         });
 
-    debug!("trying invalid payload method for error body fetch");
+        debug!("trying invalid payload method for error body fetch");
         match client.post(url).json(&invalid_payload).send().await {
             Ok(response) => {
                 debug!(status = ?response.status(), "received error response status");
@@ -479,7 +475,7 @@ async fn try_fetch_error_body_advanced(
         }
 
         // 方法2: 发送空的POST请求
-    debug!("trying empty post method for error body fetch");
+        debug!("trying empty post method for error body fetch");
         match client.post(url).header("Content-Type", "application/json").body("{}").send().await {
             Ok(response) => {
                 debug!(status = ?response.status(), "empty post response status");
@@ -501,7 +497,7 @@ async fn try_fetch_error_body_advanced(
         }
 
         // 方法3: 尝试用HEAD请求来获取一些信息
-    debug!("trying head request method for error body fetch");
+        debug!("trying head request method for error body fetch");
         match client.head(url).send().await {
             Ok(response) => {
                 debug!(status = ?response.status(), headers = ?response.headers(), "head response info");
@@ -526,7 +522,7 @@ async fn try_fetch_error_body_advanced(
         }
     } else {
         // 对于其他API，使用GET请求
-    debug!("trying get request method for error body fetch");
+        debug!("trying get request method for error body fetch");
         match client.get(url).send().await {
             Ok(response) => {
                 if response.status().is_client_error() || response.status().is_server_error() {
@@ -563,11 +559,11 @@ async fn enhanced_error_logging_v2<E: std::error::Error + 'static>(
     let mut error_urls = Vec::new(); // 收集URL用于后续处理
 
     while let Some(err) = current_error {
-    debug!(index = i, err = %err, err_type = std::any::type_name_of_val(err), "error chain element");
+        debug!(index = i, err = %err, err_type = std::any::type_name_of_val(err), "error chain element");
 
         // 检查错误字符串中是否包含有用信息
         let error_string = err.to_string();
-    debug!(error_string = %error_string, "error string");
+        debug!(error_string = %error_string, "error string");
 
         // 尝试从错误字符串中提取URL和状态码
         if error_string.contains("400") && error_string.contains("https://") {
@@ -598,7 +594,14 @@ async fn enhanced_error_logging_v2<E: std::error::Error + 'static>(
                 }
             }
 
-            debug!(is_timeout = reqwest_error.is_timeout(), is_connect = reqwest_error.is_connect(), is_request = reqwest_error.is_request(), is_body = reqwest_error.is_body(), is_decode = reqwest_error.is_decode(), "reqwest error flags");
+            debug!(
+                is_timeout = reqwest_error.is_timeout(),
+                is_connect = reqwest_error.is_connect(),
+                is_request = reqwest_error.is_request(),
+                is_body = reqwest_error.is_body(),
+                is_decode = reqwest_error.is_decode(),
+                "reqwest error flags"
+            );
         } else {
             // 如果不是reqwest错误，尝试其他方式解析
             debug!("not reqwest error: attempting string parsing");
@@ -636,7 +639,7 @@ async fn enhanced_error_logging_v2<E: std::error::Error + 'static>(
 
     // 现在在循环外处理URL（如果有的话）
     for (url_str, status) in error_urls {
-    debug!(url = %url_str, %status, "processing extracted url");
+        debug!(url = %url_str, %status, "processing extracted url");
         let is_chat_api = url_str.contains("/chat/completions");
         if let Some(error_body) = try_fetch_error_body_advanced(&url_str, status, is_chat_api).await
         {
@@ -667,7 +670,11 @@ fn build_rich_error_payload(
     if lower.contains("网络") || lower.contains("network") || lower.contains("连接") {
         suggestions.push("检查网络连接与代理设置");
     }
-    if lower.contains("认证") || lower.contains("api密钥") || lower.contains("unauthorized") || lower.contains("401") {
+    if lower.contains("认证")
+        || lower.contains("api密钥")
+        || lower.contains("unauthorized")
+        || lower.contains("401")
+    {
         suggestions.push("检查 API Key 是否正确、是否过期");
     }
     if lower.contains("权限") || lower.contains("forbidden") || lower.contains("403") {
@@ -676,7 +683,11 @@ fn build_rich_error_payload(
     if lower.contains("频繁") || lower.contains("429") || lower.contains("rate limit") {
         suggestions.push("降低调用频率或稍后再试");
     }
-    if lower.contains("服务器") || lower.contains("503") || lower.contains("502") || lower.contains("500") {
+    if lower.contains("服务器")
+        || lower.contains("503")
+        || lower.contains("502")
+        || lower.contains("500")
+    {
         suggestions.push("服务端异常，稍后重试");
     }
     if lower.contains("格式") || lower.contains("json") || lower.contains("parse") {
@@ -1010,7 +1021,7 @@ pub async fn handle_stream_chat(
     // 外层重试循环，处理整个流式会话
     loop {
         main_attempts += 1;
-    info!(attempt = main_attempts, max_attempts = max_retry_attempts, "stream chat attempt");
+        info!(attempt = main_attempts, max_attempts = max_retry_attempts, "stream chat attempt");
 
         let stream_result = attempt_stream_chat(
             client,
@@ -1061,7 +1072,11 @@ pub async fn handle_stream_chat(
                     );
 
                     // 发送错误通知到合适的窗口
-                    send_error_to_appropriate_window(&window, &user_friendly);
+                    send_error_to_appropriate_window(
+                        &window,
+                        &user_friendly,
+                        Some(conversation_id),
+                    );
 
                     // 创建错误消息
                     create_error_message(
@@ -1111,7 +1126,7 @@ async fn attempt_stream_chat(
 
     debug!("stream chat_request messages");
     for (i, msg) in chat_request.messages.iter().enumerate() {
-    debug!(message_index = i, role = ?msg.role, "stream message");
+        debug!(message_index = i, role = ?msg.role, "stream message");
         match &msg.role {
             genai::chat::ChatRole::Assistant => {
                 if let Some(text) = msg.content.first_text() {
@@ -1631,7 +1646,7 @@ pub async fn handle_non_stream_chat(
 
     debug!("non_stream chat_request messages");
     for (i, msg) in chat_request.messages.iter().enumerate() {
-    debug!(message_index = i, role = ?msg.role, "non stream message");
+        debug!(message_index = i, role = ?msg.role, "non stream message");
         match &msg.role {
             genai::chat::ChatRole::Assistant => {
                 if let Some(text) = msg.content.first_text() {
@@ -1693,7 +1708,11 @@ pub async fn handle_non_stream_chat(
                         error!(attempts, error = %e, "final non stream chat error");
 
                         // 发送错误通知到合适的窗口
-                        send_error_to_appropriate_window(&window, &user_friendly_error);
+                        send_error_to_appropriate_window(
+                            &window,
+                            &user_friendly_error,
+                            Some(conversation_id),
+                        );
 
                         break Err(anyhow::anyhow!("{}", final_error));
                     }
@@ -1872,7 +1891,7 @@ pub async fn handle_non_stream_chat(
                 e.to_string(),
             );
             let now = chrono::Utc::now();
-            send_error_to_appropriate_window(&window, &user_friendly_error);
+            send_error_to_appropriate_window(&window, &user_friendly_error, Some(conversation_id));
 
             let generation_group_id = generation_group_id_override
                 .clone()

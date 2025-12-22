@@ -212,7 +212,7 @@ pub async fn generate_title(
             Err(e) => {
                 error!(error = %e, conversation_id, "chat error during title generation");
                 // 将错误发送到前端，并同时返回错误供调用方处理
-                send_error_to_appropriate_window(&window, "生成对话标题失败，请检查配置");
+                send_error_to_appropriate_window(&window, "生成对话标题失败，请检查配置", Some(conversation_id));
                 return Err(AppError::UnknownError(format!("生成对话标题失败: {}", e)));
             }
             Ok(response_text) => {

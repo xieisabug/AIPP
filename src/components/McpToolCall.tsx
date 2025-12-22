@@ -2,7 +2,6 @@ import React, { useState, useCallback, useMemo, useEffect } from "react";
 import { Play, Loader2, CheckCircle, XCircle, Blocks, ChevronDown, ChevronUp, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { ShineBorder } from "@/components/magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { invoke } from "@tauri-apps/api/core";
@@ -36,10 +35,8 @@ const JsonDisplay: React.FC<{ content: string; maxHeight?: string; className?: s
     }, [content]);
 
     return (
-        <div className={`border rounded ${className}`} style={{ maxHeight: maxHeight }}>
-            <ScrollArea>
-                <pre className="text-xs font-mono p-2 whitespace-pre-wrap break-words mt-0 mb-0">{formattedJson}</pre>
-            </ScrollArea>
+        <div className={`${className} overflow-auto`} style={{ maxHeight: maxHeight }}>
+            <pre className="text-xs font-mono p-2 whitespace-pre-wrap break-words mt-0 mb-0 bg-muted text-foreground rounded-md">{formattedJson}</pre>
         </div>
     );
 };
@@ -102,7 +99,20 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
 
     // 监听全局MCP状态变化
     useEffect(() => {
-        if (mcpToolCallStates && toolCallId && mcpToolCallStates.has(toolCallId)) {
+        if (!mcpToolCallStates) return;
+
+        if (!toolCallId) {
+            console.log("[MCP] McpToolCall missing toolCallId; waiting for resolution", {
+                conversationId,
+                messageId,
+                serverName,
+                toolName,
+                knownIds: Array.from(mcpToolCallStates.keys()),
+            });
+            return;
+        }
+
+        if (mcpToolCallStates.has(toolCallId)) {
             const globalState = mcpToolCallStates.get(toolCallId)!;
             console.log(`McpToolCall ${toolCallId} received global state update:`, globalState);
 
@@ -125,8 +135,12 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     setExecutionResult(null);
                     break;
             }
+        } else {
+            console.log(`[MCP] McpToolCall ${toolCallId} no match in map`, {
+                mapKeys: Array.from(mcpToolCallStates.keys()),
+            });
         }
-    }, [mcpToolCallStates, toolCallId]);
+    }, [mcpToolCallStates, toolCallId, conversationId, messageId, serverName, toolName]);
 
     // 检查执行状态
     const isFailed = executionState === "failed";
@@ -178,6 +192,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     );
 
                     if (matchingCall) {
+                        console.log("[MCP] matched tool call by message/server/tool/parameters", matchingCall);
                         setToolCallId(matchingCall.id);
 
                         if (matchingCall.status === "success" && matchingCall.result) {
@@ -189,6 +204,15 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         } else if (matchingCall.status === "executing") {
                             setExecutionState("executing");
                         }
+                    } else {
+                        console.log("[MCP] no matching tool call found for message", {
+                            conversationId,
+                            messageId,
+                            serverName,
+                            toolName,
+                            parameters,
+                            allCallIds: allCalls.map((c) => ({ id: c.id, message_id: c.message_id, status: c.status })),
+                        });
                     }
                 } catch (error) {
                     console.warn("Failed to find existing tool call:", error);
@@ -246,16 +270,12 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         }
     }, [conversationId, messageId, serverName, toolName, parameters, toolCallId]);
 
-    const renderResult = (fixedHeight = false) => {
+    const renderResult = () => {
         if (executionResult) {
             return (
                 <div className="mt-2">
                     <span className="text-xs text-muted-foreground">结果:</span>
-                    <div className="border rounded mt-1">
-                        <ScrollArea className="h-72">
-                            <pre className="whitespace-pre-wrap break-words mt-0 mb-0">{executionResult}</pre>
-                        </ScrollArea>
-                    </div>
+                    <JsonDisplay content={executionResult} maxHeight="288px" className="mt-1" />
                 </div>
             );
         }
@@ -264,18 +284,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             return (
                 <div className="mt-2">
                     <span className="text-xs text-muted-foreground">错误:</span>
-                    <div
-                        className="border rounded mt-1"
-                        style={{ height: fixedHeight ? "200px" : "auto", maxHeight: fixedHeight ? "none" : "200px" }}
-                    >
-                        <ScrollArea className="h-full w-full">
-                            <div className="text-xs font-mono bg-muted p-2">
-                                <div className="text-red-600 whitespace-pre-wrap break-words">
-                                    <strong>错误:</strong> {executionError}
-                                </div>
-                            </div>
-                        </ScrollArea>
-                    </div>
+                    <JsonDisplay content={executionError} maxHeight="200px" className="mt-1" />
                 </div>
             );
         }

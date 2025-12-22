@@ -1,8 +1,7 @@
-import React, { useMemo, Profiler } from "react";
+import React, { useMemo } from "react";
 import MessageItem from "../MessageItem";
 import VersionPagination from "../VersionPagination";
 import { Message, StreamEvent } from "../../data/Conversation";
-import { onRenderCallback } from "../../hooks/usePerformanceMonitor";
 
 export interface MessageListProps {
     allDisplayMessages: Message[];
@@ -56,8 +55,8 @@ const MessageList: React.FC<MessageListProps> = ({
             return {
                 messageId: message.id,
                 messageElement: (
-                    <Profiler id={`MessageItem-${message.id}`} onRender={onRenderCallback as any} key={`message-${message.id}`}>
-                        <MemoizedMessageItem
+                    <MemoizedMessageItem
+                        key={`message-${message.id}`}
                         message={message}
                         streamEvent={streamEvent}
                         onCodeRun={onCodeRun}
@@ -77,8 +76,7 @@ const MessageList: React.FC<MessageListProps> = ({
                         conversationId={message.conversation_id}
                         // 传递 MCP 工具调用状态
                         mcpToolCallStates={mcpToolCallStates}
-                        />
-                    </Profiler>
+                    />
                 ),
                 groupControl,
             };
@@ -225,11 +223,7 @@ const MessageList: React.FC<MessageListProps> = ({
         return elements;
     }, [messageElements, versionMap, placeholderElements, allDisplayMessages]);
 
-    return (
-        <Profiler id="MessageList" onRender={onRenderCallback as any}>
-            {allElements}
-        </Profiler>
-    );
+    return <>{allElements}</>;
 };
 
 export default React.memo(MessageList);

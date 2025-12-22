@@ -64,7 +64,7 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
                 key: "SEARCH_ENGINE".into(),
                 label: "搜索引擎".into(),
                 required: true,
-                tip: Some("搜索使用的搜索引擎，默认使用 Google，如果不可用则降级为 Bing".into()),
+                tip: Some("搜索使用的搜索引擎，默认使用 Google".into()),
                 field_type: "select".into(),
                 default_value: Some("google".into()),
                 placeholder: None,
@@ -106,6 +106,16 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
                 options: None,
             },
             BuiltinTemplateEnvVar {
+                key: "KAGI_SESSION_URL".into(),
+                label: "Kagi 会话链接".into(),
+                required: false,
+                tip: Some("仅在使用 Kagi 搜索引擎时需要填写。Kagi 是付费搜索引擎，需要提供带 token 的会话链接才能搜索。格式如：https://kagi.com/search?token=xxxxx。如果填写了此配置，搜索时将直接使用该链接拼接搜索参数，而不是模拟在首页输入搜索。注意：此配置仅对 Kagi 生效，其他搜索引擎请勿填写，否则可能导致搜索失败。".into()),
+                field_type: "text".into(),
+                default_value: None,
+                placeholder: Some("https://kagi.com/search?token=xxxxx".into()),
+                options: None,
+            },
+            BuiltinTemplateEnvVar {
                 key: "WAIT_SELECTORS".into(),
                 label: "等待元素选择器".into(),
                 required: false,
@@ -134,7 +144,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
         Some("search") => vec![
             BuiltinToolInfo {
                 name: "search_web".into(),
-                description: "搜索网络内容，支持多种结果格式。可以返回原始HTML、Markdown格式或结构化搜索结果。当搜索的结果较为简单但判断该结果有可用性时，可以进一步通过fetch_url工具获取到页面完整的信息。".into(),
+                description: "搜索网络内容，当进行事实性验证、实事信息、研究特定主题等情况时使用最佳。当搜索结果没有可用时，可以尝试更改关键字进行搜索；当搜索结果的简介有限但判断该结果有可用性时，请进一步通过fetch_url工具获取到页面完整的信息。".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -144,9 +154,9 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "result_type": {
                             "type": "string",
-                            "enum": ["html", "markdown", "items"],
-                            "default": "html",
-                            "description": "结果格式类型：\n- html: 返回原始HTML内容，适合需要完整页面信息的场景\n- markdown: 将HTML转换为Markdown格式，便于阅读和处理\n- items: 返回结构化的搜索结果列表，包含标题、URL、摘要等字段"
+                            "enum": ["markdown", "items"],
+                            "default": "markdown",
+                            "description": "结果格式类型：\n- markdown: 将HTML转换为Markdown格式，便于阅读和处理\n- items: 返回结构化的搜索结果列表，包含标题、URL、摘要等字段"
                         }
                     },
                     "required": ["query"]
@@ -154,7 +164,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "fetch_url".into(),
-                description: "获取网页内容，支持多种结果格式。可以返回原始HTML或Markdown格式的网页内容。".into(),
+                description: "获取网页内容，支持多种结果格式。可以返回Markdown格式的网页内容。".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -164,9 +174,9 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "result_type": {
                             "type": "string",
-                            "enum": ["html", "markdown"],
-                            "default": "html",
-                            "description": "结果格式类型：\\n- html: 返回原始HTML内容，适合需要完整页面信息的场景\\n- markdown: 将HTML转换为Markdown格式，便于阅读和处理"
+                            "enum": ["markdown"],
+                            "default": "markdown",
+                            "description": "结果格式类型：- markdown: 将HTML转换为Markdown格式，便于阅读和处理"
                         }
                     },
                     "required": ["url"]

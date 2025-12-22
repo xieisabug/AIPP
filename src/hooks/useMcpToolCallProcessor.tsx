@@ -32,6 +32,12 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             return fallbackElement;
         }
 
+        console.log(
+            "[MCP] detected MCP_TOOL_CALL comments",
+            mcpCalls.map((match) => match[1]),
+            { conversationId, messageId },
+        );
+
         // 将注释替换为实际的 React 组件
         const parts: React.ReactNode[] = [];
         let lastIndex = 0;

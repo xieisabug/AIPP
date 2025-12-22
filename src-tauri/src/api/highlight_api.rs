@@ -25,13 +25,13 @@ fn map_ui_theme_to_syntect(ui: &str, _is_dark: bool) -> Option<&'static str> {
     // Map UI theme ids to syntect built-in theme names
     match ui.to_lowercase().as_str() {
         // Map to closest defaults in syntect
-        // Light
-        "github" | "github-light" => Some("Solarized (light)"),
-        "vs" => Some("Solarized (light)"),
+        // Light themes - use light background themes
+        "github" | "github-light" => Some("InspiredGitHub"), // InspiredGitHub is a light theme
+        "vs" => Some("InspiredGitHub"),
         "atom-one-light" => Some("Solarized (light)"),
         "base16/github" => Some("base16-ocean.light"),
-        // Dark
-        "github-dark" | "github-dark-dimmed" => Some("InspiredGitHub"),
+        // Dark themes - use dark background themes
+        "github-dark" | "github-dark-dimmed" => Some("base16-ocean.dark"),
         "vs2015" => Some("base16-ocean.dark"),
         "atom-one-dark" | "atom-one-dark-reasonable" => Some("base16-eighties.dark"),
         _ => None,
@@ -40,17 +40,17 @@ fn map_ui_theme_to_syntect(ui: &str, _is_dark: bool) -> Option<&'static str> {
 
 fn pick_theme(is_dark: bool) -> &'static syntect::highlighting::Theme {
     let ts = theme_set();
-    // Try to prefer GitHub-like themes, then fall back to base16
+    // Prefer appropriate themes based on light/dark mode
     let candidates_dark = [
-        "InspiredGitHub", // a popular dark theme in defaults
         "base16-ocean.dark",
         "base16-eighties.dark",
         "base16-mocha.dark",
+        "Solarized (dark)",
     ];
     let candidates_light = [
+        "InspiredGitHub", // InspiredGitHub is a light theme with white background
         "Solarized (light)",
         "base16-ocean.light",
-        "base16-eighties.light",
     ];
     if is_dark {
         for name in candidates_dark.iter() {

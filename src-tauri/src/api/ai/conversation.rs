@@ -300,7 +300,8 @@ pub async fn handle_message_type_end(
 
     conversation_db.message_repo()?.update_finish_time(message_id)?;
 
-    if message_type == "response" && !skip_mcp_detection {
+    // 对 response 和 reasoning 类型的消息都启用 MCP 检测
+    if (message_type == "response" || message_type == "reasoning") && !skip_mcp_detection {
         if let Err(e) = crate::mcp::detect_and_process_mcp_calls(
             app_handle,
             window,

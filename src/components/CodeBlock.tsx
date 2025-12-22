@@ -89,7 +89,7 @@ const CodeBlock = React.memo(
         // 使用 react-syntax-highlighter 进行客户端高亮渲染
 
         const ButtonGroup = () => (
-            <div className="flex items-center gap-1 bg-white/90 opacity-0 group-hover/codeblock:opacity-100 hover:opacity-100 transition-opacity duration-200 rounded-md p-1 backdrop-blur-sm">
+            <div className="flex items-center gap-1 bg-background/90 dark:bg-muted/90 opacity-0 group-hover/codeblock:opacity-100 hover:opacity-100 transition-opacity duration-200 rounded-md p-1 backdrop-blur-sm">
                 <IconButton
                     icon={copyIconState === "copy" ? <Copy fill="black" /> : <Ok fill="black" />}
                     onClick={handleCopy}
@@ -101,7 +101,7 @@ const CodeBlock = React.memo(
         return (
             <div
                 ref={containerRef}
-                className="relative rounded-lg group/codeblock border border-border"
+                className="relative rounded-lg group/codeblock"
                 data-theme={currentTheme}
                 data-force-update={forceUpdate}
                 style={collapsed ? { maxHeight: isVeryLongCode ? 480 : 320, overflow: 'hidden' } : undefined}
@@ -130,18 +130,14 @@ const CodeBlock = React.memo(
                 </div>
 
                 {isLongCode && (
-                    <div className="absolute bottom-0 left-0 right-0 pointer-events-none"
-                        style={{
-                            background: collapsed ? 'linear-gradient(to top, rgba(0,0,0,0.35), rgba(0,0,0,0) 60%)' : 'none',
-                            height: collapsed ? 64 : 0,
-                        }}
+                    <div className={`absolute bottom-0 left-0 right-0 pointer-events-none ${collapsed ? 'h-16 bg-gradient-to-t from-muted to-transparent' : 'h-0'}`}
                     />
                 )}
 
                 {isLongCode && (
                     <div className="absolute bottom-2 right-2 z-10">
                         <button
-                            className="pointer-events-auto text-xs px-2 py-1 rounded bg-neutral-800/80 text-white hover:bg-neutral-700/90 dark:bg-neutral-200/80 dark:text-black dark:hover:bg-neutral-300/90"
+                            className="pointer-events-auto text-xs px-2 py-1 rounded bg-muted hover:bg-muted/80 text-foreground"
                             onClick={() => setCollapsed((v) => !v)}
                             title={collapsed ? '展开全部' : '收起'}
                         >

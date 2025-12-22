@@ -7,11 +7,14 @@
 //! 4. 将执行结果写回数据库并触发前端事件
 //! 5. 在工具成功后继续驱动 AI 对话（包含重试场景）
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
-use crate::api::ai_api::tool_result_continue_ask_ai;
+use crate::api::ai_api::tool_result_continue_ask_ai_impl;
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::mcp::builtin_mcp::{execute_aipp_builtin_tool, is_builtin_mcp_call};
 use crate::mcp::mcp_db::{MCPDatabase, MCPServer, MCPToolCall};
+use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use anyhow::{anyhow, bail, Context, Result};
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use rmcp::{
     model::{CallToolRequestParam, ClientCapabilities, ClientInfo, Implementation},
@@ -22,8 +25,9 @@ use rmcp::{
     ServiceExt,
 };
 use serde_json::Map as JsonMap;
-use tauri::Emitter;
 use tokio::process::Command;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
 // =============================
@@ -32,6 +36,34 @@ use tracing::{debug, error, info, instrument, warn};
 
 /// 各种传输方式统一使用的默认超时时间（毫秒）
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
+type ToolCancelRegistry = Arc<Mutex<HashMap<i64, CancellationToken>>>;
+static TOOL_CANCEL_REGISTRY: OnceLock<ToolCancelRegistry> = OnceLock::new();
+
+fn tool_cancel_registry() -> &'static ToolCancelRegistry {
+    TOOL_CANCEL_REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+async fn register_cancel_token(call_id: i64) -> CancellationToken {
+    let token = CancellationToken::new();
+    let mut registry = tool_cancel_registry().lock().await;
+    registry.insert(call_id, token.clone());
+    token
+}
+
+async fn take_cancel_token(call_id: i64) -> Option<CancellationToken> {
+    let mut registry = tool_cancel_registry().lock().await;
+    registry.remove(&call_id)
+}
+
+async fn cancel_tool_call_execution(call_id: i64) -> bool {
+    if let Some(token) = take_cancel_token(call_id).await {
+        token.cancel();
+        true
+    } else {
+        false
+    }
+}
 
 // =============================
 // 公共辅助函数 (参数解析 / 请求构建 / 结果提取)
@@ -100,12 +132,14 @@ fn serialize_tool_response(response: &rmcp::model::CallToolResult) -> Result<Str
 
 // 发送MCP工具调用状态更新事件
 /// 向前端发送工具调用状态更新事件（包括执行中 / 成功 / 失败）。
-fn emit_mcp_tool_call_update(
-    window: &tauri::Window,
-    conversation_id: i64,
-    tool_call: &MCPToolCall,
-) {
-    let update_event = ConversationEvent {
+fn build_mcp_tool_call_update_event(tool_call: &MCPToolCall) -> ConversationEvent {
+    let parse_ts = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap_or_else(|_| chrono::Utc::now().into())
+            .with_timezone(&chrono::Utc)
+    };
+
+    ConversationEvent {
         r#type: "mcp_tool_call_update".to_string(),
         data: serde_json::to_value(MCPToolCallUpdateEvent {
             call_id: tool_call.id,
@@ -113,21 +147,16 @@ fn emit_mcp_tool_call_update(
             status: tool_call.status.clone(),
             result: tool_call.result.clone(),
             error: tool_call.error.clone(),
-            started_time: tool_call.started_time.as_ref().map(|s| {
-                chrono::DateTime::parse_from_rfc3339(s)
-                    .unwrap_or_else(|_| chrono::Utc::now().into())
-                    .with_timezone(&chrono::Utc)
-            }),
-            finished_time: tool_call.finished_time.as_ref().map(|s| {
-                chrono::DateTime::parse_from_rfc3339(s)
-                    .unwrap_or_else(|_| chrono::Utc::now().into())
-                    .with_timezone(&chrono::Utc)
-            }),
+            started_time: tool_call.started_time.as_deref().map(parse_ts),
+            finished_time: tool_call.finished_time.as_deref().map(parse_ts),
         })
         .unwrap(),
-    };
+    }
+}
 
-    let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+fn broadcast_mcp_tool_call_update(app_handle: &tauri::AppHandle, tool_call: &MCPToolCall) {
+    let update_event = build_mcp_tool_call_update_event(tool_call);
+    send_conversation_event_to_chat_windows(app_handle, tool_call.conversation_id, update_event);
 }
 
 // 验证工具调用是否可以执行
@@ -175,7 +204,8 @@ async fn handle_tool_execution_result(
             tool_call.result = Some(result.clone());
             tool_call.error = None;
 
-            emit_mcp_tool_call_update(window, tool_call.conversation_id, &tool_call);
+            // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
+            broadcast_mcp_tool_call_update(app_handle, &tool_call);
 
             // 处理对话继续逻辑
             if let Err(e) = handle_tool_success_continuation(
@@ -202,7 +232,8 @@ async fn handle_tool_execution_result(
             tool_call.error = Some(error);
             tool_call.result = None;
 
-            emit_mcp_tool_call_update(window, tool_call.conversation_id, &tool_call);
+            // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
+            broadcast_mcp_tool_call_update(app_handle, &tool_call);
         }
     }
 
@@ -274,6 +305,10 @@ pub async fn create_mcp_tool_call(
 
     let result = tool_call.map_err(|e| format!("创建MCP工具调用失败: {}", e))?;
 
+    // 创建后立即广播 pending 状态事件，确保前端能及时显示工具调用
+    broadcast_mcp_tool_call_update(&app_handle, &result);
+    debug!(call_id = result.id, status = %result.status, "broadcasted pending status event after creation");
+
     Ok(result)
 }
 
@@ -344,20 +379,25 @@ pub async fn execute_mcp_tool_call(
         return Ok(current);
     }
 
-    // 重新加载工具调用以获取更新后的状态并发送事件
+    // 重新加载工具调用以获取更新后的状态并广播事件
     tool_call =
         db.get_mcp_tool_call(call_id).map_err(|e| format!("重新加载工具调用信息失败: {}", e))?;
-    emit_mcp_tool_call_update(&window, tool_call.conversation_id, &tool_call);
-    debug!(call_id=call_id, status=%tool_call.status, "emitted executing status event");
+    // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
+    broadcast_mcp_tool_call_update(&app_handle, &tool_call);
+    debug!(call_id=call_id, status=%tool_call.status, "broadcasted executing status event");
 
     // 执行工具
-    let execution_result = execute_tool_by_transport(
-        &app_handle,
-        &server,
-        &tool_call.tool_name,
-        &tool_call.parameters,
-    )
-    .await;
+    let cancel_token = register_cancel_token(call_id).await;
+    let execution_result = {
+        let exec_future =
+            execute_tool_by_transport(&app_handle, &server, &tool_call.tool_name, &tool_call.parameters);
+        tokio::select! {
+            _ = cancel_token.cancelled() => Err("Cancelled by user".to_string()),
+            res = exec_future => res,
+        }
+    };
+
+    let _ = take_cancel_token(call_id).await;
 
     // 处理执行结果
     handle_tool_execution_result(
@@ -393,6 +433,40 @@ pub async fn get_mcp_tool_calls_by_conversation(
 ) -> std::result::Result<Vec<MCPToolCall>, String> {
     let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.get_mcp_tool_calls_by_conversation(conversation_id).map_err(|e| e.to_string())
+}
+
+pub async fn cancel_mcp_tool_calls_by_conversation(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+) -> std::result::Result<Vec<i64>, String> {
+    let db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let calls = db
+        .get_mcp_tool_calls_by_conversation(conversation_id)
+        .map_err(|e| e.to_string())?;
+
+    let mut cancelled_ids = Vec::new();
+    for call in calls.into_iter().filter(|c| c.status == "executing" || c.status == "pending") {
+        let _ = cancel_tool_call_execution(call.id).await;
+
+        if let Err(e) =
+            db.update_mcp_tool_call_status(call.id, "failed", None, Some("Cancelled by user"))
+        {
+            warn!(call_id = call.id, error = %e, "failed to mark MCP call as cancelled");
+            continue;
+        }
+
+        match db.get_mcp_tool_call(call.id) {
+            Ok(updated_call) => {
+                broadcast_mcp_tool_call_update(app_handle, &updated_call);
+                cancelled_ids.push(call.id);
+            }
+            Err(e) => {
+                warn!(call_id = call.id, error = %e, "failed to reload MCP call after cancellation");
+            }
+        }
+    }
+
+    Ok(cancelled_ids)
 }
 
 /// 工具成功后的续写逻辑调度：区分首次与重试。
@@ -494,11 +568,11 @@ async fn handle_retry_success_continuation(
 }
 
 /// 触发会话继续：把工具结果作为 tool_result 语义传递给 AI 继续生成。
-#[instrument(skip(app_handle,state,feature_config_state,window,tool_call,result), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
+#[instrument(skip(app_handle, _state, _feature_config_state, window, tool_call, result), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
 async fn trigger_conversation_continuation(
     app_handle: &tauri::AppHandle,
-    state: &tauri::State<'_, crate::AppState>,
-    feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
+    _state: &tauri::State<'_, crate::AppState>,
+    _feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
     window: &tauri::Window,
     tool_call: &MCPToolCall,
     result: &str,
@@ -519,25 +593,40 @@ async fn trigger_conversation_continuation(
     let tool_call_id =
         tool_call.llm_call_id.clone().unwrap_or_else(|| format!("mcp_tool_call_{}", tool_call.id));
 
-    // 调用 tool_result_continue_ask_ai 以工具结果继续对话
-    tool_result_continue_ask_ai(
-        app_handle.clone(),
-        state.clone(),
-        feature_config_state.clone(),
-        window.clone(),
-        tool_call.conversation_id.to_string(),
-        assistant_id,
-        tool_call_id,
-        result.to_string(),
-    )
-    .await
-    .map_err(|e| anyhow!("触发对话继续失败: {:?}", e))?;
+    // 异步派发续写，避免同步栈递归导致栈溢出
+    let app_handle_clone = app_handle.clone();
+    let window_clone = window.clone();
+    let conversation_id_str = tool_call.conversation_id.to_string();
+    let continuation_call_id = tool_call.id;
+    let continuation_conversation_id = tool_call.conversation_id;
+    let continuation_result = result.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::block_on(async move {
+            match tool_result_continue_ask_ai_impl(
+                app_handle_clone.clone(),
+                window_clone,
+                conversation_id_str,
+                assistant_id,
+                tool_call_id,
+                continuation_result,
+            )
+            .await
+            {
+                Ok(_) => info!(
+                    call_id = continuation_call_id,
+                    conversation_id = continuation_conversation_id,
+                    "triggered conversation continuation (async)"
+                ),
+                Err(e) => warn!(
+                    call_id = continuation_call_id,
+                    conversation_id = continuation_conversation_id,
+                    error = %e,
+                    "failed to trigger conversation continuation (async)"
+                ),
+            }
+        });
+    });
 
-    info!(
-        call_id = tool_call.id,
-        conversation_id = tool_call.conversation_id,
-        "triggered conversation continuation"
-    );
     Ok(())
 }
 

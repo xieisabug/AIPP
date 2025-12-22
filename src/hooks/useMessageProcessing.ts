@@ -25,7 +25,20 @@ export function useMessageProcessing({
     groupRootMessageIds,
     getMessageVersionInfo,
 }: UseMessageProcessingProps): UseMessageProcessingReturn {
-    
+    const getOrderValue = (msg: Message): number => {
+        const tryParse = (value: any) => {
+            const ts = value ? new Date(value as any).getTime() : NaN;
+            return Number.isFinite(ts) ? ts : null;
+        };
+
+        return (
+            tryParse(msg.created_time) ??
+            tryParse(msg.start_time) ??
+            tryParse(msg.finish_time) ??
+            msg.id
+        );
+    };
+
     // 管理组合并关系：new_group_id -> original_group_id
     const [groupMergeMap, setGroupMergeMap] = useState<Map<string, string>>(
         new Map(),
@@ -103,9 +116,11 @@ export function useMessageProcessing({
             return true;
         });
 
-        // 如果没有分组信息，直接按ID排序返回
+        // 如果没有分组信息，直接按时间/ID排序返回
         if (generationGroups.size === 0) {
-            return visibleMessages.sort((a, b) => a.id - b.id);
+            return visibleMessages.sort(
+                (a, b) => getOrderValue(a) - getOrderValue(b),
+            );
         }
 
         // 创建消息到根组的映射，包括子分组的消息
@@ -141,18 +156,18 @@ export function useMessageProcessing({
             const aGroupId = messageToRootGroupMap.get(a.id);
             const bGroupId = messageToRootGroupMap.get(b.id);
 
-            // 获取排序基准值：分组消息使用分组基准消息ID，非分组消息使用自身ID
-            const aBaseValue = aGroupId ? (groupRootMessageIds.get(aGroupId) || a.id) : a.id;
-            const bBaseValue = bGroupId ? (groupRootMessageIds.get(bGroupId) || b.id) : b.id;
+            // 获取排序基准值：对所有可见消息直接使用自身时间/ID，避免跨轮分组的旧基准把新轮消息提前
+            const aBaseValue = getOrderValue(a);
+            const bBaseValue = getOrderValue(b);
 
             if (aBaseValue !== bBaseValue) {
                 return aBaseValue - bBaseValue;
             }
             
-            // 基准值相同时，按ID排序（同一分组内的消息或ID相同的情况）
-            return a.id - b.id;
+            // 基准值相同时，按时间/ID排序（同一分组内的消息或ID相同的情况）
+            return getOrderValue(a) - getOrderValue(b);
         });
-        
+
         return sorted;
     }, [combinedMessagesForGrouping, generationGroups, groupRootMessageIds, getMessageVersionInfo]);
 

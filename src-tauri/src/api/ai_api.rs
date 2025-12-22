@@ -18,6 +18,7 @@ use crate::db::conversation_db::{ConversationDatabase, Message, MessageAttachmen
 use crate::db::llm_db::LLMDatabase;
 use crate::errors::AppError;
 use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt};
+use crate::mcp::execution_api::cancel_mcp_tool_calls_by_conversation;
 use crate::state::message_token::MessageTokenManager;
 use crate::template_engine::TemplateEngine;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
@@ -29,7 +30,7 @@ use genai::chat::Tool;
 use std::collections::{HashMap, HashSet};
 use tauri::Emitter;
 use tauri::State;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 
 #[tauri::command]
 #[instrument(skip(app_handle, state, feature_config_state, message_token_manager, window, request, override_model_config, override_prompt, override_mcp_config), fields(assistant_id = request.assistant_id, conversation_id = %request.conversation_id, override_model_id = request.override_model_id))]
@@ -369,12 +370,9 @@ pub async fn ask_ai(
     Ok(AiResponse { conversation_id, request_prompt_result_with_context })
 }
 
-#[tauri::command]
-#[instrument(skip(app_handle, _state, _feature_config_state, window, tool_result), fields(conversation_id = %conversation_id, assistant_id, tool_call_id))]
-pub async fn tool_result_continue_ask_ai(
+#[instrument(skip(app_handle, window, tool_result), fields(conversation_id = %conversation_id, assistant_id, tool_call_id))]
+pub(crate) async fn tool_result_continue_ask_ai_impl(
     app_handle: tauri::AppHandle,
-    _state: State<'_, AppState>,
-    _feature_config_state: State<'_, FeatureConfigState>,
     window: tauri::Window,
     conversation_id: String,
     assistant_id: i64,
@@ -783,12 +781,41 @@ pub async fn tool_result_continue_ask_ai(
 }
 
 #[tauri::command]
+#[instrument(skip(app_handle, _state, _feature_config_state, window, tool_result), fields(conversation_id = %conversation_id, assistant_id, tool_call_id))]
+pub async fn tool_result_continue_ask_ai(
+    app_handle: tauri::AppHandle,
+    _state: State<'_, AppState>,
+    _feature_config_state: State<'_, FeatureConfigState>,
+    window: tauri::Window,
+    conversation_id: String,
+    assistant_id: i64,
+    tool_call_id: String,
+    tool_result: String,
+) -> Result<AiResponse, AppError> {
+    tool_result_continue_ask_ai_impl(
+        app_handle,
+        window,
+        conversation_id,
+        assistant_id,
+        tool_call_id,
+        tool_result,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn cancel_ai(
     app_handle: tauri::AppHandle,
     message_token_manager: State<'_, MessageTokenManager>,
     conversation_id: i64,
 ) -> Result<(), String> {
     message_token_manager.cancel_request(conversation_id).await;
+
+    if let Err(e) =
+        cancel_mcp_tool_calls_by_conversation(&app_handle, conversation_id).await
+    {
+        warn!(conversation_id, error = %e, "failed to cancel MCP tool calls for conversation");
+    }
 
     // Send cancellation event to both ask and chat_ui windows
     let cancel_event = crate::api::ai::events::ConversationEvent {

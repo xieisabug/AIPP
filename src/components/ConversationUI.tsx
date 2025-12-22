@@ -494,8 +494,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 监听错误通知事件
         useEffect(() => {
-            const unsubscribe = listen("conversation-window-error-notification", (event) => {
-                const errorMessage = event.payload as string;
+            const unsubscribe = listen<{ conversation_id: number | null, error_message: string }>("conversation-window-error-notification", (event) => {
+                const { error_message: errorMessage } = event.payload;
                 console.error("Received error notification:", errorMessage);
 
                 // 重置AI响应状态

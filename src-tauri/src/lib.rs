@@ -271,9 +271,15 @@ fn copy_selection_via_clipboard_fallback() -> Option<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 初始化 tracing 日志 (RUST_LOG 环境变量可覆盖，默认 info)
+    // 初始化 tracing 日志 (RUST_LOG 环境变量可覆盖)
+    // dev 构建默认 debug，release 构建默认 info
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info,Aipp=info,aipp=info,rmcp=warn");
+        let default_log = if cfg!(debug_assertions) {
+            "debug,Aipp=debug,aipp=debug,rmcp=debug"
+        } else {
+            "info,Aipp=info,aipp=info,rmcp=warn"
+        };
+        std::env::set_var("RUST_LOG", default_log);
     }
     let subscriber = FmtSubscriber::builder()
         .with_env_filter(EnvFilter::from_default_env())

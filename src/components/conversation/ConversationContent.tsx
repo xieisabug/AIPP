@@ -1,6 +1,5 @@
-import React, { useState, Profiler, memo } from "react";
+import React, { useState, memo } from "react";
 import MessageList from "./MessageList";
-import { onRenderCallback } from "../../hooks/usePerformanceMonitor";
 import NewChatComponent from "../NewChatComponent";
 import { Message, StreamEvent } from "../../data/Conversation";
 import { AssistantListItem } from "../../data/Assistant";
@@ -77,15 +76,13 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
             <>
                 {/* Conversation-level sub-tasks - shown between header and messages */}
                 {isValidConversationId && (
-                    <Profiler id="SubTaskList-Conversation" onRender={onRenderCallback as any}>
-                        <SubTaskList
-                            conversation_id={conversationIdNum}
-                            onTaskDetailView={handleSubTaskDetailView}
-                        />
-                    </Profiler>
+                    <SubTaskList
+                        conversation_id={conversationIdNum}
+                        onTaskDetailView={handleSubTaskDetailView}
+                    />
                 )}
 
-                <Profiler id="MessageList-Container" onRender={onRenderCallback as any}>
+                <>
                     <MessageList
                         allDisplayMessages={allDisplayMessages}
                         streamingMessages={streamingMessages}
@@ -102,7 +99,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
                         onMessageFork={onMessageFork}
                         onToggleReasoningExpand={onToggleReasoningExpand}
                     />
-                </Profiler>
+                </>
 
                 {/* Sub-task detail dialog */}
                 {selectedSubTask && (

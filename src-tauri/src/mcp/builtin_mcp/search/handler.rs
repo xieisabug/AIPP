@@ -46,31 +46,8 @@ impl SearchHandler {
                 self.process_html_by_type(html, &request, &search_engine)
             }
             Err(e) => {
-                // 尝试降级到其他搜索引擎
-                if let Some(fallback_engine) = engine_manager.get_fallback_engine(&search_engine) {
-                    info!(fallback_engine = fallback_engine.as_str(), "Trying fallback engine");
-
-                    match self
-                        .fetch_search_html(
-                            &request.query,
-                            &fallback_engine,
-                            &browser_manager,
-                            &config,
-                        )
-                        .await
-                    {
-                        Ok(html) => self.process_html_by_type(html, &request, &fallback_engine),
-                        Err(fallback_error) => {
-                            error!(error = %fallback_error, "Fallback engine failed");
-                            Err(format!(
-                                "Search failed: {} (fallback also failed: {})",
-                                e, fallback_error
-                            ))
-                        }
-                    }
-                } else {
-                    Err(format!("Search failed: {}", e))
-                }
+                error!(error = %e, engine = search_engine.as_str(), "Search failed");
+                Err(format!("Search failed: {}", e))
             }
         }
     }
@@ -185,34 +162,6 @@ impl SearchHandler {
         }
     }
 
-    /// 抓取指定URL的内容（保持向后兼容）
-    #[instrument(skip(self), fields(url = %url))]
-    pub async fn fetch_url(&self, url: &str) -> Result<serde_json::Value, String> {
-        debug!("Fetching URL (legacy)");
-
-        let config = self.load_search_config()?;
-        let browser_manager = BrowserManager::new(config.get("BROWSER_TYPE").map(|s| s.as_str()));
-
-        let fetch_config = self.build_general_fetch_config(&config)?;
-        let mut fetcher = ContentFetcher::new(self.app_handle.clone(), fetch_config);
-
-        match fetcher.fetch_content(url, &browser_manager).await {
-            Ok(html) => {
-                info!("Successfully fetched URL content");
-                Ok(serde_json::json!({
-                    "url": url,
-                    "status": "success",
-                    "html_content": html,
-                    "message": "URL fetched successfully",
-                }))
-            }
-            Err(e) => {
-                error!(error = %e, "Failed to fetch URL");
-                Err(format!("Failed to fetch URL: {}", e))
-            }
-        }
-    }
-
     /// 从数据库加载搜索配置
     fn load_search_config(&self) -> Result<HashMap<String, String>, String> {
         use crate::mcp::mcp_db::MCPDatabase;
@@ -254,7 +203,7 @@ impl SearchHandler {
             proxy_server: config.get("PROXY_SERVER").cloned(),
             headless: config
                 .get("HEADLESS")
-                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
+                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
                 .unwrap_or(true),
             user_agent: None,
             bypass_csp: false,
@@ -264,6 +213,7 @@ impl SearchHandler {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(15000),
             wait_poll_ms: config.get("WAIT_POLL_MS").and_then(|v| v.parse().ok()).unwrap_or(250),
+            kagi_session_url: config.get("KAGI_SESSION_URL").cloned().filter(|s| !s.trim().is_empty()),
         })
     }
 
@@ -287,7 +237,7 @@ impl SearchHandler {
             proxy_server: config.get("PROXY_SERVER").cloned(),
             headless: config
                 .get("HEADLESS")
-                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
+                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
                 .unwrap_or(true),
             user_agent: None,
             bypass_csp: false,
@@ -297,6 +247,7 @@ impl SearchHandler {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(15000),
             wait_poll_ms: config.get("WAIT_POLL_MS").and_then(|v| v.parse().ok()).unwrap_or(250),
+            kagi_session_url: None,  // 通用抓取不需要 Kagi 会话链接
         })
     }
 }

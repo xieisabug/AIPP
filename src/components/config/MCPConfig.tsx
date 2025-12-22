@@ -676,6 +676,15 @@ const MCPConfig: React.FC = () => {
                                 is_builtin: editingServer.is_builtin,
                             };
                             await invoke('update_mcp_server', { id: editingServer.id, request: req });
+                            
+                            // 立即更新 selectedServer 以确保下次编辑时显示最新数据
+                            if (selectedServer && selectedServer.id === editingServer.id) {
+                                setSelectedServer({
+                                    ...selectedServer,
+                                    environment_variables: builtinEditEnv,
+                                });
+                            }
+                            
                             toast.success('已保存内置工具环境变量');
                             setBuiltinEditOpen(false);
                             getMcpServers();

@@ -1,4 +1,6 @@
-use crate::api::ai::events::{ConversationEvent, ERROR_NOTIFICATION_EVENT};
+use crate::api::ai::events::{
+    ConversationEvent, ErrorNotificationPayload, ERROR_NOTIFICATION_EVENT,
+};
 use tauri::{Emitter, Manager, Window};
 
 /// 检查chat和ask窗口是否有任何一个聚焦
@@ -34,27 +36,30 @@ pub fn is_chat_or_ask_window_focused(app_handle: &tauri::AppHandle) -> bool {
 }
 
 /// 智能发送错误到合适的窗口
-/// 如果 ChatUI 窗口打开且可见，优先发送给 ChatUI
-/// 否则发送给 Ask 窗口
-pub fn send_error_to_appropriate_window(window: &Window, error_message: &str) {
+/// 如果 ChatUI 窗口存在（不管是否可见），只发送给 ChatUI（不发送给 Ask 窗口）
+/// 否则发送给 Ask 窗口，并附带 conversation_id 以便前端过滤
+pub fn send_error_to_appropriate_window(
+    window: &Window,
+    error_message: &str,
+    conversation_id: Option<i64>,
+) {
+    let payload =
+        ErrorNotificationPayload { conversation_id, error_message: error_message.to_string() };
+
     // 获取 ChatUI 窗口
     if let Some(chat_ui_window) = window.app_handle().get_webview_window("chat_ui") {
-        // 检查 ChatUI 窗口是否可见
-        if let Ok(is_visible) = chat_ui_window.is_visible() {
-            if is_visible {
-                // ChatUI 窗口可见，发送错误给 ChatUI
-                let _ = chat_ui_window.emit(ERROR_NOTIFICATION_EVENT, error_message);
-                return;
-            }
-        }
+        // ChatUI 窗口存在，只发送错误给 ChatUI，不发送给 Ask 窗口
+        // 不再检查 is_visible，因为用户说只要 chat 窗口打开了就不在 ask 显示
+        let _ = chat_ui_window.emit(ERROR_NOTIFICATION_EVENT, &payload);
+        return;
     }
 
-    // ChatUI 窗口不存在或不可见，发送给 Ask 窗口
+    // ChatUI 窗口不存在，发送给 Ask 窗口
     if let Some(ask_window) = window.app_handle().get_webview_window("ask") {
-        let _ = ask_window.emit(ERROR_NOTIFICATION_EVENT, error_message);
+        let _ = ask_window.emit(ERROR_NOTIFICATION_EVENT, &payload);
     } else {
         // 回退到全局广播（保险起见）
-        let _ = window.emit(ERROR_NOTIFICATION_EVENT, error_message);
+        let _ = window.emit(ERROR_NOTIFICATION_EVENT, &payload);
     }
 }
 
@@ -66,12 +71,12 @@ pub fn send_conversation_event_to_chat_windows(
     event: ConversationEvent,
 ) {
     let event_name = format!("conversation_event_{}", conversation_id);
-    
+
     // 发送给 Ask 窗口
     if let Some(ask_window) = app_handle.get_webview_window("ask") {
         let _ = ask_window.emit(&event_name, &event);
     }
-    
+
     // 发送给 Chat UI 窗口
     if let Some(chat_ui_window) = app_handle.get_webview_window("chat_ui") {
         let _ = chat_ui_window.emit(&event_name, &event);
