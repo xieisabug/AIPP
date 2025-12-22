@@ -106,6 +106,16 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
                 options: None,
             },
             BuiltinTemplateEnvVar {
+                key: "KAGI_SESSION_URL".into(),
+                label: "Kagi 会话链接".into(),
+                required: false,
+                tip: Some("仅在使用 Kagi 搜索引擎时需要填写。Kagi 是付费搜索引擎，需要提供带 token 的会话链接才能搜索。格式如：https://kagi.com/search?token=xxxxx。如果填写了此配置，搜索时将直接使用该链接拼接搜索参数，而不是模拟在首页输入搜索。注意：此配置仅对 Kagi 生效，其他搜索引擎请勿填写，否则可能导致搜索失败。".into()),
+                field_type: "text".into(),
+                default_value: None,
+                placeholder: Some("https://kagi.com/search?token=xxxxx".into()),
+                options: None,
+            },
+            BuiltinTemplateEnvVar {
                 key: "WAIT_SELECTORS".into(),
                 label: "等待元素选择器".into(),
                 required: false,

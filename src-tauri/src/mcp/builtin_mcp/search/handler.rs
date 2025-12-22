@@ -213,6 +213,7 @@ impl SearchHandler {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(15000),
             wait_poll_ms: config.get("WAIT_POLL_MS").and_then(|v| v.parse().ok()).unwrap_or(250),
+            kagi_session_url: config.get("KAGI_SESSION_URL").cloned().filter(|s| !s.trim().is_empty()),
         })
     }
 
@@ -246,6 +247,7 @@ impl SearchHandler {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(15000),
             wait_poll_ms: config.get("WAIT_POLL_MS").and_then(|v| v.parse().ok()).unwrap_or(250),
+            kagi_session_url: None,  // 通用抓取不需要 Kagi 会话链接
         })
     }
 }

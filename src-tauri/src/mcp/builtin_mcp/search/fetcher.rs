@@ -28,6 +28,9 @@ pub struct FetchConfig {
     pub wait_selectors: Vec<String>,
     pub wait_timeout_ms: u64,
     pub wait_poll_ms: u64,
+    /// Kagi 会话链接，仅在使用 Kagi 搜索引擎时生效
+    /// 格式如：https://kagi.com/search?token=xxxxx
+    pub kagi_session_url: Option<String>,
 }
 
 impl Default for FetchConfig {
@@ -41,6 +44,7 @@ impl Default for FetchConfig {
             wait_selectors: vec![],
             wait_timeout_ms: 15000,
             wait_poll_ms: 250,
+            kagi_session_url: None,
         }
     }
 }
@@ -150,6 +154,14 @@ impl ContentFetcher {
     ) -> Result<String, String> {
         info!(%query, engine = ?search_engine, "Starting search content fetch");
 
+        // 如果是 Kagi 且配置了会话链接，使用直接 URL 方式搜索
+        if *search_engine == SearchEngine::Kagi {
+            if let Some(session_url) = self.config.kagi_session_url.clone() {
+                info!("Using Kagi session URL for direct search");
+                return self.fetch_kagi_with_session_url(query, &session_url, browser_manager).await;
+            }
+        }
+
         // 使用Playwright执行搜索流程
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         match self.fetch_search_with_playwright(query, search_engine, browser_manager).await {
@@ -168,6 +180,167 @@ impl ContentFetcher {
             search_engine.display_name(),
             "All interactive search attempts failed"
         ))
+    }
+
+    /// 使用 Kagi 会话链接直接搜索
+    /// 会话链接格式：https://kagi.com/search?token=xxxxx
+    /// 拼接搜索参数后：https://kagi.com/search?token=xxxxx&q=搜索词
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    async fn fetch_kagi_with_session_url(
+        &mut self,
+        query: &str,
+        session_url: &str,
+        browser_manager: &BrowserManager,
+    ) -> Result<String, String> {
+        // 构造搜索 URL：在会话链接后面拼接 &q=搜索词
+        let encoded_query = urlencoding::encode(query);
+        let search_url = if session_url.contains('?') {
+            format!("{}&q={}", session_url, encoded_query)
+        } else {
+            format!("{}?q={}", session_url, encoded_query)
+        };
+        
+        info!(%search_url, "Fetching Kagi search results with session URL");
+
+        // 使用 Playwright 直接访问搜索结果页面
+        let (_browser_type, browser_path) = browser_manager.get_available_browser()?;
+
+        let user_data_dir = self.get_user_data_dir()?;
+        if let Err(e) = fs::create_dir_all(&user_data_dir) {
+            warn!(error = %e, dir = ?user_data_dir, "Failed to create user_data_dir");
+        }
+
+        let playwright =
+            Playwright::initialize().await.map_err(|e| format!("Playwright init error: {}", e))?;
+
+        let chromium = playwright.chromium();
+        let mut launcher = chromium.persistent_context_launcher(&user_data_dir);
+
+        // 获取稳定的指纹配置
+        let (fingerprint, stealth_args) = {
+            let fp = self.fingerprint_manager.get_stable_fingerprint(None).clone();
+            let args = FingerprintManager::get_stealth_launch_args();
+            (fp, args)
+        };
+
+        // 应用指纹配置
+        launcher = self.fingerprint_manager.apply_fingerprint_to_context(launcher, &fingerprint);
+
+        // 配置浏览器启动参数
+        launcher =
+            launcher.executable(&browser_path).headless(self.config.headless).args(&stealth_args);
+
+        if self.config.bypass_csp {
+            launcher = launcher.bypass_csp(true);
+        }
+
+        // 处理代理配置
+        if let Some(ref proxy) = self.config.proxy_server {
+            if !proxy.trim().is_empty() {
+                info!(proxy = %proxy, "Checking proxy availability for Kagi search");
+                match Self::check_proxy_available(proxy).await {
+                    Ok(_) => {
+                        use playwright::api::ProxySettings;
+                        let proxy_settings = ProxySettings {
+                            server: proxy.clone(),
+                            bypass: None,
+                            username: None,
+                            password: None,
+                        };
+                        launcher = launcher.proxy(proxy_settings);
+                        info!(proxy = %proxy, "✅ Proxy configured for Kagi search");
+                    }
+                    Err(e) => {
+                        warn!(proxy = %proxy, error = %e, "⚠️ Proxy not available, continuing without proxy");
+                    }
+                }
+            }
+        }
+
+        let context =
+            launcher.launch().await.map_err(|e| format!("Playwright launch error: {}", e))?;
+
+        let page =
+            context.new_page().await.map_err(|e| format!("Playwright new_page error: {}", e))?;
+
+        // 注入反检测脚本
+        self.inject_anti_detection_scripts(&page).await?;
+
+        // 在页面级别设置额外的HTTP头
+        self.set_page_http_headers(&page, &fingerprint).await?;
+
+        // 直接导航到搜索结果页面
+        page.goto_builder(&search_url).goto().await.map_err(|e| format!("Playwright goto error: {}", e))?;
+
+        // 等待 Kagi 搜索结果加载
+        let kagi_selectors = super::engines::kagi::KagiEngine::default_wait_selectors();
+        self.wait_for_results_with_selectors(&page, &kagi_selectors).await?;
+
+        // 提取 HTML
+        let html: String = page
+            .eval("() => document.documentElement.outerHTML")
+            .await
+            .map_err(|e| format!("Playwright eval error: {}", e))?;
+
+        if html.trim().is_empty() {
+            return Err("Empty HTML from Kagi session URL search".to_string());
+        }
+
+        info!(bytes = html.len(), "Successfully fetched Kagi search results");
+        
+        // 保存调试HTML
+        Self::save_debug_html(&html, "kagi_session_search");
+        
+        Ok(html)
+    }
+
+    /// 等待搜索结果，使用指定的选择器列表
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    async fn wait_for_results_with_selectors(
+        &self,
+        page: &playwright::api::Page,
+        selectors: &[String],
+    ) -> Result<(), String> {
+        let start = tokio::time::Instant::now();
+        let timeout = Duration::from_millis(self.config.wait_timeout_ms);
+        let selectors_json = serde_json::to_string(selectors).unwrap_or("[]".to_string());
+
+        let mut check_count = 0;
+        loop {
+            check_count += 1;
+
+            let found_selector_script = format!(
+                "() => {{ const sels = {}; for (const s of sels) {{ if (document.querySelector(s)) return s; }} return null; }}",
+                selectors_json
+            );
+
+            let found: Option<String> = page.eval(&found_selector_script).await.unwrap_or(None);
+
+            if let Some(sel) = found {
+                info!(
+                    selector = %sel,
+                    check_count,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "✅ Results loaded"
+                );
+                // 额外等待一点时间确保内容完全渲染
+                sleep(Duration::from_millis(500 + fastrand::u64(0..500))).await;
+                return Ok(());
+            }
+
+            if start.elapsed() >= timeout {
+                warn!(
+                    timeout_ms = self.config.wait_timeout_ms,
+                    check_count,
+                    "⚠️ Results wait timeout, continuing anyway"
+                );
+                break;
+            }
+
+            sleep(Duration::from_millis(250)).await;
+        }
+
+        Ok(())
     }
 
     /// 使用Playwright执行搜索流程
