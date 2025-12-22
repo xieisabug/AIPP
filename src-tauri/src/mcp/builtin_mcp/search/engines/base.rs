@@ -1,3 +1,5 @@
+use htmd::{Element, HtmlToMarkdown, element_handler::Handlers};
+
 /// 搜索引擎通用基础功能
 pub struct SearchEngineBase;
 
@@ -73,85 +75,25 @@ impl SearchEngineBase {
 
     /// 将HTML标签转换为Markdown语法
     fn convert_html_tags_to_markdown(html: &str) -> String {
-        let mut markdown = html.to_string();
-        
-        // 标题转换
-        for i in 1..=6 {
-            let pattern = format!(r"(?is)<h{0}[^>]*>(.*?)</h{0}>", i);
-            if let Ok(re) = regex::Regex::new(&pattern) {
-                let replacement = format!("{} $1\n", "#".repeat(i));
-                markdown = re.replace_all(&markdown, replacement.as_str()).to_string();
+        let converter = HtmlToMarkdown::builder()
+            .skip_tags(vec!["script", "style"])
+            .add_handler(vec!["svg"], |_handlers: &dyn Handlers, _: Element| {
+                Some("[Svg Image]".into())
+            })
+            .add_handler(vec!["del"], |handlers: &dyn Handlers, element: Element| {
+                let content = handlers.walk_children(&element.node).content;
+                Some(format!("~~{}~~", content).into())
+            })
+            .build();
+
+        match converter.convert(html) {
+            Ok(result) => {
+                result
+            }
+            Err(_) => {
+                // 如果转换失败，保留原始HTML
+                html.to_string()
             }
         }
-        
-        // 段落转换
-        let p_pattern = regex::Regex::new(r"(?is)<p[^>]*>(.*?)</p>").unwrap();
-        markdown = p_pattern.replace_all(&markdown, "$1\n\n").to_string();
-        
-        // 链接转换
-        let link_pattern = regex::Regex::new(r#"(?is)<a[^>]*href=\"([^\"]*)\"[^>]*>(.*?)</a>"#).unwrap();
-        markdown = link_pattern.replace_all(&markdown, "[$2]($1)").to_string();
-        
-        // 粗体和斜体
-        let strong_pattern = regex::Regex::new(r"(?is)<(?:strong|b)[^>]*>(.*?)</(?:strong|b)>").unwrap();
-        markdown = strong_pattern.replace_all(&markdown, "**$1**").to_string();
-        
-        let em_pattern = regex::Regex::new(r"(?is)<(?:em|i)[^>]*>(.*?)</(?:em|i)>").unwrap();
-        markdown = em_pattern.replace_all(&markdown, "*$1*").to_string();
-        
-        // 列表转换
-        let ul_pattern = regex::Regex::new(r"(?is)<ul[^>]*>(.*?)</ul>").unwrap();
-        let li_pattern = regex::Regex::new(r"(?is)<li[^>]*>(.*?)</li>").unwrap();
-        
-        markdown = ul_pattern.replace_all(&markdown, |caps: &regex::Captures| {
-            let list_content = &caps[1];
-            let items = li_pattern.replace_all(list_content, "- $1\n");
-            format!("\n{}\n", items)
-        }).to_string();
-        
-        // 有序列表
-        let ol_pattern = regex::Regex::new(r"(?is)<ol[^>]*>(.*?)</ol>").unwrap();
-        markdown = ol_pattern.replace_all(&markdown, |caps: &regex::Captures| {
-            let list_content = &caps[1];
-            let mut counter = 1;
-            let items = li_pattern.replace_all(list_content, |_: &regex::Captures| {
-                let result = format!("{}. $1\n", counter);
-                counter += 1;
-                result
-            });
-            format!("\n{}\n", items)
-        }).to_string();
-        
-        // 代码块
-        let pre_pattern = regex::Regex::new(r"(?is)<pre[^>]*>(.*?)</pre>").unwrap();
-        markdown = pre_pattern.replace_all(&markdown, "```\n$1\n```\n").to_string();
-        
-        let code_pattern = regex::Regex::new(r"(?is)<code[^>]*>(.*?)</code>").unwrap();
-        markdown = code_pattern.replace_all(&markdown, "`$1`").to_string();
-        
-        // 分割线
-        let hr_pattern = regex::Regex::new(r"(?is)<hr[^>]*/?>\s*").unwrap();
-        markdown = hr_pattern.replace_all(&markdown, "\n---\n").to_string();
-        
-        // 换行
-        let br_pattern = regex::Regex::new(r"(?is)<br[^>]*/?>\s*").unwrap();
-        markdown = br_pattern.replace_all(&markdown, "\n").to_string();
-        
-        // 移除剩余的HTML标签
-        let tag_pattern = regex::Regex::new(r"<[^>]*>").unwrap();
-        markdown = tag_pattern.replace_all(&markdown, "").to_string();
-        
-        // 解码HTML实体
-        markdown = markdown
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&nbsp;", " ")
-            .replace("&ndash;", "–")
-            .replace("&mdash;", "—");
-        
-        markdown
     }
 }
