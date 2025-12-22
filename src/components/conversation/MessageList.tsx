@@ -20,9 +20,6 @@ export interface MessageListProps {
     onToggleReasoningExpand: (messageId: number) => void;
 }
 
-// 使用 React.memo 优化 MessageItem 渲染
-const MemoizedMessageItem = React.memo(MessageItem);
-
 const MessageList: React.FC<MessageListProps> = ({
     allDisplayMessages,
     streamingMessages,
@@ -55,7 +52,7 @@ const MessageList: React.FC<MessageListProps> = ({
             return {
                 messageId: message.id,
                 messageElement: (
-                    <MemoizedMessageItem
+                    <MessageItem
                         key={`message-${message.id}`}
                         message={message}
                         streamEvent={streamEvent}
@@ -95,6 +92,7 @@ const MessageList: React.FC<MessageListProps> = ({
         onMessageRegenerate,
         onMessageEdit,
         onToggleReasoningExpand,
+        onMessageFork,
     ]);
 
     // 优化版本控制组件的渲染

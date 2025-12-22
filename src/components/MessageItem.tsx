@@ -219,12 +219,6 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
     // Sub-task related props comparison
     if (prevProps.conversationId !== nextProps.conversationId) return false;
 
-    // 回调函数比较（通常应该是稳定的）
-    if (prevProps.onCodeRun !== nextProps.onCodeRun) return false;
-    if (prevProps.onMessageRegenerate !== nextProps.onMessageRegenerate) return false;
-    if (prevProps.onMessageEdit !== nextProps.onMessageEdit) return false;
-    if (prevProps.onToggleReasoningExpand !== nextProps.onToggleReasoningExpand) return false;
-
     return true;
 };
 
