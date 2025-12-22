@@ -214,13 +214,13 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({ language, children, onCod
                 )}
                 {/* Gradient overlay when collapsed */}
                 {isCollapsed && isOverflow && (
-                    <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-white dark:from-neutral-950 to-transparent pointer-events-none" />
+                    <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-muted to-transparent pointer-events-none" />
                 )}
             </div>
 
             {/* Expand/Collapse control */}
             {isOverflow && (
-                <div className="flex justify-center pt-2 pb-1 bg-white dark:bg-neutral-950">
+                <div className="flex justify-center pt-2 pb-1 bg-muted">
                     <button
                         type="button"
                         className="px-3 py-1 text-xs text-foreground/70 hover:text-foreground transition-colors cursor-pointer"

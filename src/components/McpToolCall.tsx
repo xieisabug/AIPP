@@ -36,7 +36,7 @@ const JsonDisplay: React.FC<{ content: string; maxHeight?: string; className?: s
 
     return (
         <div className={`${className} overflow-auto`} style={{ maxHeight: maxHeight }}>
-            <pre className="text-xs font-mono p-2 whitespace-pre-wrap break-words mt-0 mb-0">{formattedJson}</pre>
+            <pre className="text-xs font-mono p-2 whitespace-pre-wrap break-words mt-0 mb-0 bg-muted text-foreground rounded-md">{formattedJson}</pre>
         </div>
     );
 };
@@ -243,14 +243,12 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         }
     }, [conversationId, messageId, serverName, toolName, parameters, toolCallId]);
 
-    const renderResult = (fixedHeight = false) => {
+    const renderResult = () => {
         if (executionResult) {
             return (
                 <div className="mt-2">
                     <span className="text-xs text-muted-foreground">结果:</span>
-                    <div className="mt-1 h-72 overflow-auto">
-                        <pre className="whitespace-pre-wrap break-words mt-0 mb-0">{executionResult}</pre>
-                    </div>
+                    <JsonDisplay content={executionResult} maxHeight="288px" className="mt-1" />
                 </div>
             );
         }
@@ -259,16 +257,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             return (
                 <div className="mt-2">
                     <span className="text-xs text-muted-foreground">错误:</span>
-                    <div
-                        className="mt-1 overflow-auto"
-                        style={{ height: fixedHeight ? "200px" : "auto", maxHeight: fixedHeight ? "none" : "200px" }}
-                    >
-                        <div className="text-xs font-mono bg-muted p-2">
-                            <div className="text-red-600 whitespace-pre-wrap break-words">
-                                <strong>错误:</strong> {executionError}
-                            </div>
-                        </div>
-                    </div>
+                    <JsonDisplay content={executionError} maxHeight="200px" className="mt-1" />
                 </div>
             );
         }
