@@ -7,7 +7,7 @@
 //! 4. 将执行结果写回数据库并触发前端事件
 //! 5. 在工具成功后继续驱动 AI 对话（包含重试场景）
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
-use crate::api::ai_api::tool_result_continue_ask_ai;
+use crate::api::ai_api::tool_result_continue_ask_ai_impl;
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::mcp::builtin_mcp::{execute_aipp_builtin_tool, is_builtin_mcp_call};
 use crate::mcp::mcp_db::{MCPDatabase, MCPServer, MCPToolCall};
@@ -570,11 +570,11 @@ async fn handle_retry_success_continuation(
 }
 
 /// 触发会话继续：把工具结果作为 tool_result 语义传递给 AI 继续生成。
-#[instrument(skip(app_handle,state,feature_config_state,window,tool_call,result), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
+#[instrument(skip(app_handle, _state, _feature_config_state, window, tool_call, result), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
 async fn trigger_conversation_continuation(
     app_handle: &tauri::AppHandle,
-    state: &tauri::State<'_, crate::AppState>,
-    feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
+    _state: &tauri::State<'_, crate::AppState>,
+    _feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
     window: &tauri::Window,
     tool_call: &MCPToolCall,
     result: &str,
@@ -595,25 +595,40 @@ async fn trigger_conversation_continuation(
     let tool_call_id =
         tool_call.llm_call_id.clone().unwrap_or_else(|| format!("mcp_tool_call_{}", tool_call.id));
 
-    // 调用 tool_result_continue_ask_ai 以工具结果继续对话
-    tool_result_continue_ask_ai(
-        app_handle.clone(),
-        state.clone(),
-        feature_config_state.clone(),
-        window.clone(),
-        tool_call.conversation_id.to_string(),
-        assistant_id,
-        tool_call_id,
-        result.to_string(),
-    )
-    .await
-    .map_err(|e| anyhow!("触发对话继续失败: {:?}", e))?;
+    // 异步派发续写，避免同步栈递归导致栈溢出
+    let app_handle_clone = app_handle.clone();
+    let window_clone = window.clone();
+    let conversation_id_str = tool_call.conversation_id.to_string();
+    let continuation_call_id = tool_call.id;
+    let continuation_conversation_id = tool_call.conversation_id;
+    let continuation_result = result.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::block_on(async move {
+            match tool_result_continue_ask_ai_impl(
+                app_handle_clone.clone(),
+                window_clone,
+                conversation_id_str,
+                assistant_id,
+                tool_call_id,
+                continuation_result,
+            )
+            .await
+            {
+                Ok(_) => info!(
+                    call_id = continuation_call_id,
+                    conversation_id = continuation_conversation_id,
+                    "triggered conversation continuation (async)"
+                ),
+                Err(e) => warn!(
+                    call_id = continuation_call_id,
+                    conversation_id = continuation_conversation_id,
+                    error = %e,
+                    "failed to trigger conversation continuation (async)"
+                ),
+            }
+        });
+    });
 
-    info!(
-        call_id = tool_call.id,
-        conversation_id = tool_call.conversation_id,
-        "triggered conversation continuation"
-    );
     Ok(())
 }
 

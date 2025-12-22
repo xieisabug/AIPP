@@ -370,12 +370,9 @@ pub async fn ask_ai(
     Ok(AiResponse { conversation_id, request_prompt_result_with_context })
 }
 
-#[tauri::command]
-#[instrument(skip(app_handle, _state, _feature_config_state, window, tool_result), fields(conversation_id = %conversation_id, assistant_id, tool_call_id))]
-pub async fn tool_result_continue_ask_ai(
+#[instrument(skip(app_handle, window, tool_result), fields(conversation_id = %conversation_id, assistant_id, tool_call_id))]
+pub(crate) async fn tool_result_continue_ask_ai_impl(
     app_handle: tauri::AppHandle,
-    _state: State<'_, AppState>,
-    _feature_config_state: State<'_, FeatureConfigState>,
     window: tauri::Window,
     conversation_id: String,
     assistant_id: i64,
@@ -781,6 +778,29 @@ pub async fn tool_result_continue_ask_ai(
         conversation_id: conversation_id_i64,
         request_prompt_result_with_context: format!("Tool result: {}", tool_result),
     })
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle, _state, _feature_config_state, window, tool_result), fields(conversation_id = %conversation_id, assistant_id, tool_call_id))]
+pub async fn tool_result_continue_ask_ai(
+    app_handle: tauri::AppHandle,
+    _state: State<'_, AppState>,
+    _feature_config_state: State<'_, FeatureConfigState>,
+    window: tauri::Window,
+    conversation_id: String,
+    assistant_id: i64,
+    tool_call_id: String,
+    tool_result: String,
+) -> Result<AiResponse, AppError> {
+    tool_result_continue_ask_ai_impl(
+        app_handle,
+        window,
+        conversation_id,
+        assistant_id,
+        tool_call_id,
+        tool_result,
+    )
+    .await
 }
 
 #[tauri::command]

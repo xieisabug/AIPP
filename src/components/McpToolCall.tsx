@@ -36,7 +36,7 @@ const JsonDisplay: React.FC<{ content: string; maxHeight?: string; className?: s
     }, [content]);
 
     return (
-        <div className={`border rounded ${className}`} style={{ maxHeight: maxHeight }}>
+        <div className={`${className}`} style={{ maxHeight: maxHeight }}>
             <ScrollArea>
                 <pre className="text-xs font-mono p-2 whitespace-pre-wrap break-words mt-0 mb-0">{formattedJson}</pre>
             </ScrollArea>
@@ -251,7 +251,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             return (
                 <div className="mt-2">
                     <span className="text-xs text-muted-foreground">结果:</span>
-                    <div className="border rounded mt-1">
+                    <div className="mt-1">
                         <ScrollArea className="h-72">
                             <pre className="whitespace-pre-wrap break-words mt-0 mb-0">{executionResult}</pre>
                         </ScrollArea>
@@ -265,7 +265,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 <div className="mt-2">
                     <span className="text-xs text-muted-foreground">错误:</span>
                     <div
-                        className="border rounded mt-1"
+                        className="mt-1"
                         style={{ height: fixedHeight ? "200px" : "auto", maxHeight: fixedHeight ? "none" : "200px" }}
                     >
                         <ScrollArea className="h-full w-full">
