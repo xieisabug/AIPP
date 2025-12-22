@@ -219,6 +219,9 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
     // Sub-task related props comparison
     if (prevProps.conversationId !== nextProps.conversationId) return false;
 
+    // Re-render when MCP tool call state map updates so tool status can refresh
+    if (prevProps.mcpToolCallStates !== nextProps.mcpToolCallStates) return false;
+
     return true;
 };
 
