@@ -25,7 +25,6 @@ use rmcp::{
     ServiceExt,
 };
 use serde_json::Map as JsonMap;
-use tauri::Emitter;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -155,14 +154,6 @@ fn build_mcp_tool_call_update_event(tool_call: &MCPToolCall) -> ConversationEven
     }
 }
 
-fn emit_mcp_tool_call_update(window: &tauri::Window, tool_call: &MCPToolCall) {
-    let update_event = build_mcp_tool_call_update_event(tool_call);
-    let _ = window.emit(
-        format!("conversation_event_{}", tool_call.conversation_id).as_str(),
-        update_event,
-    );
-}
-
 fn broadcast_mcp_tool_call_update(app_handle: &tauri::AppHandle, tool_call: &MCPToolCall) {
     let update_event = build_mcp_tool_call_update_event(tool_call);
     send_conversation_event_to_chat_windows(app_handle, tool_call.conversation_id, update_event);
@@ -213,7 +204,8 @@ async fn handle_tool_execution_result(
             tool_call.result = Some(result.clone());
             tool_call.error = None;
 
-            emit_mcp_tool_call_update(window, &tool_call);
+            // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
+            broadcast_mcp_tool_call_update(app_handle, &tool_call);
 
             // 处理对话继续逻辑
             if let Err(e) = handle_tool_success_continuation(
@@ -240,7 +232,8 @@ async fn handle_tool_execution_result(
             tool_call.error = Some(error);
             tool_call.result = None;
 
-            emit_mcp_tool_call_update(window, &tool_call);
+            // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
+            broadcast_mcp_tool_call_update(app_handle, &tool_call);
         }
     }
 
@@ -312,6 +305,10 @@ pub async fn create_mcp_tool_call(
 
     let result = tool_call.map_err(|e| format!("创建MCP工具调用失败: {}", e))?;
 
+    // 创建后立即广播 pending 状态事件，确保前端能及时显示工具调用
+    broadcast_mcp_tool_call_update(&app_handle, &result);
+    debug!(call_id = result.id, status = %result.status, "broadcasted pending status event after creation");
+
     Ok(result)
 }
 
@@ -382,11 +379,12 @@ pub async fn execute_mcp_tool_call(
         return Ok(current);
     }
 
-    // 重新加载工具调用以获取更新后的状态并发送事件
+    // 重新加载工具调用以获取更新后的状态并广播事件
     tool_call =
         db.get_mcp_tool_call(call_id).map_err(|e| format!("重新加载工具调用信息失败: {}", e))?;
-    emit_mcp_tool_call_update(&window, &tool_call);
-    debug!(call_id=call_id, status=%tool_call.status, "emitted executing status event");
+    // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
+    broadcast_mcp_tool_call_update(&app_handle, &tool_call);
+    debug!(call_id=call_id, status=%tool_call.status, "broadcasted executing status event");
 
     // 执行工具
     let cancel_token = register_cancel_token(call_id).await;

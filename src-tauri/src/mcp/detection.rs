@@ -1,4 +1,7 @@
+use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
 use crate::db::conversation_db::Repository;
+use crate::mcp::mcp_db::MCPToolCall;
+use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use tauri::Manager; // for AppHandle.state
@@ -9,6 +12,31 @@ use tracing::{debug, error, instrument, warn};
 type ConversationMcpState = Arc<Mutex<HashMap<i64, u32>>>;
 
 static CONVERSATION_MCP_DEPTH: OnceLock<ConversationMcpState> = OnceLock::new();
+
+/// 构建并广播 MCP 工具调用状态更新事件
+fn broadcast_mcp_tool_call_update(app_handle: &tauri::AppHandle, tool_call: &MCPToolCall) {
+    let parse_ts = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap_or_else(|_| chrono::Utc::now().into())
+            .with_timezone(&chrono::Utc)
+    };
+
+    let update_event = ConversationEvent {
+        r#type: "mcp_tool_call_update".to_string(),
+        data: serde_json::to_value(MCPToolCallUpdateEvent {
+            call_id: tool_call.id,
+            conversation_id: tool_call.conversation_id,
+            status: tool_call.status.clone(),
+            result: tool_call.result.clone(),
+            error: tool_call.error.clone(),
+            started_time: tool_call.started_time.as_deref().map(parse_ts),
+            finished_time: tool_call.finished_time.as_deref().map(parse_ts),
+        })
+        .unwrap(),
+    };
+
+    send_conversation_event_to_chat_windows(app_handle, tool_call.conversation_id, update_event);
+}
 
 const MAX_MCP_RECURSION_DEPTH: u32 = 3;
 
@@ -69,6 +97,9 @@ pub async fn detect_and_process_mcp_calls_for_subtask(
                 None,
             )?;
 
+            // 广播 pending 状态事件，确保前端及时显示工具调用
+            broadcast_mcp_tool_call_update(app_handle, &tool_call);
+
             // 直接执行工具调用（复用现有执行逻辑）
             let execution_result = crate::mcp::execution_api::execute_tool_by_transport(
                 app_handle,
@@ -100,6 +131,8 @@ pub async fn detect_and_process_mcp_calls_for_subtask(
                     updated.status = "success".to_string();
                     updated.result = Some(result);
                     updated.error = None;
+                    // 广播 success 状态事件
+                    broadcast_mcp_tool_call_update(app_handle, &updated);
                     executed_calls.push(updated);
                 }
                 Err(error) => {
@@ -127,6 +160,8 @@ pub async fn detect_and_process_mcp_calls_for_subtask(
                     updated.status = "failed".to_string();
                     updated.result = None;
                     updated.error = Some(truncated_chain);
+                    // 广播 failed 状态事件
+                    broadcast_mcp_tool_call_update(app_handle, &updated);
                     executed_calls.push(updated);
                 }
             }
