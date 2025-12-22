@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Message, StreamEvent, MCPToolCallUpdateEvent } from "../data/Conversation";
-import { usePerformanceMonitor } from "../hooks/usePerformanceMonitor";
 import { useMcpToolCallProcessor } from "../hooks/useMcpToolCallProcessor";
 import { useMarkdownConfig } from "../hooks/useMarkdownConfig";
 import { useCustomTagParser } from "../hooks/useCustomTagParser";
@@ -26,20 +25,6 @@ const ReasoningMessage = React.memo(
         conversationId,
         mcpToolCallStates,
     }: ReasoningMessageProps) => {
-        // 性能监控
-        usePerformanceMonitor(
-            "ReasoningMessage",
-            [
-                message.id,
-                message.start_time,
-                message.finish_time,
-                streamEvent?.is_done,
-                isReasoningExpanded,
-                displayedContent,
-            ],
-            false,
-        );
-
         const [currentTime, setCurrentTime] = useState(new Date());
 
         // 使用 start_time 和 finish_time 来判断思考状态，也考虑 streamEvent 的状态

@@ -8,7 +8,6 @@ import RawTextRenderer from "./RawTextRenderer";
 import { ShineBorder } from "./magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { Message, StreamEvent, MCPToolCallUpdateEvent } from "../data/Conversation";
-import { usePerformanceMonitor, measureSync } from "../hooks/usePerformanceMonitor";
 import { useCopyHandler } from "../hooks/useCopyHandler";
 import { useCustomTagParser } from "../hooks/useCustomTagParser";
 import { useMarkdownConfig } from "../hooks/useMarkdownConfig";
@@ -59,12 +58,6 @@ const MessageItem = React.memo<MessageItemProps>(
             setIsDetailDialogOpen(false);
             setSelectedSubTask(null);
         };
-        // 性能监控
-        usePerformanceMonitor(
-            "MessageItem",
-            [message.id, message.content, message.message_type, streamEvent?.is_done, isReasoningExpanded],
-            false
-        );
 
         const { copyIconState, handleCopy } = useCopyHandler(message.content);
         const { parseCustomTags } = useCustomTagParser();
@@ -87,39 +80,34 @@ const MessageItem = React.memo<MessageItemProps>(
 
         // 处理自定义标签解析
         const markdownContent = useMemo(
-            () => measureSync(`markdown-parsing-${message.id}`, () => parseCustomTags(message.content), true),
-            [message.content, parseCustomTags, message.id]
+            () => parseCustomTags(message.content),
+            [message.content, parseCustomTags]
         );
 
         // 渲染内容 - 根据用户消息类型和配置选择渲染方式
         const contentElement = useMemo(
-            () =>
-                measureSync(
-                    `content-render-${message.id}`,
-                    () => {
-                        // 如果是用户消息且禁用了 Markdown 渲染，使用 RawTextRenderer
-                        if (isUserMessage && !isUserMessageMarkdownEnabled) {
-                            return <RawTextRenderer content={markdownContent} />;
-                        }
+            () => {
+                // 如果是用户消息且禁用了 Markdown 渲染，使用 RawTextRenderer
+                if (isUserMessage && !isUserMessageMarkdownEnabled) {
+                    return <RawTextRenderer content={markdownContent} />;
+                }
 
-                        // 否则使用统一的 UnifiedMarkdown 渲染
-                        const element = (
-                            <UnifiedMarkdown
-                                // 使用 noProseWrapper，避免嵌套重复 prose 容器
-                                noProseWrapper
-                                onCodeRun={onCodeRun}
-                                isStreaming={isStreaming}
-                            >
-                                {markdownContent}
-                            </UnifiedMarkdown>
-                        );
+                // 否则使用统一的 UnifiedMarkdown 渲染
+                const element = (
+                    <UnifiedMarkdown
+                        // 使用 noProseWrapper，避免嵌套重复 prose 容器
+                        noProseWrapper
+                        onCodeRun={onCodeRun}
+                        isStreaming={isStreaming}
+                    >
+                        {markdownContent}
+                    </UnifiedMarkdown>
+                );
 
-                        // MCP 工具调用后处理
-                        return processContent(markdownContent, element);
-                    },
-                    true
-                ),
-            [markdownContent, onCodeRun, processContent, message.id, isUserMessage, isUserMessageMarkdownEnabled]
+                // MCP 工具调用后处理
+                return processContent(markdownContent, element);
+            },
+            [markdownContent, onCodeRun, processContent, isUserMessage, isUserMessageMarkdownEnabled]
         );
 
         // 早期返回：reasoning 类型消息

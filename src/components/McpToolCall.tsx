@@ -99,7 +99,20 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
 
     // 监听全局MCP状态变化
     useEffect(() => {
-        if (mcpToolCallStates && toolCallId && mcpToolCallStates.has(toolCallId)) {
+        if (!mcpToolCallStates) return;
+
+        if (!toolCallId) {
+            console.log("[MCP] McpToolCall missing toolCallId; waiting for resolution", {
+                conversationId,
+                messageId,
+                serverName,
+                toolName,
+                knownIds: Array.from(mcpToolCallStates.keys()),
+            });
+            return;
+        }
+
+        if (mcpToolCallStates.has(toolCallId)) {
             const globalState = mcpToolCallStates.get(toolCallId)!;
             console.log(`McpToolCall ${toolCallId} received global state update:`, globalState);
 
@@ -122,8 +135,12 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     setExecutionResult(null);
                     break;
             }
+        } else {
+            console.log(`[MCP] McpToolCall ${toolCallId} no match in map`, {
+                mapKeys: Array.from(mcpToolCallStates.keys()),
+            });
         }
-    }, [mcpToolCallStates, toolCallId]);
+    }, [mcpToolCallStates, toolCallId, conversationId, messageId, serverName, toolName]);
 
     // 检查执行状态
     const isFailed = executionState === "failed";
@@ -175,6 +192,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     );
 
                     if (matchingCall) {
+                        console.log("[MCP] matched tool call by message/server/tool/parameters", matchingCall);
                         setToolCallId(matchingCall.id);
 
                         if (matchingCall.status === "success" && matchingCall.result) {
@@ -186,6 +204,15 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         } else if (matchingCall.status === "executing") {
                             setExecutionState("executing");
                         }
+                    } else {
+                        console.log("[MCP] no matching tool call found for message", {
+                            conversationId,
+                            messageId,
+                            serverName,
+                            toolName,
+                            parameters,
+                            allCallIds: allCalls.map((c) => ({ id: c.id, message_id: c.message_id, status: c.status })),
+                        });
                     }
                 } catch (error) {
                     console.warn("Failed to find existing tool call:", error);

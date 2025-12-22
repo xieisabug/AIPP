@@ -5,6 +5,7 @@ import {
     StreamEvent,
     ConversationEvent,
     MessageUpdateEvent,
+    MessageTypeEndEvent,
     GroupMergeEvent,
     MCPToolCallUpdateEvent,
     ConversationCancelEvent,
@@ -104,6 +105,64 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     useEffect(() => {
         updateShiningMessages();
     }, [updateShiningMessages]);
+
+    const applyMcpToolCalls = useCallback((calls: MCPToolCall[]) => {
+        const stateMap = new Map<number, MCPToolCallUpdateEvent>();
+        const activeSet = new Set<number>();
+
+        calls.forEach((call) => {
+            const update: MCPToolCallUpdateEvent = {
+                call_id: call.id,
+                conversation_id: call.conversation_id,
+                status: call.status,
+                result: call.result,
+                error: call.error,
+                started_time: call.started_time ? new Date(call.started_time) : undefined,
+                finished_time: call.finished_time ? new Date(call.finished_time) : undefined,
+            };
+            stateMap.set(call.id, update);
+            if (call.status === "executing" || call.status === "pending") {
+                activeSet.add(call.id);
+            }
+        });
+
+        console.log(
+            `[MCP] applyMcpToolCalls -> total=${calls.length}, active=${activeSet.size}`,
+            { ids: calls.map((c) => c.id) },
+        );
+        setMCPToolCallStates(stateMap);
+        setActiveMcpCallIds(activeSet);
+    }, []);
+
+    const refreshMcpToolCalls = useCallback(
+        (cancelRef?: { cancelled: boolean }) => {
+            if (!options.conversationId) {
+                return;
+            }
+
+            const conversationIdNum = Number(options.conversationId);
+            if (Number.isNaN(conversationIdNum)) {
+                return;
+            }
+
+            invoke<MCPToolCall[]>("get_mcp_tool_calls_by_conversation", {
+                conversationId: conversationIdNum,
+            })
+                .then((calls) => {
+                    if (cancelRef?.cancelled) return;
+                    console.log(
+                        `[MCP] refreshMcpToolCalls success for conversation ${conversationIdNum}`,
+                        { callIds: calls.map((c) => c.id), statuses: calls.map((c) => c.status) },
+                    );
+                    applyMcpToolCalls(calls);
+                })
+                .catch((error) => {
+                    if (cancelRef?.cancelled) return;
+                    console.warn("Failed to preload MCP tool calls", error);
+                });
+        },
+        [options.conversationId, applyMcpToolCalls],
+    );
 
     // 统一的事件处理函数
     const handleConversationEvent = useCallback(
@@ -262,10 +321,21 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
                 // 调用外部的组合并处理函数
                 callbacksRef.current.onGroupMerge?.(groupMergeData);
+            } else if (conversationEvent.type === "message_type_end") {
+                const typeEndData = conversationEvent.data as MessageTypeEndEvent;
+                if (
+                    typeEndData.message_type === "response" ||
+                    typeEndData.message_type === "reasoning"
+                ) {
+                    refreshMcpToolCalls();
+                }
             } else if (conversationEvent.type === "mcp_tool_call_update") {
                 // 处理MCP工具调用状态更新事件
                 const mcpUpdateData = conversationEvent.data as MCPToolCallUpdateEvent;
                 console.log("Received mcp_tool_call_update event:", mcpUpdateData);
+                console.log(
+                    `[MCP] current map size=${mcpToolCallStates.size}, active=${activeMcpCallIds.size}`,
+                );
 
                 // 更新MCP工具调用状态
                 setMCPToolCallStates((prev) => {
@@ -319,10 +389,10 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 setPendingUserMessageId(null);
 
                 // 通知外部响应已完成（即便没有 response chunk）
-                callbacksRef.current.onAiResponseComplete?.();
+        callbacksRef.current.onAiResponseComplete?.();
             }
         },
-        [], // 不再依赖 options，因为我们使用 callbacksRef
+        [refreshMcpToolCalls],
     );
 
     // 设置和清理事件监听
@@ -379,48 +449,13 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             return;
         }
 
-        const conversationIdNum = Number(options.conversationId);
-        if (Number.isNaN(conversationIdNum)) {
-            return;
-        }
-
-        let cancelled = false;
-        invoke<MCPToolCall[]>("get_mcp_tool_calls_by_conversation", {
-            conversationId: conversationIdNum,
-        })
-            .then((calls) => {
-                if (cancelled) return;
-
-                const stateMap = new Map<number, MCPToolCallUpdateEvent>();
-                const activeSet = new Set<number>();
-
-                calls.forEach((call) => {
-                    const update: MCPToolCallUpdateEvent = {
-                        call_id: call.id,
-                        conversation_id: call.conversation_id,
-                        status: call.status,
-                        result: call.result,
-                        error: call.error,
-                        started_time: call.started_time ? new Date(call.started_time) : undefined,
-                        finished_time: call.finished_time ? new Date(call.finished_time) : undefined,
-                    };
-                    stateMap.set(call.id, update);
-                    if (call.status === "executing" || call.status === "pending") {
-                        activeSet.add(call.id);
-                    }
-                });
-
-                setMCPToolCallStates(stateMap);
-                setActiveMcpCallIds(activeSet);
-            })
-            .catch((error) => {
-                console.warn("Failed to preload MCP tool calls", error);
-            });
+        const cancelRef = { cancelled: false };
+        refreshMcpToolCalls(cancelRef);
 
         return () => {
-            cancelled = true;
+            cancelRef.cancelled = true;
         };
-    }, [options.conversationId]);
+    }, [options.conversationId, refreshMcpToolCalls]);
 
     // 清理函数
     const clearStreamingMessages = useCallback(() => {
