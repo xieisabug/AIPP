@@ -2,7 +2,6 @@ import React, { useState, useCallback, useMemo, useEffect } from "react";
 import { Play, Loader2, CheckCircle, XCircle, Blocks, ChevronDown, ChevronUp, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { ShineBorder } from "@/components/magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { invoke } from "@tauri-apps/api/core";
@@ -36,10 +35,8 @@ const JsonDisplay: React.FC<{ content: string; maxHeight?: string; className?: s
     }, [content]);
 
     return (
-        <div className={`${className}`} style={{ maxHeight: maxHeight }}>
-            <ScrollArea>
-                <pre className="text-xs font-mono p-2 whitespace-pre-wrap break-words mt-0 mb-0">{formattedJson}</pre>
-            </ScrollArea>
+        <div className={`${className} overflow-auto`} style={{ maxHeight: maxHeight }}>
+            <pre className="text-xs font-mono p-2 whitespace-pre-wrap break-words mt-0 mb-0">{formattedJson}</pre>
         </div>
     );
 };
@@ -251,10 +248,8 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             return (
                 <div className="mt-2">
                     <span className="text-xs text-muted-foreground">结果:</span>
-                    <div className="mt-1">
-                        <ScrollArea className="h-72">
-                            <pre className="whitespace-pre-wrap break-words mt-0 mb-0">{executionResult}</pre>
-                        </ScrollArea>
+                    <div className="mt-1 h-72 overflow-auto">
+                        <pre className="whitespace-pre-wrap break-words mt-0 mb-0">{executionResult}</pre>
                     </div>
                 </div>
             );
@@ -265,16 +260,14 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 <div className="mt-2">
                     <span className="text-xs text-muted-foreground">错误:</span>
                     <div
-                        className="mt-1"
+                        className="mt-1 overflow-auto"
                         style={{ height: fixedHeight ? "200px" : "auto", maxHeight: fixedHeight ? "none" : "200px" }}
                     >
-                        <ScrollArea className="h-full w-full">
-                            <div className="text-xs font-mono bg-muted p-2">
-                                <div className="text-red-600 whitespace-pre-wrap break-words">
-                                    <strong>错误:</strong> {executionError}
-                                </div>
+                        <div className="text-xs font-mono bg-muted p-2">
+                            <div className="text-red-600 whitespace-pre-wrap break-words">
+                                <strong>错误:</strong> {executionError}
                             </div>
-                        </ScrollArea>
+                        </div>
                     </div>
                 </div>
             );
