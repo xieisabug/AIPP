@@ -144,7 +144,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
         Some("search") => vec![
             BuiltinToolInfo {
                 name: "search_web".into(),
-                description: "搜索网络内容，当进行事实性验证、实事信息、研究特定主题等情况时使用最佳。当搜索结果的简介有限但判断该结果有可用性时，请进一步通过fetch_url工具获取到页面完整的信息。".into(),
+                description: "搜索网络内容，当进行事实性验证、实事信息、研究特定主题等情况时使用最佳。当搜索结果没有可用时，可以尝试更改关键字进行搜索；当搜索结果的简介有限但判断该结果有可用性时，请进一步通过fetch_url工具获取到页面完整的信息。".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -164,7 +164,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "fetch_url".into(),
-                description: "获取网页内容，支持多种结果格式。可以返回原始HTML或Markdown格式的网页内容。".into(),
+                description: "获取网页内容，支持多种结果格式。可以返回Markdown格式的网页内容。".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
