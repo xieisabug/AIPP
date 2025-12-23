@@ -68,7 +68,7 @@ function ConfigWindow() {
 
     // 监听窗口隐藏事件，重置状态准备下次打开
     useEffect(() => {
-        const unlistenHidden = listen("window-hidden", () => {
+        const unlistenHidden = listen("config-window-hidden", () => {
             console.log("ConfigWindow hidden, resetting state");
             // 重置到默认菜单
             setSelectedMenu("llm-provider-config");

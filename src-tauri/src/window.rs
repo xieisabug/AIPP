@@ -151,7 +151,7 @@ fn create_ask_window_with_visibility(app: &AppHandle, visible: bool) {
                         api.prevent_close();
                         window_clone.hide().unwrap();
                         // 发送窗口隐藏事件，让前端重置状态
-                        let _ = app_handle.emit_to("ask", "window-hidden", ());
+                        let _ = app_handle.emit_to("ask", "ask-window-hidden", ());
                     }
                 });
             }
@@ -204,7 +204,7 @@ fn create_config_window_with_visibility(app: &AppHandle, visible: bool) {
                         api.prevent_close();
                         window_clone.hide().unwrap();
                         // 发送窗口隐藏事件，让前端重置状态
-                        let _ = app_handle.emit_to("config", "window-hidden", ());
+                        let _ = app_handle.emit_to("config", "config-window-hidden", ());
                     }
                 });
             }
@@ -300,7 +300,7 @@ fn create_chat_ui_window_with_visibility(app: &AppHandle, visible: bool) {
                         api.prevent_close();
                         window_clone.hide().unwrap();
                         // 发送窗口隐藏事件，让前端重置状态
-                        let _ = app_handle.emit_to("chat_ui", "window-hidden", ());
+                        let _ = app_handle.emit_to("chat_ui", "chat-ui-window-hidden", ());
                     }
                 });
                 // 只有在可见时才最大化

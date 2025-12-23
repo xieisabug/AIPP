@@ -212,7 +212,7 @@ function AskWindow() {
         });
 
         // 监听窗口隐藏事件，重置状态准备下次打开
-        const unlistenHidden = listen("window-hidden", () => {
+        const unlistenHidden = listen("ask-window-hidden", () => {
             console.log("AskWindow hidden, resetting state");
             setQuery("");
             setResponse("");
