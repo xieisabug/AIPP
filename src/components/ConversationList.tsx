@@ -148,9 +148,10 @@ const ConversationList = memo(function ConversationList({
     }, [hasMoreData, isLoadingMore, loadNextPage]);
 
     // 当 conversationId 不在当前列表中时，自动重新拉取列表。
-    const fetchRetryingRef = useRef(false);
+    const lastFetchConversationIdRef = useRef<string | null>(null);
     useEffect(() => {
         if (!conversationId) {
+            lastFetchConversationIdRef.current = null;
             return;
         }
 
@@ -158,21 +159,34 @@ const ConversationList = memo(function ConversationList({
             (conversation) => conversation.id.toString() === conversationId,
         );
 
-        if (!exists && !fetchRetryingRef.current) {
+        if (exists) {
+            lastFetchConversationIdRef.current = null;
+            return;
+        }
+
+        if (lastFetchConversationIdRef.current === conversationId) {
+            return;
+        }
+
+        lastFetchConversationIdRef.current = conversationId;
+
+        const fetchConversations = async () => {
             console.log(
                 "ConversationList: 选中的 conversationId 不在列表中，重新获取列表...",
                 conversationId,
             );
-            fetchRetryingRef.current = true;
-            listConversations(1, 100).then((c) => {
+            try {
+                const c = await listConversations(1, 100);
                 setConversations(c);
                 setCurrentPage(1);
                 setHasMoreData(c.length === 100);
-                // 获取完毕后重置标记，防止死循环
-                fetchRetryingRef.current = false;
-            });
-        }
-    }, [conversationId, conversations]);
+            } catch (error) {
+                console.error("ConversationList: reload conversations failed", error);
+            }
+        };
+
+        fetchConversations();
+    }, [conversationId, conversations, listConversations]);
 
     const [titleEditDialogIsOpen, setTitleEditDialogIsOpen] =
         useState<boolean>(false);
@@ -249,11 +263,20 @@ const ConversationList = memo(function ConversationList({
             const deletedConversationId = event.payload as number;
 
             // 从列表中移除被删除的对话
-            setConversations((prevConversations) =>
-                prevConversations.filter(
-                    (conversation) => conversation.id !== deletedConversationId
-                )
-            );
+            setConversations((prevConversations) => {
+                const updated = prevConversations.filter(
+                    (conversation) => conversation.id !== deletedConversationId,
+                );
+
+                if (conversationId === deletedConversationId.toString()) {
+                    const nextId = updated[0]?.id?.toString() ?? "";
+                    if (nextId !== conversationId) {
+                        onSelectConversation(nextId);
+                    }
+                }
+
+                return updated;
+            });
         });
 
         return () => {
@@ -261,7 +284,7 @@ const ConversationList = memo(function ConversationList({
                 unsubscribe.then((f) => f());
             }
         };
-    }, []);
+    }, [conversationId, onSelectConversation]);
 
     const [deleteDialogIsOpen, setDeleteDialogIsOpen] =
         useState<boolean>(false);
@@ -340,6 +363,13 @@ const ConversationList = memo(function ConversationList({
                                 setConversations(conversations);
                                 setCurrentPage(1);
                                 setHasMoreData(conversations.length === 100);
+                                if (deleteConversationId === conversationId) {
+                                    const nextId =
+                                        conversations[0]?.id?.toString() ?? "";
+                                    if (nextId !== conversationId) {
+                                        onSelectConversation(nextId);
+                                    }
+                                }
                             } catch (error) {
                                 console.error(
                                     "Failed to reload conversations after delete:",
