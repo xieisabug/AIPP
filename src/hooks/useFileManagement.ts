@@ -20,6 +20,10 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
         setFileInfoList(null);
     }, []);
 
+    const isSupportedFile = useCallback((file: File) => {
+        return file.type.startsWith("image/") || file.type === "text/plain";
+    }, []);
+
     const getAttachmentType = useCallback((fileType: string) => {
         if (fileType.startsWith("image/")) {
             return AttachmentType.Image;
@@ -29,6 +33,67 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
             return AttachmentType.Text;
         }
     }, []);
+
+    const processFiles = useCallback(
+        async (files: File[]) => {
+            const filePromises = files.map(
+                (file) =>
+                    new Promise<FileInfo>((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onload = async (event) => {
+                            const fileContent = event.target?.result;
+                            if (typeof fileContent !== "string") {
+                                reject(new Error("Failed to read file content"));
+                                return;
+                            }
+
+                            let newFile: FileInfo = {
+                                id: -1,
+                                name: file.name,
+                                path: file.name,
+                                type: getAttachmentType(file.type),
+                                thumbnail:
+                                    file.type.startsWith("image/") ? fileContent : undefined,
+                            };
+
+                            try {
+                                const res = await invoke<AddAttachmentResponse>(
+                                    "add_attachment",
+                                    {
+                                        fileContent,
+                                        fileName: file.name,
+                                        attachmentType: newFile.type,
+                                    },
+                                );
+                                newFile.id = res.attachment_id;
+                            } catch (error) {
+                                toast.error("文件上传失败: " + error);
+                            }
+
+                            resolve(newFile);
+                        };
+                        reader.onerror = reject;
+
+                        if (file.type.startsWith("image/")) {
+                            reader.readAsDataURL(file);
+                        } else {
+                            reader.readAsText(file);
+                        }
+                    }),
+            );
+
+            try {
+                const newFiles = await Promise.all(filePromises);
+                setFileInfoList((prev) => [...(prev || []), ...newFiles]);
+                if (onFileSelect) {
+                    onFileSelect(newFiles);
+                }
+            } catch (error) {
+                toast.error("文件处理失败: " + error);
+            }
+        },
+        [getAttachmentType, onFileSelect],
+    );
 
     const handleChooseFile = useCallback(async () => {
         console.log("trigger handleChooseFile");
@@ -100,83 +165,32 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
             if (e.clipboardData.files.length > 0) {
                 e.preventDefault(); // Prevent default paste behavior
                 const files = Array.from(e.clipboardData.files).filter(
-                    (file) =>
-                        file.type === "image/png" ||
-                        file.type === "image/jpeg" ||
-                        file.type === "image/gif" ||
-                        file.type === "text/plain",
+                    (file) => isSupportedFile(file),
                 );
 
                 console.log("paste files", files);
-
-                const filePromises = files.map(
-                    (file) =>
-                        new Promise<FileInfo>((resolve, reject) => {
-                            const reader = new FileReader();
-                            reader.onload = async (event) => {
-                                const fileContent = event.target?.result;
-                                if (fileContent) {
-                                    let newFile: FileInfo = {
-                                        id: -1,
-                                        name: file.name,
-                                        path: file.name,
-                                        type: getAttachmentType(file.type),
-                                        thumbnail:
-                                            typeof fileContent === "string"
-                                                ? fileContent
-                                                : undefined,
-                                    };
-
-                                    try {
-                                        console.log(
-                                            "trigger add attachment api",
-                                        );
-                                        const res =
-                                            await invoke<AddAttachmentResponse>(
-                                                "add_attachment",
-                                                {
-                                                    fileContent: fileContent,
-                                                    fileName: file.name,
-                                                    attachmentType:
-                                                        newFile.type,
-                                                },
-                                            );
-                                        newFile.id = res.attachment_id;
-                                    } catch (error) {
-                                        toast.error("文件上传失败: " + error);
-                                    }
-
-                                    resolve(newFile);
-                                } else {
-                                    reject(
-                                        new Error(
-                                            "Failed to read file content",
-                                        ),
-                                    );
-                                }
-                            };
-                            reader.onerror = reject;
-
-                            if (file.type.startsWith("image/")) {
-                                reader.readAsDataURL(file);
-                            } else {
-                                reader.readAsText(file);
-                            }
-                        }),
-                );
-
-                try {
-                    const newFiles = await Promise.all(filePromises);
-                    setFileInfoList((prev) => [...(prev || []), ...newFiles]);
-                    if (onFileSelect) {
-                        onFileSelect(newFiles);
-                    }
-                } catch (error) {
-                    toast.error("文件处理失败: " + error);
+                if (files.length === 0) {
+                    toast.error("暂不支持该文件类型");
+                    return;
                 }
+
+                await processFiles(files);
             }
         },
-        [getAttachmentType, onFileSelect],
+        [isSupportedFile, processFiles],
+    );
+
+    const handleDropFiles = useCallback(
+        (files: File[]) => {
+            const supportedFiles = files.filter((file) => isSupportedFile(file));
+            if (supportedFiles.length === 0) {
+                toast.error("暂不支持该文件类型");
+                return;
+            }
+
+            void processFiles(supportedFiles);
+        },
+        [isSupportedFile, processFiles],
     );
 
     return {
@@ -185,6 +199,7 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
         handleChooseFile,
         handleDeleteFile,
         handlePaste,
+        handleDropFiles,
     };
 };
 

@@ -90,11 +90,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const { selectedText } = useTextSelection();
 
         // 文件管理
-        const { fileInfoList, clearFileInfoList, handleChooseFile, handleDeleteFile, handlePaste } =
+        const { fileInfoList, clearFileInfoList, handleChooseFile, handleDeleteFile, handlePaste, handleDropFiles } =
             useFileManagement();
 
         // 文件拖拽
-        const { isDragging, setIsDragging, dropRef } = useFileDropHandler(handleChooseFile);
+        const { isDragging, setIsDragging, dropRef } = useFileDropHandler(handleDropFiles);
 
         // Reasoning 展开状态
         const { reasoningExpandStates, toggleReasoningExpand } = useReasoningExpand();
@@ -591,7 +591,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     <div ref={messagesEndRef} />
                 </div>
 
-                {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleChooseFile} /> : null}
+                {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleDropFiles} /> : null}
 
                 <InputArea
                     ref={inputAreaRef}
