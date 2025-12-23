@@ -2,6 +2,7 @@ use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
 use crate::db::conversation_db::Repository;
 use crate::mcp::mcp_db::MCPToolCall;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use tauri::Manager; // for AppHandle.state
@@ -180,7 +181,7 @@ pub async fn detect_and_process_mcp_calls(
     conversation_id: i64,
     message_id: i64,
     content: &str,
-) -> Result<(), anyhow::Error> {
+) -> Result<Option<String>, anyhow::Error> {
     // Check conversation-level recursion depth to prevent infinite loops
     let depth_state = CONVERSATION_MCP_DEPTH.get_or_init(|| Arc::new(Mutex::new(HashMap::new())));
     let mut depth_map = depth_state.lock().await;
@@ -188,7 +189,7 @@ pub async fn detect_and_process_mcp_calls(
 
     if current_depth >= MAX_MCP_RECURSION_DEPTH {
         warn!(depth = current_depth, "MCP recursion depth limit reached, skipping detection");
-        return Ok(());
+        return Ok(None);
     }
 
     // Increment conversation-level recursion depth
@@ -197,6 +198,7 @@ pub async fn detect_and_process_mcp_calls(
 
     let result = async {
         let mcp_regex = regex::Regex::new(r"<mcp_tool_call>\s*<server_name>([^<]*)</server_name>\s*<tool_name>([^<]*)</tool_name>\s*<parameters>([\s\S]*?)</parameters>\s*</mcp_tool_call>").unwrap();
+        let mut updated_content: Option<String> = None;
 
         // 只处理第一个匹配的 MCP 调用，避免单次回复中执行多个工具
         if let Some(cap) = mcp_regex.captures_iter(content).next() {
@@ -239,6 +241,19 @@ pub async fn detect_and_process_mcp_calls(
             match create_result {
                 Ok(tool_call) => {
                     debug!(call_id = tool_call.id, "Created MCP tool call");
+
+                    // å°† MCP æ ‡ç­¾æ›¿æ¢ä¸ºåŒ…å« call_id çš„ UI æ³¨é‡Šï¼Œç¡®ä¿å‰ç«¯èƒ½æ­£ç¡®åŒ¹é…çŠ¶æ€?
+                    let ui_hint = format!(
+                        "<!-- MCP_TOOL_CALL:{} -->",
+                        json!({
+                            "server_name": server_name,
+                            "tool_name": tool_name,
+                            "parameters": parameters,
+                            "call_id": tool_call.id,
+                            "llm_call_id": tool_call.llm_call_id,
+                        })
+                    );
+                    updated_content = Some(mcp_regex.replacen(content, 1, ui_hint).to_string());
 
                     // 尝试根据助手配置自动执行（is_auto_run）
                     if let Ok(conversation_db) = crate::db::conversation_db::ConversationDatabase::new(app_handle) {
@@ -297,7 +312,7 @@ pub async fn detect_and_process_mcp_calls(
         } else {
             debug!("No MCP tool calls detected in message content");
         }
-        Ok(())
+        Ok(updated_content)
     }
     .await;
 

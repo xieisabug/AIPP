@@ -297,21 +297,32 @@ pub async fn handle_message_type_end(
 ) -> Result<(), anyhow::Error> {
     let end_time = chrono::Utc::now();
     let duration_ms = end_time.timestamp_millis() - start_time.timestamp_millis();
+    let mut final_content = content.to_string();
 
     conversation_db.message_repo()?.update_finish_time(message_id)?;
 
     // 对 response 和 reasoning 类型的消息都启用 MCP 检测
     if (message_type == "response" || message_type == "reasoning") && !skip_mcp_detection {
-        if let Err(e) = crate::mcp::detect_and_process_mcp_calls(
+        match crate::mcp::detect_and_process_mcp_calls(
             app_handle,
             window,
             conversation_id,
             message_id,
-            content,
+            &final_content,
         )
         .await
         {
-            warn!(error = %e, "failed to detect MCP calls");
+            Ok(updated_content) => {
+                if let Some(new_content) = updated_content {
+                    final_content = new_content;
+                    if let Ok(repo) = conversation_db.message_repo() {
+                        let _ = repo.update_content(message_id, &final_content);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to detect MCP calls");
+            }
         }
     }
 
@@ -332,7 +343,7 @@ pub async fn handle_message_type_end(
         data: serde_json::to_value(crate::api::ai::events::MessageUpdateEvent {
             message_id,
             message_type: message_type.to_string(),
-            content: content.to_string(),
+            content: final_content,
             is_done: true,
         })
         .unwrap(),
