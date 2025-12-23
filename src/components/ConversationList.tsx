@@ -47,20 +47,31 @@ const ConversationItem = memo(function ConversationItem({
                     <Button
                         variant="link"
                         className="invisible absolute right-2 top-4 group-hover:visible transition-opacity duration-200"
+                        onClick={(e) => {
+                            // 避免点击菜单按钮时触发列表项选择
+                            e.stopPropagation();
+                        }}
                     >
                         <MenuIcon className="fill-foreground" />
                     </Button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent>
+                <DropdownMenuContent
+                    onClick={(e) => {
+                        // 阻止菜单内部点击冒泡到列表项
+                        e.stopPropagation();
+                    }}
+                >
                     <DropdownMenuItem
-                        onClick={() => {
+                        onClick={(e) => {
+                            e.stopPropagation();
                             onOpenTitleEdit(conversation.id, conversation.name);
                         }}
                     >
                         修改标题
                     </DropdownMenuItem>
                     <DropdownMenuItem
-                        onClick={() => {
+                        onClick={(e) => {
+                            e.stopPropagation();
                             onOpenDelete(
                                 conversation.id.toString(),
                                 conversation.name,
