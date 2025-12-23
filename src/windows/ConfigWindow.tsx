@@ -1,5 +1,6 @@
 import React, { ReactNode, useEffect, useState } from "react";
 import ReactDOM from "react-dom";
+import { listen } from "@tauri-apps/api/event";
 import LLMProviderConfig from "../components/config/LLMProviderConfig";
 import AssistantConfig from "../components/config/AssistantConfig";
 import FeatureAssistantConfig from "../components/config/FeatureAssistantConfig";
@@ -64,6 +65,20 @@ function ConfigWindow() {
 
     const [selectedMenu, setSelectedMenu] = useState<string>("llm-provider-config");
     const [pluginList, setPluginList] = useState<any[]>([]);
+
+    // 监听窗口隐藏事件，重置状态准备下次打开
+    useEffect(() => {
+        const unlistenHidden = listen("window-hidden", () => {
+            console.log("ConfigWindow hidden, resetting state");
+            // 重置到默认菜单
+            setSelectedMenu("llm-provider-config");
+            setSidebarOpen(false);
+        });
+
+        return () => {
+            unlistenHidden.then((unlistenFn) => unlistenFn());
+        };
+    }, []);
 
     useEffect(() => {
         // 为可能使用 UMD 构建的插件提供全局 React/ReactDOM（与 PluginWindow 保持一致）

@@ -1,7 +1,7 @@
 use crate::artifacts::artifacts_db::ArtifactCollection;
 use serde::{Deserialize, Serialize};
 use tauri::webview::DownloadEvent;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri::{LogicalPosition, LogicalSize};
 use tauri_plugin_notification::NotificationExt;
 use tracing::{debug, error, info, warn};
@@ -109,6 +109,14 @@ fn get_window_size_and_position(
 }
 
 pub fn create_ask_window(app: &AppHandle) {
+    create_ask_window_with_visibility(app, true);
+}
+
+pub fn create_ask_window_hidden(app: &AppHandle) {
+    create_ask_window_with_visibility(app, false);
+}
+
+fn create_ask_window_with_visibility(app: &AppHandle, visible: bool) {
     let t_build_total = std::time::Instant::now();
 
     #[cfg(desktop)]
@@ -119,6 +127,7 @@ pub fn create_ask_window(app: &AppHandle) {
             .fullscreen(false)
             .resizable(false)
             .decorations(false)
+            .visible(visible)
             .center();
 
     #[cfg(desktop)]
@@ -132,13 +141,17 @@ pub fn create_ask_window(app: &AppHandle) {
     match window_builder.build() {
         Ok(window) => {
             let dt = t_build_total.elapsed().as_millis();
-            info!(elapsed_ms=%dt, "Ask window built (first creation)");
+            info!(elapsed_ms=%dt, visible=%visible, "Ask window built");
             #[cfg(desktop)]
             {
                 let window_clone = window.clone();
+                let app_handle = app.clone();
                 window.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { .. } = event {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
                         window_clone.hide().unwrap();
+                        // 发送窗口隐藏事件，让前端重置状态
+                        let _ = app_handle.emit_to("ask", "window-hidden", ());
                     }
                 });
             }
@@ -148,6 +161,14 @@ pub fn create_ask_window(app: &AppHandle) {
 }
 
 pub fn create_config_window(app: &AppHandle) {
+    create_config_window_with_visibility(app, true);
+}
+
+pub fn create_config_window_hidden(app: &AppHandle) {
+    create_config_window_with_visibility(app, false);
+}
+
+fn create_config_window_with_visibility(app: &AppHandle, visible: bool) {
     #[cfg(desktop)]
     {
         let (window_size, window_position) =
@@ -159,6 +180,7 @@ pub fn create_config_window(app: &AppHandle) {
                 .inner_size(window_size.width, window_size.height)
                 .fullscreen(false)
                 .resizable(true)
+                .visible(visible)
                 .decorations(true);
 
         // macOS 若仍有偏差可考虑额外使用 parent(&window) 方案
@@ -174,10 +196,15 @@ pub fn create_config_window(app: &AppHandle) {
 
         match window_builder.build() {
             Ok(window) => {
+                info!(visible=%visible, "Config window built");
                 let window_clone = window.clone();
+                let app_handle = app.clone();
                 window.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { .. } = event {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
                         window_clone.hide().unwrap();
+                        // 发送窗口隐藏事件，让前端重置状态
+                        let _ = app_handle.emit_to("config", "window-hidden", ());
                     }
                 });
             }
@@ -195,6 +222,14 @@ pub fn create_config_window(app: &AppHandle) {
 }
 
 pub fn create_chat_ui_window(app: &AppHandle) {
+    create_chat_ui_window_with_visibility(app, true);
+}
+
+pub fn create_chat_ui_window_hidden(app: &AppHandle) {
+    create_chat_ui_window_with_visibility(app, false);
+}
+
+fn create_chat_ui_window_with_visibility(app: &AppHandle, visible: bool) {
     #[cfg(desktop)]
     {
         let (window_size, window_position) =
@@ -206,6 +241,7 @@ pub fn create_chat_ui_window(app: &AppHandle) {
                 .inner_size(window_size.width, window_size.height)
                 .fullscreen(false)
                 .resizable(true)
+                .visible(visible)
                 .decorations(true)
                 .on_download(|webview, event| {
                     let download_path =
@@ -256,13 +292,21 @@ pub fn create_chat_ui_window(app: &AppHandle) {
 
         match window_builder.build() {
             Ok(window) => {
+                info!(visible=%visible, "Chat UI window built");
                 let window_clone = window.clone();
+                let app_handle = app.clone();
                 window.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { .. } = event {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
                         window_clone.hide().unwrap();
+                        // 发送窗口隐藏事件，让前端重置状态
+                        let _ = app_handle.emit_to("chat_ui", "window-hidden", ());
                     }
                 });
-                let _ = window.maximize();
+                // 只有在可见时才最大化
+                if visible {
+                    let _ = window.maximize();
+                }
             }
             Err(e) => error!(error=%e, "Failed to build window"),
         }
@@ -387,12 +431,8 @@ pub async fn open_artifact_preview_window(app_handle: AppHandle) -> Result<(), S
 
 #[tauri::command]
 pub async fn open_config_window(app_handle: AppHandle) -> Result<(), String> {
-    if app_handle.get_webview_window("config").is_none() {
-        debug!("Creating window");
-
-        create_config_window(&app_handle)
-    } else if let Some(window) = app_handle.get_webview_window("config") {
-        debug!("Showing window");
+    if let Some(window) = app_handle.get_webview_window("config") {
+        debug!("Showing config window");
         #[cfg(desktop)]
         {
             if window.is_minimized().unwrap_or(false) {
@@ -401,28 +441,40 @@ pub async fn open_config_window(app_handle: AppHandle) -> Result<(), String> {
             window.show().unwrap();
             window.set_focus().unwrap();
         }
+    } else {
+        // 窗口不存在时创建（正常情况下不应该发生，因为启动时已预创建）
+        debug!("Creating config window (fallback)");
+        create_config_window(&app_handle);
     }
     Ok(())
 }
 
 #[tauri::command]
 pub async fn open_chat_ui_window(app_handle: AppHandle) -> Result<(), String> {
-    if app_handle.get_webview_window("chat_ui").is_none() {
-        debug!("Creating window");
-
-        create_chat_ui_window(&app_handle);
-        #[cfg(desktop)]
-        app_handle.get_webview_window("ask").unwrap().hide().unwrap();
-    } else if let Some(window) = app_handle.get_webview_window("chat_ui") {
-        debug!("Showing window");
+    if let Some(window) = app_handle.get_webview_window("chat_ui") {
+        debug!("Showing chat_ui window");
         #[cfg(desktop)]
         {
             if window.is_minimized().unwrap_or(false) {
                 window.unminimize().unwrap();
             }
+            // 首次显示时最大化
+            if !window.is_visible().unwrap_or(false) {
+                let _ = window.maximize();
+            }
             window.show().unwrap();
             window.set_focus().unwrap();
-            app_handle.get_webview_window("ask").unwrap().hide().unwrap();
+            if let Some(ask_window) = app_handle.get_webview_window("ask") {
+                let _ = ask_window.hide();
+            }
+        }
+    } else {
+        // 窗口不存在时创建（正常情况下不应该发生，因为启动时已预创建）
+        debug!("Creating chat_ui window (fallback)");
+        create_chat_ui_window(&app_handle);
+        #[cfg(desktop)]
+        if let Some(ask_window) = app_handle.get_webview_window("ask") {
+            let _ = ask_window.hide();
         }
     }
     Ok(())
@@ -457,35 +509,32 @@ struct ReactComponentPayload {
 pub fn handle_open_ask_window(app_handle: &AppHandle) {
     use chrono::Local;
     let t_handle = std::time::Instant::now();
-    let ask_window = app_handle.get_webview_window("ask");
 
-    match ask_window {
-        None => {
-            info!(ts=%Local::now().to_string(), "Creating ask window");
-            let t_create = std::time::Instant::now();
-            create_ask_window(app_handle);
-            let dt = t_create.elapsed().as_millis();
-            info!(elapsed_ms=%dt, "create_ask_window returned");
-        }
-        Some(window) => {
-            debug!(ts=%Local::now().to_string(), "Focusing ask window");
-            #[cfg(desktop)]
-            {
-                let t_focus = std::time::Instant::now();
-                if window.is_minimized().unwrap_or(false) {
-                    let t_unmin = std::time::Instant::now();
-                    window.unminimize().unwrap();
-                    info!(elapsed_ms=%t_unmin.elapsed().as_millis(), "ask window unminimize");
-                }
-                let t_show = std::time::Instant::now();
-                window.show().unwrap();
-                let show_ms = t_show.elapsed().as_millis();
-                let t_setf = std::time::Instant::now();
-                window.set_focus().unwrap();
-                let focus_ms = t_setf.elapsed().as_millis();
-                info!(show_ms=%show_ms, focus_ms=%focus_ms, total_ms=%t_focus.elapsed().as_millis(), "ask window show+focus timings");
+    if let Some(window) = app_handle.get_webview_window("ask") {
+        debug!(ts=%Local::now().to_string(), "Showing ask window");
+        #[cfg(desktop)]
+        {
+            let t_focus = std::time::Instant::now();
+            if window.is_minimized().unwrap_or(false) {
+                let t_unmin = std::time::Instant::now();
+                window.unminimize().unwrap();
+                info!(elapsed_ms=%t_unmin.elapsed().as_millis(), "ask window unminimize");
             }
+            let t_show = std::time::Instant::now();
+            window.show().unwrap();
+            let show_ms = t_show.elapsed().as_millis();
+            let t_setf = std::time::Instant::now();
+            window.set_focus().unwrap();
+            let focus_ms = t_setf.elapsed().as_millis();
+            info!(show_ms=%show_ms, focus_ms=%focus_ms, total_ms=%t_focus.elapsed().as_millis(), "ask window show+focus timings");
         }
+    } else {
+        // 窗口不存在时创建（正常情况下不应该发生，因为启动时已预创建）
+        info!(ts=%Local::now().to_string(), "Creating ask window (fallback)");
+        let t_create = std::time::Instant::now();
+        create_ask_window(app_handle);
+        let dt = t_create.elapsed().as_millis();
+        info!(elapsed_ms=%dt, "create_ask_window returned");
     }
     info!(elapsed_ms=%t_handle.elapsed().as_millis(), "handle_open_ask_window done");
 }
@@ -493,26 +542,38 @@ pub fn handle_open_ask_window(app_handle: &AppHandle) {
 pub fn awaken_aipp(app_handle: &AppHandle) {
     use chrono::Local;
 
-    let ask_window = app_handle.get_webview_window("ask");
     let chat_ui_window = app_handle.get_webview_window("chat_ui");
+    let ask_window = app_handle.get_webview_window("ask");
 
-    // 优先检查 chat_ui 窗口
-    if let Some(window) = chat_ui_window {
-        debug!(ts=%Local::now().to_string(), "Focusing chat_ui window");
+    // 优先检查 chat_ui 窗口是否可见
+    if let Some(window) = &chat_ui_window {
         #[cfg(desktop)]
-        {
+        if window.is_visible().unwrap_or(false) {
+            debug!(ts=%Local::now().to_string(), "Focusing visible chat_ui window");
             if window.is_minimized().unwrap_or(false) {
                 window.unminimize().unwrap();
             }
-            window.show().unwrap();
             window.set_focus().unwrap();
+            return;
         }
-        return;
     }
 
-    // 其次检查 ask 窗口
+    // 其次检查 ask 窗口是否可见
+    if let Some(window) = &ask_window {
+        #[cfg(desktop)]
+        if window.is_visible().unwrap_or(false) {
+            debug!(ts=%Local::now().to_string(), "Focusing visible ask window");
+            if window.is_minimized().unwrap_or(false) {
+                window.unminimize().unwrap();
+            }
+            window.set_focus().unwrap();
+            return;
+        }
+    }
+
+    // 都不可见时，显示 ask 窗口
     if let Some(window) = ask_window {
-        debug!(ts=%Local::now().to_string(), "Focusing ask window");
+        debug!(ts=%Local::now().to_string(), "Showing hidden ask window");
         #[cfg(desktop)]
         {
             if window.is_minimized().unwrap_or(false) {
@@ -521,12 +582,11 @@ pub fn awaken_aipp(app_handle: &AppHandle) {
             window.show().unwrap();
             window.set_focus().unwrap();
         }
-        return;
+    } else {
+        // 窗口不存在时创建（正常情况下不应该发生）
+        info!(ts=%Local::now().to_string(), "Creating ask window (fallback)");
+        create_ask_window(app_handle);
     }
-
-    // 最后创建 ask 窗口
-    info!(ts=%Local::now().to_string(), "Creating ask window");
-    create_ask_window(app_handle);
 }
 
 // Create artifact collections window to manage saved artifacts

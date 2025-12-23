@@ -211,12 +211,28 @@ function AskWindow() {
             }
         });
 
+        // 监听窗口隐藏事件，重置状态准备下次打开
+        const unlistenHidden = listen("window-hidden", () => {
+            console.log("AskWindow hidden, resetting state");
+            setQuery("");
+            setResponse("");
+            setMessageId(-1);
+            setAiIsResponsing(false);
+            setConversationId("");
+            setErrorMessage("");
+            setShouldShowShineBorder(false);
+            setSelectedText("");
+            setCopySuccess(false);
+        });
+
         window.addEventListener("keydown", handleShortcut);
 
         return () => {
             window.removeEventListener("keydown", handleShortcut);
             // 清理窗口焦点监听
             unlisten.then((unlistenFn) => unlistenFn());
+            // 清理窗口隐藏事件监听
+            unlistenHidden.then((unlistenFn) => unlistenFn());
             // 清理逻辑现在由 useConversationEvents hook 处理
         };
     }, []);

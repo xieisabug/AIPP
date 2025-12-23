@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState, useRef } from "react";
 import ReactDOM from "react-dom";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import ChatUIToolbar from "../components/ChatUIToolbar";
 import ConversationList from "../components/ConversationList";
 import ChatUIInfomation from "../components/ChatUIInfomation";
@@ -75,9 +75,19 @@ function ChatUIWindow() {
             }
         });
 
+        // 监听窗口隐藏事件，重置状态准备下次打开
+        const unlistenHidden = listen("window-hidden", () => {
+            console.log("ChatUIWindow hidden, resetting state");
+            // 重置选中的对话，下次打开时显示新对话界面
+            setSelectedConversation("");
+            setConversationTitle("");
+            setSidebarOpen(false);
+        });
+
         return () => {
             unlisten.then((unlisten) => unlisten());
             windowFocusUnlisten.then((unlistenFn) => unlistenFn());
+            unlistenHidden.then((unlistenFn) => unlistenFn());
         };
     }, []);
 
