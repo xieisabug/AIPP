@@ -5,6 +5,7 @@ import { Switch } from "../ui/switch";
 import { Badge } from "../ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { Blocks, Trash2, Edit, RefreshCw, Zap } from "lucide-react";
+import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { toast } from 'sonner';
 import ConfirmDialog from "../ConfirmDialog";
 import MCPServerDialog from "./MCPServerDialog";
@@ -444,30 +445,45 @@ const MCPConfig: React.FC = () => {
                             checked={selectedServer.is_enabled}
                             onCheckedChange={(checked) => handleToggleServer(selectedServer.id, checked)}
                         />
-                        <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleRefreshServerCapabilities(selectedServer.id)}
-                            disabled={isRefreshing}
-                        >
-                            <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
-                        </Button>
+                        <Tooltip delayDuration={500}>
+                            <TooltipTrigger asChild>
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => handleRefreshServerCapabilities(selectedServer.id)}
+                                    disabled={isRefreshing}
+                                >
+                                    <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+                                </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>重新获取能力</TooltipContent>
+                        </Tooltip>
 
-                        <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => openEditServerDialog(selectedServer)}
-                        >
-                            <Edit className="h-4 w-4" />
-                        </Button>
+                        <Tooltip delayDuration={500}>
+                            <TooltipTrigger asChild>
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => openEditServerDialog(selectedServer)}
+                                >
+                                    <Edit className="h-4 w-4" />
+                                </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>编辑MCP</TooltipContent>
+                        </Tooltip>
 
-                        <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleDeleteServer(selectedServer.id)}
-                        >
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                        </Button>
+                        <Tooltip delayDuration={500}>
+                            <TooltipTrigger asChild>
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => handleDeleteServer(selectedServer.id)}
+                                >
+                                    <Trash2 className="h-4 w-4 text-destructive" />
+                                </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>删除MCP</TooltipContent>
+                        </Tooltip>
                     </div>
                 </div>
 
@@ -495,7 +511,7 @@ const MCPConfig: React.FC = () => {
 
             {/* 能力列表 - 使用 Tabs */}
             <div className="bg-background rounded-lg border border-border p-6">
-                <h4 className="text-md font-semibold text-foreground mb-4">服务器能力</h4>
+                <h4 className="text-md font-semibold text-foreground mb-4">MCP能力</h4>
 
                 {/* 动态计算需要显示的tabs */}
                 {(() => {

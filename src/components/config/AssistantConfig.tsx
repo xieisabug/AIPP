@@ -4,6 +4,7 @@ import { AssistantDetail, AssistantListItem } from "../../data/Assistant";
 import { useAssistantListListener } from "../../hooks/useAssistantListListener";
 import { Bot, Settings, User, Download } from "lucide-react";
 import { Button } from "../ui/button";
+import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { useForm } from "react-hook-form";
 import { validateConfig } from "../../utils/validate";
 import AddAssistantDialog from "./AddAssistantDialog";
@@ -406,13 +407,18 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                             "gap-2 bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm hover:shadow-md transition-all",
                     }}
                 />
-                <Button
-                    variant="outline"
-                    onClick={openImportDialog}
-                    className="shadow-sm hover:shadow-md transition-all"
-                >
-                    <Download className="h-4 w-4" />
-                </Button>
+                <Tooltip delayDuration={500}>
+                    <TooltipTrigger asChild>
+                        <Button
+                            variant="outline"
+                            onClick={openImportDialog}
+                            className="shadow-sm hover:shadow-md transition-all"
+                        >
+                            <Download className="h-4 w-4" />
+                        </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>导入助手</TooltipContent>
+                </Tooltip>
             </div>
         ),
         [assistantTypes, handleAssistantAdded, openImportDialog]
@@ -436,13 +442,18 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                                             assistantTypes={assistantTypes}
                                             onAssistantAdded={handleAssistantAdded}
                                         />
-                                        <Button
-                                            variant="outline"
-                                            onClick={openImportDialog}
-                                            className="shadow-lg hover:shadow-xl transition-all"
-                                        >
-                                            <Download className="h-4 w-4" />
-                                        </Button>
+                                        <Tooltip delayDuration={500}>
+                                            <TooltipTrigger asChild>
+                                                <Button
+                                                    variant="outline"
+                                                    onClick={openImportDialog}
+                                                    className="shadow-lg hover:shadow-xl transition-all"
+                                                >
+                                                    <Download className="h-4 w-4" />
+                                                </Button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>导入助手</TooltipContent>
+                                        </Tooltip>
                                     </div>
                                 </div>
                             }

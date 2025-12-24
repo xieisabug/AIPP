@@ -8,6 +8,7 @@ import ShareDialog from "../ShareDialog";
 import ImportDialog from "../ImportDialog";
 import PasswordDialog from "../PasswordDialog";
 import { Button } from "../ui/button";
+import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { PlusCircle, Zap, Settings, ServerCrash, Download } from "lucide-react";
 import { toast } from 'sonner';
 
@@ -248,19 +249,29 @@ const LLMProviderConfig: React.FC = () => {
     // 新增按钮组件
     const addButton = useMemo(() => (
         <div className="flex gap-2">
-            <Button
-                onClick={openNewProviderDialog}
-                className="gap-2 bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm hover:shadow-md transition-all"
-            >
-                <PlusCircle className="h-4 w-4" />
-            </Button>
-            <Button
-                variant="outline"
-                onClick={() => setImportDialogOpen(true)}
-                className="shadow-sm hover:shadow-md transition-all"
-            >
-                <Download className="h-4 w-4" />
-            </Button>
+            <Tooltip delayDuration={500}>
+                <TooltipTrigger asChild>
+                    <Button
+                        onClick={openNewProviderDialog}
+                        className="gap-2 bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm hover:shadow-md transition-all"
+                    >
+                        <PlusCircle className="h-4 w-4" />
+                    </Button>
+                </TooltipTrigger>
+                <TooltipContent>添加提供商</TooltipContent>
+            </Tooltip>
+            <Tooltip delayDuration={500}>
+                <TooltipTrigger asChild>
+                    <Button
+                        variant="outline"
+                        onClick={() => setImportDialogOpen(true)}
+                        className="shadow-sm hover:shadow-md transition-all"
+                    >
+                        <Download className="h-4 w-4" />
+                    </Button>
+                </TooltipTrigger>
+                <TooltipContent>导入提供商</TooltipContent>
+            </Tooltip>
         </div>
     ), [openNewProviderDialog]);
 
@@ -285,13 +296,18 @@ const LLMProviderConfig: React.FC = () => {
                                             <PlusCircle className="h-4 w-4" />
                                             添加第一个提供商
                                         </Button>
-                                        <Button
-                                            variant="outline"
-                                            onClick={() => setImportDialogOpen(true)}
-                                            className="shadow-lg hover:shadow-xl transition-all"
-                                        >
-                                            <Download className="h-4 w-4" />
-                                        </Button>
+                                        <Tooltip delayDuration={500}>
+                                            <TooltipTrigger asChild>
+                                                <Button
+                                                    variant="outline"
+                                                    onClick={() => setImportDialogOpen(true)}
+                                                    className="shadow-lg hover:shadow-xl transition-all"
+                                                >
+                                                    <Download className="h-4 w-4" />
+                                                </Button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>导入提供商</TooltipContent>
+                                        </Tooltip>
                                     </div>
                                 </div>
                             }
