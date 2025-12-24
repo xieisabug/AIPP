@@ -61,13 +61,80 @@
 3. **集成测试**: 多模块协作的测试
 4. **端到端测试**: 完整用户流程测试
 
+### 测试文件组织规范
+
+> ⚠️ **重要**: 测试代码必须按功能域分离到独立文件，禁止将所有测试写在单一文件中
+
+#### 后端测试组织 (Rust)
+
+```
+src-tauri/src/
+├── db/
+│   └── tests/                    # 数据库层测试（模块化目录）
+│       ├── mod.rs               # 测试模块入口
+│       ├── test_helpers.rs      # 共享的测试辅助函数
+│       ├── conversation_tests.rs # Conversation 测试
+│       ├── message_tests.rs     # Message 测试
+│       ├── attachment_tests.rs  # Attachment 测试
+│       └── assistant_tests.rs   # Assistant 测试
+├── api/
+│   └── tests/                   # API 层测试
+│       ├── mod.rs
+│       ├── ai_api_tests.rs      # AI API 测试
+│       ├── conversation_api_tests.rs
+│       └── ...
+└── template_engine/
+    └── tests.rs                 # 小模块可用单文件
+```
+
+**规则**:
+1. 每个功能域一个测试文件（如 conversation_tests.rs, message_tests.rs）
+2. 共享的辅助函数放入 `test_helpers.rs`
+3. 使用 `mod.rs` 统一导出所有测试模块
+4. 测试函数命名: `test_[功能]_[场景]`
+
+#### 前端测试组织 (React/TypeScript)
+
+```
+src/
+├── __tests__/                   # 全局测试配置和 Mock
+│   ├── setup.ts                # 测试环境初始化
+│   └── mocks/
+│       └── tauri.ts            # Tauri invoke Mock
+├── components/
+│   └── [Component]/
+│       ├── Component.tsx
+│       └── Component.test.tsx  # 组件测试（同级放置）
+├── hooks/
+│   └── useXxx.test.ts          # Hook 测试（同级放置）
+└── utils/
+    └── utils.test.ts           # 工具函数测试
+```
+
+**规则**:
+1. 组件/Hook 测试与源文件同级放置
+2. 测试文件命名: `[SourceFile].test.tsx` 或 `[SourceFile].test.ts`
+3. 全局 Mock 和 Setup 放入 `__tests__/` 目录
+4. 测试命名: `should [行为] when [条件]`
+
 ---
 
 ## 后端测试计划
 
 ### 1. 数据库层 (P0) - `db/*.rs`
 
-**现状**: 已有 `db/tests.rs` 覆盖基础 CRUD
+**现状**: 测试已模块化到 `db/tests/` 目录
+
+**测试文件结构**:
+```
+db/tests/
+├── mod.rs              # 测试模块入口
+├── test_helpers.rs     # 共享辅助函数
+├── conversation_tests.rs  # ✅ 已完成
+├── message_tests.rs       # ✅ 已完成
+├── attachment_tests.rs    # TODO
+└── assistant_tests.rs     # TODO
+```
 
 **测试目标**:
 - 所有 Repository 的 CRUD 操作
