@@ -283,10 +283,58 @@ The application includes built-in MCP tools in `builtin_mcp/`:
 
 ## Testing Framework
 
--   Integration tests in `src-tauri/src/api/tests/`
--   AI functionality tests with mocked responses
--   Conversation management tests
--   Regeneration and versioning tests
+### Technology Stack
+
+**Backend (Rust):**
+-   `#[tokio::test]` - 异步测试
+-   `rstest` - 参数化测试
+-   `tempfile` - 临时数据库
+-   `tauri::test` - Tauri 集成测试
+
+**Frontend (React/TypeScript):**
+-   `Vitest` - 测试框架（Vite 集成）
+-   `@testing-library/react` - 组件测试
+-   `@testing-library/user-event` - 用户交互模拟
+-   `happy-dom` - DOM 环境
+-   Mock `@tauri-apps/api/core` invoke 调用
+
+### Test Organization
+
+```
+src-tauri/src/
+├── api/tests/           # API 集成测试
+│   ├── ai_api_tests.rs
+│   ├── conversation_api_tests.rs
+│   └── regenerate_tests.rs
+├── db/tests.rs          # 数据库 CRUD 测试
+└── template_engine/tests.rs  # 模板引擎测试
+
+src/
+├── __tests__/           # 全局测试配置
+│   ├── setup.ts
+│   └── mocks/tauri.ts   # Mock Tauri invoke
+├── components/**/*.test.tsx  # 组件测试（同级放置）
+└── hooks/**/*.test.ts   # Hook 测试
+```
+
+### Testing Guidelines
+
+1. **后端测试**: 使用内存 SQLite 数据库，测试 CRUD、版本管理、消息过滤逻辑
+2. **前端测试**: Mock Tauri invoke，测试组件渲染、用户交互、Hook 状态管理
+3. **集成测试**: 测试完整用户流程（配置修改→保存→读取）
+4. **测试命名**: `test_[功能]_[场景]` (Rust) / `should [行为] when [条件]` (TS)
+
+### Running Tests
+
+```bash
+# 后端测试（精确范围运行）
+cargo test --manifest-path src-tauri/Cargo.toml [test_name]
+
+# 前端测试
+npm run test        # 运行所有测试
+npm run test:watch  # 监听模式
+npm run test:coverage  # 覆盖率报告
+```
 
 # important-instruction-reminders
 
