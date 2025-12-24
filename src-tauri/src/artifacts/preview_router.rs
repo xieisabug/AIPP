@@ -1,6 +1,7 @@
-use std::sync::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Emitter, EventId, Listener, Manager};
+use tokio::sync::Mutex;
 
 use crate::artifacts::code_utils::{
     extract_component_name, extract_vue_component_name, is_react_component, is_vue_component,
@@ -11,25 +12,76 @@ use crate::artifacts::{applescript::run_applescript, powershell::run_powershell}
 use crate::errors::AppError;
 use crate::utils::bun_utils::BunUtils;
 
-// Wait for the ArtifactPreview window to register its event listeners before sending data
+/// Wait for the ArtifactPreview window to register its event listeners before sending data.
+/// 
+/// The frontend now continuously sends ready signals every 200ms until it receives data,
+/// so we just need to wait for any ready signal to arrive.
+/// 
+/// Improved mechanism:
+/// 1. Extended timeout from 2s to 10s for slow machines or first-time loads
+/// 2. The frontend sends ready signals repeatedly, so we're more likely to catch one
+/// 3. Returns true if ready signal received, false on timeout
 async fn wait_for_artifact_preview_ready(app_handle: &tauri::AppHandle) -> bool {
     use tokio::sync::oneshot;
 
     let (tx, rx) = oneshot::channel::<()>();
-    let sender = Mutex::new(Some(tx));
+    let sender = Arc::new(Mutex::new(Some(tx)));
     let app_handle_clone = app_handle.clone();
 
-    let listener_id: EventId = app_handle.listen("artifact-preview-ready", move |_| {
-        if let Ok(mut guard) = sender.lock() {
-            if let Some(tx) = guard.take() {
+    let listener_id: EventId = app_handle.listen("artifact-preview-ready", move |_event| {
+        let sender_clone = sender.clone();
+        // Use spawn_blocking to handle the async lock in sync context
+        tokio::spawn(async move {
+            if let Some(tx) = sender_clone.lock().await.take() {
                 let _ = tx.send(());
             }
-        }
+        });
     });
 
-    // Proceed after timeout to avoid blocking if the ready event is missed
-    let ready = tokio::time::timeout(Duration::from_millis(2000), rx).await.is_ok();
+    // Extended timeout to 10 seconds for reliability
+    // The frontend sends ready signals every 200ms, so we should receive one quickly
+    let ready = tokio::time::timeout(Duration::from_secs(10), rx).await.is_ok();
+    
     app_handle_clone.unlisten(listener_id);
+    
+    if ready {
+        tracing::debug!("artifact-preview-ready signal received");
+    } else {
+        tracing::warn!("Timeout waiting for artifact-preview-ready signal (10s)");
+    }
+    
+    ready
+}
+
+/// Wait for the Artifact window (not preview) to register its event listeners.
+/// Uses the same mechanism as wait_for_artifact_preview_ready but listens for "artifact-ready".
+pub async fn wait_for_artifact_ready(app_handle: &tauri::AppHandle) -> bool {
+    use tokio::sync::oneshot;
+
+    let (tx, rx) = oneshot::channel::<()>();
+    let sender = Arc::new(Mutex::new(Some(tx)));
+    let app_handle_clone = app_handle.clone();
+
+    let listener_id: EventId = app_handle.listen("artifact-ready", move |_event| {
+        let sender_clone = sender.clone();
+        tokio::spawn(async move {
+            if let Some(tx) = sender_clone.lock().await.take() {
+                let _ = tx.send(());
+            }
+        });
+    });
+
+    // Extended timeout to 10 seconds for reliability
+    let ready = tokio::time::timeout(Duration::from_secs(10), rx).await.is_ok();
+    
+    app_handle_clone.unlisten(listener_id);
+    
+    if ready {
+        tracing::debug!("artifact-ready signal received");
+    } else {
+        tracing::warn!("Timeout waiting for artifact-ready signal (10s)");
+    }
+    
     ready
 }
 
