@@ -414,7 +414,7 @@ impl MessageAttachmentRepository {
     pub fn list_by_id(&self, id_list: &Vec<i64>) -> Result<Vec<MessageAttachment>> {
         let id_list_str: Vec<String> = id_list.iter().map(|id| id.to_string()).collect();
         let id_list_str = id_list_str.join(",");
-        let query = format!("SELECT * FROM message_attachment WHERE id IN ({})", id_list_str);
+        let query = format!("SELECT id, message_id, attachment_type, attachment_url, attachment_content, attachment_hash, use_vector, token_count FROM message_attachment WHERE id IN ({})", id_list_str);
         let mut stmt = self.conn.prepare(&query)?;
         let rows = stmt.query_map([], |row| {
             let attachment_type_int: i64 = row.get(2)?;
@@ -425,9 +425,9 @@ impl MessageAttachmentRepository {
                 attachment_type,
                 attachment_url: row.get(3)?,
                 attachment_content: row.get(4)?,
-                attachment_hash: None,
-                use_vector: row.get(5)?,
-                token_count: row.get(6)?,
+                attachment_hash: row.get(5)?,
+                use_vector: row.get(6)?,
+                token_count: row.get(7)?,
             })
         })?;
         rows.collect()
@@ -438,7 +438,7 @@ impl MessageAttachmentRepository {
         attachment_hash: &str,
     ) -> Result<Option<MessageAttachment>> {
         self.conn
-            .query_row("SELECT id, message_id, attachment_type, attachment_url, attachment_content, use_vector, token_count FROM message_attachment WHERE attachment_hash = ?", &[&attachment_hash], |row| {
+            .query_row("SELECT id, message_id, attachment_type, attachment_url, attachment_content, attachment_hash, use_vector, token_count FROM message_attachment WHERE attachment_hash = ?", &[&attachment_hash], |row| {
                 let attachment_type_int: i64 = row.get(2)?;
                 let attachment_type = AttachmentType::try_from(attachment_type_int)?;
                 Ok(MessageAttachment {
@@ -447,9 +447,9 @@ impl MessageAttachmentRepository {
                     attachment_type,
                     attachment_url: row.get(3)?,
                     attachment_content: row.get(4)?,
-                    attachment_hash: None,
-                    use_vector: row.get(5)?,
-                    token_count: row.get(6)?,
+                    attachment_hash: row.get(5)?,
+                    use_vector: row.get(6)?,
+                    token_count: row.get(7)?,
                 })
             })
             .optional()
@@ -479,7 +479,7 @@ impl Repository<MessageAttachment> for MessageAttachmentRepository {
     #[instrument(level = "debug", skip(self), fields(id = id))]
     fn read(&self, id: i64) -> Result<Option<MessageAttachment>> {
         self.conn
-            .query_row("SELECT * FROM message_attachment WHERE id = ?", &[&id], |row| {
+            .query_row("SELECT id, message_id, attachment_type, attachment_url, attachment_content, attachment_hash, use_vector, token_count FROM message_attachment WHERE id = ?", &[&id], |row| {
                 let attachment_type_int: i64 = row.get(2)?;
                 let attachment_type = AttachmentType::try_from(attachment_type_int)?;
                 Ok(MessageAttachment {
@@ -488,9 +488,9 @@ impl Repository<MessageAttachment> for MessageAttachmentRepository {
                     attachment_type,
                     attachment_url: row.get(3)?,
                     attachment_content: row.get(4)?,
-                    attachment_hash: None,
-                    use_vector: row.get(5)?,
-                    token_count: row.get(6)?,
+                    attachment_hash: row.get(5)?,
+                    use_vector: row.get(6)?,
+                    token_count: row.get(7)?,
                 })
             })
             .optional()

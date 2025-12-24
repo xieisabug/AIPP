@@ -8,6 +8,7 @@
 //! - test_helpers.rs: 共享的测试辅助函数和数据库初始化
 //! - conversation_db_tests.rs: Conversation CRUD 测试
 //! - message_db_tests.rs: Message CRUD 和版本管理测试
+//! - attachment_db_tests.rs: MessageAttachment CRUD 测试
 //! - assistant_db_tests.rs: Assistant 及其关联表测试
 //! - llm_db_tests.rs: LLM Provider 和 Model 测试
 //! - mcp_db_tests.rs: MCP Server 和 Tool 测试
@@ -20,6 +21,7 @@ mod test_helpers;
 
 mod conversation_db_tests;
 mod message_db_tests;
+mod attachment_db_tests;
 mod assistant_db_tests;
 mod llm_db_tests;
 mod mcp_db_tests;

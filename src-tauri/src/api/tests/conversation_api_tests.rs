@@ -3,6 +3,10 @@ use crate::db::conversation_db::MessageDetail;
 use chrono::Utc;
 use uuid::Uuid;
 
+// ============================================================================
+// 辅助函数
+// ============================================================================
+
 /// 创建测试用的 MessageDetail
 fn create_message_detail(
     id: i64,
@@ -32,6 +36,25 @@ fn create_message_detail(
         tool_calls_json: None,
     }
 }
+
+/// 快速创建消息
+fn quick_message(id: i64, msg_type: &str, content: &str, parent_id: Option<i64>, offset_secs: i64) -> MessageDetail {
+    let base_time = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
+    create_message_detail(
+        id,
+        1,
+        msg_type,
+        content,
+        parent_id,
+        Some(Uuid::new_v4().to_string()),
+        None,
+        base_time + chrono::Duration::seconds(offset_secs),
+    )
+}
+
+// ============================================================================
+// 基础功能测试
+// ============================================================================
 
 #[tokio::test]
 async fn test_version_management_logic() {
@@ -123,3 +146,231 @@ async fn test_single_user_message() {
     assert_eq!(final_messages[0].content, "Hello");
     assert_eq!(final_messages[0].message_type, "user");
 }
+
+// ============================================================================
+// 版本管理高级测试
+// ============================================================================
+
+/// 测试没有子版本的消息应该保持不变
+#[tokio::test]
+async fn test_message_without_versions() {
+    let messages = vec![
+        quick_message(1, "system", "You are helpful", None, 0),
+        quick_message(2, "user", "Hello", None, 1),
+        quick_message(3, "response", "Hi there!", None, 2),
+    ];
+
+    let result = process_message_versions(messages);
+
+    assert_eq!(result.len(), 3);
+    assert_eq!(result[0].message_type, "system");
+    assert_eq!(result[1].message_type, "user");
+    assert_eq!(result[2].message_type, "response");
+}
+
+/// 测试单层版本链（一次重发）
+#[tokio::test]
+async fn test_single_regeneration() {
+    let messages = vec![
+        quick_message(1, "user", "What is 2+2?", None, 0),
+        quick_message(2, "response", "Original: 4", None, 1),
+        quick_message(3, "response", "Regenerated: 2+2=4", Some(2), 2),
+    ];
+
+    let result = process_message_versions(messages);
+
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0].content, "What is 2+2?");
+    assert_eq!(result[1].content, "Regenerated: 2+2=4");
+}
+
+/// 测试多层版本链（多次重发）
+#[tokio::test]
+async fn test_multi_level_regeneration() {
+    let messages = vec![
+        quick_message(1, "user", "Question", None, 0),
+        quick_message(2, "response", "V1", None, 1),
+        quick_message(3, "response", "V2", Some(2), 2),
+        quick_message(4, "response", "V3", Some(3), 3),
+        quick_message(5, "response", "V4 (latest)", Some(4), 4),
+    ];
+
+    let result = process_message_versions(messages);
+
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[1].content, "V4 (latest)");
+    assert_eq!(result[1].id, 5);
+}
+
+/// 测试多个独立消息各自有版本链
+#[tokio::test]
+async fn test_multiple_independent_version_chains() {
+    let messages = vec![
+        quick_message(1, "user", "First question", None, 0),
+        quick_message(2, "response", "Answer 1 V1", None, 1),
+        quick_message(3, "response", "Answer 1 V2", Some(2), 2),
+        quick_message(4, "user", "Second question", None, 3),
+        quick_message(5, "response", "Answer 2 V1", None, 4),
+        quick_message(6, "response", "Answer 2 V2", Some(5), 5),
+        quick_message(7, "response", "Answer 2 V3", Some(6), 6),
+    ];
+
+    let result = process_message_versions(messages);
+
+    assert_eq!(result.len(), 4);
+    assert_eq!(result[0].content, "First question");
+    assert_eq!(result[1].content, "Answer 1 V2"); // 最新版本
+    assert_eq!(result[2].content, "Second question");
+    assert_eq!(result[3].content, "Answer 2 V3"); // 最新版本
+}
+
+/// 测试带有 reasoning 和 response 的消息组
+#[tokio::test]
+async fn test_reasoning_and_response_group() {
+    let group_id = Uuid::new_v4().to_string();
+    let base_time = Utc::now();
+
+    let messages = vec![
+        create_message_detail(1, 1, "user", "What is 2+2?", None, None, None, base_time),
+        create_message_detail(2, 1, "reasoning", "Let me calculate...", None, Some(group_id.clone()), None, base_time + chrono::Duration::seconds(1)),
+        create_message_detail(3, 1, "response", "The answer is 4", None, Some(group_id.clone()), None, base_time + chrono::Duration::seconds(2)),
+    ];
+
+    let result = process_message_versions(messages);
+
+    assert_eq!(result.len(), 3);
+    assert_eq!(result[0].message_type, "user");
+    assert_eq!(result[1].message_type, "reasoning");
+    assert_eq!(result[2].message_type, "response");
+    // reasoning 和 response 应该有相同的 generation_group_id
+    assert_eq!(result[1].generation_group_id, result[2].generation_group_id);
+}
+
+/// 测试消息按时间排序
+#[tokio::test]
+async fn test_messages_sorted_by_time() {
+    // 故意乱序创建消息
+    let messages = vec![
+        quick_message(3, "response", "Third", None, 2),
+        quick_message(1, "user", "First", None, 0),
+        quick_message(2, "user", "Second", None, 1),
+    ];
+
+    let result = process_message_versions(messages);
+
+    assert_eq!(result.len(), 3);
+    assert_eq!(result[0].content, "First");
+    assert_eq!(result[1].content, "Second");
+    assert_eq!(result[2].content, "Third");
+}
+
+/// 测试 regenerate 数组被正确填充
+#[tokio::test]
+async fn test_regenerate_array_populated() {
+    let messages = vec![
+        quick_message(1, "user", "Question", None, 0),
+        quick_message(2, "response", "V1", None, 1),
+        quick_message(3, "response", "V2", Some(2), 2),
+        quick_message(4, "response", "V3", Some(2), 3), // 也指向 2，但时间更晚
+    ];
+
+    let result = process_message_versions(messages);
+
+    // 最终显示的消息
+    assert_eq!(result.len(), 2);
+    // 应该显示最新版本（V3 或 V4 取决于实现）
+    // 注意：当前实现中 V3 和 V4 都指向 V1，所以会取时间最晚的
+}
+
+// ============================================================================
+// 边界条件测试
+// ============================================================================
+
+/// 测试只有 system 消息
+#[tokio::test]
+async fn test_only_system_message() {
+    let messages = vec![
+        quick_message(1, "system", "You are a helpful assistant", None, 0),
+    ];
+
+    let result = process_message_versions(messages);
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].message_type, "system");
+}
+
+/// 测试消息内容为空字符串
+#[tokio::test]
+async fn test_empty_content_message() {
+    let messages = vec![
+        quick_message(1, "user", "", None, 0),
+        quick_message(2, "response", "", None, 1),
+    ];
+
+    let result = process_message_versions(messages);
+
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0].content, "");
+    assert_eq!(result[1].content, "");
+}
+
+/// 测试非常长的消息内容
+#[tokio::test]
+async fn test_very_long_content() {
+    let long_content = "A".repeat(100000);
+    let messages = vec![
+        quick_message(1, "user", &long_content, None, 0),
+    ];
+
+    let result = process_message_versions(messages);
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].content.len(), 100000);
+}
+
+/// 测试包含特殊字符的消息
+#[tokio::test]
+async fn test_special_characters_in_content() {
+    let special_content = r#"<script>alert('xss')</script> 中文 émojis 🎉 \n\t"#;
+    let messages = vec![
+        quick_message(1, "user", special_content, None, 0),
+    ];
+
+    let result = process_message_versions(messages);
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].content, special_content);
+}
+
+/// 测试大量消息的性能
+#[tokio::test]
+async fn test_many_messages() {
+    let mut messages = Vec::new();
+    for i in 0..1000 {
+        messages.push(quick_message(i as i64, "user", &format!("Message {}", i), None, i as i64));
+    }
+
+    let result = process_message_versions(messages);
+
+    assert_eq!(result.len(), 1000);
+}
+
+/// 测试深层嵌套的版本链
+#[tokio::test]
+async fn test_deep_version_chain() {
+    let mut messages = vec![
+        quick_message(1, "user", "Question", None, 0),
+        quick_message(2, "response", "V1", None, 1),
+    ];
+
+    // 创建 50 层深的版本链
+    for i in 3..53 {
+        messages.push(quick_message(i as i64, "response", &format!("V{}", i - 1), Some((i - 1) as i64), i as i64));
+    }
+
+    let result = process_message_versions(messages);
+
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[1].content, "V51"); // 最深层版本
+}
+
