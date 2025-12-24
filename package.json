@@ -9,7 +9,11 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "package": "tauri build",
-    "android": "powershell -ExecutionPolicy Bypass -File ./scripts/android-dev.ps1"
+    "android": "powershell -ExecutionPolicy Bypass -File ./scripts/android-dev.ps1",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:ui": "vitest --ui"
   },
   "dependencies": {
     "@babel/standalone": "^7.28.2",
@@ -93,6 +97,10 @@
   "devDependencies": {
     "@shadcn/ui": "^0.0.4",
     "@tauri-apps/cli": "^2.7.1",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.1",
+    "@testing-library/user-event": "^14.6.1",
     "@types/babel__standalone": "^7.1.9",
     "@types/lodash": "^4.17.20",
     "@types/node": "^24.9.1",
@@ -101,10 +109,13 @@
     "@types/react-syntax-highlighter": "^15.5.13",
     "@types/unist": "^3.0.3",
     "@vitejs/plugin-react": "^4.7.0",
+    "@vitest/coverage-v8": "^4.0.16",
+    "happy-dom": "^20.0.11",
     "react-devtools": "^6.1.5",
     "tailwindcss": "^4.1.11",
     "typescript": "^5.8.3",
     "vite": "^7.0.6",
-    "vite-plugin-svgr": "^4.3.0"
+    "vite-plugin-svgr": "^4.3.0",
+    "vitest": "^4.0.16"
   }
 }

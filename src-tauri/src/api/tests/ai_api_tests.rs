@@ -39,7 +39,8 @@ fn create_ai_api_test_db() -> Connection {
             finish_time TEXT,
             token_count INTEGER DEFAULT 0,
             generation_group_id TEXT,
-            parent_group_id TEXT
+            parent_group_id TEXT,
+            tool_calls_json TEXT
         )",
         [],
     )
