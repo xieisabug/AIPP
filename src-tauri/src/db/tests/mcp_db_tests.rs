@@ -10,7 +10,7 @@
 //! ## 测试隔离
 //! 所有测试使用 `Connection::open_in_memory()` 创建内存数据库
 
-use crate::mcp::mcp_db::*;
+use crate::db::mcp_db::*;
 use rusqlite::Connection;
 
 // ============================================================================

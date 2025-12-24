@@ -13,6 +13,7 @@ use tracing::{debug, error, info, instrument, warn};
 pub mod assistant_db;
 pub mod conversation_db;
 pub mod llm_db;
+pub mod mcp_db;
 pub mod plugin_db;
 pub mod sub_task_db;
 pub mod system_db;

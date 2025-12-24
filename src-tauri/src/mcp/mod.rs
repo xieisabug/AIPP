@@ -5,7 +5,6 @@ pub mod detection;
 pub mod execution_api;
 pub mod builtin_mcp;
 pub mod registry_api;
-pub mod mcp_db;
 pub mod util;
 
 // Re-exports for convenience to minimize callsite churn

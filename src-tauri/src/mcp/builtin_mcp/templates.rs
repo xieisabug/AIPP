@@ -1,4 +1,4 @@
-use crate::mcp::mcp_db::MCPDatabase;
+use crate::db::mcp_db::MCPDatabase;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;

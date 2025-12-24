@@ -1,4 +1,4 @@
-use crate::mcp::mcp_db::MCPServer;
+use crate::db::mcp_db::MCPServer;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use tracing::{warn, debug};

@@ -10,7 +10,7 @@ use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
 use crate::api::ai_api::tool_result_continue_ask_ai_impl;
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::mcp::builtin_mcp::{execute_aipp_builtin_tool, is_builtin_mcp_call};
-use crate::mcp::mcp_db::{MCPDatabase, MCPServer, MCPToolCall};
+use crate::db::mcp_db::{MCPDatabase, MCPServer, MCPToolCall};
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;

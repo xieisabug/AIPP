@@ -164,7 +164,7 @@ impl SearchHandler {
 
     /// 从数据库加载搜索配置
     fn load_search_config(&self) -> Result<HashMap<String, String>, String> {
-        use crate::mcp::mcp_db::MCPDatabase;
+        use crate::db::mcp_db::MCPDatabase;
         let db = MCPDatabase::new(&self.app_handle).map_err(|e| e.to_string())?;
         let mut stmt = db.conn.prepare(
             "SELECT environment_variables FROM mcp_server WHERE command = ? AND is_builtin = 1 LIMIT 1"

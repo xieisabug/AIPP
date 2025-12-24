@@ -87,7 +87,7 @@ use crate::mcp::execution_api::{
     create_mcp_tool_call, execute_mcp_tool_call, get_mcp_tool_call,
     get_mcp_tool_calls_by_conversation,
 };
-use crate::mcp::mcp_db::MCPDatabase;
+use crate::db::mcp_db::MCPDatabase;
 use crate::mcp::registry_api::{
     add_mcp_server, build_mcp_prompt, delete_mcp_server, get_mcp_provider, get_mcp_server,
     get_mcp_server_prompts, get_mcp_server_resources, get_mcp_server_tools, get_mcp_servers,

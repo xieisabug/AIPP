@@ -78,7 +78,7 @@ pub async fn collect_mcp_info_for_assistant(
 
             if !extra_ids.is_empty() {
                 trace!(?extra_ids, "Fetching extra servers by id (filter not in assistant set)");
-                if let Ok(db) = crate::mcp::mcp_db::MCPDatabase::new(app_handle) {
+                if let Ok(db) = crate::db::mcp_db::MCPDatabase::new(app_handle) {
                     if let Ok(pairs) = db.get_mcp_servers_with_tools_by_ids(&extra_ids) {
                         for (srv, tools_raw) in pairs {
                             if existing_id_set.contains(&srv.id) {
