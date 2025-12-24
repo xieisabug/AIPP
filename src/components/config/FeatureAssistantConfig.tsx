@@ -280,8 +280,8 @@ const FeatureAssistantConfig: React.FC = () => {
         [handleSelectFeature]
     );
 
-    // 侧边栏内容
-    const sidebar = (
+    // 侧边栏内容 - 使用 useMemo 避免重复创建
+    const sidebar = useMemo(() => (
         <SidebarList title="功能列表" description="选择功能进行配置" icon={<Settings className="h-5 w-5" />}>
             {featureList.map((feature) => {
                 return (
@@ -302,10 +302,10 @@ const FeatureAssistantConfig: React.FC = () => {
                 );
             })}
         </SidebarList>
-    );
+    ), [featureList, selectedFeature.id, handleSelectFeature]);
 
-    // 右侧内容
-    const content = (
+    // 右侧内容 - 使用 useMemo 避免重复创建
+    const content = useMemo(() => (
         <div className="space-y-6">
             <FeatureFormRenderer
                 selectedFeature={selectedFeature}
@@ -324,7 +324,7 @@ const FeatureAssistantConfig: React.FC = () => {
                 onSaveShortcuts={handleSaveShortcutsConfig}
             />
         </div>
-    );
+    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig]);
 
     return (
         <ConfigPageLayout

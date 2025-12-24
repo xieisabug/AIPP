@@ -341,62 +341,8 @@ const MCPConfig: React.FC = () => {
         />
     ), [handleTemplateSelect, handleJSONImport]);
 
-    // 空状态
-    if (mcpServers.length === 0) {
-        return (
-            <>
-                <ConfigPageLayout
-                    sidebar={null}
-                    content={null}
-                    emptyState={
-                        <EmptyState
-                            icon={<Blocks className="h-8 w-8 text-muted-foreground" />}
-                            title="还没有配置MCP服务器"
-                            description="开始添加你的第一个MCP服务器，扩展AI助手的能力"
-                            action={
-                                <MCPActionDropdown
-                                    onTemplateSelect={handleTemplateSelect}
-                                    onJSONImport={handleJSONImport}
-                                    className="bg-primary hover:bg-primary/90 text-primary-foreground shadow-lg hover:shadow-xl transition-all"
-                                />
-                            }
-                        />
-                    }
-                    showEmptyState={true}
-                />
-
-                {/* MCP服务器对话框 - 空状态时也需要渲染 */}
-                <MCPServerDialog
-                    isOpen={serverDialogOpen}
-                    onClose={closeServerDialog}
-                    onSubmit={handleServerDialogSubmit}
-                    editingServer={editingServer}
-                    initialServerType={dialogInitialServerType}
-                    initialConfig={dialogInitialConfig}
-                />
-
-                {/* JSON导入对话框 */}
-                <JSONImportDialog
-                    isOpen={jsonImportDialogOpen}
-                    onClose={closeJSONImportDialog}
-                    onImport={handleJSONImportConfirm}
-                />
-
-                {/* 内置工具对话框 - 空状态时也需要渲染 */}
-                <BuiltinToolDialog
-                    isOpen={builtinDialogOpen}
-                    onClose={() => setBuiltinDialogOpen(false)}
-                    onSubmit={() => {
-                        setBuiltinDialogOpen(false);
-                        getMcpServers();
-                    }}
-                />
-            </>
-        );
-    }
-
-    // 侧边栏内容
-    const sidebar = (
+    // 侧边栏内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
+    const sidebar = useMemo(() => (
         <SidebarList
             title="MCP列表"
             description="选择MCP进行配置"
@@ -428,10 +374,10 @@ const MCPConfig: React.FC = () => {
                 </ListItemButton>
             ))}
         </SidebarList>
-    );
+    ), [mcpServers, selectedServer?.id, handleSelectServer, handleTemplateSelect, handleJSONImport]);
 
-    // 右侧内容
-    const content = selectedServer ? (
+    // 右侧内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
+    const content = useMemo(() => selectedServer ? (
         <div className="space-y-6">
             {/* 服务器基本信息 */}
             <div className="bg-background rounded-lg border border-border p-6">
@@ -624,7 +570,61 @@ const MCPConfig: React.FC = () => {
             title="选择一个MCP服务器"
             description="从左侧列表中选择一个服务器开始配置"
         />
-    );
+    ), [selectedServer, serverTools, serverPrompts, serverResources, expandedTools, isRefreshing, handleToggleServer, handleRefreshServerCapabilities, openEditServerDialog, handleDeleteServer, toggleToolExpansion, handleUpdateTool, handleUpdatePrompt, truncateText]);
+
+    // 空状态
+    if (mcpServers.length === 0) {
+        return (
+            <>
+                <ConfigPageLayout
+                    sidebar={null}
+                    content={null}
+                    emptyState={
+                        <EmptyState
+                            icon={<Blocks className="h-8 w-8 text-muted-foreground" />}
+                            title="还没有配置MCP服务器"
+                            description="开始添加你的第一个MCP服务器，扩展AI助手的能力"
+                            action={
+                                <MCPActionDropdown
+                                    onTemplateSelect={handleTemplateSelect}
+                                    onJSONImport={handleJSONImport}
+                                    className="bg-primary hover:bg-primary/90 text-primary-foreground shadow-lg hover:shadow-xl transition-all"
+                                />
+                            }
+                        />
+                    }
+                    showEmptyState={true}
+                />
+
+                {/* MCP服务器对话框 - 空状态时也需要渲染 */}
+                <MCPServerDialog
+                    isOpen={serverDialogOpen}
+                    onClose={closeServerDialog}
+                    onSubmit={handleServerDialogSubmit}
+                    editingServer={editingServer}
+                    initialServerType={dialogInitialServerType}
+                    initialConfig={dialogInitialConfig}
+                />
+
+                {/* JSON导入对话框 */}
+                <JSONImportDialog
+                    isOpen={jsonImportDialogOpen}
+                    onClose={closeJSONImportDialog}
+                    onImport={handleJSONImportConfirm}
+                />
+
+                {/* 内置工具对话框 - 空状态时也需要渲染 */}
+                <BuiltinToolDialog
+                    isOpen={builtinDialogOpen}
+                    onClose={() => setBuiltinDialogOpen(false)}
+                    onSubmit={() => {
+                        setBuiltinDialogOpen(false);
+                        getMcpServers();
+                    }}
+                />
+            </>
+        );
+    }
 
     return (
         <>

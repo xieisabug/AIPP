@@ -31,7 +31,6 @@ interface LLMProvider {
 }
 
 const LLMProviderConfig: React.FC = () => {
-    console.log("render llm provider config")
     const [LLMProviders, setLLMProviders] = useState<Array<LLMProvider>>([]);
     const [selectedProvider, setSelectedProvider] = useState<LLMProvider | null>(null);
 
@@ -275,6 +274,60 @@ const LLMProviderConfig: React.FC = () => {
         </div>
     ), [openNewProviderDialog]);
 
+    // 侧边栏内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
+    const sidebar = useMemo(() => (
+        <SidebarList
+            title="提供商"
+            description="选择提供商进行配置"
+            icon={<ServerCrash className="h-5 w-5" />}
+            addButton={addButton}
+        >
+            {LLMProviders.map((provider) => (
+                <ListItemButton
+                    key={provider.id}
+                    isSelected={selectedProvider?.id === provider.id}
+                    onClick={() => handleSelectProvider(provider)}
+                >
+                    <div className="flex items-center w-full">
+                        <div className="flex-1 truncate">
+                            <div className="font-medium truncate">{provider.name}</div>
+                        </div>
+                        {provider.is_enabled && (
+                            <Zap className="h-3 w-3 ml-2 flex-shrink-0" />
+                        )}
+                    </div>
+                </ListItemButton>
+            ))}
+        </SidebarList>
+    ), [LLMProviders, selectedProvider?.id, handleSelectProvider, addButton]);
+
+    const selectedProviderApiType = selectedProvider ? apiTypes.find(type => type.value === selectedProvider.api_type)?.label || selectedProvider.api_type : "";
+    
+    // 右侧内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
+    const content = useMemo(() => selectedProvider ? (
+        <div className="space-y-6">
+            <LLMProviderConfigForm
+                id={selectedProvider.id}
+                index={LLMProviders.findIndex(p => p.id === selectedProvider.id)}
+                apiType={selectedProvider.api_type}
+                name={selectedProvider.name}
+                description={selectedProvider.description || `${selectedProviderApiType} 提供商配置`}
+                isOffical={selectedProvider.is_official}
+                enabled={selectedProvider.is_enabled}
+                onToggleEnabled={handleToggle}
+                onDelete={() => openConfirmDialog(selectedProvider.id)}
+                onShare={handleShareProvider}
+                onRename={handleRenameProvider}
+            />
+        </div>
+    ) : (
+        <EmptyState
+            icon={<Settings className="h-8 w-8 text-muted-foreground" />}
+            title="选择一个提供商"
+            description="从左侧列表中选择一个提供商开始配置"
+        />
+    ), [selectedProvider, LLMProviders, selectedProviderApiType, handleToggle, openConfirmDialog, handleShareProvider, handleRenameProvider]);
+
     // 空状态
     if (LLMProviders.length === 0) {
         return (
@@ -326,58 +379,6 @@ const LLMProviderConfig: React.FC = () => {
             </>
         );
     }
-
-    // 侧边栏内容
-    const sidebar = (
-        <SidebarList
-            title="提供商"
-            description="选择提供商进行配置"
-            icon={<ServerCrash className="h-5 w-5" />}
-        >
-            {LLMProviders.map((provider) => (
-                <ListItemButton
-                    key={provider.id}
-                    isSelected={selectedProvider?.id === provider.id}
-                    onClick={() => handleSelectProvider(provider)}
-                >
-                    <div className="flex items-center w-full">
-                        <div className="flex-1 truncate">
-                            <div className="font-medium truncate">{provider.name}</div>
-                        </div>
-                        {provider.is_enabled && (
-                            <Zap className="h-3 w-3 ml-2 flex-shrink-0" />
-                        )}
-                    </div>
-                </ListItemButton>
-            ))}
-        </SidebarList>
-    );
-
-    const selectedProviderApiType = selectedProvider ? apiTypes.find(type => type.value === selectedProvider.api_type)?.label || selectedProvider.api_type : "";
-    // 右侧内容
-    const content = selectedProvider ? (
-        <div className="space-y-6">
-            <LLMProviderConfigForm
-                id={selectedProvider.id}
-                index={LLMProviders.findIndex(p => p.id === selectedProvider.id)}
-                apiType={selectedProvider.api_type}
-                name={selectedProvider.name}
-                description={selectedProvider.description || `${selectedProviderApiType} 提供商配置`}
-                isOffical={selectedProvider.is_official}
-                enabled={selectedProvider.is_enabled}
-                onToggleEnabled={handleToggle}
-                onDelete={() => openConfirmDialog(selectedProvider.id)}
-                onShare={handleShareProvider}
-                onRename={handleRenameProvider}
-            />
-        </div>
-    ) : (
-        <EmptyState
-            icon={<Settings className="h-8 w-8 text-muted-foreground" />}
-            title="选择一个提供商"
-            description="从左侧列表中选择一个提供商开始配置"
-        />
-    );
 
     return (
         <>

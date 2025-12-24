@@ -1,4 +1,4 @@
-import React, { ReactNode, useEffect, useState } from "react";
+import React, { ReactNode, useEffect, useState, useCallback, useMemo } from "react";
 import ReactDOM from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 import LLMProviderConfig from "../components/config/LLMProviderConfig";
@@ -146,12 +146,15 @@ function ConfigWindow() {
     // 获取选中的组件
     const SelectedComponent = contentMap[selectedMenu];
 
-    // 导航函数
-    const navigateTo = (menuKey: string) => {
+    // 导航函数 - 使用 useCallback 稳定化引用
+    const navigateTo = useCallback((menuKey: string) => {
         if (contentMap[menuKey]) {
             setSelectedMenu(menuKey);
         }
-    };
+    }, []);
+
+    // 稳定化 pluginList 引用
+    const stablePluginList = useMemo(() => pluginList, [pluginList]);
 
     const renderMenuItems = (onSelect: (id: string) => void) => (
         <div className="flex flex-col gap-1 mt-2">
@@ -243,11 +246,8 @@ function ConfigWindow() {
 
                 <div className="flex-1 overflow-auto bg-card px-4 py-4">
                     <SelectedComponent
-                        pluginList={pluginList}
-                        navigateTo={(key: string) => {
-                            navigateTo(key);
-                            setSidebarOpen(false);
-                        }}
+                        pluginList={stablePluginList}
+                        navigateTo={navigateTo}
                     />
                 </div>
             </div>
@@ -268,7 +268,7 @@ function ConfigWindow() {
                 {/* 内容区域 */}
                 <div className="bg-card px-4 md:px-6 lg:px-8 py-6 overflow-y-auto max-h-screen">
                     {/* 配置组件内容 */}
-                    <SelectedComponent pluginList={pluginList} navigateTo={navigateTo} />
+                    <SelectedComponent pluginList={stablePluginList} navigateTo={navigateTo} />
                 </div>
             </div>
         </div>

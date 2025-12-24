@@ -1,4 +1,4 @@
-import React, { useState, useEffect, cloneElement } from 'react';
+import React, { useState, useEffect, memo } from 'react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
 
 export interface SelectOption {
@@ -49,13 +49,6 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
     // 小屏幕时使用下拉菜单（宽度小于1200px）
     const isSmallScreen = windowWidth < 1200;
     const shouldShowDropdown = isSmallScreen && selectOptions && selectOptions.length > 0;
-
-    // 为sidebar添加addButton props（如果sidebar是SidebarList组件）
-    const enhancedSidebar = sidebar && React.isValidElement(sidebar) && !shouldShowDropdown
-        ? cloneElement(sidebar as React.ReactElement<any>, {
-            addButton: addButton
-        })
-        : sidebar;
 
     const renderDropdownHeader = () => {
         if (!shouldShowDropdown) return null;
@@ -110,7 +103,7 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
                     {/* 左侧列表 - 大屏幕时显示 */}
                     {!shouldShowDropdown && (
                         <div className="col-span-12 lg:col-span-4 xl:col-span-4 2xl:col-span-3">
-                            {enhancedSidebar}
+                            {sidebar}
                         </div>
                     )}
 
@@ -124,4 +117,4 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
     );
 };
 
-export default ConfigPageLayout; 
+export default memo(ConfigPageLayout); 
