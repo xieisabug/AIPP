@@ -109,8 +109,10 @@ async fn test_extract_assistant_from_message_with_at_symbol_in_middle() {
 
     assert!(result.is_ok());
     let (assistant_id, cleaned_prompt) = result.unwrap();
-    assert_eq!(assistant_id, 999); // 应该返回默认 ID（因为@不在开头）
-    assert_eq!(cleaned_prompt, "Hello @gpt4, how are you?"); // 原始消息不变
+    // 默认选项 position_restriction: Anywhere，所以即使@在中间也能匹配
+    // first_only: true，所以只匹配第一个
+    assert_eq!(assistant_id, 1); // 应该匹配到 gpt4
+    assert_eq!(cleaned_prompt, "Hello how are you?"); // @gpt4 和逗号后的空格被移除
 }
 
 #[tokio::test]
@@ -166,9 +168,9 @@ async fn test_extract_assistant_from_message_case_sensitive() {
 
     assert!(result.is_ok());
     let (assistant_id, cleaned_prompt) = result.unwrap();
-    // 应该区分大小写，所以找不到 GPT4（只有 gpt4）
-    assert_eq!(assistant_id, 999); // 应该返回默认 ID
-    assert_eq!(cleaned_prompt, "@GPT4 Hello, how are you?"); // 原始消息不变
+    // 默认选项 case_sensitive: false，所以应该能匹配到 gpt4（不区分大小写）
+    assert_eq!(assistant_id, 1); // 应该匹配到 gpt4
+    assert_eq!(cleaned_prompt, "Hello, how are you?"); // @GPT4 被移除
 }
 
 #[tokio::test]

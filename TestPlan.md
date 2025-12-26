@@ -135,10 +135,13 @@ db/tests/
 ├── attachment_db_tests.rs    # ✅ 已完成 (17 个测试)
 ├── assistant_db_tests.rs     # ✅ 已完成 (17 个测试)
 ├── llm_db_tests.rs           # ✅ 已完成 (17 个测试)
-└── mcp_db_tests.rs           # ✅ 已完成 (22 个测试)
+├── mcp_db_tests.rs           # ✅ 已完成 (22 个测试)
+├── sub_task_db_tests.rs      # ✅ 已完成 (19 个测试)
+├── system_db_tests.rs        # ✅ 已完成 (17 个测试)
+└── plugin_db_tests.rs        # ✅ 已完成 (16 个测试)
 ```
 
-**测试统计**: 数据库层共 **102 个测试**，全部通过。
+**测试统计**: 数据库层共 **154 个测试**，全部通过。
 
 **测试目标**:
 - 所有 Repository 的 CRUD 操作
