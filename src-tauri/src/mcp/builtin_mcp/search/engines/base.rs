@@ -97,3 +97,141 @@ impl SearchEngineBase {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============================================
+    // html_to_markdown Tests
+    // ============================================
+
+    #[test]
+    fn test_html_to_markdown_basic() {
+        let html = "<p>Hello World</p>";
+        let result = SearchEngineBase::html_to_markdown(html);
+        assert!(result.contains("Hello World"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_strips_script() {
+        let html = "<div><script>alert('evil');</script><p>Content</p></div>";
+        let result = SearchEngineBase::html_to_markdown(html);
+        assert!(!result.contains("alert"));
+        assert!(!result.contains("script"));
+        assert!(result.contains("Content"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_strips_style() {
+        let html = "<style>.hidden { display: none; }</style><p>Visible</p>";
+        let result = SearchEngineBase::html_to_markdown(html);
+        assert!(!result.contains("display"));
+        assert!(!result.contains("hidden"));
+        assert!(result.contains("Visible"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_heading() {
+        let html = "<h1>Title</h1><p>Paragraph</p>";
+        let result = SearchEngineBase::html_to_markdown(html);
+        assert!(result.contains("Title"));
+        assert!(result.contains("Paragraph"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_link() {
+        let html = r#"<a href="https://example.com">Link Text</a>"#;
+        let result = SearchEngineBase::html_to_markdown(html);
+        // Markdown link format
+        assert!(result.contains("Link Text"));
+        assert!(result.contains("https://example.com"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_removes_comments() {
+        let html = "<!-- This is a comment --><p>Content</p>";
+        let result = SearchEngineBase::html_to_markdown(html);
+        assert!(!result.contains("comment"));
+        assert!(result.contains("Content"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_list() {
+        let html = "<ul><li>Item 1</li><li>Item 2</li></ul>";
+        let result = SearchEngineBase::html_to_markdown(html);
+        assert!(result.contains("Item 1"));
+        assert!(result.contains("Item 2"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_cleans_whitespace() {
+        let html = "<p>Line 1</p>\n\n\n\n<p>Line 2</p>";
+        let result = SearchEngineBase::html_to_markdown(html);
+        // Should not have more than one consecutive empty line
+        assert!(!result.contains("\n\n\n"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_empty_input() {
+        let html = "";
+        let result = SearchEngineBase::html_to_markdown(html);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_html_to_markdown_svg_placeholder() {
+        let html = "<svg><path d='...'></path></svg><p>After SVG</p>";
+        let result = SearchEngineBase::html_to_markdown(html);
+        // SVG should be replaced with placeholder
+        assert!(result.contains("[Svg Image]") || !result.contains("<svg"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_del_tag() {
+        let html = "<del>Deleted text</del>";
+        let result = SearchEngineBase::html_to_markdown(html);
+        // Del tag should become strikethrough
+        assert!(result.contains("~~") || result.contains("Deleted text"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_bold() {
+        let html = "<strong>Bold text</strong>";
+        let result = SearchEngineBase::html_to_markdown(html);
+        // Should convert to markdown bold
+        assert!(result.contains("Bold text"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_italic() {
+        let html = "<em>Italic text</em>";
+        let result = SearchEngineBase::html_to_markdown(html);
+        // Should convert to markdown italic
+        assert!(result.contains("Italic text"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_main_content_extraction() {
+        let html = r#"
+        <header>Header content</header>
+        <main><p>Main content here</p></main>
+        <footer>Footer content</footer>
+        "#;
+        let result = SearchEngineBase::html_to_markdown(html);
+        // Should extract main content
+        assert!(result.contains("Main content here"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_article_extraction() {
+        let html = r#"
+        <nav>Navigation</nav>
+        <article><p>Article content</p></article>
+        <aside>Sidebar</aside>
+        "#;
+        let result = SearchEngineBase::html_to_markdown(html);
+        // Should extract article content
+        assert!(result.contains("Article content"));
+    }
+}

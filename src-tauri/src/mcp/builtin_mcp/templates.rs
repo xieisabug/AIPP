@@ -249,3 +249,197 @@ pub async fn add_or_update_aipp_builtin_server(
         format!("{}", e)
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============================================
+    // builtin_templates Tests
+    // ============================================
+
+    #[test]
+    fn test_builtin_templates_not_empty() {
+        let templates = builtin_templates();
+        assert!(!templates.is_empty(), "Should have at least one builtin template");
+    }
+
+    #[test]
+    fn test_builtin_templates_search_exists() {
+        let templates = builtin_templates();
+        let search = templates.iter().find(|t| t.id == "search");
+        assert!(search.is_some(), "Search template should exist");
+    }
+
+    #[test]
+    fn test_search_template_has_required_fields() {
+        let templates = builtin_templates();
+        let search = templates.iter().find(|t| t.id == "search").unwrap();
+        
+        assert!(!search.name.is_empty());
+        assert!(!search.description.is_empty());
+        assert!(!search.command.is_empty());
+        assert_eq!(search.transport_type, "stdio");
+    }
+
+    #[test]
+    fn test_search_template_has_env_vars() {
+        let templates = builtin_templates();
+        let search = templates.iter().find(|t| t.id == "search").unwrap();
+        
+        assert!(!search.required_envs.is_empty(), "Search template should have environment variables");
+    }
+
+    #[test]
+    fn test_search_template_browser_type_env() {
+        let templates = builtin_templates();
+        let search = templates.iter().find(|t| t.id == "search").unwrap();
+        
+        let browser_env = search.required_envs.iter().find(|e| e.key == "BROWSER_TYPE");
+        assert!(browser_env.is_some(), "BROWSER_TYPE env should exist");
+        
+        let env = browser_env.unwrap();
+        assert_eq!(env.field_type, "select");
+        assert!(env.options.is_some());
+        
+        let options = env.options.as_ref().unwrap();
+        assert!(options.iter().any(|o| o.value == "chrome"));
+        assert!(options.iter().any(|o| o.value == "edge"));
+    }
+
+    #[test]
+    fn test_search_template_search_engine_env() {
+        let templates = builtin_templates();
+        let search = templates.iter().find(|t| t.id == "search").unwrap();
+        
+        let engine_env = search.required_envs.iter().find(|e| e.key == "SEARCH_ENGINE");
+        assert!(engine_env.is_some(), "SEARCH_ENGINE env should exist");
+        
+        let env = engine_env.unwrap();
+        assert!(env.required, "SEARCH_ENGINE should be required");
+        assert_eq!(env.default_value, Some("google".into()));
+        
+        let options = env.options.as_ref().unwrap();
+        assert!(options.iter().any(|o| o.value == "google"));
+        assert!(options.iter().any(|o| o.value == "bing"));
+        assert!(options.iter().any(|o| o.value == "duckduckgo"));
+        assert!(options.iter().any(|o| o.value == "kagi"));
+    }
+
+    #[test]
+    fn test_search_template_headless_env() {
+        let templates = builtin_templates();
+        let search = templates.iter().find(|t| t.id == "search").unwrap();
+        
+        let headless_env = search.required_envs.iter().find(|e| e.key == "HEADLESS");
+        assert!(headless_env.is_some(), "HEADLESS env should exist");
+        
+        let env = headless_env.unwrap();
+        assert_eq!(env.field_type, "boolean");
+        assert_eq!(env.default_value, Some("true".into()));
+    }
+
+    // ============================================
+    // get_builtin_tools_for_command Tests
+    // ============================================
+
+    #[test]
+    fn test_get_tools_for_search_command() {
+        let tools = get_builtin_tools_for_command("aipp:search");
+        assert_eq!(tools.len(), 2, "Search command should have 2 tools");
+    }
+
+    #[test]
+    fn test_search_web_tool_exists() {
+        let tools = get_builtin_tools_for_command("aipp:search");
+        let search_web = tools.iter().find(|t| t.name == "search_web");
+        assert!(search_web.is_some(), "search_web tool should exist");
+    }
+
+    #[test]
+    fn test_fetch_url_tool_exists() {
+        let tools = get_builtin_tools_for_command("aipp:search");
+        let fetch_url = tools.iter().find(|t| t.name == "fetch_url");
+        assert!(fetch_url.is_some(), "fetch_url tool should exist");
+    }
+
+    #[test]
+    fn test_search_web_tool_schema() {
+        let tools = get_builtin_tools_for_command("aipp:search");
+        let search_web = tools.iter().find(|t| t.name == "search_web").unwrap();
+        
+        assert!(!search_web.description.is_empty());
+        
+        let schema = &search_web.input_schema;
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["query"].is_object());
+        
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|r| r == "query"));
+    }
+
+    #[test]
+    fn test_fetch_url_tool_schema() {
+        let tools = get_builtin_tools_for_command("aipp:search");
+        let fetch_url = tools.iter().find(|t| t.name == "fetch_url").unwrap();
+        
+        assert!(!fetch_url.description.is_empty());
+        
+        let schema = &fetch_url.input_schema;
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["url"].is_object());
+        
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|r| r == "url"));
+    }
+
+    #[test]
+    fn test_get_tools_for_unknown_command() {
+        let tools = get_builtin_tools_for_command("unknown:command");
+        assert!(tools.is_empty(), "Unknown command should return empty tools");
+    }
+
+    #[test]
+    fn test_get_tools_for_empty_command() {
+        let tools = get_builtin_tools_for_command("");
+        assert!(tools.is_empty(), "Empty command should return empty tools");
+    }
+
+    // ============================================
+    // BuiltinTemplateEnvVar Structure Tests
+    // ============================================
+
+    #[test]
+    fn test_all_env_vars_have_valid_field_type() {
+        let templates = builtin_templates();
+        let valid_types = ["text", "select", "boolean", "number"];
+        
+        for template in templates {
+            for env in template.required_envs {
+                assert!(
+                    valid_types.contains(&env.field_type.as_str()),
+                    "Env var {} has invalid field_type: {}",
+                    env.key,
+                    env.field_type
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_select_env_vars_have_options() {
+        let templates = builtin_templates();
+        
+        for template in templates {
+            for env in template.required_envs {
+                if env.field_type == "select" {
+                    assert!(
+                        env.options.is_some() && !env.options.as_ref().unwrap().is_empty(),
+                        "Select env var {} should have options",
+                        env.key
+                    );
+                }
+            }
+        }
+    }
+}

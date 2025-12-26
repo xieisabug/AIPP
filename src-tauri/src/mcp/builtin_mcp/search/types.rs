@@ -100,3 +100,171 @@ pub enum SearchResponse {
     /// 简化的搜索结果响应（仅包含结果项数组）
     ItemsOnly(Vec<SearchItem>),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============================================
+    // SearchResultType Tests
+    // ============================================
+
+    #[test]
+    fn test_search_result_type_default() {
+        let result_type = SearchResultType::default();
+        assert_eq!(result_type, SearchResultType::Html);
+    }
+
+    #[test]
+    fn test_search_result_type_from_str_html() {
+        let result = SearchResultType::from_str(Some("html"));
+        assert_eq!(result, SearchResultType::Html);
+    }
+
+    #[test]
+    fn test_search_result_type_from_str_markdown() {
+        let result = SearchResultType::from_str(Some("markdown"));
+        assert_eq!(result, SearchResultType::Markdown);
+    }
+
+    #[test]
+    fn test_search_result_type_from_str_items() {
+        let result = SearchResultType::from_str(Some("items"));
+        assert_eq!(result, SearchResultType::Items);
+    }
+
+    #[test]
+    fn test_search_result_type_from_str_none() {
+        let result = SearchResultType::from_str(None);
+        assert_eq!(result, SearchResultType::Html); // default
+    }
+
+    #[test]
+    fn test_search_result_type_from_str_invalid() {
+        let result = SearchResultType::from_str(Some("invalid"));
+        assert_eq!(result, SearchResultType::Html); // default
+    }
+
+    #[test]
+    fn test_search_result_type_from_str_empty() {
+        let result = SearchResultType::from_str(Some(""));
+        assert_eq!(result, SearchResultType::Html); // default
+    }
+
+    // ============================================
+    // SearchRequest Tests
+    // ============================================
+
+    #[test]
+    fn test_search_request_serialize() {
+        let request = SearchRequest {
+            query: "test query".to_string(),
+            result_type: SearchResultType::Markdown,
+        };
+        
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("test query"));
+        assert!(json.contains("markdown"));
+    }
+
+    #[test]
+    fn test_search_request_deserialize() {
+        let json = r#"{"query": "hello world", "result_type": "items"}"#;
+        let request: SearchRequest = serde_json::from_str(json).unwrap();
+        
+        assert_eq!(request.query, "hello world");
+        assert_eq!(request.result_type, SearchResultType::Items);
+    }
+
+    #[test]
+    fn test_search_request_deserialize_default_result_type() {
+        let json = r#"{"query": "hello"}"#;
+        let request: SearchRequest = serde_json::from_str(json).unwrap();
+        
+        assert_eq!(request.query, "hello");
+        assert_eq!(request.result_type, SearchResultType::Html); // default
+    }
+
+    // ============================================
+    // SearchItem Tests
+    // ============================================
+
+    #[test]
+    fn test_search_item_serialize() {
+        let item = SearchItem {
+            title: "Test Title".to_string(),
+            url: "https://example.com".to_string(),
+            snippet: "Test snippet".to_string(),
+            rank: 1,
+            display_url: Some("example.com".to_string()),
+        };
+        
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("Test Title"));
+        assert!(json.contains("https://example.com"));
+        assert!(json.contains("\"rank\":1"));
+    }
+
+    #[test]
+    fn test_search_item_deserialize() {
+        let json = r#"{
+            "title": "Result",
+            "url": "https://test.com",
+            "snippet": "A test result",
+            "rank": 3,
+            "display_url": null
+        }"#;
+        
+        let item: SearchItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.title, "Result");
+        assert_eq!(item.url, "https://test.com");
+        assert_eq!(item.rank, 3);
+        assert!(item.display_url.is_none());
+    }
+
+    // ============================================
+    // SearchResults Tests
+    // ============================================
+
+    #[test]
+    fn test_search_results_serialize() {
+        let results = SearchResults {
+            query: "rust programming".to_string(),
+            search_engine: "Google".to_string(),
+            engine_id: "google".to_string(),
+            homepage_url: "https://www.google.com".to_string(),
+            items: vec![
+                SearchItem {
+                    title: "Rust Lang".to_string(),
+                    url: "https://rust-lang.org".to_string(),
+                    snippet: "Official Rust website".to_string(),
+                    rank: 1,
+                    display_url: None,
+                },
+            ],
+            total_results: Some(1000000),
+            search_time_ms: Some(250),
+        };
+        
+        let json = serde_json::to_string(&results).unwrap();
+        assert!(json.contains("rust programming"));
+        assert!(json.contains("Google"));
+        assert!(json.contains("Rust Lang"));
+    }
+
+    #[test]
+    fn test_search_results_empty_items() {
+        let results = SearchResults {
+            query: "no results".to_string(),
+            search_engine: "Bing".to_string(),
+            engine_id: "bing".to_string(),
+            homepage_url: "https://www.bing.com".to_string(),
+            items: vec![],
+            total_results: Some(0),
+            search_time_ms: None,
+        };
+        
+        assert!(results.items.is_empty());
+        assert_eq!(results.total_results, Some(0));
+    }
+}
