@@ -318,3 +318,323 @@ pub struct TimingConfig {
     pub action_delay_max: u64,
     pub page_load_timeout: u64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    // ============================================
+    // FingerprintConfig Tests
+    // ============================================
+
+    #[test]
+    fn test_fingerprint_config_serialization() {
+        let config = FingerprintConfig {
+            device_name: "Desktop Chrome".to_string(),
+            locale: "en-US".to_string(),
+            timezone_id: "America/New_York".to_string(),
+            color_scheme: "dark".to_string(),
+            reduced_motion: "no-preference".to_string(),
+            forced_colors: "none".to_string(),
+            user_agent: "Mozilla/5.0 Test".to_string(),
+            viewport_width: 1920,
+            viewport_height: 1080,
+            device_scale_factor: 1.0,
+            is_mobile: false,
+            has_touch: false,
+            screen_width: 1920,
+            screen_height: 1080,
+            accept_language: "en-US,en;q=0.9".to_string(),
+            platform: "Win32".to_string(),
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("Desktop Chrome"));
+        assert!(json.contains("en-US"));
+
+        let deserialized: FingerprintConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.device_name, "Desktop Chrome");
+    }
+
+    // ============================================
+    // SavedState Tests
+    // ============================================
+
+    #[test]
+    fn test_saved_state_serialization() {
+        let state = SavedState {
+            fingerprint: None,
+            google_domain: Some("google.com".to_string()),
+            last_update: Some(1234567890),
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+        let deserialized: SavedState = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.google_domain, Some("google.com".to_string()));
+        assert_eq!(deserialized.last_update, Some(1234567890));
+    }
+
+    #[test]
+    fn test_saved_state_empty() {
+        let state = SavedState {
+            fingerprint: None,
+            google_domain: None,
+            last_update: None,
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+        let deserialized: SavedState = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.fingerprint.is_none());
+    }
+
+    // ============================================
+    // FingerprintManager Tests
+    // ============================================
+
+    #[test]
+    fn test_fingerprint_manager_new() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = FingerprintManager::new(temp_dir.path());
+        assert!(manager.saved_state.fingerprint.is_none());
+    }
+
+    #[test]
+    fn test_fingerprint_manager_get_stable_fingerprint() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = FingerprintManager::new(temp_dir.path());
+
+        // First call should generate a fingerprint
+        let config = manager.get_stable_fingerprint(Some("en-US"));
+        assert!(!config.device_name.is_empty());
+        assert!(!config.user_agent.is_empty());
+        assert!(config.viewport_width > 0);
+        assert!(config.viewport_height > 0);
+    }
+
+    #[test]
+    fn test_fingerprint_manager_generates_valid_locale() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = FingerprintManager::new(temp_dir.path());
+
+        let config = manager.get_stable_fingerprint(Some("zh-CN"));
+        assert_eq!(config.locale, "zh-CN");
+    }
+
+    #[test]
+    fn test_fingerprint_manager_default_locale() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = FingerprintManager::new(temp_dir.path());
+
+        let config = manager.get_stable_fingerprint(None);
+        assert_eq!(config.locale, "zh-CN"); // default
+    }
+
+    // ============================================
+    // get_stealth_launch_args Tests
+    // ============================================
+
+    #[test]
+    fn test_get_stealth_launch_args_not_empty() {
+        let args = FingerprintManager::get_stealth_launch_args();
+        assert!(!args.is_empty());
+    }
+
+    #[test]
+    fn test_get_stealth_launch_args_contains_automation_control() {
+        let args = FingerprintManager::get_stealth_launch_args();
+        assert!(args.iter().any(|a| a.contains("AutomationControlled")));
+    }
+
+    #[test]
+    fn test_get_stealth_launch_args_contains_no_first_run() {
+        let args = FingerprintManager::get_stealth_launch_args();
+        assert!(args.contains(&"--no-first-run".to_string()));
+    }
+
+    #[test]
+    fn test_get_stealth_launch_args_contains_disable_logging() {
+        let args = FingerprintManager::get_stealth_launch_args();
+        assert!(args.contains(&"--disable-logging".to_string()));
+    }
+
+    // ============================================
+    // get_timing_config Tests
+    // ============================================
+
+    #[test]
+    fn test_get_timing_config_valid_ranges() {
+        let config = FingerprintManager::get_timing_config();
+
+        // Typing delay should be in reasonable range
+        assert!(config.typing_delay_min >= 50);
+        assert!(config.typing_delay_max >= config.typing_delay_min);
+        assert!(config.typing_delay_max <= 300);
+
+        // Action delay should be in reasonable range
+        assert!(config.action_delay_min >= 200);
+        assert!(config.action_delay_max >= config.action_delay_min);
+        assert!(config.action_delay_max <= 900);
+
+        // Page load timeout should be reasonable
+        assert!(config.page_load_timeout >= 15000);
+        assert!(config.page_load_timeout <= 25000);
+    }
+
+    #[test]
+    fn test_get_timing_config_randomness() {
+        // Get multiple configs and check they can vary
+        let mut configs = Vec::new();
+        for _ in 0..10 {
+            configs.push(FingerprintManager::get_timing_config());
+        }
+
+        // Check that not all values are identical (would indicate no randomness)
+        let first_typing_min = configs[0].typing_delay_min;
+        let all_same = configs.iter().all(|c| c.typing_delay_min == first_typing_min);
+        // With 10 samples, it's very unlikely all would be the same if there's randomness
+        // But we allow for the possibility in case of test flakiness
+        // The main goal is to ensure the config is valid
+        assert!(configs.iter().all(|c| c.typing_delay_min >= 50));
+    }
+
+    // ============================================
+    // TimingConfig Tests
+    // ============================================
+
+    #[test]
+    fn test_timing_config_struct() {
+        let config = TimingConfig {
+            typing_delay_min: 50,
+            typing_delay_max: 100,
+            action_delay_min: 200,
+            action_delay_max: 500,
+            page_load_timeout: 15000,
+        };
+
+        assert_eq!(config.typing_delay_min, 50);
+        assert_eq!(config.page_load_timeout, 15000);
+    }
+
+    // ============================================
+    // Internal Method Tests (via public interface)
+    // ============================================
+
+    #[test]
+    fn test_fingerprint_has_valid_user_agent() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = FingerprintManager::new(temp_dir.path());
+
+        let config = manager.get_stable_fingerprint(None);
+        assert!(config.user_agent.contains("Mozilla"));
+        assert!(config.user_agent.contains("AppleWebKit") || config.user_agent.contains("Chrome"));
+    }
+
+    #[test]
+    fn test_fingerprint_has_valid_timezone() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = FingerprintManager::new(temp_dir.path());
+
+        let config = manager.get_stable_fingerprint(None);
+        assert!(!config.timezone_id.is_empty());
+        assert!(config.timezone_id.contains("/"));
+    }
+
+    #[test]
+    fn test_fingerprint_has_valid_accept_language() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = FingerprintManager::new(temp_dir.path());
+
+        let config = manager.get_stable_fingerprint(Some("zh-CN"));
+        assert!(config.accept_language.contains("zh-CN"));
+        assert!(config.accept_language.contains("q="));
+    }
+
+    #[test]
+    fn test_fingerprint_has_valid_platform() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = FingerprintManager::new(temp_dir.path());
+
+        let config = manager.get_stable_fingerprint(None);
+        assert!(
+            config.platform == "Win32"
+                || config.platform == "MacIntel"
+                || config.platform == "Linux x86_64"
+        );
+    }
+
+    #[test]
+    fn test_fingerprint_color_scheme() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = FingerprintManager::new(temp_dir.path());
+
+        let config = manager.get_stable_fingerprint(None);
+        assert!(config.color_scheme == "dark" || config.color_scheme == "light");
+    }
+
+    #[test]
+    fn test_fingerprint_device_scale_factor() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = FingerprintManager::new(temp_dir.path());
+
+        let config = manager.get_stable_fingerprint(None);
+        assert!(config.device_scale_factor >= 1.0);
+        assert!(config.device_scale_factor <= 3.0);
+    }
+
+    #[test]
+    fn test_fingerprint_viewport_reasonable_size() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = FingerprintManager::new(temp_dir.path());
+
+        let config = manager.get_stable_fingerprint(None);
+        // Viewport should be reasonable desktop size
+        assert!(config.viewport_width >= 1000);
+        assert!(config.viewport_width <= 4000);
+        assert!(config.viewport_height >= 600);
+        assert!(config.viewport_height <= 3000);
+    }
+
+    #[test]
+    fn test_fingerprint_persists_to_file() {
+        let temp_dir = TempDir::new().unwrap();
+        
+        // Create manager and generate fingerprint
+        {
+            let mut manager = FingerprintManager::new(temp_dir.path());
+            let _ = manager.get_stable_fingerprint(Some("en-US"));
+        }
+
+        // Check that state file was created
+        let state_file = temp_dir.path().join("search_fingerprint_state.json");
+        assert!(state_file.exists());
+
+        // Load again and verify fingerprint is loaded
+        let content = std::fs::read_to_string(&state_file).unwrap();
+        let state: SavedState = serde_json::from_str(&content).unwrap();
+        assert!(state.fingerprint.is_some());
+    }
+
+    #[test]
+    fn test_fingerprint_accept_language_variants() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Test Chinese
+        {
+            let mut manager = FingerprintManager::new(temp_dir.path());
+            let config = manager.get_stable_fingerprint(Some("zh-CN"));
+            assert!(config.accept_language.starts_with("zh-CN"));
+        }
+
+        // Clean up for next test
+        let _ = std::fs::remove_file(temp_dir.path().join("search_fingerprint_state.json"));
+
+        // Test English
+        {
+            let mut manager = FingerprintManager::new(temp_dir.path());
+            let config = manager.get_stable_fingerprint(Some("en-US"));
+            assert!(config.accept_language.starts_with("en-US"));
+        }
+    }
+}

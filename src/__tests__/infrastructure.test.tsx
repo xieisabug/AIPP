@@ -3,7 +3,7 @@
  *
  * 这个文件用于验证测试环境配置是否正确
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
@@ -101,9 +101,7 @@ describe("测试基础设施验证", () => {
                 data: "test data",
             }));
 
-            const result = await invoke<{ success: boolean; data: string }>(
-                "test_command"
-            );
+            const result = await invoke("test_command");
 
             expect(result).toEqual({ success: true, data: "test data" });
         });
@@ -114,10 +112,7 @@ describe("测试基础设施验证", () => {
                 name: `Item ${args?.id}`,
             }));
 
-            const result = await invoke<{ id: number; name: string }>(
-                "get_item",
-                { id: 42 }
-            );
+            const result = await invoke("get_item", { id: 42 });
 
             expect(result).toEqual({ id: 42, name: "Item 42" });
         });

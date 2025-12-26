@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useRef } from "react";
+import React, { useState, useCallback, useMemo } from "react";
 import { UseFormReturn } from "react-hook-form";
 import { toast } from "sonner";
 import ConfigForm from "@/components/ConfigForm";
@@ -32,21 +32,6 @@ export const ShortcutsConfigForm: React.FC<ShortcutsConfigFormProps> = ({ form, 
         if (/^Space$/i.test(keyPart)) keyPart = "Space";
         return [...parts.slice(0, -1), keyPart].join("+");
     }, [shortcutValue]);
-
-    // 保留占位的工具函数（当前未直接使用）
-    const computeModifierTokens = (e: KeyboardEvent) => {
-        const tokens: string[] = [];
-        if (e.ctrlKey) tokens.push("Ctrl");
-        if (e.shiftKey) tokens.push("Shift");
-        if (e.altKey) tokens.push("Alt");
-        if (e.metaKey) tokens.push("Super");
-        return tokens;
-    };
-    const normalizeCode = (code: string, key: string) => {
-        if (!code || code === "Unidentified") return key.toUpperCase();
-        if (code === "Space" || key === " ") return "Space";
-        return code;
-    };
 
     const onShortcutChange = useCallback((s: string) => {
         form.setValue("shortcut", s, { shouldDirty: true });

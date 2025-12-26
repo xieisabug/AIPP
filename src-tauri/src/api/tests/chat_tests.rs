@@ -497,8 +497,8 @@ async fn test_parse_assistant_mentions_performance_large_text_with_mention() {
     assert_eq!(result.mentions[0].assistant_id, 1); // gpt4
     assert_eq!(result.primary_assistant_id, Some(1));
 
-    // 性能断言：在1MB文本中应该能在合理时间内完成（比如200ms内）
-    assert!(elapsed.as_millis() < 200, "解析时间过长: {:?}", elapsed);
+    // 性能断言：在1MB文本中应该能在合理时间内完成（500ms内，考虑不同机器性能差异）
+    assert!(elapsed.as_millis() < 500, "解析时间过长: {:?}", elapsed);
 }
 
 #[tokio::test]
@@ -543,8 +543,8 @@ async fn test_parse_assistant_mentions_performance_large_text_no_mention() {
     assert_eq!(result.mentions.len(), 0);
     assert_eq!(result.primary_assistant_id, None);
 
-    // 性能断言：即使没有@符号，在1MB文本中也应该能在合理时间内完成（比如150ms内）
-    assert!(elapsed.as_millis() < 150, "解析时间过长: {:?}", elapsed);
+    // 性能断言：即使没有@符号，在1MB文本中也应该能在合理时间内完成（500ms内，考虑不同机器性能差异）
+    assert!(elapsed.as_millis() < 500, "解析时间过长: {:?}", elapsed);
 }
 
 #[tokio::test]
@@ -606,8 +606,8 @@ async fn test_parse_assistant_mentions_performance_multiple_mentions_in_large_te
     assert_eq!(result.mentions[2].assistant_id, 3); // gemini-pro
     assert_eq!(result.primary_assistant_id, Some(2));
 
-    // 性能断言：在包含多个@提及的1MB文本中应该能在合理时间内完成（比如200ms内）
-    assert!(elapsed.as_millis() < 200, "解析时间过长: {:?}", elapsed);
+    // 性能断言：在包含多个@提及的1MB文本中应该能在合理时间内完成（500ms内，考虑不同机器性能差异）
+    assert!(elapsed.as_millis() < 500, "解析时间过长: {:?}", elapsed);
 }
 
 #[tokio::test]

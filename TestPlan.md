@@ -24,11 +24,11 @@
 | 对话管理 | `api/conversation_api.rs` | 9 | P0 | ✅ 部分 |
 | 助手管理 | `api/assistant_api.rs` | 14 | P1 | ❌ |
 | LLM 配置 | `api/llm_api.rs` | 15 | P1 | ❌ |
-| MCP 服务 | `mcp/*` | 多个 | P1 | ❌ |
+| MCP 服务 | `mcp/*` | 多个 | P1 | ✅ 部分 |
 | 子任务 | `api/sub_task_api.rs` | 17 | P2 | ❌ |
 | 数据库层 | `db/*.rs` | N/A | P0 | ✅ 部分 |
 | 模板引擎 | `template_engine/` | N/A | P2 | ✅ 有 |
-| Artifacts | `artifacts/*` | 多个 | P2 | ❌ |
+| Artifacts | `artifacts/*` | 多个 | P2 | ✅ 部分 |
 | Copilot | `api/copilot_api.rs` | 9 | P3 | ✅ 部分 |
 | 系统 API | `api/system_api.rs` | 12 | P2 | ❌ |
 
@@ -142,6 +142,25 @@ db/tests/
 ```
 
 **测试统计**: 数据库层共 **154 个测试**，全部通过。
+
+### 1.1 其他已完成的纯函数测试
+
+| 模块 | 文件 | 测试数 | 描述 |
+|------|------|--------|------|
+| Artifacts | `artifacts/code_utils.rs` | 29 | React/Vue 组件检测 |
+| Artifacts | `artifacts/artifacts_db.rs` | 29 | Artifacts 数据库 CRUD |
+| MCP Utils | `mcp/util.rs` | 27 | 环境变量替换、Header 处理 |
+| MCP Templates | `mcp/builtin_mcp/templates.rs` | 16 | 内置 MCP 模板配置 |
+| Search Types | `mcp/builtin_mcp/search/types.rs` | 14 | 搜索类型序列化/反序列化 |
+| Search Base | `mcp/builtin_mcp/search/engines/base.rs` | 15 | HTML 转 Markdown 转换 |
+| Fingerprint | `mcp/builtin_mcp/search/fingerprint.rs` | 23 | 浏览器指纹管理 |
+| Engine Manager | `mcp/builtin_mcp/search/engine_manager.rs` | 26 | 搜索引擎配置管理 |
+| Google Engine | `mcp/builtin_mcp/search/engines/google.rs` | 20 | Google 搜索结果解析 |
+| Bing Engine | `mcp/builtin_mcp/search/engines/bing.rs` | 16 | Bing 搜索结果解析 |
+| DuckDuckGo Engine | `mcp/builtin_mcp/search/engines/duckduckgo.rs` | 13 | DuckDuckGo 搜索结果解析 |
+| Kagi Engine | `mcp/builtin_mcp/search/engines/kagi.rs` | 14 | Kagi 搜索结果解析 |
+
+**纯函数测试统计**: 共 **242 个测试**，全部通过。
 
 **测试目标**:
 - 所有 Repository 的 CRUD 操作
@@ -362,15 +381,37 @@ db/tests/
 
 ### 9. Artifacts (P2) - `artifacts/*`
 
+#### 9.1 code_utils.rs ✅ 已完成 (29 个测试)
+
 | 测试用例 | 描述 | 状态 |
 |----------|------|------|
-| `test_create_artifact` | 创建 Artifact | ❌ |
-| `test_update_artifact` | 更新 Artifact | ❌ |
-| `test_delete_artifact` | 删除 Artifact | ❌ |
+| `test_is_react_component_*` | React 组件检测 | ✅ (6 个) |
+| `test_extract_component_name_*` | 组件名提取 | ✅ (8 个) |
+| `test_is_vue_component_*` | Vue 组件检测 | ✅ (6 个) |
+| `test_extract_vue_component_name_*` | Vue 组件名提取 | ✅ (5 个) |
+| `test_edge_cases_*` | 边界情况测试 | ✅ (4 个) |
+
+#### 9.2 artifacts_db.rs ✅ 已完成 (29 个测试)
+
+| 测试用例 | 描述 | 状态 |
+|----------|------|------|
+| `test_create_tables_*` | 表创建测试 | ✅ (2 个) |
+| `test_save_artifact_*` | 保存 Artifact | ✅ (4 个) |
+| `test_get_artifact_*` | 获取 Artifact | ✅ (4 个) |
+| `test_search_artifacts_*` | 搜索 Artifact | ✅ (6 个) |
+| `test_update_artifact_*` | 更新 Artifact | ✅ (3 个) |
+| `test_delete_artifact_*` | 删除 Artifact | ✅ (2 个) |
+| `test_increment_use_count_*` | 使用计数 | ✅ (2 个) |
+| `test_get_statistics_*` | 统计信息 | ✅ (2 个) |
+| `test_ordering_*` | 排序测试 | ✅ (1 个) |
+
+#### 9.3 Preview 生成 (待完成)
+
+| 测试用例 | 描述 | 状态 |
+|----------|------|------|
 | `test_react_preview_generation` | React 预览生成 | ❌ |
 | `test_vue_preview_generation` | Vue 预览生成 | ❌ |
 | `test_html_preview_generation` | HTML 预览生成 | ❌ |
-| `test_collection_management` | Collection 管理 | ❌ |
 
 ---
 
@@ -578,8 +619,22 @@ db/tests/
 - [ ] **T033** [P1] 添加 MCP 服务器注册测试
 - [x] **T034** [P1] 添加 MCP 工具获取测试 (24 个测试)
 - [ ] **T035** [P1] 添加 MCP 执行测试
-- [ ] **T036** [P2] 添加内置搜索工具测试
+- [x] **T036** [P2] 添加内置搜索工具测试 (部分完成 - templates 16测试, types 14测试, base 15测试)
 - [ ] **T037** [P2] 添加 URL 抓取工具测试
+
+#### 纯函数模块 ✅ 已完成 (130 个测试)
+- [x] **T083** [P2] 添加 artifacts/code_utils 测试 (29 个测试)
+- [x] **T084** [P2] 添加 artifacts/artifacts_db 测试 (29 个测试)
+- [x] **T085** [P2] 添加 mcp/util 测试 (27 个测试)
+- [x] **T086** [P2] 添加 builtin_mcp/templates 测试 (16 个测试)
+- [x] **T087** [P2] 添加 search/types 测试 (14 个测试)
+- [x] **T088** [P2] 添加 search/engines/base 测试 (15 个测试)
+- [x] **T089** [P2] 添加 search/fingerprint 测试 (23 个测试)
+- [x] **T090** [P2] 添加 search/engine_manager 测试 (26 个测试)
+- [x] **T091** [P2] 添加 search/engines/google 测试 (20 个测试)
+- [x] **T092** [P2] 添加 search/engines/bing 测试 (16 个测试)
+- [x] **T093** [P2] 添加 search/engines/duckduckgo 测试 (13 个测试)
+- [x] **T094** [P2] 添加 search/engines/kagi 测试 (14 个测试)
 
 ### 阶段四：前端核心测试 (Week 6-7)
 

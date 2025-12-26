@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import AnimatedLogo from "./AnimatedLogo";
 import { useLogoState } from "../hooks/useLogoState";
 import { Button } from "./ui/button";
-import React, { memo } from "react";
+import { memo } from "react";
 
 interface ChatUIInfomationProps {
     showArtifacts?: boolean;
