@@ -4,7 +4,8 @@ import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { Badge } from "../ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
-import { Blocks, Trash2, Edit, RefreshCw, Zap } from "lucide-react";
+import { Trash2, Edit, RefreshCw, Zap } from "lucide-react";
+import MCP from "@/assets/mcp.svg?react";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { toast } from 'sonner';
 import ConfirmDialog from "../ConfirmDialog";
@@ -321,7 +322,7 @@ const MCPConfig: React.FC = () => {
         mcpServers.map(server => ({
             id: server.id.toString(),
             label: server.name,
-            icon: server.is_enabled ? <Zap className="h-4 w-4" /> : <Blocks className="h-4 w-4" />
+            icon: server.is_enabled ? <Zap className="h-4 w-4" /> : <MCP className="h-4 w-4" />
         })), [mcpServers]);
 
     // 下拉菜单选择回调
@@ -346,7 +347,7 @@ const MCPConfig: React.FC = () => {
         <SidebarList
             title="MCP列表"
             description="选择MCP进行配置"
-            icon={<Blocks className="h-5 w-5" />}
+            icon={<MCP className="h-5 w-5" />}
             addButton={
                 <MCPActionDropdown
                     onTemplateSelect={handleTemplateSelect}
@@ -556,7 +557,7 @@ const MCPConfig: React.FC = () => {
                         </Tabs>
                     ) : (
                         <div className="text-center py-8">
-                            <Blocks className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+                            <MCP className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
                             <p className="text-sm text-muted-foreground">暂无能力数据</p>
                             <p className="text-xs text-muted-foreground mt-1">点击上方"刷新能力"按钮获取服务器能力</p>
                         </div>
@@ -566,7 +567,7 @@ const MCPConfig: React.FC = () => {
         </div>
     ) : (
         <EmptyState
-            icon={<Blocks className="h-8 w-8 text-muted-foreground" />}
+            icon={<MCP className="h-8 w-8 text-muted-foreground" />}
             title="选择一个MCP服务器"
             description="从左侧列表中选择一个服务器开始配置"
         />
@@ -581,7 +582,7 @@ const MCPConfig: React.FC = () => {
                     content={null}
                     emptyState={
                         <EmptyState
-                            icon={<Blocks className="h-8 w-8 text-muted-foreground" />}
+                            icon={<MCP className="h-8 w-8 text-muted-foreground" />}
                             title="还没有配置MCP服务器"
                             description="开始添加你的第一个MCP服务器，扩展AI助手的能力"
                             action={
@@ -692,7 +693,7 @@ const MCPConfig: React.FC = () => {
                                 is_builtin: editingServer.is_builtin,
                             };
                             await invoke('update_mcp_server', { id: editingServer.id, request: req });
-                            
+
                             // 立即更新 selectedServer 以确保下次编辑时显示最新数据
                             if (selectedServer && selectedServer.id === editingServer.id) {
                                 setSelectedServer({
@@ -700,7 +701,7 @@ const MCPConfig: React.FC = () => {
                                     environment_variables: builtinEditEnv,
                                 });
                             }
-                            
+
                             toast.success('已保存内置工具环境变量');
                             setBuiltinEditOpen(false);
                             getMcpServers();

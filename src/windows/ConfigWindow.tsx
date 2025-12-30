@@ -8,12 +8,13 @@ import MCPConfig from "../components/config/MCPConfig";
 import { appDataDir } from "@tauri-apps/api/path";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { Blocks, Bot, ServerCrash, Settings } from "lucide-react";
+import { Bot, ServerCrash, Settings } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
 import { Home, Menu } from "lucide-react";
+import MCP from "../assets/mcp.svg?react";
 
 interface MenuItem {
     id: string;
@@ -52,8 +53,8 @@ function ConfigWindow() {
         {
             id: "mcp-config",
             name: "MCP配置",
-            icon: <Blocks className="w-full h-full text-muted-foreground" />,
-            iconSelected: <Blocks className="w-full h-full text-foreground" />,
+            icon: <MCP className="w-full h-full text-muted-foreground" />,
+            iconSelected: <MCP className="w-full h-full text-foreground" />,
         },
         {
             id: "feature-assistant-config",
