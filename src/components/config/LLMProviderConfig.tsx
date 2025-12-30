@@ -277,7 +277,7 @@ const LLMProviderConfig: React.FC = () => {
     // 侧边栏内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
     const sidebar = useMemo(() => (
         <SidebarList
-            title="提供商"
+            title="模型提供商"
             description="选择提供商进行配置"
             icon={<ServerCrash className="h-5 w-5" />}
             addButton={addButton}
@@ -302,7 +302,7 @@ const LLMProviderConfig: React.FC = () => {
     ), [LLMProviders, selectedProvider?.id, handleSelectProvider, addButton]);
 
     const selectedProviderApiType = selectedProvider ? apiTypes.find(type => type.value === selectedProvider.api_type)?.label || selectedProvider.api_type : "";
-    
+
     // 右侧内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
     const content = useMemo(() => selectedProvider ? (
         <div className="space-y-6">
@@ -394,7 +394,7 @@ const LLMProviderConfig: React.FC = () => {
 
             {/* 新增提供商对话框 */}
             <FormDialog
-                title='新增大模型提供商'
+                title='新增模型提供商'
                 isOpen={newProviderDialogOpen}
                 onClose={closeNewProviderDialog}
                 onSubmit={handleNewProviderSubmit}

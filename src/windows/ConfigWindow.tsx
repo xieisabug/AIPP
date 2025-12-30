@@ -40,25 +40,25 @@ function ConfigWindow() {
     const menuList: Array<MenuItem> = [
         {
             id: "llm-provider-config",
-            name: "大模型配置",
+            name: "模型提供商",
             icon: <ServerCrash className="w-full h-full text-muted-foreground" />,
             iconSelected: <ServerCrash className="w-full h-full text-foreground" />,
         },
         {
             id: "assistant-config",
-            name: "个人助手配置",
+            name: "个人助手",
             icon: <Bot className="w-full h-full text-muted-foreground" />,
             iconSelected: <Bot className="w-full h-full text-foreground" />,
         },
         {
             id: "mcp-config",
-            name: "MCP配置",
+            name: "MCP",
             icon: <MCP className="w-full h-full text-muted-foreground" />,
             iconSelected: <MCP className="w-full h-full text-foreground" />,
         },
         {
             id: "feature-assistant-config",
-            name: "程序配置",
+            name: "程序功能",
             icon: <Settings className="w-full h-full text-muted-foreground" />,
             iconSelected: <Settings className="w-full h-full text-foreground" />,
         },
