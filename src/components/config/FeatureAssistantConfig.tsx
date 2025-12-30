@@ -118,7 +118,7 @@ const FeatureAssistantConfig: React.FC = () => {
     });
 
     const dataFolderForm = useForm({});
-    
+
     // 根据平台设置快捷键默认值
     const isMac = typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().indexOf('mac') !== -1;
     const shortcutsForm = useForm({
@@ -134,7 +134,7 @@ const FeatureAssistantConfig: React.FC = () => {
     useEffect(() => {
         if (!loading && featureConfig.size > 0) {
             console.log("feature config loaded", featureConfig);
-            
+
             // 更新 display 表单
             const displayConfig = featureConfig.get("display");
             if (displayConfig) {
@@ -282,7 +282,7 @@ const FeatureAssistantConfig: React.FC = () => {
 
     // 侧边栏内容 - 使用 useMemo 避免重复创建
     const sidebar = useMemo(() => (
-        <SidebarList title="功能列表" description="选择功能进行配置" icon={<Settings className="h-5 w-5" />}>
+        <SidebarList title="程序功能" description="选择功能进行配置" icon={<Settings className="h-5 w-5" />}>
             {featureList.map((feature) => {
                 return (
                     <ListItemButton
