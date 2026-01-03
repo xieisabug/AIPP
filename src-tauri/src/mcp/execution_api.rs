@@ -7,7 +7,7 @@
 //! 4. 将执行结果写回数据库并触发前端事件
 //! 5. 在工具成功后继续驱动 AI 对话（包含重试场景）
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
-use crate::api::ai_api::tool_result_continue_ask_ai_impl;
+use crate::api::ai_api::{sanitize_tool_name, tool_result_continue_ask_ai_impl};
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::mcp::builtin_mcp::{execute_aipp_builtin_tool, is_builtin_mcp_call};
 use crate::db::mcp_db::{MCPDatabase, MCPServer, MCPToolCall};
@@ -274,19 +274,26 @@ pub async fn create_mcp_tool_call(
     let db = MCPDatabase::new(&app_handle).map_err(|e| format!("初始化数据库失败: {}", e))?;
 
     // 查找并验证服务器
+    // 支持两种匹配方式：
+    // 1. 精确匹配原始名称
+    // 2. 匹配清理后的名称（用于处理大模型返回的 sanitized 名称）
     let servers = db.get_mcp_servers().map_err(|e| format!("获取MCP服务器列表失败: {}", e))?;
     let server = servers
         .iter()
-        .find(|s| s.name == server_name && s.is_enabled)
+        .find(|s| {
+            s.is_enabled
+                && (s.name == server_name || sanitize_tool_name(&s.name) == server_name)
+        })
         .ok_or_else(|| format!("服务器 '{}' 未找到或已禁用", server_name))?;
 
     // 根据是否提供 llm_call_id 选择相应的创建方法
+    // 注意：使用 server.name（原始名称）而不是 server_name（可能是清理后的名称）
     let tool_call = if llm_call_id.is_some() || assistant_message_id.is_some() {
         db.create_mcp_tool_call_with_llm_id(
             conversation_id,
             message_id,
             server.id,
-            &server_name,
+            &server.name,
             &tool_name,
             &parameters,
             llm_call_id.as_deref(),
@@ -297,7 +304,7 @@ pub async fn create_mcp_tool_call(
             conversation_id,
             message_id,
             server.id,
-            &server_name,
+            &server.name,
             &tool_name,
             &parameters,
         )

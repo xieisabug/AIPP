@@ -1,3 +1,4 @@
+use crate::api::ai_api::build_tool_name;
 use crate::db::conversation_db::AttachmentType;
 use crate::db::conversation_db::Repository;
 use crate::db::conversation_db::{Conversation, ConversationDatabase, Message, MessageAttachment};
@@ -212,8 +213,8 @@ pub fn reconstruct_assistant_with_tool_calls_from_content(content: &str) -> Opti
                 tool_data["tool_name"].as_str(),
                 tool_data["parameters"].as_str(),
             ) {
-                // 使用正确的格式：server__tool (双下划线)
-                let fn_name = format!("{}__{}", server_name, tool_name);
+                // 使用正确的格式：server__tool (双下划线)，并清理名称以符合 API 规范
+                let fn_name = build_tool_name(server_name, tool_name);
                 let fn_arguments =
                     serde_json::from_str(parameters).unwrap_or(serde_json::json!({}));
 

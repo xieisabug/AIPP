@@ -1,6 +1,7 @@
 use crate::api::ai::config::{calculate_retry_delay, get_retry_attempts_from_config};
 use crate::api::ai::events::{ConversationEvent, MessageAddEvent, MessageUpdateEvent};
 use crate::api::ai::types::McpOverrideConfig;
+use crate::api::ai_api::{resolve_tool_name, sanitize_tool_name, ToolNameMapping};
 use crate::db::assistant_db::Assistant;
 use crate::db::conversation_db::{ConversationDatabase, Message, Repository};
 use crate::db::system_db::FeatureConfig;
@@ -403,6 +404,7 @@ async fn handle_captured_tool_calls_common(
     response_content: &mut String,
     emit_tool_call_events: bool,
     mcp_override_config: Option<&McpOverrideConfig>,
+    tool_name_mapping: &ToolNameMapping,
 ) -> anyhow::Result<()> {
     // 先将完整的 tool_calls JSON 覆盖保存到消息，保证数据源一致
     if let Ok(Some(mut msg)) = conversation_db
@@ -418,10 +420,11 @@ async fn handle_captured_tool_calls_common(
     }
 
     for tool_call in captured_tool_calls {
-        let (server_name, tool_name) = split_tool_name(&tool_call.fn_name);
+        // 使用映射表还原原始名称，用于 UI 显示和数据库记录
+        let (server_name, tool_name) = resolve_tool_name(&tool_call.fn_name, tool_name_mapping);
         let params_str = tool_call.fn_arguments.to_string();
 
-        // 创建工具调用记录
+        // 创建工具调用记录（使用原始名称）
         match crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
             app_handle.clone(),
             conversation_id,
@@ -435,7 +438,7 @@ async fn handle_captured_tool_calls_common(
         .await
         {
             Ok(tool_call_record) => {
-                // 追加 UI hint
+                // 追加 UI hint（使用原始名称）
                 let ui_hint = format!(
                     "\n\n<!-- MCP_TOOL_CALL:{} -->\n",
                     serde_json::json!({
@@ -494,7 +497,10 @@ async fn handle_captured_tool_calls_common(
                         {
                             let mut should_auto_run = false;
                             for s in servers.iter() {
-                                if s.name == server_name && s.is_enabled {
+                                // 支持精确匹配和清理后名称匹配
+                                let name_matches = s.name == server_name
+                                    || sanitize_tool_name(&s.name) == server_name;
+                                if name_matches && s.is_enabled {
                                     if let Some(t) =
                                         s.tools.iter().find(|t| t.name == tool_name && t.is_enabled)
                                     {
@@ -1274,6 +1280,7 @@ pub async fn handle_stream_chat(
     llm_model_id: i64,
     llm_model_name: String,
     mcp_override_config: Option<McpOverrideConfig>,
+    tool_name_mapping: ToolNameMapping,
 ) -> Result<(), anyhow::Error> {
     let mut main_attempts = 0;
     let app_handle_clone = app_handle.clone();
@@ -1303,6 +1310,7 @@ pub async fn handle_stream_chat(
             llm_model_id,
             llm_model_name.clone(),
             mcp_override_config.clone(),
+            tool_name_mapping.clone(),
         )
         .await;
 
@@ -1384,6 +1392,7 @@ async fn attempt_stream_chat(
     llm_model_id: i64,
     llm_model_name: String,
     mcp_override_config: Option<McpOverrideConfig>,
+    tool_name_mapping: ToolNameMapping,
 ) -> Result<(), anyhow::Error> {
     // 尝试建立流式连接
     info!(model_name, "establishing stream connection");
@@ -1659,6 +1668,7 @@ async fn attempt_stream_chat(
                                     &mut response_content,
                                     true,
                                     mcp_override_config.as_ref(),
+                                    &tool_name_mapping,
                                 )
                                 .await;
                             }
@@ -1898,6 +1908,7 @@ pub async fn handle_non_stream_chat(
     llm_model_id: i64,
     llm_model_name: String,
     mcp_override_config: Option<McpOverrideConfig>,
+    tool_name_mapping: ToolNameMapping,
 ) -> Result<(), anyhow::Error> {
     let generation_group_id =
         generation_group_id_override.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -2067,6 +2078,7 @@ pub async fn handle_non_stream_chat(
                     &mut content,
                     true,
                     mcp_override_config.as_ref(),
+                    &tool_name_mapping,
                 )
                 .await;
             }

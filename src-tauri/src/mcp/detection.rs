@@ -1,4 +1,5 @@
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
+use crate::api::ai_api::sanitize_tool_name;
 use crate::db::conversation_db::Repository;
 use crate::db::mcp_db::MCPToolCall;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
@@ -75,9 +76,12 @@ pub async fn detect_and_process_mcp_calls_for_subtask(
         }
 
         // 查找服务器（复用原逻辑）
+        // 支持精确匹配和清理后名称匹配（处理大模型返回的 sanitized 名称）
         let mcp_db = crate::db::mcp_db::MCPDatabase::new(app_handle)?;
         let servers = mcp_db.get_mcp_servers()?;
-        let server_opt = servers.iter().find(|s| s.name == server_name && s.is_enabled);
+        let server_opt = servers
+            .iter()
+            .find(|s| s.is_enabled && (s.name == server_name || sanitize_tool_name(&s.name) == server_name));
 
         if let Some(server) = server_opt {
             // 现在基于 server.id 来判断是否启用（enabled_servers 存储的是 id 而不是名称）
@@ -88,11 +92,12 @@ pub async fn detect_and_process_mcp_calls_for_subtask(
             }
 
             // 创建工具调用记录（用于子任务）
+            // 使用 server.name（原始名称）而不是 server_name（可能是清理后的名称）
             let tool_call = mcp_db.create_mcp_tool_call_for_subtask(
                 conversation_id,
                 subtask_id,
                 server.id,
-                &server_name,
+                &server.name,
                 &tool_name,
                 &parameters,
                 None,
@@ -269,7 +274,10 @@ pub async fn detect_and_process_mcp_calls(
                                         Ok(servers_with_tools) => {
                                             let mut should_auto_run = false;
                                             for s in servers_with_tools.iter() {
-                                                if s.name == server_name && s.is_enabled {
+                                                // 支持精确匹配和清理后名称匹配
+                                                let name_matches = s.name == server_name
+                                                    || sanitize_tool_name(&s.name) == server_name;
+                                                if name_matches && s.is_enabled {
                                                     if let Some(tool) = s.tools.iter().find(|t| t.name == tool_name && t.is_enabled) {
                                                         if tool.is_auto_run {
                                                             should_auto_run = true;

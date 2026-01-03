@@ -17,20 +17,132 @@ use crate::db::conversation_db::{AttachmentType, Repository};
 use crate::db::conversation_db::{ConversationDatabase, Message, MessageAttachment};
 use crate::db::llm_db::LLMDatabase;
 use crate::errors::AppError;
-use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt};
 use crate::mcp::execution_api::cancel_mcp_tool_calls_by_conversation;
+use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt};
 use crate::state::message_token::MessageTokenManager;
 use crate::template_engine::TemplateEngine;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use crate::{AppState, FeatureConfigState};
 use anyhow::Context;
-use anyhow::Error;
 use genai::chat::ChatRequest;
 use genai::chat::Tool;
 use std::collections::{HashMap, HashSet};
 use tauri::Emitter;
 use tauri::State;
 use tracing::{debug, error, info, instrument, warn};
+
+/// 计算字符串的简短 hash（用于确保唯一性）
+fn short_hash(s: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    // 取 hash 的前 8 位十六进制
+    format!("{:08x}", hasher.finish() as u32)
+}
+
+/// 将字符串清理为符合 OpenAI 工具名称规范的格式
+/// OpenAI 要求工具名称匹配正则表达式: ^[a-zA-Z0-9_\.-]+$
+/// 即只能包含字母、数字、下划线、点号和连字符
+///
+/// 当清理后的名称为空或太短时，会附加原始字符串的 hash 以确保唯一性
+pub fn sanitize_tool_name(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
+                c
+            } else {
+                // 将不允许的字符替换为下划线
+                '_'
+            }
+        })
+        .collect::<String>()
+        // 去除连续的下划线
+        .split('_')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+
+    // 如果清理后的名称为空或太短（少于2个字符），附加 hash 以确保唯一性
+    if sanitized.len() < 2 {
+        if sanitized.is_empty() {
+            format!("h{}", short_hash(name))
+        } else {
+            format!("{}_{}", sanitized, short_hash(name))
+        }
+    } else {
+        sanitized
+    }
+}
+
+/// 构建符合 API 规范的工具名称
+/// 格式: {server_name}__{tool_name}
+///
+/// 注意：此函数会对服务器名称和工具名称进行清理，
+/// 当原始名称包含大量非法字符（如中文）时，会使用 hash 确保唯一性
+pub fn build_tool_name(server_name: &str, tool_name: &str) -> String {
+    format!("{}__{}", sanitize_tool_name(server_name), sanitize_tool_name(tool_name))
+}
+
+/// 工具名称映射表，用于在 sanitized 名称和原始名称之间进行转换
+/// key: sanitized 工具名称 (如 "h1234abcd__search_web")
+/// value: (原始服务器名称, 原始工具名称) (如 ("搜索服务", "网页搜索"))
+pub type ToolNameMapping = HashMap<String, (String, String)>;
+
+/// 工具名分割助手（从 sanitized 名称中分割）
+pub fn split_tool_name(fn_name: &str) -> (String, String) {
+    if let Some((s, t)) = fn_name.split_once("__") {
+        (s.to_string(), t.to_string())
+    } else {
+        (String::from("default"), fn_name.to_string())
+    }
+}
+
+/// 从 sanitized 工具全名中解析出原始的服务器名和工具名
+/// 如果在映射表中找到，返回原始名称；否则返回 sanitized 名称
+pub fn resolve_tool_name(sanitized_full_name: &str, mapping: &ToolNameMapping) -> (String, String) {
+    if let Some((server, tool)) = mapping.get(sanitized_full_name) {
+        (server.clone(), tool.clone())
+    } else {
+        // 回退：从 sanitized 名称中分割
+        split_tool_name(sanitized_full_name)
+    }
+}
+
+/// 从 MCP 服务器列表构建 genai 工具列表和名称映射表
+/// 返回 (工具列表, 映射表)
+pub fn build_tools_with_mapping(
+    servers: &[crate::api::assistant_api::MCPServerWithTools],
+) -> (Vec<Tool>, ToolNameMapping) {
+    let mut tools = Vec::new();
+    let mut mapping = HashMap::new();
+
+    for server in servers {
+        for tool in &server.tools {
+            let sanitized_name = build_tool_name(&server.name, &tool.name);
+
+            // 保存映射关系
+            mapping.insert(sanitized_name.clone(), (server.name.clone(), tool.name.clone()));
+
+            let schema = serde_json::from_str::<serde_json::Value>(&tool.parameters)
+                .unwrap_or_else(|_| {
+                    serde_json::json!({
+                        "type": "object",
+                        "additionalProperties": true
+                    })
+                });
+
+            tools.push(
+                Tool::new(sanitized_name)
+                    .with_description(tool.description.clone())
+                    .with_schema(schema),
+            );
+        }
+    }
+
+    (tools, mapping)
+}
 
 #[tauri::command]
 #[instrument(skip(app_handle, state, feature_config_state, message_token_manager, window, request, override_model_config, override_prompt, override_mcp_config), fields(assistant_id = request.assistant_id, conversation_id = %request.conversation_id, override_model_id = request.override_model_id))]
@@ -262,7 +374,8 @@ pub async fn ask_ai(
         // 为避免该无害错误噪音，这里对「provider_api_type=openai 且 model_code 含 gemini」的组合禁用 usage 捕获。
         let provider_api_type_lc = provider_api_type.to_lowercase();
         let model_code_lc = model_code.to_lowercase();
-        let is_openai_like = provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
+        let is_openai_like =
+            provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
         let is_gemini = model_code_lc.contains("gemini");
         let capture_usage = !(is_openai_like && is_gemini);
 
@@ -290,29 +403,13 @@ pub async fn ask_ai(
         // 将消息转换为 ChatMessage（已按是否原生 toolcall 处理过 tool_result）
         let chat_messages = build_chat_messages(&final_message_list_for_llm);
         // 原生模式：把 MCP 工具映射为 genai::chat::Tool 并注入到请求，并附加轻量提示
-        let chat_request = if has_available_tools {
-            let mut tools: Vec<Tool> = Vec::new();
-            for server in &mcp_info.enabled_servers {
-                for tool in &server.tools {
-                    let name = format!("{}__{}", server.name, tool.name);
-                    let schema = serde_json::from_str::<serde_json::Value>(&tool.parameters)
-                        .unwrap_or_else(|_| {
-                            serde_json::json!({
-                                "type": "object",
-                                "additionalProperties": true
-                            })
-                        });
-                    tools.push(
-                        Tool::new(name)
-                            .with_description(tool.description.clone())
-                            .with_schema(schema),
-                    );
-                }
-            }
+        // 同时构建工具名称映射表，用于将 sanitized 名称还原为原始名称
+        let (chat_request, tool_name_mapping) = if has_available_tools {
+            let (tools, mapping) = build_tools_with_mapping(&mcp_info.enabled_servers);
             debug!(tools = ?tools, "injected MCP tools");
-            ChatRequest::new(chat_messages).with_tools(tools)
+            (ChatRequest::new(chat_messages).with_tools(tools), mapping)
         } else {
-            ChatRequest::new(chat_messages)
+            (ChatRequest::new(chat_messages), HashMap::new())
         };
 
         if chat_config.stream {
@@ -329,11 +426,12 @@ pub async fn ask_ai(
                 _need_generate_title,
                 processed_request.prompt.clone(),
                 _config_feature_map.clone(),
-                None,                // 普通ask_ai不需要复用generation_group_id
-                None,                // 普通ask_ai不需要parent_group_id
-                model_id,            // 传递模型ID
-                model_code.clone(),  // 传递模型名称
-                override_mcp_config, // MCP override配置
+                None,                      // 普通ask_ai不需要复用generation_group_id
+                None,                      // 普通ask_ai不需要parent_group_id
+                model_id,                  // 传递模型ID
+                model_code.clone(),        // 传递模型名称
+                override_mcp_config,       // MCP override配置
+                tool_name_mapping.clone(), // 工具名称映射表
             )
             .await?;
         } else {
@@ -355,6 +453,7 @@ pub async fn ask_ai(
                 model_id,            // 传递模型ID
                 model_code.clone(),  // 传递模型名称
                 override_mcp_config, // MCP override配置
+                tool_name_mapping,   // 工具名称映射表
             )
             .await?;
         }
@@ -433,10 +532,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         })
         .unwrap(),
     };
-    let _ = window.emit(
-        format!("conversation_event_{}", conversation_id_i64).as_str(),
-        add_event,
-    );
+    let _ = window.emit(format!("conversation_event_{}", conversation_id_i64).as_str(), add_event);
 
     // 2) message_update (is_done = true)
     let update_event = ConversationEvent {
@@ -449,10 +545,8 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         })
         .unwrap(),
     };
-    let _ = window.emit(
-        format!("conversation_event_{}", conversation_id_i64).as_str(),
-        update_event,
-    );
+    let _ =
+        window.emit(format!("conversation_event_{}", conversation_id_i64).as_str(), update_event);
 
     // Get all existing messages
     let all_messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id_i64)?;
@@ -625,7 +719,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     // 兼容：Gemini 通过 OpenAI 适配时，服务端要求 function_response.name 不为空。通用 ToolResponse 不带 name。
     // 为避免 400，这里在该场景下对"继续对话"强制降级为非原生。
     let use_native_for_continue = has_available_tools;
-    let chat_request = if use_native_for_continue {
+    let (chat_request, tool_name_mapping) = if use_native_for_continue {
         // 重新构建消息序列，确保 Assistant-Tool 消息正确配对
         // 而不是让 build_chat_messages_with_context 自动重建，我们手动控制顺序
         let mut chat_messages = Vec::new();
@@ -690,29 +784,10 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             }
         }
 
-        // 注入 MCP 工具
-        let mut tools: Vec<Tool> = Vec::new();
-        if !mcp_info.enabled_servers.is_empty() {
-            for server in &mcp_info.enabled_servers {
-                for tool in &server.tools {
-                    let name = format!("{}__{}", server.name, tool.name);
-                    let schema = serde_json::from_str::<serde_json::Value>(&tool.parameters)
-                        .unwrap_or_else(|_| {
-                            serde_json::json!({
-                                "type": "object",
-                                "additionalProperties": true
-                            })
-                        });
-                    tools.push(
-                        Tool::new(name)
-                            .with_description(tool.description.clone())
-                            .with_schema(schema),
-                    );
-                }
-            }
-        }
+        // 注入 MCP 工具，同时构建映射表
+        let (tools, tool_name_mapping) = build_tools_with_mapping(&mcp_info.enabled_servers);
         debug!(tools = ?tools, "injected MCP tools (continue)");
-        ChatRequest::new(chat_messages).with_tools(tools)
+        (ChatRequest::new(chat_messages).with_tools(tools), tool_name_mapping)
     } else {
         let transformed_list: Vec<(String, String, Vec<MessageAttachment>)> = init_message_list
             .iter()
@@ -727,7 +802,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             .collect();
 
         let chat_messages = build_chat_messages(&transformed_list);
-        ChatRequest::new(chat_messages)
+        (ChatRequest::new(chat_messages), HashMap::new())
     };
 
     if chat_config.stream {
@@ -747,7 +822,8 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             None,                              // no parent_group_id
             model_id,
             model_code.clone(),
-            None, // no MCP override config
+            None,                      // no MCP override config
+            tool_name_mapping.clone(), // 工具名称映射表
         ))
         .await?;
     } else {
@@ -767,7 +843,8 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             None,                      // no parent_group_id
             model_id,
             model_code.clone(),
-            None, // no MCP override config
+            None,              // no MCP override config
+            tool_name_mapping, // 工具名称映射表
         ))
         .await?;
     }
@@ -811,9 +888,7 @@ pub async fn cancel_ai(
 ) -> Result<(), String> {
     message_token_manager.cancel_request(conversation_id).await;
 
-    if let Err(e) =
-        cancel_mcp_tool_calls_by_conversation(&app_handle, conversation_id).await
-    {
+    if let Err(e) = cancel_mcp_tool_calls_by_conversation(&app_handle, conversation_id).await {
         warn!(conversation_id, error = %e, "failed to cancel MCP tool calls for conversation");
     }
 
@@ -1040,7 +1115,8 @@ pub async fn regenerate_ai(
         // 同 ask_ai：避免 OpenAI 兼容通道 + Gemini 模型导致的 usage 反序列化报错日志
         let provider_api_type_lc = regenerate_provider_api_type.to_lowercase();
         let model_code_lc = regenerate_model_code.to_lowercase();
-        let is_openai_like = provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
+        let is_openai_like =
+            provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
         let is_gemini = model_code_lc.contains("gemini");
         let capture_usage = !(is_openai_like && is_gemini);
 
@@ -1086,10 +1162,9 @@ pub async fn regenerate_ai(
 
         let chat_messages = build_chat_messages(&final_message_list_for_llm);
         debug!(?chat_messages, "final chat messages (regenerate)");
-        // 原生：注入 MCP 工具
-        let chat_request = if has_available_tools {
+        // 原生：注入 MCP 工具，同时构建映射表
+        let (chat_request, tool_name_mapping) = if has_available_tools {
             // 重新拉取一次助手的 MCP 工具，确保一致
-            let mut tools: Vec<Tool> = Vec::new();
             if let Ok(mcp_info) = crate::mcp::collect_mcp_info_for_assistant(
                 &app_handle_clone,
                 assistant_id,
@@ -1098,27 +1173,13 @@ pub async fn regenerate_ai(
             )
             .await
             {
-                for server in &mcp_info.enabled_servers {
-                    for tool in &server.tools {
-                        let name = format!("{}__{}", server.name, tool.name);
-                        let schema = serde_json::from_str::<serde_json::Value>(&tool.parameters)
-                            .unwrap_or_else(|_| {
-                                serde_json::json!({
-                                    "type": "object",
-                                    "additionalProperties": true
-                                })
-                            });
-                        tools.push(
-                            Tool::new(name)
-                                .with_description(tool.description.clone())
-                                .with_schema(schema),
-                        );
-                    }
-                }
+                let (tools, mapping) = build_tools_with_mapping(&mcp_info.enabled_servers);
+                (ChatRequest::new(chat_messages).with_tools(tools), mapping)
+            } else {
+                (ChatRequest::new(chat_messages), HashMap::new())
             }
-            ChatRequest::new(chat_messages).with_tools(tools)
         } else {
-            ChatRequest::new(chat_messages)
+            (ChatRequest::new(chat_messages), HashMap::new())
         };
 
         if chat_config.stream {
@@ -1140,6 +1201,7 @@ pub async fn regenerate_ai(
                 regenerate_model_id,                    // 传递模型ID
                 regenerate_model_code.clone(),          // 传递模型名称
                 None,                                   // regenerate 不使用 MCP override
+                tool_name_mapping.clone(),              // 工具名称映射表
             )
             .await?;
         } else {
@@ -1161,6 +1223,7 @@ pub async fn regenerate_ai(
                 regenerate_model_id,                    // 传递模型ID
                 regenerate_model_code.clone(),          // 传递模型名称
                 None,                                   // regenerate 不使用 MCP override
+                tool_name_mapping,                      // 工具名称映射表
             )
             .await?;
         }
