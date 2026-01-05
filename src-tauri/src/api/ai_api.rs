@@ -26,6 +26,7 @@ use crate::{AppState, FeatureConfigState};
 use anyhow::Context;
 use genai::chat::ChatRequest;
 use genai::chat::Tool;
+use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use tauri::Emitter;
 use tauri::State;
@@ -144,6 +145,25 @@ pub fn build_tools_with_mapping(
     (tools, mapping)
 }
 
+/// 在非原生 toolcall 场景下，移除 MCP 注释并将 tool_result 转换为 user 消息，避免重新构建原生 tool_calls
+fn sanitize_messages_for_non_native(
+    init_message_list: &[(String, String, Vec<MessageAttachment>)],
+) -> Vec<(String, String, Vec<MessageAttachment>)> {
+    let mcp_hint_regex = Regex::new(r"<!--\s*MCP_TOOL_CALL:.*?-->").unwrap();
+
+    init_message_list
+        .iter()
+        .map(|(message_type, content, attachments)| {
+            let sanitized_content = mcp_hint_regex.replace_all(content, "").to_string();
+            if message_type == "tool_result" {
+                (String::from("user"), sanitized_content, Vec::new())
+            } else {
+                (message_type.clone(), sanitized_content, attachments.clone())
+            }
+        })
+        .collect()
+}
+
 #[tauri::command]
 #[instrument(skip(app_handle, state, feature_config_state, message_token_manager, window, request, override_model_config, override_prompt, override_mcp_config), fields(assistant_id = request.assistant_id, conversation_id = %request.conversation_id, override_model_id = request.override_model_id))]
 pub async fn ask_ai(
@@ -247,16 +267,7 @@ pub async fn ask_ai(
         if is_native_toolcall {
             init_message_list.clone()
         } else {
-            init_message_list
-                .iter()
-                .map(|(message_type, content, attachments)| {
-                    if message_type == "tool_result" {
-                        (String::from("user"), content.clone(), Vec::new())
-                    } else {
-                        (message_type.clone(), content.clone(), attachments.clone())
-                    }
-                })
-                .collect()
+            sanitize_messages_for_non_native(&init_message_list)
         };
 
     // 总是启动流式处理，即使没有预先创建消息
@@ -789,18 +800,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         debug!(tools = ?tools, "injected MCP tools (continue)");
         (ChatRequest::new(chat_messages).with_tools(tools), tool_name_mapping)
     } else {
-        let transformed_list: Vec<(String, String, Vec<MessageAttachment>)> = init_message_list
-            .iter()
-            .map(|(message_type, content, attachments)| {
-                if message_type == "tool_result" {
-                    // 将工具结果作为用户侧输入提供给模型（仅在请求中使用，不更改 DB 与 UI）
-                    (String::from("user"), content.clone(), Vec::new())
-                } else {
-                    (message_type.clone(), content.clone(), attachments.clone())
-                }
-            })
-            .collect();
-
+        let transformed_list = sanitize_messages_for_non_native(&init_message_list);
         let chat_messages = build_chat_messages(&transformed_list);
         (ChatRequest::new(chat_messages), HashMap::new())
     };
@@ -1148,16 +1148,7 @@ pub async fn regenerate_ai(
             if has_available_tools {
                 init_message_list.clone()
             } else {
-                init_message_list
-                    .iter()
-                    .map(|(message_type, content, attachments)| {
-                        if message_type == "tool_result" {
-                            (String::from("user"), content.clone(), Vec::new())
-                        } else {
-                            (message_type.clone(), content.clone(), attachments.clone())
-                        }
-                    })
-                    .collect()
+                sanitize_messages_for_non_native(&init_message_list)
             };
 
         let chat_messages = build_chat_messages(&final_message_list_for_llm);

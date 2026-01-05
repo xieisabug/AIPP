@@ -1972,20 +1972,25 @@ pub async fn handle_non_stream_chat(
                     break Ok(response);
                 }
                 Err(e) => {
-                    let user_friendly_error = enhanced_error_logging_v2(
+                    let _ = enhanced_error_logging_v2(
                         &e,
                         &format!("Non-Stream Chat (attempt {}/{})", attempts, max_retry_attempts),
                     )
                     .await;
-
                     if attempts >= max_retry_attempts {
-                        let final_error = format!("AI请求失败: {}", user_friendly_error);
-                        error!(attempts, error = %e, "final non stream chat error");
+                        let http_details = extract_http_error_details(&e);
+                        let raw_error = e.to_string();
+                        let final_error = http_details
+                            .response_body
+                            .clone()
+                            .unwrap_or_else(|| raw_error.clone());
+
+                        error!(attempts, error = %e, final_error, "final non stream chat error");
 
                         // 发送错误通知到合适的窗口
                         send_error_to_appropriate_window(
                             &window,
-                            &user_friendly_error,
+                            &final_error,
                             Some(conversation_id),
                         );
 
@@ -2081,6 +2086,26 @@ pub async fn handle_non_stream_chat(
                     &tool_name_mapping,
                 )
                 .await;
+            }
+
+            // 非流式场景下补充基于提示词的 MCP 检测，确保 prompt 模式生效
+            match crate::mcp::detect_and_process_mcp_calls(
+                app_handle,
+                window,
+                conversation_id,
+                response_message_id,
+                &content,
+            )
+            .await
+            {
+                Ok(updated) => {
+                    if let Some(new_content) = updated {
+                        content = new_content;
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to detect MCP calls in non-stream response");
+                }
             }
 
             let mut message =

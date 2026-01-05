@@ -247,7 +247,7 @@ pub async fn detect_and_process_mcp_calls(
                 Ok(tool_call) => {
                     debug!(call_id = tool_call.id, "Created MCP tool call");
 
-                    // å°† MCP æ ‡ç­¾æ›¿æ¢ä¸ºåŒ…å« call_id çš„ UI æ³¨é‡Šï¼Œç¡®ä¿å‰ç«¯èƒ½æ­£ç¡®åŒ¹é…çŠ¶æ€?
+                    // 将 MCP 标签替换为包含 call_id 的 UI 注释，确保前端能正确匹配工具调用的状态
                     let ui_hint = format!(
                         "<!-- MCP_TOOL_CALL:{} -->",
                         json!({
