@@ -1,4 +1,4 @@
-use crate::mcp::mcp_db::{
+use crate::db::mcp_db::{
     MCPDatabase, MCPServer, MCPServerPrompt, MCPServerResource, MCPServerTool,
 };
 use serde::{Deserialize, Serialize};

@@ -124,16 +124,6 @@ export const ShortcutRecorder: React.FC<ShortcutRecorderProps> = ({
         }
     }, [recording, handleKeyDown, handleKeyUp]);
 
-    const startRecording = () => {
-        setPressedKeys(new Set());
-        setRecording(true);
-    };
-
-    const stopRecording = () => {
-        setRecording(false);
-        setPressedKeys(new Set());
-    };
-
     const handleSave = () => {
         if (recordedShortcut) {
             onShortcutChange(recordedShortcut);

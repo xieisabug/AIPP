@@ -16,6 +16,32 @@ interface ParsedErrorContent {
     meta?: Record<string, any> | null;
 }
 
+// HTTP 状态码描述映射
+const getStatusDescription = (status: number): string => {
+    const statusMap: Record<number, string> = {
+        400: "Bad Request - 请求参数错误",
+        401: "Unauthorized - 认证失败",
+        403: "Forbidden - 权限不足",
+        404: "Not Found - 资源不存在",
+        429: "Too Many Requests - 请求过于频繁",
+        500: "Internal Server Error - 服务器内部错误",
+        502: "Bad Gateway - 网关错误",
+        503: "Service Unavailable - 服务不可用",
+        504: "Gateway Timeout - 网关超时",
+    };
+    return statusMap[status] || `HTTP ${status}`;
+};
+
+// 状态码对应的样式
+const getStatusBadgeStyle = (status: number): string => {
+    if (status >= 500) {
+        return "bg-red-200 text-red-800 border-red-300";
+    } else if (status >= 400) {
+        return "bg-orange-200 text-orange-800 border-orange-300";
+    }
+    return "bg-gray-200 text-gray-800 border-gray-300";
+};
+
 const ErrorMessage: React.FC<ErrorMessageProps> = ({ content }) => {
     const [isExpanded, setIsExpanded] = useState(false);
     const { copyIconState, handleCopy } = useCopyHandler(content);
@@ -139,7 +165,20 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content }) => {
                         {mainMessage}
                     </div>
                     {meta && (
-                        <div className="mt-2 text-xs text-red-700 space-y-1">
+                        <div className="mt-2 text-xs text-red-700 space-y-2">
+                            {/* HTTP 状态码 - 突出显示 */}
+                            {meta.status && (
+                                <div className="flex items-center gap-2">
+                                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-bold border ${getStatusBadgeStyle(meta.status)}`}>
+                                        {meta.status}
+                                    </span>
+                                    <span className="text-red-600/80">
+                                        {getStatusDescription(meta.status)}
+                                    </span>
+                                </div>
+                            )}
+
+                            {/* 基本信息网格 */}
                             <div className="grid grid-cols-2 gap-x-4 gap-y-1">
                                 {meta.model && (
                                     <div>
@@ -150,7 +189,7 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content }) => {
                                 {meta.phase && (
                                     <div>
                                         <span className="text-red-600/80">阶段：</span>
-                                        <span className="font-medium">{meta.phase}</span>
+                                        <span className="font-medium">{meta.phase === 'stream' ? '流式请求' : meta.phase === 'non_stream' ? '非流式请求' : meta.phase}</span>
                                     </div>
                                 )}
                                 {typeof meta.attempts !== "undefined" && meta.attempts !== null && (
@@ -159,31 +198,28 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content }) => {
                                         <span className="font-medium">{meta.attempts}</span>
                                     </div>
                                 )}
-                                {meta.status && (
-                                    <div>
-                                        <span className="text-red-600/80">状态码：</span>
-                                        <span className="font-medium">{String(meta.status)}</span>
-                                    </div>
-                                )}
                                 {meta.request_id && (
                                     <div className="col-span-2 truncate">
                                         <span className="text-red-600/80">请求ID：</span>
-                                        <span className="font-medium">{String(meta.request_id)}</span>
+                                        <span className="font-medium font-mono text-[11px]">{String(meta.request_id)}</span>
                                     </div>
                                 )}
                                 {meta.endpoint && (
                                     <div className="col-span-2 truncate">
                                         <span className="text-red-600/80">端点：</span>
-                                        <span className="font-medium">{String(meta.endpoint)}</span>
+                                        <span className="font-medium font-mono text-[11px]">{String(meta.endpoint)}</span>
                                     </div>
                                 )}
                             </div>
+
+                            {/* 建议标签 */}
                             {Array.isArray(meta.suggestions) && meta.suggestions.length > 0 && (
-                                <div className="mt-1 flex flex-wrap gap-1">
+                                <div className="flex flex-wrap gap-1 pt-1">
+                                    <span className="text-red-600/80 text-[11px]">建议：</span>
                                     {meta.suggestions.map((s: string, idx: number) => (
                                         <span
                                             key={idx}
-                                            className="inline-flex items-center px-2 py-0.5 rounded bg-red-100 text-red-700 border border-red-200"
+                                            className="inline-flex items-center px-2 py-0.5 rounded bg-red-100 text-red-700 border border-red-200 text-[11px]"
                                         >
                                             {s}
                                         </span>
@@ -204,25 +240,36 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content }) => {
                                     <ChevronRight className="w-3 h-3" />
                                 )}
                                 <span>
-                                    {isExpanded ? "隐藏详情" : "查看详情"}
+                                    {isExpanded ? "隐藏详情" : "查看详情（响应体/原始错误）"}
                                 </span>
                             </button>
                             {isExpanded && (
-                                <div className="mt-2 p-3 bg-red-100 rounded-lg border border-red-200 space-y-2">
-                                    {meta && meta.original_error && (
-                                        <div>
-                                            <div className="text-[11px] text-red-600/80 mb-1">原始错误</div>
-                                            <pre className="text-xs text-red-700 whitespace-pre-wrap overflow-x-auto">
-                                                {String(meta.original_error)}
-                                            </pre>
-                                        </div>
-                                    )}
+                                <div className="mt-2 p-3 bg-red-100 rounded-lg border border-red-200 space-y-3">
+                                    {/* 响应体 / 错误详情 - 重点展示 */}
                                     {details && (
                                         <div>
-                                            <div className="text-[11px] text-red-600/80 mb-1">错误详情</div>
-                                            <pre className="text-xs text-red-700 whitespace-pre-wrap overflow-x-auto max-h-40 overflow-y-auto">
-                                                {formatDetails(details)}
-                                            </pre>
+                                            <div className="flex items-center justify-between mb-1">
+                                                <div className="text-[11px] text-red-600/80 font-medium">
+                                                    {meta?.status ? `HTTP ${meta.status} 响应体` : '错误详情'}
+                                                </div>
+                                            </div>
+                                            <div className="bg-white/50 rounded border border-red-200 p-2">
+                                                <pre className="text-xs text-red-800 whitespace-pre-wrap overflow-x-auto max-h-60 overflow-y-auto font-mono">
+                                                    {formatDetails(details)}
+                                                </pre>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* 原始错误信息 */}
+                                    {meta && meta.original_error && (
+                                        <div>
+                                            <div className="text-[11px] text-red-600/80 mb-1 font-medium">原始错误信息</div>
+                                            <div className="bg-white/30 rounded border border-red-200 p-2">
+                                                <pre className="text-[11px] text-red-700 whitespace-pre-wrap overflow-x-auto max-h-32 overflow-y-auto font-mono">
+                                                    {String(meta.original_error)}
+                                                </pre>
+                                            </div>
                                         </div>
                                     )}
                                 </div>

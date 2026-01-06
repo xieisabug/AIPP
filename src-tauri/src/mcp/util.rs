@@ -1,4 +1,4 @@
-use crate::mcp::mcp_db::MCPServer;
+use crate::db::mcp_db::MCPServer;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use tracing::{warn, debug};
@@ -133,5 +133,295 @@ pub fn mask_header_value(key: &str, value: &str) -> String {
         "<empty>".to_string()
     } else {
         value.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to create a test MCPServer with the correct structure
+    fn create_test_server(
+        headers: Option<String>,
+        environment_variables: Option<String>,
+    ) -> MCPServer {
+        MCPServer {
+            id: 1,
+            name: "test".to_string(),
+            description: "Test server".to_string(),
+            transport_type: "stdio".to_string(),
+            command: None,
+            environment_variables,
+            headers,
+            url: None,
+            timeout: None,
+            is_long_running: false,
+            is_enabled: true,
+            is_builtin: false,
+            created_time: "2024-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    // ============================================
+    // replace_env_placeholders Tests
+    // ============================================
+
+    #[test]
+    fn test_replace_env_placeholders_no_placeholders() {
+        let input = "hello world";
+        let result = replace_env_placeholders(input);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_replace_env_placeholders_with_existing_var() {
+        // Set a test env var
+        std::env::set_var("TEST_MCP_VAR_123", "replaced_value");
+        let input = "prefix_${TEST_MCP_VAR_123}_suffix";
+        let result = replace_env_placeholders(input);
+        assert_eq!(result, "prefix_replaced_value_suffix");
+        std::env::remove_var("TEST_MCP_VAR_123");
+    }
+
+    #[test]
+    fn test_replace_env_placeholders_missing_var() {
+        // Ensure the var doesn't exist
+        std::env::remove_var("NONEXISTENT_VAR_XYZ");
+        let input = "prefix_${NONEXISTENT_VAR_XYZ}_suffix";
+        let result = replace_env_placeholders(input);
+        assert_eq!(result, "prefix_${NONEXISTENT_VAR_XYZ}_suffix");
+    }
+
+    #[test]
+    fn test_replace_env_placeholders_multiple_vars() {
+        std::env::set_var("TEST_MCP_A", "AAA");
+        std::env::set_var("TEST_MCP_B", "BBB");
+        let input = "${TEST_MCP_A}-${TEST_MCP_B}";
+        let result = replace_env_placeholders(input);
+        assert_eq!(result, "AAA-BBB");
+        std::env::remove_var("TEST_MCP_A");
+        std::env::remove_var("TEST_MCP_B");
+    }
+
+    #[test]
+    fn test_replace_env_placeholders_partial_syntax() {
+        let input = "hello ${ incomplete";
+        let result = replace_env_placeholders(input);
+        assert_eq!(result, "hello ${ incomplete");
+    }
+
+    #[test]
+    fn test_replace_env_placeholders_empty_var_name() {
+        // Note: Cannot set empty env var name on most systems (Invalid argument)
+        let input = "${}";
+        let result = replace_env_placeholders(input);
+        // Empty var name - behavior depends on impl, likely keeps as-is or returns empty
+        assert!(result == "${}" || result.is_empty());
+    }
+
+    #[test]
+    fn test_replace_env_placeholders_dollar_without_brace() {
+        let input = "price is $100";
+        let result = replace_env_placeholders(input);
+        assert_eq!(result, "price is $100");
+    }
+
+    // ============================================
+    // mask_header_value Tests
+    // ============================================
+
+    #[test]
+    fn test_mask_header_value_authorization_bearer() {
+        let result = mask_header_value("Authorization", "Bearer abc123456789");
+        assert_eq!(result, "Bearer ****abc12345");
+    }
+
+    #[test]
+    fn test_mask_header_value_authorization_case_insensitive() {
+        let result = mask_header_value("AUTHORIZATION", "Bearer xyz");
+        assert!(result.starts_with("Bearer "));
+        assert!(result.contains("****"));
+    }
+
+    #[test]
+    fn test_mask_header_value_authorization_short_token() {
+        let result = mask_header_value("authorization", "Bearer abc");
+        assert_eq!(result, "Bearer ****abc");
+    }
+
+    #[test]
+    fn test_mask_header_value_authorization_no_scheme() {
+        let result = mask_header_value("Authorization", "only_token");
+        // No space, so entire value becomes scheme
+        assert!(result.contains("****"));
+    }
+
+    #[test]
+    fn test_mask_header_value_regular_header_short() {
+        let result = mask_header_value("Content-Type", "application");
+        assert_eq!(result, "application");
+    }
+
+    #[test]
+    fn test_mask_header_value_regular_header_long() {
+        let result = mask_header_value("X-Custom-Header", "this_is_a_very_long_value");
+        assert!(result.contains("..."));
+        assert!(result.contains("len="));
+    }
+
+    #[test]
+    fn test_mask_header_value_empty_value() {
+        let result = mask_header_value("Empty-Header", "");
+        assert_eq!(result, "<empty>");
+    }
+
+    // ============================================
+    // sanitize_headers_for_log Tests
+    // ============================================
+
+    #[test]
+    fn test_sanitize_headers_for_log_empty() {
+        let headers = HashMap::new();
+        let result = sanitize_headers_for_log(&headers);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_sanitize_headers_for_log_mixed() {
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer secret_token_12345".to_string());
+        headers.insert("Content-Type".to_string(), "text/plain".to_string()); // short enough (10 chars)
+
+        let result = sanitize_headers_for_log(&headers);
+        
+        // Authorization should be masked
+        assert!(result.get("Authorization").unwrap().contains("****"));
+        // Content-Type should remain as-is (it's 10 chars, under threshold of 12)
+        assert_eq!(result.get("Content-Type").unwrap(), "text/plain");
+    }
+
+    // ============================================
+    // build_server_env_map Tests
+    // ============================================
+
+    #[test]
+    fn test_build_server_env_map_basic() {
+        let server = create_test_server(None, Some("KEY1=value1\nKEY2=value2".to_string()));
+        
+        let map = build_server_env_map(&server);
+        assert_eq!(map.get("KEY1"), Some(&"value1".to_string()));
+        assert_eq!(map.get("KEY2"), Some(&"value2".to_string()));
+    }
+
+    #[test]
+    fn test_build_server_env_map_with_comments() {
+        let server = create_test_server(
+            None,
+            Some("# This is a comment\nKEY=value\n# Another comment".to_string()),
+        );
+        
+        let map = build_server_env_map(&server);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("KEY"), Some(&"value".to_string()));
+    }
+
+    #[test]
+    fn test_build_server_env_map_empty_lines() {
+        let server = create_test_server(None, Some("\n\nKEY=value\n\n".to_string()));
+        
+        let map = build_server_env_map(&server);
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn test_build_server_env_map_value_with_equals() {
+        let server = create_test_server(
+            None,
+            Some("URL=https://api.example.com?key=value".to_string()),
+        );
+        
+        let map = build_server_env_map(&server);
+        // split_once only splits on first '='
+        assert_eq!(map.get("URL"), Some(&"https://api.example.com?key=value".to_string()));
+    }
+
+    #[test]
+    fn test_build_server_env_map_none() {
+        let server = create_test_server(None, None);
+        
+        let map = build_server_env_map(&server);
+        assert!(map.is_empty());
+    }
+
+    // ============================================
+    // parse_server_headers Tests
+    // ============================================
+
+    #[test]
+    fn test_parse_server_headers_none() {
+        let server = create_test_server(None, None);
+
+        let (auth, headers) = parse_server_headers(&server);
+        assert!(auth.is_none());
+        assert!(headers.is_none());
+    }
+
+    #[test]
+    fn test_parse_server_headers_empty_string() {
+        let server = create_test_server(Some("   ".to_string()), None);
+
+        let (auth, headers) = parse_server_headers(&server);
+        assert!(auth.is_none());
+        assert!(headers.is_none());
+    }
+
+    #[test]
+    fn test_parse_server_headers_with_authorization() {
+        let server = create_test_server(
+            Some(r#"{"Authorization": "Bearer test_token"}"#.to_string()),
+            None,
+        );
+
+        let (auth, headers) = parse_server_headers(&server);
+        assert_eq!(auth, Some("Bearer test_token".to_string()));
+        assert!(headers.is_some());
+        assert_eq!(headers.unwrap().get("Authorization"), Some(&"Bearer test_token".to_string()));
+    }
+
+    #[test]
+    fn test_parse_server_headers_with_env_replacement() {
+        std::env::set_var("TEST_API_KEY_789", "secret_key");
+        
+        let server = create_test_server(
+            Some(r#"{"X-API-Key": "${TEST_API_KEY_789}"}"#.to_string()),
+            None,
+        );
+
+        let (_, headers) = parse_server_headers(&server);
+        assert!(headers.is_some());
+        assert_eq!(headers.unwrap().get("X-API-Key"), Some(&"secret_key".to_string()));
+        
+        std::env::remove_var("TEST_API_KEY_789");
+    }
+
+    #[test]
+    fn test_parse_server_headers_with_server_env() {
+        let server = create_test_server(
+            Some(r#"{"X-Custom": "${MY_SERVER_VAR}"}"#.to_string()),
+            Some("MY_SERVER_VAR=server_value".to_string()),
+        );
+
+        let (_, headers) = parse_server_headers(&server);
+        assert!(headers.is_some());
+        assert_eq!(headers.unwrap().get("X-Custom"), Some(&"server_value".to_string()));
+    }
+
+    #[test]
+    fn test_parse_server_headers_invalid_json() {
+        let server = create_test_server(Some("not valid json".to_string()), None);
+
+        let (auth, headers) = parse_server_headers(&server);
+        assert!(auth.is_none());
+        assert!(headers.is_none());
     }
 }

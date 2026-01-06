@@ -7,10 +7,10 @@
 //! 4. 将执行结果写回数据库并触发前端事件
 //! 5. 在工具成功后继续驱动 AI 对话（包含重试场景）
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
-use crate::api::ai_api::tool_result_continue_ask_ai_impl;
+use crate::api::ai_api::{sanitize_tool_name, tool_result_continue_ask_ai_impl};
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::mcp::builtin_mcp::{execute_aipp_builtin_tool, is_builtin_mcp_call};
-use crate::mcp::mcp_db::{MCPDatabase, MCPServer, MCPToolCall};
+use crate::db::mcp_db::{MCPDatabase, MCPServer, MCPToolCall};
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
@@ -38,10 +38,16 @@ use tracing::{debug, error, info, instrument, warn};
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 type ToolCancelRegistry = Arc<Mutex<HashMap<i64, CancellationToken>>>;
+type ContinuationLockRegistry = Arc<Mutex<HashMap<i64, Arc<Mutex<()>>>>>;
 static TOOL_CANCEL_REGISTRY: OnceLock<ToolCancelRegistry> = OnceLock::new();
+static CONTINUATION_LOCKS: OnceLock<ContinuationLockRegistry> = OnceLock::new();
 
 fn tool_cancel_registry() -> &'static ToolCancelRegistry {
     TOOL_CANCEL_REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+fn continuation_lock_registry() -> &'static ContinuationLockRegistry {
+    CONTINUATION_LOCKS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
 async fn register_cancel_token(call_id: i64) -> CancellationToken {
@@ -274,19 +280,26 @@ pub async fn create_mcp_tool_call(
     let db = MCPDatabase::new(&app_handle).map_err(|e| format!("初始化数据库失败: {}", e))?;
 
     // 查找并验证服务器
+    // 支持两种匹配方式：
+    // 1. 精确匹配原始名称
+    // 2. 匹配清理后的名称（用于处理大模型返回的 sanitized 名称）
     let servers = db.get_mcp_servers().map_err(|e| format!("获取MCP服务器列表失败: {}", e))?;
     let server = servers
         .iter()
-        .find(|s| s.name == server_name && s.is_enabled)
+        .find(|s| {
+            s.is_enabled
+                && (s.name == server_name || sanitize_tool_name(&s.name) == server_name)
+        })
         .ok_or_else(|| format!("服务器 '{}' 未找到或已禁用", server_name))?;
 
     // 根据是否提供 llm_call_id 选择相应的创建方法
+    // 注意：使用 server.name（原始名称）而不是 server_name（可能是清理后的名称）
     let tool_call = if llm_call_id.is_some() || assistant_message_id.is_some() {
         db.create_mcp_tool_call_with_llm_id(
             conversation_id,
             message_id,
             server.id,
-            &server_name,
+            &server.name,
             &tool_name,
             &parameters,
             llm_call_id.as_deref(),
@@ -297,7 +310,7 @@ pub async fn create_mcp_tool_call(
             conversation_id,
             message_id,
             server.id,
-            &server_name,
+            &server.name,
             &tool_name,
             &parameters,
         )
@@ -600,32 +613,45 @@ async fn trigger_conversation_continuation(
     let continuation_call_id = tool_call.id;
     let continuation_conversation_id = tool_call.conversation_id;
     let continuation_result = result.to_string();
-    tauri::async_runtime::spawn_blocking(move || {
-        tauri::async_runtime::block_on(async move {
-            match tool_result_continue_ask_ai_impl(
-                app_handle_clone.clone(),
-                window_clone,
-                conversation_id_str,
-                assistant_id,
-                tool_call_id,
-                continuation_result,
-            )
-            .await
-            {
-                Ok(_) => info!(
-                    call_id = continuation_call_id,
-                    conversation_id = continuation_conversation_id,
-                    "triggered conversation continuation (async)"
-                ),
-                Err(e) => warn!(
-                    call_id = continuation_call_id,
-                    conversation_id = continuation_conversation_id,
-                    error = %e,
-                    "failed to trigger conversation continuation (async)"
-                ),
-            }
-        });
-    });
+    let continuation_lock = {
+        let registry = continuation_lock_registry();
+        let mut guard = registry.lock().await;
+        guard
+            .entry(continuation_conversation_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+
+    // 使用会话级锁保证续写串行，避免同一会话并发触发续写
+    let _lock_guard = continuation_lock.lock().await;
+    match tool_result_continue_ask_ai_impl(
+        app_handle_clone.clone(),
+        window_clone,
+        conversation_id_str,
+        assistant_id,
+        tool_call_id,
+        continuation_result,
+    )
+    .await
+    {
+        Ok(_) => {
+            info!(
+                call_id = continuation_call_id,
+                conversation_id = continuation_conversation_id,
+                "triggered conversation continuation (serialized)"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            warn!(
+                call_id = continuation_call_id,
+                conversation_id = continuation_conversation_id,
+                error = %e,
+                "failed to trigger conversation continuation (serialized)"
+            );
+            Err(anyhow!(e.to_string()))
+        }
+    }?;
 
     Ok(())
 }

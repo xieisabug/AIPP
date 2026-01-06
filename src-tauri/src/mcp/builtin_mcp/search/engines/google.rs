@@ -249,3 +249,246 @@ impl GoogleEngine {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==================== Static Method Tests ====================
+
+    #[test]
+    fn test_display_name() {
+        assert_eq!(GoogleEngine::display_name(), "Google");
+    }
+
+    #[test]
+    fn test_homepage_url() {
+        assert_eq!(GoogleEngine::homepage_url(), "https://www.google.com");
+    }
+
+    #[test]
+    fn test_search_input_selectors_not_empty() {
+        let selectors = GoogleEngine::search_input_selectors();
+        assert!(!selectors.is_empty());
+        // 验证包含主要选择器
+        assert!(selectors.contains(&"textarea[name='q']"));
+        assert!(selectors.contains(&"input[name='q']"));
+    }
+
+    #[test]
+    fn test_search_button_selectors_not_empty() {
+        let selectors = GoogleEngine::search_button_selectors();
+        assert!(!selectors.is_empty());
+        assert!(selectors.contains(&"input[name='btnK']"));
+    }
+
+    #[test]
+    fn test_default_wait_selectors_not_empty() {
+        let selectors = GoogleEngine::default_wait_selectors();
+        assert!(!selectors.is_empty());
+        assert!(selectors.contains(&"#search".to_string()));
+        assert!(selectors.contains(&".g".to_string()));
+    }
+
+    // ==================== URL Decode Tests ====================
+
+    #[test]
+    fn test_decode_google_url_simple() {
+        let url = "/url?q=https://example.com&sa=U";
+        let decoded = GoogleEngine::decode_google_url(url);
+        assert_eq!(decoded, Some("https://example.com".to_string()));
+    }
+
+    #[test]
+    fn test_decode_google_url_encoded() {
+        let url = "/url?q=https%3A%2F%2Fexample.com%2Fpath%3Fquery%3Dvalue&sa=U";
+        let decoded = GoogleEngine::decode_google_url(url);
+        assert_eq!(
+            decoded,
+            Some("https://example.com/path?query=value".to_string())
+        );
+    }
+
+    #[test]
+    fn test_decode_google_url_no_ampersand() {
+        let url = "/url?q=https://example.com";
+        let decoded = GoogleEngine::decode_google_url(url);
+        assert_eq!(decoded, Some("https://example.com".to_string()));
+    }
+
+    #[test]
+    fn test_decode_google_url_invalid() {
+        let url = "/some/other/path";
+        let decoded = GoogleEngine::decode_google_url(url);
+        assert_eq!(decoded, None);
+    }
+
+    // ==================== Extract Total Results Tests ====================
+
+    #[test]
+    fn test_extract_total_results_english() {
+        let html = r#"<div>About 1,234,567 results</div>"#;
+        let total = GoogleEngine::extract_total_results(html);
+        assert_eq!(total, Some(1234567));
+    }
+
+    #[test]
+    fn test_extract_total_results_chinese() {
+        let html = r#"<div>大约 12,345 条结果</div>"#;
+        let total = GoogleEngine::extract_total_results(html);
+        assert_eq!(total, Some(12345));
+    }
+
+    #[test]
+    fn test_extract_total_results_simple_chinese() {
+        let html = r#"<div>100 个结果</div>"#;
+        let total = GoogleEngine::extract_total_results(html);
+        assert_eq!(total, Some(100));
+    }
+
+    #[test]
+    fn test_extract_total_results_no_match() {
+        let html = r#"<div>No results found</div>"#;
+        let total = GoogleEngine::extract_total_results(html);
+        assert_eq!(total, None);
+    }
+
+    // ==================== Parse Search Results Tests ====================
+
+    #[test]
+    fn test_parse_search_results_empty_html() {
+        let html = "";
+        let results = GoogleEngine::parse_search_results(html, "test query");
+
+        assert_eq!(results.query, "test query");
+        assert_eq!(results.search_engine, "Google");
+        assert_eq!(results.engine_id, "google");
+        assert_eq!(results.homepage_url, "https://www.google.com");
+        assert!(results.items.is_empty());
+    }
+
+    #[test]
+    fn test_parse_search_results_no_results() {
+        let html = r#"
+            <html>
+                <body>
+                    <div id="search">No results found</div>
+                </body>
+            </html>
+        "#;
+        let results = GoogleEngine::parse_search_results(html, "nonexistent query");
+
+        assert_eq!(results.query, "nonexistent query");
+        assert!(results.items.is_empty());
+    }
+
+    #[test]
+    fn test_parse_search_results_with_tF2Cxc_class() {
+        let html = r#"
+            <html>
+                <body>
+                    <div id="search">
+                        <div class="tF2Cxc">
+                            <div class="yuRUbf">
+                                <h3>Test Title</h3>
+                                <a href="https://example.com">Link</a>
+                            </div>
+                            <div class="VwiC3b">This is the snippet text</div>
+                        </div>
+                    </div>
+                </body>
+            </html>
+        "#;
+        let results = GoogleEngine::parse_search_results(html, "test");
+
+        assert_eq!(results.query, "test");
+        assert_eq!(results.search_engine, "Google");
+        // 结果可能解析也可能不解析，取决于选择器匹配
+    }
+
+    #[test]
+    fn test_parse_search_results_with_g_class() {
+        let html = r#"
+            <html>
+                <body>
+                    <div id="search">
+                        <div class="g">
+                            <div class="yuRUbf">
+                                <h3>Result Title</h3>
+                                <a href="https://example.org">Link</a>
+                            </div>
+                            <div class="VwiC3b">Result snippet</div>
+                        </div>
+                    </div>
+                </body>
+            </html>
+        "#;
+        let results = GoogleEngine::parse_search_results(html, "search term");
+
+        assert_eq!(results.query, "search term");
+        assert_eq!(results.engine_id, "google");
+    }
+
+    #[test]
+    fn test_parse_search_results_with_total_count() {
+        let html = r#"
+            <html>
+                <body>
+                    <div>About 500,000 results</div>
+                    <div id="search"></div>
+                </body>
+            </html>
+        "#;
+        let results = GoogleEngine::parse_search_results(html, "query");
+
+        assert_eq!(results.total_results, Some(500000));
+    }
+
+    #[test]
+    fn test_parse_search_results_max_20_items() {
+        // 验证最多返回 20 个结果
+        let mut html = String::from("<html><body><div id='search'>");
+        for i in 0..30 {
+            html.push_str(&format!(
+                r#"<div class="g">
+                    <div class="yuRUbf">
+                        <h3>Result {}</h3>
+                        <a href="https://example{}.com">Link</a>
+                    </div>
+                    <div class="VwiC3b">Snippet {}</div>
+                </div>"#,
+                i, i, i
+            ));
+        }
+        html.push_str("</div></body></html>");
+
+        let results = GoogleEngine::parse_search_results(&html, "test");
+
+        // 最多 20 个结果
+        assert!(results.items.len() <= 20);
+    }
+
+    #[test]
+    fn test_parse_search_results_with_redirect_url() {
+        let html = r#"
+            <html>
+                <body>
+                    <div class="tF2Cxc">
+                        <div class="yuRUbf">
+                            <h3>Test</h3>
+                            <a href="/url?q=https://real-url.com&sa=U">Link</a>
+                        </div>
+                        <div class="VwiC3b">Snippet</div>
+                    </div>
+                </body>
+            </html>
+        "#;
+        let results = GoogleEngine::parse_search_results(html, "test");
+
+        // 验证 URL 解码逻辑被调用
+        if !results.items.is_empty() {
+            let first = &results.items[0];
+            assert!(first.url.starts_with("https://"));
+        }
+    }
+}

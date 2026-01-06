@@ -4,7 +4,9 @@ import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { Badge } from "../ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
-import { Blocks, Trash2, Edit, RefreshCw, Zap } from "lucide-react";
+import { Trash2, Edit, RefreshCw, Zap } from "lucide-react";
+import MCP from "@/assets/mcp.svg?react";
+import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { toast } from 'sonner';
 import ConfirmDialog from "../ConfirmDialog";
 import MCPServerDialog from "./MCPServerDialog";
@@ -320,7 +322,7 @@ const MCPConfig: React.FC = () => {
         mcpServers.map(server => ({
             id: server.id.toString(),
             label: server.name,
-            icon: server.is_enabled ? <Zap className="h-4 w-4" /> : <Blocks className="h-4 w-4" />
+            icon: server.is_enabled ? <Zap className="h-4 w-4" /> : <MCP className="h-4 w-4" />
         })), [mcpServers]);
 
     // 下拉菜单选择回调
@@ -340,66 +342,12 @@ const MCPConfig: React.FC = () => {
         />
     ), [handleTemplateSelect, handleJSONImport]);
 
-    // 空状态
-    if (mcpServers.length === 0) {
-        return (
-            <>
-                <ConfigPageLayout
-                    sidebar={null}
-                    content={null}
-                    emptyState={
-                        <EmptyState
-                            icon={<Blocks className="h-8 w-8 text-muted-foreground" />}
-                            title="还没有配置MCP服务器"
-                            description="开始添加你的第一个MCP服务器，扩展AI助手的能力"
-                            action={
-                                <MCPActionDropdown
-                                    onTemplateSelect={handleTemplateSelect}
-                                    onJSONImport={handleJSONImport}
-                                    className="bg-primary hover:bg-primary/90 text-primary-foreground shadow-lg hover:shadow-xl transition-all"
-                                />
-                            }
-                        />
-                    }
-                    showEmptyState={true}
-                />
-
-                {/* MCP服务器对话框 - 空状态时也需要渲染 */}
-                <MCPServerDialog
-                    isOpen={serverDialogOpen}
-                    onClose={closeServerDialog}
-                    onSubmit={handleServerDialogSubmit}
-                    editingServer={editingServer}
-                    initialServerType={dialogInitialServerType}
-                    initialConfig={dialogInitialConfig}
-                />
-
-                {/* JSON导入对话框 */}
-                <JSONImportDialog
-                    isOpen={jsonImportDialogOpen}
-                    onClose={closeJSONImportDialog}
-                    onImport={handleJSONImportConfirm}
-                />
-
-                {/* 内置工具对话框 - 空状态时也需要渲染 */}
-                <BuiltinToolDialog
-                    isOpen={builtinDialogOpen}
-                    onClose={() => setBuiltinDialogOpen(false)}
-                    onSubmit={() => {
-                        setBuiltinDialogOpen(false);
-                        getMcpServers();
-                    }}
-                />
-            </>
-        );
-    }
-
-    // 侧边栏内容
-    const sidebar = (
+    // 侧边栏内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
+    const sidebar = useMemo(() => (
         <SidebarList
             title="MCP列表"
             description="选择MCP进行配置"
-            icon={<Blocks className="h-5 w-5" />}
+            icon={<MCP className="h-5 w-5" />}
             addButton={
                 <MCPActionDropdown
                     onTemplateSelect={handleTemplateSelect}
@@ -427,10 +375,10 @@ const MCPConfig: React.FC = () => {
                 </ListItemButton>
             ))}
         </SidebarList>
-    );
+    ), [mcpServers, selectedServer?.id, handleSelectServer, handleTemplateSelect, handleJSONImport]);
 
-    // 右侧内容
-    const content = selectedServer ? (
+    // 右侧内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
+    const content = useMemo(() => selectedServer ? (
         <div className="space-y-6">
             {/* 服务器基本信息 */}
             <div className="bg-background rounded-lg border border-border p-6">
@@ -444,30 +392,45 @@ const MCPConfig: React.FC = () => {
                             checked={selectedServer.is_enabled}
                             onCheckedChange={(checked) => handleToggleServer(selectedServer.id, checked)}
                         />
-                        <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleRefreshServerCapabilities(selectedServer.id)}
-                            disabled={isRefreshing}
-                        >
-                            <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
-                        </Button>
+                        <Tooltip delayDuration={500}>
+                            <TooltipTrigger asChild>
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => handleRefreshServerCapabilities(selectedServer.id)}
+                                    disabled={isRefreshing}
+                                >
+                                    <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+                                </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>重新获取能力</TooltipContent>
+                        </Tooltip>
 
-                        <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => openEditServerDialog(selectedServer)}
-                        >
-                            <Edit className="h-4 w-4" />
-                        </Button>
+                        <Tooltip delayDuration={500}>
+                            <TooltipTrigger asChild>
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => openEditServerDialog(selectedServer)}
+                                >
+                                    <Edit className="h-4 w-4" />
+                                </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>编辑MCP</TooltipContent>
+                        </Tooltip>
 
-                        <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleDeleteServer(selectedServer.id)}
-                        >
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                        </Button>
+                        <Tooltip delayDuration={500}>
+                            <TooltipTrigger asChild>
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => handleDeleteServer(selectedServer.id)}
+                                >
+                                    <Trash2 className="h-4 w-4 text-destructive" />
+                                </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>删除MCP</TooltipContent>
+                        </Tooltip>
                     </div>
                 </div>
 
@@ -495,7 +458,7 @@ const MCPConfig: React.FC = () => {
 
             {/* 能力列表 - 使用 Tabs */}
             <div className="bg-background rounded-lg border border-border p-6">
-                <h4 className="text-md font-semibold text-foreground mb-4">服务器能力</h4>
+                <h4 className="text-md font-semibold text-foreground mb-4">MCP能力</h4>
 
                 {/* 动态计算需要显示的tabs */}
                 {(() => {
@@ -594,7 +557,7 @@ const MCPConfig: React.FC = () => {
                         </Tabs>
                     ) : (
                         <div className="text-center py-8">
-                            <Blocks className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+                            <MCP className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
                             <p className="text-sm text-muted-foreground">暂无能力数据</p>
                             <p className="text-xs text-muted-foreground mt-1">点击上方"刷新能力"按钮获取服务器能力</p>
                         </div>
@@ -604,11 +567,65 @@ const MCPConfig: React.FC = () => {
         </div>
     ) : (
         <EmptyState
-            icon={<Blocks className="h-8 w-8 text-muted-foreground" />}
+            icon={<MCP className="h-8 w-8 text-muted-foreground" />}
             title="选择一个MCP服务器"
             description="从左侧列表中选择一个服务器开始配置"
         />
-    );
+    ), [selectedServer, serverTools, serverPrompts, serverResources, expandedTools, isRefreshing, handleToggleServer, handleRefreshServerCapabilities, openEditServerDialog, handleDeleteServer, toggleToolExpansion, handleUpdateTool, handleUpdatePrompt, truncateText]);
+
+    // 空状态
+    if (mcpServers.length === 0) {
+        return (
+            <>
+                <ConfigPageLayout
+                    sidebar={null}
+                    content={null}
+                    emptyState={
+                        <EmptyState
+                            icon={<MCP className="h-8 w-8 text-muted-foreground" />}
+                            title="还没有配置MCP服务器"
+                            description="开始添加你的第一个MCP服务器，扩展AI助手的能力"
+                            action={
+                                <MCPActionDropdown
+                                    onTemplateSelect={handleTemplateSelect}
+                                    onJSONImport={handleJSONImport}
+                                    className="bg-primary hover:bg-primary/90 text-primary-foreground shadow-lg hover:shadow-xl transition-all"
+                                />
+                            }
+                        />
+                    }
+                    showEmptyState={true}
+                />
+
+                {/* MCP服务器对话框 - 空状态时也需要渲染 */}
+                <MCPServerDialog
+                    isOpen={serverDialogOpen}
+                    onClose={closeServerDialog}
+                    onSubmit={handleServerDialogSubmit}
+                    editingServer={editingServer}
+                    initialServerType={dialogInitialServerType}
+                    initialConfig={dialogInitialConfig}
+                />
+
+                {/* JSON导入对话框 */}
+                <JSONImportDialog
+                    isOpen={jsonImportDialogOpen}
+                    onClose={closeJSONImportDialog}
+                    onImport={handleJSONImportConfirm}
+                />
+
+                {/* 内置工具对话框 - 空状态时也需要渲染 */}
+                <BuiltinToolDialog
+                    isOpen={builtinDialogOpen}
+                    onClose={() => setBuiltinDialogOpen(false)}
+                    onSubmit={() => {
+                        setBuiltinDialogOpen(false);
+                        getMcpServers();
+                    }}
+                />
+            </>
+        );
+    }
 
     return (
         <>
@@ -676,7 +693,7 @@ const MCPConfig: React.FC = () => {
                                 is_builtin: editingServer.is_builtin,
                             };
                             await invoke('update_mcp_server', { id: editingServer.id, request: req });
-                            
+
                             // 立即更新 selectedServer 以确保下次编辑时显示最新数据
                             if (selectedServer && selectedServer.id === editingServer.id) {
                                 setSelectedServer({
@@ -684,7 +701,7 @@ const MCPConfig: React.FC = () => {
                                     environment_variables: builtinEditEnv,
                                 });
                             }
-                            
+
                             toast.success('已保存内置工具环境变量');
                             setBuiltinEditOpen(false);
                             getMcpServers();

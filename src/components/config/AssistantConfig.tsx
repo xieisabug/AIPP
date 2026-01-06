@@ -4,6 +4,7 @@ import { AssistantDetail, AssistantListItem } from "../../data/Assistant";
 import { useAssistantListListener } from "../../hooks/useAssistantListListener";
 import { Bot, Settings, User, Download } from "lucide-react";
 import { Button } from "../ui/button";
+import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { useForm } from "react-hook-form";
 import { validateConfig } from "../../utils/validate";
 import AddAssistantDialog from "./AddAssistantDialog";
@@ -346,22 +347,6 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         [addAssistant, form]
     );
 
-    // 侧边栏内容
-    const sidebar = (
-        <SidebarList title="助手列表" description="选择助手进行配置" icon={<Bot className="h-5 w-5" />}>
-            {assistants.map((assistant, index) => (
-                <ListItemButton
-                    key={index}
-                    isSelected={currentAssistant?.assistant.id === assistant.id}
-                    onClick={() => handleChooseAssistant(assistant)}
-                >
-                    <User className="h-4 w-4 mr-2 flex-shrink-0" />
-                    <span className="truncate">{assistant.name}</span>
-                </ListItemButton>
-            ))}
-        </SidebarList>
-    );
-
     // 分享助手
     const handleShareAssistant = useCallback(async () => {
         try {
@@ -406,17 +391,59 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                             "gap-2 bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm hover:shadow-md transition-all",
                     }}
                 />
-                <Button
-                    variant="outline"
-                    onClick={openImportDialog}
-                    className="shadow-sm hover:shadow-md transition-all"
-                >
-                    <Download className="h-4 w-4" />
-                </Button>
+                <Tooltip delayDuration={500}>
+                    <TooltipTrigger asChild>
+                        <Button
+                            variant="outline"
+                            onClick={openImportDialog}
+                            className="shadow-sm hover:shadow-md transition-all"
+                        >
+                            <Download className="h-4 w-4" />
+                        </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>导入助手</TooltipContent>
+                </Tooltip>
             </div>
         ),
         [assistantTypes, handleAssistantAdded, openImportDialog]
     );
+
+    // 侧边栏内容 - 使用 useMemo 避免重复创建
+    const sidebar = useMemo(() => (
+        <SidebarList title="助手列表" description="选择助手进行配置" icon={<Bot className="h-5 w-5" />} addButton={addButton}>
+            {assistants.map((assistant) => (
+                <ListItemButton
+                    key={assistant.id}
+                    isSelected={currentAssistant?.assistant.id === assistant.id}
+                    onClick={() => handleChooseAssistant(assistant)}
+                >
+                    <User className="h-4 w-4 mr-2 flex-shrink-0" />
+                    <span className="truncate">{assistant.name}</span>
+                </ListItemButton>
+            ))}
+        </SidebarList>
+    ), [assistants, currentAssistant?.assistant.id, handleChooseAssistant, addButton]);
+
+    // 右侧内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
+    const content = useMemo(() => currentAssistant ? (
+        <AssistantFormRenderer
+            currentAssistant={currentAssistant}
+            formConfig={formConfig}
+            form={form}
+            assistantConfigApi={assistantConfigApi}
+            onSave={handleAssistantFormSave}
+            onCopy={currentAssistant.assistant.id === 1 ? undefined : copyAssistant}
+            onDelete={currentAssistant.assistant.id === 1 ? undefined : openConfirmDeleteDialog}
+            onEdit={openUpdateFormDialog}
+            onShare={handleShareAssistant}
+        />
+    ) : (
+        <EmptyState
+            icon={<Settings className="h-8 w-8 text-muted-foreground" />}
+            title="选择一个助手"
+            description="从左侧列表中选择一个助手开始配置"
+        />
+    ), [currentAssistant, formConfig, form, assistantConfigApi, handleAssistantFormSave, copyAssistant, openConfirmDeleteDialog, openUpdateFormDialog, handleShareAssistant]);
 
     // 空状态
     if (assistants.length === 0) {
@@ -436,13 +463,18 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                                             assistantTypes={assistantTypes}
                                             onAssistantAdded={handleAssistantAdded}
                                         />
-                                        <Button
-                                            variant="outline"
-                                            onClick={openImportDialog}
-                                            className="shadow-lg hover:shadow-xl transition-all"
-                                        >
-                                            <Download className="h-4 w-4" />
-                                        </Button>
+                                        <Tooltip delayDuration={500}>
+                                            <TooltipTrigger asChild>
+                                                <Button
+                                                    variant="outline"
+                                                    onClick={openImportDialog}
+                                                    className="shadow-lg hover:shadow-xl transition-all"
+                                                >
+                                                    <Download className="h-4 w-4" />
+                                                </Button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>导入助手</TooltipContent>
+                                        </Tooltip>
                                     </div>
                                 </div>
                             }
@@ -471,27 +503,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         <>
             <ConfigPageLayout
                 sidebar={sidebar}
-                content={
-                    currentAssistant ? (
-                        <AssistantFormRenderer
-                            currentAssistant={currentAssistant}
-                            formConfig={formConfig}
-                            form={form}
-                            assistantConfigApi={assistantConfigApi}
-                            onSave={handleAssistantFormSave}
-                            onCopy={currentAssistant.assistant.id === 1 ? undefined : copyAssistant}
-                            onDelete={currentAssistant.assistant.id === 1 ? undefined : openConfirmDeleteDialog}
-                            onEdit={openUpdateFormDialog}
-                            onShare={handleShareAssistant}
-                        />
-                    ) : (
-                        <EmptyState
-                            icon={<Settings className="h-8 w-8 text-muted-foreground" />}
-                            title="选择一个助手"
-                            description="从左侧列表中选择一个助手开始配置"
-                        />
-                    )
-                }
+                content={content}
                 selectOptions={selectOptions}
                 selectedOptionId={currentAssistant?.assistant.id.toString()}
                 onSelectOption={handleSelectFromDropdown}

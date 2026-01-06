@@ -230,7 +230,10 @@ pub async fn open_artifact_window(
         .map_err(|e| format!("Failed to increment use count: {}", e))?;
 
     crate::window::open_artifact_window(app_handle.clone(), artifact.clone()).await?;
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    
+    // Wait for the artifact window to be ready using the improved handshake mechanism
+    // This replaces the old hardcoded 1000ms sleep with a proper event-based wait
+    let _ = crate::artifacts::preview_router::wait_for_artifact_ready(&app_handle).await;
 
     match artifact.artifact_type.as_str() {
         "react" | "jsx" => {

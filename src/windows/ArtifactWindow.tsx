@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { listen, emitTo, once } from "@tauri-apps/api/event";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { emitTo, once } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import mermaid from "mermaid";
@@ -18,6 +18,7 @@ import "katex/dist/katex.min.css";
 import EnvironmentInstallDialog from "../components/EnvironmentInstallDialog";
 import { useTheme } from "../hooks/useTheme";
 import { formatIconDisplay } from "@/utils/emojiUtils";
+import { useArtifactEvents, ArtifactData, EnvironmentCheckData } from "../hooks/useArtifactEvents";
 
 interface ArtifactInfo {
     id: number;
@@ -32,11 +33,6 @@ interface ArtifactInfo {
     use_count: number;
 }
 
-interface LogLine {
-    type: "log" | "error" | "success";
-    message: string;
-}
-
 /**
  * 仅用于 "artifact" 窗口。
  * - 监听后端发出的 artifact-log / artifact-error / artifact-success 事件并展示。
@@ -47,7 +43,6 @@ export default function ArtifactWindow() {
     // 集成主题系统
     useTheme();
 
-    const [logs, setLogs] = useState<LogLine[]>([]);
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [isPreviewReady, setIsPreviewReady] = useState(false);
     const [currentView, setCurrentView] = useState<"loading" | "preview">("loading");
@@ -55,8 +50,6 @@ export default function ArtifactWindow() {
         "react" | "vue" | "mermaid" | "html" | "svg" | "xml" | "markdown" | "md" | null
     >(null);
     const [artifactInfo, setArtifactInfo] = useState<ArtifactInfo | null>(null);
-    const unlistenersRef = useRef<(() => void)[]>([]);
-    const isRegisteredRef = useRef(false);
     const previewTypeRef = useRef<"react" | "vue" | "mermaid" | "html" | "svg" | "xml" | "markdown" | "md" | null>(
         null
     );
@@ -92,6 +85,128 @@ export default function ArtifactWindow() {
         currentLangRef.current = currentLang;
         currentInputStrRef.current = currentInputStr;
     }, [currentLang, currentInputStr]);
+
+    // 处理 artifact 数据
+    const handleArtifactData = useCallback((data: ArtifactData) => {
+        console.log("[ArtifactWindow] 接收到 artifact 数据：", data);
+        
+        // 存储完整的 artifact 信息
+        setArtifactInfo(data as unknown as ArtifactInfo);
+
+        if (data.original_code && data.type) {
+            switch (data.type) {
+                case "vue":
+                case "react":
+                    setPreviewType(data.type as "vue" | "react");
+                    break;
+                case "mermaid":
+                    setPreviewType("mermaid");
+                    setMermaidContent(data.original_code);
+                    setIsPreviewReady(true);
+                    break;
+                case "html":
+                    setPreviewType("html");
+                    setHtmlContent(data.original_code);
+                    setIsPreviewReady(true);
+                    break;
+                case "svg":
+                    setPreviewType("svg");
+                    setHtmlContent(data.original_code);
+                    setIsPreviewReady(true);
+                    break;
+                case "xml":
+                    setPreviewType("xml");
+                    setHtmlContent(data.original_code);
+                    setIsPreviewReady(true);
+                    break;
+                case "markdown":
+                case "md":
+                    setPreviewType(data.type as "markdown" | "md");
+                    setMarkdownContent(data.original_code);
+                    setIsPreviewReady(true);
+                    break;
+                default:
+                    break;
+            }
+        }
+    }, []);
+
+    // 处理重定向
+    const handleRedirect = useCallback((url: string) => {
+        setPreviewUrl(url);
+        setIsPreviewReady(true);
+    }, []);
+
+    // 处理环境检查
+    const handleEnvironmentCheck = useCallback((data: EnvironmentCheckData) => {
+        setEnvironmentTool(data.tool);
+        setEnvironmentMessage(data.message);
+        setCurrentLang(data.lang);
+        setCurrentInputStr(data.input_str);
+        setShowEnvironmentDialog(true);
+    }, []);
+
+    // 处理环境安装开始
+    const handleEnvironmentInstallStarted = useCallback((data: { tool: string; lang: string; input_str: string }) => {
+        setCurrentLang(data.lang);
+        setCurrentInputStr(data.input_str);
+        isInstalling.current = true;
+        setShowEnvironmentDialog(false);
+    }, []);
+
+    // 处理 Bun 安装完成
+    const handleBunInstallFinished = useCallback((success: boolean) => {
+        console.log("🔧 [ArtifactWindow] 收到Bun安装完成事件:", success, isInstalling.current);
+        if (success && isInstalling.current) {
+            artifactEvents.addLog("success", "Bun 安装成功，正在重新启动预览...");
+            invoke("retry_preview_after_install", {
+                lang: currentLangRef.current,
+                inputStr: currentInputStrRef.current,
+            })
+                .then(() => {
+                    isInstalling.current = false;
+                })
+                .catch((error) => {
+                    artifactEvents.addLog("error", `重新启动预览失败: ${error}`);
+                    isInstalling.current = false;
+                });
+        } else if (!success) {
+            artifactEvents.addLog("error", "Bun 安装失败");
+            isInstalling.current = false;
+        }
+    }, []);
+
+    // 处理 uv 安装完成
+    const handleUvInstallFinished = useCallback((success: boolean) => {
+        if (success && isInstalling.current) {
+            artifactEvents.addLog("success", "uv 安装成功，正在重新启动预览...");
+            invoke("retry_preview_after_install", {
+                lang: currentLangRef.current,
+                inputStr: currentInputStrRef.current,
+            })
+                .then(() => {
+                    isInstalling.current = false;
+                })
+                .catch((error) => {
+                    artifactEvents.addLog("error", `重新启动预览失败: ${error}`);
+                    isInstalling.current = false;
+                });
+        } else if (!success) {
+            artifactEvents.addLog("error", "uv 安装失败");
+            isInstalling.current = false;
+        }
+    }, []);
+
+    // 使用统一的事件处理 hook
+    const artifactEvents = useArtifactEvents({
+        windowType: "artifact",
+        onArtifactData: handleArtifactData,
+        onRedirect: handleRedirect,
+        onEnvironmentCheck: handleEnvironmentCheck,
+        onEnvironmentInstallStarted: handleEnvironmentInstallStarted,
+        onBunInstallFinished: handleBunInstallFinished,
+        onUvInstallFinished: handleUvInstallFinished,
+    });
 
     // 初始化 mermaid - 根据主题动态配置
     useEffect(() => {
@@ -238,7 +353,7 @@ export default function ArtifactWindow() {
                 inputStr: currentInputStrRef.current,
             });
         } catch (error) {
-            setLogs((prev) => [...prev, { type: "error", message: `确认安装失败: ${error}` }]);
+            artifactEvents.addLog("error", `确认安装失败: ${error}`);
         }
     };
 
@@ -253,7 +368,7 @@ export default function ArtifactWindow() {
             });
             setShowEnvironmentDialog(false);
         } catch (error) {
-            setLogs((prev) => [...prev, { type: "error", message: `取消安装失败: ${error}` }]);
+            artifactEvents.addLog("error", `取消安装失败: ${error}`);
         }
     };
 
@@ -272,171 +387,6 @@ export default function ArtifactWindow() {
             setCurrentView("preview");
         }
     }, [isPreviewReady, previewUrl, previewType]);
-
-    // 注册事件监听
-    useEffect(() => {
-        let isCancelled = false;
-
-        const registerListeners = async () => {
-            // 在函数执行一开始就检查并设置标志位，避免竞争条件
-            if (isRegisteredRef.current || isCancelled) {
-                return;
-            }
-            isRegisteredRef.current = true;
-
-            const addLog = (type: LogLine["type"]) => (event: { payload: any }) => {
-                const message = event.payload as string;
-                console.log("[ArtifactWindow] 接收消息：", message);
-                setLogs((prev) => [...prev, { type, message }]);
-            };
-
-            const handleArtifactData = (event: { payload: any }) => {
-                const data = event.payload as ArtifactInfo;
-                console.log("[ArtifactWindow] 接收到 artifact 数据：", data);
-
-                // 存储完整的 artifact 信息
-                setArtifactInfo(data);
-
-                if (data.original_code && data.type) {
-                    switch (data.type) {
-                        case "vue":
-                        case "react":
-                            setPreviewType(data.type as "vue" | "react");
-                            break;
-                        case "mermaid":
-                            setPreviewType("mermaid");
-                            setMermaidContent(data.original_code);
-                            setIsPreviewReady(true);
-                            break;
-                        case "html":
-                            setPreviewType("html");
-                            setHtmlContent(data.original_code);
-                            setIsPreviewReady(true);
-                            break;
-                        case "svg":
-                            setPreviewType("svg");
-                            setHtmlContent(data.original_code);
-                            setIsPreviewReady(true);
-                            break;
-                        case "xml":
-                            setPreviewType("xml");
-                            setHtmlContent(data.original_code);
-                            setIsPreviewReady(true);
-                            break;
-                        case "markdown":
-                        case "md":
-                            setPreviewType(data.type as "markdown" | "md");
-                            setMarkdownContent(data.original_code);
-                            setIsPreviewReady(true);
-                            break;
-                        default:
-                            break;
-                    }
-                }
-            };
-
-            const handleRedirect = (event: { payload: any }) => {
-                const url = event.payload as string;
-                setPreviewUrl(url);
-                setIsPreviewReady(true);
-            };
-
-            const handleEnvironmentCheck = (event: { payload: any }) => {
-                const data = event.payload;
-                setEnvironmentTool(data.tool);
-                setEnvironmentMessage(data.message);
-                setCurrentLang(data.lang);
-                setCurrentInputStr(data.input_str);
-                setShowEnvironmentDialog(true);
-            };
-
-            const handleEnvironmentInstallStarted = (event: { payload: any }) => {
-                const data = event.payload;
-                setCurrentLang(data.lang);
-                setCurrentInputStr(data.input_str);
-                isInstalling.current = true;
-                setShowEnvironmentDialog(false);
-            };
-
-            const handleBunInstallFinished = (event: { payload: any }) => {
-                const success = event.payload as boolean;
-                console.log("🔧 [ArtifactPreviewWindow] 收到Bun安装完成事件:", success, isInstalling);
-                if (success && isInstalling.current) {
-                    setLogs((prev) => [...prev, { type: "success", message: "Bun 安装成功，正在重新启动预览..." }]);
-                    // 重新启动预览
-                    invoke("retry_preview_after_install", {
-                        lang: currentLangRef.current,
-                        inputStr: currentInputStrRef.current,
-                    })
-                        .then(() => {
-                            isInstalling.current = false;
-                        })
-                        .catch((error) => {
-                            setLogs((prev) => [...prev, { type: "error", message: `重新启动预览失败: ${error}` }]);
-                            isInstalling.current = false;
-                        });
-                } else if (!success) {
-                    setLogs((prev) => [...prev, { type: "error", message: "Bun 安装失败" }]);
-                    isInstalling.current = false;
-                }
-            };
-
-            const handleUvInstallFinished = (event: { payload: any }) => {
-                const success = event.payload as boolean;
-                if (success && isInstalling.current) {
-                    setLogs((prev) => [...prev, { type: "success", message: "uv 安装成功，正在重新启动预览..." }]);
-                    // 重新启动预览
-                    invoke("retry_preview_after_install", {
-                        lang: currentLangRef.current,
-                        inputStr: currentInputStrRef.current,
-                    })
-                        .then(() => {
-                            isInstalling.current = false;
-                        })
-                        .catch((error) => {
-                            setLogs((prev) => [...prev, { type: "error", message: `重新启动预览失败: ${error}` }]);
-                            isInstalling.current = false;
-                        });
-                } else if (!success) {
-                    setLogs((prev) => [...prev, { type: "error", message: "uv 安装失败" }]);
-                    isInstalling.current = false;
-                }
-            };
-
-            try {
-                const unlisteners = await Promise.all([
-                    listen("artifact-data", handleArtifactData),
-                    listen("artifact-log", addLog("log")),
-                    listen("artifact-error", addLog("error")),
-                    listen("artifact-success", addLog("success")),
-                    listen("artifact-redirect", handleRedirect),
-                    listen("environment-check", handleEnvironmentCheck),
-                    listen("environment-install-started", handleEnvironmentInstallStarted),
-                    listen("bun-install-finished", handleBunInstallFinished),
-                    listen("uv-install-finished", handleUvInstallFinished),
-                ]);
-
-                // 检查是否已被取消
-                if (isCancelled) {
-                    unlisteners.forEach((fn) => fn());
-                    return;
-                }
-
-                unlistenersRef.current = unlisteners;
-            } catch (error) {
-                isRegisteredRef.current = false;
-            }
-        };
-
-        registerListeners();
-
-        return () => {
-            isCancelled = true;
-            unlistenersRef.current.forEach((fn) => fn());
-            unlistenersRef.current = [];
-            isRegisteredRef.current = false;
-        };
-    }, []);
 
     // 监听窗口关闭事件，清理预览服务器
     useEffect(() => {
@@ -466,7 +416,7 @@ export default function ArtifactWindow() {
                     await invoke("close_react_artifact", { previewId: "react" });
                 }
 
-                setLogs([]);
+                artifactEvents.clearLogs();
                 setPreviewUrl(null);
                 setIsPreviewReady(false);
                 setCurrentView("loading");
@@ -529,10 +479,7 @@ export default function ArtifactWindow() {
                 emitTo("artifact_preview", "artifact-preview-data", payload);
             });
         } catch (error) {
-            setLogs((prev) => [
-                ...prev,
-                { type: "error", message: `打开预览窗口失败: ${String(error)}` },
-            ]);
+            artifactEvents.addLog("error", `打开预览窗口失败: ${String(error)}`);
         }
     };
 
@@ -599,18 +546,18 @@ export default function ArtifactWindow() {
                             <div className="w-full max-w-2xl">
                                 <div className="bg-card border border-border rounded-lg shadow-sm overflow-hidden">
                                     <div className="px-4 py-3 text-center">
-                                        {logs.length === 0 ? (
+                                        {artifactEvents.logs.length === 0 ? (
                                             <div className="text-muted-foreground text-sm py-2">等待启动...</div>
                                         ) : (
                                             <div
-                                                className={`text-sm font-medium transition-all duration-300 ${logs[logs.length - 1].type === "error"
+                                                className={`text-sm font-medium transition-all duration-300 ${artifactEvents.logs[artifactEvents.logs.length - 1].type === "error"
                                                     ? "text-destructive"
-                                                    : logs[logs.length - 1].type === "success"
+                                                    : artifactEvents.logs[artifactEvents.logs.length - 1].type === "success"
                                                         ? "text-green-600 dark:text-green-400"
                                                         : "text-foreground"
                                                     }`}
                                             >
-                                                {logs[logs.length - 1].message}
+                                                {artifactEvents.logs[artifactEvents.logs.length - 1].message}
                                             </div>
                                         )}
                                     </div>

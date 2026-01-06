@@ -1,6 +1,7 @@
 use crate::api::ai::config::{calculate_retry_delay, get_retry_attempts_from_config};
 use crate::api::ai::events::{ConversationEvent, MessageAddEvent, MessageUpdateEvent};
 use crate::api::ai::types::McpOverrideConfig;
+use crate::api::ai_api::{resolve_tool_name, sanitize_tool_name, ToolNameMapping};
 use crate::db::assistant_db::Assistant;
 use crate::db::conversation_db::{ConversationDatabase, Message, Repository};
 use crate::db::system_db::FeatureConfig;
@@ -17,6 +18,199 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
+
+/// HTTP 错误详情，包含状态码、响应体、端点等
+#[derive(Debug, Clone, Default)]
+pub struct HttpErrorDetails {
+    pub status_code: Option<u16>,
+    pub response_body: Option<String>,
+    pub endpoint: Option<String>,
+    pub request_id: Option<String>,
+}
+
+/// 从 genai::Error 中提取 HTTP 错误详情
+fn extract_http_error_details(error: &genai::Error) -> HttpErrorDetails {
+    let mut details = HttpErrorDetails::default();
+
+    match error {
+        // WebModelCall 和 WebAdapterCall 包含 webc_error
+        genai::Error::WebModelCall { model_iden, webc_error } => {
+            details.endpoint = Some(format!("{:?}", model_iden));
+            extract_webc_error_details(webc_error, &mut details);
+        }
+        genai::Error::WebAdapterCall { adapter_kind, webc_error } => {
+            details.endpoint = Some(format!("{:?}", adapter_kind));
+            extract_webc_error_details(webc_error, &mut details);
+        }
+        // ChatResponse 包含 body (JSON Value)
+        genai::Error::ChatResponse { model_iden, body } => {
+            details.endpoint = Some(format!("{:?}", model_iden));
+            details.response_body =
+                Some(serde_json::to_string_pretty(body).unwrap_or_else(|_| body.to_string()));
+            // 尝试从 body 中提取状态码和请求ID
+            if let Some(error_obj) = body.get("error") {
+                if let Some(code) = error_obj.get("code").and_then(|c| c.as_str()) {
+                    // 常见的错误代码映射到 HTTP 状态码
+                    details.status_code = match code {
+                        "invalid_api_key" | "authentication_error" => Some(401),
+                        "insufficient_quota" | "rate_limit_exceeded" => Some(429),
+                        "model_not_found" => Some(404),
+                        "context_length_exceeded" | "invalid_request_error" => Some(400),
+                        "server_error" => Some(500),
+                        _ => None,
+                    };
+                }
+            }
+            // 提取 request_id
+            if let Some(req_id) = body.get("request_id").and_then(|r| r.as_str()) {
+                details.request_id = Some(req_id.to_string());
+            }
+        }
+        // WebStream 错误
+        genai::Error::WebStream { model_iden, cause } => {
+            details.endpoint = Some(format!("{:?}", model_iden));
+            // 尝试从 cause 字符串中解析状态码
+            parse_status_from_string(cause, &mut details);
+        }
+        // ReqwestEventSource 错误
+        genai::Error::ReqwestEventSource(es_error) => {
+            let error_str = format!("{:?}", es_error);
+            parse_status_from_string(&error_str, &mut details);
+        }
+        _ => {
+            // 对于其他错误，尝试从错误字符串解析
+            let error_str = error.to_string();
+            parse_status_from_string(&error_str, &mut details);
+        }
+    }
+
+    details
+}
+
+/// 从 webc::Error 中提取详情
+fn extract_webc_error_details(webc_error: &genai::webc::Error, details: &mut HttpErrorDetails) {
+    match webc_error {
+        genai::webc::Error::ResponseFailedStatus { status, body, headers: _ } => {
+            details.status_code = Some(status.as_u16());
+            details.response_body = Some(body.clone());
+            // 尝试从响应体中解析更多信息
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+                if let Some(req_id) = json.get("request_id").and_then(|r| r.as_str()) {
+                    details.request_id = Some(req_id.to_string());
+                }
+            }
+        }
+        genai::webc::Error::ResponseFailedNotJson { content_type } => {
+            details.response_body =
+                Some(format!("响应不是有效的 JSON，Content-Type: {}", content_type));
+        }
+        genai::webc::Error::Reqwest(reqwest_error) => {
+            if let Some(status) = reqwest_error.status() {
+                details.status_code = Some(status.as_u16());
+            }
+            if let Some(url) = reqwest_error.url() {
+                details.endpoint = Some(url.to_string());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 从错误字符串中解析状态码
+fn parse_status_from_string(error_str: &str, details: &mut HttpErrorDetails) {
+    // 尝试匹配常见的状态码模式
+    let status_patterns = [
+        ("400", 400u16),
+        ("401", 401),
+        ("403", 403),
+        ("404", 404),
+        ("429", 429),
+        ("500", 500),
+        ("502", 502),
+        ("503", 503),
+    ];
+
+    for (pattern, code) in status_patterns {
+        if error_str.contains(pattern) && details.status_code.is_none() {
+            details.status_code = Some(code);
+            break;
+        }
+    }
+
+    // 尝试提取 URL
+    if details.endpoint.is_none() {
+        if let Some(start) = error_str.find("https://") {
+            let remaining = &error_str[start..];
+            let end = remaining
+                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '>')
+                .unwrap_or(remaining.len());
+            details.endpoint = Some(remaining[..end].to_string());
+        }
+    }
+
+    // 尝试提取 JSON 响应体
+    if details.response_body.is_none() {
+        if let Some(start) = error_str.find('{') {
+            if let Some(end) = error_str.rfind('}') {
+                if end > start {
+                    let json_str = &error_str[start..=end];
+                    // 验证是否为有效 JSON
+                    if serde_json::from_str::<serde_json::Value>(json_str).is_ok() {
+                        details.response_body = Some(json_str.to_string());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 从 anyhow::Error 链中尝试提取 HTTP 错误详情
+fn extract_http_details_from_anyhow(error: &anyhow::Error) -> HttpErrorDetails {
+    // 首先尝试直接转换为 genai::Error
+    if let Some(genai_error) = error.downcast_ref::<genai::Error>() {
+        return extract_http_error_details(genai_error);
+    }
+
+    // 遍历错误链
+    let mut details = HttpErrorDetails::default();
+    let error_string = error.to_string();
+
+    // 从错误字符串中解析
+    parse_status_from_string(&error_string, &mut details);
+
+    // 遍历 source 链
+    let mut current: Option<&(dyn std::error::Error + 'static)> = error.source();
+    while let Some(source) = current {
+        // 尝试转换为 genai::Error
+        if let Some(genai_error) = source.downcast_ref::<genai::Error>() {
+            let genai_details = extract_http_error_details(genai_error);
+            // 合并详情（优先使用已有的非空值）
+            if details.status_code.is_none() {
+                details.status_code = genai_details.status_code;
+            }
+            if details.response_body.is_none() {
+                details.response_body = genai_details.response_body;
+            }
+            if details.endpoint.is_none() {
+                details.endpoint = genai_details.endpoint;
+            }
+            if details.request_id.is_none() {
+                details.request_id = genai_details.request_id;
+            }
+            break;
+        }
+
+        // 尝试从 source 错误字符串中解析
+        let source_str = source.to_string();
+        if details.status_code.is_none() || details.response_body.is_none() {
+            parse_status_from_string(&source_str, &mut details);
+        }
+
+        current = source.source();
+    }
+
+    details
+}
 
 /// 删除会话中最后一条错误消息（如果最后一条是 error）
 async fn cleanup_last_error_message(
@@ -210,6 +404,7 @@ async fn handle_captured_tool_calls_common(
     response_content: &mut String,
     emit_tool_call_events: bool,
     mcp_override_config: Option<&McpOverrideConfig>,
+    tool_name_mapping: &ToolNameMapping,
 ) -> anyhow::Result<()> {
     // 先将完整的 tool_calls JSON 覆盖保存到消息，保证数据源一致
     if let Ok(Some(mut msg)) = conversation_db
@@ -225,10 +420,11 @@ async fn handle_captured_tool_calls_common(
     }
 
     for tool_call in captured_tool_calls {
-        let (server_name, tool_name) = split_tool_name(&tool_call.fn_name);
+        // 使用映射表还原原始名称，用于 UI 显示和数据库记录
+        let (server_name, tool_name) = resolve_tool_name(&tool_call.fn_name, tool_name_mapping);
         let params_str = tool_call.fn_arguments.to_string();
 
-        // 创建工具调用记录
+        // 创建工具调用记录（使用原始名称）
         match crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
             app_handle.clone(),
             conversation_id,
@@ -242,7 +438,7 @@ async fn handle_captured_tool_calls_common(
         .await
         {
             Ok(tool_call_record) => {
-                // 追加 UI hint
+                // 追加 UI hint（使用原始名称）
                 let ui_hint = format!(
                     "\n\n<!-- MCP_TOOL_CALL:{} -->\n",
                     serde_json::json!({
@@ -301,7 +497,10 @@ async fn handle_captured_tool_calls_common(
                         {
                             let mut should_auto_run = false;
                             for s in servers.iter() {
-                                if s.name == server_name && s.is_enabled {
+                                // 支持精确匹配和清理后名称匹配
+                                let name_matches = s.name == server_name
+                                    || sanitize_tool_name(&s.name) == server_name;
+                                if name_matches && s.is_enabled {
                                     if let Some(t) =
                                         s.tools.iter().find(|t| t.name == tool_name && t.is_enabled)
                                     {
@@ -656,6 +855,8 @@ async fn enhanced_error_logging_v2<E: std::error::Error + 'static>(
 }
 
 /// 构建统一的、可被前端解析的富错误负载（JSON字符串）
+/// 保留此函数以向后兼容，内部调用带 HTTP 详情的版本
+#[allow(dead_code)]
 fn build_rich_error_payload(
     main_message: String,
     details: Option<String>,
@@ -664,44 +865,112 @@ fn build_rich_error_payload(
     attempts: Option<i32>,
     original_error: String,
 ) -> String {
+    build_rich_error_payload_with_http_details(
+        main_message,
+        details,
+        model_name,
+        phase,
+        attempts,
+        original_error,
+        None,
+    )
+}
+
+/// 构建统一的、可被前端解析的富错误负载（JSON字符串），包含 HTTP 错误详情
+fn build_rich_error_payload_with_http_details(
+    main_message: String,
+    details: Option<String>,
+    model_name: Option<String>,
+    phase: &str,
+    attempts: Option<i32>,
+    original_error: String,
+    http_details: Option<HttpErrorDetails>,
+) -> String {
     // 根据主要信息给出建议
     let mut suggestions: Vec<&str> = Vec::new();
     let lower = main_message.to_lowercase();
-    if lower.contains("网络") || lower.contains("network") || lower.contains("连接") {
+    let original_lower = original_error.to_lowercase();
+
+    // 综合检查主消息和原始错误
+    let check_str = format!("{} {}", lower, original_lower);
+
+    if check_str.contains("网络")
+        || check_str.contains("network")
+        || check_str.contains("连接")
+        || check_str.contains("connection")
+    {
         suggestions.push("检查网络连接与代理设置");
     }
-    if lower.contains("认证")
-        || lower.contains("api密钥")
-        || lower.contains("unauthorized")
-        || lower.contains("401")
+    if check_str.contains("认证")
+        || check_str.contains("api密钥")
+        || check_str.contains("unauthorized")
+        || check_str.contains("401")
+        || check_str.contains("api_key")
     {
         suggestions.push("检查 API Key 是否正确、是否过期");
     }
-    if lower.contains("权限") || lower.contains("forbidden") || lower.contains("403") {
+    if check_str.contains("权限") || check_str.contains("forbidden") || check_str.contains("403")
+    {
         suggestions.push("检查账户或密钥是否有对应权限");
     }
-    if lower.contains("频繁") || lower.contains("429") || lower.contains("rate limit") {
+    if check_str.contains("频繁")
+        || check_str.contains("429")
+        || check_str.contains("rate limit")
+        || check_str.contains("rate_limit")
+    {
         suggestions.push("降低调用频率或稍后再试");
     }
-    if lower.contains("服务器")
-        || lower.contains("503")
-        || lower.contains("502")
-        || lower.contains("500")
+    if check_str.contains("服务器")
+        || check_str.contains("503")
+        || check_str.contains("502")
+        || check_str.contains("500")
+        || check_str.contains("server_error")
     {
         suggestions.push("服务端异常，稍后重试");
     }
-    if lower.contains("格式") || lower.contains("json") || lower.contains("parse") {
+    if check_str.contains("格式") || check_str.contains("json") || check_str.contains("parse") {
         suggestions.push("检查 Base URL / 模型配置与请求参数格式");
     }
+    if check_str.contains("model")
+        && (check_str.contains("not found")
+            || check_str.contains("not_found")
+            || check_str.contains("does not exist"))
+    {
+        suggestions.push("检查模型名称是否正确");
+    }
+    if check_str.contains("context_length")
+        || check_str.contains("too long")
+        || check_str.contains("token")
+    {
+        suggestions.push("尝试减少输入内容长度");
+    }
+
+    // 提取 HTTP 详情
+    let (status_code, response_body, endpoint, request_id) = if let Some(ref http) = http_details {
+        (
+            http.status_code,
+            http.response_body.clone(),
+            http.endpoint.clone(),
+            http.request_id.clone(),
+        )
+    } else {
+        (None, None, None, None)
+    };
+
+    // 优先使用 HTTP 详情中的 response_body，否则使用 details
+    let final_details = response_body.or(details);
 
     let payload = serde_json::json!({
         "message": main_message,
-        "details": details,
+        "details": final_details,
         "model": model_name,
         "phase": phase,
         "attempts": attempts,
         "original_error": original_error,
         "suggestions": suggestions,
+        "status": status_code,
+        "endpoint": endpoint,
+        "request_id": request_id,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     });
     payload.to_string()
@@ -1011,6 +1280,7 @@ pub async fn handle_stream_chat(
     llm_model_id: i64,
     llm_model_name: String,
     mcp_override_config: Option<McpOverrideConfig>,
+    tool_name_mapping: ToolNameMapping,
 ) -> Result<(), anyhow::Error> {
     let mut main_attempts = 0;
     let app_handle_clone = app_handle.clone();
@@ -1040,6 +1310,7 @@ pub async fn handle_stream_chat(
             llm_model_id,
             llm_model_name.clone(),
             mcp_override_config.clone(),
+            tool_name_mapping.clone(),
         )
         .await;
 
@@ -1052,19 +1323,20 @@ pub async fn handle_stream_chat(
                 warn!(attempt = main_attempts, error = %e, "stream chat failed attempt");
 
                 if main_attempts >= max_retry_attempts {
-                    // 最终失败，构建结构化错误并返回
+                    // 最终失败，提取 HTTP 错误详情并构建结构化错误
+                    let http_details = extract_http_details_from_anyhow(&e);
                     let user_friendly = get_user_friendly_error_message(&e);
-                    // 最终失败不再尝试网络抓取错误体，避免泛型/trait 限制，这里仅构建富错误载荷
-                    let details_opt: Option<String> = None;
+
                     // 使用更友好的主消息
                     let final_main = format!("AI请求失败: {}", user_friendly);
-                    let payload = build_rich_error_payload(
+                    let payload = build_rich_error_payload_with_http_details(
                         final_main,
-                        details_opt,
+                        None,
                         Some(llm_model_name.clone()),
                         "stream",
                         Some(main_attempts as i32),
                         e.to_string(),
+                        Some(http_details),
                     );
                     error!(
                         "[[final_stream_error]]: 流式聊天在{}次尝试后失败: {}",
@@ -1120,6 +1392,7 @@ async fn attempt_stream_chat(
     llm_model_id: i64,
     llm_model_name: String,
     mcp_override_config: Option<McpOverrideConfig>,
+    tool_name_mapping: ToolNameMapping,
 ) -> Result<(), anyhow::Error> {
     // 尝试建立流式连接
     info!(model_name, "establishing stream connection");
@@ -1395,6 +1668,7 @@ async fn attempt_stream_chat(
                                     &mut response_content,
                                     true,
                                     mcp_override_config.as_ref(),
+                                    &tool_name_mapping,
                                 )
                                 .await;
                             }
@@ -1634,6 +1908,7 @@ pub async fn handle_non_stream_chat(
     llm_model_id: i64,
     llm_model_name: String,
     mcp_override_config: Option<McpOverrideConfig>,
+    tool_name_mapping: ToolNameMapping,
 ) -> Result<(), anyhow::Error> {
     let generation_group_id =
         generation_group_id_override.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -1697,20 +1972,25 @@ pub async fn handle_non_stream_chat(
                     break Ok(response);
                 }
                 Err(e) => {
-                    let user_friendly_error = enhanced_error_logging_v2(
+                    let _ = enhanced_error_logging_v2(
                         &e,
                         &format!("Non-Stream Chat (attempt {}/{})", attempts, max_retry_attempts),
                     )
                     .await;
-
                     if attempts >= max_retry_attempts {
-                        let final_error = format!("AI请求失败: {}", user_friendly_error);
-                        error!(attempts, error = %e, "final non stream chat error");
+                        let http_details = extract_http_error_details(&e);
+                        let raw_error = e.to_string();
+                        let final_error = http_details
+                            .response_body
+                            .clone()
+                            .unwrap_or_else(|| raw_error.clone());
+
+                        error!(attempts, error = %e, final_error, "final non stream chat error");
 
                         // 发送错误通知到合适的窗口
                         send_error_to_appropriate_window(
                             &window,
-                            &user_friendly_error,
+                            &final_error,
                             Some(conversation_id),
                         );
 
@@ -1803,8 +2083,29 @@ pub async fn handle_non_stream_chat(
                     &mut content,
                     true,
                     mcp_override_config.as_ref(),
+                    &tool_name_mapping,
                 )
                 .await;
+            }
+
+            // 非流式场景下补充基于提示词的 MCP 检测，确保 prompt 模式生效
+            match crate::mcp::detect_and_process_mcp_calls(
+                app_handle,
+                window,
+                conversation_id,
+                response_message_id,
+                &content,
+            )
+            .await
+            {
+                Ok(updated) => {
+                    if let Some(new_content) = updated {
+                        content = new_content;
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to detect MCP calls in non-stream response");
+                }
             }
 
             let mut message =
@@ -1879,16 +2180,18 @@ pub async fn handle_non_stream_chat(
             Ok(())
         }
         Err(e) => {
+            // 提取 HTTP 错误详情
+            let http_details = extract_http_details_from_anyhow(&e);
             let user_friendly_error = get_user_friendly_error_message(&e);
-            // 此处不尝试网络抓取错误体，直接构建富错误载荷
-            let details_opt: Option<String> = None;
-            let err_msg = build_rich_error_payload(
+
+            let err_msg = build_rich_error_payload_with_http_details(
                 format!("AI请求失败: {}", user_friendly_error),
-                details_opt,
+                None,
                 Some(llm_model_name.clone()),
                 "non_stream",
                 None,
                 e.to_string(),
+                Some(http_details),
             );
             let now = chrono::Utc::now();
             send_error_to_appropriate_window(&window, &user_friendly_error, Some(conversation_id));

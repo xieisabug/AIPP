@@ -198,3 +198,218 @@ impl KagiEngine {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==================== Static Method Tests ====================
+
+    #[test]
+    fn test_display_name() {
+        assert_eq!(KagiEngine::display_name(), "Kagi");
+    }
+
+    #[test]
+    fn test_homepage_url() {
+        assert_eq!(KagiEngine::homepage_url(), "https://kagi.com");
+    }
+
+    #[test]
+    fn test_search_input_selectors_not_empty() {
+        let selectors = KagiEngine::search_input_selectors();
+        assert!(!selectors.is_empty());
+        assert!(selectors.contains(&"input[name='q']"));
+        assert!(selectors.contains(&"#searchInput"));
+    }
+
+    #[test]
+    fn test_search_button_selectors_not_empty() {
+        let selectors = KagiEngine::search_button_selectors();
+        assert!(!selectors.is_empty());
+        assert!(selectors.contains(&"button[type='submit']"));
+    }
+
+    #[test]
+    fn test_default_wait_selectors_not_empty() {
+        let selectors = KagiEngine::default_wait_selectors();
+        assert!(!selectors.is_empty());
+        assert!(selectors.contains(&"._0_SRI".to_string()));
+        assert!(selectors.contains(&".search-result".to_string()));
+    }
+
+    // ==================== Parse Search Results Tests ====================
+
+    #[test]
+    fn test_parse_search_results_empty_html() {
+        let html = "";
+        let results = KagiEngine::parse_search_results(html, "test query");
+
+        assert_eq!(results.query, "test query");
+        assert_eq!(results.search_engine, "Kagi");
+        assert_eq!(results.engine_id, "kagi");
+        assert_eq!(results.homepage_url, "https://kagi.com");
+        assert!(results.items.is_empty());
+        assert!(results.total_results.is_none());
+    }
+
+    #[test]
+    fn test_parse_search_results_no_results() {
+        let html = r#"
+            <html>
+                <body>
+                    <div id="main">No results found</div>
+                </body>
+            </html>
+        "#;
+        let results = KagiEngine::parse_search_results(html, "nonexistent query");
+
+        assert_eq!(results.query, "nonexistent query");
+        assert!(results.items.is_empty());
+    }
+
+    #[test]
+    fn test_parse_search_results_with_main_result() {
+        let html = r#"
+            <html>
+                <body>
+                    <div class="_0_SRI search-result">
+                        <a class="__sri_title_link" href="https://example.com">Test Title</a>
+                        <div class="_0_DESC __sri-desc">This is the description</div>
+                    </div>
+                </body>
+            </html>
+        "#;
+        let results = KagiEngine::parse_search_results(html, "test");
+
+        assert_eq!(results.query, "test");
+        assert_eq!(results.search_engine, "Kagi");
+        assert!(!results.items.is_empty());
+        
+        let first = &results.items[0];
+        assert_eq!(first.title, "Test Title");
+        assert_eq!(first.url, "https://example.com");
+    }
+
+    #[test]
+    fn test_parse_search_results_with_group_item() {
+        let html = r#"
+            <html>
+                <body>
+                    <div class="__srgi">
+                        <h3 class="__srgi-title">
+                            <a href="https://example.org">Group Item Title</a>
+                        </h3>
+                        <div class="__sri-desc">Group item description</div>
+                    </div>
+                </body>
+            </html>
+        "#;
+        let results = KagiEngine::parse_search_results(html, "test");
+
+        assert_eq!(results.query, "test");
+        assert_eq!(results.engine_id, "kagi");
+    }
+
+    #[test]
+    fn test_parse_search_results_max_30_items() {
+        let mut html = String::from("<html><body>");
+        for i in 0..40 {
+            html.push_str(&format!(
+                r#"<div class="_0_SRI search-result">
+                    <a class="__sri_title_link" href="https://example{}.com">Result {}</a>
+                    <div class="_0_DESC __sri-desc">Snippet {}</div>
+                </div>"#,
+                i, i, i
+            ));
+        }
+        html.push_str("</body></html>");
+
+        let results = KagiEngine::parse_search_results(&html, "test");
+
+        // Kagi 最多返回 30 个结果
+        assert!(results.items.len() <= 30);
+    }
+
+    #[test]
+    fn test_parse_search_results_rank_increment() {
+        let html = r#"
+            <html>
+                <body>
+                    <div class="_0_SRI search-result">
+                        <a class="__sri_title_link" href="https://first.com">First</a>
+                        <div class="_0_DESC __sri-desc">First desc</div>
+                    </div>
+                    <div class="_0_SRI search-result">
+                        <a class="__sri_title_link" href="https://second.com">Second</a>
+                        <div class="_0_DESC __sri-desc">Second desc</div>
+                    </div>
+                </body>
+            </html>
+        "#;
+        let results = KagiEngine::parse_search_results(html, "test");
+
+        assert_eq!(results.items.len(), 2);
+        assert_eq!(results.items[0].rank, 1);
+        assert_eq!(results.items[1].rank, 2);
+    }
+
+    #[test]
+    fn test_parse_search_results_no_total_results() {
+        // Kagi 不显示结果总数
+        let html = r#"
+            <html>
+                <body>
+                    <div id="main">Some content</div>
+                </body>
+            </html>
+        "#;
+        let results = KagiEngine::parse_search_results(html, "query");
+
+        assert!(results.total_results.is_none());
+    }
+
+    #[test]
+    fn test_parse_search_results_with_display_url() {
+        let html = r#"
+            <html>
+                <body>
+                    <div class="_0_SRI search-result">
+                        <a class="__sri_title_link" href="https://example.com">Title</a>
+                        <div class="__sri_url_path_box">example.com/path</div>
+                        <div class="_0_DESC __sri-desc">Description</div>
+                    </div>
+                </body>
+            </html>
+        "#;
+        let results = KagiEngine::parse_search_results(html, "test");
+
+        assert!(!results.items.is_empty());
+        let first = &results.items[0];
+        assert_eq!(first.display_url, Some("example.com/path".to_string()));
+    }
+
+    #[test]
+    fn test_parse_search_results_mixed_main_and_group() {
+        let html = r#"
+            <html>
+                <body>
+                    <div class="_0_SRI search-result">
+                        <a class="__sri_title_link" href="https://main.com">Main Result</a>
+                        <div class="_0_DESC __sri-desc">Main desc</div>
+                    </div>
+                    <div class="__srgi">
+                        <h3 class="__srgi-title">
+                            <a href="https://group.com">Group Result</a>
+                        </h3>
+                        <div class="__sri-desc">Group desc</div>
+                    </div>
+                </body>
+            </html>
+        "#;
+        let results = KagiEngine::parse_search_results(html, "test");
+
+        // 应该解析主结果和分组结果
+        assert!(!results.items.is_empty());
+    }
+}

@@ -178,11 +178,6 @@ export const useCopilot = ({
         }
     }, [llmProviderId, onAuthSuccess]);
 
-    // 保留原有的 startLspAuthorization 方法用于兼容（现在使用直接的 Device Flow）
-    const startLspAuthorization = useCallback(async () => {
-        await oauthFlowAuth();
-    }, [oauthFlowAuth]);
-
     const startAuthorization = useCallback(async () => {
         // 统一使用 Device Flow 方式
         await oauthFlowAuth();

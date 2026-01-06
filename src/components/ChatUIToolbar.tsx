@@ -1,6 +1,6 @@
 import { message } from "@tauri-apps/plugin-dialog";
 import { Button } from "./ui/button";
-import React, { memo } from "react";
+import { memo } from "react";
 
 interface ChatUIToolbarProps {
     onNewConversation: () => void;

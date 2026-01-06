@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { memo } from 'react';
 import { Button } from "../ui/button";
 
 interface ListItemButtonProps {
@@ -32,4 +32,4 @@ const ListItemButton: React.FC<ListItemButtonProps> = ({
     );
 };
 
-export default ListItemButton; 
+export default memo(ListItemButton); 

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tauri::Emitter;
 
-use crate::mcp::mcp_db::MCPDatabase;
+use crate::db::mcp_db::{MCPDatabase, MCPToolCall};
 use crate::{
     api::{
         ai::{
@@ -25,7 +25,6 @@ use crate::{
     },
     mcp::{
         detection::detect_and_process_mcp_calls_for_subtask,
-        mcp_db::MCPToolCall,
         prompt::{collect_mcp_info_for_assistant, format_mcp_prompt_with_filters},
     },
     FeatureConfigState,
@@ -1678,7 +1677,7 @@ async fn validate_source_permission(
 ) -> Result<bool, String> {
     let result = match plugin_source {
         "mcp" => {
-            let mcp_db = crate::mcp::mcp_db::MCPDatabase::new(app_handle).map_err(|e| {
+            let mcp_db = crate::db::mcp_db::MCPDatabase::new(app_handle).map_err(|e| {
                 error!(error=%e, source_id=source_id, "create MCP db failed");
                 format!("创建MCP数据库连接失败: {}", e)
             })?;

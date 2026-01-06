@@ -95,7 +95,7 @@ async fn test_web_command() {
     let context = HashMap::new();
 
     let except_result =
-        format!("\n<bangweb url=\"{}\">\n{}\n</bangweb>", &mockito::server_url(), html_content);
+        format!("<bangweb url=\"{}\">\n{}\n</bangweb>", &mockito::server_url(), html_content);
 
     let result = engine.parse(&format!("!web({})", mockito::server_url()), &context).await;
     assert_eq!(result, except_result);
@@ -136,7 +136,7 @@ async fn test_web_to_markdown_command() {
     let context = HashMap::new();
 
     let except_result = format!(
-        "\n<bangwebtomarkdown url=\"{}\">\n{}\n</bangwebtomarkdown>",
+        "<bangwebtomarkdown url=\"{}\">\n{}\n</bangwebtomarkdown>",
         &mockito::server_url(),
         "# Hello, World!\n\nThis is a test."
     );

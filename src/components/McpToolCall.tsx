@@ -175,7 +175,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
 
     // 如果没有 callId，尝试根据消息参数查询是否存在相关的工具调用记录
     useEffect(() => {
-        if (!callId && conversationId && messageId && executionState === "idle") {
+        if (!toolCallId && conversationId && messageId && executionState === "idle") {
             const findExistingToolCall = async () => {
                 try {
                     const allCalls = await invoke<MCPToolCall[]>("get_mcp_tool_calls_by_conversation", {
@@ -203,6 +203,8 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             setExecutionState("failed");
                         } else if (matchingCall.status === "executing") {
                             setExecutionState("executing");
+                        } else if (matchingCall.status === "pending") {
+                            setExecutionState("pending");
                         }
                     } else {
                         console.log("[MCP] no matching tool call found for message", {
@@ -221,7 +223,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
 
             findExistingToolCall();
         }
-    }, [callId, conversationId, messageId, serverName, toolName, parameters, executionState]);
+    }, [toolCallId, callId, conversationId, messageId, serverName, toolName, parameters, executionState, mcpToolCallStates]);
 
     // 注意：后端 `detect_and_process_mcp_calls` 已根据助手配置自动执行，这里不再做自动执行
 

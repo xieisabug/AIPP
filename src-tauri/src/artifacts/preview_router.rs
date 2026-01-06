@@ -1,4 +1,7 @@
-use tauri::{Emitter, Manager};
+use std::sync::Arc;
+use std::time::Duration;
+use tauri::{Emitter, EventId, Listener, Manager};
+use tokio::sync::Mutex;
 
 use crate::artifacts::code_utils::{
     extract_component_name, extract_vue_component_name, is_react_component, is_vue_component,
@@ -9,6 +12,79 @@ use crate::artifacts::{applescript::run_applescript, powershell::run_powershell}
 use crate::errors::AppError;
 use crate::utils::bun_utils::BunUtils;
 
+/// Wait for the ArtifactPreview window to register its event listeners before sending data.
+/// 
+/// The frontend now continuously sends ready signals every 200ms until it receives data,
+/// so we just need to wait for any ready signal to arrive.
+/// 
+/// Improved mechanism:
+/// 1. Extended timeout from 2s to 10s for slow machines or first-time loads
+/// 2. The frontend sends ready signals repeatedly, so we're more likely to catch one
+/// 3. Returns true if ready signal received, false on timeout
+async fn wait_for_artifact_preview_ready(app_handle: &tauri::AppHandle) -> bool {
+    use tokio::sync::oneshot;
+
+    let (tx, rx) = oneshot::channel::<()>();
+    let sender = Arc::new(Mutex::new(Some(tx)));
+    let app_handle_clone = app_handle.clone();
+
+    let listener_id: EventId = app_handle.listen("artifact-preview-ready", move |_event| {
+        let sender_clone = sender.clone();
+        // Use spawn_blocking to handle the async lock in sync context
+        tokio::spawn(async move {
+            if let Some(tx) = sender_clone.lock().await.take() {
+                let _ = tx.send(());
+            }
+        });
+    });
+
+    // Extended timeout to 10 seconds for reliability
+    // The frontend sends ready signals every 200ms, so we should receive one quickly
+    let ready = tokio::time::timeout(Duration::from_secs(10), rx).await.is_ok();
+    
+    app_handle_clone.unlisten(listener_id);
+    
+    if ready {
+        tracing::debug!("artifact-preview-ready signal received");
+    } else {
+        tracing::warn!("Timeout waiting for artifact-preview-ready signal (10s)");
+    }
+    
+    ready
+}
+
+/// Wait for the Artifact window (not preview) to register its event listeners.
+/// Uses the same mechanism as wait_for_artifact_preview_ready but listens for "artifact-ready".
+pub async fn wait_for_artifact_ready(app_handle: &tauri::AppHandle) -> bool {
+    use tokio::sync::oneshot;
+
+    let (tx, rx) = oneshot::channel::<()>();
+    let sender = Arc::new(Mutex::new(Some(tx)));
+    let app_handle_clone = app_handle.clone();
+
+    let listener_id: EventId = app_handle.listen("artifact-ready", move |_event| {
+        let sender_clone = sender.clone();
+        tokio::spawn(async move {
+            if let Some(tx) = sender_clone.lock().await.take() {
+                let _ = tx.send(());
+            }
+        });
+    });
+
+    // Extended timeout to 10 seconds for reliability
+    let ready = tokio::time::timeout(Duration::from_secs(10), rx).await.is_ok();
+    
+    app_handle_clone.unlisten(listener_id);
+    
+    if ready {
+        tracing::debug!("artifact-ready signal received");
+    } else {
+        tracing::warn!("Timeout waiting for artifact-ready signal (10s)");
+    }
+    
+    ready
+}
+
 #[tauri::command]
 pub async fn run_artifacts(
     app_handle: tauri::AppHandle,
@@ -16,7 +92,16 @@ pub async fn run_artifacts(
     input_str: &str,
 ) -> Result<String, AppError> {
     let _ = crate::window::open_artifact_preview_window(app_handle.clone()).await;
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    // Ensure the preview window is visible and focused so it can attach listeners quickly
+    #[cfg(desktop)]
+    if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+
+    // Avoid first-open race by waiting for the front-end ready event
+    let _ = wait_for_artifact_preview_ready(&app_handle).await;
 
     match lang {
         "powershell" => {
@@ -52,7 +137,8 @@ pub async fn run_artifacts(
                     "artifact-preview-data",
                     serde_json::json!({ "type": "mermaid", "original_code": input_str }),
                 );
-                let _ = window.emit("artifact-preview-log", format!("mermaid content: {}", input_str));
+                let _ =
+                    window.emit("artifact-preview-log", format!("mermaid content: {}", input_str));
                 let _ = window.emit("artifact-preview-success", "Mermaid 图表预览已准备完成");
             }
         }
@@ -63,13 +149,19 @@ pub async fn run_artifacts(
                     "artifact-preview-data",
                     serde_json::json!({ "type": lang, "original_code": input_str }),
                 );
-                let _ = window.emit("artifact-preview-log", format!("{} content: {}", lang, input_str));
-                let _ = window.emit("artifact-preview-success", format!("{} 预览已准备完成", lang.to_uppercase()));
+                let _ =
+                    window.emit("artifact-preview-log", format!("{} content: {}", lang, input_str));
+                let _ = window.emit(
+                    "artifact-preview-success",
+                    format!("{} 预览已准备完成", lang.to_uppercase()),
+                );
             }
         }
         "react" | "jsx" => {
             let bun_version = BunUtils::get_bun_version(&app_handle);
-            if bun_version.is_err() || bun_version.as_ref().unwrap_or(&String::new()).contains("Not Installed") {
+            if bun_version.is_err()
+                || bun_version.as_ref().unwrap_or(&String::new()).contains("Not Installed")
+            {
                 if let Some(window) = app_handle.get_webview_window("artifact_preview") {
                     let _ = window.emit("environment-check", serde_json::json!({
                         "tool": "bun",
@@ -82,25 +174,42 @@ pub async fn run_artifacts(
             }
 
             if is_react_component(input_str) {
-                let component_name = extract_component_name(input_str).unwrap_or_else(|| "UserComponent".to_string());
+                let component_name = extract_component_name(input_str)
+                    .unwrap_or_else(|| "UserComponent".to_string());
                 if let Some(window) = app_handle.get_webview_window("artifact_preview") {
-                    let _ = window.emit("artifact-preview-data", serde_json::json!({ "type": "react", "original_code": input_str }));
+                    let _ = window.emit(
+                        "artifact-preview-data",
+                        serde_json::json!({ "type": "react", "original_code": input_str }),
+                    );
                 }
-                let preview_id = create_react_preview_for_artifact(app_handle.clone(), input_str.to_string(), component_name).await.map_err(|e| {
+                let preview_id = create_react_preview_for_artifact(
+                    app_handle.clone(),
+                    input_str.to_string(),
+                    component_name,
+                )
+                .await
+                .map_err(|e| {
                     let error_msg = format!("React 组件预览失败: {}", e);
-                    if let Some(window) = app_handle.get_webview_window("artifact_preview") { let _ = window.emit("artifact-preview-error", &error_msg); }
+                    if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+                        let _ = window.emit("artifact-preview-error", &error_msg);
+                    }
                     AppError::RunCodeError(error_msg)
                 })?;
                 return Ok(format!("React 组件预览已启动，预览 ID: {}", preview_id));
             } else {
                 if let Some(window) = app_handle.get_webview_window("artifact_preview") {
-                    let _ = window.emit("artifact-preview-error", "React 代码片段预览暂不支持，请提供完整的 React 组件代码。");
+                    let _ = window.emit(
+                        "artifact-preview-error",
+                        "React 代码片段预览暂不支持，请提供完整的 React 组件代码。",
+                    );
                 }
             }
         }
         "vue" => {
             let bun_version = BunUtils::get_bun_version(&app_handle);
-            if bun_version.is_err() || bun_version.as_ref().unwrap_or(&String::new()).contains("Not Installed") {
+            if bun_version.is_err()
+                || bun_version.as_ref().unwrap_or(&String::new()).contains("Not Installed")
+            {
                 if let Some(window) = app_handle.get_webview_window("artifact_preview") {
                     let _ = window.emit("environment-check", serde_json::json!({
                         "tool": "bun",
@@ -113,25 +222,42 @@ pub async fn run_artifacts(
             }
 
             if is_vue_component(input_str) {
-                let component_name = extract_vue_component_name(input_str).unwrap_or_else(|| "UserComponent".to_string());
+                let component_name = extract_vue_component_name(input_str)
+                    .unwrap_or_else(|| "UserComponent".to_string());
                 if let Some(window) = app_handle.get_webview_window("artifact_preview") {
-                    let _ = window.emit("artifact-preview-data", serde_json::json!({ "type": "vue", "original_code": input_str }));
+                    let _ = window.emit(
+                        "artifact-preview-data",
+                        serde_json::json!({ "type": "vue", "original_code": input_str }),
+                    );
                 }
-                let preview_id = create_vue_preview_for_artifact(app_handle.clone(), input_str.to_string(), component_name).await.map_err(|e| {
+                let preview_id = create_vue_preview_for_artifact(
+                    app_handle.clone(),
+                    input_str.to_string(),
+                    component_name,
+                )
+                .await
+                .map_err(|e| {
                     let error_msg = format!("Vue 组件预览失败: {}", e);
-                    if let Some(window) = app_handle.get_webview_window("artifact_preview") { let _ = window.emit("artifact-preview-error", &error_msg); }
+                    if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+                        let _ = window.emit("artifact-preview-error", &error_msg);
+                    }
                     AppError::RunCodeError(error_msg)
                 })?;
                 return Ok(format!("Vue 组件预览已启动，预览 ID: {}", preview_id));
             } else {
                 if let Some(window) = app_handle.get_webview_window("artifact_preview") {
-                    let _ = window.emit("artifact-preview-error", "Vue 代码片段预览暂不支持，请提供完整的 Vue 组件代码。");
+                    let _ = window.emit(
+                        "artifact-preview-error",
+                        "Vue 代码片段预览暂不支持，请提供完整的 Vue 组件代码。",
+                    );
                 }
             }
         }
         _ => {
             let error_msg = "暂不支持该语言的代码执行".to_owned();
-            if let Some(window) = app_handle.get_webview_window("artifact_preview") { let _ = window.emit("artifact-preview-error", &error_msg); }
+            if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+                let _ = window.emit("artifact-preview-error", &error_msg);
+            }
             return Err(AppError::RunCodeError(error_msg));
         }
     }
@@ -166,9 +292,18 @@ pub async fn confirm_environment_install(
     }
 
     if let Some(window) = app_handle.get_webview_window("artifact_preview") {
-        let _ = window.emit("artifact-preview-log", format!("开始安装 {} 环境...", tool));
-        if tool == "bun" { let _ = crate::artifacts::env_installer::install_bun(app_handle.clone(), Some("artifact_preview".to_string())); }
-        else if tool == "uv" { let _ = crate::artifacts::env_installer::install_uv(app_handle.clone(), Some("artifact_preview".to_string())); }
+        let _ = window.emit("artifact-preview-log", format!("开始安装{} 环境...", tool));
+        if tool == "bun" {
+            let _ = crate::artifacts::env_installer::install_bun(
+                app_handle.clone(),
+                Some("artifact_preview".to_string()),
+            );
+        } else if tool == "uv" {
+            let _ = crate::artifacts::env_installer::install_uv(
+                app_handle.clone(),
+                Some("artifact_preview".to_string()),
+            );
+        }
         if let Some(window) = app_handle.get_webview_window("artifact_preview") {
             let _ = window.emit(
                 "environment-install-started",

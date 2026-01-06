@@ -1,119 +1,87 @@
-import React, { useMemo } from 'react';
-import ReactMarkdown from 'react-markdown';
-import { MARKDOWN_COMPONENTS_BASE, REMARK_PLUGINS, REHYPE_PLUGINS, customUrlTransform } from '@/constants/markdown';
+import React, { useMemo } from "react";
+import ReactMarkdown from "react-markdown";
+import {
+    MARKDOWN_COMPONENTS_BASE,
+    REMARK_PLUGINS,
+    REHYPE_PLUGINS,
+    customUrlTransform,
+} from "@/constants/markdown";
 
 interface RawTextRendererProps {
     content: string;
 }
 
-/**
- * RawTextRenderer - 用于在非 Markdown 模式下渲染文本
- * 保持文本的原始格式（换行、空行等），同时支持自定义标签的处理
- */
+// Render raw text while still allowing custom tags to hydrate as React components.
+const CUSTOM_TAG_PATTERN =
+    /<(fileattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*>[\s\S]*?<\/\1>|<(fileattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*\/>/gi;
+
 const RawTextRenderer: React.FC<RawTextRendererProps> = ({ content }) => {
     const processedContent = useMemo(() => {
-        // 先检查是否包含自定义标签
-        const customTagPattern = /<(fileattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*>.*?<\/\1>|<(fileattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*\/>/gi;
-        const hasCustomTags = customTagPattern.test(content);
+        const segments: React.ReactNode[] = [];
+        let cursor = 0;
 
-        if (!hasCustomTags) {
-            // 如果没有自定义标签，直接以原始文本格式渲染
+        for (const match of content.matchAll(CUSTOM_TAG_PATTERN)) {
+            const start = match.index ?? 0;
+            const tagText = match[0];
+
+            if (start > cursor) {
+                const plainText = content.slice(cursor, start);
+                segments.push(
+                    <span
+                        key={`text-${cursor}`}
+                        className="whitespace-pre-wrap break-words"
+                    >
+                        {plainText}
+                    </span>,
+                );
+            }
+
+            segments.push(
+                <ReactMarkdown
+                    key={`tag-${start}`}
+                    children={tagText}
+                    remarkPlugins={[
+                        REMARK_PLUGINS.find(
+                            (plugin) => plugin.name === "remarkCustomCompenent",
+                        ) || REMARK_PLUGINS[3],
+                    ].filter(Boolean) as any}
+                    rehypePlugins={[REHYPE_PLUGINS[0], REHYPE_PLUGINS[1]] as any}
+                    components={MARKDOWN_COMPONENTS_BASE as any}
+                    urlTransform={customUrlTransform}
+                />,
+            );
+
+            cursor = start + tagText.length;
+        }
+
+        if (cursor < content.length) {
+            const trailingText = content.slice(cursor);
+            segments.push(
+                <span
+                    key={`text-${cursor}`}
+                    className="whitespace-pre-wrap break-words"
+                >
+                    {trailingText}
+                </span>,
+            );
+        }
+
+        if (segments.length === 0) {
             return (
-                <span style={{ whiteSpace: 'pre-wrap' }}>
+                <span className="whitespace-pre-wrap break-words">
                     {content}
                 </span>
             );
         }
 
-        // 重新设计分割逻辑：使用 split 来更精确地分割内容
-        const parts: React.ReactNode[] = [];
-        
-        // 先找到所有标签的位置和内容
-        customTagPattern.lastIndex = 0;
-        const matches: Array<{ index: number; length: number; content: string }> = [];
-        let match;
-        
-        while ((match = customTagPattern.exec(content)) !== null) {
-            matches.push({
-                index: match.index,
-                length: match[0].length,
-                content: match[0]
-            });
-        }
-
-        let currentIndex = 0;
-        
-        matches.forEach((tagMatch) => {
-            // 处理标签前的文本
-            if (tagMatch.index > currentIndex) {
-                const textBefore = content.slice(currentIndex, tagMatch.index);
-                if (textBefore) {
-                    parts.push(
-                        <span key={`text-${currentIndex}`} style={{ whiteSpace: 'pre-wrap' }}>
-                            {textBefore}
-                        </span>
-                    );
-                }
-            }
-
-        // 处理自定义标签
-        parts.push(
-            <ReactMarkdown
-                key={`tag-${tagMatch.index}`}
-                children={tagMatch.content}
-                remarkPlugins={[
-                    REMARK_PLUGINS.find(plugin => plugin.name === 'remarkCustomCompenent') || REMARK_PLUGINS[3]
-                ].filter(Boolean) as any}
-                rehypePlugins={[
-                    REHYPE_PLUGINS[0], // rehypeRaw
-                    REHYPE_PLUGINS[1], // rehypeSanitize
-                ] as any}
-                components={MARKDOWN_COMPONENTS_BASE as any}
-                urlTransform={customUrlTransform}
-            />
-        );
-
-            currentIndex = tagMatch.index + tagMatch.length;
-        });
-
-        // 处理最后剩余的文本
-        if (currentIndex < content.length) {
-            const textAfter = content.slice(currentIndex);
-            
-            // 关键改进：检查是否为紧跟标签的单个换行符
-            const isSingleNewlineAfterTag = matches.length > 0 && /^\n/.test(textAfter);
-            
-            if (isSingleNewlineAfterTag) {
-                // 如果是标签后的单个换行符，移除它，但保留后续内容
-                const contentAfterNewline = textAfter.slice(1);
-                if (contentAfterNewline) {
-                    parts.push(
-                        <span key={`text-${currentIndex}`} style={{ whiteSpace: 'pre-wrap' }}>
-                            {contentAfterNewline}
-                        </span>
-                    );
-                }
-            } else if (textAfter) {
-                // 其他情况：用 ReactMarkdown 处理可能存在的自定义标签
-                parts.push(
-                    <ReactMarkdown
-                        key={`md-${currentIndex}`}
-                        children={textAfter}
-                        remarkPlugins={[
-                            REMARK_PLUGINS.find(plugin => plugin.name === 'remarkCustomCompenent') || REMARK_PLUGINS[3]
-                        ].filter(Boolean) as any}
-                        rehypePlugins={[REHYPE_PLUGINS[0], REHYPE_PLUGINS[1]] as any}
-                        components={MARKDOWN_COMPONENTS_BASE as any}
-                        urlTransform={customUrlTransform}
-                    />
-                );
-            }
-        }
-
-        return <>{parts}</>;
+        return segments;
     }, [content]);
 
-    return <div className="prose prose-sm max-w-none prose-neutral dark:prose-invert">{processedContent}</div>;
+    return (
+        <div className="text-sm text-neutral-900 dark:text-neutral-100">
+            {processedContent}
+        </div>
+    );
 };
 
 export default RawTextRenderer;

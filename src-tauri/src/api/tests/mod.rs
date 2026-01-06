@@ -1,6 +1,9 @@
 pub mod ai_api_tests;
+pub mod ai_config_tests;
 pub mod chat_tests;
 pub mod conversation_api_tests;
 pub mod copilot_api_tests;
 pub mod integration_tests;
+pub mod mcp_detection_tests;
+pub mod mcp_registry_tests;
 pub mod regenerate_tests;

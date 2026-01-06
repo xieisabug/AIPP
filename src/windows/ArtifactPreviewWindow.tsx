@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
-import { listen, emit } from '@tauri-apps/api/event';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { open } from '@tauri-apps/plugin-shell';
@@ -18,12 +17,8 @@ import 'katex/dist/katex.min.css';
 import EnvironmentInstallDialog from '../components/EnvironmentInstallDialog';
 import SaveArtifactDialog from '../components/SaveArtifactDialog';
 import { useTheme } from '../hooks/useTheme';
+import { useArtifactEvents, ArtifactData, EnvironmentCheckData } from '../hooks/useArtifactEvents';
 import { Button } from '@/components/ui/button';
-
-interface LogLine {
-    type: 'log' | 'error' | 'success';
-    message: string;
-}
 
 /**
  * 仅用于 "artifact_preview" 窗口。
@@ -35,14 +30,11 @@ export default function ArtifactPreviewWindow() {
     // 集成主题系统
     useTheme();
 
-    const [logs, setLogs] = useState<LogLine[]>([]);
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [isPreviewReady, setIsPreviewReady] = useState(false);
     const [currentView, setCurrentView] = useState<'logs' | 'preview'>('logs');
     const [previewType, setPreviewType] = useState<'react' | 'vue' | 'mermaid' | 'html' | 'svg' | 'xml' | 'markdown' | 'md' | null>(null);
     const logsEndRef = useRef<HTMLDivElement | null>(null);
-    const unlistenersRef = useRef<(() => void)[]>([]);
-    const isRegisteredRef = useRef(false);
     const previewTypeRef = useRef<'react' | 'vue' | 'mermaid' | 'html' | 'svg' | 'xml' | 'markdown' | 'md' | null>(null);
     const mermaidContainerRef = useRef<HTMLDivElement | null>(null);
     const [mermaidContent, setMermaidContent] = useState<string>('');
@@ -81,11 +73,119 @@ export default function ArtifactPreviewWindow() {
         currentInputStrRef.current = currentInputStr;
     }, [currentLang, currentInputStr]);
 
-    // 通知其他窗口：预览窗口已准备就绪（避免事件丢失）
-    useEffect(() => {
-        // 仅在挂载后发一次就绪事件
-        emit('artifact-preview-ready');
+    // 处理 artifact 数据
+    const handleArtifactData = useCallback((data: ArtifactData) => {
+        if (data.original_code && data.type) {
+            switch (data.type) {
+                case 'vue':
+                case 'react':
+                    setPreviewType(data.type as 'vue' | 'react');
+                    break;
+                case 'mermaid':
+                    setPreviewType('mermaid');
+                    setMermaidContent(data.original_code);
+                    setIsPreviewReady(true);
+                    break;
+                case 'html':
+                    setPreviewType('html');
+                    setHtmlContent(data.original_code);
+                    setIsPreviewReady(true);
+                    break;
+                case 'svg':
+                    setPreviewType('svg');
+                    setHtmlContent(data.original_code);
+                    setIsPreviewReady(true);
+                    break;
+                case 'xml':
+                    setPreviewType('xml');
+                    setHtmlContent(data.original_code);
+                    setIsPreviewReady(true);
+                    break;
+                case 'markdown':
+                case 'md':
+                    setPreviewType(data.type as 'markdown' | 'md');
+                    setMarkdownContent(data.original_code);
+                    setIsPreviewReady(true);
+                    break;
+                default:
+                    break;
+            }
+            setOriginalCode(data.original_code);
+        }
     }, []);
+
+    // 处理重定向
+    const handleRedirect = useCallback((url: string) => {
+        setPreviewUrl(url);
+        setIsPreviewReady(true);
+    }, []);
+
+    // 处理环境检查
+    const handleEnvironmentCheck = useCallback((data: EnvironmentCheckData) => {
+        setEnvironmentTool(data.tool);
+        setEnvironmentMessage(data.message);
+        setCurrentLang(data.lang);
+        setCurrentInputStr(data.input_str);
+        setShowEnvironmentDialog(true);
+    }, []);
+
+    // 处理环境安装开始
+    const handleEnvironmentInstallStarted = useCallback((data: { tool: string; lang: string; input_str: string }) => {
+        setCurrentLang(data.lang);
+        setCurrentInputStr(data.input_str);
+        isInstalling.current = true;
+        setShowEnvironmentDialog(false);
+    }, []);
+
+    // 处理 Bun 安装完成
+    const handleBunInstallFinished = useCallback((success: boolean) => {
+        console.log('🔧 [ArtifactPreviewWindow] 收到Bun安装完成事件:', success, isInstalling.current);
+        if (success && isInstalling.current) {
+            artifactEvents.addLog('success', 'Bun 安装成功，正在重新启动预览...');
+            invoke('retry_preview_after_install', {
+                lang: currentLangRef.current,
+                inputStr: currentInputStrRef.current
+            }).then(() => {
+                isInstalling.current = false;
+            }).catch(error => {
+                artifactEvents.addLog('error', `重新启动预览失败: ${error}`);
+                isInstalling.current = false;
+            });
+        } else if (!success) {
+            artifactEvents.addLog('error', 'Bun 安装失败');
+            isInstalling.current = false;
+        }
+    }, []);
+
+    // 处理 uv 安装完成
+    const handleUvInstallFinished = useCallback((success: boolean) => {
+        if (success && isInstalling.current) {
+            artifactEvents.addLog('success', 'uv 安装成功，正在重新启动预览...');
+            invoke('retry_preview_after_install', {
+                lang: currentLangRef.current,
+                inputStr: currentInputStrRef.current
+            }).then(() => {
+                isInstalling.current = false;
+            }).catch(error => {
+                artifactEvents.addLog('error', `重新启动预览失败: ${error}`);
+                isInstalling.current = false;
+            });
+        } else if (!success) {
+            artifactEvents.addLog('error', 'uv 安装失败');
+            isInstalling.current = false;
+        }
+    }, []);
+
+    // 使用统一的事件处理 hook
+    const artifactEvents = useArtifactEvents({
+        windowType: 'preview',
+        onArtifactData: handleArtifactData,
+        onRedirect: handleRedirect,
+        onEnvironmentCheck: handleEnvironmentCheck,
+        onEnvironmentInstallStarted: handleEnvironmentInstallStarted,
+        onBunInstallFinished: handleBunInstallFinished,
+        onUvInstallFinished: handleUvInstallFinished,
+    });
 
     // 初始化 mermaid - 根据主题动态配置
     useEffect(() => {
@@ -110,7 +210,7 @@ export default function ArtifactPreviewWindow() {
     // 自动滚动到底部
     useEffect(() => {
         logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [logs]);
+    }, [artifactEvents.logs]);
 
     // 渲染 mermaid 图表
     useEffect(() => {
@@ -258,7 +358,7 @@ export default function ArtifactPreviewWindow() {
                 inputStr: currentInputStrRef.current
             });
         } catch (error) {
-            setLogs(prev => [...prev, { type: 'error', message: `确认安装失败: ${error}` }]);
+            artifactEvents.addLog('error', `确认安装失败: ${error}`);
         }
     };
 
@@ -273,7 +373,7 @@ export default function ArtifactPreviewWindow() {
             });
             setShowEnvironmentDialog(false);
         } catch (error) {
-            setLogs(prev => [...prev, { type: 'error', message: `取消安装失败: ${error}` }]);
+            artifactEvents.addLog('error', `取消安装失败: ${error}`);
         }
     };
 
@@ -283,165 +383,6 @@ export default function ArtifactPreviewWindow() {
             setCurrentView('preview');
         }
     }, [isPreviewReady, previewUrl, previewType]);
-
-    // 注册事件监听
-    useEffect(() => {
-        let isCancelled = false;
-
-        const registerListeners = async () => {
-            // 在函数执行一开始就检查并设置标志位，避免竞争条件
-            if (isRegisteredRef.current || isCancelled) {
-                return;
-            }
-            isRegisteredRef.current = true;
-
-            const addLog = (type: LogLine['type']) => (event: { payload: any }) => {
-                const message = event.payload as string;
-                setLogs(prev => [...prev, { type, message }]);
-            };
-
-            const handleArtifactData = (event: { payload: any }) => {
-                const data = event.payload;
-                if (data.original_code && data.type) {
-                    switch (data.type) {
-                        case 'vue':
-                        case 'react':
-                            setPreviewType(data.type);
-                            break;
-                        case 'mermaid':
-                            setPreviewType('mermaid');
-                            setMermaidContent(data.original_code);
-                            setIsPreviewReady(true);
-                            break;
-                        case 'html':
-                            setPreviewType('html');
-                            setHtmlContent(data.original_code);
-                            setIsPreviewReady(true);
-                            break;
-                        case 'svg':
-                            setPreviewType('svg');
-                            setHtmlContent(data.original_code);
-                            setIsPreviewReady(true);
-                            break;
-                        case 'xml':
-                            setPreviewType('xml');
-                            setHtmlContent(data.original_code);
-                            setIsPreviewReady(true);
-                            break;
-                        case 'markdown':
-                        case 'md':
-                            setPreviewType(data.type);
-                            setMarkdownContent(data.original_code);
-                            setIsPreviewReady(true);
-                            break;
-                        default:
-                            break;
-                    }
-                    setOriginalCode(data.original_code);
-                }
-            };
-
-            const handleRedirect = (event: { payload: any }) => {
-                const url = event.payload as string;
-                setPreviewUrl(url);
-                setIsPreviewReady(true);
-            };
-
-            const handleEnvironmentCheck = (event: { payload: any }) => {
-                const data = event.payload;
-                setEnvironmentTool(data.tool);
-                setEnvironmentMessage(data.message);
-                setCurrentLang(data.lang);
-                setCurrentInputStr(data.input_str);
-                setShowEnvironmentDialog(true);
-            };
-
-            const handleEnvironmentInstallStarted = (event: { payload: any }) => {
-                const data = event.payload;
-                setCurrentLang(data.lang);
-                setCurrentInputStr(data.input_str);
-                isInstalling.current = true;
-                setShowEnvironmentDialog(false);
-            };
-
-            const handleBunInstallFinished = (event: { payload: any }) => {
-                const success = event.payload as boolean;
-                console.log('🔧 [ArtifactPreviewWindow] 收到Bun安装完成事件:', success, isInstalling);
-                if (success && isInstalling.current) {
-                    setLogs(prev => [...prev, { type: 'success', message: 'Bun 安装成功，正在重新启动预览...' }]);
-                    // 重新启动预览
-                    invoke('retry_preview_after_install', {
-                        lang: currentLangRef.current,
-                        inputStr: currentInputStrRef.current
-                    }).then(() => {
-                        isInstalling.current = false;
-                    }).catch(error => {
-                        setLogs(prev => [...prev, { type: 'error', message: `重新启动预览失败: ${error}` }]);
-                        isInstalling.current = false;
-                    });
-                } else if (!success) {
-                    setLogs(prev => [...prev, { type: 'error', message: 'Bun 安装失败' }]);
-                    isInstalling.current = false;
-                }
-            };
-
-            const handleUvInstallFinished = (event: { payload: any }) => {
-                const success = event.payload as boolean;
-                if (success && isInstalling.current) {
-                    setLogs(prev => [...prev, { type: 'success', message: 'uv 安装成功，正在重新启动预览...' }]);
-                    // 重新启动预览
-                    invoke('retry_preview_after_install', {
-                        lang: currentLangRef.current,
-                        inputStr: currentInputStrRef.current
-                    }).then(() => {
-                        isInstalling.current = false;
-                    }).catch(error => {
-                        setLogs(prev => [...prev, { type: 'error', message: `重新启动预览失败: ${error}` }]);
-                        isInstalling.current = false;
-                    });
-                } else if (!success) {
-                    setLogs(prev => [...prev, { type: 'error', message: 'uv 安装失败' }]);
-                    isInstalling.current = false;
-                }
-            };
-
-
-            try {
-                const unlisteners = await Promise.all([
-                    listen('artifact-preview-data', handleArtifactData),
-                    listen('artifact-preview-log', addLog('log')),
-                    listen('artifact-preview-error', addLog('error')),
-                    listen('artifact-preview-success', addLog('success')),
-                    listen('artifact-preview-redirect', handleRedirect),
-                    listen('environment-check', handleEnvironmentCheck),
-                    listen('environment-install-started', handleEnvironmentInstallStarted),
-                    listen('bun-install-finished', handleBunInstallFinished),
-                    listen('uv-install-finished', handleUvInstallFinished)
-                ]);
-
-                console.log("🔧 [ArtifactPreviewWindow] 监听器注册成功");
-
-                // 检查是否已被取消
-                if (isCancelled) {
-                    unlisteners.forEach((fn) => fn());
-                    return;
-                }
-
-                unlistenersRef.current = unlisteners;
-            } catch (error) {
-                isRegisteredRef.current = false;
-            }
-        };
-
-        registerListeners();
-
-        return () => {
-            isCancelled = true;
-            unlistenersRef.current.forEach((fn) => fn());
-            unlistenersRef.current = [];
-            isRegisteredRef.current = false;
-        };
-    }, []);
 
     // 监听窗口关闭事件，清理预览服务器
     useEffect(() => {
@@ -464,7 +405,7 @@ export default function ArtifactPreviewWindow() {
                     await invoke('close_react_preview', { previewId: 'react' });
                 }
 
-                setLogs([]);
+                artifactEvents.clearLogs();
                 setPreviewUrl(null);
                 setIsPreviewReady(false);
                 setCurrentView('logs');
@@ -600,7 +541,7 @@ export default function ArtifactPreviewWindow() {
                         <div className="flex-1 flex flex-col p-4">
                             <h2 className="text-lg font-semibold mb-2 text-foreground">Artifact Preview Logs</h2>
                             <div className="flex-1 overflow-y-auto rounded border border-border p-2 bg-muted text-sm font-mono">
-                                {logs.map((log, idx) => (
+                                {artifactEvents.logs.map((log, idx) => (
                                     <div
                                         key={idx}
                                         className={

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { memo } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
 
 interface SidebarListProps {
@@ -43,4 +43,4 @@ const SidebarList: React.FC<SidebarListProps> = ({
     );
 };
 
-export default SidebarList; 
+export default memo(SidebarList); 

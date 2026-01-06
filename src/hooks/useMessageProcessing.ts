@@ -153,8 +153,6 @@ export function useMessageProcessing({
 
         // 然后对可见消息进行排序
         const sorted = visibleMessages.sort((a, b) => {
-            const aGroupId = messageToRootGroupMap.get(a.id);
-            const bGroupId = messageToRootGroupMap.get(b.id);
 
             // 获取排序基准值：对所有可见消息直接使用自身时间/ID，避免跨轮分组的旧基准把新轮消息提前
             const aBaseValue = getOrderValue(a);

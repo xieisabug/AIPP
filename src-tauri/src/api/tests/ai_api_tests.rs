@@ -39,7 +39,8 @@ fn create_ai_api_test_db() -> Connection {
             finish_time TEXT,
             token_count INTEGER DEFAULT 0,
             generation_group_id TEXT,
-            parent_group_id TEXT
+            parent_group_id TEXT,
+            tool_calls_json TEXT
         )",
         [],
     )
@@ -594,5 +595,137 @@ mod ai_api_tests {
         // response 消息应该指向对应的 reasoning 消息
         assert_eq!(response_original.parent_id, Some(reasoning_msg_id));
         assert_eq!(response_new.parent_id, Some(new_reasoning_msg_id));
+    }
+
+    // ===== Tool Name Sanitization Tests =====
+
+    #[test]
+    fn test_sanitize_tool_name_basic() {
+        // 正常的 ASCII 名称应该保持不变
+        assert_eq!(sanitize_tool_name("my_tool"), "my_tool");
+        assert_eq!(sanitize_tool_name("my-tool"), "my-tool");
+        assert_eq!(sanitize_tool_name("my.tool"), "my.tool");
+        assert_eq!(sanitize_tool_name("myTool123"), "myTool123");
+    }
+
+    #[test]
+    fn test_sanitize_tool_name_with_spaces() {
+        // 空格应该被替换为下划线
+        assert_eq!(sanitize_tool_name("my tool"), "my_tool");
+        assert_eq!(sanitize_tool_name("my  tool"), "my_tool"); // 多个空格合并
+        assert_eq!(sanitize_tool_name(" my tool "), "my_tool"); // 首尾空格被清理
+    }
+
+    #[test]
+    fn test_sanitize_tool_name_with_special_chars() {
+        // 特殊字符应该被替换
+        assert_eq!(sanitize_tool_name("my@tool"), "my_tool");
+        assert_eq!(sanitize_tool_name("my#tool!"), "my_tool");
+        assert_eq!(sanitize_tool_name("my/tool\\name"), "my_tool_name");
+    }
+
+    #[test]
+    fn test_sanitize_tool_name_with_chinese() {
+        // 中文字符应该被替换，并添加 hash 以确保唯一性
+        let result = sanitize_tool_name("测试工具");
+        assert!(result.starts_with("h"), "全中文名称应该以 'h' 开头表示使用了 hash");
+        assert!(result.len() > 1, "结果不应该为空");
+
+        // 混合中英文
+        let mixed = sanitize_tool_name("my测试tool");
+        assert!(mixed.contains("my"), "应该保留英文部分");
+        assert!(mixed.contains("tool"), "应该保留英文部分");
+    }
+
+    #[test]
+    fn test_sanitize_tool_name_uniqueness() {
+        // 不同的中文字符串应该生成不同的 hash
+        let name1 = sanitize_tool_name("测试A");
+        let name2 = sanitize_tool_name("测试B");
+        assert_ne!(name1, name2, "不同的输入应该生成不同的结果");
+
+        // 相同的输入应该生成相同的结果（确定性）
+        let name3 = sanitize_tool_name("测试A");
+        assert_eq!(name1, name3, "相同的输入应该生成相同的结果");
+    }
+
+    #[test]
+    fn test_sanitize_tool_name_short_result() {
+        // 只有一个有效字符的情况应该添加 hash
+        let result = sanitize_tool_name("a测试");
+        assert!(result.len() > 1, "单字符结果应该添加 hash");
+        assert!(result.starts_with("a_"), "应该保留原始字符并添加 hash");
+    }
+
+    #[test]
+    fn test_sanitize_tool_name_empty_input() {
+        // 空字符串应该生成带 hash 的结果
+        let result = sanitize_tool_name("");
+        assert!(result.starts_with("h"), "空字符串应该生成 hash 前缀的结果");
+        assert!(result.len() > 1, "结果不应该为空");
+    }
+
+    #[test]
+    fn test_build_tool_name_basic() {
+        // 基本功能测试
+        let result = build_tool_name("my_server", "my_tool");
+        assert_eq!(result, "my_server__my_tool");
+    }
+
+    #[test]
+    fn test_build_tool_name_with_special_chars() {
+        // 服务器名和工具名都包含特殊字符
+        let result = build_tool_name("my server", "my@tool");
+        assert_eq!(result, "my_server__my_tool");
+    }
+
+    #[test]
+    fn test_build_tool_name_with_chinese() {
+        // 全中文名称
+        let result = build_tool_name("搜索服务", "网页搜索");
+        // 结果应该是两个 hash 的组合
+        assert!(result.contains("__"), "应该包含双下划线分隔符");
+        let parts: Vec<&str> = result.split("__").collect();
+        assert_eq!(parts.len(), 2, "应该分成两部分");
+        // 两部分都应该以 'h' 开头（表示使用了 hash）
+        assert!(parts[0].starts_with("h"), "服务器名部分应该使用 hash");
+        assert!(parts[1].starts_with("h"), "工具名部分应该使用 hash");
+    }
+
+    #[test]
+    fn test_build_tool_name_mixed() {
+        // 混合情况
+        let result = build_tool_name("mcp_server", "搜索工具");
+        assert!(result.starts_with("mcp_server__"), "服务器名应该保持不变");
+        // 工具名部分应该是 hash
+        let parts: Vec<&str> = result.split("__").collect();
+        assert!(parts[1].starts_with("h"), "中文工具名应该使用 hash");
+    }
+
+    #[test]
+    fn test_build_tool_name_matches_openai_pattern() {
+        // 验证生成的名称符合 OpenAI 的正则表达式要求
+        let pattern = regex::Regex::new(r"^[a-zA-Z0-9_\.\-]+$").unwrap();
+
+        let test_cases = vec![
+            ("normal_server", "normal_tool"),
+            ("my server", "my tool"),
+            ("服务器", "工具"),
+            ("mixed测试", "tool工具"),
+            ("a", "b"),
+            ("", ""),
+            ("@#$%", "!@#$"),
+        ];
+
+        for (server, tool) in test_cases {
+            let result = build_tool_name(server, tool);
+            assert!(
+                pattern.is_match(&result),
+                "生成的名称 '{}' 应该符合 OpenAI 的正则表达式 (输入: server='{}', tool='{}')",
+                result,
+                server,
+                tool
+            );
+        }
     }
 }

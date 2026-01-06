@@ -1,4 +1,4 @@
-import React, { ReactNode, useEffect, useState } from "react";
+import React, { ReactNode, useEffect, useState, useCallback, useMemo } from "react";
 import ReactDOM from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 import LLMProviderConfig from "../components/config/LLMProviderConfig";
@@ -8,12 +8,13 @@ import MCPConfig from "../components/config/MCPConfig";
 import { appDataDir } from "@tauri-apps/api/path";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { Blocks, Bot, ServerCrash, Settings } from "lucide-react";
+import { Bot, ServerCrash, Settings } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
 import { Home, Menu } from "lucide-react";
+import MCP from "../assets/mcp.svg?react";
 
 interface MenuItem {
     id: string;
@@ -39,25 +40,25 @@ function ConfigWindow() {
     const menuList: Array<MenuItem> = [
         {
             id: "llm-provider-config",
-            name: "大模型配置",
+            name: "模型提供商",
             icon: <ServerCrash className="w-full h-full text-muted-foreground" />,
             iconSelected: <ServerCrash className="w-full h-full text-foreground" />,
         },
         {
             id: "assistant-config",
-            name: "个人助手配置",
+            name: "个人助手",
             icon: <Bot className="w-full h-full text-muted-foreground" />,
             iconSelected: <Bot className="w-full h-full text-foreground" />,
         },
         {
             id: "mcp-config",
-            name: "MCP配置",
-            icon: <Blocks className="w-full h-full text-muted-foreground" />,
-            iconSelected: <Blocks className="w-full h-full text-foreground" />,
+            name: "MCP",
+            icon: <MCP className="w-full h-full text-muted-foreground" />,
+            iconSelected: <MCP className="w-full h-full text-foreground" />,
         },
         {
             id: "feature-assistant-config",
-            name: "程序配置",
+            name: "程序功能",
             icon: <Settings className="w-full h-full text-muted-foreground" />,
             iconSelected: <Settings className="w-full h-full text-foreground" />,
         },
@@ -68,7 +69,7 @@ function ConfigWindow() {
 
     // 监听窗口隐藏事件，重置状态准备下次打开
     useEffect(() => {
-        const unlistenHidden = listen("window-hidden", () => {
+        const unlistenHidden = listen("config-window-hidden", () => {
             console.log("ConfigWindow hidden, resetting state");
             // 重置到默认菜单
             setSelectedMenu("llm-provider-config");
@@ -146,12 +147,15 @@ function ConfigWindow() {
     // 获取选中的组件
     const SelectedComponent = contentMap[selectedMenu];
 
-    // 导航函数
-    const navigateTo = (menuKey: string) => {
+    // 导航函数 - 使用 useCallback 稳定化引用
+    const navigateTo = useCallback((menuKey: string) => {
         if (contentMap[menuKey]) {
             setSelectedMenu(menuKey);
         }
-    };
+    }, []);
+
+    // 稳定化 pluginList 引用
+    const stablePluginList = useMemo(() => pluginList, [pluginList]);
 
     const renderMenuItems = (onSelect: (id: string) => void) => (
         <div className="flex flex-col gap-1 mt-2">
@@ -243,11 +247,8 @@ function ConfigWindow() {
 
                 <div className="flex-1 overflow-auto bg-card px-4 py-4">
                     <SelectedComponent
-                        pluginList={pluginList}
-                        navigateTo={(key: string) => {
-                            navigateTo(key);
-                            setSidebarOpen(false);
-                        }}
+                        pluginList={stablePluginList}
+                        navigateTo={navigateTo}
                     />
                 </div>
             </div>
@@ -268,7 +269,7 @@ function ConfigWindow() {
                 {/* 内容区域 */}
                 <div className="bg-card px-4 md:px-6 lg:px-8 py-6 overflow-y-auto max-h-screen">
                     {/* 配置组件内容 */}
-                    <SelectedComponent pluginList={pluginList} navigateTo={navigateTo} />
+                    <SelectedComponent pluginList={stablePluginList} navigateTo={navigateTo} />
                 </div>
             </div>
         </div>
