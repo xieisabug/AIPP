@@ -38,10 +38,16 @@ use tracing::{debug, error, info, instrument, warn};
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 type ToolCancelRegistry = Arc<Mutex<HashMap<i64, CancellationToken>>>;
+type ContinuationLockRegistry = Arc<Mutex<HashMap<i64, Arc<Mutex<()>>>>>;
 static TOOL_CANCEL_REGISTRY: OnceLock<ToolCancelRegistry> = OnceLock::new();
+static CONTINUATION_LOCKS: OnceLock<ContinuationLockRegistry> = OnceLock::new();
 
 fn tool_cancel_registry() -> &'static ToolCancelRegistry {
     TOOL_CANCEL_REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+fn continuation_lock_registry() -> &'static ContinuationLockRegistry {
+    CONTINUATION_LOCKS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
 async fn register_cancel_token(call_id: i64) -> CancellationToken {
@@ -607,32 +613,45 @@ async fn trigger_conversation_continuation(
     let continuation_call_id = tool_call.id;
     let continuation_conversation_id = tool_call.conversation_id;
     let continuation_result = result.to_string();
-    tauri::async_runtime::spawn_blocking(move || {
-        tauri::async_runtime::block_on(async move {
-            match tool_result_continue_ask_ai_impl(
-                app_handle_clone.clone(),
-                window_clone,
-                conversation_id_str,
-                assistant_id,
-                tool_call_id,
-                continuation_result,
-            )
-            .await
-            {
-                Ok(_) => info!(
-                    call_id = continuation_call_id,
-                    conversation_id = continuation_conversation_id,
-                    "triggered conversation continuation (async)"
-                ),
-                Err(e) => warn!(
-                    call_id = continuation_call_id,
-                    conversation_id = continuation_conversation_id,
-                    error = %e,
-                    "failed to trigger conversation continuation (async)"
-                ),
-            }
-        });
-    });
+    let continuation_lock = {
+        let registry = continuation_lock_registry();
+        let mut guard = registry.lock().await;
+        guard
+            .entry(continuation_conversation_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+
+    // 使用会话级锁保证续写串行，避免同一会话并发触发续写
+    let _lock_guard = continuation_lock.lock().await;
+    match tool_result_continue_ask_ai_impl(
+        app_handle_clone.clone(),
+        window_clone,
+        conversation_id_str,
+        assistant_id,
+        tool_call_id,
+        continuation_result,
+    )
+    .await
+    {
+        Ok(_) => {
+            info!(
+                call_id = continuation_call_id,
+                conversation_id = continuation_conversation_id,
+                "triggered conversation continuation (serialized)"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            warn!(
+                call_id = continuation_call_id,
+                conversation_id = continuation_conversation_id,
+                error = %e,
+                "failed to trigger conversation continuation (serialized)"
+            );
+            Err(anyhow!(e.to_string()))
+        }
+    }?;
 
     Ok(())
 }
