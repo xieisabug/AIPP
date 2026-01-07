@@ -40,7 +40,9 @@ pub struct BuiltinToolInfo {
 }
 
 fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
-    vec![BuiltinTemplateInfo {
+    vec![
+        // 搜索工具
+        BuiltinTemplateInfo {
         id: "search".into(),
         name: "搜索工具".into(),
         description: "内置的网络搜索和网页访问工具，支持多种搜索引擎和浏览器，可以通过搜索引擎获取到相关信息，并且可以调用访问工具进一步获取页面的具体信息".into(),
@@ -136,7 +138,63 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
                 options: None,
             },
         ],
-    }]
+        },
+        // 操作工具
+        BuiltinTemplateInfo {
+            id: "operation".into(),
+            name: "操作工具".into(),
+            description: "内置的文件操作和命令执行工具，支持文件读写、目录列表、命令行执行等操作。可以帮助 AI 助手完成代码编辑、文件管理、脚本执行等任务。".into(),
+            command: "aipp:operation".into(),
+            transport_type: "stdio".into(),
+            required_envs: vec![
+                BuiltinTemplateEnvVar {
+                    key: "ALLOWED_DIRECTORIES".into(),
+                    label: "允许访问的目录".into(),
+                    required: false,
+                    tip: Some("允许操作的目录白名单，每行一个目录路径。如果为空，所有操作都需要用户确认授权。".into()),
+                    field_type: "textarea".into(),
+                    default_value: None,
+                    placeholder: Some("/Users/username/projects\n/tmp".into()),
+                    options: None,
+                },
+                BuiltinTemplateEnvVar {
+                    key: "DEFAULT_SHELL".into(),
+                    label: "默认 Shell".into(),
+                    required: false,
+                    tip: Some("执行命令时使用的 Shell，默认自动检测（macOS/Linux 使用 zsh/bash，Windows 使用 PowerShell）".into()),
+                    field_type: "select".into(),
+                    default_value: Some("auto".into()),
+                    placeholder: None,
+                    options: Some(vec![
+                        EnvVarOption { label: "自动检测".into(), value: "auto".into() },
+                        EnvVarOption { label: "Bash".into(), value: "bash".into() },
+                        EnvVarOption { label: "Zsh".into(), value: "zsh".into() },
+                        EnvVarOption { label: "PowerShell".into(), value: "powershell".into() },
+                    ]),
+                },
+                BuiltinTemplateEnvVar {
+                    key: "MAX_READ_LINES".into(),
+                    label: "文件读取行数限制".into(),
+                    required: false,
+                    tip: Some("单次读取文件的最大行数，默认 2000 行".into()),
+                    field_type: "number".into(),
+                    default_value: Some("2000".into()),
+                    placeholder: Some("2000".into()),
+                    options: None,
+                },
+                BuiltinTemplateEnvVar {
+                    key: "COMMAND_TIMEOUT_MS".into(),
+                    label: "命令超时时间".into(),
+                    required: false,
+                    tip: Some("命令执行的默认超时时间（毫秒），默认 120000（2分钟），最大 600000（10分钟）".into()),
+                    field_type: "number".into(),
+                    default_value: Some("120000".into()),
+                    placeholder: Some("120000".into()),
+                    options: None,
+                },
+            ],
+        },
+    ]
 }
 
 pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
@@ -180,6 +238,143 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         }
                     },
                     "required": ["url"]
+                }),
+            },
+        ],
+        Some("operation") => vec![
+            BuiltinToolInfo {
+                name: "read_file".into(),
+                description: "读取文件内容。支持部分读取（通过 offset 和 limit 参数）。返回带行号的内容（类似 cat -n 格式）。必须使用绝对路径。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "要读取的文件的绝对路径"
+                        },
+                        "offset": {
+                            "type": "number",
+                            "description": "开始读取的行号（1-indexed）。仅在文件过大无法一次读取时使用"
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "要读取的行数。仅在文件过大无法一次读取时使用"
+                        }
+                    },
+                    "required": ["file_path"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "write_file".into(),
+                description: "创建新文件或完全覆盖现有文件。必须使用绝对路径。安全机制：覆盖现有文件前必须先使用 read_file 读取该文件。推荐使用 edit_file 进行文件修改，write_file 仅用于创建新文件。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "要写入的文件的绝对路径"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "要写入的完整文件内容"
+                        }
+                    },
+                    "required": ["file_path", "content"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "edit_file".into(),
+                description: "对文件进行精确的字符串替换。必须使用绝对路径。要求：1) 必须先用 read_file 读取文件；2) old_string 必须精确匹配文件中的文本（包括空格和缩进）；3) 默认情况下 old_string 必须在文件中唯一出现，否则需要设置 replace_all=true。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "要编辑的文件的绝对路径"
+                        },
+                        "old_string": {
+                            "type": "string",
+                            "description": "要查找并替换的精确文本，必须包含足够的上下文以确保唯一匹配"
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "description": "替换后的文本（必须与 old_string 不同）"
+                        },
+                        "replace_all": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "是否替换所有匹配项（默认 false，仅替换第一个唯一匹配）"
+                        }
+                    },
+                    "required": ["file_path", "old_string", "new_string"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "list_directory".into(),
+                description: "列出目录内容。支持 glob 模式过滤和递归列出。返回文件名、路径、类型、大小和修改时间。结果按修改时间排序（最新的在前）。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "要列出的目录的绝对路径"
+                        },
+                        "pattern": {
+                            "type": "string",
+                            "description": "可选的 glob 模式过滤，如 '*.js'、'**/*.ts'、'src/**/*.{ts,tsx}'"
+                        },
+                        "recursive": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "是否递归列出子目录"
+                        }
+                    },
+                    "required": ["path"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "execute_bash".into(),
+                description: "执行 Shell 命令。根据操作系统自动选择 Shell（macOS/Linux: zsh/bash, Windows: PowerShell）。默认超时 2 分钟，最长 10 分钟。对于长时间运行的命令（如服务器、watch 模式），请设置 run_in_background=true，然后使用 get_bash_output 获取输出。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "要执行的 Shell 命令"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "命令的简短描述（5-10 个词），例如 'List files in current directory'"
+                        },
+                        "timeout": {
+                            "type": "number",
+                            "description": "超时时间（毫秒），默认 120000，最大 600000"
+                        },
+                        "run_in_background": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "是否后台运行。后台运行会返回 bash_id，稍后使用 get_bash_output 获取输出"
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "get_bash_output".into(),
+                description: "获取后台运行的命令的输出。返回自上次调用以来的新增输出（增量输出）。可以使用正则表达式过滤输出，但过滤后的行将不再可用。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "bash_id": {
+                            "type": "string",
+                            "description": "execute_bash 返回的后台任务 ID"
+                        },
+                        "filter": {
+                            "type": "string",
+                            "description": "可选的正则表达式，用于过滤输出行。注意：不匹配的行将被永久丢弃"
+                        }
+                    },
+                    "required": ["bash_id"]
                 }),
             },
         ],

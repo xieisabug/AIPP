@@ -5,6 +5,7 @@ import { Label } from "../ui/label";
 import { Button } from "../ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
 import { Switch } from "../ui/switch";
 import { Card, CardContent } from "../ui/card";
 
@@ -68,7 +69,15 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
     useEffect(() => {
         // Only run once when dialog opens and template is loaded
         if (!isOpen || initialized) return;
-        if (editing && !selected) return; // Wait for template to load in editing mode
+        
+        // Get the template for current mode
+        let currentTemplate = selected;
+        if (editing && initialCommand) {
+            const templateId = initialCommand.replace("aipp:", "");
+            currentTemplate = templates.find((t) => t.id === templateId);
+        }
+        
+        if (editing && !currentTemplate) return; // Wait for template to load in editing mode
 
         // Parse the initial env text
         const parsedEnvs: Record<string, string> = {};
@@ -88,9 +97,9 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
         }
 
         // In editing mode, merge with default values for fields that don't have a saved value
-        if (editing && selected) {
+        if (editing && currentTemplate) {
             const defaultValues: Record<string, string> = {};
-            selected.required_envs.forEach((env) => {
+            currentTemplate.required_envs.forEach((env) => {
                 if (env.default_value && parsedEnvs[env.key] === undefined) {
                     defaultValues[env.key] = env.default_value;
                 }
@@ -101,7 +110,7 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
             setEnvValues(parsedEnvs);
             // Don't set initialized here for non-editing mode, let the other effect handle defaults
         }
-    }, [isOpen, initialEnvText, editing, selected, initialized]);
+    }, [isOpen, initialEnvText, editing, selected, initialized, templates, initialCommand]);
 
     // Set default values when template changes (non-editing mode only)
     useEffect(() => {
@@ -245,6 +254,25 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
                     </div>
                 );
 
+            case "textarea":
+                return (
+                    <div key={env.key} className="space-y-2 col-span-2">
+                        <Label htmlFor={fieldId} className="text-sm font-medium">
+                            {env.label}
+                            {env.required && <span className="text-red-500 ml-1">*</span>}
+                        </Label>
+                        <Textarea
+                            id={fieldId}
+                            value={value}
+                            placeholder={env.placeholder}
+                            onChange={(e) => handleEnvValueChange(env.key, e.target.value)}
+                            rows={4}
+                            className="font-mono text-xs resize-y"
+                        />
+                        {env.tip && <p className="text-xs text-muted-foreground">{env.tip}</p>}
+                    </div>
+                );
+
             case "text":
             default:
                 return (
@@ -267,9 +295,14 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
     };
 
     // Get the template to use for rendering fields
-    const templateForFields = editing
-        ? templates.find((t) => t.id === "search") // Use search template for editing
-        : selected;
+    const templateForFields = useMemo(() => {
+        if (editing && initialCommand) {
+            // Extract template ID from command (e.g., "aipp:search" -> "search")
+            const templateId = initialCommand.replace("aipp:", "");
+            return templates.find((t) => t.id === templateId);
+        }
+        return selected;
+    }, [editing, initialCommand, templates, selected]);
 
     return (
         <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>

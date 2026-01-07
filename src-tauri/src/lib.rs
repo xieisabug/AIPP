@@ -41,6 +41,7 @@ use crate::api::llm_api::{
     get_models_for_select, import_llm_provider, preview_model_list, update_llm_provider,
     update_llm_provider_config, update_selected_models,
 };
+use crate::api::operation_api::confirm_operation_permission;
 use crate::api::sub_task_api::{
     cancel_sub_task_execution, cancel_sub_task_execution_for_ui, create_sub_task_execution,
     delete_sub_task_definition, get_sub_task_definition, get_sub_task_execution_detail,
@@ -83,6 +84,7 @@ use crate::db::sub_task_db::SubTaskDatabase;
 use crate::db::system_db::SystemDatabase;
 use crate::mcp::builtin_mcp::{
     add_or_update_aipp_builtin_server, execute_aipp_builtin_tool, list_aipp_builtin_templates,
+    OperationState,
 };
 use crate::mcp::execution_api::{
     create_mcp_tool_call, execute_mcp_tool_call, get_mcp_tool_call,
@@ -385,7 +387,8 @@ pub fn run() {
             selected_text: TokioMutex::new(String::new()),
             recording_shortcut: TokioMutex::new(false),
         })
-        .manage(MessageTokenManager::new());
+        .manage(MessageTokenManager::new())
+        .manage(OperationState::new());
     #[cfg(desktop)]
     let app = app.manage(CopilotLspState::default());
     let app = app
@@ -514,6 +517,7 @@ pub fn run() {
             list_aipp_builtin_templates,
             add_or_update_aipp_builtin_server,
             execute_aipp_builtin_tool,
+            confirm_operation_permission,
             register_sub_task_definition,
             run_sub_task_sync,
             run_sub_task_with_mcp_loop,

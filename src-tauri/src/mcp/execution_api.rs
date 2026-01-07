@@ -403,7 +403,7 @@ pub async fn execute_mcp_tool_call(
     let cancel_token = register_cancel_token(call_id).await;
     let execution_result = {
         let exec_future =
-            execute_tool_by_transport(&app_handle, &server, &tool_call.tool_name, &tool_call.parameters);
+            execute_tool_by_transport(&app_handle, &server, &tool_call.tool_name, &tool_call.parameters, Some(tool_call.conversation_id));
         tokio::select! {
             _ = cancel_token.cancelled() => Err("Cancelled by user".to_string()),
             res = exec_future => res,
@@ -664,13 +664,14 @@ pub async fn execute_tool_by_transport(
     server: &MCPServer,
     tool_name: &str,
     parameters: &str,
+    conversation_id: Option<i64>,
 ) -> std::result::Result<String, String> {
     match server.transport_type.as_str() {
         // If stdio but command is aipp:*, route to builtin executor
         "stdio" => {
             if let Some(cmd) = &server.command {
                 if crate::mcp::builtin_mcp::is_builtin_mcp_call(cmd) {
-                    execute_builtin_tool(app_handle, server, tool_name, parameters)
+                    execute_builtin_tool(app_handle, server, tool_name, parameters, conversation_id)
                         .await
                         .map_err(|e| e.to_string())
                 } else {
@@ -691,7 +692,7 @@ pub async fn execute_tool_by_transport(
             .await
             .map_err(|e| e.to_string()),
         // Legacy builtin type is no longer used, but keep for backward compatibility
-        "builtin" => execute_builtin_tool(app_handle, server, tool_name, parameters)
+        "builtin" => execute_builtin_tool(app_handle, server, tool_name, parameters, conversation_id)
             .await
             .map_err(|e| e.to_string()),
         _ => {
@@ -713,7 +714,7 @@ async fn execute_stdio_tool(
     // builtin 透传
     if let Some(cmd) = &server.command {
         if crate::mcp::builtin_mcp::is_builtin_mcp_call(cmd) {
-            return execute_builtin_tool(app_handle, server, tool_name, parameters).await;
+            return execute_builtin_tool(app_handle, server, tool_name, parameters, None).await;
         }
     }
 
@@ -871,6 +872,7 @@ async fn execute_builtin_tool(
     server: &MCPServer,
     tool_name: &str,
     parameters: &str,
+    conversation_id: Option<i64>,
 ) -> Result<String> {
     // 验证是否为内置工具调用
     let command = server.command.clone().unwrap_or_default();
@@ -887,6 +889,7 @@ async fn execute_builtin_tool(
         command.clone(),
         tool_name.to_string(),
         normalize_parameters_json(parameters),
+        conversation_id,
     )
     .await
     .map_err(|e| anyhow!(e))?; // map String error to anyhow

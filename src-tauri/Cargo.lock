@@ -18,6 +18,7 @@ dependencies = [
  "futures",
  "genai",
  "get-selected-text",
+ "glob",
  "hex",
  "htmd",
  "image",

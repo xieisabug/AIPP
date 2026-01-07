@@ -112,6 +112,7 @@ pub async fn detect_and_process_mcp_calls_for_subtask(
                 server,
                 &tool_name,
                 &parameters,
+                Some(conversation_id),
             )
             .await;
 
