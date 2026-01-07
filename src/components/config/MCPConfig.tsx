@@ -43,6 +43,7 @@ const MCPConfig: React.FC = () => {
     const [deletingServerId, setDeletingServerId] = useState<number | null>(null);
     const [builtinEditOpen, setBuiltinEditOpen] = useState(false);
     const [builtinEditEnv, setBuiltinEditEnv] = useState<string>("");
+    const [builtinEditName, setBuiltinEditName] = useState<string>("");
 
     // Dialog initial data
     const [dialogInitialServerType, setDialogInitialServerType] = useState<string | undefined>(undefined);
@@ -167,6 +168,7 @@ const MCPConfig: React.FC = () => {
         if (isBuiltin) {
             setEditingServer(server);
             setBuiltinEditEnv(server.environment_variables || "");
+            setBuiltinEditName(server.name || "");
             setBuiltinEditOpen(true);
             return;
         }
@@ -666,7 +668,7 @@ const MCPConfig: React.FC = () => {
                 }}
             />
 
-            {/* 内置工具编辑对话框（仅环境变量） */}
+            {/* 内置工具编辑对话框 */}
             {editingServer && (
                 <BuiltinToolDialog
                     isOpen={builtinEditOpen}
@@ -676,12 +678,13 @@ const MCPConfig: React.FC = () => {
                     initialCommand={editingServer.command || ''}
                     initialEnvText={builtinEditEnv}
                     onEnvChange={setBuiltinEditEnv}
+                    onNameChange={setBuiltinEditName}
                     onClose={() => setBuiltinEditOpen(false)}
                     onSubmit={async () => {
-                        // Save env-only changes via update API
+                        // Save name and env changes via update API
                         try {
                             const req: MCPServerRequest = {
-                                name: editingServer.name,
+                                name: builtinEditName || editingServer.name,
                                 description: editingServer.description || undefined,
                                 transport_type: editingServer.transport_type,
                                 command: editingServer.command || undefined,
@@ -698,11 +701,12 @@ const MCPConfig: React.FC = () => {
                             if (selectedServer && selectedServer.id === editingServer.id) {
                                 setSelectedServer({
                                     ...selectedServer,
+                                    name: builtinEditName || editingServer.name,
                                     environment_variables: builtinEditEnv,
                                 });
                             }
 
-                            toast.success('已保存内置工具环境变量');
+                            toast.success('已保存内置工具配置');
                             setBuiltinEditOpen(false);
                             getMcpServers();
                         } catch (e) {

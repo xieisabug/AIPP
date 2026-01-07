@@ -44,6 +44,7 @@ interface BuiltinToolDialogProps {
     initialCommand?: string;
     initialEnvText?: string;
     onEnvChange?: (v: string) => void;
+    onNameChange?: (v: string) => void;
 }
 
 const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
@@ -56,12 +57,14 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
     initialCommand,
     initialEnvText,
     onEnvChange,
+    onNameChange,
 }) => {
     const [templates, setTemplates] = useState<BuiltinTemplate[]>([]);
     const [selectedId, setSelectedId] = useState<string>("search");
     const [envValues, setEnvValues] = useState<Record<string, string>>({});
     const [busy, setBusy] = useState(false);
     const [initialized, setInitialized] = useState(false);
+    const [editedName, setEditedName] = useState<string>("");
 
     const selected = useMemo(() => templates.find((t) => t.id === selectedId), [templates, selectedId]);
 
@@ -131,8 +134,23 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
         if (!isOpen) {
             setInitialized(false);
             setEnvValues({});
+            setEditedName("");
         }
     }, [isOpen]);
+
+    // Initialize editedName when dialog opens in editing mode
+    useEffect(() => {
+        if (isOpen && editing && initialName) {
+            setEditedName(initialName);
+        }
+    }, [isOpen, editing, initialName]);
+
+    // Notify parent when name changes
+    useEffect(() => {
+        if (editing && onNameChange && editedName) {
+            onNameChange(editedName);
+        }
+    }, [editing, editedName, onNameChange]);
 
     useEffect(() => {
         if (!isOpen) return;
@@ -308,7 +326,7 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
         <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
             <DialogContent className="max-w-4xl min-w-xl w-1/2 sm:max-w-none max-h-[80vh] flex flex-col">
                 <DialogHeader>
-                    <DialogTitle>{editing ? "编辑内置工具环境变量" : "添加内置工具"}</DialogTitle>
+                    <DialogTitle>{editing ? "编辑内置工具" : "添加内置工具"}</DialogTitle>
                 </DialogHeader>
                 <div className="space-y-4 overflow-y-auto flex-1 min-h-0 px-4">
                     {/* Template selector; hidden in edit mode */}
@@ -330,13 +348,22 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
                         </div>
                     )}
 
-                    {/* Readonly basics as plain text */}
+                    {/* Readonly basics as plain text, name editable in edit mode */}
                     <div className="grid grid-cols-2 gap-4 text-sm">
                         <div>
-                            <div className="text-muted-foreground">ID</div>
-                            <div className="text-foreground break-all">
-                                {editing ? initialName || "" : selected?.id ?? ""}
-                            </div>
+                            <div className="text-muted-foreground">名称</div>
+                            {editing ? (
+                                <Input
+                                    value={editedName}
+                                    onChange={(e) => setEditedName(e.target.value)}
+                                    placeholder="输入名称"
+                                    className="mt-1"
+                                />
+                            ) : (
+                                <div className="text-foreground break-all">
+                                    {selected?.id ?? ""}
+                                </div>
+                            )}
                         </div>
                         <div>
                             <div className="text-muted-foreground">类型</div>
