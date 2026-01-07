@@ -49,17 +49,27 @@ pub async fn get_skill_content(
     app_handle: tauri::AppHandle,
     identifier: String,
 ) -> Result<SkillContent, String> {
-    let scanner = create_scanner(&app_handle);
+    get_skill_content_internal(&app_handle, &identifier)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Internal function to get skill content (for use by other modules)
+pub async fn get_skill_content_internal(
+    app_handle: &tauri::AppHandle,
+    identifier: &str,
+) -> Result<SkillContent, crate::errors::AppError> {
+    let scanner = create_scanner(app_handle);
 
     // Find the skill
     let skill = scanner
-        .get_skill(&identifier)
-        .ok_or_else(|| format!("Skill not found: {}", identifier))?;
+        .get_skill(identifier)
+        .ok_or_else(|| crate::errors::AppError::InternalError(format!("Skill not found: {}", identifier)))?;
 
     // Parse full content
     let file_path = PathBuf::from(&skill.file_path);
-    let (metadata, content) = SkillParser::parse_full(&file_path, &identifier)
-        .map_err(|e| format!("Failed to parse skill: {}", e))?;
+    let (_metadata, content) = SkillParser::parse_full(&file_path, identifier)
+        .map_err(|e| crate::errors::AppError::UnknownError(format!("Failed to parse skill: {}", e)))?;
 
     Ok(content)
 }
@@ -119,17 +129,27 @@ pub async fn get_enabled_assistant_skills(
     app_handle: tauri::AppHandle,
     assistant_id: i64,
 ) -> Result<Vec<ScannedSkill>, String> {
-    let db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    get_enabled_assistant_skills_internal(&app_handle, assistant_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Internal function to get enabled skills (for use by other modules)
+pub async fn get_enabled_assistant_skills_internal(
+    app_handle: &tauri::AppHandle,
+    assistant_id: i64,
+) -> Result<Vec<ScannedSkill>, crate::errors::AppError> {
+    let db = SkillDatabase::new(app_handle).map_err(crate::errors::AppError::from)?;
     let configs = db
         .get_enabled_skill_configs(assistant_id)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::errors::AppError::from)?;
 
     if configs.is_empty() {
         return Ok(Vec::new());
     }
 
     // Scan all skills to check existence
-    let scanner = create_scanner(&app_handle);
+    let scanner = create_scanner(app_handle);
     let existing_skills = scanner.scan_all_as_map();
 
     // Filter to only existing skills, maintaining priority order

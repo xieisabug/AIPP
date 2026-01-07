@@ -205,6 +205,6 @@ pub async fn format_mcp_prompt_with_filters(
 
     format!(
         "{}\n{}\n{}\n{}",
-        mcp_constraint_prompt, tools_info, "## 原始助手指令\n", assistant_prompt_result
+        "# 助手指令\n", assistant_prompt_result, mcp_constraint_prompt, tools_info
     )
 }

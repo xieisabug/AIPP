@@ -8,5 +8,9 @@
 //! - Custom user-defined sources
 
 pub mod parser;
+pub mod prompt;
 pub mod scanner;
 pub mod types;
+
+// Re-exports for convenience
+pub use prompt::{collect_skills_info_for_assistant, format_skills_prompt};
