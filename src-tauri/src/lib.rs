@@ -6,6 +6,7 @@ mod db;
 mod errors;
 mod mcp;
 mod plugin;
+mod skills;
 mod state;
 mod template_engine;
 mod utils;
@@ -93,6 +94,13 @@ use crate::mcp::registry_api::{
     get_mcp_server_prompts, get_mcp_server_resources, get_mcp_server_tools, get_mcp_servers,
     refresh_mcp_server_capabilities, test_mcp_connection, toggle_mcp_server, update_mcp_server,
     update_mcp_server_prompt, update_mcp_server_tool,
+};
+use crate::api::skill_api::{
+    bulk_update_assistant_skills, cleanup_orphaned_skill_configs,
+    get_assistant_skills, get_enabled_assistant_skills, get_skill, get_skill_content,
+    get_skill_sources, get_skills_directory, open_skill_parent_folder, open_skills_folder,
+    remove_assistant_skill, scan_skills, skill_exists, toggle_assistant_skill,
+    update_assistant_skill_config,
 };
 use crate::window::{
     awaken_aipp, create_ask_window, create_chat_ui_window, create_chat_ui_window_hidden,
@@ -332,6 +340,7 @@ pub fn run() {
             let mcp_db = MCPDatabase::new(&app_handle)?;
             let sub_task_db = SubTaskDatabase::new(&app_handle)?;
             let artifacts_db = ArtifactsDatabase::new(&app_handle)?;
+            let skill_db = db::skill_db::SkillDatabase::new(&app_handle)?;
 
             system_db.create_tables()?;
             llm_db.create_tables()?;
@@ -341,6 +350,7 @@ pub fn run() {
             mcp_db.create_tables()?;
             sub_task_db.create_tables()?;
             artifacts_db.create_tables()?;
+            skill_db.create_tables()?;
 
             let _ = database_upgrade(&app_handle, system_db, llm_db, assistant_db, conversation_db);
 
@@ -521,7 +531,23 @@ pub fn run() {
             cancel_sub_task_execution_for_ui,
             highlight_code,
             ensure_hidden_search_window,
-            list_syntect_themes
+            list_syntect_themes,
+            // Skill commands
+            scan_skills,
+            get_skill_sources,
+            get_skill_content,
+            get_skill,
+            skill_exists,
+            get_assistant_skills,
+            get_enabled_assistant_skills,
+            update_assistant_skill_config,
+            toggle_assistant_skill,
+            remove_assistant_skill,
+            bulk_update_assistant_skills,
+            cleanup_orphaned_skill_configs,
+            open_skills_folder,
+            open_skill_parent_folder,
+            get_skills_directory
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");
