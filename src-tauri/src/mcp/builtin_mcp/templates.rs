@@ -42,6 +42,15 @@ pub struct BuiltinToolInfo {
 
 fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
     vec![
+        // Agent 工具
+        BuiltinTemplateInfo {
+            id: "agent".into(),
+            name: "Agent 工具".into(),
+            description: "内置的 Agent 能力工具集，包含 Skill 加载等功能。当 AI 需要执行用户定义的技能时，可以通过此工具加载技能的详细指令。".into(),
+            command: "aipp:agent".into(),
+            transport_type: "stdio".into(),
+            required_envs: vec![],
+        },
         // 搜索工具
         BuiltinTemplateInfo {
         id: "search".into(),
@@ -200,6 +209,26 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
 
 pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
     match super::builtin_command_id(command).as_deref() {
+        Some("agent") => vec![
+            BuiltinToolInfo {
+                name: "load_skill".into(),
+                description: "Load a skill's detailed instructions (SKILL.md). Use this tool when you need to execute a user-defined skill. The skill's prompt will provide detailed instructions on how to complete the task.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The skill name only (no arguments). E.g., 'pdf' or 'xlsx'. This should match the skill's display name or file name."
+                        },
+                        "source_type": {
+                            "type": "string",
+                            "description": "The source type of the skill. Available types: 'aipp' (AIPP Skills), 'claude_code_agents' (Claude Code Agents), 'claude_code_rules' (Claude Code Rules), 'codex' (Codex), or custom source types."
+                        }
+                    },
+                    "required": ["command", "source_type"]
+                }),
+            },
+        ],
         Some("search") => vec![
             BuiltinToolInfo {
                 name: "search_web".into(),
@@ -521,6 +550,56 @@ mod tests {
         let templates = builtin_templates();
         let search = templates.iter().find(|t| t.id == "search");
         assert!(search.is_some(), "Search template should exist");
+    }
+
+    #[test]
+    fn test_builtin_templates_agent_exists() {
+        let templates = builtin_templates();
+        let agent = templates.iter().find(|t| t.id == "agent");
+        assert!(agent.is_some(), "Agent template should exist");
+    }
+
+    #[test]
+    fn test_agent_template_has_required_fields() {
+        let templates = builtin_templates();
+        let agent = templates.iter().find(|t| t.id == "agent").unwrap();
+        
+        assert!(!agent.name.is_empty());
+        assert!(!agent.description.is_empty());
+        assert_eq!(agent.command, "aipp:agent");
+        assert_eq!(agent.transport_type, "stdio");
+        // Agent has no required env vars
+        assert!(agent.required_envs.is_empty());
+    }
+
+    #[test]
+    fn test_get_tools_for_agent_command() {
+        let tools = get_builtin_tools_for_command("aipp:agent");
+        assert_eq!(tools.len(), 1, "Agent command should have 1 tool");
+    }
+
+    #[test]
+    fn test_agent_load_skill_tool_exists() {
+        let tools = get_builtin_tools_for_command("aipp:agent");
+        let load_skill = tools.iter().find(|t| t.name == "load_skill");
+        assert!(load_skill.is_some(), "load_skill tool should exist");
+    }
+
+    #[test]
+    fn test_agent_load_skill_tool_schema() {
+        let tools = get_builtin_tools_for_command("aipp:agent");
+        let load_skill = tools.iter().find(|t| t.name == "load_skill").unwrap();
+        
+        assert!(!load_skill.description.is_empty());
+        
+        let schema = &load_skill.input_schema;
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["command"].is_object());
+        assert!(schema["properties"]["source_type"].is_object());
+        
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|r| r == "command"));
+        assert!(required.iter().any(|r| r == "source_type"));
     }
 
     #[test]

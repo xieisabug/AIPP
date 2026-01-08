@@ -2,10 +2,12 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use tracing::{error, instrument};
 
+pub mod agent;
 pub mod operation;
 pub mod search;
 pub mod templates;
 
+pub use agent::AgentHandler;
 pub use operation::{OperationHandler, OperationState};
 pub use search::SearchHandler;
 pub use templates::{
@@ -383,6 +385,76 @@ pub async fn execute_aipp_builtin_tool(
                 }
                 _ => serde_json::json!({
                     "content": [{"type": "text", "text": format!("Unknown operation tool: {}", tool_name)}],
+                    "isError": true
+                }),
+            }
+        }
+        "agent" => {
+            use agent::types::*;
+            
+            let handler = AgentHandler::new(app_handle.clone());
+            
+            match tool_name.as_str() {
+                "load_skill" => {
+                    let command = args
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing required parameter: command".to_string())?;
+                    let source_type = args
+                        .get("source_type")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing required parameter: source_type".to_string())?;
+                    
+                    let request = LoadSkillRequest {
+                        command: command.to_string(),
+                        source_type: source_type.to_string(),
+                    };
+                    
+                    match handler.load_skill(request).await {
+                        Ok(response) => {
+                            if response.found {
+                                // Build the content text
+                                let mut text = response.content.clone();
+                                
+                                // Append additional files if any
+                                if !response.additional_files.is_empty() {
+                                    text.push_str("\n\n---\n## Additional Files\n\n");
+                                    for file in &response.additional_files {
+                                        text.push_str(&format!("### {}\n```\n{}\n```\n\n", file.path, file.content));
+                                    }
+                                }
+                                
+                                serde_json::json!({
+                                    "content": [{"type": "text", "text": text}],
+                                    "isError": false,
+                                    "metadata": {
+                                        "identifier": response.identifier,
+                                        "found": true,
+                                        "additional_files_count": response.additional_files.len()
+                                    }
+                                })
+                            } else {
+                                serde_json::json!({
+                                    "content": [{"type": "text", "text": response.error.unwrap_or_else(|| "Skill not found".to_string())}],
+                                    "isError": true,
+                                    "metadata": {
+                                        "identifier": response.identifier,
+                                        "found": false
+                                    }
+                                })
+                            }
+                        }
+                        Err(e) => {
+                            error!(error = %e, "load_skill tool execution failed");
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": e}],
+                                "isError": true
+                            })
+                        }
+                    }
+                }
+                _ => serde_json::json!({
+                    "content": [{"type": "text", "text": format!("Unknown agent tool: {}", tool_name)}],
                     "isError": true
                 }),
             }

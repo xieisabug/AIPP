@@ -75,22 +75,6 @@ pub async fn format_skills_prompt(
             skills_content.push_str(&format!("**标签**: {}\n\n", skill.metadata.tags.join(", ")));
         }
 
-        // 获取并添加 skill 内容
-        match get_skill_content_internal(app_handle, &skill.identifier).await {
-            Ok(content) => {
-                skills_content.push_str("**指令内容**:\n\n");
-                skills_content.push_str(&content.content);
-                skills_content.push_str("\n\n");
-            }
-            Err(e) => {
-                warn!(
-                    skill_identifier = %skill.identifier,
-                    error = %e,
-                    "Failed to load skill content, skipping"
-                );
-            }
-        }
-
         skills_content.push_str("---\n\n");
     }
 
