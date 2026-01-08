@@ -1131,3 +1131,276 @@ pub async fn build_mcp_prompt(
     let result = format_mcp_prompt("".to_string(), &mcp_info).await;
     Ok(result)
 }
+
+// =============================================================================
+// Skills 与操作 MCP 联动校验 API
+// =============================================================================
+
+/// 操作 MCP 工具集的 command 标识
+pub const OPERATION_MCP_COMMAND: &str = "aipp:operation";
+
+/// 获取操作 MCP 工具集（用于校验）
+fn get_operation_mcp_server(db: &MCPDatabase) -> Result<Option<MCPServer>, String> {
+    let servers = db.get_mcp_servers().map_err(|e| e.to_string())?;
+    Ok(servers.into_iter().find(|s| s.command.as_deref() == Some(OPERATION_MCP_COMMAND)))
+}
+
+/// 检查结果结构体
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OperationMcpCheckResult {
+    /// 操作 MCP 服务器 ID（如果存在）
+    pub operation_mcp_id: Option<i64>,
+    /// 操作 MCP 全局是否启用
+    pub global_enabled: bool,
+    /// 操作 MCP 助手级是否启用（如果指定了助手）
+    pub assistant_enabled: bool,
+    /// 助手当前启用的 Skills 数量
+    pub enabled_skills_count: usize,
+}
+
+/// 检查操作 MCP 是否已启用（用于启用 Skills 前的校验）
+/// 返回操作 MCP 的状态信息
+#[tauri::command]
+#[instrument(level = "debug", skip(app_handle), fields(assistant_id))]
+pub async fn check_operation_mcp_for_skills(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+) -> Result<OperationMcpCheckResult, String> {
+    let db = open_db(&app_handle)?;
+    
+    // 获取操作 MCP 服务器
+    let operation_mcp = get_operation_mcp_server(&db)?;
+    
+    let (operation_mcp_id, global_enabled) = match &operation_mcp {
+        Some(server) => (Some(server.id), server.is_enabled),
+        None => (None, false),
+    };
+    
+    // 检查助手级 MCP 配置
+    let assistant_enabled = if let Some(server) = &operation_mcp {
+        use crate::db::assistant_db::AssistantDatabase;
+        let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+        let mcp_configs = assistant_db.get_assistant_mcp_configs(assistant_id).map_err(|e| e.to_string())?;
+        mcp_configs.iter().find(|c| c.mcp_server_id == server.id).map(|c| c.is_enabled).unwrap_or(false)
+    } else {
+        false
+    };
+    
+    // 获取助手启用的 Skills 数量
+    use crate::db::skill_db::SkillDatabase;
+    let skill_db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let enabled_skills = skill_db.get_enabled_skill_configs(assistant_id).map_err(|e| e.to_string())?;
+    
+    Ok(OperationMcpCheckResult {
+        operation_mcp_id,
+        global_enabled,
+        assistant_enabled,
+        enabled_skills_count: enabled_skills.len(),
+    })
+}
+
+/// 启用操作 MCP 并启用指定的 Skill
+/// 同时启用全局 MCP 和助手级 MCP 配置
+#[tauri::command]
+#[instrument(level = "debug", skip(app_handle), fields(assistant_id, skill_identifier))]
+pub async fn enable_operation_mcp_and_skill(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+    skill_identifier: String,
+    priority: i32,
+) -> Result<(), String> {
+    let db = open_db(&app_handle)?;
+    
+    // 获取操作 MCP 服务器
+    let operation_mcp = get_operation_mcp_server(&db)?
+        .ok_or("操作工具集不存在，请先初始化内置工具")?;
+    
+    // 1. 启用全局 MCP
+    if !operation_mcp.is_enabled {
+        db.toggle_mcp_server(operation_mcp.id, true).map_err(|e| e.to_string())?;
+        info!(server_id = operation_mcp.id, "Enabled global operation MCP for skills");
+    }
+    
+    // 2. 启用助手级 MCP 配置
+    use crate::db::assistant_db::AssistantDatabase;
+    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    assistant_db.upsert_assistant_mcp_config(assistant_id, operation_mcp.id, true)
+        .map_err(|e| e.to_string())?;
+    info!(assistant_id, server_id = operation_mcp.id, "Enabled assistant-level operation MCP for skills");
+    
+    // 3. 启用 Skill
+    use crate::db::skill_db::SkillDatabase;
+    let skill_db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    skill_db.upsert_assistant_skill_config(assistant_id, &skill_identifier, true, priority)
+        .map_err(|e| e.to_string())?;
+    info!(assistant_id, skill_identifier = %skill_identifier, "Enabled skill after enabling operation MCP");
+    
+    Ok(())
+}
+
+/// 批量启用操作 MCP 和多个 Skills
+#[tauri::command]
+#[instrument(level = "debug", skip(app_handle, skill_configs), fields(assistant_id))]
+pub async fn enable_operation_mcp_and_skills(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+    skill_configs: Vec<(String, i32)>, // (skill_identifier, priority)
+) -> Result<(), String> {
+    let db = open_db(&app_handle)?;
+    
+    // 获取操作 MCP 服务器
+    let operation_mcp = get_operation_mcp_server(&db)?
+        .ok_or("操作工具集不存在，请先初始化内置工具")?;
+    
+    // 1. 启用全局 MCP
+    if !operation_mcp.is_enabled {
+        db.toggle_mcp_server(operation_mcp.id, true).map_err(|e| e.to_string())?;
+    }
+    
+    // 2. 启用助手级 MCP 配置
+    use crate::db::assistant_db::AssistantDatabase;
+    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    assistant_db.upsert_assistant_mcp_config(assistant_id, operation_mcp.id, true)
+        .map_err(|e| e.to_string())?;
+    
+    // 3. 批量启用 Skills
+    use crate::db::skill_db::SkillDatabase;
+    let skill_db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    for (skill_identifier, priority) in skill_configs {
+        skill_db.upsert_assistant_skill_config(assistant_id, &skill_identifier, true, priority)
+            .map_err(|e| e.to_string())?;
+    }
+    
+    info!(assistant_id, "Enabled operation MCP and skills");
+    Ok(())
+}
+
+/// 关闭操作 MCP 的校验结果
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DisableOperationMcpCheckResult {
+    /// 受影响的助手列表（有启用 Skills 的助手）
+    pub affected_assistants: Vec<AffectedAssistantInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AffectedAssistantInfo {
+    pub assistant_id: i64,
+    pub assistant_name: String,
+    pub enabled_skills_count: usize,
+}
+
+/// 检查关闭操作 MCP 会影响哪些助手的 Skills
+#[tauri::command]
+#[instrument(level = "debug", skip(app_handle))]
+pub async fn check_disable_operation_mcp(
+    app_handle: tauri::AppHandle,
+) -> Result<DisableOperationMcpCheckResult, String> {
+    use crate::db::assistant_db::AssistantDatabase;
+    use crate::db::skill_db::SkillDatabase;
+    
+    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let skill_db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    
+    // 获取所有助手
+    let assistants = assistant_db.get_assistants().map_err(|e| e.to_string())?;
+    
+    let mut affected_assistants = Vec::new();
+    
+    for assistant in assistants {
+        let enabled_skills = skill_db.get_enabled_skill_configs(assistant.id).map_err(|e| e.to_string())?;
+        if !enabled_skills.is_empty() {
+            affected_assistants.push(AffectedAssistantInfo {
+                assistant_id: assistant.id,
+                assistant_name: assistant.name,
+                enabled_skills_count: enabled_skills.len(),
+            });
+        }
+    }
+    
+    Ok(DisableOperationMcpCheckResult { affected_assistants })
+}
+
+/// 关闭操作 MCP 并同时关闭所有助手的 Skills
+#[tauri::command]
+#[instrument(level = "debug", skip(app_handle))]
+pub async fn disable_operation_mcp_with_skills(
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    use crate::db::assistant_db::AssistantDatabase;
+    use crate::db::skill_db::SkillDatabase;
+    
+    let db = open_db(&app_handle)?;
+    
+    // 获取操作 MCP 服务器
+    let operation_mcp = get_operation_mcp_server(&db)?;
+    
+    if let Some(server) = operation_mcp {
+        // 1. 关闭所有助手的 Skills
+        let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+        let skill_db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+        
+        let assistants = assistant_db.get_assistants().map_err(|e| e.to_string())?;
+        for assistant in assistants {
+            let enabled_skills = skill_db.get_enabled_skill_configs(assistant.id).map_err(|e| e.to_string())?;
+            for skill_config in enabled_skills {
+                skill_db.update_skill_config_enabled(skill_config.id, false).map_err(|e| e.to_string())?;
+            }
+        }
+        
+        // 2. 关闭全局 MCP
+        db.toggle_mcp_server(server.id, false).map_err(|e| e.to_string())?;
+        
+        info!(server_id = server.id, "Disabled operation MCP and all assistant skills");
+    }
+    
+    Ok(())
+}
+
+/// 检查关闭助手级操作 MCP 会影响的 Skills
+#[tauri::command]
+#[instrument(level = "debug", skip(app_handle), fields(assistant_id))]
+pub async fn check_disable_assistant_operation_mcp(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+) -> Result<usize, String> {
+    use crate::db::skill_db::SkillDatabase;
+    
+    let skill_db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let enabled_skills = skill_db.get_enabled_skill_configs(assistant_id).map_err(|e| e.to_string())?;
+    
+    Ok(enabled_skills.len())
+}
+
+/// 关闭助手级操作 MCP 并同时关闭该助手的 Skills
+#[tauri::command]
+#[instrument(level = "debug", skip(app_handle), fields(assistant_id))]
+pub async fn disable_assistant_operation_mcp_with_skills(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+) -> Result<(), String> {
+    use crate::db::assistant_db::AssistantDatabase;
+    use crate::db::skill_db::SkillDatabase;
+    
+    let db = open_db(&app_handle)?;
+    
+    // 获取操作 MCP 服务器
+    let operation_mcp = get_operation_mcp_server(&db)?;
+    
+    if let Some(server) = operation_mcp {
+        // 1. 关闭该助手的所有 Skills
+        let skill_db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+        let enabled_skills = skill_db.get_enabled_skill_configs(assistant_id).map_err(|e| e.to_string())?;
+        for skill_config in enabled_skills {
+            skill_db.update_skill_config_enabled(skill_config.id, false).map_err(|e| e.to_string())?;
+        }
+        
+        // 2. 关闭助手级 MCP 配置
+        let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+        assistant_db.upsert_assistant_mcp_config(assistant_id, server.id, false)
+            .map_err(|e| e.to_string())?;
+        
+        info!(assistant_id, server_id = server.id, "Disabled assistant operation MCP and skills");
+    }
+    
+    Ok(())
+}

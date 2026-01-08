@@ -26,6 +26,7 @@ import {
 
 import { MCPServer, MCPServerTool, MCPServerResource, MCPServerPrompt, MCPServerRequest } from "../../data/MCP";
 import { MCPTemplate } from "../../data/MCPTemplates";
+import { useSkillsMcpValidation, DisableOperationMcpCheckResult } from "../../hooks/useSkillsMcpValidation";
 
 const MCPConfig: React.FC = () => {
     const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
@@ -54,6 +55,14 @@ const MCPConfig: React.FC = () => {
 
     // Tool expansion states
     const [expandedTools, setExpandedTools] = useState<Set<number>>(new Set());
+
+    // Skills/MCP 联动校验
+    const { checkDisableOperationMcp, disableOperationMcpWithSkills, isOperationMcp } = useSkillsMcpValidation();
+
+    // 关闭操作 MCP 确认对话框
+    const [disableOperationMcpConfirmOpen, setDisableOperationMcpConfirmOpen] = useState(false);
+    const [disableOperationMcpCheckResult, setDisableOperationMcpCheckResult] = useState<DisableOperationMcpCheckResult | null>(null);
+    const [pendingServerToggle, setPendingServerToggle] = useState<{ serverId: number; isEnabled: boolean } | null>(null);
 
     // Toggle tool expansion
     const toggleToolExpansion = useCallback((toolId: number) => {
@@ -139,6 +148,25 @@ const MCPConfig: React.FC = () => {
 
     // 切换服务器启用状态
     const handleToggleServer = useCallback(async (serverId: number, isEnabled: boolean) => {
+        // 如果是关闭操作 MCP，先检查是否有 Skills 依赖
+        if (!isEnabled) {
+            const server = mcpServers.find(s => s.id === serverId);
+            if (server && isOperationMcp(server.command)) {
+                try {
+                    const checkResult = await checkDisableOperationMcp();
+                    if (checkResult.affected_assistants.length > 0) {
+                        // 有助手的 Skills 依赖操作 MCP，需要确认
+                        setDisableOperationMcpCheckResult(checkResult);
+                        setPendingServerToggle({ serverId, isEnabled });
+                        setDisableOperationMcpConfirmOpen(true);
+                        return;
+                    }
+                } catch (e) {
+                    console.error('检查操作 MCP 依赖失败:', e);
+                }
+            }
+        }
+
         try {
             await invoke('toggle_mcp_server', { id: serverId, isEnabled });
             setMcpServers(prev => prev.map(server =>
@@ -151,7 +179,32 @@ const MCPConfig: React.FC = () => {
         } catch (e) {
             toast.error('切换服务器状态失败: ' + e);
         }
-    }, [selectedServer]);
+    }, [selectedServer, mcpServers, isOperationMcp, checkDisableOperationMcp]);
+
+    // 确认关闭操作 MCP 并同时关闭所有 Skills
+    const handleConfirmDisableOperationMcp = useCallback(async () => {
+        if (!pendingServerToggle) return;
+
+        try {
+            await disableOperationMcpWithSkills();
+            
+            // 更新 UI 状态
+            setMcpServers(prev => prev.map(server =>
+                server.id === pendingServerToggle.serverId ? { ...server, is_enabled: false } : server
+            ));
+            if (selectedServer && selectedServer.id === pendingServerToggle.serverId) {
+                setSelectedServer(prev => prev ? { ...prev, is_enabled: false } : null);
+            }
+            
+            toast.success('已关闭操作工具集和相关Skills');
+        } catch (e) {
+            toast.error('关闭失败: ' + e);
+        } finally {
+            setDisableOperationMcpConfirmOpen(false);
+            setDisableOperationMcpCheckResult(null);
+            setPendingServerToggle(null);
+        }
+    }, [pendingServerToggle, selectedServer, disableOperationMcpWithSkills]);
 
     // 打开新增服务器对话框
     const openAddServerDialog = useCallback((initialServerType?: string, initialConfig?: Partial<MCPServerRequest>) => {
@@ -726,6 +779,27 @@ const MCPConfig: React.FC = () => {
                 confirmText="确定要删除这个MCP服务器吗？删除后相关配置将无法恢复。"
                 onConfirm={confirmDeleteServer}
                 onCancel={() => setConfirmDialogOpen(false)}
+            />
+
+            {/* 关闭操作 MCP 确认对话框 */}
+            <ConfirmDialog
+                isOpen={disableOperationMcpConfirmOpen}
+                title="确认关闭操作工具集"
+                confirmText={
+                    disableOperationMcpCheckResult
+                        ? `关闭操作工具集将同时禁用以下助手的Skills：\n${
+                            disableOperationMcpCheckResult.affected_assistants
+                                .map(a => `• ${a.assistant_name}（${a.enabled_skills_count}个Skills）`)
+                                .join('\n')
+                          }\n\n确定要继续吗？`
+                        : "关闭操作工具集将同时禁用相关的Skills。确定要继续吗？"
+                }
+                onConfirm={handleConfirmDisableOperationMcp}
+                onCancel={() => {
+                    setDisableOperationMcpConfirmOpen(false);
+                    setDisableOperationMcpCheckResult(null);
+                    setPendingServerToggle(null);
+                }}
             />
         </>
     );

@@ -6,6 +6,7 @@ import { Badge } from "../ui/badge";
 import { Folder, Sparkles, RefreshCw, FolderOpen, FileText } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { toast } from 'sonner';
+import ConfirmDialog from "../ConfirmDialog";
 
 import {
     ConfigPageLayout,
@@ -23,6 +24,7 @@ import {
 } from "../../data/Skill";
 
 import SkillActionDropdown from "./SkillActionDropdown";
+import { useSkillsMcpValidation } from "../../hooks/useSkillsMcpValidation";
 
 interface SkillsManagerProps {
     /** Optional: if provided, shows skills config for an assistant */
@@ -38,6 +40,12 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
 
     // Assistant skill configs (only used when assistantId is provided)
     const [assistantSkills, setAssistantSkills] = useState<SkillWithConfig[]>([]);
+
+    // 操作 MCP 启用确认对话框
+    const [mcpEnableConfirmOpen, setMcpEnableConfirmOpen] = useState(false);
+    const [pendingSkillEnable, setPendingSkillEnable] = useState<{ skill: ScannedSkill; enabled: boolean } | null>(null);
+
+    const { checkOperationMcpForSkills, enableOperationMcpAndSkill, isOperationMcpNotEnabledError } = useSkillsMcpValidation();
 
     // Scan all skills
     const scanSkills = useCallback(async () => {
@@ -108,8 +116,27 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
     const handleToggleSkill = useCallback(async (skill: ScannedSkill, enabled: boolean) => {
         if (!assistantId) return;
 
+        // 启用 Skill 前先检查「操作」工具集状态，未开启则先询问用户
+        if (enabled) {
+            try {
+                const checkResult = await checkOperationMcpForSkills(assistantId);
+                if (!checkResult.operation_mcp_id) {
+                    toast.error('未找到「操作」工具集，请先初始化内置工具');
+                    return;
+                }
+                if (!checkResult.global_enabled || !checkResult.assistant_enabled) {
+                    setPendingSkillEnable({ skill, enabled });
+                    setMcpEnableConfirmOpen(true);
+                    return;
+                }
+            } catch (e) {
+                toast.error('检查操作工具集状态失败: ' + e);
+                return;
+            }
+        }
+
         try {
-            await invoke('update_assistant_skill_config', {
+            await invoke<number>('update_assistant_skill_config', {
                 assistantId,
                 skillIdentifier: skill.identifier,
                 isEnabled: enabled,
@@ -120,10 +147,43 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
             await loadAssistantSkills();
 
             toast.success(enabled ? 'Skill已启用' : 'Skill已禁用');
-        } catch (e) {
+        } catch (e: unknown) {
+            if (isOperationMcpNotEnabledError(e)) {
+                setPendingSkillEnable({ skill, enabled });
+                setMcpEnableConfirmOpen(true);
+                return;
+            }
             toast.error('更新Skill配置失败: ' + e);
         }
-    }, [assistantId, loadAssistantSkills]);
+    }, [assistantId, checkOperationMcpForSkills, loadAssistantSkills, isOperationMcpNotEnabledError]);
+
+    // 确认启用操作 MCP 并启用 Skill
+    const handleConfirmEnableMcpAndSkill = useCallback(async () => {
+        if (!assistantId || !pendingSkillEnable) return;
+        if (!pendingSkillEnable.enabled) {
+            setMcpEnableConfirmOpen(false);
+            setPendingSkillEnable(null);
+            return;
+        }
+
+        try {
+            await enableOperationMcpAndSkill(
+                assistantId,
+                pendingSkillEnable.skill.identifier,
+                0
+            );
+            
+            // Refresh configs
+            await loadAssistantSkills();
+            
+            toast.success('已启用操作工具集和Skill');
+        } catch (e) {
+            toast.error('启用失败: ' + e);
+        } finally {
+            setMcpEnableConfirmOpen(false);
+            setPendingSkillEnable(null);
+        }
+    }, [assistantId, pendingSkillEnable, enableOperationMcpAndSkill, loadAssistantSkills]);
 
     // Open skills folder
     const handleOpenSkillsFolder = useCallback(async () => {
@@ -402,14 +462,28 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
     }
 
     return (
-        <ConfigPageLayout
-            sidebar={sidebar}
-            content={content}
-            selectOptions={selectOptions}
-            selectedOptionId={selectedSkill?.identifier}
-            onSelectOption={handleSelectFromDropdown}
-            selectPlaceholder="选择Skill"
-        />
+        <>
+            <ConfigPageLayout
+                sidebar={sidebar}
+                content={content}
+                selectOptions={selectOptions}
+                selectedOptionId={selectedSkill?.identifier}
+                onSelectOption={handleSelectFromDropdown}
+                selectPlaceholder="选择Skill"
+            />
+
+            {/* 操作 MCP 启用确认对话框 */}
+            <ConfirmDialog
+                isOpen={mcpEnableConfirmOpen}
+                title="需要启用操作工具集"
+                confirmText="启用Skill需要开启「操作」工具集。是否同时启用操作工具集和该Skill？"
+                onConfirm={handleConfirmEnableMcpAndSkill}
+                onCancel={() => {
+                    setMcpEnableConfirmOpen(false);
+                    setPendingSkillEnable(null);
+                }}
+            />
+        </>
     );
 };
 

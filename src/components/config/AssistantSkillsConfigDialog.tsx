@@ -18,6 +18,8 @@ import {
     groupSkillsBySource,
     SkillSourceType
 } from "../../data/Skill";
+import ConfirmDialog from "../ConfirmDialog";
+import { useSkillsMcpValidation } from "../../hooks/useSkillsMcpValidation";
 
 interface AssistantSkillsConfigDialogProps {
     assistantId: number;
@@ -35,6 +37,10 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
     const [allSkills, setAllSkills] = useState<ScannedSkill[]>([]);
     const [assistantSkills, setAssistantSkills] = useState<SkillWithConfig[]>([]);
     const [isScanning, setIsScanning] = useState(false);
+    const [mcpEnableConfirmOpen, setMcpEnableConfirmOpen] = useState(false);
+    const [pendingSkillEnable, setPendingSkillEnable] = useState<{ skill: ScannedSkill; enabled: boolean } | null>(null);
+
+    const { checkOperationMcpForSkills, enableOperationMcpAndSkill, isOperationMcpNotEnabledError } = useSkillsMcpValidation();
 
     // 获取所有可用的 skills 和助手配置
     const fetchSkillsData = useCallback(async () => {
@@ -71,6 +77,26 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
 
     // 切换 skill 启用状态
     const handleToggleSkill = useCallback(async (skill: ScannedSkill, enabled: boolean) => {
+        // 启用 Skill 前先检查「操作」工具集状态
+        if (enabled) {
+            try {
+                const checkResult = await checkOperationMcpForSkills(assistantId);
+                if (!checkResult.operation_mcp_id) {
+                    toast.error('未找到「操作」工具集，请先初始化内置工具');
+                    return;
+                }
+                if (!checkResult.global_enabled || !checkResult.assistant_enabled) {
+                    setPendingSkillEnable({ skill, enabled });
+                    setMcpEnableConfirmOpen(true);
+                    return;
+                }
+            } catch (error) {
+                console.error('Failed to check operation MCP status:', error);
+                toast.error('检查操作工具集状态失败: ' + error);
+                return;
+            }
+        }
+
         try {
             await invoke('update_assistant_skill_config', {
                 assistantId,
@@ -87,9 +113,41 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
             onConfigChange?.();
         } catch (error) {
             console.error('Failed to update skill config:', error);
+            if (isOperationMcpNotEnabledError(error)) {
+                setPendingSkillEnable({ skill, enabled });
+                setMcpEnableConfirmOpen(true);
+                return;
+            }
             toast.error('更新Skill配置失败: ' + error);
         }
-    }, [assistantId, onConfigChange]);
+    }, [assistantId, checkOperationMcpForSkills, isOperationMcpNotEnabledError, onConfigChange]);
+
+    const handleConfirmEnableMcpAndSkill = useCallback(async () => {
+        if (!pendingSkillEnable || !pendingSkillEnable.enabled) {
+            setMcpEnableConfirmOpen(false);
+            setPendingSkillEnable(null);
+            return;
+        }
+
+        try {
+            await enableOperationMcpAndSkill(
+                assistantId,
+                pendingSkillEnable.skill.identifier,
+                0
+            );
+
+            const configs = await invoke<SkillWithConfig[]>('get_assistant_skills', { assistantId });
+            setAssistantSkills(configs);
+
+            toast.success('已启用操作工具集和Skill');
+            onConfigChange?.();
+        } catch (error) {
+            toast.error('启用失败: ' + error);
+        } finally {
+            setMcpEnableConfirmOpen(false);
+            setPendingSkillEnable(null);
+        }
+    }, [assistantId, enableOperationMcpAndSkill, onConfigChange, pendingSkillEnable]);
 
     // 按来源分组
     const groupedSkills = useMemo(() => {
@@ -102,137 +160,151 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
     const enabledSkillsCount = assistantSkills.filter(s => s.config.is_enabled && s.exists).length;
 
     return (
-        <Dialog open={isOpen} onOpenChange={onClose}>
-            <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
-                <DialogHeader>
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <DialogTitle className="flex items-center gap-2">
-                                <Sparkles className="h-5 w-5" />
-                                Skills配置
-                            </DialogTitle>
-                            <DialogDescription>
-                                为该助手配置可用的Skills ({enabledSkillsCount}个已启用)
-                            </DialogDescription>
+        <>
+            <Dialog open={isOpen} onOpenChange={onClose}>
+                <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+                    <DialogHeader>
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <DialogTitle className="flex items-center gap-2">
+                                    <Sparkles className="h-5 w-5" />
+                                    Skills配置
+                                </DialogTitle>
+                                <DialogDescription>
+                                    为该助手配置可用的Skills ({enabledSkillsCount}个已启用)
+                                </DialogDescription>
+                            </div>
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={fetchSkillsData}
+                                disabled={isScanning}
+                            >
+                                <RefreshCw className={`h-4 w-4 mr-1 ${isScanning ? 'animate-spin' : ''}`} />
+                                刷新
+                            </Button>
                         </div>
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={fetchSkillsData}
-                            disabled={isScanning}
-                        >
-                            <RefreshCw className={`h-4 w-4 mr-1 ${isScanning ? 'animate-spin' : ''}`} />
-                            刷新
-                        </Button>
+                    </DialogHeader>
+
+                    <div className="flex-1 overflow-auto">
+                        {allSkills.length === 0 ? (
+                            <div className="text-center py-8">
+                                <Sparkles className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+                                <p className="text-sm text-muted-foreground mb-2">暂无可用的Skills</p>
+                                <p className="text-xs text-muted-foreground">请先在Skills配置中扫描或安装Skills</p>
+                            </div>
+                        ) : (
+                            <div className="space-y-4">
+                                {sourceOrder.map(sourceType => {
+                                    const sourceSkills = groupedSkills.get(sourceType);
+                                    if (!sourceSkills || sourceSkills.length === 0) return null;
+
+                                    return (
+                                        <div key={sourceType} className="space-y-2">
+                                            <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider px-1">
+                                                {sourceSkills[0].source_display_name}
+                                            </div>
+                                            {sourceSkills.map((skill) => {
+                                                const enabled = isSkillEnabled(skill.identifier);
+
+                                                return (
+                                                    <div
+                                                        key={skill.identifier}
+                                                        className={`flex items-center justify-between p-3 rounded-lg border transition-colors ${
+                                                            enabled
+                                                                ? 'border-border bg-background'
+                                                                : 'border-border bg-muted/30'
+                                                        }`}
+                                                    >
+                                                        <div className="flex-1 min-w-0">
+                                                            <div className="font-medium text-foreground truncate">
+                                                                {skill.display_name}
+                                                            </div>
+                                                            {skill.metadata.description && (
+                                                                <div className="text-sm text-muted-foreground truncate">
+                                                                    {skill.metadata.description}
+                                                                </div>
+                                                            )}
+                                                            {skill.metadata.tags.length > 0 && (
+                                                                <div className="flex flex-wrap gap-1 mt-1">
+                                                                    {skill.metadata.tags.slice(0, 3).map((tag, index) => (
+                                                                        <Badge key={index} variant="outline" className="text-xs">
+                                                                            {tag}
+                                                                        </Badge>
+                                                                    ))}
+                                                                    {skill.metadata.tags.length > 3 && (
+                                                                        <Badge variant="outline" className="text-xs">
+                                                                            +{skill.metadata.tags.length - 3}
+                                                                        </Badge>
+                                                                    )}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                        <Switch
+                                                            checked={enabled}
+                                                            onCheckedChange={(checked) => handleToggleSkill(skill, checked)}
+                                                            className="ml-3 flex-shrink-0"
+                                                        />
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    );
+                                })}
+
+                                {/* Custom sources */}
+                                {Array.from(groupedSkills.entries())
+                                    .filter(([sourceType]) => !sourceOrder.includes(sourceType))
+                                    .map(([sourceType, sourceSkills]) => (
+                                        <div key={sourceType} className="space-y-2">
+                                            <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider px-1">
+                                                {sourceSkills[0].source_display_name}
+                                            </div>
+                                            {sourceSkills.map((skill) => {
+                                                const enabled = isSkillEnabled(skill.identifier);
+
+                                                return (
+                                                    <div
+                                                        key={skill.identifier}
+                                                        className={`flex items-center justify-between p-3 rounded-lg border transition-colors ${
+                                                            enabled
+                                                                ? 'border-border bg-background'
+                                                                : 'border-border bg-muted/30'
+                                                        }`}
+                                                    >
+                                                        <div className="flex-1 min-w-0">
+                                                            <div className="font-medium text-foreground truncate">
+                                                                {skill.display_name}
+                                                            </div>
+                                                        </div>
+                                                        <Switch
+                                                            checked={enabled}
+                                                            onCheckedChange={(checked) => handleToggleSkill(skill, checked)}
+                                                            className="ml-3 flex-shrink-0"
+                                                        />
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    ))}
+                            </div>
+                        )}
                     </div>
-                </DialogHeader>
+                </DialogContent>
+            </Dialog>
 
-                <div className="flex-1 overflow-auto">
-                    {allSkills.length === 0 ? (
-                        <div className="text-center py-8">
-                            <Sparkles className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-                            <p className="text-sm text-muted-foreground mb-2">暂无可用的Skills</p>
-                            <p className="text-xs text-muted-foreground">请先在Skills配置中扫描或安装Skills</p>
-                        </div>
-                    ) : (
-                        <div className="space-y-4">
-                            {sourceOrder.map(sourceType => {
-                                const sourceSkills = groupedSkills.get(sourceType);
-                                if (!sourceSkills || sourceSkills.length === 0) return null;
-
-                                return (
-                                    <div key={sourceType} className="space-y-2">
-                                        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider px-1">
-                                            {sourceSkills[0].source_display_name}
-                                        </div>
-                                        {sourceSkills.map((skill) => {
-                                            const enabled = isSkillEnabled(skill.identifier);
-
-                                            return (
-                                                <div
-                                                    key={skill.identifier}
-                                                    className={`flex items-center justify-between p-3 rounded-lg border transition-colors ${
-                                                        enabled
-                                                            ? 'border-border bg-background'
-                                                            : 'border-border bg-muted/30'
-                                                    }`}
-                                                >
-                                                    <div className="flex-1 min-w-0">
-                                                        <div className="font-medium text-foreground truncate">
-                                                            {skill.display_name}
-                                                        </div>
-                                                        {skill.metadata.description && (
-                                                            <div className="text-sm text-muted-foreground truncate">
-                                                                {skill.metadata.description}
-                                                            </div>
-                                                        )}
-                                                        {skill.metadata.tags.length > 0 && (
-                                                            <div className="flex flex-wrap gap-1 mt-1">
-                                                                {skill.metadata.tags.slice(0, 3).map((tag, index) => (
-                                                                    <Badge key={index} variant="outline" className="text-xs">
-                                                                        {tag}
-                                                                    </Badge>
-                                                                ))}
-                                                                {skill.metadata.tags.length > 3 && (
-                                                                    <Badge variant="outline" className="text-xs">
-                                                                        +{skill.metadata.tags.length - 3}
-                                                                    </Badge>
-                                                                )}
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                    <Switch
-                                                        checked={enabled}
-                                                        onCheckedChange={(checked) => handleToggleSkill(skill, checked)}
-                                                        className="ml-3 flex-shrink-0"
-                                                    />
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                );
-                            })}
-
-                            {/* Custom sources */}
-                            {Array.from(groupedSkills.entries())
-                                .filter(([sourceType]) => !sourceOrder.includes(sourceType))
-                                .map(([sourceType, sourceSkills]) => (
-                                    <div key={sourceType} className="space-y-2">
-                                        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider px-1">
-                                            {sourceSkills[0].source_display_name}
-                                        </div>
-                                        {sourceSkills.map((skill) => {
-                                            const enabled = isSkillEnabled(skill.identifier);
-
-                                            return (
-                                                <div
-                                                    key={skill.identifier}
-                                                    className={`flex items-center justify-between p-3 rounded-lg border transition-colors ${
-                                                        enabled
-                                                            ? 'border-border bg-background'
-                                                            : 'border-border bg-muted/30'
-                                                    }`}
-                                                >
-                                                    <div className="flex-1 min-w-0">
-                                                        <div className="font-medium text-foreground truncate">
-                                                            {skill.display_name}
-                                                        </div>
-                                                    </div>
-                                                    <Switch
-                                                        checked={enabled}
-                                                        onCheckedChange={(checked) => handleToggleSkill(skill, checked)}
-                                                        className="ml-3 flex-shrink-0"
-                                                    />
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                ))}
-                        </div>
-                    )}
-                </div>
-            </DialogContent>
-        </Dialog>
+            {/* 操作 MCP 启用确认对话框 */}
+            <ConfirmDialog
+                isOpen={mcpEnableConfirmOpen}
+                title="需要启用操作工具集"
+                confirmText="启用Skill需要开启「操作」工具集。是否同时启用操作工具集和该Skill？"
+                onConfirm={handleConfirmEnableMcpAndSkill}
+                onCancel={() => {
+                    setMcpEnableConfirmOpen(false);
+                    setPendingSkillEnable(null);
+                }}
+            />
+        </>
     );
 };
 

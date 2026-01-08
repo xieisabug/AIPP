@@ -161,6 +161,38 @@ pub async fn get_enabled_assistant_skills_internal(
     Ok(result)
 }
 
+/// 检查操作 MCP 是否已启用（内部函数）
+fn check_operation_mcp_enabled(app_handle: &tauri::AppHandle, assistant_id: i64) -> Result<bool, String> {
+    use crate::db::mcp_db::MCPDatabase;
+    use crate::db::assistant_db::AssistantDatabase;
+    use crate::mcp::registry_api::OPERATION_MCP_COMMAND;
+    
+    let mcp_db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let servers = mcp_db.get_mcp_servers().map_err(|e| e.to_string())?;
+    
+    // 查找操作 MCP
+    let operation_mcp = servers.into_iter().find(|s| s.command.as_deref() == Some(OPERATION_MCP_COMMAND));
+    
+    if let Some(server) = operation_mcp {
+        // 检查全局是否启用
+        if !server.is_enabled {
+            return Ok(false);
+        }
+        
+        // 检查助手级是否启用
+        let assistant_db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
+        let mcp_configs = assistant_db.get_assistant_mcp_configs(assistant_id).map_err(|e| e.to_string())?;
+        let assistant_enabled = mcp_configs.iter()
+            .find(|c| c.mcp_server_id == server.id)
+            .map(|c| c.is_enabled)
+            .unwrap_or(false);
+        
+        Ok(assistant_enabled)
+    } else {
+        Ok(false)
+    }
+}
+
 /// Update skill config for an assistant
 #[tauri::command]
 pub async fn update_assistant_skill_config(
@@ -171,6 +203,20 @@ pub async fn update_assistant_skill_config(
     priority: i32,
 ) -> Result<i64, String> {
     let db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    
+    // 后端校验：如果要启用 skill，检查当前是否有启用的 skills
+    if is_enabled {
+        let current_enabled = db.get_enabled_skill_configs(assistant_id).map_err(|e| e.to_string())?;
+        
+        // 如果当前没有启用的 skills（即从 0 到 1），需要检查操作 MCP
+        if current_enabled.is_empty() {
+            let operation_mcp_enabled = check_operation_mcp_enabled(&app_handle, assistant_id)?;
+            if !operation_mcp_enabled {
+                return Err("OPERATION_MCP_NOT_ENABLED".to_string());
+            }
+        }
+    }
+    
     let id = db
         .upsert_assistant_skill_config(assistant_id, &skill_identifier, is_enabled, priority)
         .map_err(|e| e.to_string())?;
@@ -219,6 +265,21 @@ pub async fn bulk_update_assistant_skills(
     configs: Vec<(String, bool, i32)>, // (skill_identifier, is_enabled, priority)
 ) -> Result<(), String> {
     let db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    
+    // 后端校验：如果新配置中有启用的 skills，检查当前是否有启用的 skills
+    let has_enabled_in_new = configs.iter().any(|(_, enabled, _)| *enabled);
+    if has_enabled_in_new {
+        let current_enabled = db.get_enabled_skill_configs(assistant_id).map_err(|e| e.to_string())?;
+        
+        // 如果当前没有启用的 skills（即从 0 到 n），需要检查操作 MCP
+        if current_enabled.is_empty() {
+            let operation_mcp_enabled = check_operation_mcp_enabled(&app_handle, assistant_id)?;
+            if !operation_mcp_enabled {
+                return Err("OPERATION_MCP_NOT_ENABLED".to_string());
+            }
+        }
+    }
+    
     db.bulk_update_assistant_skills(assistant_id, &configs)
         .map_err(|e| e.to_string())?;
 

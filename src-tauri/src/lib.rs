@@ -96,6 +96,10 @@ use crate::mcp::registry_api::{
     get_mcp_server_prompts, get_mcp_server_resources, get_mcp_server_tools, get_mcp_servers,
     refresh_mcp_server_capabilities, test_mcp_connection, toggle_mcp_server, update_mcp_server,
     update_mcp_server_prompt, update_mcp_server_tool,
+    // Skills 与操作 MCP 联动校验 API
+    check_operation_mcp_for_skills, enable_operation_mcp_and_skill, enable_operation_mcp_and_skills,
+    check_disable_operation_mcp, disable_operation_mcp_with_skills,
+    check_disable_assistant_operation_mcp, disable_assistant_operation_mcp_with_skills,
 };
 use crate::api::skill_api::{
     bulk_update_assistant_skills, cleanup_orphaned_skill_configs,
@@ -498,6 +502,14 @@ pub fn run() {
             update_mcp_server_prompt,
             test_mcp_connection,
             refresh_mcp_server_capabilities,
+            // Skills 与操作 MCP 联动校验 API
+            check_operation_mcp_for_skills,
+            enable_operation_mcp_and_skill,
+            enable_operation_mcp_and_skills,
+            check_disable_operation_mcp,
+            disable_operation_mcp_with_skills,
+            check_disable_assistant_operation_mcp,
+            disable_assistant_operation_mcp_with_skills,
             get_assistant_mcp_servers_with_tools,
             update_assistant_mcp_config,
             update_assistant_mcp_tool_config,

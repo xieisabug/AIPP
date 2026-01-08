@@ -24,6 +24,8 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
+import ConfirmDialog from "../ConfirmDialog";
+import { useSkillsMcpValidation, OPERATION_MCP_COMMAND } from "../../hooks/useSkillsMcpValidation";
 
 interface AssistantMCPConfigDialogProps {
     assistantId: number;
@@ -36,6 +38,7 @@ interface MCPServerInfo {
     id: number;
     name: string;
     is_enabled: boolean;
+    command?: string; // 用于判断是否为操作 MCP
 }
 
 interface MCPToolInfo {
@@ -56,6 +59,14 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
     const [serverTools, setServerTools] = useState<Map<number, MCPToolInfo[]>>(new Map());
     const [useNativeToolCall, setUseNativeToolCall] = useState<boolean>(false);
     // loadingTools 不再需要，因为工具数据在初始化时一次性加载
+
+    // Skills/MCP 联动校验
+    const { checkDisableAssistantOperationMcp, disableAssistantOperationMcpWithSkills } = useSkillsMcpValidation();
+
+    // 关闭操作 MCP 确认对话框
+    const [disableOperationMcpConfirmOpen, setDisableOperationMcpConfirmOpen] = useState(false);
+    const [affectedSkillsCount, setAffectedSkillsCount] = useState(0);
+    const [pendingServerToggle, setPendingServerToggle] = useState<{ serverId: number; isEnabled: boolean } | null>(null);
 
     // 获取可用的MCP服务器列表
     const fetchAvailableServers = useCallback(async () => {
@@ -103,6 +114,25 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
 
     // 更新服务器启用状态
     const handleServerToggle = useCallback(async (serverId: number, isEnabled: boolean) => {
+        // 如果是关闭操作 MCP，先检查是否有 Skills 依赖
+        if (!isEnabled) {
+            const server = availableServers.find(s => s.id === serverId);
+            if (server && server.command === OPERATION_MCP_COMMAND) {
+                try {
+                    const skillsCount = await checkDisableAssistantOperationMcp(assistantId);
+                    if (skillsCount > 0) {
+                        // 有 Skills 依赖操作 MCP，需要确认
+                        setAffectedSkillsCount(skillsCount);
+                        setPendingServerToggle({ serverId, isEnabled });
+                        setDisableOperationMcpConfirmOpen(true);
+                        return;
+                    }
+                } catch (e) {
+                    console.error('检查操作 MCP 依赖失败:', e);
+                }
+            }
+        }
+
         try {
             await invoke('update_assistant_mcp_config', {
                 assistantId,
@@ -122,7 +152,32 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
             console.error('Failed to update server config:', error);
             toast.error('更新服务器配置失败: ' + error);
         }
-    }, [assistantId, onConfigChange]);
+    }, [assistantId, availableServers, checkDisableAssistantOperationMcp, onConfigChange]);
+
+    // 确认关闭操作 MCP 并同时关闭所有 Skills
+    const handleConfirmDisableAssistantOperationMcp = useCallback(async () => {
+        if (!pendingServerToggle) return;
+
+        try {
+            await disableAssistantOperationMcpWithSkills(assistantId);
+            
+            // 更新 UI 状态
+            setAvailableServers(prev =>
+                prev.map(server =>
+                    server.id === pendingServerToggle.serverId ? { ...server, is_enabled: false } : server
+                )
+            );
+            
+            toast.success('已关闭操作工具集和相关Skills');
+            onConfigChange?.();
+        } catch (e) {
+            toast.error('关闭失败: ' + e);
+        } finally {
+            setDisableOperationMcpConfirmOpen(false);
+            setAffectedSkillsCount(0);
+            setPendingServerToggle(null);
+        }
+    }, [assistantId, pendingServerToggle, disableAssistantOperationMcpWithSkills, onConfigChange]);
 
     // 更新工具配置
     const handleToolConfigChange = useCallback(async (
@@ -241,6 +296,7 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
         .filter(tool => tool.is_enabled).length;
 
     return (
+        <>
         <Dialog open={isOpen} onOpenChange={onClose}>
             <DialogContent className="max-w-4xl max-h-[80vh] overflow-hidden flex flex-col">
                 <DialogHeader>
@@ -432,6 +488,20 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
                 </div>
             </DialogContent>
         </Dialog>
+
+        {/* 关闭操作 MCP 确认对话框 */}
+        <ConfirmDialog
+            isOpen={disableOperationMcpConfirmOpen}
+            title="确认关闭操作工具集"
+            confirmText={`关闭操作工具集将同时禁用该助手的 ${affectedSkillsCount} 个Skills。确定要继续吗？`}
+            onConfirm={handleConfirmDisableAssistantOperationMcp}
+            onCancel={() => {
+                setDisableOperationMcpConfirmOpen(false);
+                setAffectedSkillsCount(0);
+                setPendingServerToggle(null);
+            }}
+        />
+    </>
     );
 };
 
