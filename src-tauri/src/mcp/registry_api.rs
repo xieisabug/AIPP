@@ -231,6 +231,7 @@ pub async fn add_mcp_server(
             request.is_long_running,
             request.is_enabled,
             request.is_builtin.unwrap_or(false),
+            true, // is_deletable - 通过 API 添加的默认可删除
         )
         .map_err(|e| e.to_string())?;
 
@@ -269,6 +270,13 @@ pub async fn update_mcp_server(
 #[instrument(level = "debug", skip(app_handle), fields(id))]
 pub async fn delete_mcp_server(app_handle: tauri::AppHandle, id: i64) -> Result<(), String> {
     let db = open_db(&app_handle)?;
+    
+    // 检查是否可删除（系统初始化的内置工具集不可删除）
+    let server = db.get_mcp_server(id).map_err(|e| e.to_string())?;
+    if !server.is_deletable {
+        return Err("系统内置工具集不可删除".to_string());
+    }
+    
     db.delete_mcp_server(id).map_err(|e| e.to_string())?;
     Ok(())
 }

@@ -9,7 +9,8 @@ pub mod templates;
 pub use operation::{OperationHandler, OperationState};
 pub use search::SearchHandler;
 pub use templates::{
-    add_or_update_aipp_builtin_server, get_builtin_tools_for_command, list_aipp_builtin_templates,
+    add_or_update_aipp_builtin_server, get_builtin_tools_for_command, init_builtin_mcp_servers,
+    list_aipp_builtin_templates,
 };
 
 pub fn is_builtin_command(command: &str) -> bool {

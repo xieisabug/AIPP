@@ -1,5 +1,6 @@
 use crate::db::mcp_db::MCPDatabase;
 use anyhow::{Context, Result};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tracing::{error, instrument};
@@ -382,6 +383,61 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
     }
 }
 
+/// 初始化所有内置工具集到数据库（如果不存在）
+/// 此函数应在应用启动时调用，确保内置工具集始终存在
+#[instrument(skip(app_handle))]
+pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
+    use tracing::info;
+    
+    let db = MCPDatabase::new(app_handle).context("Create MCPDatabase failed")?;
+    let templates = builtin_templates();
+    
+    for tpl in templates {
+        // 检查是否已存在该内置工具集（通过 command 匹配）
+        let exists = db.conn
+            .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1 AND is_deletable = 0")?
+            .query_row([&tpl.command], |row| row.get::<_, i64>(0))
+            .optional()?;
+        
+        if exists.is_none() {
+            info!(template_id = %tpl.id, name = %tpl.name, "Initializing builtin MCP server");
+            
+            // 插入内置工具集（系统初始化的不可删除）
+            let server_id = db
+                .upsert_mcp_server_with_builtin(
+                    &tpl.name,              // name
+                    Some(&tpl.description), // description
+                    &tpl.transport_type,    // transport_type
+                    Some(&tpl.command),     // command
+                    None,                   // environment_variables (用户可以后续配置)
+                    None,                   // headers
+                    None,                   // url (builtins use stdio)
+                    Some(20000),            // timeout
+                    false,                  // is_long_running
+                    true,                   // is_enabled
+                    true,                   // is_builtin
+                    false,                  // is_deletable - 系统初始化的不可删除
+                )
+                .context("Insert builtin server failed")?;
+
+            // 注册工具
+            for tool in get_builtin_tools_for_command(&tpl.command) {
+                db.upsert_mcp_server_tool(
+                    server_id,
+                    &tool.name,
+                    Some(&tool.description),
+                    Some(&tool.input_schema.to_string()),
+                )
+                .with_context(|| format!("Insert server tool failed: {}", tool.name))?;
+            }
+            
+            info!(template_id = %tpl.id, server_id = server_id, "Builtin MCP server initialized");
+        }
+    }
+    
+    Ok(())
+}
+
 #[tauri::command]
 #[instrument]
 pub async fn list_aipp_builtin_templates() -> Result<Vec<BuiltinTemplateInfo>, String> {
@@ -423,6 +479,7 @@ pub async fn add_or_update_aipp_builtin_server(
                 false,                                             // is_long_running
                 true,                                              // is_enabled
                 true,                                              // is_builtin
+                true,                                              // is_deletable - 用户添加的可删除
             )
             .context("Upsert builtin server failed")?;
 
@@ -607,7 +664,7 @@ mod tests {
     #[test]
     fn test_all_env_vars_have_valid_field_type() {
         let templates = builtin_templates();
-        let valid_types = ["text", "select", "boolean", "number"];
+        let valid_types = ["text", "select", "boolean", "number", "textarea"];
         
         for template in templates {
             for env in template.required_envs {

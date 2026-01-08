@@ -83,8 +83,8 @@ use crate::db::llm_db::LLMDatabase;
 use crate::db::sub_task_db::SubTaskDatabase;
 use crate::db::system_db::SystemDatabase;
 use crate::mcp::builtin_mcp::{
-    add_or_update_aipp_builtin_server, execute_aipp_builtin_tool, list_aipp_builtin_templates,
-    OperationState,
+    add_or_update_aipp_builtin_server, execute_aipp_builtin_tool, init_builtin_mcp_servers,
+    list_aipp_builtin_templates, OperationState,
 };
 use crate::mcp::execution_api::{
     create_mcp_tool_call, execute_mcp_tool_call, get_mcp_tool_call,
@@ -356,7 +356,10 @@ pub fn run() {
 
             let _ = database_upgrade(&app_handle, system_db, llm_db, assistant_db, conversation_db);
 
-            // 无需启动时初始化内置服务器，改为使用模板创建
+            // 初始化内置工具集（搜索、操作），如果不存在则自动创建
+            if let Err(e) = init_builtin_mcp_servers(&app_handle) {
+                warn!(error = %e, "Failed to initialize builtin MCP servers");
+            }
 
             app.manage(initialize_state(&app_handle));
             app.manage(initialize_name_cache_state(&app_handle));

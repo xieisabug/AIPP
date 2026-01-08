@@ -38,6 +38,7 @@ fn create_mcp_test_db() -> Connection {
             is_long_running BOOLEAN NOT NULL DEFAULT 0,
             is_enabled BOOLEAN NOT NULL DEFAULT 1,
             is_builtin BOOLEAN NOT NULL DEFAULT 0,
+            is_deletable BOOLEAN NOT NULL DEFAULT 1,
             created_time DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
         [],
@@ -131,7 +132,7 @@ fn create_mcp_db() -> MCPDatabase {
 }
 
 /// 创建测试用的 MCP Server 并返回其 ID
-/// 参数顺序: name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, is_builtin
+/// 参数顺序: name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, is_builtin, is_deletable
 fn create_test_server(db: &MCPDatabase) -> i64 {
     db.upsert_mcp_server_with_builtin(
         "test-server",
@@ -145,6 +146,7 @@ fn create_test_server(db: &MCPDatabase) -> i64 {
         false,
         true,
         false,
+        true,  // is_deletable
     )
     .unwrap()
 }
@@ -165,7 +167,7 @@ fn test_mcp_server_crud() {
     let db = create_mcp_db();
 
     // Create (via upsert)
-    // 参数: name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, is_builtin
+    // 参数: name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, is_builtin, is_deletable
     let id = db
         .upsert_mcp_server_with_builtin(
             "my-server",
@@ -179,6 +181,7 @@ fn test_mcp_server_crud() {
             false,
             true,
             false,
+            true,  // is_deletable
         )
         .unwrap();
     assert!(id > 0);
@@ -250,6 +253,7 @@ fn test_mcp_server_upsert() {
             false,
             true,
             false,
+            true,  // is_deletable
         )
         .unwrap();
 
@@ -264,6 +268,7 @@ fn test_mcp_server_upsert() {
             false,
             false,
             true,
+            true,  // is_deletable
         )
         .unwrap();
 
@@ -666,12 +671,12 @@ fn test_mcp_server_empty_name() {
     let db = create_mcp_db();
 
     let id1 = db
-        .upsert_mcp_server_with_builtin("", Some("Empty Name"), "stdio", None, None, None, None, None, false, true, false)
+        .upsert_mcp_server_with_builtin("", Some("Empty Name"), "stdio", None, None, None, None, None, false, true, false, true)
         .unwrap();
 
     // 同名 upsert
     let id2 = db
-        .upsert_mcp_server_with_builtin("", Some("Updated"), "sse", None, None, None, None, None, false, false, false)
+        .upsert_mcp_server_with_builtin("", Some("Updated"), "sse", None, None, None, None, None, false, false, false, true)
         .unwrap();
 
     assert_eq!(id1, id2);
@@ -689,7 +694,7 @@ fn test_mcp_very_long_text() {
     let long_desc = "D".repeat(10000);
 
     let id = db
-        .upsert_mcp_server_with_builtin(&long_name, Some(&long_desc), "stdio", None, None, None, None, None, false, true, false)
+        .upsert_mcp_server_with_builtin(&long_name, Some(&long_desc), "stdio", None, None, None, None, None, false, true, false, true)
         .unwrap();
 
     let server = db.get_mcp_server(id).unwrap();
@@ -708,7 +713,7 @@ fn test_mcp_special_characters() {
 
     // 中文和 Emoji
     let id = db
-        .upsert_mcp_server_with_builtin("搜索服务 🔍", Some("网络搜索 ✨"), "stdio", None, None, None, None, None, false, true, false)
+        .upsert_mcp_server_with_builtin("搜索服务 🔍", Some("网络搜索 ✨"), "stdio", None, None, None, None, None, false, true, false, true)
         .unwrap();
 
     let server = db.get_mcp_server(id).unwrap();
@@ -717,7 +722,7 @@ fn test_mcp_special_characters() {
 
     // SQL 注入尝试
     let id2 = db
-        .upsert_mcp_server_with_builtin("'; DROP TABLE mcp_server; --", Some("Injection test"), "stdio", None, None, None, None, None, false, true, false)
+        .upsert_mcp_server_with_builtin("'; DROP TABLE mcp_server; --", Some("Injection test"), "stdio", None, None, None, None, None, false, true, false, true)
         .unwrap();
     assert!(id2 > 0);
 
@@ -771,6 +776,7 @@ fn test_mcp_server_transport_types() {
                 false,
                 true,
                 *transport == "builtin",
+                true, // is_deletable
             )
             .unwrap();
 

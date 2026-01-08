@@ -11,6 +11,7 @@ export interface MCPServer {
     is_long_running: boolean;
     is_enabled: boolean;
     is_builtin: boolean; // 标识是否为内置服务器
+    is_deletable: boolean; // 标识是否可删除（系统初始化的内置工具集不可删除）
     created_time: string;
 }
 

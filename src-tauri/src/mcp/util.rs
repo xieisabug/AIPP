@@ -158,6 +158,7 @@ mod tests {
             is_long_running: false,
             is_enabled: true,
             is_builtin: false,
+            is_deletable: true,
             created_time: "2024-01-01T00:00:00Z".to_string(),
         }
     }

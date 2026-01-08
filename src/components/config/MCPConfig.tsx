@@ -385,7 +385,7 @@ const MCPConfig: React.FC = () => {
             {/* 服务器基本信息 */}
             <div className="bg-background rounded-lg border border-border p-6">
                 <div className="flex items-center justify-between mb-4">
-                    <div>
+                    <div className='mr-8 mb-5'>
                         <h3 className="text-lg font-semibold text-foreground">{selectedServer.name}</h3>
                         <p className="text-sm text-muted-foreground">{selectedServer.description || '暂无描述'}</p>
                     </div>
@@ -421,18 +421,21 @@ const MCPConfig: React.FC = () => {
                             <TooltipContent>编辑MCP</TooltipContent>
                         </Tooltip>
 
-                        <Tooltip delayDuration={500}>
-                            <TooltipTrigger asChild>
-                                <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => handleDeleteServer(selectedServer.id)}
-                                >
-                                    <Trash2 className="h-4 w-4 text-destructive" />
-                                </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>删除MCP</TooltipContent>
-                        </Tooltip>
+                        {/* 系统内置工具集不显示删除按钮（is_deletable = false） */}
+                        {selectedServer.is_deletable && (
+                            <Tooltip delayDuration={500}>
+                                <TooltipTrigger asChild>
+                                    <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => handleDeleteServer(selectedServer.id)}
+                                    >
+                                        <Trash2 className="h-4 w-4 text-destructive" />
+                                    </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>删除MCP</TooltipContent>
+                            </Tooltip>
+                        )}
                     </div>
                 </div>
 
