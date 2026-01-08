@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Button } from "../ui/button";
 import { Settings, Sparkles } from "lucide-react";
 import AssistantSkillsConfigDialog from './AssistantSkillsConfigDialog';
@@ -58,6 +59,15 @@ const AssistantSkillsFieldDisplay: React.FC<AssistantSkillsFieldDisplayProps> = 
 
     useEffect(() => {
         fetchSkillsSummary();
+
+        // 监听 MCP 状态变更事件，Skills 可能被自动禁用
+        const unlistenPromise = listen('mcp_state_changed', () => {
+            fetchSkillsSummary();
+        });
+
+        return () => {
+            unlistenPromise.then(unlisten => unlisten());
+        };
     }, [fetchSkillsSummary]);
 
     const handleOpenConfig = useCallback(() => {

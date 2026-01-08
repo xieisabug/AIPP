@@ -45,7 +45,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
     const [mcpEnableConfirmOpen, setMcpEnableConfirmOpen] = useState(false);
     const [pendingSkillEnable, setPendingSkillEnable] = useState<{ skill: ScannedSkill; enabled: boolean } | null>(null);
 
-    const { checkOperationMcpForSkills, enableOperationMcpAndSkill, isOperationMcpNotEnabledError } = useSkillsMcpValidation();
+    const { checkOperationMcpForSkills, enableOperationMcpAndSkill, isAgentLoadSkillError } = useSkillsMcpValidation();
 
     // Scan all skills
     const scanSkills = useCallback(async () => {
@@ -116,21 +116,24 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
     const handleToggleSkill = useCallback(async (skill: ScannedSkill, enabled: boolean) => {
         if (!assistantId) return;
 
-        // 启用 Skill 前先检查「操作」工具集状态，未开启则先询问用户
+        // 启用 Skill 前检查 Agent load_skill 依赖
         if (enabled) {
             try {
                 const checkResult = await checkOperationMcpForSkills(assistantId);
-                if (!checkResult.operation_mcp_id) {
-                    toast.error('未找到「操作」工具集，请先初始化内置工具');
+                const hasAgent = !!checkResult.agent_mcp_id;
+                if (!hasAgent) {
+                    toast.error('未找到 Agent 工具集（aipp:agent），请先添加或初始化内置工具');
                     return;
                 }
-                if (!checkResult.global_enabled || !checkResult.assistant_enabled) {
+                const agentReady = checkResult.agent_ready ??
+                    (checkResult.agent_enabled && checkResult.agent_assistant_enabled && checkResult.agent_load_skill_enabled && checkResult.agent_load_skill_assistant_enabled);
+                if (!agentReady) {
                     setPendingSkillEnable({ skill, enabled });
                     setMcpEnableConfirmOpen(true);
                     return;
                 }
             } catch (e) {
-                toast.error('检查操作工具集状态失败: ' + e);
+                toast.error('检查 Agent 工具集状态失败: ' + e);
                 return;
             }
         }
@@ -148,14 +151,14 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
 
             toast.success(enabled ? 'Skill已启用' : 'Skill已禁用');
         } catch (e: unknown) {
-            if (isOperationMcpNotEnabledError(e)) {
+            if (isAgentLoadSkillError(e)) {
                 setPendingSkillEnable({ skill, enabled });
                 setMcpEnableConfirmOpen(true);
                 return;
             }
             toast.error('更新Skill配置失败: ' + e);
         }
-    }, [assistantId, checkOperationMcpForSkills, loadAssistantSkills, isOperationMcpNotEnabledError]);
+    }, [assistantId, checkOperationMcpForSkills, loadAssistantSkills, isAgentLoadSkillError]);
 
     // 确认启用操作 MCP 并启用 Skill
     const handleConfirmEnableMcpAndSkill = useCallback(async () => {
@@ -176,7 +179,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
             // Refresh configs
             await loadAssistantSkills();
             
-            toast.success('已启用操作工具集和Skill');
+            toast.success('已启用 Agent load_skill 并开启 Skill');
         } catch (e) {
             toast.error('启用失败: ' + e);
         } finally {
@@ -475,8 +478,8 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
             {/* 操作 MCP 启用确认对话框 */}
             <ConfirmDialog
                 isOpen={mcpEnableConfirmOpen}
-                title="需要启用操作工具集"
-                confirmText="启用Skill需要开启「操作」工具集。是否同时启用操作工具集和该Skill？"
+                title="需要启用 Agent load_skill"
+                confirmText="启用Skill需要开启 Agent 工具集的 load_skill。是否同时启用该工具并启用Skill？"
                 onConfirm={handleConfirmEnableMcpAndSkill}
                 onCancel={() => {
                     setMcpEnableConfirmOpen(false);

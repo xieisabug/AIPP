@@ -99,7 +99,9 @@ use crate::mcp::registry_api::{
     // Skills 与操作 MCP 联动校验 API
     check_operation_mcp_for_skills, enable_operation_mcp_and_skill, enable_operation_mcp_and_skills,
     check_disable_operation_mcp, disable_operation_mcp_with_skills,
+    check_disable_agent_mcp, disable_agent_mcp_with_skills,
     check_disable_assistant_operation_mcp, disable_assistant_operation_mcp_with_skills,
+    check_disable_assistant_agent_mcp, disable_assistant_agent_mcp_with_skills,
 };
 use crate::api::skill_api::{
     bulk_update_assistant_skills, cleanup_orphaned_skill_configs,
@@ -508,8 +510,12 @@ pub fn run() {
             enable_operation_mcp_and_skills,
             check_disable_operation_mcp,
             disable_operation_mcp_with_skills,
+            check_disable_agent_mcp,
+            disable_agent_mcp_with_skills,
             check_disable_assistant_operation_mcp,
             disable_assistant_operation_mcp_with_skills,
+            check_disable_assistant_agent_mcp,
+            disable_assistant_agent_mcp_with_skills,
             get_assistant_mcp_servers_with_tools,
             update_assistant_mcp_config,
             update_assistant_mcp_tool_config,

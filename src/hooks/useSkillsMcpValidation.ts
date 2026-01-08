@@ -13,6 +13,7 @@ export interface OperationMcpCheckResult {
     agent_assistant_enabled?: boolean;
     agent_load_skill_enabled?: boolean;
     agent_load_skill_assistant_enabled?: boolean;
+    agent_ready?: boolean;
 }
 
 /**
@@ -35,11 +36,13 @@ export interface DisableOperationMcpCheckResult {
  * 操作 MCP 命令标识符
  */
 export const OPERATION_MCP_COMMAND = "aipp:operation";
+export const AGENT_MCP_COMMAND = "aipp:agent";
 
 /**
  * Skills/MCP 校验错误类型
  */
 export const OPERATION_MCP_NOT_ENABLED_ERROR = "OPERATION_MCP_NOT_ENABLED";
+export const AGENT_LOAD_SKILL_REQUIRED_ERROR = "AGENT_LOAD_SKILL_REQUIRED";
 
 /**
  * Skills 与 操作 MCP 联动校验 Hook
@@ -123,10 +126,24 @@ export function useSkillsMcpValidation() {
     };
 
     /**
+     * 检查关闭 Agent MCP 会影响哪些助手
+     */
+    const checkDisableAgentMcp = async (): Promise<DisableOperationMcpCheckResult> => {
+        return invoke<DisableOperationMcpCheckResult>('check_disable_agent_mcp');
+    };
+
+    /**
      * 关闭全局操作 MCP 并同时关闭所有助手的 Skills
      */
     const disableOperationMcpWithSkills = async (): Promise<void> => {
         return invoke('disable_operation_mcp_with_skills');
+    };
+
+    /**
+     * 关闭全局 Agent MCP 并同时关闭所有助手的 Skills
+     */
+    const disableAgentMcpWithSkills = async (): Promise<void> => {
+        return invoke('disable_agent_mcp_with_skills');
     };
 
     /**
@@ -137,6 +154,13 @@ export function useSkillsMcpValidation() {
     };
 
     /**
+     * 检查关闭助手级 Agent MCP 会影响多少 Skills
+     */
+    const checkDisableAssistantAgentMcp = async (assistantId: number): Promise<number> => {
+        return invoke<number>('check_disable_assistant_agent_mcp', { assistantId });
+    };
+
+    /**
      * 关闭助手级操作 MCP 并同时关闭该助手的 Skills
      */
     const disableAssistantOperationMcpWithSkills = async (assistantId: number): Promise<void> => {
@@ -144,11 +168,23 @@ export function useSkillsMcpValidation() {
     };
 
     /**
-     * 判断错误是否为操作 MCP 未启用
+     * 关闭助手级 Agent MCP 并同时关闭该助手的 Skills
      */
-    const isOperationMcpNotEnabledError = (error: unknown): boolean => {
+    const disableAssistantAgentMcpWithSkills = async (assistantId: number): Promise<void> => {
+        return invoke('disable_assistant_agent_mcp_with_skills', { assistantId });
+    };
+
+    /**
+     * 判断错误是否为需要 Agent load_skill
+     */
+    const isAgentLoadSkillError = (error: unknown): boolean => {
         const message = extractErrorMessage(error);
-        return message === OPERATION_MCP_NOT_ENABLED_ERROR || message.includes(OPERATION_MCP_NOT_ENABLED_ERROR);
+        return (
+            message === AGENT_LOAD_SKILL_REQUIRED_ERROR ||
+            message.includes(AGENT_LOAD_SKILL_REQUIRED_ERROR) ||
+            message.includes("AGENT_MCP_NOT_FOUND") ||
+            message.includes("AGENT_LOAD_SKILL_TOOL_NOT_FOUND")
+        );
     };
 
     /**
@@ -162,15 +198,19 @@ export function useSkillsMcpValidation() {
         // 检查 API
         checkOperationMcpForSkills,
         checkDisableOperationMcp,
+        checkDisableAgentMcp,
         checkDisableAssistantOperationMcp,
+        checkDisableAssistantAgentMcp,
         // 启用 API
         enableOperationMcpAndSkill,
         enableOperationMcpAndSkills,
         // 关闭 API
         disableOperationMcpWithSkills,
         disableAssistantOperationMcpWithSkills,
+        disableAgentMcpWithSkills,
+        disableAssistantAgentMcpWithSkills,
         // 辅助函数
-        isOperationMcpNotEnabledError,
+        isAgentLoadSkillError,
         isOperationMcp,
     };
 }
