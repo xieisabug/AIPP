@@ -103,6 +103,7 @@ pub async fn collect_mcp_info_for_assistant(
                             picked.push(MCPServerWithTools {
                                 id: srv.id,
                                 name: srv.name,
+                                command: srv.command.clone(),
                                 is_enabled: srv.is_enabled,
                                 tools: tools_converted,
                             });

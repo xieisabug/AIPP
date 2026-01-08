@@ -206,15 +206,13 @@ pub async fn update_assistant_skill_config(
     
     // 后端校验：如果要启用 skill，检查当前是否有启用的 skills
     if is_enabled {
-        let current_enabled = db.get_enabled_skill_configs(assistant_id).map_err(|e| e.to_string())?;
-        
-        // 如果当前没有启用的 skills（即从 0 到 1），需要检查操作 MCP
-        if current_enabled.is_empty() {
-            let operation_mcp_enabled = check_operation_mcp_enabled(&app_handle, assistant_id)?;
-            if !operation_mcp_enabled {
-                return Err("OPERATION_MCP_NOT_ENABLED".to_string());
-            }
+        let operation_mcp_enabled = check_operation_mcp_enabled(&app_handle, assistant_id)?;
+        if !operation_mcp_enabled {
+            return Err("OPERATION_MCP_NOT_ENABLED".to_string());
         }
+
+        // 确保 Agent load_skill 已启用（全局 + 助手级）
+        crate::mcp::registry_api::ensure_agent_load_skill_for_assistant(&app_handle, assistant_id)?;
     }
     
     let id = db
@@ -269,15 +267,13 @@ pub async fn bulk_update_assistant_skills(
     // 后端校验：如果新配置中有启用的 skills，检查当前是否有启用的 skills
     let has_enabled_in_new = configs.iter().any(|(_, enabled, _)| *enabled);
     if has_enabled_in_new {
-        let current_enabled = db.get_enabled_skill_configs(assistant_id).map_err(|e| e.to_string())?;
-        
-        // 如果当前没有启用的 skills（即从 0 到 n），需要检查操作 MCP
-        if current_enabled.is_empty() {
-            let operation_mcp_enabled = check_operation_mcp_enabled(&app_handle, assistant_id)?;
-            if !operation_mcp_enabled {
-                return Err("OPERATION_MCP_NOT_ENABLED".to_string());
-            }
+        let operation_mcp_enabled = check_operation_mcp_enabled(&app_handle, assistant_id)?;
+        if !operation_mcp_enabled {
+            return Err("OPERATION_MCP_NOT_ENABLED".to_string());
         }
+
+        // 确保 Agent load_skill 已启用
+        crate::mcp::registry_api::ensure_agent_load_skill_for_assistant(&app_handle, assistant_id)?;
     }
     
     db.bulk_update_assistant_skills(assistant_id, &configs)

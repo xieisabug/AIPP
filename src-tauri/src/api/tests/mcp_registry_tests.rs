@@ -233,6 +233,7 @@ async fn test_format_mcp_prompt_single_server() {
         enabled_servers: vec![MCPServerWithTools {
             id: 1,
             name: "weather-server".to_string(),
+            command: None,
             is_enabled: true,
             tools: vec![MCPToolInfo {
                 id: 1,
@@ -260,6 +261,7 @@ async fn test_format_mcp_prompt_multiple_tools() {
         enabled_servers: vec![MCPServerWithTools {
             id: 1,
             name: "multi-tool-server".to_string(),
+            command: None,
             is_enabled: true,
             tools: vec![
                 MCPToolInfo {
@@ -296,6 +298,7 @@ async fn test_format_mcp_prompt_native_toolcall() {
         enabled_servers: vec![MCPServerWithTools {
             id: 1,
             name: "test-server".to_string(),
+            command: None,
             is_enabled: true,
             tools: vec![MCPToolInfo {
                 id: 1,
@@ -322,6 +325,7 @@ async fn test_format_mcp_prompt_with_initial_prompt() {
         enabled_servers: vec![MCPServerWithTools {
             id: 1,
             name: "server".to_string(),
+            command: None,
             is_enabled: true,
             tools: vec![MCPToolInfo {
                 id: 1,
@@ -350,6 +354,7 @@ async fn test_format_mcp_prompt_multiple_servers() {
             MCPServerWithTools {
                 id: 1,
                 name: "server-a".to_string(),
+                command: None,
                 is_enabled: true,
                 tools: vec![MCPToolInfo {
                     id: 1,
@@ -363,6 +368,7 @@ async fn test_format_mcp_prompt_multiple_servers() {
             MCPServerWithTools {
                 id: 2,
                 name: "server-b".to_string(),
+                command: None,
                 is_enabled: true,
                 tools: vec![MCPToolInfo {
                     id: 2,

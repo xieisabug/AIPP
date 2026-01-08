@@ -94,7 +94,8 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
             const servers = serversWithTools.map(server => ({
                 id: server.id,
                 name: server.name,
-                is_enabled: server.is_enabled
+                is_enabled: server.is_enabled,
+                command: server.command
             }));
             setAvailableServers(servers);
 

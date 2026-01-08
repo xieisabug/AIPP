@@ -8,6 +8,11 @@ export interface OperationMcpCheckResult {
     global_enabled: boolean;
     assistant_enabled: boolean;
     enabled_skills_count: number;
+    agent_mcp_id?: number | null;
+    agent_enabled?: boolean;
+    agent_assistant_enabled?: boolean;
+    agent_load_skill_enabled?: boolean;
+    agent_load_skill_assistant_enabled?: boolean;
 }
 
 /**
