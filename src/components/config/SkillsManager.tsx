@@ -18,7 +18,6 @@ import {
 import {
     ScannedSkill,
     SkillWithConfig,
-    getSourceDisplayName,
     groupSkillsBySource,
     SkillSourceType
 } from "../../data/Skill";
@@ -210,7 +209,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
                 return (
                     <div key={sourceType} className="mb-4">
                         <div className="text-xs font-medium text-muted-foreground px-2 py-1 uppercase tracking-wider">
-                            {getSourceDisplayName(sourceType)}
+                            {sourceSkills[0].source_display_name}
                         </div>
                         {sourceSkills.map((skill) => {
                             const config = getSkillConfig(skill.identifier);
@@ -244,7 +243,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
                 .map(([sourceType, sourceSkills]) => (
                     <div key={sourceType} className="mb-4">
                         <div className="text-xs font-medium text-muted-foreground px-2 py-1 uppercase tracking-wider">
-                            {getSourceDisplayName(sourceType)}
+                            {sourceSkills[0].source_display_name}
                         </div>
                         {sourceSkills.map((skill) => (
                             <ListItemButton
@@ -287,7 +286,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
                     <div>
                         <span className="font-medium text-foreground">来源:</span>
                         <Badge variant="secondary" className="ml-2">
-                            {getSourceDisplayName(selectedSkill.source_type)}
+                            {selectedSkill.source_display_name}
                         </Badge>
                     </div>
                     {selectedSkill.metadata.version && (

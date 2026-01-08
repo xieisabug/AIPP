@@ -151,6 +151,7 @@ impl SkillScanner {
                 Some(ScannedSkill {
                     identifier,
                     source_type: source.source_type.clone(),
+                    source_display_name: source.source_type.display_name().to_string(),
                     file_path: file_path.to_string_lossy().to_string(),
                     relative_path,
                     metadata,
@@ -267,6 +268,7 @@ impl SkillScanner {
                 Some(ScannedSkill {
                     identifier,
                     source_type: source.source_type.clone(),
+                    source_display_name: source.source_type.display_name().to_string(),
                     file_path: skill_file.to_string_lossy().to_string(),
                     relative_path: folder_name.to_string(),
                     metadata,

@@ -12,8 +12,6 @@ pub enum SkillSourceType {
     ClaudeCodeAgents,
     /// Claude Code rules (~/.claude/rules/*.md)
     ClaudeCodeRules,
-    /// Claude Code user memory (~/.claude/CLAUDE.md)
-    ClaudeCodeMemory,
     /// Codex CLI instructions
     Codex,
     /// Custom user-defined source
@@ -26,7 +24,6 @@ impl SkillSourceType {
             SkillSourceType::Aipp => "aipp",
             SkillSourceType::ClaudeCodeAgents => "claude_code_agents",
             SkillSourceType::ClaudeCodeRules => "claude_code_rules",
-            SkillSourceType::ClaudeCodeMemory => "claude_code_memory",
             SkillSourceType::Codex => "codex",
             SkillSourceType::Custom(name) => name.as_str(),
         }
@@ -37,7 +34,6 @@ impl SkillSourceType {
             "aipp" => SkillSourceType::Aipp,
             "claude_code_agents" => SkillSourceType::ClaudeCodeAgents,
             "claude_code_rules" => SkillSourceType::ClaudeCodeRules,
-            "claude_code_memory" => SkillSourceType::ClaudeCodeMemory,
             "codex" => SkillSourceType::Codex,
             other => SkillSourceType::Custom(other.to_string()),
         }
@@ -48,8 +44,7 @@ impl SkillSourceType {
             SkillSourceType::Aipp => "AIPP Skills",
             SkillSourceType::ClaudeCodeAgents => "Claude Code Agents",
             SkillSourceType::ClaudeCodeRules => "Claude Code Rules",
-            SkillSourceType::ClaudeCodeMemory => "Claude Code Memory",
-            SkillSourceType::Codex => "Codex Instructions",
+            SkillSourceType::Codex => "Codex",
             SkillSourceType::Custom(name) => name.as_str(),
         }
     }
@@ -80,7 +75,7 @@ impl SkillSourceConfig {
             // AIPP internal skills - will be set to app_data_dir/skills at runtime
             SkillSourceConfig {
                 source_type: SkillSourceType::Aipp,
-                display_name: "AIPP Skills".to_string(),
+                display_name: SkillSourceType::Aipp.display_name().to_string(),
                 paths: vec!["{app_data}/skills".to_string()],
                 file_pattern: "*.md".to_string(),
                 is_enabled: true,
@@ -89,8 +84,17 @@ impl SkillSourceConfig {
             // Claude Code skills (each .md file is a skill)
             SkillSourceConfig {
                 source_type: SkillSourceType::ClaudeCodeAgents,
-                display_name: "Claude Code Agents".to_string(),
-                paths: vec!["~/.claude/skills/".to_string()],
+                display_name: SkillSourceType::ClaudeCodeAgents.display_name().to_string(),
+                paths: vec!["~/.claude/agents/".to_string()],
+                file_pattern: "*.md".to_string(),
+                is_enabled: true,
+                is_builtin: true,
+            },
+            // Claude Code skills (each .md file is a skill)
+            SkillSourceConfig {
+                source_type: SkillSourceType::ClaudeCodeAgents,
+                display_name: SkillSourceType::ClaudeCodeAgents.display_name().to_string(),
+                paths: vec!["~/.claude/rules/".to_string()],
                 file_pattern: "*.md".to_string(),
                 is_enabled: true,
                 is_builtin: true,
@@ -98,7 +102,7 @@ impl SkillSourceConfig {
             // Codex skills (each subdirectory with .md is a skill)
             SkillSourceConfig {
                 source_type: SkillSourceType::Codex,
-                display_name: "Codex Skills".to_string(),
+                display_name: SkillSourceType::Codex.display_name().to_string(),
                 paths: vec!["~/.codex/skills/".to_string()],
                 file_pattern: "*.md".to_string(),
                 is_enabled: true,
@@ -132,6 +136,8 @@ pub struct ScannedSkill {
     pub identifier: String,
     /// Source type
     pub source_type: SkillSourceType,
+    /// Display name for the source type (for UI display)
+    pub source_display_name: String,
     /// Absolute path to the skill file
     pub file_path: String,
     /// Relative path within the source (used as part of identifier)

@@ -15,7 +15,6 @@ import {
 import {
     ScannedSkill,
     SkillWithConfig,
-    getSourceDisplayName,
     groupSkillsBySource,
     SkillSourceType
 } from "../../data/Skill";
@@ -144,7 +143,7 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
                                 return (
                                     <div key={sourceType} className="space-y-2">
                                         <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider px-1">
-                                            {getSourceDisplayName(sourceType)}
+                                            {sourceSkills[0].source_display_name}
                                         </div>
                                         {sourceSkills.map((skill) => {
                                             const enabled = isSkillEnabled(skill.identifier);
@@ -200,7 +199,7 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
                                 .map(([sourceType, sourceSkills]) => (
                                     <div key={sourceType} className="space-y-2">
                                         <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider px-1">
-                                            {getSourceDisplayName(sourceType)}
+                                            {sourceSkills[0].source_display_name}
                                         </div>
                                         {sourceSkills.map((skill) => {
                                             const enabled = isSkillEnabled(skill.identifier);

@@ -35,6 +35,8 @@ export interface ScannedSkill {
   identifier: string;
   /** Source type */
   source_type: SkillSourceType;
+  /** Display name for the source type (from backend) */
+  source_display_name: string;
   /** Absolute path to the skill file */
   file_path: string;
   /** Relative path within the source */
@@ -75,24 +77,6 @@ export interface SkillWithConfig {
   skill: ScannedSkill | null;
   config: AssistantSkillConfig;
   exists: boolean;
-}
-
-/** Display name for source types */
-export function getSourceDisplayName(sourceType: SkillSourceType): string {
-  switch (sourceType) {
-    case 'aipp':
-      return 'AIPP Skills';
-    case 'claude_code_agents':
-      return 'Claude Code Agents';
-    case 'claude_code_rules':
-      return 'Claude Code Rules';
-    case 'claude_code_memory':
-      return 'Claude Code Memory';
-    case 'codex':
-      return 'Codex Instructions';
-    default:
-      return sourceType;
-  }
 }
 
 /** Parse skill identifier to extract source type and relative path */
