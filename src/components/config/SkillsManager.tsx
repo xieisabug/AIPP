@@ -24,6 +24,7 @@ import {
 } from "../../data/Skill";
 
 import SkillActionDropdown from "./SkillActionDropdown";
+import SkillInstallGuideDialog from "./SkillInstallGuideDialog";
 import { useSkillsMcpValidation } from "../../hooks/useSkillsMcpValidation";
 
 interface SkillsManagerProps {
@@ -44,6 +45,8 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
     // 操作 MCP 启用确认对话框
     const [mcpEnableConfirmOpen, setMcpEnableConfirmOpen] = useState(false);
     const [pendingSkillEnable, setPendingSkillEnable] = useState<{ skill: ScannedSkill; enabled: boolean } | null>(null);
+    // 安装指南对话框
+    const [installGuideOpen, setInstallGuideOpen] = useState(false);
 
     const { checkOperationMcpForSkills, enableOperationMcpAndSkill, isAgentLoadSkillError } = useSkillsMcpValidation();
 
@@ -212,6 +215,11 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
         window.open('https://github.com/aipp-org/skills', '_blank');
     }, []);
 
+    // Show install guide
+    const handleShowInstallGuide = useCallback(() => {
+        setInstallGuideOpen(true);
+    }, []);
+
     // Group skills by source
     const groupedSkills = useMemo(() => {
         return groupSkillsBySource(skills);
@@ -258,6 +266,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
                     onScan={scanSkills}
                     onOpenFolder={handleOpenSkillsFolder}
                     onInstallOfficial={handleInstallOfficial}
+                    onShowInstallGuide={handleShowInstallGuide}
                     isScanning={isRefreshing}
                     showIcon={false}
                     variant="outline"
@@ -485,6 +494,12 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
                     setMcpEnableConfirmOpen(false);
                     setPendingSkillEnable(null);
                 }}
+            />
+
+            {/* 安装指南对话框 */}
+            <SkillInstallGuideDialog
+                isOpen={installGuideOpen}
+                onClose={() => setInstallGuideOpen(false)}
             />
         </>
     );
