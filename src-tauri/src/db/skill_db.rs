@@ -244,6 +244,19 @@ impl SkillDatabase {
         }
         Ok(result)
     }
+
+    /// Migration: Remove old ClaudeCodeAgents and ClaudeCodeRules skill configs
+    /// This should be called once when upgrading to the new skills system
+    #[instrument(level = "trace", skip(self))]
+    pub fn migrate_claude_code_skills(&self) -> rusqlite::Result<usize> {
+        let rows = self.conn.execute(
+            "DELETE FROM assistant_skill_config
+             WHERE skill_identifier LIKE 'claude_code_agents:%'
+             OR skill_identifier LIKE 'claude_code_rules:%'",
+            [],
+        )?;
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]

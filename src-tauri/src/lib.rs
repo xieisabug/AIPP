@@ -360,6 +360,11 @@ pub fn run() {
             artifacts_db.create_tables()?;
             skill_db.create_tables()?;
 
+            // Migration: Remove old Claude Code agents/rules skill configs
+            if let Err(e) = skill_db.migrate_claude_code_skills() {
+                warn!(error = %e, "Failed to migrate Claude Code skills");
+            }
+
             let _ = database_upgrade(&app_handle, system_db, llm_db, assistant_db, conversation_db);
 
             // 初始化内置工具集（搜索、操作），如果不存在则自动创建

@@ -26,7 +26,6 @@ interface SkillActionDropdownProps {
 const SkillActionDropdown: React.FC<SkillActionDropdownProps> = ({
     onScan,
     onOpenFolder,
-    onInstallOfficial,
     onShowInstallGuide,
     className = '',
     variant = 'default',

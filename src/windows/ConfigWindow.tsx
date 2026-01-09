@@ -5,7 +5,7 @@ import LLMProviderConfig from "../components/config/LLMProviderConfig";
 import AssistantConfig from "../components/config/AssistantConfig";
 import FeatureAssistantConfig from "../components/config/FeatureAssistantConfig";
 import MCPConfig from "../components/config/MCPConfig";
-import SkillsManager from "../components/config/SkillsManager";
+import SkillsConfig from "../components/config/SkillsConfig";
 import { appDataDir } from "@tauri-apps/api/path";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -30,7 +30,7 @@ const contentMap: Record<string, React.ComponentType<any>> = {
     "assistant-config": AssistantConfig,
     "feature-assistant-config": FeatureAssistantConfig,
     "mcp-config": MCPConfig,
-    "skills-config": SkillsManager,
+    "skills-config": SkillsConfig,
 };
 
 function ConfigWindow() {

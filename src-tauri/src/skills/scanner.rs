@@ -1,7 +1,7 @@
 //! Skill scanner - discovers skills from multiple configured sources
 
 use crate::skills::parser::SkillParser;
-use crate::skills::types::{ScannedSkill, SkillSourceConfig};
+use crate::skills::types::{InstalledPluginsJson, ScannedSkill, SkillSourceConfig};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -93,6 +93,122 @@ impl SkillScanner {
             .collect()
     }
 
+    /// Parse installed_plugins.json and extract plugin install paths
+    fn parse_installed_plugins(&self, json_path: &Path) -> Vec<(String, PathBuf)> {
+        let mut plugins = Vec::new();
+
+        // Read JSON file
+        let content = match fs::read_to_string(json_path) {
+            Ok(content) => content,
+            Err(e) => {
+                warn!(
+                    "Failed to read installed_plugins.json {:?}: {}",
+                    json_path, e
+                );
+                return plugins;
+            }
+        };
+
+        // Parse JSON
+        let installed: InstalledPluginsJson = match serde_json::from_str(&content) {
+            Ok(data) => data,
+            Err(e) => {
+                warn!(
+                    "Failed to parse installed_plugins.json {:?}: {}",
+                    json_path, e
+                );
+                return plugins;
+            }
+        };
+
+        // Extract plugin names and install paths
+        for (plugin_id, entries) in installed.plugins.iter() {
+            for entry in entries {
+                // Extract plugin name from plugin_id (e.g., "frontend-design@claude-plugins-official")
+                let plugin_name = plugin_id
+                    .split('@')
+                    .next()
+                    .unwrap_or(plugin_id)
+                    .to_string();
+
+                let install_path = PathBuf::from(&entry.install_path);
+                plugins.push((plugin_name, install_path));
+            }
+        }
+
+        debug!(
+            "Parsed {} plugins from {:?}",
+            plugins.len(),
+            json_path
+        );
+
+        plugins
+    }
+
+    /// Scan a plugin's skills directory
+    fn scan_plugin_skills(
+        &self,
+        plugin_name: &str,
+        plugin_path: &Path,
+        source: &SkillSourceConfig,
+    ) -> Vec<ScannedSkill> {
+        let mut skills = Vec::new();
+
+        // Check if skills directory exists
+        let skills_dir = plugin_path.join("skills");
+        if !skills_dir.exists() || !skills_dir.is_dir() {
+            debug!(
+                "Plugin {} has no skills directory: {:?}",
+                plugin_name, skills_dir
+            );
+            return skills;
+        }
+
+        // Scan each subdirectory in skills/
+        let entries = match fs::read_dir(&skills_dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                warn!(
+                    "Failed to read skills directory {:?}: {}",
+                    skills_dir, e
+                );
+                return skills;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let skill_folder_path = entry.path();
+
+            // Only process directories
+            if !skill_folder_path.is_dir() {
+                continue;
+            }
+
+            // Skip hidden directories
+            if let Some(name) = skill_folder_path.file_name().and_then(|s| s.to_str()) {
+                if name.starts_with('.') {
+                    continue;
+                }
+
+                // Scan the skill folder with plugin context
+                if let Some(skill) =
+                    self.scan_skill_folder_with_plugin(&skill_folder_path, source, plugin_name, name)
+                {
+                    skills.push(skill);
+                }
+            }
+        }
+
+        debug!(
+            "Found {} skills in plugin {} at {:?}",
+            skills.len(),
+            plugin_name,
+            skills_dir
+        );
+
+        skills
+    }
+
     /// Scan a specific source
     fn scan_source(&self, source: &SkillSourceConfig) -> Vec<ScannedSkill> {
         let mut skills = Vec::new();
@@ -108,7 +224,16 @@ impl SkillScanner {
                 continue;
             }
 
-            if expanded_path.is_file() {
+            // Special handling for ClaudeCodeSkills source
+            if source.source_type.as_str() == "claude_code_skills" {
+                let plugins = self.parse_installed_plugins(&expanded_path);
+
+                for (plugin_name, plugin_path) in plugins {
+                    let plugin_skills =
+                        self.scan_plugin_skills(&plugin_name, &plugin_path, source);
+                    skills.extend(plugin_skills);
+                }
+            } else if expanded_path.is_file() {
                 // Single file source
                 if let Some(skill) = self.scan_file(&expanded_path, source, path_pattern) {
                     skills.push(skill);
@@ -249,6 +374,90 @@ impl SkillScanner {
         None
     }
 
+    /// Scan a skill folder with plugin context (for Claude Code Skills)
+    fn scan_skill_folder_with_plugin(
+        &self,
+        folder_path: &Path,
+        source: &SkillSourceConfig,
+        plugin_name: &str,
+        skill_name: &str,
+    ) -> Option<ScannedSkill> {
+        // Priority 1: Look for SKILL.md (standard skill definition)
+        let skill_md = folder_path.join("SKILL.md");
+        if skill_md.exists() {
+            return self.create_skill_from_file(
+                &skill_md,
+                source,
+                plugin_name,
+                skill_name,
+            );
+        }
+
+        // Priority 2: Look for README.md
+        let readme_md = folder_path.join("README.md");
+        if readme_md.exists() {
+            return self.create_skill_from_file(
+                &readme_md,
+                source,
+                plugin_name,
+                skill_name,
+            );
+        }
+
+        // Priority 3: Find any .md file in the folder
+        if let Ok(entries) = fs::read_dir(folder_path) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(ext) = path.extension() {
+                        if ext == "md" {
+                            return self.create_skill_from_file(&path, source, plugin_name, skill_name);
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Create a ScannedSkill from a file with plugin context
+    fn create_skill_from_file(
+        &self,
+        skill_file: &Path,
+        source: &SkillSourceConfig,
+        plugin_name: &str,
+        skill_name: &str,
+    ) -> Option<ScannedSkill> {
+        // Create identifier with plugin name: claude_code_skills:plugin_name/skill_name
+        let relative_path = format!("{}/{}", plugin_name, skill_name);
+        let identifier = format!("{}:{}", source.source_type.as_str(), relative_path);
+
+        match SkillParser::parse_metadata(skill_file) {
+            Ok(metadata) => {
+                let display_name = metadata
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| skill_name.to_string());
+
+                Some(ScannedSkill {
+                    identifier,
+                    source_type: source.source_type.clone(),
+                    source_display_name: source.source_type.display_name().to_string(),
+                    file_path: skill_file.to_string_lossy().to_string(),
+                    relative_path,
+                    metadata,
+                    display_name,
+                    exists: true,
+                })
+            }
+            Err(e) => {
+                warn!("Failed to parse skill file {:?}: {}", skill_file, e);
+                None
+            }
+        }
+    }
+
     /// Scan a skill folder (folder with SKILL.md)
     fn scan_skill_folder(
         &self,
@@ -310,32 +519,69 @@ impl SkillScanner {
             // Find the source config
             for source in &self.sources {
                 if source.source_type == source_type {
-                    for path_pattern in &source.paths {
-                        let expanded_path = self.expand_path(path_pattern);
+                    // Special handling for ClaudeCodeSkills
+                    if source_type.as_str() == "claude_code_skills" {
+                        // Parse relative_path: "plugin_name/skill_name"
+                        let parts: Vec<&str> = relative_path.split('/').collect();
+                        if parts.len() != 2 {
+                            return false;
+                        }
 
-                        if expanded_path.is_file() {
-                            // Single file source
-                            if expanded_path.file_name().and_then(|s| s.to_str())
-                                == Some(&relative_path)
-                            {
-                                return expanded_path.exists();
-                            }
-                        } else if expanded_path.is_dir() {
-                            // Directory source - check for skill folder
-                            let skill_folder = expanded_path.join(&relative_path);
-                            if skill_folder.is_dir() {
-                                // Check if folder contains any .md file
-                                if skill_folder.join("SKILL.md").exists()
-                                    || skill_folder.join("README.md").exists()
-                                    || self.has_any_md_file(&skill_folder)
-                                {
-                                    return true;
+                        let plugin_name = parts[0];
+                        let skill_name = parts[1];
+
+                        // Parse installed_plugins.json
+                        for path_pattern in &source.paths {
+                            let expanded_path = self.expand_path(path_pattern);
+                            if expanded_path.exists() && expanded_path.is_file() {
+                                let plugins = self.parse_installed_plugins(&expanded_path);
+
+                                // Find the plugin by name
+                                for (p_name, p_path) in plugins {
+                                    if p_name == plugin_name {
+                                        // Found the plugin, check if skill exists
+                                        let skills_dir = p_path.join("skills");
+                                        let skill_folder = skills_dir.join(skill_name);
+
+                                        if skill_folder.is_dir() {
+                                            // Check if folder contains any .md file
+                                            return skill_folder.join("SKILL.md").exists()
+                                                || skill_folder.join("README.md").exists()
+                                                || self.has_any_md_file(&skill_folder);
+                                        }
+                                    }
                                 }
                             }
-                            // Also check for direct file (backward compatibility)
-                            let direct_file = expanded_path.join(&relative_path);
-                            if direct_file.is_file() && direct_file.exists() {
-                                return true;
+                        }
+                    } else {
+                        // Regular handling for other source types
+                        for path_pattern in &source.paths {
+                            let expanded_path = self.expand_path(path_pattern);
+
+                            if expanded_path.is_file() {
+                                // Single file source
+                                if expanded_path.file_name().and_then(|s| s.to_str())
+                                    == Some(relative_path.as_str())
+                                {
+                                    return expanded_path.exists();
+                                }
+                            } else if expanded_path.is_dir() {
+                                // Directory source - check for skill folder
+                                let skill_folder = expanded_path.join(&relative_path);
+                                if skill_folder.is_dir() {
+                                    // Check if folder contains any .md file
+                                    if skill_folder.join("SKILL.md").exists()
+                                        || skill_folder.join("README.md").exists()
+                                        || self.has_any_md_file(&skill_folder)
+                                    {
+                                        return true;
+                                    }
+                                }
+                                // Also check for direct file (backward compatibility)
+                                let direct_file = expanded_path.join(&relative_path);
+                                if direct_file.is_file() && direct_file.exists() {
+                                    return true;
+                                }
                             }
                         }
                     }
@@ -368,26 +614,69 @@ impl SkillScanner {
             // Find the source config
             for source in &self.sources {
                 if source.source_type == source_type {
-                    for path_pattern in &source.paths {
-                        let expanded_path = self.expand_path(path_pattern);
+                    // Special handling for ClaudeCodeSkills
+                    if source_type.as_str() == "claude_code_skills" {
+                        // Parse relative_path: "plugin_name/skill_name"
+                        let parts: Vec<&str> = relative_path.split('/').collect();
+                        if parts.len() != 2 {
+                            warn!(
+                                "Invalid Claude Code skill identifier format: {}",
+                                identifier
+                            );
+                            continue;
+                        }
 
-                        if expanded_path.is_file() {
-                            // Single file source
-                            if expanded_path.file_name().and_then(|s| s.to_str())
-                                == Some(relative_path.as_str())
-                            {
-                                return self.scan_file(&expanded_path, source, path_pattern);
+                        let plugin_name = parts[0];
+                        let skill_name = parts[1];
+
+                        // Parse installed_plugins.json
+                        for path_pattern in &source.paths {
+                            let expanded_path = self.expand_path(path_pattern);
+                            if expanded_path.exists() && expanded_path.is_file() {
+                                let plugins = self.parse_installed_plugins(&expanded_path);
+
+                                // Find the plugin by name
+                                for (p_name, p_path) in plugins {
+                                    if p_name == plugin_name {
+                                        // Found the plugin, now scan for the specific skill
+                                        let skills_dir = p_path.join("skills");
+                                        let skill_folder = skills_dir.join(skill_name);
+
+                                        if skill_folder.is_dir() {
+                                            return self.scan_skill_folder_with_plugin(
+                                                &skill_folder,
+                                                source,
+                                                plugin_name,
+                                                skill_name,
+                                            );
+                                        }
+                                    }
+                                }
                             }
-                        } else if expanded_path.is_dir() {
-                            // Check for skill folder first
-                            let skill_folder = expanded_path.join(&relative_path);
-                            if skill_folder.is_dir() {
-                                return self.scan_skill_folder_any_md(&skill_folder, source);
-                            }
-                            // Also check for direct file (backward compatibility)
-                            let direct_file = expanded_path.join(&relative_path);
-                            if direct_file.is_file() {
-                                return self.scan_file(&direct_file, source, path_pattern);
+                        }
+                    } else {
+                        // Regular handling for other source types
+                        for path_pattern in &source.paths {
+                            let expanded_path = self.expand_path(path_pattern);
+
+                            if expanded_path.is_file() {
+                                // Single file source
+                                if expanded_path.file_name().and_then(|s| s.to_str())
+                                    == Some(relative_path.as_str())
+                                {
+                                    return self.scan_file(&expanded_path, source, path_pattern);
+                                }
+                            } else if expanded_path.is_dir() {
+                                // Check for skill folder first
+                                let skill_folder = expanded_path.join(&relative_path);
+                                if skill_folder.is_dir() {
+                                    return self.scan_skill_folder_any_md(&skill_folder, source);
+                                }
+                                // Also check for direct file (backward compatibility)
+                                let direct_file = expanded_path.join(&relative_path);
+                                if direct_file.is_file() {
+                                    return self.scan_file(&direct_file, source, path_pattern);
+                                }
                             }
                         }
                     }
@@ -533,5 +822,112 @@ description: A skill with non-standard filename
         fs::File::create(&md_file).unwrap();
 
         assert!(scanner.has_any_md_file(&test_dir));
+    }
+
+    #[test]
+    fn test_parse_installed_plugins() {
+        let (scanner, home_dir, _) = create_test_scanner();
+
+        // Create a mock installed_plugins.json
+        let plugins_dir = home_dir.path().join(".claude/plugins");
+        fs::create_dir_all(&plugins_dir).unwrap();
+
+        let json_file = plugins_dir.join("installed_plugins.json");
+        let mut f = fs::File::create(&json_file).unwrap();
+        writeln!(
+            f,
+            r#"{{
+  "version": 2,
+  "plugins": {{
+    "frontend-design@claude-plugins-official": [
+      {{
+        "scope": "user",
+        "installPath": "{}/plugins/frontend-design",
+        "version": "1.0.0",
+        "installedAt": "2026-01-09T00:00:00Z",
+        "lastUpdated": "2026-01-09T00:00:00Z"
+      }}
+    ],
+    "document-skills@anthropic-agent-skills": [
+      {{
+        "scope": "user",
+        "installPath": "{}/plugins/document-skills",
+        "version": "1.0.0",
+        "installedAt": "2026-01-09T00:00:00Z",
+        "lastUpdated": "2026-01-09T00:00:00Z"
+      }}
+    ]
+  }}
+}}"#,
+            home_dir.path().display(),
+            home_dir.path().display()
+        )
+        .unwrap();
+
+        // Parse the JSON file
+        let plugins = scanner.parse_installed_plugins(&json_file);
+
+        // Should parse 2 plugins
+        assert_eq!(plugins.len(), 2);
+
+        // Check plugin names are extracted correctly (without @ suffix)
+        // Use a set for comparison since HashMap doesn't guarantee order
+        let plugin_names: Vec<_> = plugins.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(plugin_names.contains(&"frontend-design"));
+        assert!(plugin_names.contains(&"document-skills"));
+    }
+
+    #[test]
+    fn test_scan_plugin_skills() {
+        let (scanner, home_dir, _) = create_test_scanner();
+
+        // Create a mock plugin structure
+        let plugin_path = home_dir.path().join("plugins/test-plugin");
+        let skills_dir = plugin_path.join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+
+        // Create a skill folder with SKILL.md
+        let skill_folder = skills_dir.join("test-skill");
+        fs::create_dir_all(&skill_folder).unwrap();
+
+        let skill_file = skill_folder.join("SKILL.md");
+        let mut f = fs::File::create(&skill_file).unwrap();
+        writeln!(
+            f,
+            r#"---
+name: Test Skill
+description: A test skill from plugin
+---
+
+# Test Skill Content
+"#
+        )
+        .unwrap();
+
+        // Create a source config for testing
+        let source = crate::skills::types::SkillSourceConfig {
+            source_type: crate::skills::types::SkillSourceType::ClaudeCodeSkills,
+            display_name: "Claude Code Skills".to_string(),
+            paths: vec!["~/.claude/plugins/installed_plugins.json".to_string()],
+            file_pattern: "*.json".to_string(),
+            is_enabled: true,
+            is_builtin: true,
+        };
+
+        // Scan the plugin skills
+        let skills = scanner.scan_plugin_skills("test-plugin", &plugin_path, &source);
+
+        // Should find the skill
+        assert_eq!(skills.len(), 1);
+        let skill = &skills[0];
+
+        // Check identifier format: claude_code_skills:plugin_name/skill_name
+        assert_eq!(skill.identifier, "claude_code_skills:test-plugin/test-skill");
+        assert_eq!(skill.relative_path, "test-plugin/test-skill");
+        assert_eq!(skill.display_name, "Test Skill");
+        assert_eq!(
+            skill.metadata.description,
+            Some("A test skill from plugin".to_string())
+        );
     }
 }

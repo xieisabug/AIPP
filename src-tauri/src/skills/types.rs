@@ -1,6 +1,25 @@
 //! Core types for the Skills system
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Installed plugin from installed_plugins.json
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledPlugin {
+    pub scope: String,
+    pub install_path: String,
+    pub version: String,
+    pub installed_at: String,
+    pub last_updated: String,
+}
+
+/// Top-level structure of installed_plugins.json
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstalledPluginsJson {
+    pub version: i32,
+    pub plugins: HashMap<String, Vec<InstalledPlugin>>,
+}
 
 /// Skill source type - identifies where the skill comes from
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -8,10 +27,8 @@ use serde::{Deserialize, Serialize};
 pub enum SkillSourceType {
     /// AIPP's internal skills directory ({app_data}/skills/)
     Aipp,
-    /// Claude Code agents (~/.claude/agents/*.md)
-    ClaudeCodeAgents,
-    /// Claude Code rules (~/.claude/rules/*.md)
-    ClaudeCodeRules,
+    /// Claude Code skills (from ~/.claude/plugins/installed_plugins.json)
+    ClaudeCodeSkills,
     /// Codex CLI instructions
     Codex,
     /// Custom user-defined source
@@ -22,8 +39,7 @@ impl SkillSourceType {
     pub fn as_str(&self) -> &str {
         match self {
             SkillSourceType::Aipp => "aipp",
-            SkillSourceType::ClaudeCodeAgents => "claude_code_agents",
-            SkillSourceType::ClaudeCodeRules => "claude_code_rules",
+            SkillSourceType::ClaudeCodeSkills => "claude_code_skills",
             SkillSourceType::Codex => "codex",
             SkillSourceType::Custom(name) => name.as_str(),
         }
@@ -32,8 +48,7 @@ impl SkillSourceType {
     pub fn from_str(s: &str) -> Self {
         match s {
             "aipp" => SkillSourceType::Aipp,
-            "claude_code_agents" => SkillSourceType::ClaudeCodeAgents,
-            "claude_code_rules" => SkillSourceType::ClaudeCodeRules,
+            "claude_code_skills" => SkillSourceType::ClaudeCodeSkills,
             "codex" => SkillSourceType::Codex,
             other => SkillSourceType::Custom(other.to_string()),
         }
@@ -42,8 +57,7 @@ impl SkillSourceType {
     pub fn display_name(&self) -> &str {
         match self {
             SkillSourceType::Aipp => "AIPP Skills",
-            SkillSourceType::ClaudeCodeAgents => "Claude Code Agents",
-            SkillSourceType::ClaudeCodeRules => "Claude Code Rules",
+            SkillSourceType::ClaudeCodeSkills => "Claude Code Skills",
             SkillSourceType::Codex => "Codex",
             SkillSourceType::Custom(name) => name.as_str(),
         }
@@ -81,21 +95,12 @@ impl SkillSourceConfig {
                 is_enabled: true,
                 is_builtin: true,
             },
-            // Claude Code skills (each .md file is a skill)
+            // Claude Code skills (from ~/.claude/plugins/installed_plugins.json)
             SkillSourceConfig {
-                source_type: SkillSourceType::ClaudeCodeAgents,
-                display_name: SkillSourceType::ClaudeCodeAgents.display_name().to_string(),
-                paths: vec!["~/.claude/agents/".to_string()],
-                file_pattern: "*.md".to_string(),
-                is_enabled: true,
-                is_builtin: true,
-            },
-            // Claude Code skills (each .md file is a skill)
-            SkillSourceConfig {
-                source_type: SkillSourceType::ClaudeCodeAgents,
-                display_name: SkillSourceType::ClaudeCodeAgents.display_name().to_string(),
-                paths: vec!["~/.claude/rules/".to_string()],
-                file_pattern: "*.md".to_string(),
+                source_type: SkillSourceType::ClaudeCodeSkills,
+                display_name: SkillSourceType::ClaudeCodeSkills.display_name().to_string(),
+                paths: vec!["~/.claude/plugins/installed_plugins.json".to_string()],
+                file_pattern: "*.json".to_string(),
                 is_enabled: true,
                 is_builtin: true,
             },
