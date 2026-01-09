@@ -127,6 +127,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             start_time: new Date(),
                             finish_time: null,
                             token_count: 0,
+                            input_token_count: 0,
+                            output_token_count: 0,
                             generation_group_id: null, // 这些字段会在数据库查询时填充
                             parent_group_id: null,
                             regenerate: null,
@@ -196,6 +198,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             start_time: streamEvent.message_type === "reasoning" ? baseTime : null,
                             finish_time: new Date(), // 标记为完成
                             token_count: 0,
+                            input_token_count: 0,
+                            output_token_count: 0,
                             generation_group_id: null, // 流式消息暂时不设置generation_group_id
                             parent_group_id: null, // 流式消息暂时不设置parent_group_id
                             regenerate: null,

@@ -175,6 +175,9 @@ const MessageItem = React.memo<MessageItemProps>(
                         onEdit={onMessageEdit}
                         onRegenerate={onMessageRegenerate}
                         onFork={onMessageFork}
+                        tokenCount={message.token_count}
+                        inputTokenCount={message.input_token_count}
+                        outputTokenCount={message.output_token_count}
                     />
                 </div>
 

@@ -1370,6 +1370,8 @@ fn add_message(
             finish_time,
             created_time: chrono::Utc::now(),
             token_count,
+            input_token_count: 0,
+            output_token_count: 0,
             generation_group_id,
             parent_group_id,
             tool_calls_json: None,

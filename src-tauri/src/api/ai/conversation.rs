@@ -437,6 +437,8 @@ pub fn init_conversation(
                 start_time: None,
                 finish_time: None,
                 token_count: 0,
+                input_token_count: 0,
+                output_token_count: 0,
                 generation_group_id: None,
                 parent_group_id: None,
                 tool_calls_json: None,

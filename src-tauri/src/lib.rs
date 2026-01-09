@@ -49,6 +49,7 @@ use crate::api::sub_task_api::{
     list_sub_task_executions, register_sub_task_definition, run_sub_task_sync,
     run_sub_task_with_mcp_loop, sub_task_regist, update_sub_task_definition,
 };
+use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
 use crate::api::system_api::{
     copy_image_to_clipboard, get_all_feature_config, get_bang_list, get_selected_text_api,
     open_data_folder, open_image, resume_global_shortcut, save_feature_config,
@@ -577,7 +578,10 @@ pub fn run() {
             cleanup_orphaned_skill_configs,
             open_skills_folder,
             open_skill_parent_folder,
-            get_skills_directory
+            get_skills_directory,
+            // Token statistics commands
+            get_conversation_token_stats,
+            get_message_token_stats,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");

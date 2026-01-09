@@ -88,6 +88,8 @@ pub struct Message {
     #[serde(serialize_with = "serialize_option_datetime_millis")]
     pub finish_time: Option<DateTime<Utc>>,
     pub token_count: i32,
+    pub input_token_count: i32,
+    pub output_token_count: i32,
     pub generation_group_id: Option<String>,
     pub parent_group_id: Option<String>,
     pub tool_calls_json: Option<String>, // 保存原始 tool_calls JSON
@@ -108,6 +110,8 @@ pub struct MessageDetail {
     #[serde(serialize_with = "serialize_option_datetime_millis")]
     pub finish_time: Option<DateTime<Utc>>,
     pub token_count: i32,
+    pub input_token_count: i32,
+    pub output_token_count: i32,
     pub generation_group_id: Option<String>,
     pub parent_group_id: Option<String>,
     pub tool_calls_json: Option<String>,
@@ -253,13 +257,13 @@ impl MessageRepository {
         &self,
         conversation_id: i64,
     ) -> Result<Vec<(Message, Option<MessageAttachment>)>> {
-        let mut stmt = self.conn.prepare("SELECT message.id, message.parent_id, message.conversation_id, message.message_type, message.content, message.llm_model_id, message.llm_model_name, message.created_time, message.start_time, message.finish_time, message.token_count, message.generation_group_id, message.parent_group_id, message.tool_calls_json, ma.attachment_type, ma.attachment_url, ma.attachment_content, ma.use_vector as attachment_use_vector, ma.token_count as attachment_token_count
+        let mut stmt = self.conn.prepare("SELECT message.id, message.parent_id, message.conversation_id, message.message_type, message.content, message.llm_model_id, message.llm_model_name, message.created_time, message.start_time, message.finish_time, message.token_count, message.input_token_count, message.output_token_count, message.generation_group_id, message.parent_group_id, message.tool_calls_json, ma.attachment_type, ma.attachment_url, ma.attachment_content, ma.use_vector as attachment_use_vector, ma.token_count as attachment_token_count
                                           FROM message
                                           LEFT JOIN message_attachment ma ON message.id = ma.message_id
                                           WHERE message.conversation_id = ?1
                                           ORDER BY message.created_time ASC")?;
         let rows = stmt.query_map(&[&conversation_id], |row| {
-            let attachment_type_int: Option<i64> = row.get(14).ok();
+            let attachment_type_int: Option<i64> = row.get(16).ok();
             let attachment_type = attachment_type_int.map(AttachmentType::try_from).transpose()?;
             let message = Message {
                 id: row.get(0)?,
@@ -273,20 +277,22 @@ impl MessageRepository {
                 start_time: get_datetime_from_row(row, 8)?,
                 finish_time: get_datetime_from_row(row, 9)?,
                 token_count: row.get(10)?,
-                generation_group_id: row.get(11)?,
-                parent_group_id: row.get(12)?,
-                tool_calls_json: row.get(13)?,
+                input_token_count: row.get(11)?,
+                output_token_count: row.get(12)?,
+                generation_group_id: row.get(13)?,
+                parent_group_id: row.get(14)?,
+                tool_calls_json: row.get(15)?,
             };
             let attachment = if attachment_type.is_some() {
                 Some(MessageAttachment {
                     id: 0,
                     message_id: row.get(0)?,
                     attachment_type: attachment_type.unwrap(),
-                    attachment_url: row.get(15)?,
-                    attachment_content: row.get(16)?,
+                    attachment_url: row.get(17)?,
+                    attachment_content: row.get(18)?,
                     attachment_hash: None,
-                    use_vector: row.get(17)?,
-                    token_count: row.get(18)?,
+                    use_vector: row.get(19)?,
+                    token_count: row.get(20)?,
                 })
             } else {
                 None
@@ -315,7 +321,7 @@ impl Repository<Message> for MessageRepository {
     #[instrument(level = "debug", skip(self, message), fields(conversation_id = message.conversation_id, message_type = message.message_type))]
     fn create(&self, message: &Message) -> Result<Message> {
         self.conn.execute(
-            "INSERT INTO message (parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, generation_group_id, parent_group_id, tool_calls_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO message (parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, input_token_count, output_token_count, generation_group_id, parent_group_id, tool_calls_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             (
                 &message.parent_id,
                 &message.conversation_id,
@@ -327,6 +333,8 @@ impl Repository<Message> for MessageRepository {
                 &message.start_time,
                 &message.finish_time,
                 &message.token_count,
+                &message.input_token_count,
+                &message.output_token_count,
                 &message.generation_group_id,
                 &message.parent_group_id,
                 &message.tool_calls_json,
@@ -345,6 +353,8 @@ impl Repository<Message> for MessageRepository {
             start_time: message.start_time,
             finish_time: message.finish_time,
             token_count: message.token_count,
+            input_token_count: message.input_token_count,
+            output_token_count: message.output_token_count,
             generation_group_id: message.generation_group_id.clone(),
             parent_group_id: message.parent_group_id.clone(),
             tool_calls_json: message.tool_calls_json.clone(),
@@ -354,7 +364,7 @@ impl Repository<Message> for MessageRepository {
     #[instrument(level = "debug", skip(self), fields(id = id))]
     fn read(&self, id: i64) -> Result<Option<Message>> {
         self.conn
-            .query_row("SELECT id, parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, generation_group_id, parent_group_id, tool_calls_json FROM message WHERE id = ?", &[&id], |row| {
+            .query_row("SELECT id, parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, input_token_count, output_token_count, generation_group_id, parent_group_id, tool_calls_json FROM message WHERE id = ?", &[&id], |row| {
                 Ok(Message {
                     id: row.get(0)?,
                     parent_id: row.get(1)?,
@@ -367,9 +377,11 @@ impl Repository<Message> for MessageRepository {
                     start_time: get_datetime_from_row(row, 8)?,
                     finish_time: get_datetime_from_row(row, 9)?,
                     token_count: row.get(10)?,
-                    generation_group_id: row.get(11)?,
-                    parent_group_id: row.get(12)?,
-                    tool_calls_json: row.get(13)?,
+                    input_token_count: row.get(11)?,
+                    output_token_count: row.get(12)?,
+                    generation_group_id: row.get(13)?,
+                    parent_group_id: row.get(14)?,
+                    tool_calls_json: row.get(15)?,
                 })
             })
             .optional()
@@ -378,7 +390,7 @@ impl Repository<Message> for MessageRepository {
     #[instrument(level = "debug", skip(self, message), fields(id = message.id))]
     fn update(&self, message: &Message) -> Result<()> {
         self.conn.execute(
-            "UPDATE message SET conversation_id = ?1, message_type = ?2, content = ?3, llm_model_id = ?4, llm_model_name = ?5, token_count = ?6, tool_calls_json = ?7 WHERE id = ?8",
+            "UPDATE message SET conversation_id = ?1, message_type = ?2, content = ?3, llm_model_id = ?4, llm_model_name = ?5, token_count = ?6, input_token_count = ?7, output_token_count = ?8, tool_calls_json = ?9 WHERE id = ?10",
             (
                 &message.conversation_id,
                 &message.message_type,
@@ -386,6 +398,8 @@ impl Repository<Message> for MessageRepository {
                 &message.llm_model_id,
                 &message.llm_model_name,
                 &message.token_count,
+                &message.input_token_count,
+                &message.output_token_count,
                 &message.tool_calls_json,
                 &message.id,
             ),
@@ -578,6 +592,8 @@ impl ConversationDatabase {
                 llm_model_id    INTEGER,
                 created_time    DATETIME default CURRENT_TIMESTAMP,
                 token_count     INTEGER,
+                input_token_count INTEGER DEFAULT 0,
+                output_token_count INTEGER DEFAULT 0,
                 parent_id       integer,
                 start_time      DATETIME,
                 finish_time     DATETIME,
@@ -589,7 +605,7 @@ impl ConversationDatabase {
             [],
         )?;
 
-        // 添加迁移逻辑：如果parent_group_id或tool_calls_json列不存在，则添加它们
+        // 添加迁移逻辑：如果parent_group_id、tool_calls_json、input_token_count或output_token_count列不存在，则添加它们
         let mut stmt = conn.prepare("PRAGMA table_info(message)")?;
         let column_info: Vec<String> = stmt
             .query_map([], |row| {
@@ -603,6 +619,12 @@ impl ConversationDatabase {
         }
         if !column_info.contains(&"tool_calls_json".to_string()) {
             conn.execute("ALTER TABLE message ADD COLUMN tool_calls_json TEXT", [])?;
+        }
+        if !column_info.contains(&"input_token_count".to_string()) {
+            conn.execute("ALTER TABLE message ADD COLUMN input_token_count INTEGER DEFAULT 0", [])?;
+        }
+        if !column_info.contains(&"output_token_count".to_string()) {
+            conn.execute("ALTER TABLE message ADD COLUMN output_token_count INTEGER DEFAULT 0", [])?;
         }
 
         conn.execute(
@@ -640,4 +662,119 @@ impl ConversationDatabase {
 
         Ok(())
     }
+
+    /// 获取对话的token统计信息
+    pub fn get_conversation_token_stats(
+        &self,
+        conversation_id: i64,
+    ) -> rusqlite::Result<ConversationTokenStats> {
+        let conn = Connection::open(&self.db_path)?;
+
+        // 获取总token统计
+        let (total_tokens, input_tokens, output_tokens, message_count): (i64, i64, i64, i64) =
+            conn.query_row(
+                "SELECT
+                    COALESCE(SUM(token_count), 0) as total,
+                    COALESCE(SUM(input_token_count), 0) as input,
+                    COALESCE(SUM(output_token_count), 0) as output,
+                    COUNT(*) as msg_count
+                FROM message
+                WHERE conversation_id = ?1",
+                &[&conversation_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+
+        // 按模型分组统计
+        let mut stmt = conn.prepare(
+            "SELECT
+                llm_model_id,
+                COALESCE(llm_model_name, 'Unknown') as llm_model_name,
+                SUM(token_count) as total,
+                SUM(input_token_count) as input,
+                SUM(output_token_count) as output,
+                COUNT(*) as msg_count
+            FROM message
+            WHERE conversation_id = ?1 AND llm_model_id IS NOT NULL AND llm_model_id != 1
+            GROUP BY llm_model_id
+            ORDER BY total DESC",
+        )?;
+
+        let by_model = stmt
+            .query_map(&[&conversation_id], |row| {
+                Ok(ModelTokenBreakdown {
+                    model_id: row.get(0)?,
+                    model_name: row.get(1).unwrap_or_else(|_| "Unknown".to_string()),
+                    total_tokens: row.get(2)?,
+                    input_tokens: row.get(3)?,
+                    output_tokens: row.get(4)?,
+                    message_count: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(ConversationTokenStats {
+            total_tokens: total_tokens as i32,
+            input_tokens: input_tokens as i32,
+            output_tokens: output_tokens as i32,
+            by_model,
+            message_count: message_count as i32,
+        })
+    }
+
+    /// 获取单个消息的token统计信息
+    pub fn get_message_token_stats(&self, message_id: i64) -> rusqlite::Result<MessageTokenStats> {
+        let conn = Connection::open(&self.db_path)?;
+
+        conn.query_row(
+            "SELECT
+                id,
+                token_count,
+                input_token_count,
+                output_token_count,
+                llm_model_name
+            FROM message
+            WHERE id = ?1",
+            &[&message_id],
+            |row| {
+                Ok(MessageTokenStats {
+                    message_id: row.get(0)?,
+                    total_tokens: row.get(1)?,
+                    input_tokens: row.get(2)?,
+                    output_tokens: row.get(3)?,
+                    model_name: row.get(4).ok(),
+                })
+            },
+        )
+    }
+}
+
+/// 对话token统计信息
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ConversationTokenStats {
+    pub total_tokens: i32,
+    pub input_tokens: i32,
+    pub output_tokens: i32,
+    pub by_model: Vec<ModelTokenBreakdown>,
+    pub message_count: i32,
+}
+
+/// 模型token分解信息
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ModelTokenBreakdown {
+    pub model_id: Option<i64>,
+    pub model_name: String,
+    pub total_tokens: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub message_count: i64,
+}
+
+/// 消息token统计信息
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MessageTokenStats {
+    pub message_id: i64,
+    pub total_tokens: i32,
+    pub input_tokens: i32,
+    pub output_tokens: i32,
+    pub model_name: Option<String>,
 }

@@ -300,6 +300,8 @@ pub async fn get_conversation_with_messages(
             start_time: message.start_time,
             finish_time: message.finish_time,
             token_count: message.token_count,
+            input_token_count: message.input_token_count,
+            output_token_count: message.output_token_count,
             generation_group_id: message.generation_group_id,
             parent_group_id: message.parent_group_id,
             tool_calls_json: message.tool_calls_json,
@@ -483,6 +485,8 @@ pub async fn create_message(
         start_time: Some(current_time),
         finish_time: Some(current_time), // Mark as completed immediately
         token_count: 0,
+        input_token_count: 0,
+        output_token_count: 0,
         generation_group_id: None,
         parent_group_id: None,
         tool_calls_json: None,

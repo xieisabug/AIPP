@@ -22,6 +22,8 @@ export interface Message {
     start_time: Date | null;
     finish_time: Date | null;
     token_count: number;
+    input_token_count: number;
+    output_token_count: number;
     generation_group_id?: string | null;
     parent_group_id?: string | null; // 添加 parent_group_id 字段
     parent_id?: number | null; // 添加 parent_id 字段
@@ -120,4 +122,31 @@ export enum AttachmentType { // 添加AttachmentType枚举
     Word = 4,
     PowerPoint = 5,
     Excel = 6,
+}
+
+// Token统计相关类型
+export interface ConversationTokenStats {
+    total_tokens: number;
+    input_tokens: number;
+    output_tokens: number;
+    by_model: ModelTokenBreakdown[];
+    message_count: number;
+}
+
+export interface ModelTokenBreakdown {
+    model_id: number | null;
+    model_name: string;
+    total_tokens: number;
+    input_tokens: number;
+    output_tokens: number;
+    message_count: number;
+    percentage?: number; // 用于UI显示的百分比
+}
+
+export interface MessageTokenStats {
+    message_id: number;
+    total_tokens: number;
+    input_tokens: number;
+    output_tokens: number;
+    model_name: string | null;
 }

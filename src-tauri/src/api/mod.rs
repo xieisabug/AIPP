@@ -13,6 +13,7 @@ pub mod operation_api;
 pub mod skill_api;
 pub mod sub_task_api;
 pub mod system_api;
+pub mod token_statistics_api;
 
 #[cfg(test)]
 mod tests;

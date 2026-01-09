@@ -74,6 +74,8 @@ export function useMessageProcessing({
                         ? streamEvent.end_time || new Date()
                         : null,
                     token_count: 0,
+                    input_token_count: 0,
+                    output_token_count: 0,
                     generation_group_id: null, // 流式消息暂时不设置generation_group_id
                     parent_group_id: null, // 流式消息暂时不设置parent_group_id
                     regenerate: null,

@@ -338,6 +338,8 @@ async fn ensure_stream_message(
             start_time: Some(now),
             finish_time: None,
             token_count: 0,
+            input_token_count: 0,
+            output_token_count: 0,
             generation_group_id: Some(generation_group_id.to_string()),
             parent_group_id: parent_group_id_override,
             tool_calls_json: None,
@@ -1609,10 +1611,69 @@ async fn attempt_stream_chat(
                     }
                     ChatStreamEvent::End(end_event) => {
                         debug!(?end_event, "end event");
-                        // Capture tool calls if they exist
+
+                        // Extract and store token usage data before ownership is taken
+                        let token_data = end_event.captured_usage.as_ref().map(|usage| {
+                            let input_tokens = usage.prompt_tokens.unwrap_or(0);
+                            let output_tokens = usage.completion_tokens.unwrap_or(0);
+                            let total_tokens = usage.total_tokens.unwrap_or(input_tokens + output_tokens);
+                            (input_tokens, output_tokens, total_tokens)
+                        });
+
+                        // Capture tool calls if they exist (this takes ownership of end_event)
                         if let Some(tool_calls) = end_event.captured_into_tool_calls() {
                             captured_tool_calls = tool_calls;
                             debug!(?captured_tool_calls, "captured tool calls");
+                        }
+
+                        // Store the extracted token data
+                        if let Some((input_tokens, output_tokens, total_tokens)) = token_data {
+                            // Update the response message with token data
+                            if let Some(msg_id) = response_message_id {
+                                if let Ok(repo) = conversation_db.message_repo() {
+                                    if let Ok(Some(mut message)) = repo.read(msg_id) {
+                                        message.input_token_count = input_tokens;
+                                        message.output_token_count = output_tokens;
+                                        message.token_count = total_tokens;
+                                        match repo.update(&message) {
+                                            Ok(_) => {
+                                                info!(
+                                                    message_id = msg_id,
+                                                    input_tokens,
+                                                    output_tokens,
+                                                    total_tokens,
+                                                    "Token usage captured and stored for streaming response"
+                                                );
+
+                                                // Send message_update event to notify frontend
+                                                let update_event = ConversationEvent {
+                                                    r#type: "message_update".to_string(),
+                                                    data: serde_json::to_value(MessageUpdateEvent {
+                                                        message_id: msg_id,
+                                                        message_type: "response".to_string(),
+                                                        content: message.content.clone(),
+                                                        is_done: true,
+                                                    })
+                                                    .unwrap(),
+                                                };
+                                                let _ = window.emit(
+                                                    format!("conversation_event_{}", conversation_id).as_str(),
+                                                    update_event,
+                                                );
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    message_id = msg_id,
+                                                    error = %e,
+                                                    "Failed to update message with token usage"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            debug!("No usage data in End event - AI provider may not support it");
                         }
 
                         // Info summary for easier debugging / visibility
@@ -1861,6 +1922,8 @@ async fn create_error_message(
         start_time: Some(now),
         finish_time: Some(now),
         token_count: 0,
+        input_token_count: 0,
+        output_token_count: 0,
         generation_group_id: Some(generation_group_id),
         parent_group_id: parent_group_id_override,
         tool_calls_json: None,
@@ -2012,6 +2075,12 @@ pub async fn handle_non_stream_chat(
 
             let mut content = chat_response.first_text().unwrap_or("").to_string();
 
+            // Extract token usage data
+            let usage = &chat_response.usage;
+            let input_tokens = usage.prompt_tokens.unwrap_or(0);
+            let output_tokens = usage.completion_tokens.unwrap_or(0);
+            let total_tokens = usage.total_tokens.unwrap_or(input_tokens + output_tokens);
+
             // 现在才创建响应消息（在有实际内容后）
             let now = chrono::Utc::now();
             let response_message = conversation_db
@@ -2028,12 +2097,22 @@ pub async fn handle_non_stream_chat(
                     created_time: now,
                     start_time: Some(now),
                     finish_time: None,
-                    token_count: 0,
+                    token_count: total_tokens,
+                    input_token_count: input_tokens,
+                    output_token_count: output_tokens,
                     generation_group_id: Some(generation_group_id.clone()),
                     parent_group_id: parent_group_id_override.clone(),
                     tool_calls_json: None,
                 })
                 .unwrap();
+
+            info!(
+                message_id = response_message.id,
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                "Token usage captured for non-streaming response"
+            );
             let response_message_id = response_message.id;
 
             // 现在才发送 message_add 事件（消息有内容时）
@@ -2215,6 +2294,8 @@ pub async fn handle_non_stream_chat(
                     start_time: Some(now),
                     finish_time: Some(now),
                     token_count: 0,
+                    input_token_count: 0,
+                    output_token_count: 0,
                     generation_group_id: Some(generation_group_id.clone()),
                     parent_group_id: parent_group_id_override.clone(),
                     tool_calls_json: None,
