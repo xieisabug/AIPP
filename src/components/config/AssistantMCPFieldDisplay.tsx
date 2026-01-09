@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Button } from "../ui/button";
 import { Settings } from "lucide-react";
 import AssistantMCPConfigDialog from './AssistantMCPConfigDialog';
@@ -91,6 +92,15 @@ const AssistantMCPFieldDisplay: React.FC<AssistantMCPFieldDisplayProps> = ({
 
     useEffect(() => {
         fetchMCPSummary();
+
+        // 监听 MCP 状态变更事件，自动刷新
+        const unlistenPromise = listen('mcp_state_changed', () => {
+            fetchMCPSummary();
+        });
+
+        return () => {
+            unlistenPromise.then(unlisten => unlisten());
+        };
     }, [fetchMCPSummary]);
 
     const handleOpenConfig = useCallback(() => {

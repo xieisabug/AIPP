@@ -1,5 +1,6 @@
 use crate::db::mcp_db::MCPDatabase;
 use anyhow::{Context, Result};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tracing::{error, instrument};
@@ -40,7 +41,18 @@ pub struct BuiltinToolInfo {
 }
 
 fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
-    vec![BuiltinTemplateInfo {
+    vec![
+        // Agent 工具
+        BuiltinTemplateInfo {
+            id: "agent".into(),
+            name: "Agent 工具".into(),
+            description: "内置的 Agent 能力工具集，包含 Skill 加载等功能。当 AI 需要执行用户定义的技能时，可以通过此工具加载技能的详细指令。".into(),
+            command: "aipp:agent".into(),
+            transport_type: "stdio".into(),
+            required_envs: vec![],
+        },
+        // 搜索工具
+        BuiltinTemplateInfo {
         id: "search".into(),
         name: "搜索工具".into(),
         description: "内置的网络搜索和网页访问工具，支持多种搜索引擎和浏览器，可以通过搜索引擎获取到相关信息，并且可以调用访问工具进一步获取页面的具体信息".into(),
@@ -136,11 +148,87 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
                 options: None,
             },
         ],
-    }]
+        },
+        // 操作工具
+        BuiltinTemplateInfo {
+            id: "operation".into(),
+            name: "操作工具".into(),
+            description: "内置的文件操作和命令执行工具，支持文件读写、目录列表、命令行执行等操作。可以帮助 AI 助手完成代码编辑、文件管理、脚本执行等任务。".into(),
+            command: "aipp:operation".into(),
+            transport_type: "stdio".into(),
+            required_envs: vec![
+                BuiltinTemplateEnvVar {
+                    key: "ALLOWED_DIRECTORIES".into(),
+                    label: "允许访问的目录".into(),
+                    required: false,
+                    tip: Some("允许操作的目录白名单，每行一个目录路径。如果为空，所有操作都需要用户确认授权。".into()),
+                    field_type: "textarea".into(),
+                    default_value: None,
+                    placeholder: Some("/Users/username/projects\n/tmp".into()),
+                    options: None,
+                },
+                BuiltinTemplateEnvVar {
+                    key: "DEFAULT_SHELL".into(),
+                    label: "默认 Shell".into(),
+                    required: false,
+                    tip: Some("执行命令时使用的 Shell，默认自动检测（macOS/Linux 使用 zsh/bash，Windows 使用 PowerShell）".into()),
+                    field_type: "select".into(),
+                    default_value: Some("auto".into()),
+                    placeholder: None,
+                    options: Some(vec![
+                        EnvVarOption { label: "自动检测".into(), value: "auto".into() },
+                        EnvVarOption { label: "Bash".into(), value: "bash".into() },
+                        EnvVarOption { label: "Zsh".into(), value: "zsh".into() },
+                        EnvVarOption { label: "PowerShell".into(), value: "powershell".into() },
+                    ]),
+                },
+                BuiltinTemplateEnvVar {
+                    key: "MAX_READ_LINES".into(),
+                    label: "文件读取行数限制".into(),
+                    required: false,
+                    tip: Some("单次读取文件的最大行数，默认 2000 行".into()),
+                    field_type: "number".into(),
+                    default_value: Some("2000".into()),
+                    placeholder: Some("2000".into()),
+                    options: None,
+                },
+                BuiltinTemplateEnvVar {
+                    key: "COMMAND_TIMEOUT_MS".into(),
+                    label: "命令超时时间".into(),
+                    required: false,
+                    tip: Some("命令执行的默认超时时间（毫秒），默认 120000（2分钟），最大 600000（10分钟）".into()),
+                    field_type: "number".into(),
+                    default_value: Some("120000".into()),
+                    placeholder: Some("120000".into()),
+                    options: None,
+                },
+            ],
+        },
+    ]
 }
 
 pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
     match super::builtin_command_id(command).as_deref() {
+        Some("agent") => vec![
+            BuiltinToolInfo {
+                name: "load_skill".into(),
+                description: "Load a skill's detailed instructions (SKILL.md). Use this tool when you need to execute a user-defined skill. The skill's prompt will provide detailed instructions on how to complete the task.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The skill name only (no arguments). E.g., 'pdf' or 'xlsx'. This should match the skill's display name or file name."
+                        },
+                        "source_type": {
+                            "type": "string",
+                            "description": "The source type of the skill. Available types: 'aipp' (AIPP Skills), 'claude_code_agents' (Claude Code Agents), 'claude_code_rules' (Claude Code Rules), 'codex' (Codex), or custom source types."
+                        }
+                    },
+                    "required": ["command", "source_type"]
+                }),
+            },
+        ],
         Some("search") => vec![
             BuiltinToolInfo {
                 name: "search_web".into(),
@@ -183,8 +271,200 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                 }),
             },
         ],
+        Some("operation") => vec![
+            BuiltinToolInfo {
+                name: "read_file".into(),
+                description: "读取文件内容。支持部分读取（通过 offset 和 limit 参数）。返回带行号的内容（类似 cat -n 格式）。必须使用绝对路径。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "要读取的文件的绝对路径"
+                        },
+                        "offset": {
+                            "type": "number",
+                            "description": "开始读取的行号（1-indexed）。仅在文件过大无法一次读取时使用"
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "要读取的行数。仅在文件过大无法一次读取时使用"
+                        }
+                    },
+                    "required": ["file_path"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "write_file".into(),
+                description: "创建新文件或完全覆盖现有文件。必须使用绝对路径。安全机制：覆盖现有文件前必须先使用 read_file 读取该文件。推荐使用 edit_file 进行文件修改，write_file 仅用于创建新文件。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "要写入的文件的绝对路径"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "要写入的完整文件内容"
+                        }
+                    },
+                    "required": ["file_path", "content"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "edit_file".into(),
+                description: "对文件进行精确的字符串替换。必须使用绝对路径。要求：1) 必须先用 read_file 读取文件；2) old_string 必须精确匹配文件中的文本（包括空格和缩进）；3) 默认情况下 old_string 必须在文件中唯一出现，否则需要设置 replace_all=true。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "要编辑的文件的绝对路径"
+                        },
+                        "old_string": {
+                            "type": "string",
+                            "description": "要查找并替换的精确文本，必须包含足够的上下文以确保唯一匹配"
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "description": "替换后的文本（必须与 old_string 不同）"
+                        },
+                        "replace_all": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "是否替换所有匹配项（默认 false，仅替换第一个唯一匹配）"
+                        }
+                    },
+                    "required": ["file_path", "old_string", "new_string"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "list_directory".into(),
+                description: "列出目录内容。支持 glob 模式过滤和递归列出。返回文件名、路径、类型、大小和修改时间。结果按修改时间排序（最新的在前）。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "要列出的目录的绝对路径"
+                        },
+                        "pattern": {
+                            "type": "string",
+                            "description": "可选的 glob 模式过滤，如 '*.js'、'**/*.ts'、'src/**/*.{ts,tsx}'"
+                        },
+                        "recursive": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "是否递归列出子目录"
+                        }
+                    },
+                    "required": ["path"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "execute_bash".into(),
+                description: "执行 Shell 命令。根据操作系统自动选择 Shell（macOS/Linux: zsh/bash, Windows: PowerShell）。默认超时 2 分钟，最长 10 分钟。对于长时间运行的命令（如服务器、watch 模式），请设置 run_in_background=true，然后使用 get_bash_output 获取输出。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "要执行的 Shell 命令"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "命令的简短描述（5-10 个词），例如 'List files in current directory'"
+                        },
+                        "timeout": {
+                            "type": "number",
+                            "description": "超时时间（毫秒），默认 120000，最大 600000"
+                        },
+                        "run_in_background": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "是否后台运行。后台运行会返回 bash_id，稍后使用 get_bash_output 获取输出"
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "get_bash_output".into(),
+                description: "获取后台运行的命令的输出。返回自上次调用以来的新增输出（增量输出）。可以使用正则表达式过滤输出，但过滤后的行将不再可用。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "bash_id": {
+                            "type": "string",
+                            "description": "execute_bash 返回的后台任务 ID"
+                        },
+                        "filter": {
+                            "type": "string",
+                            "description": "可选的正则表达式，用于过滤输出行。注意：不匹配的行将被永久丢弃"
+                        }
+                    },
+                    "required": ["bash_id"]
+                }),
+            },
+        ],
         _ => vec![],
     }
+}
+
+/// 初始化所有内置工具集到数据库（如果不存在）
+/// 此函数应在应用启动时调用，确保内置工具集始终存在
+#[instrument(skip(app_handle))]
+pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
+    use tracing::info;
+    
+    let db = MCPDatabase::new(app_handle).context("Create MCPDatabase failed")?;
+    let templates = builtin_templates();
+    
+    for tpl in templates {
+        // 检查是否已存在该内置工具集（通过 command 匹配）
+        let exists = db.conn
+            .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1 AND is_deletable = 0")?
+            .query_row([&tpl.command], |row| row.get::<_, i64>(0))
+            .optional()?;
+        
+        if exists.is_none() {
+            info!(template_id = %tpl.id, name = %tpl.name, "Initializing builtin MCP server");
+            
+            // 插入内置工具集（系统初始化的不可删除）
+            let server_id = db
+                .upsert_mcp_server_with_builtin(
+                    &tpl.name,              // name
+                    Some(&tpl.description), // description
+                    &tpl.transport_type,    // transport_type
+                    Some(&tpl.command),     // command
+                    None,                   // environment_variables (用户可以后续配置)
+                    None,                   // headers
+                    None,                   // url (builtins use stdio)
+                    Some(20000),            // timeout
+                    false,                  // is_long_running
+                    true,                   // is_enabled
+                    true,                   // is_builtin
+                    false,                  // is_deletable - 系统初始化的不可删除
+                )
+                .context("Insert builtin server failed")?;
+
+            // 注册工具
+            for tool in get_builtin_tools_for_command(&tpl.command) {
+                db.upsert_mcp_server_tool(
+                    server_id,
+                    &tool.name,
+                    Some(&tool.description),
+                    Some(&tool.input_schema.to_string()),
+                )
+                .with_context(|| format!("Insert server tool failed: {}", tool.name))?;
+            }
+            
+            info!(template_id = %tpl.id, server_id = server_id, "Builtin MCP server initialized");
+        }
+    }
+    
+    Ok(())
 }
 
 #[tauri::command]
@@ -228,6 +508,7 @@ pub async fn add_or_update_aipp_builtin_server(
                 false,                                             // is_long_running
                 true,                                              // is_enabled
                 true,                                              // is_builtin
+                true,                                              // is_deletable - 用户添加的可删除
             )
             .context("Upsert builtin server failed")?;
 
@@ -269,6 +550,56 @@ mod tests {
         let templates = builtin_templates();
         let search = templates.iter().find(|t| t.id == "search");
         assert!(search.is_some(), "Search template should exist");
+    }
+
+    #[test]
+    fn test_builtin_templates_agent_exists() {
+        let templates = builtin_templates();
+        let agent = templates.iter().find(|t| t.id == "agent");
+        assert!(agent.is_some(), "Agent template should exist");
+    }
+
+    #[test]
+    fn test_agent_template_has_required_fields() {
+        let templates = builtin_templates();
+        let agent = templates.iter().find(|t| t.id == "agent").unwrap();
+        
+        assert!(!agent.name.is_empty());
+        assert!(!agent.description.is_empty());
+        assert_eq!(agent.command, "aipp:agent");
+        assert_eq!(agent.transport_type, "stdio");
+        // Agent has no required env vars
+        assert!(agent.required_envs.is_empty());
+    }
+
+    #[test]
+    fn test_get_tools_for_agent_command() {
+        let tools = get_builtin_tools_for_command("aipp:agent");
+        assert_eq!(tools.len(), 1, "Agent command should have 1 tool");
+    }
+
+    #[test]
+    fn test_agent_load_skill_tool_exists() {
+        let tools = get_builtin_tools_for_command("aipp:agent");
+        let load_skill = tools.iter().find(|t| t.name == "load_skill");
+        assert!(load_skill.is_some(), "load_skill tool should exist");
+    }
+
+    #[test]
+    fn test_agent_load_skill_tool_schema() {
+        let tools = get_builtin_tools_for_command("aipp:agent");
+        let load_skill = tools.iter().find(|t| t.name == "load_skill").unwrap();
+        
+        assert!(!load_skill.description.is_empty());
+        
+        let schema = &load_skill.input_schema;
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["command"].is_object());
+        assert!(schema["properties"]["source_type"].is_object());
+        
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|r| r == "command"));
+        assert!(required.iter().any(|r| r == "source_type"));
     }
 
     #[test]
@@ -412,7 +743,7 @@ mod tests {
     #[test]
     fn test_all_env_vars_have_valid_field_type() {
         let templates = builtin_templates();
-        let valid_types = ["text", "select", "boolean", "number"];
+        let valid_types = ["text", "select", "boolean", "number", "textarea"];
         
         for template in templates {
             for env in template.required_envs {

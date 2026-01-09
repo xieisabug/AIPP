@@ -24,6 +24,8 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
+import ConfirmDialog from "../ConfirmDialog";
+import { useSkillsMcpValidation, AGENT_MCP_COMMAND } from "../../hooks/useSkillsMcpValidation";
 
 interface AssistantMCPConfigDialogProps {
     assistantId: number;
@@ -36,6 +38,7 @@ interface MCPServerInfo {
     id: number;
     name: string;
     is_enabled: boolean;
+    command?: string; // 用于判断是否为操作 MCP
 }
 
 interface MCPToolInfo {
@@ -57,7 +60,44 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
     const [useNativeToolCall, setUseNativeToolCall] = useState<boolean>(false);
     // loadingTools 不再需要，因为工具数据在初始化时一次性加载
 
-    // 获取可用的MCP服务器列表
+    // Skills/MCP 联动校验
+    const { checkDisableAssistantAgentMcp, disableAssistantAgentMcpWithSkills } = useSkillsMcpValidation();
+
+    // 关闭操作 MCP 确认对话框
+    const [disableOperationMcpConfirmOpen, setDisableOperationMcpConfirmOpen] = useState(false);
+    const [affectedSkillsCount, setAffectedSkillsCount] = useState(0);
+    const [pendingServerToggle, setPendingServerToggle] = useState<{ serverId: number; isEnabled: boolean; isAgent?: boolean } | null>(null);
+    const [pendingToolToggle, setPendingToolToggle] = useState<{ toolId: number; serverId: number } | null>(null);
+
+    // 强制刷新数据（不检查 isOpen，用于操作完成后立即刷新）
+    const forceRefreshServers = useCallback(async () => {
+        try {
+            const serversWithTools = await invoke<(MCPServerInfo & { tools: MCPToolInfo[] })[]>(
+                'get_assistant_mcp_servers_with_tools',
+                { assistantId }
+            );
+
+            // 提取服务器信息
+            const servers = serversWithTools.map(server => ({
+                id: server.id,
+                name: server.name,
+                is_enabled: server.is_enabled,
+                command: server.command
+            }));
+            setAvailableServers(servers);
+
+            // 设置所有服务器的工具映射
+            const toolsMap = new Map<number, MCPToolInfo[]>();
+            serversWithTools.forEach(server => {
+                toolsMap.set(server.id, server.tools);
+            });
+            setServerTools(toolsMap);
+        } catch (error) {
+            console.error('Failed to refresh servers:', error);
+        }
+    }, [assistantId]);
+
+    // 获取可用的MCP服务器列表（用于初始化）
     const fetchAvailableServers = useCallback(async () => {
         if (!isOpen) return;
 
@@ -83,7 +123,8 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
             const servers = serversWithTools.map(server => ({
                 id: server.id,
                 name: server.name,
-                is_enabled: server.is_enabled
+                is_enabled: server.is_enabled,
+                command: server.command
             }));
             setAvailableServers(servers);
 
@@ -103,6 +144,25 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
 
     // 更新服务器启用状态
     const handleServerToggle = useCallback(async (serverId: number, isEnabled: boolean) => {
+        // 如果是关闭 Agent MCP，先检查是否有 Skills 依赖
+        if (!isEnabled) {
+            const server = availableServers.find(s => s.id === serverId);
+            if (server && server.command === AGENT_MCP_COMMAND) {
+                try {
+                    const skillsCount = await checkDisableAssistantAgentMcp(assistantId);
+                    if (skillsCount > 0) {
+                        // 有 Skills 依赖操作 MCP，需要确认
+                        setAffectedSkillsCount(skillsCount);
+                        setPendingServerToggle({ serverId, isEnabled, isAgent: true });
+                        setDisableOperationMcpConfirmOpen(true);
+                        return;
+                    }
+                } catch (e) {
+                    console.error('检查 MCP 依赖失败:', e);
+                }
+            }
+        }
+
         try {
             await invoke('update_assistant_mcp_config', {
                 assistantId,
@@ -117,12 +177,33 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
             );
 
             toast.success(`服务器已${isEnabled ? '启用' : '禁用'}`);
+            await forceRefreshServers();
             onConfigChange?.();
         } catch (error) {
             console.error('Failed to update server config:', error);
             toast.error('更新服务器配置失败: ' + error);
         }
-    }, [assistantId, onConfigChange]);
+    }, [assistantId, availableServers, checkDisableAssistantAgentMcp, onConfigChange, forceRefreshServers]);
+
+    // 确认关闭操作 MCP 并同时关闭所有 Skills
+    const handleConfirmDisableAssistantOperationMcp = useCallback(async () => {
+        if (!pendingServerToggle) return;
+
+        try {
+            await disableAssistantAgentMcpWithSkills(assistantId);
+            
+            await forceRefreshServers();
+            
+            toast.success('已关闭工具集和相关Skills');
+            onConfigChange?.();
+        } catch (e) {
+            toast.error('关闭失败: ' + e);
+        } finally {
+            setDisableOperationMcpConfirmOpen(false);
+            setAffectedSkillsCount(0);
+            setPendingServerToggle(null);
+        }
+    }, [assistantId, pendingServerToggle, disableAssistantAgentMcpWithSkills, onConfigChange, forceRefreshServers]);
 
     // 更新工具配置
     const handleToolConfigChange = useCallback(async (
@@ -131,6 +212,25 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
         isAutoRun: boolean,
         serverId: number
     ) => {
+        // 如果关闭的是 load_skill，且有 Skill 依赖，需要提示
+        if (!isEnabled) {
+            const serverToolsList = serverTools.get(serverId) || [];
+            const tool = serverToolsList.find(t => t.id === toolId);
+            if (tool && tool.name === 'load_skill') {
+                try {
+                    const skillsCount = await checkDisableAssistantAgentMcp(assistantId);
+                    if (skillsCount > 0) {
+                        setAffectedSkillsCount(skillsCount);
+                        setPendingToolToggle({ toolId, serverId });
+                        setDisableOperationMcpConfirmOpen(true);
+                        return;
+                    }
+                } catch (e) {
+                    console.error('检查 load_skill 依赖失败:', e);
+                }
+            }
+        }
+
         try {
             await invoke('update_assistant_mcp_tool_config', {
                 assistantId,
@@ -162,12 +262,13 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
                 return newMap;
             });
 
+            await forceRefreshServers();
             onConfigChange?.();
         } catch (error) {
             console.error('Failed to update tool config:', error);
             toast.error('更新工具配置失败: ' + error);
         }
-    }, [assistantId, availableServers, handleServerToggle, onConfigChange]);
+    }, [assistantId, availableServers, handleServerToggle, onConfigChange, serverTools, checkDisableAssistantAgentMcp, forceRefreshServers]);
 
     // 更新原生ToolCall配置
     const handleNativeToolCallToggle = useCallback(async (checked: boolean) => {
@@ -203,14 +304,14 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
             });
 
             // 重新获取所有数据
-            await fetchAvailableServers();
+            await forceRefreshServers();
             toast.success(`批量${isEnabled ? '启用' : '禁用'}工具成功`);
             onConfigChange?.();
         } catch (error) {
             console.error('Failed to bulk update tools:', error);
             toast.error('批量更新工具失败: ' + error);
         }
-    }, [assistantId, fetchAvailableServers, onConfigChange]);
+    }, [assistantId, forceRefreshServers, onConfigChange]);
 
     // 处理服务器展开/折叠
     const handleServerExpand = useCallback((serverId: number) => {
@@ -229,8 +330,10 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
     }, [expandedServers, serverTools]);
 
     useEffect(() => {
-        fetchAvailableServers();
-    }, [fetchAvailableServers]);
+        if (isOpen) {
+            fetchAvailableServers();
+        }
+    }, [isOpen, assistantId]);
 
     const enabledServers = availableServers.filter(server => server.is_enabled);
     
@@ -241,6 +344,7 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
         .filter(tool => tool.is_enabled).length;
 
     return (
+        <>
         <Dialog open={isOpen} onOpenChange={onClose}>
             <DialogContent className="max-w-4xl max-h-[80vh] overflow-hidden flex flex-col">
                 <DialogHeader>
@@ -432,6 +536,39 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
                 </div>
             </DialogContent>
         </Dialog>
+
+        {/* 关闭操作 MCP 确认对话框 */}
+        <ConfirmDialog
+            isOpen={disableOperationMcpConfirmOpen}
+            title="确认关闭 Agent 工具集"
+            confirmText={`关闭 Agent 工具集或 load_skill 将同时禁用该助手的 ${affectedSkillsCount} 个Skills。确定要继续吗？`}
+            onConfirm={async () => {
+                if (pendingToolToggle) {
+                    try {
+                        await disableAssistantAgentMcpWithSkills(assistantId);
+                        await forceRefreshServers();
+                        toast.success('已关闭 load_skill 和相关Skills');
+                        onConfigChange?.();
+                    } catch (e) {
+                        toast.error('关闭失败: ' + e);
+                    } finally {
+                        setDisableOperationMcpConfirmOpen(false);
+                        setAffectedSkillsCount(0);
+                        setPendingToolToggle(null);
+                        setPendingServerToggle(null);
+                    }
+                } else {
+                    await handleConfirmDisableAssistantOperationMcp();
+                }
+            }}
+            onCancel={() => {
+                setDisableOperationMcpConfirmOpen(false);
+                setAffectedSkillsCount(0);
+                setPendingServerToggle(null);
+                setPendingToolToggle(null);
+            }}
+        />
+    </>
     );
 };
 

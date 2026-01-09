@@ -5,9 +5,11 @@ import ChatUIToolbar from "../components/ChatUIToolbar";
 import ConversationList from "../components/ConversationList";
 import ChatUIInfomation from "../components/ChatUIInfomation";
 import ConversationUI, { ConversationUIRef } from "../components/ConversationUI";
+import { OperationPermissionDialog } from "../components/OperationPermissionDialog";
 import { Conversation } from "../data/Conversation";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
+import { useOperationPermission } from "../hooks/useOperationPermission";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
 import { Menu, Plus } from "lucide-react";
@@ -29,6 +31,11 @@ function ChatUIWindow() {
 
     const [selectedConversation, setSelectedConversation] = useState<string>("");
     const conversationUIRef = useRef<ConversationUIRef>(null);
+
+    // 操作权限对话框
+    const { pendingRequest, isDialogOpen, handleDecision } = useOperationPermission({
+        conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
+    });
 
     // 移动端选择对话后自动关闭侧边栏
     const handleSelectConversation = useCallback(
@@ -208,6 +215,13 @@ function ChatUIWindow() {
                         onConversationChange={handleConversationChange}
                     />
                 </div>
+
+                {/* 操作权限对话框 */}
+                <OperationPermissionDialog
+                    request={pendingRequest}
+                    isOpen={isDialogOpen}
+                    onDecision={handleDecision}
+                />
             </div>
         );
     }
@@ -232,6 +246,13 @@ function ChatUIWindow() {
                     onChangeConversationId={setSelectedConversation}
                 />
             </div>
+
+            {/* 操作权限对话框 */}
+            <OperationPermissionDialog
+                request={pendingRequest}
+                isOpen={isDialogOpen}
+                onDecision={handleDecision}
+            />
         </div>
     );
 }

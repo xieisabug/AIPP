@@ -47,9 +47,8 @@ const StatusIndicator: React.FC<{ state: ExecutionState }> = ({ state }) => {
             return null;
         case "pending":
             return (
-                <Badge variant="secondary" className="flex items-center gap-1 ml-3">
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                    等待中
+                <Badge variant="outline" className="flex items-center gap-1 ml-3">
+                    待执行
                 </Badge>
             );
         case "executing":
@@ -145,8 +144,8 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     // 检查执行状态
     const isFailed = executionState === "failed";
     const isExecuting = executionState === "executing";
-    const canExecute = executionState === "idle" || executionState === "failed"; // 失败状态也可以重新执行
-    const isRunning = executionState === "executing" || executionState === "pending"; // 运行状态用于显示闪亮边框
+    const canExecute = executionState === "idle" || executionState === "pending" || executionState === "failed"; // idle/pending/failed 状态都可以执行
+    const isRunning = executionState === "executing"; // 只有 executing 才显示闪亮边框
 
     // 如果提供了 callId，尝试获取已有的执行结果
     useEffect(() => {

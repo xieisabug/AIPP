@@ -4,6 +4,7 @@ import { AssistantDetail } from "@/data/Assistant";
 import { AssistantFormConfig } from "@/types/forms";
 import { validateConfig } from "@/utils/validate";
 import AssistantMCPFieldDisplay from "@/components/config/AssistantMCPFieldDisplay";
+import AssistantSkillsFieldDisplay from "@/components/config/AssistantSkillsFieldDisplay";
 
 interface UseAssistantFormConfigProps {
     currentAssistant: AssistantDetail | null;
@@ -151,6 +152,25 @@ export const useAssistantFormConfig = ({
                             assistantId: currentAssistant?.assistant.id ?? 0,
                             onConfigChange: () => {
                                 console.log("MCP configuration changed");
+                            },
+                            navigateTo: navigateTo,
+                        });
+                    },
+                },
+            });
+        }
+
+        if (!assistantTypeHideField.includes("skills_config")) {
+            baseConfigs.push({
+                key: "skills_config",
+                config: {
+                    type: "custom" as const,
+                    label: "Skills",
+                    customRender: () => {
+                        return React.createElement(AssistantSkillsFieldDisplay, {
+                            assistantId: currentAssistant?.assistant.id ?? 0,
+                            onConfigChange: () => {
+                                console.log("Skills configuration changed");
                             },
                             navigateTo: navigateTo,
                         });

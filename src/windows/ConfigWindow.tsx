@@ -5,10 +5,11 @@ import LLMProviderConfig from "../components/config/LLMProviderConfig";
 import AssistantConfig from "../components/config/AssistantConfig";
 import FeatureAssistantConfig from "../components/config/FeatureAssistantConfig";
 import MCPConfig from "../components/config/MCPConfig";
+import SkillsConfig from "../components/config/SkillsConfig";
 import { appDataDir } from "@tauri-apps/api/path";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { Bot, ServerCrash, Settings } from "lucide-react";
+import { Bot, ServerCrash, Settings, Sparkles } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
@@ -29,6 +30,7 @@ const contentMap: Record<string, React.ComponentType<any>> = {
     "assistant-config": AssistantConfig,
     "feature-assistant-config": FeatureAssistantConfig,
     "mcp-config": MCPConfig,
+    "skills-config": SkillsConfig,
 };
 
 function ConfigWindow() {
@@ -55,6 +57,12 @@ function ConfigWindow() {
             name: "MCP",
             icon: <MCP className="w-full h-full text-muted-foreground" />,
             iconSelected: <MCP className="w-full h-full text-foreground" />,
+        },
+        {
+            id: "skills-config",
+            name: "Skills",
+            icon: <Sparkles className="w-full h-full text-muted-foreground" />,
+            iconSelected: <Sparkles className="w-full h-full text-foreground" />,
         },
         {
             id: "feature-assistant-config",

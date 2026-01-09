@@ -650,21 +650,21 @@ impl AssistantDatabase {
     pub fn get_assistant_mcp_servers_with_tools(
         &self,
         assistant_id: i64,
-    ) -> Result<Vec<(i64, String, bool, Vec<(i64, String, String, bool, bool, String)>)>> {
+    ) -> Result<Vec<(i64, String, Option<String>, bool, Vec<(i64, String, String, bool, bool, String)>)>> {
         // 使用一条 SQL 语句获取所有需要的数据，避免 N+1 查询问题
         // 注意：由于涉及两个数据库（assistant.db 和 mcp.db），我们需要分两步查询，但可以优化为批量查询
 
         // 1. 获取所有启用的服务器及其配置状态
         let mut server_stmt = self.mcp_conn.prepare(
             "
-            SELECT s.id, s.name
+            SELECT s.id, s.name, s.command
             FROM mcp_server s
             WHERE s.is_enabled = 1
             ORDER BY s.name
         ",
         )?;
-        let servers: Vec<(i64, String)> = server_stmt
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+        let servers: Vec<(i64, String, Option<String>)> = server_stmt
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)))?
             .collect::<Result<Vec<_>, _>>()?;
 
         if servers.is_empty() {
@@ -672,7 +672,7 @@ impl AssistantDatabase {
         }
 
         // 2. 批量获取所有服务器的配置状态
-        let server_ids: Vec<String> = servers.iter().map(|(id, _)| id.to_string()).collect();
+        let server_ids: Vec<String> = servers.iter().map(|(id, _, _)| id.to_string()).collect();
         let server_ids_placeholder = vec!["?"; server_ids.len()].join(",");
         let server_config_sql = format!(
             "SELECT mcp_server_id, is_enabled FROM assistant_mcp_config 
@@ -682,7 +682,7 @@ impl AssistantDatabase {
 
         let mut server_config_stmt = self.conn.prepare(&server_config_sql)?;
         let mut server_config_params = vec![assistant_id];
-        server_config_params.extend(servers.iter().map(|(id, _)| *id));
+        server_config_params.extend(servers.iter().map(|(id, _, _)| *id));
 
         let server_configs: std::collections::HashMap<i64, bool> = server_config_stmt
             .query_map(rusqlite::params_from_iter(server_config_params), |row| {
@@ -701,7 +701,7 @@ impl AssistantDatabase {
 
         let mut tools_stmt = self.mcp_conn.prepare(&tools_sql)?;
         let all_tools: Vec<(i64, i64, String, String, String)> = tools_stmt
-            .query_map(rusqlite::params_from_iter(servers.iter().map(|(id, _)| *id)), |row| {
+            .query_map(rusqlite::params_from_iter(servers.iter().map(|(id, _, _)| *id)), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
@@ -738,7 +738,7 @@ impl AssistantDatabase {
 
         // 5. 组织数据结构
         let mut result = Vec::new();
-        for (server_id, server_name) in servers {
+        for (server_id, server_name, server_command) in servers {
             let server_is_enabled = server_configs.get(&server_id).copied().unwrap_or(false);
 
             // 获取该服务器的所有工具
@@ -760,7 +760,7 @@ impl AssistantDatabase {
                 })
                 .collect();
 
-            result.push((server_id, server_name, server_is_enabled, server_tools));
+            result.push((server_id, server_name, server_command, server_is_enabled, server_tools));
         }
 
         debug!(server_count = result.len(), "fetched assistant mcp servers with tools");

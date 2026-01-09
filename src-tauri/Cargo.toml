@@ -46,6 +46,7 @@ fastrand = "2.0"
 mockito = "0.31"
 image = "0.25"
 uuid = { version = "1.0", features = ["v4"] }
+glob = "0.3"
 urlencoding = "2.1"
 tauri-plugin-dialog = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
 tauri-plugin-clipboard-manager = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }

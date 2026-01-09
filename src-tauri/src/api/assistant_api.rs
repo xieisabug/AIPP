@@ -47,6 +47,7 @@ pub struct MCPToolInfo {
 pub struct MCPServerWithTools {
     pub id: i64,
     pub name: String,
+    pub command: Option<String>,
     pub is_enabled: bool,
     pub tools: Vec<MCPToolInfo>,
 }
@@ -579,7 +580,7 @@ pub async fn get_assistant_mcp_servers_with_tools(
 
     let servers = servers_data
         .into_iter()
-        .map(|(server_id, server_name, server_is_enabled, tools_data)| {
+        .map(|(server_id, server_name, server_command, server_is_enabled, tools_data)| {
             let tools = tools_data
                 .into_iter()
                 .map(
@@ -606,6 +607,7 @@ pub async fn get_assistant_mcp_servers_with_tools(
             MCPServerWithTools {
                 id: server_id,
                 name: server_name,
+                command: server_command,
                 is_enabled: server_is_enabled,
                 tools,
             }
@@ -634,8 +636,8 @@ pub async fn bulk_update_assistant_mcp_tools(
     // Find the specific server and get its tools
     let tools_data = servers_data
         .into_iter()
-        .find(|(server_id, _, _, _)| *server_id == mcp_server_id)
-        .map(|(_, _, _, tools)| tools)
+        .find(|(server_id, _, _, _, _)| *server_id == mcp_server_id)
+        .map(|(_, _, _, _, tools)| tools)
         .unwrap_or_default();
 
     // Update each tool

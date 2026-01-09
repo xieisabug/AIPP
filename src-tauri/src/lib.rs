@@ -6,6 +6,7 @@ mod db;
 mod errors;
 mod mcp;
 mod plugin;
+mod skills;
 mod state;
 mod template_engine;
 mod utils;
@@ -40,6 +41,7 @@ use crate::api::llm_api::{
     get_models_for_select, import_llm_provider, preview_model_list, update_llm_provider,
     update_llm_provider_config, update_selected_models,
 };
+use crate::api::operation_api::confirm_operation_permission;
 use crate::api::sub_task_api::{
     cancel_sub_task_execution, cancel_sub_task_execution_for_ui, create_sub_task_execution,
     delete_sub_task_definition, get_sub_task_definition, get_sub_task_execution_detail,
@@ -81,7 +83,8 @@ use crate::db::llm_db::LLMDatabase;
 use crate::db::sub_task_db::SubTaskDatabase;
 use crate::db::system_db::SystemDatabase;
 use crate::mcp::builtin_mcp::{
-    add_or_update_aipp_builtin_server, execute_aipp_builtin_tool, list_aipp_builtin_templates,
+    add_or_update_aipp_builtin_server, execute_aipp_builtin_tool, init_builtin_mcp_servers,
+    list_aipp_builtin_templates, OperationState,
 };
 use crate::mcp::execution_api::{
     create_mcp_tool_call, execute_mcp_tool_call, get_mcp_tool_call,
@@ -93,6 +96,19 @@ use crate::mcp::registry_api::{
     get_mcp_server_prompts, get_mcp_server_resources, get_mcp_server_tools, get_mcp_servers,
     refresh_mcp_server_capabilities, test_mcp_connection, toggle_mcp_server, update_mcp_server,
     update_mcp_server_prompt, update_mcp_server_tool,
+    // Skills 与操作 MCP 联动校验 API
+    check_operation_mcp_for_skills, enable_operation_mcp_and_skill, enable_operation_mcp_and_skills,
+    check_disable_operation_mcp, disable_operation_mcp_with_skills,
+    check_disable_agent_mcp, disable_agent_mcp_with_skills,
+    check_disable_assistant_operation_mcp, disable_assistant_operation_mcp_with_skills,
+    check_disable_assistant_agent_mcp, disable_assistant_agent_mcp_with_skills,
+};
+use crate::api::skill_api::{
+    bulk_update_assistant_skills, cleanup_orphaned_skill_configs,
+    get_assistant_skills, get_enabled_assistant_skills, get_skill, get_skill_content,
+    get_skill_sources, get_skills_directory, open_skill_parent_folder, open_skills_folder,
+    remove_assistant_skill, scan_skills, skill_exists, toggle_assistant_skill,
+    update_assistant_skill_config,
 };
 use crate::window::{
     awaken_aipp, create_ask_window, create_chat_ui_window, create_chat_ui_window_hidden,
@@ -332,6 +348,7 @@ pub fn run() {
             let mcp_db = MCPDatabase::new(&app_handle)?;
             let sub_task_db = SubTaskDatabase::new(&app_handle)?;
             let artifacts_db = ArtifactsDatabase::new(&app_handle)?;
+            let skill_db = db::skill_db::SkillDatabase::new(&app_handle)?;
 
             system_db.create_tables()?;
             llm_db.create_tables()?;
@@ -341,10 +358,19 @@ pub fn run() {
             mcp_db.create_tables()?;
             sub_task_db.create_tables()?;
             artifacts_db.create_tables()?;
+            skill_db.create_tables()?;
+
+            // Migration: Remove old Claude Code agents/rules skill configs
+            if let Err(e) = skill_db.migrate_claude_code_skills() {
+                warn!(error = %e, "Failed to migrate Claude Code skills");
+            }
 
             let _ = database_upgrade(&app_handle, system_db, llm_db, assistant_db, conversation_db);
 
-            // 无需启动时初始化内置服务器，改为使用模板创建
+            // 初始化内置工具集（搜索、操作），如果不存在则自动创建
+            if let Err(e) = init_builtin_mcp_servers(&app_handle) {
+                warn!(error = %e, "Failed to initialize builtin MCP servers");
+            }
 
             app.manage(initialize_state(&app_handle));
             app.manage(initialize_name_cache_state(&app_handle));
@@ -375,7 +401,8 @@ pub fn run() {
             selected_text: TokioMutex::new(String::new()),
             recording_shortcut: TokioMutex::new(false),
         })
-        .manage(MessageTokenManager::new());
+        .manage(MessageTokenManager::new())
+        .manage(OperationState::new());
     #[cfg(desktop)]
     let app = app.manage(CopilotLspState::default());
     let app = app
@@ -482,6 +509,18 @@ pub fn run() {
             update_mcp_server_prompt,
             test_mcp_connection,
             refresh_mcp_server_capabilities,
+            // Skills 与操作 MCP 联动校验 API
+            check_operation_mcp_for_skills,
+            enable_operation_mcp_and_skill,
+            enable_operation_mcp_and_skills,
+            check_disable_operation_mcp,
+            disable_operation_mcp_with_skills,
+            check_disable_agent_mcp,
+            disable_agent_mcp_with_skills,
+            check_disable_assistant_operation_mcp,
+            disable_assistant_operation_mcp_with_skills,
+            check_disable_assistant_agent_mcp,
+            disable_assistant_agent_mcp_with_skills,
             get_assistant_mcp_servers_with_tools,
             update_assistant_mcp_config,
             update_assistant_mcp_tool_config,
@@ -504,6 +543,7 @@ pub fn run() {
             list_aipp_builtin_templates,
             add_or_update_aipp_builtin_server,
             execute_aipp_builtin_tool,
+            confirm_operation_permission,
             register_sub_task_definition,
             run_sub_task_sync,
             run_sub_task_with_mcp_loop,
@@ -521,7 +561,23 @@ pub fn run() {
             cancel_sub_task_execution_for_ui,
             highlight_code,
             ensure_hidden_search_window,
-            list_syntect_themes
+            list_syntect_themes,
+            // Skill commands
+            scan_skills,
+            get_skill_sources,
+            get_skill_content,
+            get_skill,
+            skill_exists,
+            get_assistant_skills,
+            get_enabled_assistant_skills,
+            update_assistant_skill_config,
+            toggle_assistant_skill,
+            remove_assistant_skill,
+            bulk_update_assistant_skills,
+            cleanup_orphaned_skill_configs,
+            open_skills_folder,
+            open_skill_parent_folder,
+            get_skills_directory
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");
