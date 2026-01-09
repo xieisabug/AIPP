@@ -280,7 +280,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
 
                 return (
                     <div key={sourceType} className="space-y-2">
-                        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider px-1">
+                        <div className="text-xs font-medium text-muted-foreground tracking-wider px-1">
                             {sourceSkills[0].source_display_name}
                         </div>
                         {sourceSkills.map((skill) => {
@@ -314,7 +314,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
                 .filter(([sourceType]) => !sourceOrder.includes(sourceType))
                 .map(([sourceType, sourceSkills]) => (
                     <div key={sourceType} className="space-y-2">
-                        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider px-1">
+                        <div className="text-xs font-medium text-muted-foreground tracking-wider px-1">
                             {sourceSkills[0].source_display_name}
                         </div>
                         {sourceSkills.map((skill) => (
