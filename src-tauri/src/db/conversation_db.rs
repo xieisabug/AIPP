@@ -672,19 +672,45 @@ impl ConversationDatabase {
     ) -> rusqlite::Result<ConversationTokenStats> {
         let conn = Connection::open(&self.db_path)?;
 
-        // 获取总token统计
-        let (total_tokens, input_tokens, output_tokens, message_count): (i64, i64, i64, i64) = conn
-            .query_row(
-                "SELECT
-                    COALESCE(SUM(token_count), 0) as total,
-                    COALESCE(SUM(input_token_count), 0) as input,
-                    COALESCE(SUM(output_token_count), 0) as output,
-                    COUNT(*) as msg_count
-                FROM message
-                WHERE conversation_id = ?1",
-                &[&conversation_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )?;
+        // 获取总token统计和按类型统计的消息数量
+        let (
+            total_tokens,
+            input_tokens,
+            output_tokens,
+            message_count,
+            system_count,
+            user_count,
+            response_count,
+            reasoning_count,
+            tool_result_count,
+        ): (i64, i64, i64, i64, i64, i64, i64, i64, i64) = conn.query_row(
+            "SELECT
+                COALESCE(SUM(token_count), 0) as total,
+                COALESCE(SUM(input_token_count), 0) as input,
+                COALESCE(SUM(output_token_count), 0) as output,
+                COUNT(*) as msg_count,
+                COUNT(CASE WHEN message_type = 'system' THEN 1 END) as system_count,
+                COUNT(CASE WHEN message_type = 'user' THEN 1 END) as user_count,
+                COUNT(CASE WHEN message_type = 'response' THEN 1 END) as response_count,
+                COUNT(CASE WHEN message_type = 'reasoning' THEN 1 END) as reasoning_count,
+                COUNT(CASE WHEN message_type = 'tool_result' THEN 1 END) as tool_result_count
+            FROM message
+            WHERE conversation_id = ?1",
+            &[&conversation_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )?;
 
         // 按模型分组统计
         let mut stmt = conn.prepare(
@@ -720,6 +746,11 @@ impl ConversationDatabase {
             output_tokens: output_tokens as i32,
             by_model,
             message_count: message_count as i32,
+            system_message_count: system_count as i32,
+            user_message_count: user_count as i32,
+            response_message_count: response_count as i32,
+            reasoning_message_count: reasoning_count as i32,
+            tool_result_message_count: tool_result_count as i32,
         })
     }
 
@@ -758,6 +789,12 @@ pub struct ConversationTokenStats {
     pub output_tokens: i32,
     pub by_model: Vec<ModelTokenBreakdown>,
     pub message_count: i32,
+    // 按消息类型统计
+    pub system_message_count: i32,
+    pub user_message_count: i32,
+    pub response_message_count: i32,
+    pub reasoning_message_count: i32,
+    pub tool_result_message_count: i32,
 }
 
 /// 模型token分解信息

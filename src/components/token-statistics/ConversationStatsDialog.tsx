@@ -51,7 +51,7 @@ export function ConversationStatsDialog({
     return (
         <Dialog open={open} onOpenChange={setOpen}>
             <DialogTrigger asChild>
-                <IconButton icon={<Info className="h-4 w-4" />} onClick={() => {}} border />
+                <IconButton icon={<Info className="h-4 w-4" />} onClick={() => { }} border />
             </DialogTrigger>
             <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
                 <DialogHeader>
@@ -88,7 +88,7 @@ export function ConversationStatsDialog({
                             {stats.by_model.length > 0 && (
                                 <div className="space-y-4">
                                     <h3 className="text-lg font-semibold">
-                                        按模型分组
+                                        模型
                                     </h3>
                                     <div className="space-y-3">
                                         {stats.by_model.map((model) => (
@@ -137,19 +137,70 @@ export function ConversationStatsDialog({
                             <div className="grid grid-cols-2 gap-4 pt-4 border-t">
                                 <div className="text-center">
                                     <p className="text-sm text-muted-foreground mb-1">
+                                        模型
+                                    </p>
+                                    <p className="text-xl font-semibold">
+                                        {stats.by_model.length}
+                                    </p>
+                                </div>
+                                <div className="text-center">
+                                    <p className="text-sm text-muted-foreground mb-1">
                                         总消息数
                                     </p>
                                     <p className="text-xl font-semibold">
                                         {formatNumber(stats.message_count)}
                                     </p>
                                 </div>
-                                <div className="text-center">
-                                    <p className="text-sm text-muted-foreground mb-1">
-                                        使用模型数
-                                    </p>
-                                    <p className="text-xl font-semibold">
-                                        {stats.by_model.length}
-                                    </p>
+                            </div>
+
+                            {/* Message Type Breakdown */}
+                            <div className="pt-4 border-t">
+                                <h4 className="text-sm font-medium mb-3">消息类型统计</h4>
+                                <div className="grid grid-cols-5 gap-3">
+                                    <div className="text-center">
+                                        <p className="text-xs text-muted-foreground mb-1">
+                                            系统
+                                        </p>
+                                        <p className="text-lg font-semibold">
+                                            {formatNumber(stats.system_message_count)}
+                                        </p>
+                                    </div>
+                                    <div className="text-center">
+                                        <p className="text-xs text-muted-foreground mb-1">
+                                            用户
+                                        </p>
+                                        <p className="text-lg font-semibold">
+                                            {formatNumber(stats.user_message_count)}
+                                        </p>
+                                    </div>
+                                    <div className="text-center">
+                                        <p className="text-xs text-muted-foreground mb-1">
+                                            AI回复
+                                        </p>
+                                        <p className="text-lg font-semibold">
+                                            {formatNumber(stats.response_message_count)}
+                                        </p>
+                                    </div>
+                                    <div className="text-center">
+                                        <p className="text-xs text-muted-foreground mb-1">
+                                            推理
+                                        </p>
+                                        <p className="text-lg font-semibold">
+                                            {formatNumber(
+                                                stats.reasoning_message_count,
+                                            )}
+                                        </p>
+                                    </div>
+                                    <div className="text-center">
+                                        <p className="text-xs text-muted-foreground mb-1">
+                                            工具结果
+                                        </p>
+                                        <p className="text-lg font-semibold">
+                                            {formatNumber(
+                                                stats.tool_result_message_count,
+                                            )}
+                                        </p>
+                                    </div>
                                 </div>
                             </div>
                         </div>

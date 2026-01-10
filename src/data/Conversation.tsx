@@ -131,6 +131,12 @@ export interface ConversationTokenStats {
     output_tokens: number;
     by_model: ModelTokenBreakdown[];
     message_count: number;
+    // 按消息类型统计
+    system_message_count: number;
+    user_message_count: number;
+    response_message_count: number;
+    reasoning_message_count: number;
+    tool_result_message_count: number;
 }
 
 export interface ModelTokenBreakdown {
