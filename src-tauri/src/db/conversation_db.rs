@@ -58,7 +58,9 @@ where
     S: Serializer,
 {
     match dt {
-        Some(value) => serializer.serialize_str(&value.to_rfc3339_opts(SecondsFormat::Millis, true)),
+        Some(value) => {
+            serializer.serialize_str(&value.to_rfc3339_opts(SecondsFormat::Millis, true))
+        }
         None => serializer.serialize_none(),
     }
 }
@@ -624,7 +626,10 @@ impl ConversationDatabase {
             conn.execute("ALTER TABLE message ADD COLUMN input_token_count INTEGER DEFAULT 0", [])?;
         }
         if !column_info.contains(&"output_token_count".to_string()) {
-            conn.execute("ALTER TABLE message ADD COLUMN output_token_count INTEGER DEFAULT 0", [])?;
+            conn.execute(
+                "ALTER TABLE message ADD COLUMN output_token_count INTEGER DEFAULT 0",
+                [],
+            )?;
         }
 
         conn.execute(
@@ -651,10 +656,7 @@ impl ConversationDatabase {
             "CREATE INDEX IF NOT EXISTS idx_message_conversation_created ON message(conversation_id, created_time)",
             [],
         )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_message_parent_id ON message(parent_id)",
-            [],
-        )?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_message_parent_id ON message(parent_id)", [])?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_message_attachment_message_id ON message_attachment(message_id)",
             [],
@@ -671,8 +673,8 @@ impl ConversationDatabase {
         let conn = Connection::open(&self.db_path)?;
 
         // 获取总token统计
-        let (total_tokens, input_tokens, output_tokens, message_count): (i64, i64, i64, i64) =
-            conn.query_row(
+        let (total_tokens, input_tokens, output_tokens, message_count): (i64, i64, i64, i64) = conn
+            .query_row(
                 "SELECT
                     COALESCE(SUM(token_count), 0) as total,
                     COALESCE(SUM(input_token_count), 0) as input,
@@ -694,7 +696,7 @@ impl ConversationDatabase {
                 SUM(output_token_count) as output,
                 COUNT(*) as msg_count
             FROM message
-            WHERE conversation_id = ?1 AND llm_model_id IS NOT NULL AND llm_model_id != 1
+            WHERE conversation_id = ?1 AND llm_model_id IS NOT NULL AND message_type = 'response'
             GROUP BY llm_model_id
             ORDER BY total DESC",
         )?;
