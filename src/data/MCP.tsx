@@ -12,6 +12,7 @@ export interface MCPServer {
     is_enabled: boolean;
     is_builtin: boolean; // 标识是否为内置服务器
     is_deletable: boolean; // 标识是否可删除（系统初始化的内置工具集不可删除）
+    proxy_enabled?: boolean; // 是否使用全局网络代理
     created_time: string;
 }
 
@@ -55,6 +56,7 @@ export interface MCPServerRequest {
     is_long_running: boolean;
     is_enabled: boolean;
     is_builtin?: boolean; // 可选字段，用于创建内置服务器
+    proxy_enabled?: boolean; // 是否使用全局网络代理
 }
 
 export interface MCPToolConfig {

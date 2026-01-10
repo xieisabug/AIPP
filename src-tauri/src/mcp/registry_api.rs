@@ -100,6 +100,7 @@ pub struct MCPServerRequest {
     pub is_long_running: bool,
     pub is_enabled: bool,
     pub is_builtin: Option<bool>,
+    pub proxy_enabled: bool,
 }
 
 // 打开数据库的辅助函数，减少重复样板代码
@@ -233,6 +234,7 @@ pub async fn add_mcp_server(
             request.is_enabled,
             request.is_builtin.unwrap_or(false),
             true, // is_deletable - 通过 API 添加的默认可删除
+            request.proxy_enabled,
         )
         .map_err(|e| e.to_string())?;
 
@@ -261,6 +263,7 @@ pub async fn update_mcp_server(
         request.is_long_running,
         request.is_enabled,
         request.is_builtin.unwrap_or(false),
+        request.proxy_enabled,
     )
     .map_err(|e| e.to_string())?;
 

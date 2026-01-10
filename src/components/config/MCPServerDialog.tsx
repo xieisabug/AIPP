@@ -40,6 +40,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
         timeout: 30000,
         is_long_running: false,
         is_enabled: true,
+        proxy_enabled: false,
     });
 
     // UI state
@@ -99,6 +100,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                 timeout: editingServer.timeout || 30000,
                 is_long_running: editingServer.is_long_running,
                 is_enabled: editingServer.is_enabled,
+                proxy_enabled: editingServer.proxy_enabled || false,
             });
             // initialize header rows from existing headers
             setHeaderRows(parseHeadersToRows(prettyHeaders));
@@ -115,6 +117,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                 timeout: 30000,
                 is_long_running: false,
                 is_enabled: true,
+                proxy_enabled: false,
             };
 
             // 合并初始配置
@@ -372,6 +375,19 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                                             </div>
                                         </div>
                                         <p className="text-xs text-muted-foreground">支持 ${'{'}VAR{'}'} 环境变量占位符；重复键以最后一次填写为准；空键将被忽略</p>
+                                    </div>
+                                )}
+
+                                {(formData.transport_type === 'http' || formData.transport_type === 'sse') && (
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <Label>使用网络代理进行请求</Label>
+                                            <p className="text-sm text-muted-foreground mt-1">启用后将使用全局网络代理配置</p>
+                                        </div>
+                                        <Switch
+                                            checked={formData.proxy_enabled || false}
+                                            onCheckedChange={(checked) => updateField('proxy_enabled', checked)}
+                                        />
                                     </div>
                                 )}
                             </AccordionContent>

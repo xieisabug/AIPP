@@ -6,6 +6,7 @@
 //! 3. 统一的参数解析、响应序列化与错误处理抽象
 //! 4. 将执行结果写回数据库并触发前端事件
 //! 5. 在工具成功后继续驱动 AI 对话（包含重试场景）
+use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
 use crate::api::ai_api::{sanitize_tool_name, tool_result_continue_ask_ai_impl};
 use crate::db::conversation_db::{ConversationDatabase, Repository};
@@ -403,7 +404,7 @@ pub async fn execute_mcp_tool_call(
     let cancel_token = register_cancel_token(call_id).await;
     let execution_result = {
         let exec_future =
-            execute_tool_by_transport(&app_handle, &server, &tool_call.tool_name, &tool_call.parameters, Some(tool_call.conversation_id));
+            execute_tool_by_transport(&app_handle, &feature_config_state, &server, &tool_call.tool_name, &tool_call.parameters, Some(tool_call.conversation_id));
         tokio::select! {
             _ = cancel_token.cancelled() => Err("Cancelled by user".to_string()),
             res = exec_future => res,
@@ -658,9 +659,10 @@ async fn trigger_conversation_continuation(
 
 /// 统一的工具执行函数，根据传输类型选择相应的执行策略（公开供子任务复用）
 /// 根据服务器配置的传输类型选择执行方式。
-#[instrument(skip(app_handle,server,parameters), fields(server_id=server.id, transport=%server.transport_type, tool_name=%tool_name))]
+#[instrument(skip(app_handle,feature_config_state,server,parameters), fields(server_id=server.id, transport=%server.transport_type, tool_name=%tool_name))]
 pub async fn execute_tool_by_transport(
     app_handle: &tauri::AppHandle,
+    feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
     server: &MCPServer,
     tool_name: &str,
     parameters: &str,
@@ -685,10 +687,10 @@ pub async fn execute_tool_by_transport(
                     .map_err(|e| e.to_string())
             }
         }
-        "sse" => execute_sse_tool(app_handle, server, tool_name, parameters)
+        "sse" => execute_sse_tool(app_handle, feature_config_state, server, tool_name, parameters)
             .await
             .map_err(|e| e.to_string()),
-        "http" => execute_http_tool(app_handle, server, tool_name, parameters)
+        "http" => execute_http_tool(app_handle, feature_config_state, server, tool_name, parameters)
             .await
             .map_err(|e| e.to_string()),
         // Legacy builtin type is no longer used, but keep for backward compatibility
@@ -773,14 +775,23 @@ async fn execute_stdio_tool(
 }
 
 /// 通过 SSE 传输执行工具。
-#[instrument(skip(server,parameters), fields(server_id=server.id, tool_name=%tool_name))]
+#[instrument(skip(feature_config_state,server,parameters), fields(server_id=server.id, tool_name=%tool_name))]
 async fn execute_sse_tool(
     _app_handle: &tauri::AppHandle,
+    feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
     server: &MCPServer,
     tool_name: &str,
     parameters: &str,
 ) -> Result<String> {
     let url = server.url.as_ref().ok_or_else(|| anyhow!("No URL specified for SSE transport"))?;
+
+    // 获取代理配置
+    let network_proxy = if server.proxy_enabled {
+        let config_map = feature_config_state.config_feature_map.lock().await;
+        get_network_proxy_from_config(&config_map)
+    } else {
+        None
+    };
 
     // Build SSE transport with a preconfigured reqwest client (propagate all headers)
     let (_auth_header, __all_headers_for_sse) = parse_server_headers(server);
@@ -796,8 +807,24 @@ async fn execute_sse_tool(
                 header_map.insert(name, value);
             }
         }
-        let client = reqwest::Client::builder()
-            .default_headers(header_map)
+        let mut client_builder = reqwest::Client::builder().default_headers(header_map);
+
+        // 配置代理
+        if let Some(ref proxy_url) = network_proxy {
+            if !proxy_url.trim().is_empty() {
+                match reqwest::Proxy::all(proxy_url) {
+                    Ok(proxy) => {
+                        client_builder = client_builder.proxy(proxy);
+                        info!(proxy_url = %proxy_url, server_id = server.id, "SSE proxy configured");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, proxy_url = %proxy_url, server_id = server.id, "SSE proxy configuration failed");
+                    }
+                }
+            }
+        }
+
+        let client = client_builder
             .build()
             .context("Failed to build reqwest client for SSE")?;
         // Requires rmcp feature `transport-sse-client-reqwest`
@@ -808,7 +835,32 @@ async fn execute_sse_tool(
         .await
         .context("Failed to start SSE transport with client")?
     } else {
-        SseClientTransport::start(url.as_str()).await.context("Failed to start SSE transport")?
+        let mut client_builder = reqwest::Client::builder();
+
+        // 配置代理（无自定义 headers 的情况）
+        if let Some(ref proxy_url) = network_proxy {
+            if !proxy_url.trim().is_empty() {
+                match reqwest::Proxy::all(proxy_url) {
+                    Ok(proxy) => {
+                        client_builder = client_builder.proxy(proxy);
+                        info!(proxy_url = %proxy_url, server_id = server.id, "SSE proxy configured");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, proxy_url = %proxy_url, server_id = server.id, "SSE proxy configuration failed");
+                    }
+                }
+            }
+        }
+
+        let client = client_builder
+            .build()
+            .context("Failed to build reqwest client for SSE")?;
+        SseClientTransport::start_with_client(
+            client,
+            SseClientConfig { sse_endpoint: url.as_str().into(), ..Default::default() },
+        )
+        .await
+        .context("Failed to start SSE transport with client")?
     };
 
     // TODO: SSE 传输暂未支持将 Authorization 注入底层 rmcp 客户端（rmcp 默认 SseClientTransport::start 内部不暴露 token 参数）。
@@ -907,14 +959,23 @@ async fn execute_builtin_tool(
 }
 
 /// 通过 HTTP (streamable) 传输执行工具。
-#[instrument(skip(server,parameters), fields(server_id=server.id, tool_name=%tool_name))]
+#[instrument(skip(feature_config_state,server,parameters), fields(server_id=server.id, tool_name=%tool_name))]
 async fn execute_http_tool(
     _app_handle: &tauri::AppHandle,
+    feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
     server: &MCPServer,
     tool_name: &str,
     parameters: &str,
 ) -> Result<String> {
     let url = server.url.as_ref().ok_or_else(|| anyhow!("No URL specified for HTTP transport"))?;
+
+    // 获取代理配置
+    let network_proxy = if server.proxy_enabled {
+        let config_map = feature_config_state.config_feature_map.lock().await;
+        get_network_proxy_from_config(&config_map)
+    } else {
+        None
+    };
 
     // 解析自定义头，仅支持将 Authorization 传入 auth_header（其余头部未来可通过自定义 client 实现）
     let (auth_header, _all) = parse_server_headers(server);
@@ -938,8 +999,24 @@ async fn execute_http_tool(
                 }
             }
         }
-        let client = reqwest::Client::builder()
-            .default_headers(header_map)
+        let mut client_builder = reqwest::Client::builder().default_headers(header_map);
+
+        // 配置代理
+        if let Some(ref proxy_url) = network_proxy {
+            if !proxy_url.trim().is_empty() {
+                match reqwest::Proxy::all(proxy_url) {
+                    Ok(proxy) => {
+                        client_builder = client_builder.proxy(proxy);
+                        info!(proxy_url = %proxy_url, server_id = server.id, "HTTP proxy configured");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, proxy_url = %proxy_url, server_id = server.id, "HTTP proxy configuration failed");
+                    }
+                }
+            }
+        }
+
+        let client = client_builder
             .build()
             .context("Failed to build reqwest client for HTTP")?;
         StreamableHttpClientTransport::with_client(client, config)

@@ -107,8 +107,10 @@ pub async fn detect_and_process_mcp_calls_for_subtask(
             broadcast_mcp_tool_call_update(app_handle, &tool_call);
 
             // 直接执行工具调用（复用现有执行逻辑）
+            let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
             let execution_result = crate::mcp::execution_api::execute_tool_by_transport(
                 app_handle,
+                &feature_config_state,
                 server,
                 &tool_name,
                 &parameters,

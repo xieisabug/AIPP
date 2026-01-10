@@ -430,7 +430,7 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
         
         if exists.is_none() {
             info!(template_id = %tpl.id, name = %tpl.name, "Initializing builtin MCP server");
-            
+
             // 插入内置工具集（系统初始化的不可删除）
             let server_id = db
                 .upsert_mcp_server_with_builtin(
@@ -446,6 +446,7 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
                     true,                   // is_enabled
                     true,                   // is_builtin
                     false,                  // is_deletable - 系统初始化的不可删除
+                    false,                  // proxy_enabled - builtin 不使用代理
                 )
                 .context("Insert builtin server failed")?;
 
@@ -509,6 +510,7 @@ pub async fn add_or_update_aipp_builtin_server(
                 true,                                              // is_enabled
                 true,                                              // is_builtin
                 true,                                              // is_deletable - 用户添加的可删除
+                false,                                             // proxy_enabled - builtin 不使用代理
             )
             .context("Upsert builtin server failed")?;
 

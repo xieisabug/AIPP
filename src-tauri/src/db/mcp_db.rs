@@ -19,6 +19,7 @@ pub struct MCPServer {
     pub is_enabled: bool,
     pub is_builtin: bool, // 标识是否为内置服务器
     pub is_deletable: bool, // 标识是否可删除（系统初始化的内置工具集不可删除）
+    pub proxy_enabled: bool, // 是否使用全局网络代理
     pub created_time: String,
 }
 
@@ -243,6 +244,7 @@ impl MCPDatabase {
         if let Ok(mut stmt) = self.conn.prepare("PRAGMA table_info(mcp_server)") {
             let mut has_headers = false;
             let mut has_is_deletable = false;
+            let mut has_proxy_enabled = false;
             let cols = stmt.query_map([], |row| Ok(row.get::<_, String>(1)?))?;
             for c in cols {
                 if let Ok(name) = c {
@@ -251,6 +253,9 @@ impl MCPDatabase {
                     }
                     if name == "is_deletable" {
                         has_is_deletable = true;
+                    }
+                    if name == "proxy_enabled" {
+                        has_proxy_enabled = true;
                     }
                 }
             }
@@ -263,6 +268,12 @@ impl MCPDatabase {
                     .conn
                     .execute("ALTER TABLE mcp_server ADD COLUMN is_deletable BOOLEAN NOT NULL DEFAULT 1", []);
             }
+            if !has_proxy_enabled {
+                // 添加 proxy_enabled 字段，默认为 0（不使用代理）
+                let _ = self
+                    .conn
+                    .execute("ALTER TABLE mcp_server ADD COLUMN proxy_enabled BOOLEAN NOT NULL DEFAULT 0", []);
+            }
         }
         Ok(())
     }
@@ -270,7 +281,7 @@ impl MCPDatabase {
     #[instrument(level = "trace", skip(self))]
     pub fn get_mcp_servers(&self) -> rusqlite::Result<Vec<MCPServer>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, COALESCE(is_builtin, 0), COALESCE(is_deletable, 1), created_time \
+            "SELECT id, name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, COALESCE(is_builtin, 0), COALESCE(is_deletable, 1), COALESCE(proxy_enabled, 0), created_time \
              FROM mcp_server ORDER BY created_time DESC"
         )?;
 
@@ -289,7 +300,8 @@ impl MCPDatabase {
                 is_enabled: row.get(10)?,
                 is_builtin: row.get(11)?,
                 is_deletable: row.get(12)?,
-                created_time: row.get(13)?,
+                proxy_enabled: row.get(13)?,
+                created_time: row.get(14)?,
             })
         })?;
 
@@ -303,7 +315,7 @@ impl MCPDatabase {
     #[instrument(level = "trace", skip(self), fields(id))]
     pub fn get_mcp_server(&self, id: i64) -> rusqlite::Result<MCPServer> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, COALESCE(is_builtin, 0), COALESCE(is_deletable, 1), created_time \
+            "SELECT id, name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, COALESCE(is_builtin, 0), COALESCE(is_deletable, 1), COALESCE(proxy_enabled, 0), created_time \
              FROM mcp_server WHERE id = ?"
         )?;
 
@@ -323,7 +335,8 @@ impl MCPDatabase {
                     is_enabled: row.get(10)?,
                     is_builtin: row.get(11)?,
                     is_deletable: row.get(12)?,
-                    created_time: row.get(13)?,
+                    proxy_enabled: row.get(13)?,
+                    created_time: row.get(14)?,
                 })
             })?
             .next()
@@ -347,7 +360,7 @@ impl MCPDatabase {
         // 构造占位符
         let placeholders = vec!["?"; server_ids.len()].join(",");
         let sql = format!(
-            "SELECT id, name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, COALESCE(is_builtin, 0), COALESCE(is_deletable, 1), created_time \
+            "SELECT id, name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, COALESCE(is_builtin, 0), COALESCE(is_deletable, 1), COALESCE(proxy_enabled, 0), created_time \
              FROM mcp_server WHERE id IN ({})",
             placeholders
         );
@@ -368,7 +381,8 @@ impl MCPDatabase {
                     is_enabled: row.get(10)?,
                     is_builtin: row.get(11)?,
                     is_deletable: row.get(12)?,
-                    created_time: row.get(13)?,
+                    proxy_enabled: row.get(13)?,
+                    created_time: row.get(14)?,
                 })
             })?;
 
@@ -432,10 +446,11 @@ impl MCPDatabase {
         is_long_running: bool,
         is_enabled: bool,
         is_builtin: bool,
+        proxy_enabled: bool,
     ) -> rusqlite::Result<()> {
         self.conn.execute(
-            "UPDATE mcp_server SET name = ?, description = ?, transport_type = ?, command = ?, environment_variables = ?, headers = ?, url = ?, timeout = ?, is_long_running = ?, is_enabled = ?, is_builtin = ? WHERE id = ?",
-            params![name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, is_builtin, id],
+            "UPDATE mcp_server SET name = ?, description = ?, transport_type = ?, command = ?, environment_variables = ?, headers = ?, url = ?, timeout = ?, is_long_running = ?, is_enabled = ?, is_builtin = ?, proxy_enabled = ? WHERE id = ?",
+            params![name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, is_builtin, proxy_enabled, id],
         )?;
         Ok(())
     }
@@ -469,6 +484,7 @@ impl MCPDatabase {
         is_enabled: bool,
         is_builtin: bool,
         is_deletable: bool,
+        proxy_enabled: bool,
     ) -> rusqlite::Result<i64> {
         // First try to get existing server by name
         let existing_id = self
@@ -482,17 +498,17 @@ impl MCPDatabase {
                 // Update existing server (不更新 is_deletable，保持原值)
                 self.conn.execute(
                     "UPDATE mcp_server SET description = ?, transport_type = ?, command = ?, \
-                     environment_variables = ?, headers = ?, url = ?, timeout = ?, is_long_running = ?, is_enabled = ?, is_builtin = ?
+                     environment_variables = ?, headers = ?, url = ?, timeout = ?, is_long_running = ?, is_enabled = ?, is_builtin = ?, proxy_enabled = ?
                      WHERE id = ?",
-                    params![description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, is_builtin, id],
+                    params![description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, is_builtin, proxy_enabled, id],
                 )?;
                 Ok(id)
             }
             None => {
                 // Insert new server
                 let mut stmt = self.conn.prepare(
-                    "INSERT INTO mcp_server (name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, is_builtin, is_deletable) 
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    "INSERT INTO mcp_server (name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, is_builtin, is_deletable, proxy_enabled)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 )?;
 
                 stmt.execute(params![
@@ -507,7 +523,8 @@ impl MCPDatabase {
                     is_long_running,
                     is_enabled,
                     is_builtin,
-                    is_deletable
+                    is_deletable,
+                    proxy_enabled
                 ])?;
 
                 Ok(self.conn.last_insert_rowid())
