@@ -109,6 +109,35 @@ fn web_to_markdown(
     .boxed()
 }
 
+// 读取文本文件内容的函数
+fn file_command(
+    _: TemplateEngine,
+    path: String,
+    _: HashMap<String, String>,
+) -> BoxFuture<'static, String> {
+    async move {
+        // 移除路径中前后的括号和空格
+        let path = path.trim_start_matches('(').trim_end_matches(')').trim();
+
+        // 支持带引号的路径（处理路径中可能的空格）
+        let path = path
+            .trim_start_matches('"')
+            .trim_end_matches('"')
+            .trim_start_matches('\'')
+            .trim_end_matches('\'');
+
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                format!("<bangfile path=\"{}\">\n{}\n</bangfile>", path, content)
+            }
+            Err(err) => {
+                format!("<!file_error: 无法读取文件 '{}' - {}>", path, err)
+            }
+        }
+    }
+    .boxed()
+}
+
 // 模板解析器结构体
 #[derive(Clone)]
 pub struct TemplateEngine {
@@ -249,6 +278,17 @@ impl TemplateEngine {
                 description: "通过网络获取URL的网页信息并且转换为markdown格式".to_string(),
                 bang_type: BangType::Text,
                 command: web_to_markdown as CommandFn,
+            },
+        );
+
+        commands.insert(
+            "file".to_string(),
+            Bang {
+                name: "file".to_string(),
+                complete: "file(|)".to_string(),
+                description: "读取文本文件内容".to_string(),
+                bang_type: BangType::Text,
+                command: file_command as CommandFn,
             },
         );
 

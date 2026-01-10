@@ -150,3 +150,37 @@ async fn test_web_to_markdown_command() {
 
     mock.assert();
 }
+
+#[tokio::test]
+async fn test_file_command() {
+    // 创建临时文件用于测试
+    let temp_dir = tempfile::tempdir().unwrap();
+    let file_path = temp_dir.path().join("test.txt");
+    let test_content = "Hello, World!\nThis is a test file.";
+
+    std::fs::write(&file_path, test_content).unwrap();
+
+    let engine = TemplateEngine::new();
+    let context = HashMap::new();
+
+    // 测试正常文件读取
+    let result = engine
+        .parse(&format!("!file({})", file_path.display()), &context)
+        .await;
+    let expected = format!(
+        "<bangfile path=\"{}\">\n{}\n</bangfile>",
+        file_path.display(),
+        test_content
+    );
+    assert_eq!(result, expected);
+
+    // 测试带引号的路径
+    let result2 = engine
+        .parse(&format!("!file(\"{}\")", file_path.display()), &context)
+        .await;
+    assert_eq!(result2, expected);
+
+    // 测试不存在的文件
+    let result3 = engine.parse("!file(/nonexistent/path.txt)", &context).await;
+    assert!(result3.contains("!file_error"));
+}

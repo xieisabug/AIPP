@@ -77,6 +77,12 @@ const AskWindowPrepare: React.FC<AskWindowPrepareProps> = ({
                         插入网页内容并转换为Markdown
                     </span>
                 </div>
+                <div className="mt-2.5 flex items-center" {...dragProps}>
+                    <Badge className="mr-2 py-1.25 px-2.5 bg-primary rounded-lg text-primary-foreground flex-none cursor-pointer">!file(path)</Badge>
+                    <span className="text-foreground" {...dragProps}>
+                        读取文本文件内容
+                    </span>
+                </div>
             </div>
         </div>
     );
