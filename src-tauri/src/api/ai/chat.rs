@@ -315,8 +315,12 @@ async fn ensure_stream_message(
     llm_model_name: &str,
     generation_group_id: &str,
     parent_group_id_override: Option<String>,
+    start_time: Option<chrono::DateTime<chrono::Utc>>,
+    first_token_time: Option<chrono::DateTime<chrono::Utc>>,
+    ttft_ms: Option<i64>,
 ) -> anyhow::Result<i64> {
     let now = chrono::Utc::now();
+    let message_start_time = start_time.unwrap_or(now);
 
     // 在创建新的 response 消息前，如果上一条是错误消息，则清理
     if message_type == "response" {
@@ -334,8 +338,8 @@ async fn ensure_stream_message(
             content: initial_content.to_string(),
             llm_model_id: Some(llm_model_id),
             llm_model_name: Some(llm_model_name.to_string()),
-            created_time: now,
-            start_time: Some(now),
+            created_time: message_start_time,
+            start_time: Some(message_start_time),
             finish_time: None,
             token_count: 0,
             input_token_count: 0,
@@ -343,6 +347,8 @@ async fn ensure_stream_message(
             generation_group_id: Some(generation_group_id.to_string()),
             parent_group_id: parent_group_id_override,
             tool_calls_json: None,
+            first_token_time,
+            ttft_ms,
         })
         .context("failed to create stream message")?;
 
@@ -390,6 +396,8 @@ fn persist_and_emit_update(
             token_count: None,
             input_token_count: None,
             output_token_count: None,
+            ttft_ms: None,
+            tps: None,
         })
         .unwrap(),
     };
@@ -480,6 +488,8 @@ async fn handle_captured_tool_calls_common(
                             token_count: None,
                             input_token_count: None,
                             output_token_count: None,
+                            ttft_ms: None,
+                            tps: None,
                         })
                         .unwrap(),
                     };
@@ -1442,6 +1452,8 @@ async fn attempt_stream_chat(
         }
     }
 
+    let stream_request_start_time = chrono::Utc::now();
+
     let chat_stream_response = match client
         .exec_chat_stream(model_name, chat_request.clone(), Some(&chat_options))
         .await
@@ -1477,7 +1489,10 @@ async fn attempt_stream_chat(
 
     let mut current_output_type: OutputType = OutputType::None;
     let mut reasoning_start_time: Option<chrono::DateTime<chrono::Utc>> = None;
-    let mut response_start_time: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut response_start_time: Option<chrono::DateTime<chrono::Utc>> =
+        Some(stream_request_start_time);
+    let mut response_first_token_time: Option<chrono::DateTime<chrono::Utc>> = None; // 首字到达时间
+    let mut first_any_token_time: Option<chrono::DateTime<chrono::Utc>> = None; // 任意类型首字到达时间（用于 TPS 计算备用）
 
     loop {
         let stream_result = chat_stream.next().await;
@@ -1488,6 +1503,17 @@ async fn attempt_stream_chat(
                     ChatStreamEvent::Chunk(chunk) => {
                         response_chunk_count += 1;
                         response_char_count += chunk.content.chars().count();
+
+                        // 记录首字到达时间
+                        if response_first_token_time.is_none() && !chunk.content.is_empty() {
+                            let now = chrono::Utc::now();
+                            response_first_token_time = Some(now);
+                            // 同时更新任意类型首字时间（如果尚未设置）
+                            if first_any_token_time.is_none() {
+                                first_any_token_time = Some(now);
+                            }
+                        }
+
                         if current_output_type == OutputType::Reasoning {
                             if let (Some(msg_id), Some(start_time)) =
                                 (reasoning_message_id, reasoning_start_time)
@@ -1517,8 +1543,13 @@ async fn attempt_stream_chat(
                         response_content.push_str(&chunk.content);
 
                         if response_message_id.is_none() {
-                            let now = chrono::Utc::now();
-                            response_start_time = Some(now);
+                            response_start_time.get_or_insert(stream_request_start_time);
+
+                            let start_time =
+                                response_start_time.clone().unwrap_or(stream_request_start_time);
+                            let ttft_ms = response_first_token_time.as_ref().map(|ft| {
+                                (ft.timestamp_millis() - start_time.timestamp_millis()).max(0)
+                            });
 
                             if let Ok(new_id) = ensure_stream_message(
                                 &conversation_db,
@@ -1530,6 +1561,9 @@ async fn attempt_stream_chat(
                                 &llm_model_name,
                                 &generation_group_id,
                                 parent_group_id_override.clone(),
+                                Some(start_time),
+                                response_first_token_time.clone(),
+                                ttft_ms,
                             )
                             .await
                             {
@@ -1573,6 +1607,12 @@ async fn attempt_stream_chat(
                     ChatStreamEvent::ReasoningChunk(reasoning_chunk) => {
                         reasoning_chunk_count += 1;
                         reasoning_char_count += reasoning_chunk.content.chars().count();
+
+                        // 记录任意类型首字到达时间（用于 TPS 计算备用）
+                        if first_any_token_time.is_none() && !reasoning_chunk.content.is_empty() {
+                            first_any_token_time = Some(chrono::Utc::now());
+                        }
+
                         if current_output_type != OutputType::Reasoning {
                             current_output_type = OutputType::Reasoning;
                         }
@@ -1593,6 +1633,9 @@ async fn attempt_stream_chat(
                                 &llm_model_name,
                                 &generation_group_id,
                                 parent_group_id_override.clone(),
+                                Some(now),
+                                None,
+                                None,
                             )
                             .await
                             {
@@ -1622,7 +1665,8 @@ async fn attempt_stream_chat(
                         let token_data = end_event.captured_usage.as_ref().map(|usage| {
                             let input_tokens = usage.prompt_tokens.unwrap_or(0);
                             let output_tokens = usage.completion_tokens.unwrap_or(0);
-                            let total_tokens = usage.total_tokens.unwrap_or(input_tokens + output_tokens);
+                            let total_tokens =
+                                usage.total_tokens.unwrap_or(input_tokens + output_tokens);
                             (input_tokens, output_tokens, total_tokens)
                         });
 
@@ -1634,39 +1678,118 @@ async fn attempt_stream_chat(
 
                         // Store the extracted token data
                         if let Some((input_tokens, output_tokens, total_tokens)) = token_data {
-                            // Update the response message with token data
-                            if let Some(msg_id) = response_message_id {
+                            // Update the response or reasoning message with token data
+                            // 优先更新 response 消息，如果没有则更新 reasoning 消息
+                            let target_msg_id = response_message_id.or(reasoning_message_id);
+                            let target_message_type = if response_message_id.is_some() {
+                                "response"
+                            } else {
+                                "reasoning"
+                            };
+
+                            if let Some(msg_id) = target_msg_id {
                                 if let Ok(repo) = conversation_db.message_repo() {
                                     if let Ok(Some(mut message)) = repo.read(msg_id) {
                                         message.input_token_count = input_tokens;
                                         message.output_token_count = output_tokens;
                                         message.token_count = total_tokens;
+
+                                        // Ensure the message used for metrics reflects the whole assistant generation
+                                        // (reasoning + response), not just the response segment.
+                                        let request_start = stream_request_start_time;
+                                        if message
+                                            .start_time
+                                            .map(|t| {
+                                                t.timestamp_millis()
+                                                    > request_start.timestamp_millis()
+                                            })
+                                            .unwrap_or(true)
+                                        {
+                                            message.start_time = Some(request_start);
+                                        }
+                                        if let Some(first_any) = first_any_token_time {
+                                            if message
+                                                .first_token_time
+                                                .map(|t| {
+                                                    t.timestamp_millis()
+                                                        > first_any.timestamp_millis()
+                                                })
+                                                .unwrap_or(true)
+                                            {
+                                                message.first_token_time = Some(first_any);
+                                            }
+                                        }
+                                        if let (Some(start), Some(first)) =
+                                            (message.start_time, message.first_token_time)
+                                        {
+                                            let diff = (first.timestamp_millis()
+                                                - start.timestamp_millis())
+                                            .max(0);
+                                            message.ttft_ms = Some(diff);
+                                        }
+
+                                        // 计算 TPS (Tokens Per Second)
+                                        // TPS = output_tokens / (finish_time - first_token_time) * 1000
+                                        // 优先使用 reasoning/response 的最早首 token 时间，避免 TPS 被高估；
+                                        // 最后使用 stream_request_start_time 作为备用
+                                        let tps = if output_tokens > 0 {
+                                            let token_time = first_any_token_time
+                                                .or(message.first_token_time)
+                                                .or(message.start_time)
+                                                .unwrap_or(stream_request_start_time);
+                                            let end_time = chrono::Utc::now();
+                                            let duration_ms = end_time.timestamp_millis()
+                                                - token_time.timestamp_millis();
+                                            if duration_ms > 0 {
+                                                Some(
+                                                    (output_tokens as f64) * 1000.0
+                                                        / duration_ms as f64,
+                                                )
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        };
+
                                         match repo.update(&message) {
                                             Ok(_) => {
                                                 info!(
                                                     message_id = msg_id,
+                                                    message_type = target_message_type,
                                                     input_tokens,
                                                     output_tokens,
                                                     total_tokens,
-                                                    "Token usage captured and stored for streaming response"
+                                                    ttft_ms = message.ttft_ms,
+                                                    tps = ?tps,
+                                                    "Token usage and performance metrics captured and stored for streaming message"
                                                 );
 
                                                 // Send message_update event to notify frontend
                                                 let update_event = ConversationEvent {
                                                     r#type: "message_update".to_string(),
-                                                    data: serde_json::to_value(MessageUpdateEvent {
-                                                        message_id: msg_id,
-                                                        message_type: "response".to_string(),
-                                                        content: message.content.clone(),
-                                                        is_done: true,
-                                                        token_count: Some(total_tokens),
-                                                        input_token_count: Some(input_tokens),
-                                                        output_token_count: Some(output_tokens),
-                                                    })
+                                                    data: serde_json::to_value(
+                                                        MessageUpdateEvent {
+                                                            message_id: msg_id,
+                                                            message_type: target_message_type
+                                                                .to_string(),
+                                                            content: message.content.clone(),
+                                                            is_done: true,
+                                                            token_count: Some(total_tokens),
+                                                            input_token_count: Some(input_tokens),
+                                                            output_token_count: Some(output_tokens),
+                                                            ttft_ms: message.ttft_ms,
+                                                            tps,
+                                                        },
+                                                    )
                                                     .unwrap(),
                                                 };
                                                 let _ = window.emit(
-                                                    format!("conversation_event_{}", conversation_id).as_str(),
+                                                    format!(
+                                                        "conversation_event_{}",
+                                                        conversation_id
+                                                    )
+                                                    .as_str(),
                                                     update_event,
                                                 );
                                             }
@@ -1704,7 +1827,7 @@ async fn attempt_stream_chat(
                             if response_message_id.is_none() {
                                 // Create a minimal response message to host MCP UI hints
                                 let now = chrono::Utc::now();
-                                response_start_time = Some(now);
+                                response_start_time.get_or_insert(now);
                                 match ensure_stream_message(
                                     &conversation_db,
                                     &window,
@@ -1715,6 +1838,9 @@ async fn attempt_stream_chat(
                                     &llm_model_name,
                                     &generation_group_id,
                                     parent_group_id_override.clone(),
+                                    response_start_time,
+                                    response_first_token_time.clone(),
+                                    None,
                                 )
                                 .await
                                 {
@@ -1936,6 +2062,8 @@ async fn create_error_message(
         generation_group_id: Some(generation_group_id),
         parent_group_id: parent_group_id_override,
         tool_calls_json: None,
+        first_token_time: None,
+        ttft_ms: None,
     }) {
         let error_event = ConversationEvent {
             r#type: "message_add".to_string(),
@@ -1958,6 +2086,8 @@ async fn create_error_message(
                 token_count: None,
                 input_token_count: None,
                 output_token_count: None,
+                ttft_ms: None,
+                tps: None,
             })
             .unwrap(),
         };
@@ -1987,6 +2117,9 @@ pub async fn handle_non_stream_chat(
 ) -> Result<(), anyhow::Error> {
     let generation_group_id =
         generation_group_id_override.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    // 记录请求开始时间，用于估算非流式响应的 TTFT
+    let request_start_time = chrono::Utc::now();
 
     // 从配置中获取最大重试次数
     let max_retry_attempts = get_retry_attempts_from_config(&config_feature_map);
@@ -2055,10 +2188,8 @@ pub async fn handle_non_stream_chat(
                     if attempts >= max_retry_attempts {
                         let http_details = extract_http_error_details(&e);
                         let raw_error = e.to_string();
-                        let final_error = http_details
-                            .response_body
-                            .clone()
-                            .unwrap_or_else(|| raw_error.clone());
+                        let final_error =
+                            http_details.response_body.clone().unwrap_or_else(|| raw_error.clone());
 
                         error!(attempts, error = %e, final_error, "final non stream chat error");
 
@@ -2095,6 +2226,20 @@ pub async fn handle_non_stream_chat(
 
             // 现在才创建响应消息（在有实际内容后）
             let now = chrono::Utc::now();
+
+            // 对于非流式响应，估算 TTFT 和 TPS
+            // TTFT = 总响应时间 (无法区分首字时间)
+            // TPS = output_tokens / 总响应时间
+            let estimated_duration_ms =
+                now.timestamp_millis() - request_start_time.timestamp_millis();
+            let ttft_ms =
+                if estimated_duration_ms > 0 { Some(estimated_duration_ms) } else { None };
+            let tps = if output_tokens > 0 && estimated_duration_ms > 0 {
+                Some((output_tokens as f64) * 1000.0 / estimated_duration_ms as f64)
+            } else {
+                None
+            };
+
             let response_message = conversation_db
                 .message_repo()
                 .unwrap()
@@ -2106,15 +2251,19 @@ pub async fn handle_non_stream_chat(
                     content: content.clone(),
                     llm_model_id: Some(llm_model_id),
                     llm_model_name: Some(llm_model_name.clone()),
+                    // Non-stream responses don't have per-token timestamps. Use request_start_time
+                    // and the time we received the full response to make duration-based TPS sane.
                     created_time: now,
-                    start_time: Some(now),
-                    finish_time: None,
+                    start_time: Some(request_start_time),
+                    finish_time: Some(now),
                     token_count: total_tokens,
                     input_token_count: input_tokens,
                     output_token_count: output_tokens,
                     generation_group_id: Some(generation_group_id.clone()),
                     parent_group_id: parent_group_id_override.clone(),
                     tool_calls_json: None,
+                    first_token_time: None, // non-stream: unknown, fallback to start_time
+                    ttft_ms,
                 })
                 .unwrap();
 
@@ -2151,6 +2300,8 @@ pub async fn handle_non_stream_chat(
                     token_count: None,
                     input_token_count: None,
                     output_token_count: None,
+                    ttft_ms: None,
+                    tps: None,
                 })
                 .unwrap(),
             };
@@ -2207,11 +2358,7 @@ pub async fn handle_non_stream_chat(
             message.content = content.clone();
             conversation_db.message_repo().unwrap().update(&message).unwrap();
 
-            conversation_db
-                .message_repo()
-                .unwrap()
-                .update_finish_time(response_message_id)
-                .unwrap();
+            // finish_time already stored with ms precision at creation time for non-stream responses
 
             let update_event = ConversationEvent {
                 r#type: "message_update".to_string(),
@@ -2220,9 +2367,11 @@ pub async fn handle_non_stream_chat(
                     message_type: "response".to_string(),
                     content: content.clone(),
                     is_done: true,
-                    token_count: None,
-                    input_token_count: None,
-                    output_token_count: None,
+                    token_count: Some(total_tokens),
+                    input_token_count: Some(input_tokens),
+                    output_token_count: Some(output_tokens),
+                    ttft_ms,
+                    tps,
                 })
                 .unwrap(),
             };
@@ -2317,6 +2466,8 @@ pub async fn handle_non_stream_chat(
                     generation_group_id: Some(generation_group_id.clone()),
                     parent_group_id: parent_group_id_override.clone(),
                     tool_calls_json: None,
+                    first_token_time: None,
+                    ttft_ms: None,
                 })
                 .unwrap();
 
@@ -2341,6 +2492,8 @@ pub async fn handle_non_stream_chat(
                     token_count: None,
                     input_token_count: None,
                     output_token_count: None,
+                    ttft_ms: None,
+                    tps: None,
                 })
                 .unwrap(),
             };

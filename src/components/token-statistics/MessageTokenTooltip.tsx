@@ -8,6 +8,8 @@ interface MessageTokenTooltipProps {
     inputTokenCount: number;
     outputTokenCount: number;
     messageType: string;
+    ttftMs?: number | null;
+    tps?: number | null;
     onOpenChange?: (open: boolean) => void;
 }
 
@@ -16,6 +18,8 @@ export function MessageTokenTooltip({
     inputTokenCount,
     outputTokenCount,
     messageType,
+    ttftMs,
+    tps,
     onOpenChange,
 }: MessageTokenTooltipProps) {
     // 只在 response 类型消息上显示
@@ -28,6 +32,20 @@ export function MessageTokenTooltip({
     const formatNumber = (num: number) => {
         return new Intl.NumberFormat("en-US").format(num);
     };
+
+    const formatDuration = (ms: number) => {
+        if (ms < 1000) return `${ms.toFixed(0)}ms`;
+        return `${(ms / 1000).toFixed(2)}s`;
+    };
+
+    const formatTps = (tps: number) => {
+        return tps.toFixed(1);
+    };
+
+    const safeTtftMs =
+        typeof ttftMs === "number" && Number.isFinite(ttftMs) ? ttftMs : 0;
+    const safeTps = typeof tps === "number" && Number.isFinite(tps) ? tps : 0;
+    const hasPerformanceMetrics = true;
 
     return (
         <Popover
@@ -63,6 +81,27 @@ export function MessageTokenTooltip({
                             </span>
                         </div>
                     </div>
+
+                    {/* 性能指标 */}
+                    {hasPerformanceMetrics && (
+                        <>
+                            <div className="border-t pt-2 mt-2">
+                                <div className="text-xs font-medium text-muted-foreground mb-1">性能指标</div>
+                            </div>
+                            <div className="space-y-1 text-sm">
+                                {ttftMs !== null && ttftMs !== undefined && (
+                                    <div className="flex justify-between gap-4">
+                                        <span className="text-muted-foreground">首字延迟 (TTFT):</span>
+                                        <span className="font-medium">{formatDuration(safeTtftMs)}</span>
+                                    </div>
+                                )}
+                                <div className="flex justify-between gap-4">
+                                    <span className="text-muted-foreground">生成速度 (TPS):</span>
+                                    <span className="font-medium">{formatTps(safeTps)} tok/s</span>
+                                </div>
+                            </div>
+                        </>
+                    )}
                 </div>
             </PopoverContent>
         </Popover>

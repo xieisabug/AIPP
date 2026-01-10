@@ -194,6 +194,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     token_count: messageUpdateData.token_count,
                     input_token_count: messageUpdateData.input_token_count,
                     output_token_count: messageUpdateData.output_token_count,
+                    // 性能指标
+                    ttft_ms: messageUpdateData.ttft_ms,
+                    tps: messageUpdateData.tps,
                 };
 
                 // 检查是否是错误消息

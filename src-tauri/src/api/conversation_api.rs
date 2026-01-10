@@ -305,6 +305,8 @@ pub async fn get_conversation_with_messages(
             generation_group_id: message.generation_group_id,
             parent_group_id: message.parent_group_id,
             tool_calls_json: message.tool_calls_json,
+            first_token_time: message.first_token_time,
+            ttft_ms: message.ttft_ms,
             attachment_list,
             regenerate: Vec::new(),
         });
@@ -466,12 +468,12 @@ pub async fn create_message(
 ) -> Result<crate::db::conversation_db::Message, String> {
     use crate::db::conversation_db::{ConversationDatabase, Message, Repository};
     use chrono::Utc;
-    
+
     let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let repo = db.message_repo().map_err(|e| e.to_string())?;
-    
+
     let current_time = Utc::now();
-    
+
     // Create new assistant message (not user message)
     let new_message = Message {
         id: 0, // Will be set by database
@@ -490,8 +492,10 @@ pub async fn create_message(
         generation_group_id: None,
         parent_group_id: None,
         tool_calls_json: None,
+        first_token_time: None,
+        ttft_ms: None,
     };
-    
+
     let created_message = repo.create(&new_message).map_err(|e| e.to_string())?;
     Ok(created_message)
 }

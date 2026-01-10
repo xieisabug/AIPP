@@ -22,6 +22,9 @@ pub struct MessageUpdateEvent {
     pub token_count: Option<i32>,
     pub input_token_count: Option<i32>,
     pub output_token_count: Option<i32>,
+    // 性能指标（可选，仅在 is_done=true 时有值）
+    pub ttft_ms: Option<i64>, // Time to First Token (毫秒)
+    pub tps: Option<f64>,     // Tokens Per Second
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

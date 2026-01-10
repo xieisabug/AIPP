@@ -349,6 +349,8 @@ pub async fn handle_message_type_end(
             token_count: None,
             input_token_count: None,
             output_token_count: None,
+            ttft_ms: None,
+            tps: None,
         })
         .unwrap(),
     };
@@ -380,6 +382,8 @@ pub fn finish_stream_messages(
                     token_count: None,
                     input_token_count: None,
                     output_token_count: None,
+                    ttft_ms: None,
+                    tps: None,
                 })
                 .unwrap(),
             };
@@ -400,6 +404,8 @@ pub fn finish_stream_messages(
                 token_count: None,
                 input_token_count: None,
                 output_token_count: None,
+                ttft_ms: None,
+                tps: None,
             })
             .unwrap(),
         };
@@ -451,6 +457,8 @@ pub fn init_conversation(
                 generation_group_id: None,
                 parent_group_id: None,
                 tool_calls_json: None,
+                first_token_time: None,
+                ttft_ms: None,
             })
             .map_err(AppError::from)?;
         for attachment in attachment_list {

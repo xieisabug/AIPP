@@ -572,6 +572,8 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             token_count: None,
             input_token_count: None,
             output_token_count: None,
+            ttft_ms: None,
+            tps: None,
         })
         .unwrap(),
     };
@@ -1378,6 +1380,8 @@ fn add_message(
             generation_group_id,
             parent_group_id,
             tool_calls_json: None,
+            first_token_time: None,
+            ttft_ms: None,
         })
         .map_err(AppError::from)?;
     Ok(message.clone())
@@ -1534,6 +1538,8 @@ async fn initialize_conversation(
                     token_count: None,
                     input_token_count: None,
                     output_token_count: None,
+                    ttft_ms: None,
+                    tps: None,
                 })
                 .unwrap(),
             };

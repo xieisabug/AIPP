@@ -84,6 +84,122 @@ const MessageItem = React.memo<MessageItemProps>(
             [message.content, parseCustomTags]
         );
 
+        const computedTtftMs = useMemo(() => {
+            if (message.ttft_ms !== null && message.ttft_ms !== undefined) {
+                return message.ttft_ms;
+            }
+
+            if (streamEvent?.ttft_ms !== null && streamEvent?.ttft_ms !== undefined) {
+                return streamEvent.ttft_ms;
+            }
+
+            const startTime = message.start_time ? new Date(message.start_time) : null;
+            const firstTokenTime = message.first_token_time ? new Date(message.first_token_time) : null;
+
+            if (startTime && firstTokenTime) {
+                const diff = firstTokenTime.getTime() - startTime.getTime();
+                return diff > 0 ? diff : null;
+            }
+
+            return null;
+        }, [
+            message.first_token_time,
+            message.start_time,
+            message.ttft_ms,
+            streamEvent?.ttft_ms,
+        ]);
+
+        const computedTps = useMemo(() => {
+            if (message.tps !== null && message.tps !== undefined) {
+                return message.tps;
+            }
+
+            if (streamEvent?.tps !== null && streamEvent?.tps !== undefined) {
+                return streamEvent.tps;
+            }
+
+            const tokenCandidates = [
+                message.output_token_count,
+                message.token_count,
+                message.input_token_count + message.output_token_count,
+                streamEvent?.output_token_count,
+                streamEvent?.token_count,
+            ].filter((value): value is number => typeof value === "number" && value > 0);
+
+            const tokensForSpeed = tokenCandidates.length > 0 ? tokenCandidates[0] : 0;
+            if (tokensForSpeed <= 0) {
+                return 0;
+            }
+
+            const startFallback = message.start_time
+                ? new Date(message.start_time)
+                : message.created_time
+                    ? new Date(message.created_time)
+                    : null;
+
+            let startPoint = message.first_token_time
+                ? new Date(message.first_token_time)
+                : startFallback;
+
+            let finishTime = message.finish_time
+                ? new Date(message.finish_time)
+                : streamEvent?.end_time
+                    ? new Date(streamEvent.end_time)
+                    : startPoint && streamEvent?.duration_ms && streamEvent.duration_ms > 0
+                        ? new Date(startPoint.getTime() + streamEvent.duration_ms)
+                        : null;
+
+            // Backward-compat: finish_time may have second precision while first_token_time has ms.
+            if (
+                finishTime &&
+                startPoint &&
+                !Number.isNaN(finishTime.getTime()) &&
+                !Number.isNaN(startPoint.getTime()) &&
+                finishTime.getMilliseconds() === 0 &&
+                Math.floor(finishTime.getTime() / 1000) === Math.floor(startPoint.getTime() / 1000) &&
+                startPoint.getMilliseconds() > 0
+            ) {
+                finishTime = new Date(finishTime.getTime() + 999);
+            }
+
+            const effectiveFinish = finishTime ?? (startPoint ? new Date() : null);
+
+            if (!startPoint || !effectiveFinish || Number.isNaN(startPoint.getTime()) || Number.isNaN(effectiveFinish.getTime())) {
+                return 0;
+            }
+
+            // If finish_time has lower precision (e.g. seconds) it can be <= first_token_time (ms).
+            // Fall back to start_time/created_time to avoid negative/zero durations.
+            if (effectiveFinish.getTime() <= startPoint.getTime() && startFallback && !Number.isNaN(startFallback.getTime())) {
+                startPoint = startFallback;
+            }
+
+            let durationMs = Math.max(1, effectiveFinish.getTime() - startPoint.getTime());
+
+            // Backward-compat: older non-stream records stored start/finish too close (or with low precision)
+            // but kept total request duration in ttft_ms. Prefer it when it's clearly larger.
+            if (typeof message.ttft_ms === "number" && Number.isFinite(message.ttft_ms) && message.ttft_ms > durationMs) {
+                durationMs = Math.max(1, message.ttft_ms);
+            }
+
+            return (tokensForSpeed * 1000) / durationMs;
+        }, [
+            message.first_token_time,
+            message.finish_time,
+            message.output_token_count,
+            message.start_time,
+            message.created_time,
+            message.token_count,
+            message.input_token_count,
+            message.ttft_ms,
+            message.tps,
+            streamEvent?.duration_ms,
+            streamEvent?.end_time,
+            streamEvent?.output_token_count,
+            streamEvent?.token_count,
+            streamEvent?.tps,
+        ]);
+
         // 渲染内容 - 根据用户消息类型和配置选择渲染方式
         const contentElement = useMemo(
             () => {
@@ -178,6 +294,8 @@ const MessageItem = React.memo<MessageItemProps>(
                         tokenCount={message.token_count}
                         inputTokenCount={message.input_token_count}
                         outputTokenCount={message.output_token_count}
+                        ttftMs={computedTtftMs}
+                        tps={computedTps}
                     />
                 </div>
 

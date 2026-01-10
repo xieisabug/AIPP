@@ -17,6 +17,8 @@ interface MessageActionButtonsProps {
     tokenCount: number;
     inputTokenCount: number;
     outputTokenCount: number;
+    ttftMs?: number | null;
+    tps?: number | null;
 }
 
 const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
@@ -30,6 +32,8 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
     tokenCount,
     inputTokenCount,
     outputTokenCount,
+    ttftMs,
+    tps,
 }) => {
     const showEditRegenerate = messageType === "assistant" || messageType === "response" || messageType === "user";
     const [isTokenTooltipOpen, setIsTokenTooltipOpen] = useState(false);
@@ -52,6 +56,8 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
                 inputTokenCount={inputTokenCount}
                 outputTokenCount={outputTokenCount}
                 messageType={messageType}
+                ttftMs={ttftMs}
+                tps={tps}
                 onOpenChange={setIsTokenTooltipOpen}
             />
             <IconButton

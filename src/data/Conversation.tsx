@@ -29,6 +29,10 @@ export interface Message {
     parent_id?: number | null; // 添加 parent_id 字段
     regenerate: Array<Message> | null;
     attachment_list?: Array<any>; // 添加附件列表字段
+    // 性能指标
+    first_token_time?: Date | null;
+    ttft_ms?: number | null;
+    tps?: number | null;
 }
 
 // 流式事件数据类型
@@ -43,6 +47,9 @@ export interface StreamEvent {
     token_count?: number;
     input_token_count?: number;
     output_token_count?: number;
+    // 性能指标（可选，仅在 is_done=true 时有值）
+    ttft_ms?: number;
+    tps?: number;
 }
 
 // 新增：Conversation 事件类型
@@ -66,6 +73,9 @@ export interface MessageUpdateEvent {
     token_count?: number;
     input_token_count?: number;
     output_token_count?: number;
+    // 性能指标（可选，仅在 is_done=true 时有值）
+    ttft_ms?: number;
+    tps?: number;
 }
 
 export interface MessageTypeEndEvent {
@@ -145,6 +155,9 @@ export interface ConversationTokenStats {
     response_message_count: number;
     reasoning_message_count: number;
     tool_result_message_count: number;
+    // 性能指标统计
+    avg_ttft_ms?: number;
+    avg_tps?: number;
 }
 
 export interface ModelTokenBreakdown {
@@ -155,6 +168,9 @@ export interface ModelTokenBreakdown {
     output_tokens: number;
     message_count: number;
     percentage?: number; // 用于UI显示的百分比
+    // 性能指标统计
+    avg_ttft_ms?: number;
+    avg_tps?: number;
 }
 
 export interface MessageTokenStats {
@@ -163,4 +179,7 @@ export interface MessageTokenStats {
     input_tokens: number;
     output_tokens: number;
     model_name: string | null;
+    // 性能指标
+    ttft_ms?: number;
+    tps?: number;
 }

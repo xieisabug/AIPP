@@ -203,10 +203,41 @@ export function ConversationStatsDialog({
                                     </div>
                                 </div>
                             </div>
+
+                            {/* Performance Metrics */}
+                            {(stats.avg_ttft_ms !== undefined || stats.avg_tps !== undefined) && (
+                                <div className="pt-4 border-t">
+                                    <h4 className="text-sm font-medium mb-3">性能指标 (响应消息)</h4>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div className="text-center">
+                                            <p className="text-xs text-muted-foreground mb-1">
+                                                平均首字延迟
+                                            </p>
+                                            <p className="text-lg font-semibold">
+                                                {formatDuration(stats.avg_ttft_ms ?? 0)}
+                                            </p>
+                                        </div>
+                                        <div className="text-center">
+                                            <p className="text-xs text-muted-foreground mb-1">
+                                                平均生成速度
+                                            </p>
+                                            <p className="text-lg font-semibold">
+                                                {`${(stats.avg_tps ?? 0).toFixed(1)} tok/s`}
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     </div>
                 )}
             </DialogContent>
         </Dialog>
     );
+}
+
+// 辅助函数：格式化持续时间
+function formatDuration(ms: number): string {
+    if (ms < 1000) return `${ms.toFixed(0)}ms`;
+    return `${(ms / 1000).toFixed(2)}s`;
 }

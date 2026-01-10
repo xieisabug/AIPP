@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use chrono::{prelude::*, SecondsFormat};
@@ -95,6 +96,9 @@ pub struct Message {
     pub generation_group_id: Option<String>,
     pub parent_group_id: Option<String>,
     pub tool_calls_json: Option<String>, // 保存原始 tool_calls JSON
+    #[serde(serialize_with = "serialize_option_datetime_millis")]
+    pub first_token_time: Option<DateTime<Utc>>, // 首个 token 到达时间
+    pub ttft_ms: Option<i64>, // Time to First Token (毫秒)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -117,6 +121,9 @@ pub struct MessageDetail {
     pub generation_group_id: Option<String>,
     pub parent_group_id: Option<String>,
     pub tool_calls_json: Option<String>,
+    #[serde(serialize_with = "serialize_option_datetime_millis")]
+    pub first_token_time: Option<DateTime<Utc>>, // 首个 token 到达时间
+    pub ttft_ms: Option<i64>, // Time to First Token (毫秒)
     pub attachment_list: Vec<MessageAttachment>,
     pub regenerate: Vec<MessageDetail>,
 }
@@ -259,13 +266,13 @@ impl MessageRepository {
         &self,
         conversation_id: i64,
     ) -> Result<Vec<(Message, Option<MessageAttachment>)>> {
-        let mut stmt = self.conn.prepare("SELECT message.id, message.parent_id, message.conversation_id, message.message_type, message.content, message.llm_model_id, message.llm_model_name, message.created_time, message.start_time, message.finish_time, message.token_count, message.input_token_count, message.output_token_count, message.generation_group_id, message.parent_group_id, message.tool_calls_json, ma.attachment_type, ma.attachment_url, ma.attachment_content, ma.use_vector as attachment_use_vector, ma.token_count as attachment_token_count
+        let mut stmt = self.conn.prepare("SELECT message.id, message.parent_id, message.conversation_id, message.message_type, message.content, message.llm_model_id, message.llm_model_name, message.created_time, message.start_time, message.finish_time, message.token_count, message.input_token_count, message.output_token_count, message.generation_group_id, message.parent_group_id, message.tool_calls_json, message.first_token_time, message.ttft_ms, ma.attachment_type, ma.attachment_url, ma.attachment_content, ma.use_vector as attachment_use_vector, ma.token_count as attachment_token_count
                                           FROM message
                                           LEFT JOIN message_attachment ma ON message.id = ma.message_id
                                           WHERE message.conversation_id = ?1
                                           ORDER BY message.created_time ASC")?;
         let rows = stmt.query_map(&[&conversation_id], |row| {
-            let attachment_type_int: Option<i64> = row.get(16).ok();
+            let attachment_type_int: Option<i64> = row.get(18).ok();
             let attachment_type = attachment_type_int.map(AttachmentType::try_from).transpose()?;
             let message = Message {
                 id: row.get(0)?,
@@ -284,17 +291,19 @@ impl MessageRepository {
                 generation_group_id: row.get(13)?,
                 parent_group_id: row.get(14)?,
                 tool_calls_json: row.get(15)?,
+                first_token_time: get_datetime_from_row(row, 16)?,
+                ttft_ms: row.get(17).ok(),
             };
             let attachment = if attachment_type.is_some() {
                 Some(MessageAttachment {
                     id: 0,
                     message_id: row.get(0)?,
                     attachment_type: attachment_type.unwrap(),
-                    attachment_url: row.get(17)?,
-                    attachment_content: row.get(18)?,
+                    attachment_url: row.get(19)?,
+                    attachment_content: row.get(20)?,
                     attachment_hash: None,
-                    use_vector: row.get(19)?,
-                    token_count: row.get(20)?,
+                    use_vector: row.get(21)?,
+                    token_count: row.get(22)?,
                 })
             } else {
                 None
@@ -306,8 +315,13 @@ impl MessageRepository {
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
     pub fn update_finish_time(&self, id: i64) -> Result<()> {
-        self.conn
-            .execute("UPDATE message SET finish_time = CURRENT_TIMESTAMP WHERE id = ?1", [&id])?;
+        // Avoid SQLite CURRENT_TIMESTAMP (second precision) which can be earlier than millisecond
+        // timestamps (e.g., first_token_time) and breaks duration-based TPS calculations.
+        let now = chrono::Utc::now();
+        self.conn.execute(
+            "UPDATE message SET finish_time = ?1 WHERE id = ?2",
+            rusqlite::params![now, id],
+        )?;
         Ok(())
     }
 
@@ -322,9 +336,10 @@ impl MessageRepository {
 impl Repository<Message> for MessageRepository {
     #[instrument(level = "debug", skip(self, message), fields(conversation_id = message.conversation_id, message_type = message.message_type))]
     fn create(&self, message: &Message) -> Result<Message> {
+        // rusqlite Params trait only supports up to 16 parameters, use named params for 17+ fields
         self.conn.execute(
-            "INSERT INTO message (parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, input_token_count, output_token_count, generation_group_id, parent_group_id, tool_calls_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            (
+            "INSERT INTO message (parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, input_token_count, output_token_count, generation_group_id, parent_group_id, tool_calls_json, first_token_time, ttft_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            rusqlite::params![
                 &message.parent_id,
                 &message.conversation_id,
                 &message.message_type,
@@ -340,7 +355,9 @@ impl Repository<Message> for MessageRepository {
                 &message.generation_group_id,
                 &message.parent_group_id,
                 &message.tool_calls_json,
-            ),
+                &message.first_token_time,
+                &message.ttft_ms,
+            ],
         )?;
         let id = self.conn.last_insert_rowid();
         Ok(Message {
@@ -360,13 +377,15 @@ impl Repository<Message> for MessageRepository {
             generation_group_id: message.generation_group_id.clone(),
             parent_group_id: message.parent_group_id.clone(),
             tool_calls_json: message.tool_calls_json.clone(),
+            first_token_time: message.first_token_time,
+            ttft_ms: message.ttft_ms,
         })
     }
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
     fn read(&self, id: i64) -> Result<Option<Message>> {
         self.conn
-            .query_row("SELECT id, parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, input_token_count, output_token_count, generation_group_id, parent_group_id, tool_calls_json FROM message WHERE id = ?", &[&id], |row| {
+            .query_row("SELECT id, parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, input_token_count, output_token_count, generation_group_id, parent_group_id, tool_calls_json, first_token_time, ttft_ms FROM message WHERE id = ?", &[&id], |row| {
                 Ok(Message {
                     id: row.get(0)?,
                     parent_id: row.get(1)?,
@@ -384,6 +403,8 @@ impl Repository<Message> for MessageRepository {
                     generation_group_id: row.get(13)?,
                     parent_group_id: row.get(14)?,
                     tool_calls_json: row.get(15)?,
+                    first_token_time: get_datetime_from_row(row, 16)?,
+                    ttft_ms: row.get(17).ok(),
                 })
             })
             .optional()
@@ -392,8 +413,8 @@ impl Repository<Message> for MessageRepository {
     #[instrument(level = "debug", skip(self, message), fields(id = message.id))]
     fn update(&self, message: &Message) -> Result<()> {
         self.conn.execute(
-            "UPDATE message SET conversation_id = ?1, message_type = ?2, content = ?3, llm_model_id = ?4, llm_model_name = ?5, token_count = ?6, input_token_count = ?7, output_token_count = ?8, tool_calls_json = ?9 WHERE id = ?10",
-            (
+            "UPDATE message SET conversation_id = ?1, message_type = ?2, content = ?3, llm_model_id = ?4, llm_model_name = ?5, token_count = ?6, input_token_count = ?7, output_token_count = ?8, tool_calls_json = ?9, first_token_time = ?10, ttft_ms = ?11, start_time = ?12, finish_time = ?13 WHERE id = ?14",
+            rusqlite::params![
                 &message.conversation_id,
                 &message.message_type,
                 &message.content,
@@ -403,8 +424,12 @@ impl Repository<Message> for MessageRepository {
                 &message.input_token_count,
                 &message.output_token_count,
                 &message.tool_calls_json,
+                &message.first_token_time,
+                &message.ttft_ms,
+                &message.start_time,
+                &message.finish_time,
                 &message.id,
-            ),
+            ],
         )?;
         Ok(())
     }
@@ -631,6 +656,13 @@ impl ConversationDatabase {
                 [],
             )?;
         }
+        // 添加性能指标相关列
+        if !column_info.contains(&"first_token_time".to_string()) {
+            conn.execute("ALTER TABLE message ADD COLUMN first_token_time DATETIME", [])?;
+        }
+        if !column_info.contains(&"ttft_ms".to_string()) {
+            conn.execute("ALTER TABLE message ADD COLUMN ttft_ms INTEGER", [])?;
+        }
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS message_attachment (
@@ -720,14 +752,33 @@ impl ConversationDatabase {
                 SUM(token_count) as total,
                 SUM(input_token_count) as input,
                 SUM(output_token_count) as output,
-                COUNT(*) as msg_count
+                COUNT(*) as msg_count,
+                AVG(
+                    CASE
+                        WHEN ttft_ms IS NOT NULL THEN ttft_ms
+                        WHEN start_time IS NOT NULL AND first_token_time IS NOT NULL THEN
+                            MAX((julianday(first_token_time) - julianday(start_time)) * 86400000, 0)
+                        ELSE NULL
+                    END
+                ) as avg_ttft,
+                AVG(CASE
+                    WHEN output_token_count > 0
+                        AND finish_time IS NOT NULL
+                        AND COALESCE(first_token_time, start_time) IS NOT NULL
+                        AND ((julianday(finish_time) - julianday(COALESCE(first_token_time, start_time))) * 86400000) > 0
+                    THEN
+                        (output_token_count * 1000.0) / CAST(
+                            (julianday(finish_time) - julianday(COALESCE(first_token_time, start_time))) * 86400000 AS REAL
+                        )
+                    ELSE NULL
+                END) as avg_tps
             FROM message
-            WHERE conversation_id = ?1 AND llm_model_id IS NOT NULL AND message_type = 'response'
+            WHERE conversation_id = ?1 AND llm_model_id IS NOT NULL AND message_type IN ('response', 'reasoning')
             GROUP BY llm_model_id
             ORDER BY total DESC",
         )?;
 
-        let by_model = stmt
+        let mut by_model = stmt
             .query_map(&[&conversation_id], |row| {
                 Ok(ModelTokenBreakdown {
                     model_id: row.get(0)?,
@@ -736,9 +787,165 @@ impl ConversationDatabase {
                     input_tokens: row.get(3)?,
                     output_tokens: row.get(4)?,
                     message_count: row.get(5)?,
+                    avg_ttft_ms: row.get(6).ok(),
+                    avg_tps: row.get(7).ok(),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // åŸºäºŽ response å’Œ reasoning æ¶ˆæ¯çš„æ€» token åŠæ—¶é—´é•¿åº¦è®¡ç®— TPS
+        let mut perf_stmt = conn.prepare(
+            "SELECT
+                llm_model_id,
+                token_count,
+                input_token_count,
+                output_token_count,
+                created_time,
+                start_time,
+                first_token_time,
+                finish_time,
+                ttft_ms
+            FROM message
+            WHERE conversation_id = ?1 AND message_type IN ('response', 'reasoning')",
+        )?;
+
+        let mut total_tokens_for_speed: i64 = 0;
+        let mut total_duration_ms_for_speed: i64 = 0;
+        let mut model_speed_map: HashMap<Option<i64>, (i64, i64)> = HashMap::new();
+
+        let perf_rows = perf_stmt.query_map(&[&conversation_id], |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                get_required_datetime_from_row(row, 4, "created_time")?,
+                get_datetime_from_row(row, 5)?,
+                get_datetime_from_row(row, 6)?,
+                get_datetime_from_row(row, 7)?,
+                row.get::<_, Option<i64>>(8).ok().flatten(),
+            ))
+        })?;
+
+        for row in perf_rows {
+            let (
+                model_id,
+                token_count,
+                input_token_count,
+                output_token_count,
+                created_time,
+                start_time,
+                first_token_time,
+                finish_time,
+                ttft_ms,
+            ) = row?;
+
+            let tokens_for_speed = if output_token_count > 0 {
+                output_token_count
+            } else if token_count > 0 {
+                token_count
+            } else if input_token_count + output_token_count > 0 {
+                input_token_count + output_token_count
+            } else {
+                0
+            };
+
+            if tokens_for_speed <= 0 {
+                continue;
+            }
+
+            let mut end_point = finish_time.unwrap_or_else(chrono::Utc::now);
+            // Backward-compat: older code stored finish_time via SQLite CURRENT_TIMESTAMP (second precision).
+            // If finish_time has 0ms but start timestamps have ms within the same second, bump end to end-of-second
+            // to avoid negative/zero durations which lead to N/A or extreme TPS.
+            if finish_time.is_some()
+                && end_point.timestamp_subsec_millis() == 0
+                && [first_token_time, start_time]
+                    .into_iter()
+                    .flatten()
+                    .any(|t| t.timestamp() == end_point.timestamp() && t.timestamp_subsec_millis() > 0)
+            {
+                end_point = end_point + chrono::Duration::milliseconds(999);
+            }
+            let start_point = {
+                let candidates = [first_token_time, start_time, Some(created_time)];
+                let mut selected: Option<DateTime<Utc>> = None;
+                for candidate in candidates {
+                    if let Some(candidate_dt) = candidate {
+                        if end_point.timestamp_millis() > candidate_dt.timestamp_millis() {
+                            selected = Some(candidate_dt);
+                            break;
+                        }
+                    }
+                }
+                selected.unwrap_or_else(|| end_point - chrono::Duration::milliseconds(1))
+            };
+            let mut duration_ms =
+                (end_point.timestamp_millis() - start_point.timestamp_millis()).max(1);
+            // Backward-compat: older non-stream code stored start_time/first_token_time too late (near finish),
+            // but did store the total request duration in ttft_ms. Prefer that when it's clearly larger.
+            if let Some(ttft) = ttft_ms {
+                if ttft > 0 && ttft > duration_ms {
+                    duration_ms = ttft.max(1);
+                }
+            }
+
+            total_tokens_for_speed += tokens_for_speed;
+            total_duration_ms_for_speed += duration_ms;
+
+            model_speed_map
+                .entry(model_id)
+                .and_modify(|(t, d)| {
+                    *t += tokens_for_speed;
+                    *d += duration_ms;
+                })
+                .or_insert((tokens_for_speed, duration_ms));
+        }
+
+        for model_entry in by_model.iter_mut() {
+            if let Some((tokens, duration_ms)) = model_speed_map.get(&model_entry.model_id) {
+                if *tokens > 0 && *duration_ms > 0 {
+                    model_entry.avg_tps = Some((*tokens as f64 * 1000.0) / (*duration_ms as f64));
+                }
+            }
+        }
+
+        // 计算平均 TTFT 和 TPS (仅针对 response 消息)
+        let (avg_ttft, avg_tps): (Option<f64>, Option<f64>) = conn.query_row(
+            "SELECT
+                AVG(
+                    CASE
+                        WHEN ttft_ms IS NOT NULL THEN ttft_ms
+                        WHEN start_time IS NOT NULL AND first_token_time IS NOT NULL THEN
+                            MAX((julianday(first_token_time) - julianday(start_time)) * 86400000, 0)
+                        ELSE NULL
+                    END
+                ) as avg_ttft,
+                AVG(CASE
+                    WHEN output_token_count > 0
+                        AND finish_time IS NOT NULL
+                        AND COALESCE(first_token_time, start_time) IS NOT NULL
+                        AND ((julianday(finish_time) - julianday(COALESCE(first_token_time, start_time))) * 86400000) > 0
+                    THEN
+                        (output_token_count * 1000.0) / CAST(
+                            (julianday(finish_time) - julianday(COALESCE(first_token_time, start_time))) * 86400000 AS REAL
+                        )
+                    ELSE NULL
+                END) as avg_tps
+            FROM message
+            WHERE conversation_id = ?1 AND message_type IN ('response', 'reasoning')",
+            &[&conversation_id],
+            |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            },
+        )?;
+
+        let aggregated_avg_tps = if total_tokens_for_speed > 0 && total_duration_ms_for_speed > 0 {
+            Some((total_tokens_for_speed as f64 * 1000.0) / (total_duration_ms_for_speed as f64))
+        } else {
+            // Ensure frontend never needs to show N/A for TPS.
+            Some(0.0)
+        };
 
         Ok(ConversationTokenStats {
             total_tokens: total_tokens as i32,
@@ -751,6 +958,8 @@ impl ConversationDatabase {
             response_message_count: response_count as i32,
             reasoning_message_count: reasoning_count as i32,
             tool_result_message_count: tool_result_count as i32,
+            avg_ttft_ms: avg_ttft,
+            avg_tps: aggregated_avg_tps.or(avg_tps),
         })
     }
 
@@ -764,17 +973,90 @@ impl ConversationDatabase {
                 token_count,
                 input_token_count,
                 output_token_count,
-                llm_model_name
+                llm_model_name,
+                ttft_ms,
+                first_token_time,
+                finish_time,
+                start_time,
+                created_time
             FROM message
             WHERE id = ?1",
             &[&message_id],
             |row| {
+                let total_tokens: i32 = row.get(1)?;
+                let input_tokens: i32 = row.get(2)?;
+                let output_tokens: i32 = row.get(3)?;
+                let first_token_time = get_datetime_from_row(row, 6)?;
+                let finish_time = get_datetime_from_row(row, 7)?;
+                let start_time = get_datetime_from_row(row, 8)?;
+                let created_time = get_required_datetime_from_row(row, 9, "created_time")?;
+                let ttft_ms: Option<i64> = row.get(5).ok().or_else(|| {
+                    match (start_time, first_token_time) {
+                        (Some(start), Some(first_token)) => {
+                            Some((first_token.timestamp_millis() - start.timestamp_millis()).max(0))
+                        }
+                        _ => None,
+                    }
+                });
+
+                // 计算 TPS (Tokens Per Second)，优先使用输出 token，缺失时回退到总 token
+                let tokens_for_speed: i64 = if output_tokens > 0 {
+                    output_tokens as i64
+                } else if total_tokens > 0 {
+                    total_tokens as i64
+                } else if input_tokens + output_tokens > 0 {
+                    (input_tokens + output_tokens) as i64
+                } else {
+                    0
+                };
+
+                let tps = if tokens_for_speed > 0 {
+                    let mut end_point = finish_time.unwrap_or_else(chrono::Utc::now);
+                    if finish_time.is_some()
+                        && end_point.timestamp_subsec_millis() == 0
+                        && [first_token_time, start_time]
+                            .into_iter()
+                            .flatten()
+                            .any(|t| {
+                                t.timestamp() == end_point.timestamp()
+                                    && t.timestamp_subsec_millis() > 0
+                            })
+                    {
+                        end_point = end_point + chrono::Duration::milliseconds(999);
+                    }
+                    let start_point = {
+                        let candidates = [first_token_time, start_time, Some(created_time)];
+                        let mut selected: Option<DateTime<Utc>> = None;
+                        for candidate in candidates {
+                            if let Some(candidate_dt) = candidate {
+                                if end_point.timestamp_millis() > candidate_dt.timestamp_millis() {
+                                    selected = Some(candidate_dt);
+                                    break;
+                                }
+                            }
+                        }
+                        selected.unwrap_or_else(|| end_point - chrono::Duration::milliseconds(1))
+                    };
+                    let mut duration_ms =
+                        (end_point.timestamp_millis() - start_point.timestamp_millis()).max(1);
+                    if let Some(ttft) = ttft_ms {
+                        if ttft > 0 && ttft > duration_ms {
+                            duration_ms = ttft.max(1);
+                        }
+                    }
+                    Some((tokens_for_speed as f64) * 1000.0 / duration_ms as f64)
+                } else {
+                    None
+                };
+
                 Ok(MessageTokenStats {
                     message_id: row.get(0)?,
-                    total_tokens: row.get(1)?,
-                    input_tokens: row.get(2)?,
-                    output_tokens: row.get(3)?,
+                    total_tokens,
+                    input_tokens,
+                    output_tokens,
                     model_name: row.get(4).ok(),
+                    ttft_ms,
+                    tps,
                 })
             },
         )
@@ -795,6 +1077,9 @@ pub struct ConversationTokenStats {
     pub response_message_count: i32,
     pub reasoning_message_count: i32,
     pub tool_result_message_count: i32,
+    // 性能指标统计
+    pub avg_ttft_ms: Option<f64>, // 平均首字延迟 (毫秒)
+    pub avg_tps: Option<f64>,     // 平均生成速度
 }
 
 /// 模型token分解信息
@@ -806,6 +1091,9 @@ pub struct ModelTokenBreakdown {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub message_count: i64,
+    // 性能指标统计
+    pub avg_ttft_ms: Option<f64>,
+    pub avg_tps: Option<f64>,
 }
 
 /// 消息token统计信息
@@ -816,4 +1104,6 @@ pub struct MessageTokenStats {
     pub input_tokens: i32,
     pub output_tokens: i32,
     pub model_name: Option<String>,
+    pub ttft_ms: Option<i64>, // Time to First Token (毫秒)
+    pub tps: Option<f64>,      // Tokens Per Second
 }

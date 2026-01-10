@@ -190,12 +190,22 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                               }
                             : {};
 
+                        // 如果事件中包含性能指标，则更新
+                        const performanceUpdates = (streamEvent.ttft_ms !== undefined ||
+                                                    streamEvent.tps !== undefined)
+                            ? {
+                                ttft_ms: streamEvent.ttft_ms ?? existingMessage.ttft_ms,
+                                tps: streamEvent.tps ?? existingMessage.tps,
+                              }
+                            : {};
+
                         updatedMessages[existingIndex] = {
                             ...existingMessage,
                             content: streamEvent.content,
                             message_type: streamEvent.message_type,
                             finish_time: new Date(), // 标记为完成
                             ...tokenUpdates, // 如果有 Token 计数，则更新
+                            ...performanceUpdates, // 如果有性能指标，则更新
                         };
                         return updatedMessages;
                     } else {
