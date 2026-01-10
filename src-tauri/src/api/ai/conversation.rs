@@ -346,6 +346,9 @@ pub async fn handle_message_type_end(
             message_type: message_type.to_string(),
             content: final_content,
             is_done: true,
+            token_count: None,
+            input_token_count: None,
+            output_token_count: None,
         })
         .unwrap(),
     };
@@ -374,6 +377,9 @@ pub fn finish_stream_messages(
                     message_type: "reasoning".to_string(),
                     content: reasoning_content.to_string(),
                     is_done: true,
+                    token_count: None,
+                    input_token_count: None,
+                    output_token_count: None,
                 })
                 .unwrap(),
             };
@@ -391,6 +397,9 @@ pub fn finish_stream_messages(
                 message_type: "response".to_string(),
                 content: response_content.to_string(),
                 is_done: true,
+                token_count: None,
+                input_token_count: None,
+                output_token_count: None,
             })
             .unwrap(),
         };

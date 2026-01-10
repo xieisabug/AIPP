@@ -39,6 +39,10 @@ export interface StreamEvent {
     is_done: boolean;
     duration_ms?: number; // 后端提供的持续时间
     end_time?: Date; // 后端提供的结束时间
+    // Token 计数（可选，仅在 is_done=true 时有值）
+    token_count?: number;
+    input_token_count?: number;
+    output_token_count?: number;
 }
 
 // 新增：Conversation 事件类型
@@ -58,6 +62,10 @@ export interface MessageUpdateEvent {
     message_type: string;
     content: string;
     is_done: boolean;
+    // Token 计数（可选，仅在 is_done=true 时有值）
+    token_count?: number;
+    input_token_count?: number;
+    output_token_count?: number;
 }
 
 export interface MessageTypeEndEvent {

@@ -387,6 +387,9 @@ fn persist_and_emit_update(
             message_type: message_type.to_string(),
             content: content.to_string(),
             is_done,
+            token_count: None,
+            input_token_count: None,
+            output_token_count: None,
         })
         .unwrap(),
     };
@@ -474,6 +477,9 @@ async fn handle_captured_tool_calls_common(
                             message_type: "response".to_string(),
                             content: response_content.clone(),
                             is_done: false,
+                            token_count: None,
+                            input_token_count: None,
+                            output_token_count: None,
                         })
                         .unwrap(),
                     };
@@ -1653,6 +1659,9 @@ async fn attempt_stream_chat(
                                                         message_type: "response".to_string(),
                                                         content: message.content.clone(),
                                                         is_done: true,
+                                                        token_count: Some(total_tokens),
+                                                        input_token_count: Some(input_tokens),
+                                                        output_token_count: Some(output_tokens),
                                                     })
                                                     .unwrap(),
                                                 };
@@ -1946,6 +1955,9 @@ async fn create_error_message(
                 message_type: "error".to_string(),
                 content: error_msg.to_string(),
                 is_done: true,
+                token_count: None,
+                input_token_count: None,
+                output_token_count: None,
             })
             .unwrap(),
         };
@@ -2136,6 +2148,9 @@ pub async fn handle_non_stream_chat(
                     message_type: "response".to_string(),
                     content: content.clone(),
                     is_done: false, // 关键：设置为 false 以触发前端的 shine-border 清理逻辑
+                    token_count: None,
+                    input_token_count: None,
+                    output_token_count: None,
                 })
                 .unwrap(),
             };
@@ -2205,6 +2220,9 @@ pub async fn handle_non_stream_chat(
                     message_type: "response".to_string(),
                     content: content.clone(),
                     is_done: true,
+                    token_count: None,
+                    input_token_count: None,
+                    output_token_count: None,
                 })
                 .unwrap(),
             };
@@ -2320,6 +2338,9 @@ pub async fn handle_non_stream_chat(
                     message_type: "error".to_string(),
                     content: err_msg.clone(),
                     is_done: true,
+                    token_count: None,
+                    input_token_count: None,
+                    output_token_count: None,
                 })
                 .unwrap(),
             };

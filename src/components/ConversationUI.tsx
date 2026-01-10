@@ -177,11 +177,25 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     if (existingIndex !== -1) {
                         // 消息已存在，更新其内容和完成状态
                         const updatedMessages = [...prevMessages];
+                        const existingMessage = updatedMessages[existingIndex];
+
+                        // 如果事件中包含 Token 计数，则更新
+                        const tokenUpdates = (streamEvent.token_count !== undefined ||
+                                            streamEvent.input_token_count !== undefined ||
+                                            streamEvent.output_token_count !== undefined)
+                            ? {
+                                token_count: streamEvent.token_count ?? existingMessage.token_count,
+                                input_token_count: streamEvent.input_token_count ?? existingMessage.input_token_count,
+                                output_token_count: streamEvent.output_token_count ?? existingMessage.output_token_count,
+                              }
+                            : {};
+
                         updatedMessages[existingIndex] = {
-                            ...updatedMessages[existingIndex],
+                            ...existingMessage,
                             content: streamEvent.content,
                             message_type: streamEvent.message_type,
                             finish_time: new Date(), // 标记为完成
+                            ...tokenUpdates, // 如果有 Token 计数，则更新
                         };
                         return updatedMessages;
                     } else {
@@ -197,9 +211,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             created_time: new Date(baseTime.getTime() + 1000),
                             start_time: streamEvent.message_type === "reasoning" ? baseTime : null,
                             finish_time: new Date(), // 标记为完成
-                            token_count: 0,
-                            input_token_count: 0,
-                            output_token_count: 0,
+                            // 如果事件中包含 Token 计数，则使用，否则默认为 0
+                            token_count: streamEvent.token_count ?? 0,
+                            input_token_count: streamEvent.input_token_count ?? 0,
+                            output_token_count: streamEvent.output_token_count ?? 0,
                             generation_group_id: null, // 流式消息暂时不设置generation_group_id
                             parent_group_id: null, // 流式消息暂时不设置parent_group_id
                             regenerate: null,
