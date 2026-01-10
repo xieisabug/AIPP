@@ -713,13 +713,6 @@ async fn execute_stdio_tool(
     tool_name: &str,
     parameters: &str,
 ) -> Result<String> {
-    // builtin 透传
-    if let Some(cmd) = &server.command {
-        if crate::mcp::builtin_mcp::is_builtin_mcp_call(cmd) {
-            return execute_builtin_tool(app_handle, server, tool_name, parameters, None).await;
-        }
-    }
-
     let command = server.command.as_ref().ok_or_else(|| anyhow!("未为 stdio 传输指定命令"))?;
     let parts: Vec<&str> = command.split_whitespace().collect();
     if parts.is_empty() {
@@ -926,6 +919,9 @@ async fn execute_builtin_tool(
     parameters: &str,
     conversation_id: Option<i64>,
 ) -> Result<String> {
+    // 获取超时配置，使用服务器配置的超时或默认值
+    let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
+
     // 验证是否为内置工具调用
     let command = server.command.clone().unwrap_or_default();
     if !is_builtin_mcp_call(&command) {
@@ -933,17 +929,21 @@ async fn execute_builtin_tool(
         bail!("Unknown builtin tool: {} for command: {}", tool_name, command);
     }
 
-    // 通过 rmcp 的内置服务执行工具，并规范化返回为 content JSON 字符串
+    // 通过 tokio::time::timeout 包裹工具调用，确保超时保护生效
     // 注意：内置工具入口当前接受原始字符串，因此这里仍传入 normalize 后的原始 JSON 文本；
     // parse_tool_arguments 在 builtin 情况下不需要提前结构化（保持行为一致）。
-    let raw = execute_aipp_builtin_tool(
-        app_handle.clone(),
-        command.clone(),
-        tool_name.to_string(),
-        normalize_parameters_json(parameters),
-        conversation_id,
+    let raw = tokio::time::timeout(
+        std::time::Duration::from_millis(timeout_ms),
+        execute_aipp_builtin_tool(
+            app_handle.clone(),
+            command.clone(),
+            tool_name.to_string(),
+            normalize_parameters_json(parameters),
+            conversation_id,
+        ),
     )
     .await
+    .map_err(|_| anyhow!("工具执行超时（{}ms）", timeout_ms))?
     .map_err(|e| anyhow!(e))?; // map String error to anyhow
 
     // raw 是序列化后的 ToolResult，提取其中的 content 字段以与其他传输保持一致
