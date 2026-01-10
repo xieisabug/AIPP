@@ -44,7 +44,7 @@ export function MessageTokenTooltip({
                 <div className="space-y-2">
                     <div className="flex justify-between items-center gap-4 border-b pb-2">
                         <span className="text-sm font-medium">总 Token</span>
-                        <span className="text-lg font-bold">
+                        <span className="text-sm font-bold">
                             {formatNumber(tokenCount)}
                         </span>
                     </div>
