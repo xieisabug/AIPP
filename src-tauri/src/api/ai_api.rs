@@ -569,6 +569,9 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             message_type: "tool_result".to_string(),
             content: tool_result_message.content.clone(),
             is_done: true,
+            token_count: None,
+            input_token_count: None,
+            output_token_count: None,
         })
         .unwrap(),
     };
@@ -1370,6 +1373,8 @@ fn add_message(
             finish_time,
             created_time: chrono::Utc::now(),
             token_count,
+            input_token_count: 0,
+            output_token_count: 0,
             generation_group_id,
             parent_group_id,
             tool_calls_json: None,
@@ -1526,6 +1531,9 @@ async fn initialize_conversation(
                     message_type: "user".to_string(),
                     content: request_prompt_result_with_context.clone(),
                     is_done: false,
+                    token_count: None,
+                    input_token_count: None,
+                    output_token_count: None,
                 })
                 .unwrap(),
             };

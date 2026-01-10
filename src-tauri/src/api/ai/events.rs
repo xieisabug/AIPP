@@ -18,6 +18,10 @@ pub struct MessageUpdateEvent {
     pub message_type: String,
     pub content: String,
     pub is_done: bool,
+    // Token 计数（可选，仅在 is_done=true 时有值）
+    pub token_count: Option<i32>,
+    pub input_token_count: Option<i32>,
+    pub output_token_count: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

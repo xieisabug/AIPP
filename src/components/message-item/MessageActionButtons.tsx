@@ -1,9 +1,10 @@
-import React from "react";
+import React, { useState } from "react";
 import { Edit2, GitBranch } from "lucide-react";
 import IconButton from "../IconButton";
 import Copy from "../../assets/copy.svg?react";
 import Ok from "../../assets/ok.svg?react";
 import Refresh from "../../assets/refresh.svg?react";
+import { MessageTokenTooltip } from "../token-statistics";
 
 interface MessageActionButtonsProps {
     messageType: string;
@@ -13,6 +14,9 @@ interface MessageActionButtonsProps {
     onEdit?: () => void;
     onRegenerate?: () => void;
     onFork?: () => void;
+    tokenCount: number;
+    inputTokenCount: number;
+    outputTokenCount: number;
 }
 
 const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
@@ -23,14 +27,16 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
     onEdit,
     onRegenerate,
     onFork,
+    tokenCount,
+    inputTokenCount,
+    outputTokenCount,
 }) => {
     const showEditRegenerate = messageType === "assistant" || messageType === "response" || messageType === "user";
+    const [isTokenTooltipOpen, setIsTokenTooltipOpen] = useState(false);
 
     return (
         <div
-            className={`hidden z-10 group-hover:flex items-center absolute -bottom-9 py-3 px-4 box-border h-10 rounded-[21px] border border-border bg-background ${
-                isUserMessage ? "right-0" : "left-0"
-            }`}
+            className={`${isTokenTooltipOpen ? "flex" : "hidden group-hover:flex"} z-10 items-center absolute -bottom-9 py-3 px-4 box-border h-10 rounded-[21px] border border-border bg-background ${isUserMessage ? "right-0" : "left-0"}`}
         >
             {showEditRegenerate && onEdit && (
                 <IconButton icon={<Edit2 size={16} className="stroke-foreground" />} onClick={onEdit} />
@@ -41,6 +47,13 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
             {messageType === "response" && onFork && (
                 <IconButton icon={<GitBranch size={16} className="stroke-foreground" />} onClick={onFork} />
             )}
+            <MessageTokenTooltip
+                tokenCount={tokenCount}
+                inputTokenCount={inputTokenCount}
+                outputTokenCount={outputTokenCount}
+                messageType={messageType}
+                onOpenChange={setIsTokenTooltipOpen}
+            />
             <IconButton
                 icon={
                     copyIconState === "copy" ? <Copy className="fill-foreground" /> : <Ok className="fill-foreground" />

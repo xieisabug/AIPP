@@ -22,6 +22,8 @@ export interface Message {
     start_time: Date | null;
     finish_time: Date | null;
     token_count: number;
+    input_token_count: number;
+    output_token_count: number;
     generation_group_id?: string | null;
     parent_group_id?: string | null; // 添加 parent_group_id 字段
     parent_id?: number | null; // 添加 parent_id 字段
@@ -37,6 +39,10 @@ export interface StreamEvent {
     is_done: boolean;
     duration_ms?: number; // 后端提供的持续时间
     end_time?: Date; // 后端提供的结束时间
+    // Token 计数（可选，仅在 is_done=true 时有值）
+    token_count?: number;
+    input_token_count?: number;
+    output_token_count?: number;
 }
 
 // 新增：Conversation 事件类型
@@ -56,6 +62,10 @@ export interface MessageUpdateEvent {
     message_type: string;
     content: string;
     is_done: boolean;
+    // Token 计数（可选，仅在 is_done=true 时有值）
+    token_count?: number;
+    input_token_count?: number;
+    output_token_count?: number;
 }
 
 export interface MessageTypeEndEvent {
@@ -120,4 +130,37 @@ export enum AttachmentType { // 添加AttachmentType枚举
     Word = 4,
     PowerPoint = 5,
     Excel = 6,
+}
+
+// Token统计相关类型
+export interface ConversationTokenStats {
+    total_tokens: number;
+    input_tokens: number;
+    output_tokens: number;
+    by_model: ModelTokenBreakdown[];
+    message_count: number;
+    // 按消息类型统计
+    system_message_count: number;
+    user_message_count: number;
+    response_message_count: number;
+    reasoning_message_count: number;
+    tool_result_message_count: number;
+}
+
+export interface ModelTokenBreakdown {
+    model_id: number | null;
+    model_name: string;
+    total_tokens: number;
+    input_tokens: number;
+    output_tokens: number;
+    message_count: number;
+    percentage?: number; // 用于UI显示的百分比
+}
+
+export interface MessageTokenStats {
+    message_id: number;
+    total_tokens: number;
+    input_tokens: number;
+    output_tokens: number;
+    model_name: string | null;
 }

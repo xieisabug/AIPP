@@ -248,6 +248,8 @@ export function useAssistantRuntime({
                     llm_model_id: createdMessage.llm_model_id,
                     content: createdMessage.content,
                     token_count: createdMessage.token_count,
+                    input_token_count: 0,
+                    output_token_count: 0,
                     message_type: createdMessage.message_type,
                     created_time: new Date(createdMessage.created_time),
                     start_time: createdMessage.start_time ? new Date(createdMessage.start_time) : null,
