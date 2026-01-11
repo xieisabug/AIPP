@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useMemo, useEffect } from "react";
-import { Play, Loader2, CheckCircle, XCircle, Blocks, ChevronDown, ChevronUp, RotateCcw } from "lucide-react";
+import { Play, Loader2, CheckCircle, XCircle, Blocks, ChevronDown, ChevronUp, RotateCcw, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ShineBorder } from "@/components/magicui/shine-border";
@@ -130,7 +130,12 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     break;
                 case "failed":
                     setExecutionState("failed");
-                    setExecutionError(globalState.error || null);
+                    // 检查是否为用户主动停止
+                    if (globalState.error?.includes("Stopped by user")) {
+                        setExecutionError("用户已停止");
+                    } else {
+                        setExecutionError(globalState.error || null);
+                    }
                     setExecutionResult(null);
                     break;
             }
@@ -271,6 +276,23 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         }
     }, [conversationId, messageId, serverName, toolName, parameters, toolCallId]);
 
+    const handleStop = useCallback(async () => {
+        if (!toolCallId) {
+            console.error("Cannot stop: no tool call ID");
+            return;
+        }
+
+        try {
+            await invoke("stop_mcp_tool_call", { callId: toolCallId });
+            // 状态会通过 mcp_tool_call_update 事件自动更新
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "停止失败";
+            console.error("Failed to stop tool call:", errorMessage);
+            setExecutionError(errorMessage);
+            setExecutionState("failed");
+        }
+    }, [toolCallId]);
+
     const renderResult = () => {
         if (executionResult) {
             return (
@@ -311,6 +333,17 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
                     <StatusIndicator state={executionState} />
+                    {isExecuting && (
+                        <Button
+                            onClick={handleStop}
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 w-7 p-0 flex-shrink-0 text-destructive"
+                            title="停止"
+                        >
+                            <Square className="h-3 w-3 fill-current" />
+                        </Button>
+                    )}
                     {!isExpanded && canExecute && (
                         <Button
                             onClick={handleExecute}
@@ -348,21 +381,33 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     </div>
                     {canExecute && (
                         <div className="flex items-center gap-2">
-                            <Button
-                                onClick={handleExecute}
-                                disabled={isExecuting}
-                                size="sm"
-                                className="flex items-center gap-1 h-7 text-xs"
-                            >
-                                {isExecuting ? (
-                                    <Loader2 className="h-3 w-3 animate-spin" />
-                                ) : isFailed ? (
-                                    <RotateCcw className="h-3 w-3" />
-                                ) : (
-                                    <Play className="h-3 w-3" />
-                                )}
-                                {isFailed ? "重新执行" : "执行"}
-                            </Button>
+                            {isExecuting ? (
+                                <>
+                                    <Button
+                                        onClick={handleStop}
+                                        size="sm"
+                                        variant="ghost"
+                                        className="flex items-center gap-1 h-7 text-xs text-destructive"
+                                        title="停止"
+                                    >
+                                        <Square className="h-3 w-3 fill-current" />
+                                        停止
+                                    </Button>
+                                </>
+                            ) : (
+                                <Button
+                                    onClick={handleExecute}
+                                    size="sm"
+                                    className="flex items-center gap-1 h-7 text-xs"
+                                >
+                                    {isFailed ? (
+                                        <RotateCcw className="h-3 w-3" />
+                                    ) : (
+                                        <Play className="h-3 w-3" />
+                                    )}
+                                    {isFailed ? "重新执行" : "执行"}
+                                </Button>
+                            )}
                         </div>
                     )}
                     <div className="max-w-full overflow-hidden">{renderResult()}</div>

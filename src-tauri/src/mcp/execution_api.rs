@@ -483,6 +483,41 @@ pub async fn cancel_mcp_tool_calls_by_conversation(
     Ok(cancelled_ids)
 }
 
+#[tauri::command]
+#[instrument(skip(app_handle), fields(call_id=call_id))]
+pub async fn stop_mcp_tool_call(
+    app_handle: tauri::AppHandle,
+    call_id: i64,
+) -> std::result::Result<(), String> {
+    // 1. 取消执行令牌（如果正在执行）
+    let _cancelled = cancel_tool_call_execution(call_id).await;
+
+    // 2. 更新状态为 failed，标记为用户主动停止
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+
+    // 获取当前工具调用状态
+    let current_call = db.get_mcp_tool_call(call_id)
+        .map_err(|e| e.to_string())?;
+
+    // 只对 pending 或 executing 状态的工具进行停止操作
+    if current_call.status == "pending" || current_call.status == "executing" {
+        db.update_mcp_tool_call_status(
+            call_id,
+            "failed",
+            None,
+            Some("Stopped by user")
+        )
+        .map_err(|e| e.to_string())?;
+
+        // 3. 广播状态更新事件
+        let updated_call = db.get_mcp_tool_call(call_id)
+            .map_err(|e| e.to_string())?;
+        broadcast_mcp_tool_call_update(&app_handle, &updated_call);
+    }
+
+    Ok(())
+}
+
 /// 工具成功后的续写逻辑调度：区分首次与重试。
 #[instrument(skip(app_handle,state,feature_config_state,window,tool_call,result), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id, retry=?is_retry))]
 async fn handle_tool_success_continuation(

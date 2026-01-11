@@ -89,7 +89,7 @@ use crate::mcp::builtin_mcp::{
 };
 use crate::mcp::execution_api::{
     create_mcp_tool_call, execute_mcp_tool_call, get_mcp_tool_call,
-    get_mcp_tool_calls_by_conversation,
+    get_mcp_tool_calls_by_conversation, stop_mcp_tool_call,
 };
 use crate::db::mcp_db::MCPDatabase;
 use crate::mcp::registry_api::{
@@ -541,6 +541,7 @@ pub fn run() {
             execute_mcp_tool_call,
             get_mcp_tool_call,
             get_mcp_tool_calls_by_conversation,
+            stop_mcp_tool_call,
             list_aipp_builtin_templates,
             add_or_update_aipp_builtin_server,
             execute_aipp_builtin_tool,
