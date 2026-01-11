@@ -178,10 +178,10 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
                 pendingSkillEnable.skill.identifier,
                 0
             );
-            
+
             // Refresh configs
             await loadAssistantSkills();
-            
+
             toast.success('已启用 Agent load_skill 并开启 Skill');
         } catch (e) {
             toast.error('启用失败: ' + e);
@@ -453,7 +453,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
                     <EmptyState
                         icon={<Sparkles className="h-8 w-8 text-muted-foreground" />}
                         title="暂无Skills"
-                        description="点击扫描按钮自动发现已安装的Skills，将扫描以下目录：~/.claude/agents、~/.claude/rules、~/.codex/skills/.system 以及应用数据目录"
+                        description="点击扫描按钮自动发现已安装的Skills，将扫描以下目录：~/.claude/plugins、~/.codex/skills/.system 以及AIPP应用数据skills目录"
                         action={
                             <div className="flex gap-2">
                                 <Button onClick={scanSkills} disabled={isRefreshing}>
