@@ -34,6 +34,16 @@ interface FeatureFormRendererProps {
         uvInstallLog: string;
         installBun: () => void;
         installUv: () => void;
+        bunLatestVersion: string | null;
+        uvLatestVersion: string | null;
+        isCheckingBunUpdate: boolean;
+        isCheckingUvUpdate: boolean;
+        isUpdatingBun: boolean;
+        isUpdatingUv: boolean;
+        checkBunUpdate: (useProxy: boolean) => void;
+        checkUvUpdate: (useProxy: boolean) => void;
+        updateBun: (useProxy: boolean) => void;
+        updateUv: (useProxy: boolean) => void;
     };
     onSaveDisplay: () => Promise<void>;
     onSaveSummary: () => Promise<void>;
@@ -77,6 +87,16 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
                     uvInstallLog={versionManager.uvInstallLog}
                     onInstallBun={versionManager.installBun}
                     onInstallUv={versionManager.installUv}
+                    bunLatestVersion={versionManager.bunLatestVersion}
+                    uvLatestVersion={versionManager.uvLatestVersion}
+                    isCheckingBunUpdate={versionManager.isCheckingBunUpdate}
+                    isCheckingUvUpdate={versionManager.isCheckingUvUpdate}
+                    isUpdatingBun={versionManager.isUpdatingBun}
+                    isUpdatingUv={versionManager.isUpdatingUv}
+                    checkBunUpdate={versionManager.checkBunUpdate}
+                    checkUvUpdate={versionManager.checkUvUpdate}
+                    updateBun={versionManager.updateBun}
+                    updateUv={versionManager.updateUv}
                 />
             );
         case "data_folder":

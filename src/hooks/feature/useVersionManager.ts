@@ -8,11 +8,17 @@ export const useVersionManager = () => {
     const [bunVersion, setBunVersion] = useState<string>("");
     const [isInstallingBun, setIsInstallingBun] = useState(false);
     const [bunInstallLog, setBunInstallLog] = useState("");
+    const [bunLatestVersion, setBunLatestVersion] = useState<string | null>(null);
+    const [isCheckingBunUpdate, setIsCheckingBunUpdate] = useState(false);
+    const [isUpdatingBun, setIsUpdatingBun] = useState(false);
 
     // UV 相关状态
     const [uvVersion, setUvVersion] = useState<string>("");
     const [isInstallingUv, setIsInstallingUv] = useState(false);
     const [uvInstallLog, setUvInstallLog] = useState("");
+    const [uvLatestVersion, setUvLatestVersion] = useState<string | null>(null);
+    const [isCheckingUvUpdate, setIsCheckingUvUpdate] = useState(false);
+    const [isUpdatingUv, setIsUpdatingUv] = useState(false);
 
     // 检查 Bun 版本
     const checkBunVersion = useCallback(() => {
@@ -42,6 +48,56 @@ export const useVersionManager = () => {
         invoke("install_uv");
     }, []);
 
+    // 检查 Bun 更新
+    const checkBunUpdate = useCallback(async (useProxy = false) => {
+        setIsCheckingBunUpdate(true);
+        try {
+            const version = await invoke(
+                "check_bun_update" + (useProxy ? "_with_proxy" : "")
+            ) as string | null;
+            setBunLatestVersion(version);
+            if (version) {
+                toast.success(`发现新版本: ${version}`);
+            } else {
+                toast.info("已是最新版本");
+            }
+        } finally {
+            setIsCheckingBunUpdate(false);
+        }
+    }, []);
+
+    // 检查 UV 更新
+    const checkUvUpdate = useCallback(async (useProxy = false) => {
+        setIsCheckingUvUpdate(true);
+        try {
+            const version = await invoke(
+                "check_uv_update" + (useProxy ? "_with_proxy" : "")
+            ) as string | null;
+            setUvLatestVersion(version);
+            if (version) {
+                toast.success(`发现新版本: ${version}`);
+            } else {
+                toast.info("已是最新版本");
+            }
+        } finally {
+            setIsCheckingUvUpdate(false);
+        }
+    }, []);
+
+    // 更新 Bun
+    const updateBun = useCallback((useProxy = false) => {
+        setIsUpdatingBun(true);
+        setBunInstallLog("开始更新 Bun...");
+        invoke("update_bun" + (useProxy ? "_with_proxy" : ""));
+    }, []);
+
+    // 更新 UV
+    const updateUv = useCallback((useProxy = false) => {
+        setIsUpdatingUv(true);
+        setUvInstallLog("开始更新 uv...");
+        invoke("update_uv" + (useProxy ? "_with_proxy" : ""));
+    }, []);
+
     // 设置事件监听器
     useEffect(() => {
         // 初始检查版本
@@ -57,10 +113,12 @@ export const useVersionManager = () => {
         const unlistenBunFinished = listen("bun-install-finished", (event) => {
             setTimeout(() => {
                 setIsInstallingBun(false);
+                setIsUpdatingBun(false);
             }, 1000);
             if (event.payload) {
                 toast.success("Bun 安装成功");
                 checkBunVersion();
+                setBunLatestVersion(null);
             } else {
                 toast.error("Bun 安装失败");
             }
@@ -75,10 +133,12 @@ export const useVersionManager = () => {
         const unlistenUvFinished = listen("uv-install-finished", (event) => {
             setTimeout(() => {
                 setIsInstallingUv(false);
+                setIsUpdatingUv(false);
             }, 1000);
             if (event.payload) {
                 toast.success("uv 安装成功");
                 checkUvVersion();
+                setUvLatestVersion(null);
             } else {
                 toast.error("uv 安装失败");
             }
@@ -100,12 +160,22 @@ export const useVersionManager = () => {
         bunInstallLog,
         checkBunVersion,
         installBun,
-        
+        bunLatestVersion,
+        isCheckingBunUpdate,
+        isUpdatingBun,
+        checkBunUpdate,
+        updateBun,
+
         // UV 相关
         uvVersion,
         isInstallingUv,
         uvInstallLog,
         checkUvVersion,
         installUv,
+        uvLatestVersion,
+        isCheckingUvUpdate,
+        isUpdatingUv,
+        checkUvUpdate,
+        updateUv,
     };
 };

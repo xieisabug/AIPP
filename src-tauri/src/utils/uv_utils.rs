@@ -25,9 +25,12 @@ impl UvUtils {
                     Ok(output) if output.status.success() => {
                         let version_info =
                             String::from_utf8_lossy(&output.stdout).trim().to_string();
-                        // The output is like "uv 0.2.8", we just need the version number.
-                        if let Some(version) = version_info.split_whitespace().last() {
-                            Some(version.to_string())
+                        // The output is like "uv 0.4.0 (d9bd3bc7a 2024-08-28)"
+                        // We need the version number "0.4.0" which is the second word
+                        let parts: Vec<&str> = version_info.split_whitespace().collect();
+                        if parts.len() >= 2 {
+                            // 第二个部分是版本号 (0.4.0)
+                            Some(parts[1].to_string())
                         } else {
                             Some(version_info)
                         }
