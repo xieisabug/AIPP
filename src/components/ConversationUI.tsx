@@ -295,6 +295,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             updateFunctionMap,
             clearStreamingMessages,
             clearShiningMessages,
+            setPendingUserMessage,
         } = useConversationEvents(conversationEventsOptions);
 
         // 当 functionMap 变化时更新事件处理器
@@ -467,7 +468,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
                     if (res.messages.length === 2) {
                         if (res.messages[0].message_type === "system" && res.messages[1].message_type === "user") {
-                            setShiningMessageIds((prev) => new Set([...prev, res.messages[1].id]));
+                            setPendingUserMessage(res.messages[1].id);
                         }
                     }
 
