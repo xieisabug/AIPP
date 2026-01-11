@@ -180,6 +180,44 @@ pub async fn copy_image_to_clipboard(_image_data: String) -> Result<(), String> 
     Err("Clipboard image copy is not supported on mobile platforms".to_string())
 }
 
+/// 获取开机自启动状态
+#[tauri::command]
+pub async fn get_autostart_state(app: tauri::AppHandle) -> Result<bool, String> {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        let autostart_manager = app.autolaunch();
+        Ok(autostart_manager.is_enabled().map_err(|e| e.to_string())?)
+    }
+    #[cfg(mobile)]
+    {
+        Ok(false)
+    }
+}
+
+/// 设置开机自启动
+#[tauri::command]
+pub async fn set_autostart(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        let autostart_manager = app.autolaunch();
+        if enabled {
+            autostart_manager.enable().map_err(|e| e.to_string())?;
+        } else {
+            autostart_manager.disable().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+    #[cfg(mobile)]
+    {
+        Err("Autostart is not supported on mobile platforms".to_string())
+    }
+}
+
 /// 打开图片（支持 base64 和 URL）
 /// 对于 base64 图片，会保存到临时文件后用系统默认应用打开
 /// 对于 URL，直接用系统默认应用打开

@@ -6,6 +6,7 @@ import { PreviewConfigForm } from "./forms/PreviewConfigForm";
 import { NetworkConfigForm } from "./forms/NetworkConfigForm";
 import { DataFolderConfigForm } from "./forms/DataFolderConfigForm";
 import { ShortcutsConfigForm } from "./forms/ShortcutsConfigForm";
+import { AutostartConfigForm } from "./forms/AutostartConfigForm";
 
 interface FeatureItem {
     id: string;
@@ -24,6 +25,7 @@ interface FeatureFormRendererProps {
         networkForm: UseFormReturn<any>;
         dataFolderForm: UseFormReturn<any>;
         shortcutsForm: UseFormReturn<any>;
+        autostartForm: UseFormReturn<any>;
     };
     versionManager: {
         bunVersion: string;
@@ -58,6 +60,7 @@ interface FeatureFormRendererProps {
     onSaveSummary: () => Promise<void>;
     onSaveNetwork: () => Promise<void>;
     onSaveShortcuts: () => Promise<void>;
+    onSaveAutostart: () => Promise<void>;
 }
 
 export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
@@ -68,6 +71,7 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
     onSaveSummary,
     onSaveNetwork,
     onSaveShortcuts,
+    onSaveAutostart,
 }) => {
     switch (selectedFeature.id) {
         case "display":
@@ -135,6 +139,13 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
                 <ShortcutsConfigForm
                     form={forms.shortcutsForm}
                     onSave={onSaveShortcuts}
+                />
+            );
+        case "autostart":
+            return (
+                <AutostartConfigForm
+                    form={forms.autostartForm}
+                    onSave={onSaveAutostart}
                 />
             );
         default:

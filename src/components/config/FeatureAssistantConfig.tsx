@@ -1,5 +1,5 @@
 import React, { useCallback, useState, useMemo, useEffect } from "react";
-import { MessageSquare, Eye, FolderOpen, Settings, Wifi, Monitor, Keyboard } from "lucide-react";
+import { MessageSquare, Eye, FolderOpen, Settings, Wifi, Monitor, Keyboard, Power } from "lucide-react";
 import { useForm } from "react-hook-form";
 
 // 导入公共组件
@@ -71,6 +71,13 @@ const FeatureAssistantConfig: React.FC = () => {
             icon: <Keyboard className="h-5 w-5" />,
             code: "shortcuts",
         },
+        {
+            id: "autostart",
+            name: "开机自启动",
+            description: "设置应用在系统启动时自动运行",
+            icon: <Power className="h-5 w-5" />,
+            code: "autostart",
+        },
     ];
 
     const [selectedFeature, setSelectedFeature] = useState<FeatureItem>(featureList[0]);
@@ -127,6 +134,12 @@ const FeatureAssistantConfig: React.FC = () => {
             shortcut: isMac ? "Option+Space" : "Alt+Space",
             // 兼容旧字段
             modifier_key: isMac ? "option" : "alt",
+        },
+    });
+
+    const autostartForm = useForm({
+        defaultValues: {
+            autostart_enabled: "false",
         },
     });
 
@@ -202,8 +215,17 @@ const FeatureAssistantConfig: React.FC = () => {
                     modifier_key,
                 });
             }
+
+            // 更新 autostart 表单
+            const autostartConfig = featureConfig.get("autostart");
+            if (autostartConfig) {
+                const enabled = autostartConfig.get("autostart_enabled") || "false";
+                autostartForm.reset({
+                    autostart_enabled: enabled,
+                });
+            }
         }
-    }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm]);
+    }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm, autostartForm]);
 
     // 选择功能
     const handleSelectFeature = useCallback((feature: FeatureItem) => {
@@ -257,6 +279,16 @@ const FeatureAssistantConfig: React.FC = () => {
             modifier_key: v.modifier_key,
         });
     }, [shortcutsForm, saveFeatureConfig]);
+
+    const handleSaveAutostartConfig = useCallback(async () => {
+        const values = autostartForm.getValues() as Record<string, any>;
+        const enabled = values.autostart_enabled;
+        // 确保值是字符串类型
+        const enabledStr = (enabled === true || enabled === "true") ? "true" : "false";
+        await saveFeatureConfig("autostart", {
+            autostart_enabled: enabledStr,
+        });
+    }, [autostartForm, saveFeatureConfig]);
 
     // 下拉菜单选项
     const selectOptions: SelectOption[] = useMemo(
@@ -316,15 +348,17 @@ const FeatureAssistantConfig: React.FC = () => {
                     networkForm,
                     dataFolderForm,
                     shortcutsForm,
+                    autostartForm,
                 }}
                 versionManager={versionManager}
                 onSaveDisplay={handleSaveDisplayConfig}
                 onSaveSummary={handleSaveSummaryConfig}
                 onSaveNetwork={handleSaveNetworkConfig}
                 onSaveShortcuts={handleSaveShortcutsConfig}
+                onSaveAutostart={handleSaveAutostartConfig}
             />
         </div>
-    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig]);
+    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, autostartForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig, handleSaveAutostartConfig]);
 
     return (
         <ConfigPageLayout

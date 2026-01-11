@@ -51,9 +51,9 @@ use crate::api::sub_task_api::{
 };
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
 use crate::api::system_api::{
-    copy_image_to_clipboard, get_all_feature_config, get_bang_list, get_selected_text_api,
+    copy_image_to_clipboard, get_all_feature_config, get_autostart_state, get_bang_list, get_selected_text_api,
     open_data_folder, open_image, resume_global_shortcut, save_feature_config,
-    set_shortcut_recording, suspend_global_shortcut,
+    set_autostart, set_shortcut_recording, suspend_global_shortcut,
 };
 use crate::artifacts::artifacts_db::ArtifactsDatabase;
 use crate::artifacts::collection_api::{
@@ -314,6 +314,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["com.aipp.app"]),
+        ))
         .setup(|app| {
             let app_handle = app.handle();
 
@@ -596,6 +600,9 @@ pub fn run() {
             // Token statistics commands
             get_conversation_token_stats,
             get_message_token_stats,
+            // Autostart commands
+            get_autostart_state,
+            set_autostart,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");
