@@ -66,6 +66,7 @@ use crate::artifacts::env_installer::{
     check_bun_version, check_uv_version, install_bun, install_uv,
     check_bun_update, check_bun_update_with_proxy, check_uv_update, check_uv_update_with_proxy,
     update_bun, update_bun_with_proxy, update_uv, update_uv_with_proxy,
+    get_python_info, install_python3,
 };
 use crate::artifacts::preview_router::{
     confirm_environment_install, preview_react_component, retry_preview_after_install,
@@ -490,6 +491,8 @@ pub fn run() {
             update_bun_with_proxy,
             update_uv,
             update_uv_with_proxy,
+            get_python_info,
+            install_python3,
             preview_react_component,
             create_react_preview,
             create_react_preview_for_artifact,

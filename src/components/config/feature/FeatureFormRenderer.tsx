@@ -44,6 +44,15 @@ interface FeatureFormRendererProps {
         checkUvUpdate: (useProxy: boolean) => void;
         updateBun: (useProxy: boolean) => void;
         updateUv: (useProxy: boolean) => void;
+        // Python 相关
+        python2Version: string;
+        python3Version: string;
+        installedPythons: string[];
+        needInstallPython3: boolean;
+        isInstallingPython: boolean;
+        pythonInstallLog: string;
+        checkPythonVersions: () => void;
+        installPython3: () => void;
     };
     onSaveDisplay: () => Promise<void>;
     onSaveSummary: () => Promise<void>;
@@ -97,6 +106,15 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
                     checkUvUpdate={versionManager.checkUvUpdate}
                     updateBun={versionManager.updateBun}
                     updateUv={versionManager.updateUv}
+                    // Python 相关
+                    python2Version={versionManager.python2Version}
+                    python3Version={versionManager.python3Version}
+                    installedPythons={versionManager.installedPythons}
+                    needInstallPython3={versionManager.needInstallPython3}
+                    isInstallingPython={versionManager.isInstallingPython}
+                    pythonInstallLog={versionManager.pythonInstallLog}
+                    checkPythonVersions={versionManager.checkPythonVersions}
+                    installPython3={versionManager.installPython3}
                 />
             );
         case "data_folder":

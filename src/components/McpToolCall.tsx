@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect } from "react";
+import React, { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { Play, Loader2, CheckCircle, XCircle, Blocks, ChevronDown, ChevronUp, RotateCcw, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -92,7 +92,10 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const [executionState, setExecutionState] = useState<ExecutionState>("idle");
     const [executionResult, setExecutionResult] = useState<string | null>(null);
     const [executionError, setExecutionError] = useState<string | null>(null);
-    const [isExpanded, setIsExpanded] = useState<boolean>(false);
+    // 默认展开：新工具调用（无 callId）默认展开，历史调用根据状态决定
+    const [isExpanded, setIsExpanded] = useState<boolean>(!callId);
+    // 自动收起定时器引用
+    const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
     const [toolCallId, setToolCallId] = useState<number | null>(callId || null);
     // 移除前端自动执行，避免与后端 detect_and_process_mcp_calls 的自动执行叠加
 
@@ -164,6 +167,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     if (result.status === "success" && result.result) {
                         setExecutionResult(result.result);
                         setExecutionState("success");
+                        setIsExpanded(false); // 历史成功的调用默认收起
                     } else if (result.status === "failed" && result.error) {
                         setExecutionError(result.error);
                         setExecutionState("failed");
@@ -202,6 +206,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         if (matchingCall.status === "success" && matchingCall.result) {
                             setExecutionResult(matchingCall.result);
                             setExecutionState("success");
+                            setIsExpanded(false); // 历史成功的调用默认收起
                         } else if (matchingCall.status === "failed" && matchingCall.error) {
                             setExecutionError(matchingCall.error);
                             setExecutionState("failed");
@@ -229,7 +234,38 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         }
     }, [toolCallId, callId, conversationId, messageId, serverName, toolName, parameters, executionState, mcpToolCallStates]);
 
+    // 成功后3秒自动收起
+    useEffect(() => {
+        // 清除之前的定时器
+        if (collapseTimerRef.current) {
+            clearTimeout(collapseTimerRef.current);
+            collapseTimerRef.current = null;
+        }
+
+        // 只有当状态变为 success 时才启动定时器
+        if (executionState === "success") {
+            collapseTimerRef.current = setTimeout(() => {
+                setIsExpanded(false);
+            }, 3000);
+        }
+
+        return () => {
+            if (collapseTimerRef.current) {
+                clearTimeout(collapseTimerRef.current);
+            }
+        };
+    }, [executionState]);
+
     // 注意：后端 `detect_and_process_mcp_calls` 已根据助手配置自动执行，这里不再做自动执行
+
+    // 切换展开/收起状态，同时清除自动收起的定时器
+    const handleToggleExpand = useCallback(() => {
+        if (collapseTimerRef.current) {
+            clearTimeout(collapseTimerRef.current);
+            collapseTimerRef.current = null;
+        }
+        setIsExpanded((prev) => !prev);
+    }, []);
 
     const handleExecute = useCallback(async () => {
         if (!conversationId) {
@@ -363,7 +399,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         </Button>
                     )}
                     <Button
-                        onClick={() => setIsExpanded(!isExpanded)}
+                        onClick={handleToggleExpand}
                         size="sm"
                         variant="ghost"
                         className="h-7 w-7 p-0 flex-shrink-0"

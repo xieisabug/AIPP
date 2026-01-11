@@ -3,6 +3,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 
+interface PythonInfo {
+    python2_version: string | null;
+    python3_version: string | null;
+    installed_pythons: string[];
+    need_install_python3: boolean;
+}
+
 export const useVersionManager = () => {
     // Bun 相关状态
     const [bunVersion, setBunVersion] = useState<string>("");
@@ -20,6 +27,14 @@ export const useVersionManager = () => {
     const [isCheckingUvUpdate, setIsCheckingUvUpdate] = useState(false);
     const [isUpdatingUv, setIsUpdatingUv] = useState(false);
 
+    // Python 相关状态
+    const [python2Version, setPython2Version] = useState<string>("");
+    const [python3Version, setPython3Version] = useState<string>("");
+    const [installedPythons, setInstalledPythons] = useState<string[]>([]);
+    const [needInstallPython3, setNeedInstallPython3] = useState(false);
+    const [isInstallingPython, setIsInstallingPython] = useState(false);
+    const [pythonInstallLog, setPythonInstallLog] = useState("");
+
     // 检查 Bun 版本
     const checkBunVersion = useCallback(() => {
         invoke("check_bun_version").then((version) => {
@@ -31,6 +46,16 @@ export const useVersionManager = () => {
     const checkUvVersion = useCallback(() => {
         invoke("check_uv_version").then((version) => {
             setUvVersion(version as string);
+        });
+    }, []);
+
+    // 检查 Python 版本
+    const checkPythonVersions = useCallback(() => {
+        invoke<PythonInfo>("get_python_info").then((info) => {
+            setPython2Version(info.python2_version || "Not Installed");
+            setPython3Version(info.python3_version || "Not Installed");
+            setInstalledPythons(info.installed_pythons);
+            setNeedInstallPython3(info.need_install_python3);
         });
     }, []);
 
@@ -46,6 +71,13 @@ export const useVersionManager = () => {
         setIsInstallingUv(true);
         setUvInstallLog("Starting uv installation...");
         invoke("install_uv");
+    }, []);
+
+    // 安装 Python 3
+    const installPython3 = useCallback(() => {
+        setIsInstallingPython(true);
+        setPythonInstallLog("开始安装 Python 3...");
+        invoke("install_python3");
     }, []);
 
     // 检查 Bun 更新
@@ -103,6 +135,7 @@ export const useVersionManager = () => {
         // 初始检查版本
         checkBunVersion();
         checkUvVersion();
+        checkPythonVersions();
 
         // 监听 Bun 安装日志
         const unlistenBunLog = listen("bun-install-log", (event) => {
@@ -144,14 +177,34 @@ export const useVersionManager = () => {
             }
         });
 
+        // 监听 Python 安装日志
+        const unlistenPythonLog = listen("python-install-log", (event) => {
+            setPythonInstallLog((prev) => prev + "\\n" + event.payload);
+        });
+
+        // 监听 Python 安装完成
+        const unlistenPythonFinished = listen("python-install-finished", (event) => {
+            setTimeout(() => {
+                setIsInstallingPython(false);
+            }, 1000);
+            if (event.payload) {
+                toast.success("Python 3 安装成功");
+                checkPythonVersions();
+            } else {
+                toast.error("Python 3 安装失败");
+            }
+        });
+
         // 清理函数
         return () => {
             unlistenBunLog.then((f) => f());
             unlistenBunFinished.then((f) => f());
             unlistenUvLog.then((f) => f());
             unlistenUvFinished.then((f) => f());
+            unlistenPythonLog.then((f) => f());
+            unlistenPythonFinished.then((f) => f());
         };
-    }, [checkBunVersion, checkUvVersion]);
+    }, [checkBunVersion, checkUvVersion, checkPythonVersions]);
 
     return {
         // Bun 相关
@@ -177,5 +230,15 @@ export const useVersionManager = () => {
         isUpdatingUv,
         checkUvUpdate,
         updateUv,
+
+        // Python 相关
+        python2Version,
+        python3Version,
+        installedPythons,
+        needInstallPython3,
+        isInstallingPython,
+        pythonInstallLog,
+        checkPythonVersions,
+        installPython3,
     };
 };

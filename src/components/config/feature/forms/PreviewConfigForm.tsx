@@ -22,6 +22,15 @@ interface PreviewConfigFormProps {
     checkUvUpdate: (useProxy: boolean) => void;
     updateBun: (useProxy: boolean) => void;
     updateUv: (useProxy: boolean) => void;
+    // Python 相关
+    python2Version: string;
+    python3Version: string;
+    installedPythons: string[];
+    needInstallPython3: boolean;
+    isInstallingPython: boolean;
+    pythonInstallLog: string;
+    checkPythonVersions: () => void;
+    installPython3: () => void;
 }
 
 export const PreviewConfigForm: React.FC<PreviewConfigFormProps> = ({
@@ -44,6 +53,15 @@ export const PreviewConfigForm: React.FC<PreviewConfigFormProps> = ({
     checkUvUpdate,
     updateBun,
     updateUv,
+    // Python 相关
+    python2Version,
+    python3Version,
+    installedPythons,
+    needInstallPython3,
+    isInstallingPython,
+    pythonInstallLog,
+    checkPythonVersions,
+    installPython3,
 }) => {
     const bunNotInstalled = bunVersion === "Not Installed";
     const uvNotInstalled = uvVersion === "Not Installed";
@@ -77,7 +95,7 @@ export const PreviewConfigForm: React.FC<PreviewConfigFormProps> = ({
                         variant: "outline" as const,
                     },
                     {
-                        text: "代理检查",
+                        text: "使用代理检查更新",
                         onClick: () => checkBunUpdate(true),
                         disabled: isCheckingBunUpdate || isUpdatingBun,
                         variant: "outline" as const,
@@ -114,7 +132,7 @@ export const PreviewConfigForm: React.FC<PreviewConfigFormProps> = ({
             key: "bun_update_proxy",
             config: {
                 type: "button" as const,
-                label: "Bun 代理更新",
+                label: "Bun 使用代理更新",
                 value: isUpdatingBun ? "更新中..." : `使用代理更新到 ${bunLatestVersion}`,
                 onClick: () => updateBun(true),
                 disabled: isUpdatingBun,
@@ -150,7 +168,7 @@ export const PreviewConfigForm: React.FC<PreviewConfigFormProps> = ({
                         variant: "outline" as const,
                     },
                     {
-                        text: "代理检查",
+                        text: "使用代理检查更新",
                         onClick: () => checkUvUpdate(true),
                         disabled: isCheckingUvUpdate || isUpdatingUv,
                         variant: "outline" as const,
@@ -187,13 +205,84 @@ export const PreviewConfigForm: React.FC<PreviewConfigFormProps> = ({
             key: "uv_update_proxy",
             config: {
                 type: "button" as const,
-                label: "UV 代理更新",
+                label: "UV 使用代理更新",
                 value: isUpdatingUv ? "更新中..." : `使用代理更新到 ${uvLatestVersion}`,
                 onClick: () => updateUv(true),
                 disabled: isUpdatingUv,
                 className: "border-orange-500/50 text-orange-600",
             },
         });
+    }
+
+    // Python 配置 - 仅在 uv 已安装时显示
+    if (uvVersion !== "Not Installed") {
+        // Python 版本显示
+        PREVIEW_FORM_CONFIG.push({
+            key: "python_versions",
+            config: {
+                type: "inline-buttons" as const,
+                label: "Python 版本",
+                value: `Python 2: ${python2Version}, Python 3: ${python3Version}`,
+                buttons: [
+                    {
+                        text: "刷新",
+                        onClick: checkPythonVersions,
+                        disabled: isInstallingPython,
+                        variant: "outline" as const,
+                    },
+                ],
+            },
+        });
+
+        // Python 安装日志
+        PREVIEW_FORM_CONFIG.push({
+            key: "python_log",
+            config: {
+                type: "static" as const,
+                label: "Python 安装日志",
+                value: pythonInstallLog || "",
+                hidden: !isInstallingPython,
+            },
+        });
+
+        // Python 安装按钮（如果需要安装 Python 3）
+        if (needInstallPython3) {
+            const installMessage = python2Version !== "Not Installed"
+                ? "检测到 Python 2，建议安装 Python 3"
+                : "未检测到 Python，建议安装 Python 3";
+
+            PREVIEW_FORM_CONFIG.push({
+                key: "python_install_message",
+                config: {
+                    type: "static" as const,
+                    label: "提示",
+                    value: installMessage,
+                },
+            });
+
+            PREVIEW_FORM_CONFIG.push({
+                key: "python_install",
+                config: {
+                    type: "button" as const,
+                    label: "安装 Python 3",
+                    value: isInstallingPython ? "安装中..." : "安装",
+                    onClick: installPython3,
+                    disabled: isInstallingPython,
+                },
+            });
+        }
+
+        // 显示 uv 管理的 Python 版本列表
+        if (installedPythons.length > 0) {
+            PREVIEW_FORM_CONFIG.push({
+                key: "installed_pythons",
+                config: {
+                    type: "static" as const,
+                    label: "uv 管理的 Python",
+                    value: installedPythons.join(", "),
+                },
+            });
+        }
     }
 
     return (
