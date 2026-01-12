@@ -13,10 +13,10 @@ use crate::errors::AppError;
 use crate::utils::bun_utils::BunUtils;
 
 /// Wait for the ArtifactPreview window to register its event listeners before sending data.
-/// 
+///
 /// The frontend now continuously sends ready signals every 200ms until it receives data,
 /// so we just need to wait for any ready signal to arrive.
-/// 
+///
 /// Improved mechanism:
 /// 1. Extended timeout from 2s to 10s for slow machines or first-time loads
 /// 2. The frontend sends ready signals repeatedly, so we're more likely to catch one
@@ -41,15 +41,15 @@ async fn wait_for_artifact_preview_ready(app_handle: &tauri::AppHandle) -> bool 
     // Extended timeout to 10 seconds for reliability
     // The frontend sends ready signals every 200ms, so we should receive one quickly
     let ready = tokio::time::timeout(Duration::from_secs(10), rx).await.is_ok();
-    
+
     app_handle_clone.unlisten(listener_id);
-    
+
     if ready {
         tracing::debug!("artifact-preview-ready signal received");
     } else {
         tracing::warn!("Timeout waiting for artifact-preview-ready signal (10s)");
     }
-    
+
     ready
 }
 
@@ -73,15 +73,15 @@ pub async fn wait_for_artifact_ready(app_handle: &tauri::AppHandle) -> bool {
 
     // Extended timeout to 10 seconds for reliability
     let ready = tokio::time::timeout(Duration::from_secs(10), rx).await.is_ok();
-    
+
     app_handle_clone.unlisten(listener_id);
-    
+
     if ready {
         tracing::debug!("artifact-ready signal received");
     } else {
         tracing::warn!("Timeout waiting for artifact-ready signal (10s)");
     }
-    
+
     ready
 }
 
@@ -155,6 +155,17 @@ pub async fn run_artifacts(
                     "artifact-preview-success",
                     format!("{} 预览已准备完成", lang.to_uppercase()),
                 );
+            }
+        }
+        // 支持 "drawio" 和 "drawio:xml" 两种格式
+        lang if lang == "drawio" || lang.starts_with("drawio:") => {
+            if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+                let _ = window.emit("artifact-preview-log", "准备预览 Draw.io 图表...");
+                let _ = window.emit(
+                    "artifact-preview-data",
+                    serde_json::json!({ "type": "drawio", "original_code": input_str }),
+                );
+                let _ = window.emit("artifact-preview-success", "Draw.io 图表预览已准备完成");
             }
         }
         "react" | "jsx" => {

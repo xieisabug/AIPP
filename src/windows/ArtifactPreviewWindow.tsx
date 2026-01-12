@@ -33,19 +33,21 @@ export default function ArtifactPreviewWindow() {
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [isPreviewReady, setIsPreviewReady] = useState(false);
     const [currentView, setCurrentView] = useState<'logs' | 'preview'>('logs');
-    const [previewType, setPreviewType] = useState<'react' | 'vue' | 'mermaid' | 'html' | 'svg' | 'xml' | 'markdown' | 'md' | null>(null);
+    const [previewType, setPreviewType] = useState<'react' | 'vue' | 'mermaid' | 'html' | 'svg' | 'xml' | 'markdown' | 'md' | 'drawio' | null>(null);
     const logsEndRef = useRef<HTMLDivElement | null>(null);
-    const previewTypeRef = useRef<'react' | 'vue' | 'mermaid' | 'html' | 'svg' | 'xml' | 'markdown' | 'md' | null>(null);
+    const previewTypeRef = useRef<'react' | 'vue' | 'mermaid' | 'html' | 'svg' | 'xml' | 'markdown' | 'md' | 'drawio' | null>(null);
     const mermaidContainerRef = useRef<HTMLDivElement | null>(null);
     const [mermaidContent, setMermaidContent] = useState<string>('');
     const [htmlContent, setHtmlContent] = useState<string>('');
     const [markdownContent, setMarkdownContent] = useState<string>('');
+    const [drawioXmlContent, setDrawioXmlContent] = useState<string>('');
     const [mermaidScale, setMermaidScale] = useState<number>(1);
     const [mermaidPosition, setMermaidPosition] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
     const [isDragging, setIsDragging] = useState<boolean>(false);
     const [dragStart, setDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
     const [isSpacePressed, setIsSpacePressed] = useState<boolean>(false);
     const isInstalling = useRef<boolean>(false);
+    const drawioIframeRef = useRef<HTMLIFrameElement>(null);
 
     // 环境安装相关状态
     const [showEnvironmentDialog, setShowEnvironmentDialog] = useState<boolean>(false);
@@ -99,6 +101,11 @@ export default function ArtifactPreviewWindow() {
                 case 'xml':
                     setPreviewType('xml');
                     setHtmlContent(data.original_code);
+                    setIsPreviewReady(true);
+                    break;
+                case 'drawio':
+                    setPreviewType('drawio');
+                    setDrawioXmlContent(data.original_code);
                     setIsPreviewReady(true);
                     break;
                 case 'markdown':
@@ -240,7 +247,7 @@ export default function ArtifactPreviewWindow() {
 
                     // 渲染图表
                     const { svg } = await mermaid.render(id, mermaidContent.trim());
-                    
+
                     // 设置 innerHTML 前先确保容器可见
                     innerContainer.style.width = '100%';
                     innerContainer.style.minHeight = '400px';
@@ -253,16 +260,16 @@ export default function ArtifactPreviewWindow() {
                         const width = svgElement.getAttribute('width');
                         const height = svgElement.getAttribute('height');
                         const viewBox = svgElement.getAttribute('viewBox');
-                        
+
                         // 如果没有 viewBox，尝试从 width/height 创建
                         if (!viewBox && width && height) {
                             svgElement.setAttribute('viewBox', `0 0 ${width} ${height}`);
                         }
-                        
+
                         // 移除固定的 width 和 height 属性，让 CSS 控制
                         svgElement.removeAttribute('width');
                         svgElement.removeAttribute('height');
-                        
+
                         // 设置样式以确保 SVG 可见且响应式
                         svgElement.style.width = '100%';
                         svgElement.style.height = 'auto';
@@ -379,7 +386,7 @@ export default function ArtifactPreviewWindow() {
 
     // 当预览准备好时，切换到预览视图
     useEffect(() => {
-        if (isPreviewReady && (previewUrl || previewType === 'mermaid' || previewType === 'html' || previewType === 'svg' || previewType === 'xml' || previewType === 'markdown' || previewType === 'md')) {
+        if (isPreviewReady && (previewUrl || previewType === 'mermaid' || previewType === 'html' || previewType === 'svg' || previewType === 'xml' || previewType === 'markdown' || previewType === 'md' || previewType === 'drawio')) {
             setCurrentView('preview');
         }
     }, [isPreviewReady, previewUrl, previewType]);
@@ -399,8 +406,8 @@ export default function ArtifactPreviewWindow() {
                 // 根据预览类型调用相应的关闭函数
                 if (previewTypeRef.current === 'vue') {
                     await invoke('close_vue_preview', { previewId: 'vue' });
-                } else if (previewTypeRef.current === 'mermaid' || previewTypeRef.current === 'html' || previewTypeRef.current === 'svg' || previewTypeRef.current === 'xml' || previewTypeRef.current === 'markdown' || previewTypeRef.current === 'md') {
-                    // Mermaid/HTML/SVG/XML/Markdown 不需要服务器清理，只需要清除DOM
+                } else if (previewTypeRef.current === 'mermaid' || previewTypeRef.current === 'html' || previewTypeRef.current === 'svg' || previewTypeRef.current === 'xml' || previewTypeRef.current === 'markdown' || previewTypeRef.current === 'md' || previewTypeRef.current === 'drawio') {
+                    // Mermaid/HTML/SVG/XML/Markdown/Draw.io 不需要服务器清理，只需要清除DOM
                 } else {
                     await invoke('close_react_preview', { previewId: 'react' });
                 }
@@ -413,6 +420,7 @@ export default function ArtifactPreviewWindow() {
                 setMermaidContent('');
                 setHtmlContent('');
                 setMarkdownContent('');
+                setDrawioXmlContent('');
 
             } catch (error) {
             }
@@ -476,11 +484,85 @@ export default function ArtifactPreviewWindow() {
     // 检查是否可以保存（仅支持 vue, react, html）
     const canSave = previewTypeRef.current && ['vue', 'react', 'html'].includes(previewTypeRef.current);
 
+    // draw.io postMessage 通信
+    useEffect(() => {
+        if (previewType === 'drawio' && drawioXmlContent) {
+            console.log('[Draw.io] drawioXmlContent 已就绪:', drawioXmlContent.substring(0, 100));
+            let loaded = false;
+
+            const handleMessage = (evt: MessageEvent) => {
+                // 忽略非字符串消息
+                if (typeof evt.data !== 'string' || evt.data.length === 0) {
+                    return;
+                }
+
+                try {
+                    const msg = JSON.parse(evt.data);
+                    console.log('[Draw.io] 收到消息:', msg);
+
+                    // configure 事件 - 需要回复配置
+                    if (msg.event === 'configure') {
+                        drawioIframeRef.current?.contentWindow?.postMessage(
+                            JSON.stringify({
+                                action: 'configure',
+                                config: {
+                                    defaultFonts: ['Humor Sans', 'Microsoft YaHei', 'SimHei'],
+                                }
+                            }),
+                            '*'
+                        );
+                        artifactEvents.addLog('log', 'Draw.io 配置已发送');
+                    }
+
+                    // init 事件 - draw.io 准备就绪，发送 XML 数据
+                    else if (msg.event === 'init' && !loaded) {
+                        loaded = true;
+                        console.log('[Draw.io] 发送 XML 数据...');
+                        drawioIframeRef.current?.contentWindow?.postMessage(
+                            JSON.stringify({
+                                action: 'load',
+                                xml: drawioXmlContent,
+                                autosave: 0  // 禁用自动保存
+                            }),
+                            '*'
+                        );
+                        artifactEvents.addLog('success', 'Draw.io 图表已加载');
+                    }
+
+                    // load 事件 - 图表加载完成
+                    else if (msg.event === 'load') {
+                        console.log('[Draw.io] 图表加载完成，尺寸:', msg.bounds);
+                    }
+
+                    // save 事件 - 用户保存时
+                    else if (msg.event === 'save') {
+                        console.log('[Draw.io] 用户保存，XML 长度:', msg.xml?.length);
+                        // 可以在这里处理保存逻辑
+                    }
+
+                    // exit 事件 - 用户退出
+                    else if (msg.event === 'exit') {
+                        console.log('[Draw.io] 用户退出，是否修改:', msg.modified);
+                    }
+                } catch (e) {
+                    // 忽略无法解析的消息（可能来自其他来源）
+                    console.debug('[Draw.io] 忽略非 JSON 消息:', evt.data.substring(0, 50));
+                }
+            };
+
+            window.addEventListener('message', handleMessage);
+            return () => {
+                console.log('[Draw.io] 移除消息监听');
+                window.removeEventListener('message', handleMessage);
+            };
+        }
+    }, [previewType, drawioXmlContent, artifactEvents]);
+
     return (
         <div className="flex h-screen bg-background">
             <div className="flex flex-col flex-1 bg-background rounded-xl m-2 shadow-lg border border-border">
                 {/* 顶部工具栏 */}
-                {isPreviewReady && (previewUrl || previewType === 'mermaid' || previewType === 'html' || previewType === 'svg' || previewType === 'xml' || previewType === 'markdown' || previewType === 'md') && (
+                {isPreviewReady && (previewUrl || previewType === 'mermaid' || previewType === 'html' || previewType === 'svg' || previewType === 'xml' || previewType === 'markdown' || previewType === 'md' || previewType === 'drawio') && (
                     <div className="flex-shrink-0 p-4 border-b border-border flex items-center justify-between">
                         <div className="text-sm text-muted-foreground">
                             {currentView === 'logs' ? '日志视图' :
@@ -489,7 +571,8 @@ export default function ArtifactPreviewWindow() {
                                         previewType === 'svg' ? 'SVG 预览' :
                                             previewType === 'xml' ? 'XML 预览' :
                                                 previewType === 'markdown' || previewType === 'md' ? 'Markdown 预览' :
-                                                    `预览地址: ${previewUrl}`}
+                                                    previewType === 'drawio' ? 'Draw.io 图表预览' :
+                                                        `预览地址: ${previewUrl}`}
                         </div>
                         <div className="flex gap-2">
                             {/* 保存按钮 - 仅在预览模式且可保存时显示 */}
@@ -503,7 +586,7 @@ export default function ArtifactPreviewWindow() {
                                     保存
                                 </Button>
                             )}
-                            {previewType !== 'mermaid' && previewType !== 'html' && previewType !== 'svg' && previewType !== 'xml' && previewType !== 'markdown' && previewType !== 'md' && (
+                            {previewType !== 'mermaid' && previewType !== 'html' && previewType !== 'svg' && previewType !== 'xml' && previewType !== 'markdown' && previewType !== 'md' && previewType !== 'drawio' && (
                                 <>
                                     <Button
                                         onClick={handleRefresh}
@@ -662,6 +745,20 @@ export default function ArtifactPreviewWindow() {
                                     sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                                     style={{
                                         minHeight: '400px'
+                                    }}
+                                />
+                            ) : previewType === 'drawio' ? (
+                                /* Draw.io 图表预览 */
+                                <iframe
+                                    ref={drawioIframeRef}
+                                    src="https://embed.diagrams.net/?embed=1&ui=min&spin=1&proto=json&noSaveBtn=1&noExitBtn=1"
+                                    className="flex-1 w-full border-0 bg-background"
+                                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                                    style={{
+                                        minHeight: '400px'
+                                    }}
+                                    onLoad={() => {
+                                        console.log('[Draw.io] iframe 加载完成');
                                     }}
                                 />
                             ) : (

@@ -8,6 +8,7 @@ export interface LogLine {
 
 export interface ArtifactData {
     id?: number;
+    message_id?: number;
     name?: string;
     icon?: string;
     description?: string;
