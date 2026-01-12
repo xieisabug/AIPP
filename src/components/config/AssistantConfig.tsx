@@ -253,17 +253,22 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             ],
             model_configs: Object.entries(values)
                 .filter(
-                    ([key]) => key !== "assistantType" && key !== "model" && key !== "prompt" && key !== "mcp_config"
+                    ([key]) => key !== "assistantType" && key !== "model" && key !== "prompt" && key !== "mcp_config" && key !== "skills_config"
                 )
                 .filter(([key]) => {
                     const config = currentAssistant.model_configs.find((config) => config.name === key);
                     const customField = assistantTypeCustomField.find((field) => field.key === key);
-                    
+
+                    // 内置字段（如 reasoning_effort）允许保存
+                    if (key === "reasoning_effort") {
+                        return true;
+                    }
+
                     // 如果是插件自定义字段，直接允许保存
                     if (customField) {
                         return true;
                     }
-                    
+
                     // 原有的过滤逻辑
                     return (
                         config &&
@@ -276,8 +281,8 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 .map(([key, value]) => {
                     const config = currentAssistant.model_configs.find((config) => config.name === key);
                     const customField = assistantTypeCustomField.find((field) => field.key === key);
-                    
-                    // 为插件自定义字段确定正确的 value_type
+
+                    // 为插件自定义字段和内置字段确定正确的 value_type
                     let valueType = config?.value_type ?? "string";
                     if (customField) {
                         // 根据插件字段的类型映射到数据库的 value_type
@@ -289,8 +294,11 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         } else {
                             valueType = "string";
                         }
+                    } else if (key === "reasoning_effort") {
+                        // 内置 reasoning_effort 字段
+                        valueType = "string";
                     }
-                    
+
                     return {
                         name: key,
                         value: value ? value.toString() : null,

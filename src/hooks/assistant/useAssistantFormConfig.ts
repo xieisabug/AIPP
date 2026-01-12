@@ -91,7 +91,8 @@ export const useAssistantFormConfig = ({
                 .filter(
                     (config) =>
                         !assistantTypeHideField.includes(config.name) &&
-                        !assistantTypeCustomField.find((field) => field.key === config.name)
+                        !assistantTypeCustomField.find((field) => field.key === config.name) &&
+                        config.name !== "reasoning_effort"
                 )
                 .map((config) => ({
                     key: config.name,
@@ -140,6 +141,28 @@ export const useAssistantFormConfig = ({
                     },
                 })),
         ];
+
+        // reasoning_effort 内置字段
+        if (!assistantTypeHideField.includes("reasoning_effort")) {
+            const reasoningConfig = currentAssistant?.model_configs.find((c) => c.name === "reasoning_effort");
+            baseConfigs.push({
+                key: "reasoning_effort",
+                config: {
+                    type: "select" as const,
+                    label: assistantTypeCustomLabel.get("reasoning_effort") ?? "思考级别",
+                    value: reasoningConfig?.value ?? "medium",
+                    options: [
+                        { value: "minimal", label: "最低" },
+                        { value: "low", label: "低" },
+                        { value: "medium", label: "中" },
+                        { value: "high", label: "高" },
+                    ],
+                    tooltip: assistantTypeCustomTips.get("reasoning_effort"),
+                    onChange: (value: string | boolean) =>
+                        handleConfigChange("reasoning_effort", value, "string"),
+                },
+            });
+        }
 
         if (!assistantTypeHideField.includes("mcp_config")) {
             baseConfigs.push({
