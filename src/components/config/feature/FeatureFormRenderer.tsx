@@ -60,7 +60,6 @@ interface FeatureFormRendererProps {
     onSaveSummary: () => Promise<void>;
     onSaveNetwork: () => Promise<void>;
     onSaveShortcuts: () => Promise<void>;
-    onSaveAutostart: () => Promise<void>;
 }
 
 export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
@@ -71,7 +70,6 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
     onSaveSummary,
     onSaveNetwork,
     onSaveShortcuts,
-    onSaveAutostart,
 }) => {
     switch (selectedFeature.id) {
         case "display":
@@ -145,7 +143,6 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
             return (
                 <AutostartConfigForm
                     form={forms.autostartForm}
-                    onSave={onSaveAutostart}
                 />
             );
         default:

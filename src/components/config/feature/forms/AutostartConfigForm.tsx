@@ -7,21 +7,22 @@ import { Loader2 } from "lucide-react";
 
 interface AutostartConfigFormProps {
     form: UseFormReturn<any>;
-    onSave: () => Promise<void>;
 }
 
-export const AutostartConfigForm: React.FC<AutostartConfigFormProps> = ({ form, onSave }) => {
+export const AutostartConfigForm: React.FC<AutostartConfigFormProps> = ({ form }) => {
     const [systemAutostartEnabled, setSystemAutostartEnabled] = useState<boolean | null>(null);
     const [isToggling, setIsToggling] = useState(false);
 
     useEffect(() => {
         const loadSystemState = async () => {
             try {
+                console.log("[Autostart] invoking get_autostart_state");
                 const enabled = await invoke<boolean>("get_autostart_state");
+                console.log("[Autostart] get_autostart_state returned:", enabled);
                 setSystemAutostartEnabled(enabled);
                 form.setValue("autostart_enabled", enabled ? "true" : "false");
             } catch (e) {
-                console.error("Failed to get autostart state:", e);
+                console.error("[Autostart] get_autostart_state failed:", e);
             }
         };
         loadSystemState();
@@ -29,24 +30,23 @@ export const AutostartConfigForm: React.FC<AutostartConfigFormProps> = ({ form, 
 
     const handleAutostartChange = useCallback(async (value: string | boolean) => {
         const checked = value === true || value === "true";
+        console.log("[Autostart] handleAutostartChange called:", { value, checked });
         setIsToggling(true);
         try {
+            console.log("[Autostart] invoking set_autostart with:", { enabled: checked });
             await invoke("set_autostart", { enabled: checked });
+            console.log("[Autostart] set_autostart succeeded");
             setSystemAutostartEnabled(checked);
             form.setValue("autostart_enabled", checked ? "true" : "false");
             toast.success(checked ? "已开启开机自启动" : "已关闭开机自启动");
         } catch (e) {
+            console.error("[Autostart] set_autostart failed:", e);
             toast.error("设置失败: " + e);
             form.setValue("autostart_enabled", systemAutostartEnabled ? "true" : "false");
         } finally {
             setIsToggling(false);
         }
     }, [form, systemAutostartEnabled]);
-
-    const handleSave = useCallback(async () => {
-        await onSave();
-        toast.success("配置保存成功");
-    }, [onSave]);
 
     const AUTOSTART_FORM_CONFIG = [
         {
@@ -78,7 +78,6 @@ export const AutostartConfigForm: React.FC<AutostartConfigFormProps> = ({ form, 
             layout="default"
             classNames="bottom-space"
             useFormReturn={form}
-            onSave={handleSave}
         />
     );
 };

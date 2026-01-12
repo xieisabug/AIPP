@@ -187,7 +187,12 @@ pub async fn get_autostart_state(app: tauri::AppHandle) -> Result<bool, String> 
     {
         use tauri_plugin_autostart::ManagerExt;
         let autostart_manager = app.autolaunch();
-        Ok(autostart_manager.is_enabled().map_err(|e| e.to_string())?)
+        let enabled = autostart_manager.is_enabled().map_err(|e| e.to_string())?;
+        tracing::info!(
+            "get_autostart_state: enabled={}, bundle_id=com.aipp.app",
+            enabled
+        );
+        Ok(enabled)
     }
     #[cfg(mobile)]
     {
@@ -205,10 +210,23 @@ pub async fn set_autostart(
     {
         use tauri_plugin_autostart::ManagerExt;
         let autostart_manager = app.autolaunch();
+        tracing::info!(
+            "set_autostart: enabled={}, bundle_id=com.aipp.app, action={}",
+            enabled,
+            if enabled { "enable" } else { "disable" }
+        );
         if enabled {
-            autostart_manager.enable().map_err(|e| e.to_string())?;
+            autostart_manager.enable().map_err(|e| {
+                tracing::error!("set_autostart: enable failed, error={}", e);
+                e.to_string()
+            })?;
+            tracing::info!("set_autostart: enable succeeded");
         } else {
-            autostart_manager.disable().map_err(|e| e.to_string())?;
+            autostart_manager.disable().map_err(|e| {
+                tracing::error!("set_autostart: disable failed, error={}", e);
+                e.to_string()
+            })?;
+            tracing::info!("set_autostart: disable succeeded");
         }
         Ok(())
     }

@@ -270,7 +270,14 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                                 fieldRenderData.value === 1 ||
                                 fieldRenderData.value === "1"
                             }
-                            onCheckedChange={fieldRenderData.onChange}
+                            onCheckedChange={(value) => {
+                                // 先调用表单的 onChange
+                                fieldRenderData.onChange(value);
+                                // 再调用自定义的 onChange（如果有）
+                                if (field.onChange) {
+                                    field.onChange(value);
+                                }
+                            }}
                         />
                     );
                 case "radio":

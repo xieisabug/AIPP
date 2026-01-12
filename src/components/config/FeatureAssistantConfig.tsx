@@ -280,16 +280,6 @@ const FeatureAssistantConfig: React.FC = () => {
         });
     }, [shortcutsForm, saveFeatureConfig]);
 
-    const handleSaveAutostartConfig = useCallback(async () => {
-        const values = autostartForm.getValues() as Record<string, any>;
-        const enabled = values.autostart_enabled;
-        // 确保值是字符串类型
-        const enabledStr = (enabled === true || enabled === "true") ? "true" : "false";
-        await saveFeatureConfig("autostart", {
-            autostart_enabled: enabledStr,
-        });
-    }, [autostartForm, saveFeatureConfig]);
-
     // 下拉菜单选项
     const selectOptions: SelectOption[] = useMemo(
         () =>
@@ -355,10 +345,9 @@ const FeatureAssistantConfig: React.FC = () => {
                 onSaveSummary={handleSaveSummaryConfig}
                 onSaveNetwork={handleSaveNetworkConfig}
                 onSaveShortcuts={handleSaveShortcutsConfig}
-                onSaveAutostart={handleSaveAutostartConfig}
             />
         </div>
-    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, autostartForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig, handleSaveAutostartConfig]);
+    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, autostartForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig]);
 
     return (
         <ConfigPageLayout
