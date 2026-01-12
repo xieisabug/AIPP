@@ -1,5 +1,5 @@
-import React, { useState, useCallback, useMemo, useEffect } from "react";
-import { Play, Loader2, CheckCircle, XCircle, Blocks, ChevronDown, ChevronUp, RotateCcw } from "lucide-react";
+import React, { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import { Play, Loader2, CheckCircle, XCircle, Blocks, ChevronDown, ChevronUp, RotateCcw, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ShineBorder } from "@/components/magicui/shine-border";
@@ -7,6 +7,8 @@ import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { invoke } from "@tauri-apps/api/core";
 import { MCPToolCall } from "@/data/MCPToolCall";
 import { MCPToolCallUpdateEvent } from "@/data/Conversation";
+import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
+import { maskToolCall } from "@/utils/antiLeakage";
 
 interface McpToolCallProps {
     serverName?: string;
@@ -89,10 +91,29 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     callId,
     mcpToolCallStates,
 }) => {
+    // 防泄露模式
+    const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
+    const shouldMask = antiLeakageEnabled && !isRevealed;
+
+    // 脱敏处理
+    const maskedData = useMemo(() => {
+        if (!shouldMask) {
+            return { serverName, toolName, parameters };
+        }
+        return maskToolCall(serverName, toolName, parameters);
+    }, [shouldMask, serverName, toolName, parameters]);
+
+    const displayServerName = maskedData.serverName;
+    const displayToolName = maskedData.toolName;
+    const displayParameters = maskedData.parameters;
+
     const [executionState, setExecutionState] = useState<ExecutionState>("idle");
     const [executionResult, setExecutionResult] = useState<string | null>(null);
     const [executionError, setExecutionError] = useState<string | null>(null);
-    const [isExpanded, setIsExpanded] = useState<boolean>(false);
+    // 默认展开：新工具调用（无 callId）默认展开，历史调用根据状态决定
+    const [isExpanded, setIsExpanded] = useState<boolean>(!callId);
+    // 自动收起定时器引用
+    const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
     const [toolCallId, setToolCallId] = useState<number | null>(callId || null);
     // 移除前端自动执行，避免与后端 detect_and_process_mcp_calls 的自动执行叠加
 
@@ -130,7 +151,12 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     break;
                 case "failed":
                     setExecutionState("failed");
-                    setExecutionError(globalState.error || null);
+                    // 检查是否为用户主动停止
+                    if (globalState.error?.includes("Stopped by user")) {
+                        setExecutionError("用户已停止");
+                    } else {
+                        setExecutionError(globalState.error || null);
+                    }
                     setExecutionResult(null);
                     break;
             }
@@ -159,6 +185,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     if (result.status === "success" && result.result) {
                         setExecutionResult(result.result);
                         setExecutionState("success");
+                        setIsExpanded(false); // 历史成功的调用默认收起
                     } else if (result.status === "failed" && result.error) {
                         setExecutionError(result.error);
                         setExecutionState("failed");
@@ -197,6 +224,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         if (matchingCall.status === "success" && matchingCall.result) {
                             setExecutionResult(matchingCall.result);
                             setExecutionState("success");
+                            setIsExpanded(false); // 历史成功的调用默认收起
                         } else if (matchingCall.status === "failed" && matchingCall.error) {
                             setExecutionError(matchingCall.error);
                             setExecutionState("failed");
@@ -224,7 +252,38 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         }
     }, [toolCallId, callId, conversationId, messageId, serverName, toolName, parameters, executionState, mcpToolCallStates]);
 
+    // 成功后3秒自动收起
+    useEffect(() => {
+        // 清除之前的定时器
+        if (collapseTimerRef.current) {
+            clearTimeout(collapseTimerRef.current);
+            collapseTimerRef.current = null;
+        }
+
+        // 只有当状态变为 success 时才启动定时器
+        if (executionState === "success") {
+            collapseTimerRef.current = setTimeout(() => {
+                setIsExpanded(false);
+            }, 3000);
+        }
+
+        return () => {
+            if (collapseTimerRef.current) {
+                clearTimeout(collapseTimerRef.current);
+            }
+        };
+    }, [executionState]);
+
     // 注意：后端 `detect_and_process_mcp_calls` 已根据助手配置自动执行，这里不再做自动执行
+
+    // 切换展开/收起状态，同时清除自动收起的定时器
+    const handleToggleExpand = useCallback(() => {
+        if (collapseTimerRef.current) {
+            clearTimeout(collapseTimerRef.current);
+            collapseTimerRef.current = null;
+        }
+        setIsExpanded((prev) => !prev);
+    }, []);
 
     const handleExecute = useCallback(async () => {
         if (!conversationId) {
@@ -271,21 +330,42 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         }
     }, [conversationId, messageId, serverName, toolName, parameters, toolCallId]);
 
+    const handleStop = useCallback(async () => {
+        if (!toolCallId) {
+            console.error("Cannot stop: no tool call ID");
+            return;
+        }
+
+        try {
+            await invoke("stop_mcp_tool_call", { callId: toolCallId });
+            // 状态会通过 mcp_tool_call_update 事件自动更新
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "停止失败";
+            console.error("Failed to stop tool call:", errorMessage);
+            setExecutionError(errorMessage);
+            setExecutionState("failed");
+        }
+    }, [toolCallId]);
+
     const renderResult = () => {
-        if (executionResult) {
+        // 防泄露模式：结果也需要脱敏
+        const displayResult = shouldMask && executionResult ? "******" : executionResult;
+        const displayError = shouldMask && executionError ? "******" : executionError;
+
+        if (displayResult) {
             return (
                 <div className="mt-2">
                     <span className="text-xs text-muted-foreground">结果:</span>
-                    <JsonDisplay content={executionResult} maxHeight="288px" className="mt-1" />
+                    <JsonDisplay content={displayResult} maxHeight="288px" className="mt-1" />
                 </div>
             );
         }
 
-        if (executionError) {
+        if (displayError) {
             return (
                 <div className="mt-2">
                     <span className="text-xs text-muted-foreground">错误:</span>
-                    <JsonDisplay content={executionError} maxHeight="200px" className="mt-1" />
+                    <JsonDisplay content={displayError} maxHeight="200px" className="mt-1" />
                 </div>
             );
         }
@@ -305,12 +385,23 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 text-sm min-w-0 flex-1">
                     <Blocks className="h-4 w-4 flex-shrink-0" />
-                    <span className="truncate">{serverName}</span>
+                    <span className="truncate">{displayServerName}</span>
                     <span className="text-xs font-bold text-muted-foreground flex-shrink-0"> - </span>
-                    <span className="truncate">{toolName}</span>
+                    <span className="truncate">{displayToolName}</span>
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
                     <StatusIndicator state={executionState} />
+                    {isExecuting && (
+                        <Button
+                            onClick={handleStop}
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 w-7 p-0 flex-shrink-0 text-destructive"
+                            title="停止"
+                        >
+                            <Square className="h-3 w-3 fill-current" />
+                        </Button>
+                    )}
                     {!isExpanded && canExecute && (
                         <Button
                             onClick={handleExecute}
@@ -330,7 +421,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         </Button>
                     )}
                     <Button
-                        onClick={() => setIsExpanded(!isExpanded)}
+                        onClick={handleToggleExpand}
                         size="sm"
                         variant="ghost"
                         className="h-7 w-7 p-0 flex-shrink-0"
@@ -344,25 +435,37 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 <div className="mt-2 space-y-2 max-w-full overflow-hidden">
                     <div className="max-w-full overflow-hidden">
                         <span className="text-xs font-medium mb-1 text-muted-foreground">参数:</span>
-                        <JsonDisplay content={parameters} maxHeight="120px" className="mt-1" />
+                        <JsonDisplay content={displayParameters} maxHeight="120px" className="mt-1" />
                     </div>
                     {canExecute && (
                         <div className="flex items-center gap-2">
-                            <Button
-                                onClick={handleExecute}
-                                disabled={isExecuting}
-                                size="sm"
-                                className="flex items-center gap-1 h-7 text-xs"
-                            >
-                                {isExecuting ? (
-                                    <Loader2 className="h-3 w-3 animate-spin" />
-                                ) : isFailed ? (
-                                    <RotateCcw className="h-3 w-3" />
-                                ) : (
-                                    <Play className="h-3 w-3" />
-                                )}
-                                {isFailed ? "重新执行" : "执行"}
-                            </Button>
+                            {isExecuting ? (
+                                <>
+                                    <Button
+                                        onClick={handleStop}
+                                        size="sm"
+                                        variant="ghost"
+                                        className="flex items-center gap-1 h-7 text-xs text-destructive"
+                                        title="停止"
+                                    >
+                                        <Square className="h-3 w-3 fill-current" />
+                                        停止
+                                    </Button>
+                                </>
+                            ) : (
+                                <Button
+                                    onClick={handleExecute}
+                                    size="sm"
+                                    className="flex items-center gap-1 h-7 text-xs"
+                                >
+                                    {isFailed ? (
+                                        <RotateCcw className="h-3 w-3" />
+                                    ) : (
+                                        <Play className="h-3 w-3" />
+                                    )}
+                                    {isFailed ? "重新执行" : "执行"}
+                                </Button>
+                            )}
                         </div>
                     )}
                     <div className="max-w-full overflow-hidden">{renderResult()}</div>

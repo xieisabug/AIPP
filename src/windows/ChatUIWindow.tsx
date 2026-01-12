@@ -10,6 +10,8 @@ import { Conversation } from "../data/Conversation";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
 import { useOperationPermission } from "../hooks/useOperationPermission";
+import { useFeatureConfig } from "../hooks/feature/useFeatureConfig";
+import { AntiLeakageProvider } from "../contexts/AntiLeakageContext";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
 import { Menu, Plus } from "lucide-react";
@@ -21,6 +23,10 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 function ChatUIWindow() {
     // 集成主题系统
     useTheme();
+
+    // 防泄露模式配置
+    const { getConfigValue, loadFeatureConfig } = useFeatureConfig();
+    const antiLeakageEnabled = getConfigValue("anti_leakage", "enabled") === "true";
 
     // 检测移动端
     const isMobile = useIsMobile();
@@ -169,50 +175,95 @@ function ChatUIWindow() {
         initPlugin();
     }, []);
 
+    // 监听配置变更事件，当 Settings 窗口修改配置后重新加载
+    useEffect(() => {
+        const unlisten = listen("feature_config_changed", () => {
+            console.log("[ChatUI] feature_config_changed event received, reloading config");
+            loadFeatureConfig();
+        });
+        return () => {
+            unlisten.then((f) => f());
+        };
+    }, [loadFeatureConfig]);
+
     // 移动端布局
     if (isMobile) {
         const mobileTitle = conversationTitle || "新会话";
 
         return (
-            <div className="flex flex-col h-screen bg-background">
-                {/* 移动端顶部栏 */}
-                <div className="flex-none flex items-center justify-between px-4 py-3 bg-secondary border-b border-border">
-                    <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
-                        <SheetTrigger asChild>
-                            <Button variant="ghost" size="icon">
-                                <Menu className="h-5 w-5" />
-                            </Button>
-                        </SheetTrigger>
-                        <SheetContent
-                            side="left"
-                            className="w-[280px] p-0 flex flex-col"
-                            aria-describedby={undefined}
-                            hideCloseButton
-                        >
-                            <SheetTitle className="sr-only">导航菜单</SheetTitle>
-                            <ChatUIInfomation showArtifacts={false} showPluginStore={false} isMobile={true} />
-                            <ChatUIToolbar onNewConversation={handleNewConversation} />
-                            <ConversationList
-                                conversationId={selectedConversation}
-                                onSelectConversation={handleSelectConversation}
-                            />
-                        </SheetContent>
-                    </Sheet>
-                    <span className="font-medium text-sm truncate flex-1 text-center mx-3">{mobileTitle}</span>
-                    <Button variant="ghost" size="icon" onClick={handleNewConversation} aria-label="新建对话">
-                        <Plus className="h-5 w-5" />
-                    </Button>
+            <AntiLeakageProvider enabled={antiLeakageEnabled}>
+                <div className="flex flex-col h-screen bg-background">
+                    {/* 移动端顶部栏 */}
+                    <div className="flex-none flex items-center justify-between px-4 py-3 bg-secondary border-b border-border">
+                        <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
+                            <SheetTrigger asChild>
+                                <Button variant="ghost" size="icon">
+                                    <Menu className="h-5 w-5" />
+                                </Button>
+                            </SheetTrigger>
+                            <SheetContent
+                                side="left"
+                                className="w-[280px] p-0 flex flex-col"
+                                aria-describedby={undefined}
+                                hideCloseButton
+                            >
+                                <SheetTitle className="sr-only">导航菜单</SheetTitle>
+                                <ChatUIInfomation showArtifacts={false} showPluginStore={false} isMobile={true} />
+                                <ChatUIToolbar onNewConversation={handleNewConversation} />
+                                <ConversationList
+                                    conversationId={selectedConversation}
+                                    onSelectConversation={handleSelectConversation}
+                                />
+                            </SheetContent>
+                        </Sheet>
+                        <span className="font-medium text-sm truncate flex-1 text-center mx-3">{mobileTitle}</span>
+                        <Button variant="ghost" size="icon" onClick={handleNewConversation} aria-label="新建对话">
+                            <Plus className="h-5 w-5" />
+                        </Button>
+                    </div>
+
+                    {/* 主内容区域 */}
+                    <div className="flex-1 overflow-hidden">
+                        <ConversationUI
+                            ref={conversationUIRef}
+                            pluginList={pluginList}
+                            conversationId={selectedConversation}
+                            onChangeConversationId={setSelectedConversation}
+                            isMobile={true}
+                            onConversationChange={handleConversationChange}
+                        />
+                    </div>
+
+                    {/* 操作权限对话框 */}
+                    <OperationPermissionDialog
+                        request={pendingRequest}
+                        isOpen={isDialogOpen}
+                        onDecision={handleDecision}
+                    />
+                </div>
+            </AntiLeakageProvider>
+        );
+    }
+
+    // 桌面端布局
+    return (
+        <AntiLeakageProvider enabled={antiLeakageEnabled}>
+            <div className="flex h-screen bg-background">
+                <div className="flex-none w-[280px] flex flex-col shadow-lg box-border rounded-r-xl mb-2 mr-2">
+                    <ChatUIInfomation />
+                    <ChatUIToolbar onNewConversation={handleNewConversation} />
+                    <ConversationList
+                        conversationId={selectedConversation}
+                        onSelectConversation={handleSelectConversation}
+                    />
                 </div>
 
-                {/* 主内容区域 */}
-                <div className="flex-1 overflow-hidden">
+                <div className="flex-1 bg-background overflow-auto rounded-xl m-2 ml-0 shadow-lg">
                     <ConversationUI
                         ref={conversationUIRef}
                         pluginList={pluginList}
                         conversationId={selectedConversation}
                         onChangeConversationId={setSelectedConversation}
-                        isMobile={true}
-                        onConversationChange={handleConversationChange}
                     />
                 </div>
 
@@ -223,37 +274,7 @@ function ChatUIWindow() {
                     onDecision={handleDecision}
                 />
             </div>
-        );
-    }
-
-    // 桌面端布局
-    return (
-        <div className="flex h-screen bg-background">
-            <div className="flex-none w-[280px] flex flex-col shadow-lg box-border rounded-r-xl mb-2 mr-2">
-                <ChatUIInfomation />
-                <ChatUIToolbar onNewConversation={handleNewConversation} />
-                <ConversationList
-                    conversationId={selectedConversation}
-                    onSelectConversation={handleSelectConversation}
-                />
-            </div>
-
-            <div className="flex-1 bg-background overflow-auto rounded-xl m-2 ml-0 shadow-lg">
-                <ConversationUI
-                    ref={conversationUIRef}
-                    pluginList={pluginList}
-                    conversationId={selectedConversation}
-                    onChangeConversationId={setSelectedConversation}
-                />
-            </div>
-
-            {/* 操作权限对话框 */}
-            <OperationPermissionDialog
-                request={pendingRequest}
-                isOpen={isDialogOpen}
-                onDecision={handleDecision}
-            />
-        </div>
+        </AntiLeakageProvider>
     );
 }
 

@@ -1,5 +1,5 @@
 import React, { useCallback, useState, useMemo, useEffect } from "react";
-import { MessageSquare, Eye, FolderOpen, Settings, Wifi, Monitor, Keyboard } from "lucide-react";
+import { MessageSquare, Eye, FolderOpen, Settings, Wifi, Monitor, Keyboard, Power } from "lucide-react";
 import { useForm } from "react-hook-form";
 
 // 导入公共组件
@@ -71,6 +71,13 @@ const FeatureAssistantConfig: React.FC = () => {
             icon: <Keyboard className="h-5 w-5" />,
             code: "shortcuts",
         },
+        {
+            id: "other",
+            name: "其他",
+            description: "系统的其他功能",
+            icon: <Power className="h-5 w-5" />,
+            code: "other",
+        },
     ];
 
     const [selectedFeature, setSelectedFeature] = useState<FeatureItem>(featureList[0]);
@@ -127,6 +134,12 @@ const FeatureAssistantConfig: React.FC = () => {
             shortcut: isMac ? "Option+Space" : "Alt+Space",
             // 兼容旧字段
             modifier_key: isMac ? "option" : "alt",
+        },
+    });
+
+    const otherForm = useForm({
+        defaultValues: {
+            autostart_enabled: "false",
         },
     });
 
@@ -202,8 +215,17 @@ const FeatureAssistantConfig: React.FC = () => {
                     modifier_key,
                 });
             }
+
+            // 更新 autostart 表单
+            const autostartConfig = featureConfig.get("autostart");
+            if (autostartConfig) {
+                const enabled = autostartConfig.get("autostart_enabled") || "false";
+                otherForm.reset({
+                    autostart_enabled: enabled,
+                });
+            }
         }
-    }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm]);
+    }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm, otherForm]);
 
     // 选择功能
     const handleSelectFeature = useCallback((feature: FeatureItem) => {
@@ -316,6 +338,7 @@ const FeatureAssistantConfig: React.FC = () => {
                     networkForm,
                     dataFolderForm,
                     shortcutsForm,
+                    otherForm,
                 }}
                 versionManager={versionManager}
                 onSaveDisplay={handleSaveDisplayConfig}
@@ -324,7 +347,7 @@ const FeatureAssistantConfig: React.FC = () => {
                 onSaveShortcuts={handleSaveShortcutsConfig}
             />
         </div>
-    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig]);
+    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, otherForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig]);
 
     return (
         <ConfigPageLayout

@@ -4,6 +4,8 @@ import MenuIcon from "../assets/menu.svg?react";
 import ConversationTitleEditDialog from "./ConversationTitleEditDialog";
 import useConversationManager from "../hooks/useConversationManager";
 import { Conversation } from "../data/Conversation";
+import { useAntiLeakage } from "../contexts/AntiLeakageContext";
+import { maskTitle } from "../utils/antiLeakage";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -28,6 +30,13 @@ const ConversationItem = memo(function ConversationItem({
     onOpenTitleEdit,
     onOpenDelete,
 }: ConversationItemProps) {
+    const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
+
+    // 判断是否需要脱敏
+    const shouldMask = antiLeakageEnabled && !isRevealed;
+    const displayName = shouldMask ? maskTitle(conversation.name) : conversation.name;
+    const displayAssistantName = shouldMask ? maskTitle(conversation.assistant_name) : conversation.assistant_name;
+
     return (
         <li
             className={`group h-16 w-full mx-0 mb-2 text-sm border-0 rounded-xl cursor-pointer select-none flex flex-col justify-center p-3 box-border relative transition-all duration-200 ${isSelected ? "font-bold text-primary bg-primary-foreground" : "bg-transparent hover:bg-muted hover:translate-x-0.5"}`}
@@ -36,10 +45,10 @@ const ConversationItem = memo(function ConversationItem({
             }}
         >
             <div className="overflow-hidden text-ellipsis whitespace-nowrap font-medium">
-                {conversation.name}
+                {displayName}
             </div>
             <div className="text-xs overflow-hidden text-ellipsis whitespace-nowrap text-muted-foreground">
-                {conversation.assistant_name}
+                {displayAssistantName}
             </div>
 
             <DropdownMenu>

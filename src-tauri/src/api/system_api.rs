@@ -1,6 +1,6 @@
 use std::cmp::Ord;
 use std::collections::HashMap;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use base64::Engine;
 
 use crate::template_engine::{BangType, TemplateEngine};
@@ -70,6 +70,9 @@ pub async fn save_feature_config(
             crate::reconfigure_global_shortcuts_async(&app).await;
         });
     }
+
+    // 发出配置变更事件，通知所有窗口重新加载配置
+    let _ = app_handle.emit("feature_config_changed", ());
 
     Ok(())
 }
@@ -178,6 +181,62 @@ pub async fn copy_image_to_clipboard(image_data: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn copy_image_to_clipboard(_image_data: String) -> Result<(), String> {
     Err("Clipboard image copy is not supported on mobile platforms".to_string())
+}
+
+/// 获取开机自启动状态
+#[tauri::command]
+pub async fn get_autostart_state(app: tauri::AppHandle) -> Result<bool, String> {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        let autostart_manager = app.autolaunch();
+        let enabled = autostart_manager.is_enabled().map_err(|e| e.to_string())?;
+        tracing::info!(
+            "get_autostart_state: enabled={}, bundle_id=com.aipp.app",
+            enabled
+        );
+        Ok(enabled)
+    }
+    #[cfg(mobile)]
+    {
+        Ok(false)
+    }
+}
+
+/// 设置开机自启动
+#[tauri::command]
+pub async fn set_autostart(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        let autostart_manager = app.autolaunch();
+        tracing::info!(
+            "set_autostart: enabled={}, bundle_id=com.aipp.app, action={}",
+            enabled,
+            if enabled { "enable" } else { "disable" }
+        );
+        if enabled {
+            autostart_manager.enable().map_err(|e| {
+                tracing::error!("set_autostart: enable failed, error={}", e);
+                e.to_string()
+            })?;
+            tracing::info!("set_autostart: enable succeeded");
+        } else {
+            autostart_manager.disable().map_err(|e| {
+                tracing::error!("set_autostart: disable failed, error={}", e);
+                e.to_string()
+            })?;
+            tracing::info!("set_autostart: disable succeeded");
+        }
+        Ok(())
+    }
+    #[cfg(mobile)]
+    {
+        Err("Autostart is not supported on mobile platforms".to_string())
+    }
 }
 
 /// 打开图片（支持 base64 和 URL）

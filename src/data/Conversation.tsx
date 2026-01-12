@@ -29,6 +29,7 @@ export interface Message {
     parent_id?: number | null; // 添加 parent_id 字段
     regenerate: Array<Message> | null;
     attachment_list?: Array<any>; // 添加附件列表字段
+    tool_calls_json?: string | null; // 添加工具调用 JSON 字段
     // 性能指标
     first_token_time?: Date | null;
     ttft_ms?: number | null;
@@ -182,4 +183,38 @@ export interface MessageTokenStats {
     // 性能指标
     ttft_ms?: number;
     tps?: number;
+}
+
+// ============ 对话导出相关类型 ============
+
+// 导出选项接口
+export interface ConversationExportOptions {
+    includeSystemPrompt: boolean;    // 是否导出 system prompt
+    includeReasoning: boolean;       // 是否导出 reasoning
+    includeToolParams: boolean;      // 是否导出工具使用参数
+    includeToolResults: boolean;     // 是否导出工具使用结果
+}
+
+// 工具调用数据接口（从 tool_calls_json 解析）
+export interface ToolCallData {
+    call_id: string;
+    fn_name: string;
+    fn_arguments: Record<string, unknown>;
+}
+
+// MCP 工具调用接口
+export interface MCPToolCall {
+    id: number;
+    conversation_id: number;
+    message_id?: number;
+    server_id: number;
+    server_name: string;
+    tool_name: string;
+    parameters: string;
+    status: 'pending' | 'executing' | 'success' | 'failed';
+    result?: string;
+    error?: string;
+    created_time: string;
+    started_time?: string;
+    finished_time?: string;
 }

@@ -6,6 +6,7 @@ import { PreviewConfigForm } from "./forms/PreviewConfigForm";
 import { NetworkConfigForm } from "./forms/NetworkConfigForm";
 import { DataFolderConfigForm } from "./forms/DataFolderConfigForm";
 import { ShortcutsConfigForm } from "./forms/ShortcutsConfigForm";
+import { OtherConfigForm } from "./forms/OtherConfigForm";
 
 interface FeatureItem {
     id: string;
@@ -24,6 +25,7 @@ interface FeatureFormRendererProps {
         networkForm: UseFormReturn<any>;
         dataFolderForm: UseFormReturn<any>;
         shortcutsForm: UseFormReturn<any>;
+        otherForm: UseFormReturn<any>;
     };
     versionManager: {
         bunVersion: string;
@@ -34,6 +36,25 @@ interface FeatureFormRendererProps {
         uvInstallLog: string;
         installBun: () => void;
         installUv: () => void;
+        bunLatestVersion: string | null;
+        uvLatestVersion: string | null;
+        isCheckingBunUpdate: boolean;
+        isCheckingUvUpdate: boolean;
+        isUpdatingBun: boolean;
+        isUpdatingUv: boolean;
+        checkBunUpdate: (useProxy: boolean) => void;
+        checkUvUpdate: (useProxy: boolean) => void;
+        updateBun: (useProxy: boolean) => void;
+        updateUv: (useProxy: boolean) => void;
+        // Python 相关
+        python2Version: string;
+        python3Version: string;
+        installedPythons: string[];
+        needInstallPython3: boolean;
+        isInstallingPython: boolean;
+        pythonInstallLog: string;
+        checkPythonVersions: () => void;
+        installPython3: () => void;
     };
     onSaveDisplay: () => Promise<void>;
     onSaveSummary: () => Promise<void>;
@@ -77,6 +98,25 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
                     uvInstallLog={versionManager.uvInstallLog}
                     onInstallBun={versionManager.installBun}
                     onInstallUv={versionManager.installUv}
+                    bunLatestVersion={versionManager.bunLatestVersion}
+                    uvLatestVersion={versionManager.uvLatestVersion}
+                    isCheckingBunUpdate={versionManager.isCheckingBunUpdate}
+                    isCheckingUvUpdate={versionManager.isCheckingUvUpdate}
+                    isUpdatingBun={versionManager.isUpdatingBun}
+                    isUpdatingUv={versionManager.isUpdatingUv}
+                    checkBunUpdate={versionManager.checkBunUpdate}
+                    checkUvUpdate={versionManager.checkUvUpdate}
+                    updateBun={versionManager.updateBun}
+                    updateUv={versionManager.updateUv}
+                    // Python 相关
+                    python2Version={versionManager.python2Version}
+                    python3Version={versionManager.python3Version}
+                    installedPythons={versionManager.installedPythons}
+                    needInstallPython3={versionManager.needInstallPython3}
+                    isInstallingPython={versionManager.isInstallingPython}
+                    pythonInstallLog={versionManager.pythonInstallLog}
+                    checkPythonVersions={versionManager.checkPythonVersions}
+                    installPython3={versionManager.installPython3}
                 />
             );
         case "data_folder":
@@ -97,6 +137,12 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
                 <ShortcutsConfigForm
                     form={forms.shortcutsForm}
                     onSave={onSaveShortcuts}
+                />
+            );
+        case "other":
+            return (
+                <OtherConfigForm
+                    form={forms.otherForm}
                 />
             );
         default:

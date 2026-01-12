@@ -39,6 +39,11 @@ const MessageList: React.FC<MessageListProps> = ({
     // 将消息渲染逻辑拆分为更小的部分
     const messageElements = useMemo(() => {
         const t0 = performance.now();
+        // 计算最后一条消息的 ID
+        const lastMessageId = allDisplayMessages.length > 0
+            ? allDisplayMessages[allDisplayMessages.length - 1].id
+            : -1;
+
         const elements = allDisplayMessages.map((message) => {
             // 查找对应的流式消息信息（如果存在）
             const streamEvent = streamingMessages.get(message.id);
@@ -48,6 +53,9 @@ const MessageList: React.FC<MessageListProps> = ({
 
             // 检查是否需要显示shine-border
             const shouldShowShineBorder = shiningMessageIds.has(message.id);
+
+            // 判断是否为最后一条消息
+            const isLastMessage = message.id === lastMessageId;
 
             return {
                 messageId: message.id,
@@ -73,6 +81,8 @@ const MessageList: React.FC<MessageListProps> = ({
                         conversationId={message.conversation_id}
                         // 传递 MCP 工具调用状态
                         mcpToolCallStates={mcpToolCallStates}
+                        // 防泄露模式：是否为最后一条消息
+                        isLastMessage={isLastMessage}
                     />
                 ),
                 groupControl,

@@ -1515,6 +1515,14 @@ async fn initialize_conversation(
                 None, // 用户消息不需要 parent_group_id
             )?;
 
+            // 更新 attachment 的 message_id，关联到新创建的用户消息
+            // 这确保后续查询时能正确获取 attachment（通过 LEFT JOIN message.id = ma.message_id）
+            for attachment in message_attachment_list.iter() {
+                let mut updated_attachment = attachment.clone();
+                updated_attachment.message_id = user_message.id;
+                db.attachment_repo().unwrap().update(&updated_attachment).map_err(AppError::from)?;
+            }
+
             // 发送消息添加事件
             let add_event = ConversationEvent {
                 r#type: "message_add".to_string(),

@@ -39,6 +39,7 @@ import { useAssistantRuntime } from "@/hooks/useAssistantRuntime";
 import { useMessageProcessing } from "@/hooks/useMessageProcessing";
 import { useReasoningExpand } from "@/hooks/useReasoningExpand";
 import { useConversationOperations } from "@/hooks/useConversationOperations";
+import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 
 // 导入新创建的组件
 import ConversationHeader from "./conversation/ConversationHeader";
@@ -99,12 +100,18 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // Reasoning 展开状态
         const { reasoningExpandStates, toggleReasoningExpand } = useReasoningExpand();
 
+        // 防泄露模式：获取重置函数
+        const { resetReveal } = useAntiLeakage();
+
         // ============= 事件处理逻辑 =============
 
         const handleMessageAdd = useCallback(
             (messageAddData: any) => {
                 // 设置函数映射
                 setFunctionMapForMessage(messageAddData.message_id);
+
+                // 发送新消息时，重置防泄露模式的临时显示状态
+                resetReveal();
 
                 // 重新获取对话消息，以确保获得完整的消息数据（包括generation_group_id等）
                 invoke<ConversationWithMessages>("get_conversation_with_messages", {
@@ -137,7 +144,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         setMessages((prevMessages) => [...prevMessages, newMessage]);
                     });
             },
-            [conversationId, setFunctionMapForMessage]
+            [conversationId, setFunctionMapForMessage, resetReveal]
         );
 
         const handleGroupMerge = useCallback((groupMergeData: GroupMergeEvent) => {
@@ -295,6 +302,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             updateFunctionMap,
             clearStreamingMessages,
             clearShiningMessages,
+            setPendingUserMessage,
         } = useConversationEvents(conversationEventsOptions);
 
         // 当 functionMap 变化时更新事件处理器
@@ -444,6 +452,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             setMessages([]);
             setConversation(undefined);
 
+            // 切换对话时，重置防泄露模式的临时显示状态
+            resetReveal();
+
             console.log(`[PERF-FRONTEND] conversationId change : ${conversationId}`);
             const frontendStartTime = performance.now();
 
@@ -467,7 +478,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
                     if (res.messages.length === 2) {
                         if (res.messages[0].message_type === "system" && res.messages[1].message_type === "user") {
-                            setShiningMessageIds((prev) => new Set([...prev, res.messages[1].id]));
+                            setPendingUserMessage(res.messages[1].id);
                         }
                     }
 

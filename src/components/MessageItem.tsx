@@ -13,6 +13,8 @@ import { useCustomTagParser } from "../hooks/useCustomTagParser";
 import { useMarkdownConfig } from "../hooks/useMarkdownConfig";
 import { useMcpToolCallProcessor } from "../hooks/useMcpToolCallProcessor";
 import { useDisplayConfig } from "../hooks/useDisplayConfig";
+import { useAntiLeakage } from "../contexts/AntiLeakageContext";
+import { maskContent } from "../utils/antiLeakage";
 import { SubTaskList, SubTaskDetailDialog } from "./sub-task";
 import { SubTaskExecutionSummary } from "../data/SubTask";
 
@@ -28,6 +30,7 @@ interface MessageItemProps {
     shouldShowShineBorder?: boolean;
     conversationId?: number; // Add conversation_id context
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>; // Add MCP states
+    isLastMessage?: boolean; // 防泄露模式：是否为最后一条消息
 }
 
 const MessageItem = React.memo<MessageItemProps>(
@@ -43,7 +46,12 @@ const MessageItem = React.memo<MessageItemProps>(
         shouldShowShineBorder = false,
         conversationId,
         mcpToolCallStates,
+        isLastMessage = false,
     }) => {
+        // 防泄露模式
+        const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
+        const shouldMaskContent = antiLeakageEnabled && !isRevealed && !isLastMessage;
+
         // Sub-task detail dialog state
         const [selectedSubTask, setSelectedSubTask] = useState<SubTaskExecutionSummary | null>(null);
         const [isDetailDialogOpen, setIsDetailDialogOpen] = useState(false);
@@ -59,7 +67,12 @@ const MessageItem = React.memo<MessageItemProps>(
             setSelectedSubTask(null);
         };
 
-        const { copyIconState, handleCopy } = useCopyHandler(message.content);
+        // 防泄露模式：获取实际显示的内容
+        const displayContent = useMemo(() => {
+            return shouldMaskContent ? maskContent(message.content) : message.content;
+        }, [shouldMaskContent, message.content, maskContent]);
+
+        const { copyIconState, handleCopy } = useCopyHandler(displayContent);
         const { parseCustomTags } = useCustomTagParser();
         const { isUserMessageMarkdownEnabled } = useDisplayConfig();
 
@@ -80,8 +93,8 @@ const MessageItem = React.memo<MessageItemProps>(
 
         // 处理自定义标签解析
         const markdownContent = useMemo(
-            () => parseCustomTags(message.content),
-            [message.content, parseCustomTags]
+            () => parseCustomTags(displayContent),
+            [displayContent, parseCustomTags]
         );
 
         const computedTtftMs = useMemo(() => {
@@ -203,6 +216,11 @@ const MessageItem = React.memo<MessageItemProps>(
         // 渲染内容 - 根据用户消息类型和配置选择渲染方式
         const contentElement = useMemo(
             () => {
+                // 如果内容被脱敏（防泄露模式），使用 RawTextRenderer 避免 Markdown 解析星号
+                if (shouldMaskContent) {
+                    return <RawTextRenderer content={displayContent} />;
+                }
+
                 // 如果是用户消息且禁用了 Markdown 渲染，使用 RawTextRenderer
                 if (isUserMessage && !isUserMessageMarkdownEnabled) {
                     return <RawTextRenderer content={markdownContent} />;
@@ -223,7 +241,7 @@ const MessageItem = React.memo<MessageItemProps>(
                 // MCP 工具调用后处理
                 return processContent(markdownContent, element);
             },
-            [markdownContent, onCodeRun, processContent, isUserMessage, isUserMessageMarkdownEnabled]
+            [shouldMaskContent, displayContent, markdownContent, onCodeRun, processContent, isUserMessage, isUserMessageMarkdownEnabled, isStreaming]
         );
 
         // 早期返回：reasoning 类型消息
@@ -342,6 +360,9 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
 
     // Re-render when MCP tool call state map updates so tool status can refresh
     if (prevProps.mcpToolCallStates !== nextProps.mcpToolCallStates) return false;
+
+    // 防泄露模式：isLastMessage 变化时需要重新渲染
+    if (prevProps.isLastMessage !== nextProps.isLastMessage) return false;
 
     return true;
 };

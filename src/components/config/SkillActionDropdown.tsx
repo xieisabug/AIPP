@@ -4,7 +4,6 @@ import {
     DropdownMenu,
     DropdownMenuContent,
     DropdownMenuItem,
-    DropdownMenuLabel,
     DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
@@ -48,7 +47,6 @@ const SkillActionDropdown: React.FC<SkillActionDropdownProps> = ({
                 </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
-                <DropdownMenuLabel>扫描发现</DropdownMenuLabel>
                 <DropdownMenuItem
                     onClick={onScan}
                     className="flex items-center gap-2 cursor-pointer"
@@ -62,7 +60,6 @@ const SkillActionDropdown: React.FC<SkillActionDropdownProps> = ({
                 
                 <DropdownMenuSeparator />
 
-                <DropdownMenuLabel>安装管理</DropdownMenuLabel>
                 {/* {onInstallOfficial && (
                     <DropdownMenuItem
                         onClick={onInstallOfficial}

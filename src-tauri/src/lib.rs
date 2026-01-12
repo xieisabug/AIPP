@@ -51,9 +51,9 @@ use crate::api::sub_task_api::{
 };
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
 use crate::api::system_api::{
-    copy_image_to_clipboard, get_all_feature_config, get_bang_list, get_selected_text_api,
+    copy_image_to_clipboard, get_all_feature_config, get_autostart_state, get_bang_list, get_selected_text_api,
     open_data_folder, open_image, resume_global_shortcut, save_feature_config,
-    set_shortcut_recording, suspend_global_shortcut,
+    set_autostart, set_shortcut_recording, suspend_global_shortcut,
 };
 use crate::artifacts::artifacts_db::ArtifactsDatabase;
 use crate::artifacts::collection_api::{
@@ -64,6 +64,9 @@ use crate::artifacts::collection_api::{
 };
 use crate::artifacts::env_installer::{
     check_bun_version, check_uv_version, install_bun, install_uv,
+    check_bun_update, check_bun_update_with_proxy, check_uv_update, check_uv_update_with_proxy,
+    update_bun, update_bun_with_proxy, update_uv, update_uv_with_proxy,
+    get_python_info, install_python3,
 };
 use crate::artifacts::preview_router::{
     confirm_environment_install, preview_react_component, retry_preview_after_install,
@@ -89,7 +92,7 @@ use crate::mcp::builtin_mcp::{
 };
 use crate::mcp::execution_api::{
     create_mcp_tool_call, execute_mcp_tool_call, get_mcp_tool_call,
-    get_mcp_tool_calls_by_conversation,
+    get_mcp_tool_calls_by_conversation, stop_mcp_tool_call,
 };
 use crate::db::mcp_db::MCPDatabase;
 use crate::mcp::registry_api::{
@@ -311,6 +314,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["com.xieisabug.aipp"]),
+        ))
         .setup(|app| {
             let app_handle = app.handle();
 
@@ -480,6 +487,16 @@ pub fn run() {
             check_uv_version,
             install_bun,
             install_uv,
+            check_bun_update,
+            check_bun_update_with_proxy,
+            check_uv_update,
+            check_uv_update_with_proxy,
+            update_bun,
+            update_bun_with_proxy,
+            update_uv,
+            update_uv_with_proxy,
+            get_python_info,
+            install_python3,
             preview_react_component,
             create_react_preview,
             create_react_preview_for_artifact,
@@ -541,6 +558,7 @@ pub fn run() {
             execute_mcp_tool_call,
             get_mcp_tool_call,
             get_mcp_tool_calls_by_conversation,
+            stop_mcp_tool_call,
             list_aipp_builtin_templates,
             add_or_update_aipp_builtin_server,
             execute_aipp_builtin_tool,
@@ -582,6 +600,9 @@ pub fn run() {
             // Token statistics commands
             get_conversation_token_stats,
             get_message_token_stats,
+            // Autostart commands
+            get_autostart_state,
+            set_autostart,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");

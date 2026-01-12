@@ -60,7 +60,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
     // 使用 ref 存储最新的回调函数，避免依赖项变化
     const callbacksRef = useRef(options);
-    
+
     // 使用 ref 存储最新的 functionMap，避免频繁变化
     const functionMapRef = useRef<Map<number, any>>(new Map());
 
@@ -203,15 +203,15 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 if (messageUpdateData.message_type === "error") {
                     // 对于错误消息，立即触发错误处理和状态清理
                     console.error("Received error message:", messageUpdateData.content);
-                    
+
                     // 清理所有边框相关状态
                     setPendingUserMessageId(null);
                     setStreamingAssistantMessageIds(new Set());
-                    
+
                     // 调用错误处理回调
                     callbacksRef.current.onError?.(messageUpdateData.content);
                     callbacksRef.current.onAiResponseComplete?.(); // 错误也算作响应完成
-                    
+
                     // 对于错误消息，处理完成状态并延长显示时间
                     if (messageUpdateData.is_done) {
                         setStreamingMessages((prev) => {
@@ -235,7 +235,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     }
                 } else {
                     // 正常消息处理逻辑
-                    
+
                     // 处理 assistant 消息的流式输出边框
                     if (messageUpdateData.message_type === "response" || messageUpdateData.message_type === "assistant") {
                         if (messageUpdateData.is_done) {
@@ -314,7 +314,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     streamMessageListener(
                         streamEvent.content,
                         { conversation_id: +callbacksRef.current.conversationId, request_prompt_result_with_context: "" },
-                        () => {}, // 空的 setAiIsResponsing 函数，实际应该从外部传入
+                        () => { }, // 空的 setAiIsResponsing 函数，实际应该从外部传入
                     );
                 }
 
@@ -354,15 +354,19 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 // 更新活跃的 MCP 调用状态
                 setActiveMcpCallIds((prev) => {
                     const newSet = new Set(prev);
-                    
+
                     if (mcpUpdateData.status === "executing" || mcpUpdateData.status === "pending") {
                         // MCP 开始执行，添加到活跃集合
                         newSet.add(mcpUpdateData.call_id);
                     } else if (mcpUpdateData.status === "success" || mcpUpdateData.status === "failed") {
                         // MCP 执行完成，从活跃集合中移除
                         newSet.delete(mcpUpdateData.call_id);
+                    } else {
+                        // 兜底：任何其他终态都认为不再活跃
+                        console.log(`[MCP] Treating status '${mcpUpdateData.status}' as inactive for call ${mcpUpdateData.call_id}`);
+                        newSet.delete(mcpUpdateData.call_id);
                     }
-                    
+
                     return newSet;
                 });
 
@@ -377,10 +381,11 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 setPendingUserMessageId(null);
                 setStreamingAssistantMessageIds(new Set());
                 setActiveMcpCallIds(new Set());
+                setMCPToolCallStates(new Map());
 
                 // 调用 AI 响应完成回调，确保状态重置
                 callbacksRef.current.onAiResponseComplete?.();
-                
+
                 // 调用外部的取消处理函数
                 callbacksRef.current.onConversationCancel?.(cancelData);
             } else if (conversationEvent.type === "stream_complete") {
@@ -394,9 +399,10 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 setStreamingAssistantMessageIds(new Set());
                 setActiveMcpCallIds(new Set());
                 setPendingUserMessageId(null);
+                setMCPToolCallStates(new Map());
 
                 // 通知外部响应已完成（即便没有 response chunk）
-        callbacksRef.current.onAiResponseComplete?.();
+                callbacksRef.current.onAiResponseComplete?.();
             }
         },
         [refreshMcpToolCalls],
@@ -470,14 +476,21 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     }, []);
 
     const clearShiningMessages = useCallback(() => {
+        console.log("[DEBUG] Clearing shining/MCP state (manual reset)");
         setShiningMessageIds(new Set());
         setStreamingAssistantMessageIds(new Set());
         setPendingUserMessageId(null);
+        setActiveMcpCallIds(new Set());
+        setMCPToolCallStates(new Map());
+    }, []);
+
+    const setPendingUserMessage = useCallback((messageId: number | null) => {
+        setPendingUserMessageId(messageId);
     }, []);
 
     const handleError = useCallback((errorMessage: string) => {
         console.error("Global error handler called:", errorMessage);
-        
+
         // 清理所有流式消息状态
         setStreamingMessages(new Map());
         setShiningMessageIds(new Set());
@@ -485,7 +498,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         setActiveMcpCallIds(new Set());
         setStreamingAssistantMessageIds(new Set());
         setPendingUserMessageId(null); // 清理等待回复的用户消息
-        
+
         // 调用外部错误处理，确保状态重置
         callbacksRef.current.onError?.(errorMessage);
         callbacksRef.current.onAiResponseComplete?.();
@@ -508,5 +521,6 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         handleError,
         updateShiningMessages, // 导出智能边框更新函数
         updateFunctionMap, // 导出 functionMap 更新函数
+        setPendingUserMessage,
     };
 }

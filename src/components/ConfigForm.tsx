@@ -14,6 +14,14 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/t
 import { useModels } from "../hooks/useModels";
 import { useMcpServers } from "../hooks/useMcpServers";
 
+interface ConfigFieldButton {
+    text: string;
+    onClick: () => void;
+    disabled?: boolean;
+    variant?: "default" | "outline" | "ghost" | "destructive";
+    className?: string;
+}
+
 interface ConfigField {
     type:
     | "select"
@@ -27,7 +35,8 @@ interface ConfigField {
     | "button"
     | "switch"
     | "model-select"
-    | "mcp-select";
+    | "mcp-select"
+    | "inline-buttons";
     label: string;
     className?: string;
     options?: { value: string; label: string; tooltip?: string }[];
@@ -39,6 +48,7 @@ interface ConfigField {
     onClick?: (assistantConfigApi?: AssistantConfigApi) => void;
     disabled?: boolean;
     hidden?: boolean;
+    buttons?: ConfigFieldButton[];
 }
 
 interface ConfigFormProps {
@@ -260,7 +270,14 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                                 fieldRenderData.value === 1 ||
                                 fieldRenderData.value === "1"
                             }
-                            onCheckedChange={fieldRenderData.onChange}
+                            onCheckedChange={(value) => {
+                                // 先调用表单的 onChange
+                                fieldRenderData.onChange(value);
+                                // 再调用自定义的 onChange（如果有）
+                                if (field.onChange) {
+                                    field.onChange(value);
+                                }
+                            }}
                         />
                     );
                 case "radio":
@@ -325,6 +342,27 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                         >
                             {field.value as string}
                         </Button>
+                    );
+                case "inline-buttons":
+                    return (
+                        <div className="flex items-center gap-2 flex-1">
+                            <div className={`flex-1 text-sm text-muted-foreground px-3 py-2 bg-muted rounded-md ${field.className || ""}`}>
+                                {field.value}
+                            </div>
+                            {field.buttons?.map((btn, i) => (
+                                <Button
+                                    key={i}
+                                    type="button"
+                                    variant={btn.variant || "outline"}
+                                    size="sm"
+                                    disabled={btn.disabled}
+                                    className={btn.className}
+                                    onClick={btn.onClick}
+                                >
+                                    {btn.text}
+                                </Button>
+                            ))}
+                        </div>
                     );
                 default:
                     return null;
