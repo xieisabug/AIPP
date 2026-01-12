@@ -13,6 +13,7 @@ interface ReasoningMessageProps {
     onToggleReasoningExpand?: () => void;
     conversationId?: number;
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>;
+    useRawTextRenderer?: boolean; // 脱敏内容使用纯文本渲染，避免 Markdown 解析问题
 }
 
 const ReasoningMessage = React.memo(
@@ -24,6 +25,7 @@ const ReasoningMessage = React.memo(
         onToggleReasoningExpand,
         conversationId,
         mcpToolCallStates,
+        useRawTextRenderer = false,
     }: ReasoningMessageProps) => {
         const [currentTime, setCurrentTime] = useState(new Date());
 
@@ -148,8 +150,12 @@ const ReasoningMessage = React.memo(
 
         // 渲染内容（统一使用 useMcpToolCallProcessor，避免重复实现）
         const renderedContent = useMemo(
-            () =>
-                processContent(
+            () => {
+                // 脱敏内容使用纯文本渲染，避免 Markdown 解析问题
+                if (useRawTextRenderer) {
+                    return <span className="whitespace-pre-wrap break-words">{parsedContent}</span>;
+                }
+                return processContent(
                     parsedContent,
                     (
                         <ReactMarkdown
@@ -160,13 +166,18 @@ const ReasoningMessage = React.memo(
                             {parsedContent}
                         </ReactMarkdown>
                     ),
-                ),
-            [processContent, parsedContent, markdownConfig.remarkPlugins, markdownConfig.rehypePlugins, markdownConfig.markdownComponents]
+                );
+            },
+            [useRawTextRenderer, processContent, parsedContent, markdownConfig.remarkPlugins, markdownConfig.rehypePlugins, markdownConfig.markdownComponents]
         );
 
         // 渲染预览内容（思考中显示最后 3 行，同样支持 MCP）
         const renderedPreviewContent = useMemo(() => {
             const previewText = contentLines.previewLines.join("\n");
+            // 脱敏内容使用纯文本渲染
+            if (useRawTextRenderer) {
+                return <span className="whitespace-pre-wrap break-words">{previewText}</span>;
+            }
             return processContent(
                 previewText,
                 (
@@ -179,7 +190,7 @@ const ReasoningMessage = React.memo(
                     </ReactMarkdown>
                 ),
             );
-        }, [contentLines.previewLines, processContent, markdownConfig.remarkPlugins, markdownConfig.rehypePlugins, markdownConfig.markdownComponents]);
+        }, [useRawTextRenderer, contentLines.previewLines, processContent, markdownConfig.remarkPlugins, markdownConfig.rehypePlugins, markdownConfig.markdownComponents]);
 
         // 思考完成时的小模块展示
         if (isComplete && !isReasoningExpanded) {
@@ -292,6 +303,9 @@ const ReasoningMessage = React.memo(
         // MCP 相关属性比较
         if (prevProps.conversationId !== nextProps.conversationId) return false;
         if (prevProps.mcpToolCallStates !== nextProps.mcpToolCallStates) return false;
+
+        // 脱敏模式比较
+        if (prevProps.useRawTextRenderer !== nextProps.useRawTextRenderer) return false;
 
         return true; // 所有关键属性都相同，不需要重新渲染
     },
