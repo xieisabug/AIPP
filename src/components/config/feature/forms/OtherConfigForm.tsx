@@ -5,11 +5,11 @@ import { toast } from "sonner";
 import ConfigForm from "@/components/ConfigForm";
 import { Loader2 } from "lucide-react";
 
-interface AutostartConfigFormProps {
+interface OtherConfigFormProps {
     form: UseFormReturn<any>;
 }
 
-export const AutostartConfigForm: React.FC<AutostartConfigFormProps> = ({ form }) => {
+export const OtherConfigForm: React.FC<OtherConfigFormProps> = ({ form }) => {
     const [systemAutostartEnabled, setSystemAutostartEnabled] = useState<boolean | null>(null);
     const [isToggling, setIsToggling] = useState(false);
 
@@ -72,8 +72,8 @@ export const AutostartConfigForm: React.FC<AutostartConfigFormProps> = ({ form }
 
     return (
         <ConfigForm
-            title="开机自启动"
-            description="设置应用在系统启动时自动运行"
+            title="其他配置"
+            description="设置应用的其他系统相关配置"
             config={AUTOSTART_FORM_CONFIG}
             layout="default"
             classNames="bottom-space"
@@ -82,4 +82,4 @@ export const AutostartConfigForm: React.FC<AutostartConfigFormProps> = ({ form }
     );
 };
 
-export default AutostartConfigForm;
+export default OtherConfigForm;

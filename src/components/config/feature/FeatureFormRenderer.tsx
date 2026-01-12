@@ -6,7 +6,7 @@ import { PreviewConfigForm } from "./forms/PreviewConfigForm";
 import { NetworkConfigForm } from "./forms/NetworkConfigForm";
 import { DataFolderConfigForm } from "./forms/DataFolderConfigForm";
 import { ShortcutsConfigForm } from "./forms/ShortcutsConfigForm";
-import { AutostartConfigForm } from "./forms/AutostartConfigForm";
+import { OtherConfigForm } from "./forms/OtherConfigForm";
 
 interface FeatureItem {
     id: string;
@@ -25,7 +25,7 @@ interface FeatureFormRendererProps {
         networkForm: UseFormReturn<any>;
         dataFolderForm: UseFormReturn<any>;
         shortcutsForm: UseFormReturn<any>;
-        autostartForm: UseFormReturn<any>;
+        otherForm: UseFormReturn<any>;
     };
     versionManager: {
         bunVersion: string;
@@ -139,10 +139,10 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
                     onSave={onSaveShortcuts}
                 />
             );
-        case "autostart":
+        case "other":
             return (
-                <AutostartConfigForm
-                    form={forms.autostartForm}
+                <OtherConfigForm
+                    form={forms.otherForm}
                 />
             );
         default:

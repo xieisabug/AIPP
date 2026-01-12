@@ -72,11 +72,11 @@ const FeatureAssistantConfig: React.FC = () => {
             code: "shortcuts",
         },
         {
-            id: "autostart",
-            name: "开机自启动",
-            description: "设置应用在系统启动时自动运行",
+            id: "other",
+            name: "其他",
+            description: "系统的其他功能",
             icon: <Power className="h-5 w-5" />,
-            code: "autostart",
+            code: "other",
         },
     ];
 
@@ -137,7 +137,7 @@ const FeatureAssistantConfig: React.FC = () => {
         },
     });
 
-    const autostartForm = useForm({
+    const otherForm = useForm({
         defaultValues: {
             autostart_enabled: "false",
         },
@@ -220,12 +220,12 @@ const FeatureAssistantConfig: React.FC = () => {
             const autostartConfig = featureConfig.get("autostart");
             if (autostartConfig) {
                 const enabled = autostartConfig.get("autostart_enabled") || "false";
-                autostartForm.reset({
+                otherForm.reset({
                     autostart_enabled: enabled,
                 });
             }
         }
-    }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm, autostartForm]);
+    }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm, otherForm]);
 
     // 选择功能
     const handleSelectFeature = useCallback((feature: FeatureItem) => {
@@ -338,7 +338,7 @@ const FeatureAssistantConfig: React.FC = () => {
                     networkForm,
                     dataFolderForm,
                     shortcutsForm,
-                    autostartForm,
+                    otherForm,
                 }}
                 versionManager={versionManager}
                 onSaveDisplay={handleSaveDisplayConfig}
@@ -347,7 +347,7 @@ const FeatureAssistantConfig: React.FC = () => {
                 onSaveShortcuts={handleSaveShortcutsConfig}
             />
         </div>
-    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, autostartForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig]);
+    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, otherForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig]);
 
     return (
         <ConfigPageLayout
