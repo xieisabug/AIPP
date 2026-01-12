@@ -29,11 +29,15 @@ fn create_message_detail(
         start_time: None,
         finish_time: None,
         token_count: 100,
+        input_token_count: 0,
+        output_token_count: 0,
         generation_group_id,
         parent_group_id,
         attachment_list: Vec::new(),
         regenerate: Vec::new(),
         tool_calls_json: None,
+        first_token_time: None,
+        ttft_ms: None,
     }
 }
 
@@ -372,5 +376,122 @@ async fn test_deep_version_chain() {
 
     assert_eq!(result.len(), 2);
     assert_eq!(result[1].content, "V51"); // 最深层版本
+}
+
+// ============================================================================
+// reasoning + response 排序测试
+// ============================================================================
+
+/// 测试 reasoning 和 response 消息的时间戳排序
+///
+/// 验证内容：
+/// - reasoning 消息的 created_time 应该早于 response 消息
+/// - 即使 reasoning 消息的 created_time 设置较晚，也能正确排序
+#[tokio::test]
+async fn test_reasoning_before_response_same_group() {
+    let group_id = Uuid::new_v4().to_string();
+    let base_time = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
+
+    // 注意：这里模拟真实场景，response 先创建（时间较早），reasoning 后创建（时间较晚）
+    // 但按 created_time 排序时，response 应该排在 reasoning 之后
+    let messages = vec![
+        create_message_detail(
+            1,
+            1,
+            "user",
+            "What is 2+2?",
+            None,
+            Some(group_id.clone()),
+            None,
+            base_time,
+        ),
+        // response 先创建，时间较早
+        create_message_detail(
+            3,
+            1,
+            "response",
+            "2+2 equals 4",
+            None,
+            Some(group_id.clone()),
+            None,
+            base_time + chrono::Duration::seconds(1),
+        ),
+        // reasoning 后创建，时间较晚
+        create_message_detail(
+            2,
+            1,
+            "reasoning",
+            "Let me calculate 2+2",
+            None,
+            Some(group_id.clone()),
+            None,
+            base_time + chrono::Duration::seconds(2),
+        ),
+    ];
+
+    let result = process_message_versions(messages);
+
+    // 最终显示的消息
+    assert_eq!(result.len(), 3);
+    assert_eq!(result[0].message_type, "user");
+    assert_eq!(result[1].message_type, "reasoning");
+    assert_eq!(result[2].message_type, "response");
+}
+
+/// 测试多个 reasoning+response 组的排序
+#[tokio::test]
+async fn test_multiple_reasoning_response_groups() {
+    let base_time = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
+    let group1_id = Uuid::new_v4().to_string();
+    let group2_id = Uuid::new_v4().to_string();
+
+    let messages = vec![
+        // 第一轮对话
+        create_message_detail(1, 1, "user", "Question 1", None, None, None, base_time),
+        create_message_detail(2, 1, "reasoning", "Reasoning 1", None, Some(group1_id.clone()), None, base_time + chrono::Duration::seconds(1)),
+        create_message_detail(3, 1, "response", "Response 1", None, Some(group1_id.clone()), None, base_time + chrono::Duration::seconds(2)),
+        // 第二轮对话
+        create_message_detail(4, 1, "user", "Question 2", None, None, None, base_time + chrono::Duration::seconds(10)),
+        create_message_detail(5, 1, "reasoning", "Reasoning 2", None, Some(group2_id.clone()), None, base_time + chrono::Duration::seconds(11)),
+        create_message_detail(6, 1, "response", "Response 2", None, Some(group2_id.clone()), None, base_time + chrono::Duration::seconds(12)),
+    ];
+
+    let result = process_message_versions(messages);
+
+    assert_eq!(result.len(), 6);
+    assert_eq!(result[0].message_type, "user");
+    assert_eq!(result[1].message_type, "reasoning");
+    assert_eq!(result[2].message_type, "response");
+    assert_eq!(result[3].message_type, "user");
+    assert_eq!(result[4].message_type, "reasoning");
+    assert_eq!(result[5].message_type, "response");
+}
+
+/// 测试 reasoning+response 带重发的情况
+#[tokio::test]
+async fn test_reasoning_response_with_regeneration() {
+    let base_time = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
+    let group1_id = Uuid::new_v4().to_string();
+    let group2_id = Uuid::new_v4().to_string();
+
+    let messages = vec![
+        create_message_detail(1, 1, "user", "What is 2+2?", None, None, None, base_time),
+        // 第一组（原始）
+        create_message_detail(2, 1, "reasoning", "Wrong reasoning", None, Some(group1_id.clone()), None, base_time + chrono::Duration::seconds(1)),
+        create_message_detail(3, 1, "response", "Wrong answer", None, Some(group1_id.clone()), None, base_time + chrono::Duration::seconds(2)),
+        // 第二组（重发）
+        create_message_detail(4, 1, "reasoning", "Correct reasoning", Some(2), Some(group2_id.clone()), Some(group1_id.clone()), base_time + chrono::Duration::seconds(3)),
+        create_message_detail(5, 1, "response", "Correct answer: 4", Some(3), Some(group2_id.clone()), Some(group1_id), base_time + chrono::Duration::seconds(4)),
+    ];
+
+    let result = process_message_versions(messages);
+
+    // 应该显示最新版本的 reasoning 和 response
+    assert_eq!(result.len(), 3);
+    assert_eq!(result[0].message_type, "user");
+    assert_eq!(result[1].message_type, "reasoning");
+    assert_eq!(result[2].message_type, "response");
+    assert_eq!(result[1].content, "Correct reasoning");
+    assert_eq!(result[2].content, "Correct answer: 4");
 }
 

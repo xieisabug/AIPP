@@ -93,9 +93,57 @@ pub fn process_message_versions(mut message_details: Vec<MessageDetail>) -> Vec<
         }
     }
 
-    // 按创建时间排序
-    final_messages.sort_by_key(|m| m.created_time);
+    // 按创建时间排序，使用复合排序键确保 reasoning 排在 response 之前
+    // 对于同一 generation_group_id 的 reasoning 和 response，使用 group_id 作为次要排序键
+    final_messages.sort_by(|a, b| {
+        // 先按 created_time 排序
+        match a.created_time.cmp(&b.created_time) {
+            std::cmp::Ordering::Equal => {
+                // 时间相同，按 message_type 优先级排序
+                get_message_type_priority(&a.message_type)
+                    .cmp(&get_message_type_priority(&b.message_type))
+            }
+            std::cmp::Ordering::Less => {
+                // a 比 b 早，a 排在前面
+                std::cmp::Ordering::Less
+            }
+            std::cmp::Ordering::Greater => {
+                // a 比 b 晚，但检查是否是同一个 generation_group_id 中的 reasoning/response
+                // 如果 a 是 reasoning，b 是 response，且属于同一组，则 a 应该排在 b 前面
+                if belongs_to_same_group(a, b) && is_reasoning_before_response(a, b) {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Greater
+                }
+            }
+        }
+    });
     final_messages
+}
+
+/// 检查两条消息是否属于同一个 generation_group_id
+fn belongs_to_same_group(a: &MessageDetail, b: &MessageDetail) -> bool {
+    match (&a.generation_group_id, &b.generation_group_id) {
+        (Some(group_a), Some(group_b)) => group_a == group_b,
+        _ => false,
+    }
+}
+
+/// 检查 a 是否是 reasoning，b 是否是 response（即 a 应该排在 b 前面）
+fn is_reasoning_before_response(a: &MessageDetail, b: &MessageDetail) -> bool {
+    a.message_type == "reasoning" && b.message_type == "response"
+}
+
+/// 获取消息类型的优先级（用于时间相同时的排序）
+fn get_message_type_priority(message_type: &str) -> i32 {
+    match message_type {
+        "system" => 0,
+        "user" => 1,
+        "reasoning" => 2,
+        "response" => 3,
+        "assistant" => 4,
+        _ => 5,
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

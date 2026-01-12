@@ -52,9 +52,13 @@ pub fn create_test_db() -> Connection {
             start_time TEXT,
             finish_time TEXT,
             token_count INTEGER DEFAULT 0,
+            input_token_count INTEGER DEFAULT 0,
+            output_token_count INTEGER DEFAULT 0,
             generation_group_id TEXT,
             parent_group_id TEXT,
-            tool_calls_json TEXT
+            tool_calls_json TEXT,
+            first_token_time TEXT,
+            ttft_ms INTEGER
         )",
         [],
     )
@@ -110,9 +114,13 @@ pub fn create_test_message(
         start_time: None,
         finish_time: None,
         token_count: 100,
+        input_token_count: 0,
+        output_token_count: 0,
         generation_group_id,
         parent_group_id: None,
         tool_calls_json: None,
+        first_token_time: None,
+        ttft_ms: None,
     }
 }
 

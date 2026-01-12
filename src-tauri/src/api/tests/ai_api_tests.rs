@@ -38,9 +38,13 @@ fn create_ai_api_test_db() -> Connection {
             start_time TEXT,
             finish_time TEXT,
             token_count INTEGER DEFAULT 0,
+            input_token_count INTEGER DEFAULT 0,
+            output_token_count INTEGER DEFAULT 0,
             generation_group_id TEXT,
             parent_group_id TEXT,
-            tool_calls_json TEXT
+            tool_calls_json TEXT,
+            first_token_time TEXT,
+            ttft_ms INTEGER
         )",
         [],
     )
@@ -75,8 +79,8 @@ fn create_test_message_for_ai_api(
     generation_group_id: Option<String>,
 ) -> i64 {
     conn.execute(
-        "INSERT INTO message (conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, token_count, parent_id, generation_group_id) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO message (conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, token_count, parent_id, generation_group_id, input_token_count, output_token_count, first_token_time, ttft_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, NULL)",
         (
             &conversation_id,
             &message_type,

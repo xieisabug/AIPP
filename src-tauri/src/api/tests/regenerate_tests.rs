@@ -30,9 +30,13 @@ fn create_test_message(
         start_time: None,
         finish_time: None,
         token_count: 100,
+        input_token_count: 0,
+        output_token_count: 0,
         generation_group_id,
         parent_group_id,
         tool_calls_json: None,
+        first_token_time: None,
+        ttft_ms: None,
     }
 }
 
