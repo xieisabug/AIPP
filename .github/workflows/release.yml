@@ -68,10 +68,19 @@ jobs:
               id: get_version
               uses: battila7/get-version-action@v2
 
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+
             - name: Setup pnpm
               uses: pnpm/action-setup@v4
               with:
                   version: 10
+
+            - name: Install dependencies
+              run: pnpm install
 
             - name: Build Tauri App
               uses: tauri-apps/tauri-action@v0.5.6
