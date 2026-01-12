@@ -1,6 +1,6 @@
 use std::cmp::Ord;
 use std::collections::HashMap;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use base64::Engine;
 
 use crate::template_engine::{BangType, TemplateEngine};
@@ -70,6 +70,9 @@ pub async fn save_feature_config(
             crate::reconfigure_global_shortcuts_async(&app).await;
         });
     }
+
+    // 发出配置变更事件，通知所有窗口重新加载配置
+    let _ = app_handle.emit("feature_config_changed", ());
 
     Ok(())
 }

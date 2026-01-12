@@ -1,7 +1,8 @@
-import { PackageOpen, Settings, Store } from "lucide-react";
+import { PackageOpen, Settings, Store, Eye, EyeOff } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import AnimatedLogo from "./AnimatedLogo";
 import { useLogoState } from "../hooks/useLogoState";
+import { useAntiLeakage } from "../contexts/AntiLeakageContext";
 import { Button } from "./ui/button";
 import { memo } from "react";
 
@@ -17,6 +18,8 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
     showPluginStore = true,
     isMobile = false,
 }: ChatUIInfomationProps) {
+    const { enabled: antiLeakageEnabled, isRevealed, toggleReveal } = useAntiLeakage();
+
     const {
         state: logoState,
         showHappy,
@@ -72,6 +75,16 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
                 <AnimatedLogo state={logoState} size={32} onClick={showNormal} />
             </div>
             <div className="flex items-center gap-2">
+                {/* 防泄露模式眼睛图标按钮 */}
+                {antiLeakageEnabled && (
+                    <Button
+                        onClick={toggleReveal}
+                        variant={"ghost"}
+                        title={isRevealed ? "隐藏原文" : "显示原文"}
+                    >
+                        {isRevealed ? <EyeOff /> : <Eye />}
+                    </Button>
+                )}
                 <Button onClick={openConfig} variant={"ghost"}>
                     <Settings />
                 </Button>

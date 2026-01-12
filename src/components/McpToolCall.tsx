@@ -7,6 +7,8 @@ import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { invoke } from "@tauri-apps/api/core";
 import { MCPToolCall } from "@/data/MCPToolCall";
 import { MCPToolCallUpdateEvent } from "@/data/Conversation";
+import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
+import { maskToolCall } from "@/utils/antiLeakage";
 
 interface McpToolCallProps {
     serverName?: string;
@@ -89,6 +91,22 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     callId,
     mcpToolCallStates,
 }) => {
+    // 防泄露模式
+    const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
+    const shouldMask = antiLeakageEnabled && !isRevealed;
+
+    // 脱敏处理
+    const maskedData = useMemo(() => {
+        if (!shouldMask) {
+            return { serverName, toolName, parameters };
+        }
+        return maskToolCall(serverName, toolName, parameters);
+    }, [shouldMask, serverName, toolName, parameters]);
+
+    const displayServerName = maskedData.serverName;
+    const displayToolName = maskedData.toolName;
+    const displayParameters = maskedData.parameters;
+
     const [executionState, setExecutionState] = useState<ExecutionState>("idle");
     const [executionResult, setExecutionResult] = useState<string | null>(null);
     const [executionError, setExecutionError] = useState<string | null>(null);
@@ -330,20 +348,24 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     }, [toolCallId]);
 
     const renderResult = () => {
-        if (executionResult) {
+        // 防泄露模式：结果也需要脱敏
+        const displayResult = shouldMask && executionResult ? "******" : executionResult;
+        const displayError = shouldMask && executionError ? "******" : executionError;
+
+        if (displayResult) {
             return (
                 <div className="mt-2">
                     <span className="text-xs text-muted-foreground">结果:</span>
-                    <JsonDisplay content={executionResult} maxHeight="288px" className="mt-1" />
+                    <JsonDisplay content={displayResult} maxHeight="288px" className="mt-1" />
                 </div>
             );
         }
 
-        if (executionError) {
+        if (displayError) {
             return (
                 <div className="mt-2">
                     <span className="text-xs text-muted-foreground">错误:</span>
-                    <JsonDisplay content={executionError} maxHeight="200px" className="mt-1" />
+                    <JsonDisplay content={displayError} maxHeight="200px" className="mt-1" />
                 </div>
             );
         }
@@ -363,9 +385,9 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 text-sm min-w-0 flex-1">
                     <Blocks className="h-4 w-4 flex-shrink-0" />
-                    <span className="truncate">{serverName}</span>
+                    <span className="truncate">{displayServerName}</span>
                     <span className="text-xs font-bold text-muted-foreground flex-shrink-0"> - </span>
-                    <span className="truncate">{toolName}</span>
+                    <span className="truncate">{displayToolName}</span>
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
                     <StatusIndicator state={executionState} />
@@ -413,7 +435,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 <div className="mt-2 space-y-2 max-w-full overflow-hidden">
                     <div className="max-w-full overflow-hidden">
                         <span className="text-xs font-medium mb-1 text-muted-foreground">参数:</span>
-                        <JsonDisplay content={parameters} maxHeight="120px" className="mt-1" />
+                        <JsonDisplay content={displayParameters} maxHeight="120px" className="mt-1" />
                     </div>
                     {canExecute && (
                         <div className="flex items-center gap-2">

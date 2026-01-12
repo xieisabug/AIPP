@@ -1,8 +1,10 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useMemo } from "react";
 import IconButton from "../IconButton";
 import Edit from "../../assets/edit.svg?react";
 import Delete from "../../assets/delete.svg?react";
 import { Conversation } from "../../data/Conversation";
+import { useAntiLeakage } from "../../contexts/AntiLeakageContext";
+import { maskTitle } from "../../utils/antiLeakage";
 import ConfirmDialog from "../ConfirmDialog";
 import useConversationManager from "../../hooks/useConversationManager";
 import { ConversationStatsDialog } from "../token-statistics";
@@ -15,6 +17,18 @@ const ConversationTitle: React.FC<{
 }> = React.memo(({ conversation, onEdit, onDelete }) => {
     const [deleteDialogIsOpen, setDeleteDialogIsOpen] = useState<boolean>(false);
     const { deleteConversation } = useConversationManager();
+    const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
+
+    // 判断是否需要脱敏
+    const shouldMask = antiLeakageEnabled && !isRevealed;
+    const displayName = useMemo(() => {
+        if (!conversation?.name) return "";
+        return shouldMask ? maskTitle(conversation.name) : conversation.name;
+    }, [conversation?.name, shouldMask]);
+    const displayAssistantName = useMemo(() => {
+        if (!conversation?.assistant_name) return "";
+        return shouldMask ? maskTitle(conversation.assistant_name) : conversation.assistant_name;
+    }, [conversation?.assistant_name, shouldMask]);
 
     const openDeleteDialog = useCallback(() => {
         setDeleteDialogIsOpen(true);
@@ -39,8 +53,8 @@ const ConversationTitle: React.FC<{
         <>
             <div className="flex justify-between flex-none h-[68px] items-center px-6 box-border border-b border-border bg-background rounded-t-xl z-20">
                 <div className="flex-1 overflow-hidden">
-                    <div className="text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap text-foreground cursor-pointer" onClick={onEdit}>{conversation?.name}</div>
-                    <div className="text-xs text-muted-foreground overflow-hidden text-ellipsis whitespace-nowrap mt-0.5">{conversation?.assistant_name}</div>
+                    <div className="text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap text-foreground cursor-pointer" onClick={onEdit}>{displayName}</div>
+                    <div className="text-xs text-muted-foreground overflow-hidden text-ellipsis whitespace-nowrap mt-0.5">{displayAssistantName}</div>
                 </div>
                 <div className="flex items-center flex-none w-64 justify-end gap-2">
                     <ConversationStatsDialog conversationId={conversation?.id.toString() || ""} />

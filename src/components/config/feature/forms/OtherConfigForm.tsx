@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import ConfigForm from "@/components/ConfigForm";
 import { Loader2 } from "lucide-react";
+import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 
 interface OtherConfigFormProps {
     form: UseFormReturn<any>;
@@ -12,6 +13,20 @@ interface OtherConfigFormProps {
 export const OtherConfigForm: React.FC<OtherConfigFormProps> = ({ form }) => {
     const [systemAutostartEnabled, setSystemAutostartEnabled] = useState<boolean | null>(null);
     const [isToggling, setIsToggling] = useState(false);
+
+    // 防泄露模式配置
+    const { getConfigValue, saveFeatureConfig, loading: featureConfigLoading } = useFeatureConfig();
+    const [antiLeakageEnabled, setAntiLeakageEnabled] = useState<boolean>(false);
+    const [isTogglingAntiLeakage, setIsTogglingAntiLeakage] = useState(false);
+
+    // 加载防泄露模式配置
+    useEffect(() => {
+        if (!featureConfigLoading) {
+            const enabled = getConfigValue("anti_leakage", "enabled") === "true";
+            setAntiLeakageEnabled(enabled);
+            form.setValue("anti_leakage_enabled", enabled ? "true" : "false");
+        }
+    }, [featureConfigLoading, getConfigValue, form]);
 
     useEffect(() => {
         const loadSystemState = async () => {
@@ -48,6 +63,23 @@ export const OtherConfigForm: React.FC<OtherConfigFormProps> = ({ form }) => {
         }
     }, [form, systemAutostartEnabled]);
 
+    const handleAntiLeakageChange = useCallback(async (value: string | boolean) => {
+        const checked = value === true || value === "true";
+        setIsTogglingAntiLeakage(true);
+        try {
+            await saveFeatureConfig("anti_leakage", { enabled: checked ? "true" : "false" });
+            setAntiLeakageEnabled(checked);
+            form.setValue("anti_leakage_enabled", checked ? "true" : "false");
+            toast.success(checked ? "已开启防泄露模式" : "已关闭防泄露模式");
+        } catch (e) {
+            console.error("[AntiLeakage] save_feature_config failed:", e);
+            toast.error("设置失败: " + e);
+            form.setValue("anti_leakage_enabled", antiLeakageEnabled ? "true" : "false");
+        } finally {
+            setIsTogglingAntiLeakage(false);
+        }
+    }, [form, antiLeakageEnabled, saveFeatureConfig]);
+
     const AUTOSTART_FORM_CONFIG = [
         {
             key: "autostart_enabled",
@@ -59,9 +91,19 @@ export const OtherConfigForm: React.FC<OtherConfigFormProps> = ({ form }) => {
                 disabled: isToggling || systemAutostartEnabled === null,
             },
         },
+        {
+            key: "anti_leakage_enabled",
+            config: {
+                type: "switch" as const,
+                label: "防泄露模式",
+                tooltip: "开启后对话标题和内容将被脱敏处理，保护隐私",
+                onChange: handleAntiLeakageChange,
+                disabled: isTogglingAntiLeakage || featureConfigLoading,
+            },
+        },
     ];
 
-    if (systemAutostartEnabled === null) {
+    if (systemAutostartEnabled === null || featureConfigLoading) {
         return (
             <div className="flex items-center justify-center py-12">
                 <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
