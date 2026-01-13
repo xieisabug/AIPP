@@ -61,7 +61,9 @@ use crate::api::system_api::{
     save_feature_config, set_autostart, set_shortcut_recording, suspend_global_shortcut,
 };
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
-use crate::api::updater_api::{check_update, check_update_with_proxy, download_and_install_update, get_app_version};
+use crate::api::updater_api::{
+    check_update, check_update_with_proxy, download_and_install_update, get_app_version,
+};
 use crate::artifacts::artifacts_db::ArtifactsDatabase;
 use crate::artifacts::collection_api::{
     delete_artifact_collection, generate_artifact_metadata, get_artifact_by_id,
@@ -131,7 +133,7 @@ use crate::mcp::registry_api::{
     update_mcp_server_tool,
 };
 use crate::window::{
-    create_ask_window, create_chat_ui_window_hidden, create_config_window_hidden,
+    awaken_aipp, create_ask_window, create_chat_ui_window_hidden, create_config_window_hidden,
     ensure_hidden_search_window, handle_open_ask_window, open_artifact_collections_window,
     open_artifact_preview_window, open_chat_ui_window, open_chat_ui_window_inner,
     open_config_window, open_config_window_inner, open_plugin_store_window, open_plugin_window,
