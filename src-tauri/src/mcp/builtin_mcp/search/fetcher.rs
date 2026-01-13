@@ -74,17 +74,17 @@ impl ContentFetcher {
         if !DEBUG_SAVE_HTML {
             return;
         }
-        
+
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S%.3f");
         let filename = format!("{}_{}.html", prefix, timestamp);
         let filepath = PathBuf::from(DEBUG_HTML_DIR).join(&filename);
-        
+
         // 确保目录存在
         if let Err(e) = fs::create_dir_all(DEBUG_HTML_DIR) {
             warn!(error = %e, dir = DEBUG_HTML_DIR, "Failed to create debug HTML directory");
             return;
         }
-        
+
         match fs::write(&filepath, html) {
             Ok(_) => {
                 info!(
@@ -158,7 +158,9 @@ impl ContentFetcher {
         if *search_engine == SearchEngine::Kagi {
             if let Some(session_url) = self.config.kagi_session_url.clone() {
                 info!("Using Kagi session URL for direct search");
-                return self.fetch_kagi_with_session_url(query, &session_url, browser_manager).await;
+                return self
+                    .fetch_kagi_with_session_url(query, &session_url, browser_manager)
+                    .await;
             }
         }
 
@@ -199,7 +201,7 @@ impl ContentFetcher {
         } else {
             format!("{}?q={}", session_url, encoded_query)
         };
-        
+
         info!(%search_url, "Fetching Kagi search results with session URL");
 
         // 使用 Playwright 直接访问搜索结果页面
@@ -270,7 +272,10 @@ impl ContentFetcher {
         self.set_page_http_headers(&page, &fingerprint).await?;
 
         // 直接导航到搜索结果页面
-        page.goto_builder(&search_url).goto().await.map_err(|e| format!("Playwright goto error: {}", e))?;
+        page.goto_builder(&search_url)
+            .goto()
+            .await
+            .map_err(|e| format!("Playwright goto error: {}", e))?;
 
         // 等待 Kagi 搜索结果加载
         let kagi_selectors = super::engines::kagi::KagiEngine::default_wait_selectors();
@@ -287,10 +292,10 @@ impl ContentFetcher {
         }
 
         info!(bytes = html.len(), "Successfully fetched Kagi search results");
-        
+
         // 保存调试HTML
         Self::save_debug_html(&html, "kagi_session_search");
-        
+
         Ok(html)
     }
 
@@ -331,8 +336,7 @@ impl ContentFetcher {
             if start.elapsed() >= timeout {
                 warn!(
                     timeout_ms = self.config.wait_timeout_ms,
-                    check_count,
-                    "⚠️ Results wait timeout, continuing anyway"
+                    check_count, "⚠️ Results wait timeout, continuing anyway"
                 );
                 break;
             }
@@ -618,22 +622,23 @@ impl ContentFetcher {
     /// 检查代理是否可用（快速TCP连接测试）
     async fn check_proxy_available(proxy_url: &str) -> Result<(), String> {
         use std::net::ToSocketAddrs;
-        
+
         // 解析代理URL获取主机和端口
         let url = proxy_url.trim();
-        let url = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")).unwrap_or(url);
+        let url =
+            url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")).unwrap_or(url);
         let url = url.strip_prefix("socks5://").unwrap_or(url);
-        
+
         // 移除可能的路径部分
         let host_port = url.split('/').next().unwrap_or(url);
-        
+
         // 尝试解析地址
         let addr = host_port
             .to_socket_addrs()
             .map_err(|e| format!("Failed to resolve proxy address '{}': {}", host_port, e))?
             .next()
             .ok_or_else(|| format!("No address found for proxy: {}", host_port))?;
-        
+
         // 尝试TCP连接，超时3秒
         let timeout = Duration::from_secs(3);
         match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
@@ -641,9 +646,7 @@ impl ContentFetcher {
                 debug!(proxy = %proxy_url, "Proxy is reachable");
                 Ok(())
             }
-            Ok(Err(e)) => {
-                Err(format!("Failed to connect to proxy {}: {}", proxy_url, e))
-            }
+            Ok(Err(e)) => Err(format!("Failed to connect to proxy {}: {}", proxy_url, e)),
             Err(_) => {
                 Err(format!("Proxy connection timeout ({}s): {}", timeout.as_secs(), proxy_url))
             }
@@ -926,7 +929,7 @@ impl ContentFetcher {
         page.add_init_script(anti_detection_script)
             .await
             .map_err(|e| format!("Failed to inject anti-detection script: {}", e))?;
-        
+
         info!("Anti-detection scripts injected");
         Ok(())
     }
@@ -998,10 +1001,10 @@ impl ContentFetcher {
         let html = self.extract_page_html_with_retry(page).await?;
 
         debug!("Successfully retrieved {} bytes", html.len());
-        
+
         // 保存调试HTML
         Self::save_debug_html(&html, "search_result");
-        
+
         Ok(html)
     }
 
@@ -1037,16 +1040,23 @@ impl ContentFetcher {
                         Ok(html) => {
                             let html_str: String = html;
                             last_html = Some(html_str.clone());
-                            
+
                             if html_str.len() > 1000 {
                                 // 确保HTML内容足够丰富
-                                info!(attempt, bytes = html_str.len(), "HTML extraction successful");
+                                info!(
+                                    attempt,
+                                    bytes = html_str.len(),
+                                    "HTML extraction successful"
+                                );
                                 return Ok(html_str);
                             } else {
                                 last_error = format!("HTML too short ({} bytes)", html_str.len());
                                 warn!(len = html_str.len(), attempt, "HTML too short, retrying");
                                 // 保存短HTML用于调试
-                                Self::save_debug_html(&html_str, &format!("short_html_attempt{}", attempt));
+                                Self::save_debug_html(
+                                    &html_str,
+                                    &format!("short_html_attempt{}", attempt),
+                                );
                             }
                         }
                         Err(e) => {
@@ -1058,7 +1068,7 @@ impl ContentFetcher {
                 Ok(false) => {
                     last_error = "Page not ready".to_string();
                     warn!(attempt, "Page not ready, waiting");
-                    
+
                     // 获取页面状态信息用于调试
                     let page_info: serde_json::Value = page
                         .eval("() => ({ readyState: document.readyState, bodyChildren: document.body ? document.body.children.length : 0, title: document.title })")
@@ -1307,10 +1317,11 @@ impl ContentFetcher {
 
         // 等待页面完全加载和JavaScript执行
         sleep(Duration::from_millis(1500)).await;
-        
+
         // 先保存一次当前页面HTML用于调试（在处理consent之前）
         if DEBUG_SAVE_HTML {
-            if let Ok(html) = page.eval::<String>("() => document.documentElement.outerHTML").await {
+            if let Ok(html) = page.eval::<String>("() => document.documentElement.outerHTML").await
+            {
                 Self::save_debug_html(&html, "before_consent");
             }
         }
@@ -1496,7 +1507,7 @@ impl ContentFetcher {
             .await
             .unwrap_or_default();
         warn!(?input_elements, "Found input elements (none worked)");
-        
+
         // 保存失败时的页面HTML用于调试
         if let Ok(html) = page.eval::<String>("() => document.documentElement.outerHTML").await {
             Self::save_debug_html(&html, "input_failed");
@@ -1574,7 +1585,7 @@ impl ContentFetcher {
 
         let selectors = search_engine.default_wait_selectors();
         let selectors_json = serde_json::to_string(&selectors).unwrap_or("[]".to_string());
-        
+
         info!(
             engine = search_engine.as_str(),
             timeout_ms,
@@ -1585,13 +1596,13 @@ impl ContentFetcher {
         let mut check_count = 0;
         loop {
             check_count += 1;
-            
+
             // 检查当前URL，确认已经跳转到搜索结果页
             let current_url: String = page
                 .eval("() => window.location.href")
                 .await
                 .unwrap_or_else(|_| "unknown".to_string());
-            
+
             // 检查是否有任何结果选择器匹配
             let found_selector_script = format!(
                 "() => {{ const sels = {}; for (const s of sels) {{ if (document.querySelector(s)) return s; }} return null; }}",
@@ -1602,8 +1613,8 @@ impl ContentFetcher {
 
             if let Some(sel) = found {
                 info!(
-                    selector = %sel, 
-                    check_count, 
+                    selector = %sel,
+                    check_count,
                     elapsed_ms = start.elapsed().as_millis() as u64,
                     %current_url,
                     "✅ Results loaded"
@@ -1619,16 +1630,18 @@ impl ContentFetcher {
                     .eval("() => ({ url: window.location.href, title: document.title, readyState: document.readyState, bodyLength: document.body ? document.body.innerHTML.length : 0 })")
                     .await
                     .unwrap_or_default();
-                    
+
                 warn!(
                     timeout_ms,
                     check_count,
                     ?page_state,
                     "⚠️ Results wait timeout, continuing anyway"
                 );
-                
+
                 // 保存超时时的页面HTML
-                if let Ok(html) = page.eval::<String>("() => document.documentElement.outerHTML").await {
+                if let Ok(html) =
+                    page.eval::<String>("() => document.documentElement.outerHTML").await
+                {
                     Self::save_debug_html(&html, "wait_timeout");
                 }
                 break;

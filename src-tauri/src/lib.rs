@@ -42,6 +42,12 @@ use crate::api::llm_api::{
     update_llm_provider_config, update_selected_models,
 };
 use crate::api::operation_api::confirm_operation_permission;
+use crate::api::skill_api::{
+    bulk_update_assistant_skills, cleanup_orphaned_skill_configs, get_assistant_skills,
+    get_enabled_assistant_skills, get_skill, get_skill_content, get_skill_sources,
+    get_skills_directory, open_skill_parent_folder, open_skills_folder, remove_assistant_skill,
+    scan_skills, skill_exists, toggle_assistant_skill, update_assistant_skill_config,
+};
 use crate::api::sub_task_api::{
     cancel_sub_task_execution, cancel_sub_task_execution_for_ui, create_sub_task_execution,
     delete_sub_task_definition, get_sub_task_definition, get_sub_task_execution_detail,
@@ -49,12 +55,13 @@ use crate::api::sub_task_api::{
     list_sub_task_executions, register_sub_task_definition, run_sub_task_sync,
     run_sub_task_with_mcp_loop, sub_task_regist, update_sub_task_definition,
 };
-use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
 use crate::api::system_api::{
-    copy_image_to_clipboard, get_all_feature_config, get_autostart_state, get_bang_list, get_selected_text_api,
-    open_data_folder, open_image, resume_global_shortcut, save_feature_config,
-    set_autostart, set_shortcut_recording, suspend_global_shortcut,
+    copy_image_to_clipboard, get_all_feature_config, get_autostart_state, get_bang_list,
+    get_selected_text_api, open_data_folder, open_image, resume_global_shortcut,
+    save_feature_config, set_autostart, set_shortcut_recording, suspend_global_shortcut,
 };
+use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
+use crate::api::updater_api::{check_update, check_update_with_proxy, download_and_install_update, get_app_version};
 use crate::artifacts::artifacts_db::ArtifactsDatabase;
 use crate::artifacts::collection_api::{
     delete_artifact_collection, generate_artifact_metadata, get_artifact_by_id,
@@ -63,14 +70,13 @@ use crate::artifacts::collection_api::{
     update_artifact_collection,
 };
 use crate::artifacts::env_installer::{
-    check_bun_version, check_uv_version, install_bun, install_uv,
-    check_bun_update, check_bun_update_with_proxy, check_uv_update, check_uv_update_with_proxy,
-    update_bun, update_bun_with_proxy, update_uv, update_uv_with_proxy,
-    get_python_info, install_python3,
+    check_bun_update, check_bun_update_with_proxy, check_bun_version, check_uv_update,
+    check_uv_update_with_proxy, check_uv_version, get_python_info, install_bun, install_python3,
+    install_uv, update_bun, update_bun_with_proxy, update_uv, update_uv_with_proxy,
 };
 use crate::artifacts::preview_router::{
-    confirm_environment_install, preview_react_component, retry_preview_after_install,
-    run_artifacts,
+    confirm_environment_install, preview_react_component, restore_artifact_preview,
+    retry_preview_after_install, run_artifacts,
 };
 use crate::artifacts::react_preview::{
     close_react_preview, create_react_preview, create_react_preview_for_artifact,
@@ -84,6 +90,7 @@ use crate::artifacts::{
 };
 use crate::db::assistant_db::AssistantDatabase;
 use crate::db::llm_db::LLMDatabase;
+use crate::db::mcp_db::MCPDatabase;
 use crate::db::sub_task_db::SubTaskDatabase;
 use crate::db::system_db::SystemDatabase;
 use crate::mcp::builtin_mcp::{
@@ -94,33 +101,41 @@ use crate::mcp::execution_api::{
     create_mcp_tool_call, execute_mcp_tool_call, get_mcp_tool_call,
     get_mcp_tool_calls_by_conversation, stop_mcp_tool_call,
 };
-use crate::db::mcp_db::MCPDatabase;
 use crate::mcp::registry_api::{
-    add_mcp_server, build_mcp_prompt, delete_mcp_server, get_mcp_provider, get_mcp_server,
-    get_mcp_server_prompts, get_mcp_server_resources, get_mcp_server_tools, get_mcp_servers,
-    refresh_mcp_server_capabilities, test_mcp_connection, toggle_mcp_server, update_mcp_server,
-    update_mcp_server_prompt, update_mcp_server_tool,
+    add_mcp_server,
+    build_mcp_prompt,
+    check_disable_agent_mcp,
+    check_disable_assistant_agent_mcp,
+    check_disable_assistant_operation_mcp,
+    check_disable_operation_mcp,
     // Skills 与操作 MCP 联动校验 API
-    check_operation_mcp_for_skills, enable_operation_mcp_and_skill, enable_operation_mcp_and_skills,
-    check_disable_operation_mcp, disable_operation_mcp_with_skills,
-    check_disable_agent_mcp, disable_agent_mcp_with_skills,
-    check_disable_assistant_operation_mcp, disable_assistant_operation_mcp_with_skills,
-    check_disable_assistant_agent_mcp, disable_assistant_agent_mcp_with_skills,
-};
-use crate::api::skill_api::{
-    bulk_update_assistant_skills, cleanup_orphaned_skill_configs,
-    get_assistant_skills, get_enabled_assistant_skills, get_skill, get_skill_content,
-    get_skill_sources, get_skills_directory, open_skill_parent_folder, open_skills_folder,
-    remove_assistant_skill, scan_skills, skill_exists, toggle_assistant_skill,
-    update_assistant_skill_config,
+    check_operation_mcp_for_skills,
+    delete_mcp_server,
+    disable_agent_mcp_with_skills,
+    disable_assistant_agent_mcp_with_skills,
+    disable_assistant_operation_mcp_with_skills,
+    disable_operation_mcp_with_skills,
+    enable_operation_mcp_and_skill,
+    enable_operation_mcp_and_skills,
+    get_mcp_provider,
+    get_mcp_server,
+    get_mcp_server_prompts,
+    get_mcp_server_resources,
+    get_mcp_server_tools,
+    get_mcp_servers,
+    refresh_mcp_server_capabilities,
+    test_mcp_connection,
+    toggle_mcp_server,
+    update_mcp_server,
+    update_mcp_server_prompt,
+    update_mcp_server_tool,
 };
 use crate::window::{
-    awaken_aipp, create_ask_window, create_chat_ui_window, create_chat_ui_window_hidden,
-    create_config_window_hidden, ensure_hidden_search_window, handle_open_ask_window,
-    open_artifact_collections_window, open_artifact_preview_window, open_chat_ui_window,
-    open_config_window, open_plugin_store_window, open_plugin_window,
+    create_ask_window, create_chat_ui_window_hidden, create_config_window_hidden,
+    ensure_hidden_search_window, handle_open_ask_window, open_artifact_collections_window,
+    open_artifact_preview_window, open_chat_ui_window, open_chat_ui_window_inner,
+    open_config_window, open_config_window_inner, open_plugin_store_window, open_plugin_window,
 };
-use chrono::Local;
 use db::conversation_db::ConversationDatabase;
 use db::database_upgrade;
 use db::plugin_db::PluginDatabase;
@@ -135,7 +150,8 @@ use tauri::path::BaseDirectory;
 use tauri::Emitter;
 #[cfg(desktop)]
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder},
+    menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconEvent},
     Manager, RunEvent,
 };
 #[cfg(mobile)]
@@ -309,6 +325,7 @@ pub fn run() {
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
@@ -324,22 +341,56 @@ pub fn run() {
             // 系统托盘菜单和图标初始化
             #[cfg(desktop)]
             {
-                let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
-                let show = MenuItemBuilder::with_id("show", "显示").build(app)?;
-                let tray_menu = MenuBuilder::new(app).items(&[&show, &quit]).build()?;
+                let ask_item = MenuItemBuilder::with_id("ask", "Ask").build(app)?;
+                let chat_item = MenuItemBuilder::with_id("chat", "Chat").build(app)?;
+                let config_item = MenuItemBuilder::with_id("config", "配置").build(app)?;
+                let separator = PredefinedMenuItem::separator(app)?;
+                let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;
+                let tray_menu = MenuBuilder::new(app)
+                    .items(&[&ask_item, &chat_item, &config_item, &separator, &quit_item])
+                    .build()?;
 
                 let tray = app.tray_by_id("aipp").unwrap();
                 tray.set_menu(Some(tray_menu))?;
+
+                // 左键点击直接打开 Ask 窗口
+                let app_handle_for_click = app_handle.clone();
+                tray.on_tray_icon_event(move |_app, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        handle_open_ask_window(&app_handle_for_click);
+                    }
+                });
+
+                // 右键菜单事件处理
                 tray.on_menu_event(move |app, event| match event.id().as_ref() {
+                    "ask" => {
+                        handle_open_ask_window(app);
+                    }
+                    "chat" => {
+                        if let Some(chat_window) = app.get_webview_window("chat_ui") {
+                            open_chat_ui_window_inner(app, &chat_window);
+                        } else {
+                            crate::window::create_chat_ui_window(app);
+                        }
+                    }
+                    "config" => {
+                        if let Some(config_window) = app.get_webview_window("config") {
+                            open_config_window_inner(app, &config_window);
+                        } else {
+                            crate::window::create_config_window(app);
+                        }
+                    }
                     "quit" => {
                         std::process::exit(0);
                     }
-                    "show" => {
-                        awaken_aipp(&app);
-                    }
                     _ => {}
                 });
-                let _ = tray.set_show_menu_on_left_click(true);
+                let _ = tray.set_show_menu_on_left_click(false);
             }
 
             let resource_path = app.path().resolve(
@@ -466,6 +517,7 @@ pub fn run() {
             update_conversation,
             update_message_content,
             run_artifacts,
+            restore_artifact_preview,
             save_artifact_to_collection,
             get_artifacts_collection,
             get_artifact_by_id,
@@ -603,6 +655,11 @@ pub fn run() {
             // Autostart commands
             get_autostart_state,
             set_autostart,
+            // Updater commands
+            check_update,
+            check_update_with_proxy,
+            download_and_install_update,
+            get_app_version,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");

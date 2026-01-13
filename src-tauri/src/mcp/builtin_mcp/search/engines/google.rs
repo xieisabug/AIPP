@@ -303,10 +303,7 @@ mod tests {
     fn test_decode_google_url_encoded() {
         let url = "/url?q=https%3A%2F%2Fexample.com%2Fpath%3Fquery%3Dvalue&sa=U";
         let decoded = GoogleEngine::decode_google_url(url);
-        assert_eq!(
-            decoded,
-            Some("https://example.com/path?query=value".to_string())
-        );
+        assert_eq!(decoded, Some("https://example.com/path?query=value".to_string()));
     }
 
     #[test]

@@ -8,11 +8,11 @@ impl BingEngine {
     pub fn display_name() -> &'static str {
         "Bing"
     }
-    
+
     pub fn homepage_url() -> &'static str {
         "https://www.bing.com"
     }
-    
+
     pub fn search_input_selectors() -> Vec<&'static str> {
         vec![
             "#sb_form_q",
@@ -24,16 +24,11 @@ impl BingEngine {
             "input[placeholder*='Search']",
         ]
     }
-    
+
     pub fn search_button_selectors() -> Vec<&'static str> {
-        vec![
-            "#search_icon",
-            "input[type='submit']",
-            ".b_searchboxSubmit",
-            "#sb_form_go",
-        ]
+        vec!["#search_icon", "input[type='submit']", ".b_searchboxSubmit", "#sb_form_go"]
     }
-    
+
     pub fn default_wait_selectors() -> Vec<String> {
         vec![
             "#b_content".to_string(),
@@ -42,18 +37,14 @@ impl BingEngine {
             "#b_results".to_string(),
         ]
     }
-    
-    
+
     /// 解析Bing搜索结果HTML，提取结构化信息（HTML解析器版）
     pub fn parse_search_results(html: &str, query: &str) -> SearchResults {
         let mut items = Vec::new();
         let document = Html::parse_document(html);
 
         // 结果卡片选择器（Bing通常使用 .b_algo 类）
-        let selectors = [
-            Selector::parse("li.b_algo").ok(),
-            Selector::parse("div.b_algo").ok(),
-        ];
+        let selectors = [Selector::parse("li.b_algo").ok(), Selector::parse("div.b_algo").ok()];
 
         let mut rank = 1usize;
         for sel in selectors.iter().flatten() {
@@ -61,10 +52,14 @@ impl BingEngine {
                 if let Some(item) = Self::parse_card_element(card, rank) {
                     items.push(item);
                     rank += 1;
-                    if items.len() >= 20 { break; }
+                    if items.len() >= 20 {
+                        break;
+                    }
                 }
             }
-            if !items.is_empty() { break; }
+            if !items.is_empty() {
+                break;
+            }
         }
 
         // 提取总结结果数量
@@ -80,10 +75,7 @@ impl BingEngine {
             search_time_ms: None,
         }
     }
-    
-    
-    
-    
+
     /// 从结果卡片元素中抽取一个条目
     fn parse_card_element(card: scraper::ElementRef<'_>, rank: usize) -> Option<SearchItem> {
         // 标题：Bing 通常使用 h2 > a 结构或 .b_title 类
@@ -94,7 +86,11 @@ impl BingEngine {
         let url = Self::first_href_in(card, &["h2 a", "a.b_title", "a[href]"]).unwrap_or_default();
 
         // 摘要：Bing 使用 .b_caption 类或其他描述元素
-        let snippet = Self::first_text_in(card, &["p.b_caption", "div.b_caption", "span.b_snippetBigText", "p", "div"]).unwrap_or_default();
+        let snippet = Self::first_text_in(
+            card,
+            &["p.b_caption", "div.b_caption", "span.b_snippetBigText", "p", "div"],
+        )
+        .unwrap_or_default();
 
         // 显示 URL
         let display_url = Self::first_text_in(card, &["cite", "span.b_attribution"]);
@@ -119,7 +115,9 @@ impl BingEngine {
                 if let Some(node) = root.select(&selector).next() {
                     let text = node.text().collect::<String>();
                     let text = text.trim();
-                    if !text.is_empty() { return Some(text.to_string()); }
+                    if !text.is_empty() {
+                        return Some(text.to_string());
+                    }
                 }
             }
         }
@@ -149,7 +147,7 @@ impl BingEngine {
             r"(\d+(?:,\d+)*)\s*results",
             r"of\s+(\d+(?:,\d+)*)\s+results",
         ];
-        
+
         for pattern in &patterns {
             if let Ok(re) = regex::Regex::new(pattern) {
                 if let Some(cap) = re.captures(html) {
@@ -283,7 +281,7 @@ mod tests {
         assert_eq!(results.query, "test");
         assert_eq!(results.search_engine, "Bing");
         assert!(!results.items.is_empty());
-        
+
         let first = &results.items[0];
         assert_eq!(first.title, "Test Title");
         assert_eq!(first.url, "https://example.com");

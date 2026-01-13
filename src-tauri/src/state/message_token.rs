@@ -10,9 +10,7 @@ pub struct MessageTokenManager {
 
 impl MessageTokenManager {
     pub fn new() -> Self {
-        Self {
-            task_handles: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self { task_handles: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     pub async fn exist(&self, conversation_id: i64) -> bool {
@@ -20,7 +18,11 @@ impl MessageTokenManager {
         map.contains_key(&conversation_id)
     }
 
-    pub async fn store_task_handle(&self, conversation_id: i64, handle: JoinHandle<Result<(), anyhow::Error>>) {
+    pub async fn store_task_handle(
+        &self,
+        conversation_id: i64,
+        handle: JoinHandle<Result<(), anyhow::Error>>,
+    ) {
         let mut map = self.task_handles.lock().await;
         map.insert(conversation_id, handle);
     }
@@ -40,7 +42,9 @@ impl MessageTokenManager {
         task_handles.remove(&conversation_id);
     }
 
-    pub fn get_task_handles(&self) -> Arc<Mutex<HashMap<i64, JoinHandle<Result<(), anyhow::Error>>>>> {
+    pub fn get_task_handles(
+        &self,
+    ) -> Arc<Mutex<HashMap<i64, JoinHandle<Result<(), anyhow::Error>>>>> {
         Arc::clone(&self.task_handles)
     }
 }

@@ -6,7 +6,7 @@ use regex::Regex;
 use reqwest;
 use serde::Serialize;
 use std::collections::HashMap;
-use tracing::{debug};
+use tracing::debug;
 
 // 定义命令处理函数类型
 type CommandFn = fn(TemplateEngine, String, HashMap<String, String>) -> BoxFuture<'static, String>;

@@ -5,21 +5,17 @@ use tauri::{Emitter, Manager, State};
 #[tauri::command]
 pub async fn check_bun_version(app: tauri::AppHandle) -> Result<String, String> {
     let app = app.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::utils::bun_utils::BunUtils::get_bun_version(&app)
-    })
-    .await
-    .map_err(|e| format!("任务执行失败: {}", e))?
+    tokio::task::spawn_blocking(move || crate::utils::bun_utils::BunUtils::get_bun_version(&app))
+        .await
+        .map_err(|e| format!("任务执行失败: {}", e))?
 }
 
 #[tauri::command]
 pub async fn check_uv_version(app: tauri::AppHandle) -> Result<String, String> {
     let app = app.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::utils::uv_utils::UvUtils::get_uv_version(&app)
-    })
-    .await
-    .map_err(|e| format!("任务执行失败: {}", e))?
+    tokio::task::spawn_blocking(move || crate::utils::uv_utils::UvUtils::get_uv_version(&app))
+        .await
+        .map_err(|e| format!("任务执行失败: {}", e))?
 }
 
 /// GitHub Release 信息

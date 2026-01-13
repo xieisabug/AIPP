@@ -31,6 +31,11 @@ impl ConfigBuilder {
                 chat_options = chat_options.with_top_p(top_p);
             }
         }
+        if let Some(reasoning_str) = config_map.get("reasoning_effort") {
+            if let Some(effort) = genai::chat::ReasoningEffort::from_keyword(reasoning_str) {
+                chat_options = chat_options.with_reasoning_effort(effort);
+            }
+        }
         chat_options
     }
 

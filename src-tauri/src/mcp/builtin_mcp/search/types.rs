@@ -161,7 +161,7 @@ mod tests {
             query: "test query".to_string(),
             result_type: SearchResultType::Markdown,
         };
-        
+
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("test query"));
         assert!(json.contains("markdown"));
@@ -171,7 +171,7 @@ mod tests {
     fn test_search_request_deserialize() {
         let json = r#"{"query": "hello world", "result_type": "items"}"#;
         let request: SearchRequest = serde_json::from_str(json).unwrap();
-        
+
         assert_eq!(request.query, "hello world");
         assert_eq!(request.result_type, SearchResultType::Items);
     }
@@ -180,7 +180,7 @@ mod tests {
     fn test_search_request_deserialize_default_result_type() {
         let json = r#"{"query": "hello"}"#;
         let request: SearchRequest = serde_json::from_str(json).unwrap();
-        
+
         assert_eq!(request.query, "hello");
         assert_eq!(request.result_type, SearchResultType::Html); // default
     }
@@ -198,7 +198,7 @@ mod tests {
             rank: 1,
             display_url: Some("example.com".to_string()),
         };
-        
+
         let json = serde_json::to_string(&item).unwrap();
         assert!(json.contains("Test Title"));
         assert!(json.contains("https://example.com"));
@@ -214,7 +214,7 @@ mod tests {
             "rank": 3,
             "display_url": null
         }"#;
-        
+
         let item: SearchItem = serde_json::from_str(json).unwrap();
         assert_eq!(item.title, "Result");
         assert_eq!(item.url, "https://test.com");
@@ -233,19 +233,17 @@ mod tests {
             search_engine: "Google".to_string(),
             engine_id: "google".to_string(),
             homepage_url: "https://www.google.com".to_string(),
-            items: vec![
-                SearchItem {
-                    title: "Rust Lang".to_string(),
-                    url: "https://rust-lang.org".to_string(),
-                    snippet: "Official Rust website".to_string(),
-                    rank: 1,
-                    display_url: None,
-                },
-            ],
+            items: vec![SearchItem {
+                title: "Rust Lang".to_string(),
+                url: "https://rust-lang.org".to_string(),
+                snippet: "Official Rust website".to_string(),
+                rank: 1,
+                display_url: None,
+            }],
             total_results: Some(1000000),
             search_time_ms: Some(250),
         };
-        
+
         let json = serde_json::to_string(&results).unwrap();
         assert!(json.contains("rust programming"));
         assert!(json.contains("Google"));
@@ -263,7 +261,7 @@ mod tests {
             total_results: Some(0),
             search_time_ms: None,
         };
-        
+
         assert!(results.items.is_empty());
         assert_eq!(results.total_results, Some(0));
     }

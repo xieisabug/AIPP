@@ -250,11 +250,12 @@ const MessageItem = React.memo<MessageItemProps>(
                 <ReasoningMessage
                     message={message}
                     streamEvent={streamEvent}
-                    displayedContent={message.content}
+                    displayedContent={displayContent}
                     isReasoningExpanded={isReasoningExpanded}
                     onToggleReasoningExpand={onToggleReasoningExpand}
                     conversationId={conversationId}
                     mcpToolCallStates={mcpToolCallStates}
+                    useRawTextRenderer={shouldMaskContent}
                 />
             );
         }

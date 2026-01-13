@@ -45,7 +45,8 @@ impl OperationHandler {
         conversation_id: Option<i64>,
     ) -> Result<WriteFileResponse, String> {
         info!("Handling write_file request");
-        FileOperations::write_file(state, &self.permission_manager(), request, conversation_id).await
+        FileOperations::write_file(state, &self.permission_manager(), request, conversation_id)
+            .await
     }
 
     /// 编辑文件
@@ -69,7 +70,8 @@ impl OperationHandler {
         conversation_id: Option<i64>,
     ) -> Result<ListDirectoryResponse, String> {
         info!("Handling list_directory request");
-        FileOperations::list_directory(state, &self.permission_manager(), request, conversation_id).await
+        FileOperations::list_directory(state, &self.permission_manager(), request, conversation_id)
+            .await
     }
 
     /// 执行 Bash 命令

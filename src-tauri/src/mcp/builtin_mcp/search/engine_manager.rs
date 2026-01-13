@@ -124,7 +124,6 @@ impl SearchEngineManager {
             engine.default_wait_selectors()
         }
     }
-
 }
 
 #[cfg(test)]
@@ -274,12 +273,9 @@ mod tests {
 
     #[test]
     fn test_search_engine_roundtrip() {
-        for engine in [
-            SearchEngine::Google,
-            SearchEngine::Bing,
-            SearchEngine::DuckDuckGo,
-            SearchEngine::Kagi,
-        ] {
+        for engine in
+            [SearchEngine::Google, SearchEngine::Bing, SearchEngine::DuckDuckGo, SearchEngine::Kagi]
+        {
             let json = serde_json::to_string(&engine).unwrap();
             let deserialized: SearchEngine = serde_json::from_str(&json).unwrap();
             assert_eq!(deserialized, engine);
@@ -339,7 +335,8 @@ mod tests {
     #[test]
     fn test_get_wait_selectors_custom() {
         let manager = SearchEngineManager::new(None);
-        let selectors = manager.get_wait_selectors(&SearchEngine::Google, Some("#custom1, #custom2"));
+        let selectors =
+            manager.get_wait_selectors(&SearchEngine::Google, Some("#custom1, #custom2"));
         assert_eq!(selectors.len(), 2);
         assert!(selectors.contains(&"#custom1".to_string()));
         assert!(selectors.contains(&"#custom2".to_string()));
@@ -364,13 +361,10 @@ mod tests {
     #[test]
     fn test_get_wait_selectors_for_each_engine() {
         let manager = SearchEngineManager::new(None);
-        
-        for engine in [
-            SearchEngine::Google,
-            SearchEngine::Bing,
-            SearchEngine::DuckDuckGo,
-            SearchEngine::Kagi,
-        ] {
+
+        for engine in
+            [SearchEngine::Google, SearchEngine::Bing, SearchEngine::DuckDuckGo, SearchEngine::Kagi]
+        {
             let selectors = manager.get_wait_selectors(&engine, None);
             assert!(!selectors.is_empty(), "Engine {:?} should have default selectors", engine);
         }

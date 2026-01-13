@@ -1,6 +1,6 @@
 [package]
 name = "Aipp"
-version = "0.1.0"
+version = "0.4.1"
 description = "Chat with LLM use powerful tools"
 authors = ["xieisabug"]
 edition = "2021"
@@ -77,6 +77,7 @@ tauri-plugin-autostart = { git = "https://github.com/tauri-apps/plugins-workspac
 playwright = "0.0.20"
 get-selected-text = "0.1.6"
 arboard = { version = "3.4", features = ["image-data"] }
+tauri-plugin-updater = "2"
 
 [dev-dependencies]
 rstest = "0.18"

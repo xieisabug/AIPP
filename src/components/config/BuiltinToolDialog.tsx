@@ -398,7 +398,7 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
                             )}
                         </div>
 
-                        <Card>
+                        <Card className="shadow-none">
                             <CardContent className="p-6">
                                 {templateForFields?.required_envs?.length ? (
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

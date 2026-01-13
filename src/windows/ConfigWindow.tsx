@@ -266,7 +266,7 @@ function ConfigWindow() {
     return (
         <div className="flex justify-center items-center h-screen bg-background">
             <div
-                className="bg-card shadow-lg w-full h-screen grid grid-cols-[1fr_3fr] md:grid-cols-[1fr_4fr] lg:grid-cols-[1fr_5fr]"
+                className="bg-card shadow-none w-full h-screen grid grid-cols-[1fr_3fr] md:grid-cols-[1fr_4fr] lg:grid-cols-[1fr_5fr]"
                 data-tauri-drag-region
             >
                 {/* 侧边栏 */}

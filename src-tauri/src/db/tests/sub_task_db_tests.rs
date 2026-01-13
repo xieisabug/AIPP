@@ -125,11 +125,9 @@ fn test_find_definition_by_code() {
 
     // Find by code
     let name: String = conn
-        .query_row(
-            "SELECT name FROM sub_task_definition WHERE code = ?",
-            ["task_b"],
-            |row| row.get(0),
-        )
+        .query_row("SELECT name FROM sub_task_definition WHERE code = ?", ["task_b"], |row| {
+            row.get(0)
+        })
         .unwrap();
 
     assert_eq!(name, "Task B");
@@ -183,11 +181,9 @@ fn test_update_definition() {
 
     // Verify
     let (name, description): (String, String) = conn
-        .query_row(
-            "SELECT name, description FROM sub_task_definition WHERE id = ?",
-            [id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+        .query_row("SELECT name, description FROM sub_task_definition WHERE id = ?", [id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
         .unwrap();
 
     assert_eq!(name, "Updated Name");
@@ -210,16 +206,11 @@ fn test_delete_definition() {
     let id = conn.last_insert_rowid();
 
     // Delete
-    conn.execute("DELETE FROM sub_task_definition WHERE id = ?", [id])
-        .unwrap();
+    conn.execute("DELETE FROM sub_task_definition WHERE id = ?", [id]).unwrap();
 
     // Verify
     let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sub_task_definition WHERE id = ?",
-            [id],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM sub_task_definition WHERE id = ?", [id], |row| row.get(0))
         .unwrap();
 
     assert_eq!(count, 0);
@@ -291,37 +282,27 @@ fn test_definition_enabled_status() {
 
     // Check initially enabled
     let enabled: bool = conn
-        .query_row(
-            "SELECT is_enabled FROM sub_task_definition WHERE id = ?",
-            [id],
-            |row| row.get(0),
-        )
+        .query_row("SELECT is_enabled FROM sub_task_definition WHERE id = ?", [id], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert!(enabled);
 
     // Disable
-    conn.execute(
-        "UPDATE sub_task_definition SET is_enabled = 0 WHERE id = ?",
-        [id],
-    )
-    .unwrap();
+    conn.execute("UPDATE sub_task_definition SET is_enabled = 0 WHERE id = ?", [id]).unwrap();
 
     let enabled: bool = conn
-        .query_row(
-            "SELECT is_enabled FROM sub_task_definition WHERE id = ?",
-            [id],
-            |row| row.get(0),
-        )
+        .query_row("SELECT is_enabled FROM sub_task_definition WHERE id = ?", [id], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert!(!enabled);
 
     // Filter by enabled
     let enabled_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sub_task_definition WHERE is_enabled = 1",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM sub_task_definition WHERE is_enabled = 1", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(enabled_count, 0);
 }
@@ -403,11 +384,9 @@ fn test_update_execution_status() {
     .unwrap();
 
     let status: String = conn
-        .query_row(
-            "SELECT status FROM sub_task_execution WHERE id = ?",
-            [exec_id],
-            |row| row.get(0),
-        )
+        .query_row("SELECT status FROM sub_task_execution WHERE id = ?", [exec_id], |row| {
+            row.get(0)
+        })
         .unwrap();
 
     assert_eq!(status, "running");
@@ -420,11 +399,9 @@ fn test_update_execution_status() {
     .unwrap();
 
     let status: String = conn
-        .query_row(
-            "SELECT status FROM sub_task_execution WHERE id = ?",
-            [exec_id],
-            |row| row.get(0),
-        )
+        .query_row("SELECT status FROM sub_task_execution WHERE id = ?", [exec_id], |row| {
+            row.get(0)
+        })
         .unwrap();
 
     assert_eq!(status, "success");
@@ -650,19 +627,15 @@ fn test_list_executions_by_status() {
 
     // Count by status
     let pending_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sub_task_execution WHERE status = 'pending'",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM sub_task_execution WHERE status = 'pending'", [], |row| {
+            row.get(0)
+        })
         .unwrap();
 
     let success_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sub_task_execution WHERE status = 'success'",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM sub_task_execution WHERE status = 'success'", [], |row| {
+            row.get(0)
+        })
         .unwrap();
 
     assert_eq!(pending_count, 1);
@@ -719,16 +692,13 @@ fn test_delete_execution() {
     let exec_id = conn.last_insert_rowid();
 
     // Delete
-    conn.execute("DELETE FROM sub_task_execution WHERE id = ?", [exec_id])
-        .unwrap();
+    conn.execute("DELETE FROM sub_task_execution WHERE id = ?", [exec_id]).unwrap();
 
     // Verify
     let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sub_task_execution WHERE id = ?",
-            [exec_id],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM sub_task_execution WHERE id = ?", [exec_id], |row| {
+            row.get(0)
+        })
         .unwrap();
 
     assert_eq!(count, 0);

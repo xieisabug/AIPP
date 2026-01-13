@@ -230,7 +230,7 @@ pub async fn open_artifact_window(
         .map_err(|e| format!("Failed to increment use count: {}", e))?;
 
     crate::window::open_artifact_window(app_handle.clone(), artifact.clone()).await?;
-    
+
     // Wait for the artifact window to be ready using the improved handshake mechanism
     // This replaces the old hardcoded 1000ms sleep with a proper event-based wait
     let _ = crate::artifacts::preview_router::wait_for_artifact_ready(&app_handle).await;
@@ -238,8 +238,8 @@ pub async fn open_artifact_window(
     match artifact.artifact_type.as_str() {
         "react" | "jsx" => {
             if is_react_component(artifact.code.as_str()) {
-                let component_name =
-                    extract_component_name(artifact.code.as_str()).unwrap_or_else(|| "UserComponent".to_string());
+                let component_name = extract_component_name(artifact.code.as_str())
+                    .unwrap_or_else(|| "UserComponent".to_string());
                 if let Some(window) = app_handle.get_webview_window("artifact") {
                     let _ = window.emit(
                         "artifact-data",
@@ -266,16 +266,23 @@ pub async fn open_artifact_window(
                 .await
                 .map_err(|e| {
                     let error_msg = format!("React 组件运行失败: {}", e);
-                    if let Some(window) = app_handle.get_webview_window("artifact") { let _ = window.emit("artifact-error", &error_msg); }
+                    if let Some(window) = app_handle.get_webview_window("artifact") {
+                        let _ = window.emit("artifact-error", &error_msg);
+                    }
                     error_msg
                 })?;
             } else if let Some(window) = app_handle.get_webview_window("artifact") {
-                let _ = window.emit("artifact-error", "React 代码片段预览暂不支持，请提供完整的 React 组件代码。");
+                let _ = window.emit(
+                    "artifact-error",
+                    "React 代码片段预览暂不支持，请提供完整的 React 组件代码。",
+                );
             }
         }
         "vue" => {
             let bun_version = BunUtils::get_bun_version(&app_handle);
-            if bun_version.is_err() || bun_version.as_ref().unwrap_or(&String::new()).contains("Not Installed") {
+            if bun_version.is_err()
+                || bun_version.as_ref().unwrap_or(&String::new()).contains("Not Installed")
+            {
                 if let Some(window) = app_handle.get_webview_window("artifact") {
                     let _ = window.emit("environment-check", serde_json::json!({
                         "tool": "bun",
@@ -287,7 +294,8 @@ pub async fn open_artifact_window(
                 return Ok(());
             }
             if is_vue_component(artifact.code.as_str()) {
-                let component_name = extract_vue_component_name(artifact.code.as_str()).unwrap_or_else(|| "UserComponent".to_string());
+                let component_name = extract_vue_component_name(artifact.code.as_str())
+                    .unwrap_or_else(|| "UserComponent".to_string());
                 if let Some(window) = app_handle.get_webview_window("artifact") {
                     let _ = window.emit(
                         "artifact-data",
@@ -314,11 +322,16 @@ pub async fn open_artifact_window(
                 .await
                 .map_err(|e| {
                     let error_msg = format!("Vue 组件运行失败: {}", e);
-                    if let Some(window) = app_handle.get_webview_window("artifact") { let _ = window.emit("artifact-error", &error_msg); }
+                    if let Some(window) = app_handle.get_webview_window("artifact") {
+                        let _ = window.emit("artifact-error", &error_msg);
+                    }
                     error_msg
                 })?;
             } else if let Some(window) = app_handle.get_webview_window("artifact") {
-                let _ = window.emit("artifact-error", "Vue 代码片段预览暂不支持，请提供完整的 Vue 组件代码。");
+                let _ = window.emit(
+                    "artifact-error",
+                    "Vue 代码片段预览暂不支持，请提供完整的 Vue 组件代码。",
+                );
             }
         }
         "html" => {
@@ -339,7 +352,8 @@ pub async fn open_artifact_window(
                         "use_count": artifact.use_count,
                     }),
                 );
-                let _ = window.emit("artifact-log", format!("html content: {}", artifact.code.as_str()));
+                let _ = window
+                    .emit("artifact-log", format!("html content: {}", artifact.code.as_str()));
                 let _ = window.emit("artifact-success", format!("{} 预览已准备完成", "HTML"));
             }
         }
@@ -379,7 +393,8 @@ pub async fn generate_artifact_metadata(
     let feature_config = config_feature_map.get("conversation_summary");
 
     if let Some(config) = feature_config {
-        let (provider_id, model_code) = if let Some(form_model) = config.get("form_autofill_model") {
+        let (provider_id, model_code) = if let Some(form_model) = config.get("form_autofill_model")
+        {
             let form_model_value = &form_model.value;
             if form_model_value.contains("%%") && !form_model_value.starts_with("%%") {
                 let parts: Vec<&str> = form_model_value.split("%%").collect();
@@ -388,10 +403,20 @@ pub async fn generate_artifact_metadata(
                         .parse::<i64>()
                         .map_err(|e| format!("表单填写模型provider_id解析失败: {}", e))?;
                     (provider_id, parts[1].to_string())
-                } else { return Err("表单填写模型配置格式错误".to_string()); }
-            } else { return Err("表单填写模型未配置，请在设置 -> 功能助手配置 -> AI总结 中配置表单填写模型".to_string()); }
+                } else {
+                    return Err("表单填写模型配置格式错误".to_string());
+                }
+            } else {
+                return Err(
+                    "表单填写模型未配置，请在设置 -> 功能助手配置 -> AI总结 中配置表单填写模型"
+                        .to_string(),
+                );
+            }
         } else {
-            return Err("表单填写模型未配置，请在设置 -> 功能助手配置 -> AI总结 中配置表单填写模型".to_string());
+            return Err(
+                "表单填写模型未配置，请在设置 -> 功能助手配置 -> AI总结 中配置表单填写模型"
+                    .to_string(),
+            );
         };
 
         let system_prompt = r#"你是一个专业的代码分析助手。提供的代码是某个工具的核心组件，请根据代码对该工具生成适当的元数据。
@@ -409,7 +434,10 @@ pub async fn generate_artifact_metadata(
 - 标签要相关且有用，帮助分类和搜索
 - emoji_category要根据代码内容选择最合适的类别"#;
 
-        let user_prompt = format!("代码类型：{}\n\n代码内容：\n{}\n\n请分析上述代码并生成相应的元数据。", artifact_type, code);
+        let user_prompt = format!(
+            "代码类型：{}\n\n代码内容：\n{}\n\n请分析上述代码并生成相应的元数据。",
+            artifact_type, code
+        );
 
         let llm_db = LLMDatabase::new(&app_handle).map_err(|e| format!("数据库连接失败: {}", e))?;
         let model_detail = llm_db
@@ -454,13 +482,20 @@ pub async fn generate_artifact_metadata(
                             Ok(metadata) => Ok(metadata),
                             Err(_) => Ok(ArtifactMetadata {
                                 name: format!("{} 代码", artifact_type),
-                                description: format!("一个 {} 类型的代码片段，包含丰富的功能实现。", artifact_type),
+                                description: format!(
+                                    "一个 {} 类型的代码片段，包含丰富的功能实现。",
+                                    artifact_type
+                                ),
                                 tags: format!("{},代码,开发,工具", artifact_type.to_lowercase()),
                                 emoji_category: "物品".to_string(),
                             }),
                         }
-                    } else { Err("无法从AI响应中提取有效的JSON格式".to_string()) }
-                } else { Err("AI响应不包含JSON格式的内容".to_string()) }
+                    } else {
+                        Err("无法从AI响应中提取有效的JSON格式".to_string())
+                    }
+                } else {
+                    Err("AI响应不包含JSON格式的内容".to_string())
+                }
             }
         }
     } else {

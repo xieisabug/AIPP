@@ -175,7 +175,10 @@ pub async fn add_attachment_content(
 
     match option_attachment {
         Some(attachment) => {
-            info!(attachment_id = attachment.id, "attachment_content already exists with same hash");
+            info!(
+                attachment_id = attachment.id,
+                "attachment_content already exists with same hash"
+            );
             return Ok(AttachmentResult { attachment_id: attachment.id });
         }
         None => {

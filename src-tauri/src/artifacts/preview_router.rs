@@ -12,11 +12,22 @@ use crate::artifacts::{applescript::run_applescript, powershell::run_powershell}
 use crate::errors::AppError;
 use crate::utils::bun_utils::BunUtils;
 
+// 缓存最后一次预览的 artifact 信息，用于刷新恢复
+struct LastArtifactCache {
+    lang: String,
+    input_str: String,
+}
+
+// 使用 LazyLock 延迟初始化全局状态
+use std::sync::LazyLock;
+static LAST_ARTIFACT_CACHE: LazyLock<Arc<Mutex<Option<LastArtifactCache>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(None)));
+
 /// Wait for the ArtifactPreview window to register its event listeners before sending data.
-/// 
+///
 /// The frontend now continuously sends ready signals every 200ms until it receives data,
 /// so we just need to wait for any ready signal to arrive.
-/// 
+///
 /// Improved mechanism:
 /// 1. Extended timeout from 2s to 10s for slow machines or first-time loads
 /// 2. The frontend sends ready signals repeatedly, so we're more likely to catch one
@@ -41,15 +52,15 @@ async fn wait_for_artifact_preview_ready(app_handle: &tauri::AppHandle) -> bool 
     // Extended timeout to 10 seconds for reliability
     // The frontend sends ready signals every 200ms, so we should receive one quickly
     let ready = tokio::time::timeout(Duration::from_secs(10), rx).await.is_ok();
-    
+
     app_handle_clone.unlisten(listener_id);
-    
+
     if ready {
         tracing::debug!("artifact-preview-ready signal received");
     } else {
         tracing::warn!("Timeout waiting for artifact-preview-ready signal (10s)");
     }
-    
+
     ready
 }
 
@@ -73,15 +84,15 @@ pub async fn wait_for_artifact_ready(app_handle: &tauri::AppHandle) -> bool {
 
     // Extended timeout to 10 seconds for reliability
     let ready = tokio::time::timeout(Duration::from_secs(10), rx).await.is_ok();
-    
+
     app_handle_clone.unlisten(listener_id);
-    
+
     if ready {
         tracing::debug!("artifact-ready signal received");
     } else {
         tracing::warn!("Timeout waiting for artifact-ready signal (10s)");
     }
-    
+
     ready
 }
 
@@ -100,8 +111,22 @@ pub async fn run_artifacts(
         let _ = window.set_focus();
     }
 
+    // 发送 reset 事件，通知前端清除旧状态（处理切换 artifact 时的状态清理）
+    if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+        let _ = window.emit("artifact-preview-reset", ());
+        tracing::debug!("artifact-preview-reset event emitted");
+    }
+
     // Avoid first-open race by waiting for the front-end ready event
     let _ = wait_for_artifact_preview_ready(&app_handle).await;
+
+    // 缓存当前 artifact 信息，用于刷新恢复
+    {
+        let mut cache = LAST_ARTIFACT_CACHE.lock().await;
+        *cache =
+            Some(LastArtifactCache { lang: lang.to_string(), input_str: input_str.to_string() });
+        tracing::debug!("Cached artifact: lang={}, input_len={}", lang, input_str.len());
+    }
 
     match lang {
         "powershell" => {
@@ -155,6 +180,17 @@ pub async fn run_artifacts(
                     "artifact-preview-success",
                     format!("{} 预览已准备完成", lang.to_uppercase()),
                 );
+            }
+        }
+        // 支持 "drawio" 和 "drawio:xml" 两种格式
+        lang if lang == "drawio" || lang.starts_with("drawio:") => {
+            if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+                let _ = window.emit("artifact-preview-log", "准备预览 Draw.io 图表...");
+                let _ = window.emit(
+                    "artifact-preview-data",
+                    serde_json::json!({ "type": "drawio", "original_code": input_str }),
+                );
+                let _ = window.emit("artifact-preview-success", "Draw.io 图表预览已准备完成");
             }
         }
         "react" | "jsx" => {
@@ -323,5 +359,34 @@ pub async fn retry_preview_after_install(
     match run_artifacts(app_handle.clone(), &lang, &input_str).await {
         Ok(result) => Ok(result),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+/// 恢复上一次的 artifact 预览（用于窗口刷新后恢复）
+///
+/// 从后端缓存中读取最后一次预览的 artifact 信息，重新执行预览流程
+#[tauri::command]
+pub async fn restore_artifact_preview(
+    app_handle: tauri::AppHandle,
+) -> Result<Option<String>, String> {
+    let cache = LAST_ARTIFACT_CACHE.lock().await;
+
+    if let Some(artifact) = cache.as_ref() {
+        let lang = artifact.lang.clone();
+        let input_str = artifact.input_str.clone();
+
+        // 释放锁，因为 run_artifacts 可能需要时间
+        drop(cache);
+
+        tracing::info!("Restoring artifact preview: lang={}, input_len={}", lang, input_str.len());
+
+        // 重新处理 artifact
+        match run_artifacts(app_handle, &lang, &input_str).await {
+            Ok(_) => Ok(Some(format!("Restored {} preview", lang))),
+            Err(e) => Err(e.to_string()),
+        }
+    } else {
+        tracing::debug!("No cached artifact to restore");
+        Ok(None) // 没有缓存的 artifact
     }
 }

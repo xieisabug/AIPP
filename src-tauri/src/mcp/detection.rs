@@ -79,9 +79,9 @@ pub async fn detect_and_process_mcp_calls_for_subtask(
         // 支持精确匹配和清理后名称匹配（处理大模型返回的 sanitized 名称）
         let mcp_db = crate::db::mcp_db::MCPDatabase::new(app_handle)?;
         let servers = mcp_db.get_mcp_servers()?;
-        let server_opt = servers
-            .iter()
-            .find(|s| s.is_enabled && (s.name == server_name || sanitize_tool_name(&s.name) == server_name));
+        let server_opt = servers.iter().find(|s| {
+            s.is_enabled && (s.name == server_name || sanitize_tool_name(&s.name) == server_name)
+        });
 
         if let Some(server) = server_opt {
             // 现在基于 server.id 来判断是否启用（enabled_servers 存储的是 id 而不是名称）

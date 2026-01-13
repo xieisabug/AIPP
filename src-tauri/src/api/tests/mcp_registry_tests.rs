@@ -6,9 +6,9 @@
 //! - 环境变量解析
 //! - MCP 提示格式化
 
+use crate::api::assistant_api::{MCPServerWithTools, MCPToolInfo};
 use crate::mcp::format_mcp_prompt;
 use crate::mcp::MCPInfoForAssistant;
-use crate::api::assistant_api::{MCPServerWithTools, MCPToolInfo};
 
 // ============================================================================
 // 命令行解析测试 (测试 split_command_line 的行为)
@@ -124,10 +124,14 @@ fn parse_env_vars(env: &str) -> Vec<(String, String)> {
     let mut result = Vec::new();
     for line in env.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         if let Some((k, v)) = line.split_once('=') {
             let key = k.trim();
-            if key.is_empty() { continue; }
+            if key.is_empty() {
+                continue;
+            }
             result.push((key.to_string(), v.trim().to_string()));
         }
     }
@@ -181,7 +185,10 @@ fn test_parse_env_with_spaces() {
 fn test_parse_env_value_with_equals() {
     let env = "CONNECTION_STRING=host=localhost;port=5432";
     let result = parse_env_vars(env);
-    assert_eq!(result, vec![("CONNECTION_STRING".to_string(), "host=localhost;port=5432".to_string())]);
+    assert_eq!(
+        result,
+        vec![("CONNECTION_STRING".to_string(), "host=localhost;port=5432".to_string())]
+    );
 }
 
 /// 测试空值
@@ -215,10 +222,7 @@ fn test_parse_env_no_equals() {
 /// 测试空 MCP 信息格式化
 #[tokio::test]
 async fn test_format_mcp_prompt_empty_servers() {
-    let mcp_info = MCPInfoForAssistant {
-        enabled_servers: vec![],
-        use_native_toolcall: false,
-    };
+    let mcp_info = MCPInfoForAssistant { enabled_servers: vec![], use_native_toolcall: false };
 
     let result = format_mcp_prompt("Initial prompt".to_string(), &mcp_info).await;
     // 即使没有服务器，也会添加 MCP 规范头部，并在最后包含原始提示
@@ -241,14 +245,15 @@ async fn test_format_mcp_prompt_single_server() {
                 description: "Get weather information".to_string(),
                 is_enabled: true,
                 is_auto_run: false,
-                parameters: r#"{"type":"object","properties":{"city":{"type":"string"}}}"#.to_string(),
+                parameters: r#"{"type":"object","properties":{"city":{"type":"string"}}}"#
+                    .to_string(),
             }],
         }],
         use_native_toolcall: false,
     };
 
     let result = format_mcp_prompt("".to_string(), &mcp_info).await;
-    
+
     // 验证结果包含服务器和工具信息
     assert!(result.contains("weather-server"));
     assert!(result.contains("get_weather"));
@@ -286,7 +291,7 @@ async fn test_format_mcp_prompt_multiple_tools() {
     };
 
     let result = format_mcp_prompt("".to_string(), &mcp_info).await;
-    
+
     assert!(result.contains("tool_one"));
     assert!(result.contains("tool_two"));
 }
@@ -313,7 +318,7 @@ async fn test_format_mcp_prompt_native_toolcall() {
     };
 
     let result = format_mcp_prompt("".to_string(), &mcp_info).await;
-    
+
     // 原生模式下仍然应该包含工具信息
     assert!(result.contains("test-server") || result.is_empty());
 }
@@ -340,7 +345,7 @@ async fn test_format_mcp_prompt_with_initial_prompt() {
     };
 
     let result = format_mcp_prompt("You are a helpful assistant.".to_string(), &mcp_info).await;
-    
+
     // 结果应该包含原始提示和 MCP 信息
     // 具体格式取决于 format_mcp_prompt 的实现
     assert!(!result.is_empty());
@@ -384,7 +389,7 @@ async fn test_format_mcp_prompt_multiple_servers() {
     };
 
     let result = format_mcp_prompt("".to_string(), &mcp_info).await;
-    
+
     assert!(result.contains("server-a"));
     assert!(result.contains("server-b"));
     assert!(result.contains("tool_a"));

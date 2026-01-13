@@ -158,9 +158,7 @@ async fn test_permission_request_handling() {
     assert_eq!(decision, PermissionDecision::Allow);
 
     // 再次尝试解决应该失败（已被移除）
-    let success = state
-        .resolve_permission_request(request_id, PermissionDecision::Deny)
-        .await;
+    let success = state.resolve_permission_request(request_id, PermissionDecision::Deny).await;
     assert!(!success);
 }
 

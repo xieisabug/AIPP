@@ -29,13 +29,8 @@ fn test_message_crud() {
     let (_, _, msg_repo, conversation) = create_shared_test_db();
 
     // Test create message
-    let message = create_test_message(
-        conversation.id,
-        "user",
-        "Test message",
-        None,
-        Some(new_group_id()),
-    );
+    let message =
+        create_test_message(conversation.id, "user", "Test message", None, Some(new_group_id()));
     let created_message = msg_repo.create(&message).unwrap();
     assert!(created_message.id > 0);
     assert_eq!(created_message.content, "Test message");
@@ -105,9 +100,10 @@ fn test_message_types() {
     let (msg_repo, conversation_id) = create_message_test_db();
 
     let message_types = vec!["user", "assistant", "system", "reasoning", "response"];
-    
+
     for msg_type in message_types {
-        let message = create_test_message(conversation_id, msg_type, "content", None, Some(new_group_id()));
+        let message =
+            create_test_message(conversation_id, msg_type, "content", None, Some(new_group_id()));
         let created = msg_repo.create(&message).unwrap();
         assert_eq!(created.message_type, msg_type);
     }
@@ -131,13 +127,8 @@ fn test_generation_group_id_management() {
     let group_id = new_group_id();
 
     // 创建用户消息
-    let user_message = create_test_message(
-        conversation.id,
-        "user",
-        "User question",
-        None,
-        Some(group_id.clone()),
-    );
+    let user_message =
+        create_test_message(conversation.id, "user", "User question", None, Some(group_id.clone()));
     let created_user_msg = msg_repo.create(&user_message).unwrap();
 
     // 创建AI回复消息（使用相同的generation_group_id）
@@ -293,14 +284,19 @@ fn test_message_regeneration_scenarios() {
 fn test_message_with_tool_calls_json() {
     let (msg_repo, conversation_id) = create_message_test_db();
 
-    let mut message = create_test_message(conversation_id, "assistant", "Response", None, Some(new_group_id()));
-    message.tool_calls_json = Some(r#"[{"name": "search", "arguments": {"query": "test"}}]"#.to_string());
-    
+    let mut message =
+        create_test_message(conversation_id, "assistant", "Response", None, Some(new_group_id()));
+    message.tool_calls_json =
+        Some(r#"[{"name": "search", "arguments": {"query": "test"}}]"#.to_string());
+
     let created = msg_repo.create(&message).unwrap();
     assert!(created.tool_calls_json.is_some());
-    
+
     let read = msg_repo.read(created.id).unwrap().unwrap();
-    assert_eq!(read.tool_calls_json, Some(r#"[{"name": "search", "arguments": {"query": "test"}}]"#.to_string()));
+    assert_eq!(
+        read.tool_calls_json,
+        Some(r#"[{"name": "search", "arguments": {"query": "test"}}]"#.to_string())
+    );
 }
 
 // ============================================================================
@@ -316,7 +312,13 @@ fn test_message_with_tool_calls_json() {
 fn test_message_update_content() {
     let (msg_repo, conversation_id) = create_message_test_db();
 
-    let message = create_test_message(conversation_id, "assistant", "Initial content", None, Some(new_group_id()));
+    let message = create_test_message(
+        conversation_id,
+        "assistant",
+        "Initial content",
+        None,
+        Some(new_group_id()),
+    );
     let created = msg_repo.create(&message).unwrap();
 
     // 更新消息内容
@@ -335,10 +337,11 @@ fn test_message_update_content() {
 fn test_message_update_finish_time() {
     let (msg_repo, conversation_id) = create_message_test_db();
 
-    let mut message = create_test_message(conversation_id, "assistant", "Response", None, Some(new_group_id()));
+    let mut message =
+        create_test_message(conversation_id, "assistant", "Response", None, Some(new_group_id()));
     message.finish_time = None; // 初始时没有完成时间
     let created = msg_repo.create(&message).unwrap();
-    
+
     // 验证初始状态
     let before = msg_repo.read(created.id).unwrap().unwrap();
     assert!(before.finish_time.is_none());
@@ -391,7 +394,7 @@ fn test_message_empty_content() {
 
     let message = create_test_message(conversation_id, "assistant", "", None, Some(new_group_id()));
     let created = msg_repo.create(&message).unwrap();
-    
+
     let read = msg_repo.read(created.id).unwrap().unwrap();
     assert_eq!(read.content, "");
 }
@@ -406,9 +409,15 @@ fn test_message_very_long_content() {
     let (msg_repo, conversation_id) = create_message_test_db();
 
     let long_content = "A".repeat(100000); // 100KB 内容
-    let mut message = create_test_message(conversation_id, "assistant", &long_content, None, Some(new_group_id()));
+    let mut message = create_test_message(
+        conversation_id,
+        "assistant",
+        &long_content,
+        None,
+        Some(new_group_id()),
+    );
     message.content = long_content.clone();
-    
+
     let created = msg_repo.create(&message).unwrap();
     let read = msg_repo.read(created.id).unwrap().unwrap();
     assert_eq!(read.content.len(), 100000);
@@ -444,7 +453,7 @@ fn test_message_invalid_parent_id() {
         Some(99999), // 不存在的 parent_id
         Some(new_group_id()),
     );
-    
+
     // 应该能创建成功（外键约束未启用）
     let created = msg_repo.create(&message).unwrap();
     assert_eq!(created.parent_id, Some(99999));
@@ -468,7 +477,8 @@ fn test_message_special_content() {
     ];
 
     for content in special_contents {
-        let message = create_test_message(conversation_id, "assistant", content, None, Some(new_group_id()));
+        let message =
+            create_test_message(conversation_id, "assistant", content, None, Some(new_group_id()));
         let created = msg_repo.create(&message).unwrap();
         let read = msg_repo.read(created.id).unwrap().unwrap();
         assert_eq!(read.content, content);

@@ -378,11 +378,7 @@ mod tests {
 
     #[test]
     fn test_saved_state_empty() {
-        let state = SavedState {
-            fingerprint: None,
-            google_domain: None,
-            last_update: None,
-        };
+        let state = SavedState { fingerprint: None, google_domain: None, last_update: None };
 
         let json = serde_json::to_string(&state).unwrap();
         let deserialized: SavedState = serde_json::from_str(&json).unwrap();
@@ -599,7 +595,7 @@ mod tests {
     #[test]
     fn test_fingerprint_persists_to_file() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         // Create manager and generate fingerprint
         {
             let mut manager = FingerprintManager::new(temp_dir.path());

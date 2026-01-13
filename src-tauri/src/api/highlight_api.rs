@@ -1,9 +1,9 @@
 use std::sync::OnceLock;
 
+use crate::FeatureConfigState;
 use syntect::highlighting::ThemeSet;
 use syntect::html::highlighted_html_for_string;
 use syntect::parsing::SyntaxSet;
-use crate::FeatureConfigState;
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
@@ -41,12 +41,8 @@ fn map_ui_theme_to_syntect(ui: &str, _is_dark: bool) -> Option<&'static str> {
 fn pick_theme(is_dark: bool) -> &'static syntect::highlighting::Theme {
     let ts = theme_set();
     // Prefer appropriate themes based on light/dark mode
-    let candidates_dark = [
-        "base16-ocean.dark",
-        "base16-eighties.dark",
-        "base16-mocha.dark",
-        "Solarized (dark)",
-    ];
+    let candidates_dark =
+        ["base16-ocean.dark", "base16-eighties.dark", "base16-mocha.dark", "Solarized (dark)"];
     let candidates_light = [
         "InspiredGitHub", // InspiredGitHub is a light theme with white background
         "Solarized (light)",
@@ -122,8 +118,7 @@ pub fn highlight_code(
         .unwrap_or_else(|| ss.find_syntax_plain_text());
 
     // Use helper to generate inline-styled HTML within <pre><code> ... </code></pre>
-    let html = highlighted_html_for_string(&code, ss, syntax, theme)
-        .map_err(|e| e.to_string())?;
+    let html = highlighted_html_for_string(&code, ss, syntax, theme).map_err(|e| e.to_string())?;
 
     Ok(html)
 }

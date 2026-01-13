@@ -9,8 +9,8 @@
 
 use crate::api::ai::config::{
     calculate_retry_delay, get_network_proxy_from_config, get_request_timeout_from_config,
-    get_retry_attempts_from_config, ConfigBuilder, DEFAULT_REQUEST_TIMEOUT_SECS, MAX_RETRY_ATTEMPTS,
-    RETRY_DELAY_BASE_MS,
+    get_retry_attempts_from_config, ConfigBuilder, DEFAULT_REQUEST_TIMEOUT_SECS,
+    MAX_RETRY_ATTEMPTS, RETRY_DELAY_BASE_MS,
 };
 use crate::db::assistant_db::AssistantModelConfig;
 use crate::db::llm_db::{LLMModel, LLMProvider, LLMProviderConfig, ModelDetail};
@@ -184,7 +184,8 @@ fn test_merge_model_configs_with_override() {
         serde_json::Value::Number(serde_json::Number::from_f64(0.9).unwrap()),
     );
 
-    let result = ConfigBuilder::merge_model_configs(base_configs, &model_detail, Some(override_configs));
+    let result =
+        ConfigBuilder::merge_model_configs(base_configs, &model_detail, Some(override_configs));
 
     let temp_config = result.iter().find(|c| c.name == "temperature").unwrap();
     assert_eq!(temp_config.value, Some("0.9".to_string()));
@@ -203,19 +204,18 @@ fn test_merge_model_configs_add_new_override() {
     );
     override_configs.insert(
         "stop_sequences".to_string(),
-        serde_json::Value::Array(vec![
-            serde_json::Value::String("END".to_string()),
-        ]),
+        serde_json::Value::Array(vec![serde_json::Value::String("END".to_string())]),
     );
 
-    let result = ConfigBuilder::merge_model_configs(base_configs, &model_detail, Some(override_configs));
+    let result =
+        ConfigBuilder::merge_model_configs(base_configs, &model_detail, Some(override_configs));
 
     assert_eq!(result.len(), 3); // model + max_tokens + stop_sequences
-    
+
     let max_tokens = result.iter().find(|c| c.name == "max_tokens").unwrap();
     assert_eq!(max_tokens.value, Some("4096".to_string()));
     assert_eq!(max_tokens.value_type, "number");
-    
+
     let stop_seq = result.iter().find(|c| c.name == "stop_sequences").unwrap();
     assert_eq!(stop_seq.value_type, "array");
 }
@@ -227,12 +227,14 @@ fn test_merge_model_configs_different_value_types() {
     let model_detail = create_test_model_detail();
 
     let mut override_configs = HashMap::new();
-    override_configs.insert("string_val".to_string(), serde_json::Value::String("hello".to_string()));
+    override_configs
+        .insert("string_val".to_string(), serde_json::Value::String("hello".to_string()));
     override_configs.insert("number_val".to_string(), serde_json::Value::Number(42.into()));
     override_configs.insert("bool_val".to_string(), serde_json::Value::Bool(true));
     override_configs.insert("null_val".to_string(), serde_json::Value::Null);
 
-    let result = ConfigBuilder::merge_model_configs(base_configs, &model_detail, Some(override_configs));
+    let result =
+        ConfigBuilder::merge_model_configs(base_configs, &model_detail, Some(override_configs));
 
     let string_config = result.iter().find(|c| c.name == "string_val").unwrap();
     assert_eq!(string_config.value_type, "string");
@@ -324,7 +326,10 @@ fn test_get_request_timeout_no_config() {
 #[test]
 fn test_get_network_proxy_with_config() {
     let mut network_config = HashMap::new();
-    network_config.insert("network_proxy".to_string(), create_feature_config("http://proxy.example.com:8080"));
+    network_config.insert(
+        "network_proxy".to_string(),
+        create_feature_config("http://proxy.example.com:8080"),
+    );
 
     let mut config_map = HashMap::new();
     config_map.insert("network_config".to_string(), network_config);

@@ -20,11 +20,7 @@ pub struct SkillScanner {
 impl SkillScanner {
     /// Create a new scanner with default built-in sources
     pub fn new(home_dir: PathBuf, app_data_dir: PathBuf) -> Self {
-        Self {
-            home_dir,
-            app_data_dir,
-            sources: SkillSourceConfig::builtin_sources(),
-        }
+        Self { home_dir, app_data_dir, sources: SkillSourceConfig::builtin_sources() }
     }
 
     /// Create a scanner with custom sources
@@ -33,11 +29,7 @@ impl SkillScanner {
         app_data_dir: PathBuf,
         sources: Vec<SkillSourceConfig>,
     ) -> Self {
-        Self {
-            home_dir,
-            app_data_dir,
-            sources,
-        }
+        Self { home_dir, app_data_dir, sources }
     }
 
     /// Add a custom source configuration
@@ -87,10 +79,7 @@ impl SkillScanner {
 
     /// Scan all sources and return as a map by identifier
     pub fn scan_all_as_map(&self) -> HashMap<String, ScannedSkill> {
-        self.scan_all()
-            .into_iter()
-            .map(|s| (s.identifier.clone(), s))
-            .collect()
+        self.scan_all().into_iter().map(|s| (s.identifier.clone(), s)).collect()
     }
 
     /// Parse installed_plugins.json and extract plugin install paths
@@ -101,10 +90,7 @@ impl SkillScanner {
         let content = match fs::read_to_string(json_path) {
             Ok(content) => content,
             Err(e) => {
-                warn!(
-                    "Failed to read installed_plugins.json {:?}: {}",
-                    json_path, e
-                );
+                warn!("Failed to read installed_plugins.json {:?}: {}", json_path, e);
                 return plugins;
             }
         };
@@ -113,10 +99,7 @@ impl SkillScanner {
         let installed: InstalledPluginsJson = match serde_json::from_str(&content) {
             Ok(data) => data,
             Err(e) => {
-                warn!(
-                    "Failed to parse installed_plugins.json {:?}: {}",
-                    json_path, e
-                );
+                warn!("Failed to parse installed_plugins.json {:?}: {}", json_path, e);
                 return plugins;
             }
         };
@@ -125,22 +108,14 @@ impl SkillScanner {
         for (plugin_id, entries) in installed.plugins.iter() {
             for entry in entries {
                 // Extract plugin name from plugin_id (e.g., "frontend-design@claude-plugins-official")
-                let plugin_name = plugin_id
-                    .split('@')
-                    .next()
-                    .unwrap_or(plugin_id)
-                    .to_string();
+                let plugin_name = plugin_id.split('@').next().unwrap_or(plugin_id).to_string();
 
                 let install_path = PathBuf::from(&entry.install_path);
                 plugins.push((plugin_name, install_path));
             }
         }
 
-        debug!(
-            "Parsed {} plugins from {:?}",
-            plugins.len(),
-            json_path
-        );
+        debug!("Parsed {} plugins from {:?}", plugins.len(), json_path);
 
         plugins
     }
@@ -157,10 +132,7 @@ impl SkillScanner {
         // Check if skills directory exists
         let skills_dir = plugin_path.join("skills");
         if !skills_dir.exists() || !skills_dir.is_dir() {
-            debug!(
-                "Plugin {} has no skills directory: {:?}",
-                plugin_name, skills_dir
-            );
+            debug!("Plugin {} has no skills directory: {:?}", plugin_name, skills_dir);
             return skills;
         }
 
@@ -168,10 +140,7 @@ impl SkillScanner {
         let entries = match fs::read_dir(&skills_dir) {
             Ok(entries) => entries,
             Err(e) => {
-                warn!(
-                    "Failed to read skills directory {:?}: {}",
-                    skills_dir, e
-                );
+                warn!("Failed to read skills directory {:?}: {}", skills_dir, e);
                 return skills;
             }
         };
@@ -191,20 +160,18 @@ impl SkillScanner {
                 }
 
                 // Scan the skill folder with plugin context
-                if let Some(skill) =
-                    self.scan_skill_folder_with_plugin(&skill_folder_path, source, plugin_name, name)
-                {
+                if let Some(skill) = self.scan_skill_folder_with_plugin(
+                    &skill_folder_path,
+                    source,
+                    plugin_name,
+                    name,
+                ) {
                     skills.push(skill);
                 }
             }
         }
 
-        debug!(
-            "Found {} skills in plugin {} at {:?}",
-            skills.len(),
-            plugin_name,
-            skills_dir
-        );
+        debug!("Found {} skills in plugin {} at {:?}", skills.len(), plugin_name, skills_dir);
 
         skills
     }
@@ -217,10 +184,7 @@ impl SkillScanner {
             let expanded_path = self.expand_path(path_pattern);
 
             if !expanded_path.exists() {
-                debug!(
-                    "Source path does not exist: {:?} (from {})",
-                    expanded_path, path_pattern
-                );
+                debug!("Source path does not exist: {:?} (from {})", expanded_path, path_pattern);
                 continue;
             }
 
@@ -229,8 +193,7 @@ impl SkillScanner {
                 let plugins = self.parse_installed_plugins(&expanded_path);
 
                 for (plugin_name, plugin_path) in plugins {
-                    let plugin_skills =
-                        self.scan_plugin_skills(&plugin_name, &plugin_path, source);
+                    let plugin_skills = self.scan_plugin_skills(&plugin_name, &plugin_path, source);
                     skills.extend(plugin_skills);
                 }
             } else if expanded_path.is_file() {
@@ -245,11 +208,7 @@ impl SkillScanner {
             }
         }
 
-        debug!(
-            "Scanned {} skills from source {:?}",
-            skills.len(),
-            source.source_type
-        );
+        debug!("Scanned {} skills from source {:?}", skills.len(), source.source_type);
         skills
     }
 
@@ -327,7 +286,9 @@ impl SkillScanner {
             }
             // Also support single md files at root level for backward compatibility
             // (e.g., Claude Code agents where each file is a separate "skill")
-            else if entry_path.is_file() && self.matches_pattern(&entry_path, &source.file_pattern) {
+            else if entry_path.is_file()
+                && self.matches_pattern(&entry_path, &source.file_pattern)
+            {
                 if let Some(skill) = self.scan_file(&entry_path, source, base_path) {
                     skills.push(skill);
                 }
@@ -385,23 +346,13 @@ impl SkillScanner {
         // Priority 1: Look for SKILL.md (standard skill definition)
         let skill_md = folder_path.join("SKILL.md");
         if skill_md.exists() {
-            return self.create_skill_from_file(
-                &skill_md,
-                source,
-                plugin_name,
-                skill_name,
-            );
+            return self.create_skill_from_file(&skill_md, source, plugin_name, skill_name);
         }
 
         // Priority 2: Look for README.md
         let readme_md = folder_path.join("README.md");
         if readme_md.exists() {
-            return self.create_skill_from_file(
-                &readme_md,
-                source,
-                plugin_name,
-                skill_name,
-            );
+            return self.create_skill_from_file(&readme_md, source, plugin_name, skill_name);
         }
 
         // Priority 3: Find any .md file in the folder
@@ -411,7 +362,12 @@ impl SkillScanner {
                 if path.is_file() {
                     if let Some(ext) = path.extension() {
                         if ext == "md" {
-                            return self.create_skill_from_file(&path, source, plugin_name, skill_name);
+                            return self.create_skill_from_file(
+                                &path,
+                                source,
+                                plugin_name,
+                                skill_name,
+                            );
                         }
                     }
                 }
@@ -435,10 +391,7 @@ impl SkillScanner {
 
         match SkillParser::parse_metadata(skill_file) {
             Ok(metadata) => {
-                let display_name = metadata
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| skill_name.to_string());
+                let display_name = metadata.name.clone().unwrap_or_else(|| skill_name.to_string());
 
                 Some(ScannedSkill {
                     identifier,
@@ -469,10 +422,7 @@ impl SkillScanner {
 
         match SkillParser::parse_metadata(skill_file) {
             Ok(metadata) => {
-                let display_name = metadata
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| folder_name.to_string());
+                let display_name = metadata.name.clone().unwrap_or_else(|| folder_name.to_string());
 
                 Some(ScannedSkill {
                     identifier,
@@ -619,10 +569,7 @@ impl SkillScanner {
                         // Parse relative_path: "plugin_name/skill_name"
                         let parts: Vec<&str> = relative_path.split('/').collect();
                         if parts.len() != 2 {
-                            warn!(
-                                "Invalid Claude Code skill identifier format: {}",
-                                identifier
-                            );
+                            warn!("Invalid Claude Code skill identifier format: {}", identifier);
                             continue;
                         }
 
@@ -697,10 +644,8 @@ mod tests {
         let home_dir = TempDir::new().unwrap();
         let app_data_dir = TempDir::new().unwrap();
 
-        let scanner = SkillScanner::new(
-            home_dir.path().to_path_buf(),
-            app_data_dir.path().to_path_buf(),
-        );
+        let scanner =
+            SkillScanner::new(home_dir.path().to_path_buf(), app_data_dir.path().to_path_buf());
 
         (scanner, home_dir, app_data_dir)
     }
@@ -755,10 +700,7 @@ description: A test skill for unit testing
 
         let skill = test_skill.unwrap();
         assert_eq!(skill.display_name, "Test Skill");
-        assert_eq!(
-            skill.metadata.description,
-            Some("A test skill for unit testing".to_string())
-        );
+        assert_eq!(skill.metadata.description, Some("A test skill for unit testing".to_string()));
     }
 
     #[test]
@@ -925,9 +867,6 @@ description: A test skill from plugin
         assert_eq!(skill.identifier, "claude_code_skills:test-plugin/test-skill");
         assert_eq!(skill.relative_path, "test-plugin/test-skill");
         assert_eq!(skill.display_name, "Test Skill");
-        assert_eq!(
-            skill.metadata.description,
-            Some("A test skill from plugin".to_string())
-        );
+        assert_eq!(skill.metadata.description, Some("A test skill from plugin".to_string()));
     }
 }

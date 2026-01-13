@@ -142,7 +142,16 @@ fn test_llm_model_operations() {
 
     // 添加 Model
     db.add_llm_model("GPT-4", provider_id, "gpt-4", "GPT-4 Model", true, false, false).unwrap();
-    db.add_llm_model("GPT-4 Vision", provider_id, "gpt-4-vision", "GPT-4 with Vision", true, false, false).unwrap();
+    db.add_llm_model(
+        "GPT-4 Vision",
+        provider_id,
+        "gpt-4-vision",
+        "GPT-4 with Vision",
+        true,
+        false,
+        false,
+    )
+    .unwrap();
 
     // 获取所有 Model
     let all_models = db.get_all_llm_models().unwrap();

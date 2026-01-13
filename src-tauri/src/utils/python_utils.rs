@@ -120,11 +120,7 @@ impl PythonUtils {
 
     /// 获取 uv 管理的 Python 版本列表
     fn get_uv_python_list() -> Option<Vec<String>> {
-        let uv_exe = if cfg!(target_os = "windows") {
-            "uv.exe"
-        } else {
-            "uv"
-        };
+        let uv_exe = if cfg!(target_os = "windows") { "uv.exe" } else { "uv" };
 
         match Command::new(uv_exe).arg("python").arg("list").output() {
             Ok(output) if output.status.success() => {
@@ -138,7 +134,8 @@ impl PythonUtils {
                 for line in stdout.lines() {
                     let line = line.trim();
                     // 匹配 "cpython-X.Y.Z" 或 "3.X.Y" 格式
-                    if line.contains("cpython-") || (line.starts_with("3.") && !line.contains(" ")) {
+                    if line.contains("cpython-") || (line.starts_with("3.") && !line.contains(" "))
+                    {
                         // 提取版本号
                         if let Some(start) = line.find("cpython-") {
                             let rest = &line[start + 8..];
@@ -165,7 +162,10 @@ impl PythonUtils {
                 }
             }
             Ok(output) => {
-                tracing::warn!("uv python list 命令失败: {:?}", String::from_utf8_lossy(&output.stderr));
+                tracing::warn!(
+                    "uv python list 命令失败: {:?}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
                 None
             }
             Err(e) => {
@@ -194,11 +194,6 @@ impl PythonUtils {
             need_install_python3
         );
 
-        PythonInfo {
-            python2_version,
-            python3_version,
-            installed_pythons,
-            need_install_python3,
-        }
+        PythonInfo { python2_version, python3_version, installed_pythons, need_install_python3 }
     }
 }

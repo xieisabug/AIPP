@@ -8,6 +8,7 @@ export interface LogLine {
 
 export interface ArtifactData {
     id?: number;
+    message_id?: number;
     name?: string;
     icon?: string;
     description?: string;
@@ -41,6 +42,8 @@ export interface UseArtifactEventsOptions {
     onBunInstallFinished?: (success: boolean) => void;
     /** 处理 uv 安装完成的回调 */
     onUvInstallFinished?: (success: boolean) => void;
+    /** 处理重置事件的回调（切换 artifact 时调用） */
+    onReset?: () => void;
 }
 
 export interface UseArtifactEventsReturn {
@@ -73,6 +76,7 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
         onEnvironmentInstallStarted,
         onBunInstallFinished,
         onUvInstallFinished,
+        onReset,
     } = options;
 
     // 事件名称前缀
@@ -212,6 +216,38 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
                 onUvInstallFinished?.(success);
             };
 
+            // 处理重置事件（切换 artifact 时）
+            const handleReset = () => {
+                console.log(`🔧 [${windowType}] 收到 reset 事件，重置状态`);
+                reset();  // 清除内部状态
+                onReset?.();  // 调用外部回调
+
+                // Reset 后需要重新发送 ready 信号，因为后端在等待
+                // 立即发送一次，然后重新启动 interval
+                console.log(`🔧 [${windowType}] reset 后重新发送 ready 信号`);
+                emit(readyEvent, {
+                    windowType,
+                    timestamp: Date.now(),
+                    listenersRegistered: true
+                });
+
+                // 重新启动 interval（如果已停止）
+                if (!readyIntervalRef.current) {
+                    readyIntervalRef.current = setInterval(() => {
+                        if (!hasReceivedDataRef.current) {
+                            emit(readyEvent, {
+                                windowType,
+                                timestamp: Date.now(),
+                                listenersRegistered: true
+                            });
+                            console.log(`🔧 [${windowType}] 发送 ready 信号: ${readyEvent}`);
+                        } else {
+                            stopReadySignal();
+                        }
+                    }, 200);
+                }
+            };
+
             try {
                 // 1. 先注册所有监听器
                 const unlisteners = await Promise.all([
@@ -224,6 +260,7 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
                     listen('environment-install-started', handleEnvironmentInstallStarted),
                     listen('bun-install-finished', handleBunInstallFinished),
                     listen('uv-install-finished', handleUvInstallFinished),
+                    listen('artifact-preview-reset', handleReset),
                 ]);
 
                 console.log(`🔧 [${windowType}] 所有监听器注册成功`);
@@ -297,6 +334,7 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
         onEnvironmentInstallStarted,
         onBunInstallFinished,
         onUvInstallFinished,
+        onReset,
         stopReadySignal,
         sendDataReceivedConfirmation,
     ]);

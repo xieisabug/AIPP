@@ -87,9 +87,19 @@ pub fn database_upgrade(
                     if current_version < version {
                         info!(target = version_str, "Executing special logic for version");
                         let start = std::time::Instant::now();
-                        match logic(&system_db, &llm_db, &assistant_db, &conversation_db, app_handle) {
+                        match logic(
+                            &system_db,
+                            &llm_db,
+                            &assistant_db,
+                            &conversation_db,
+                            app_handle,
+                        ) {
                             Ok(_) => {
-                                info!(target = version_str, elapsed_ms = start.elapsed().as_millis() as u64, "Special logic completed");
+                                info!(
+                                    target = version_str,
+                                    elapsed_ms = start.elapsed().as_millis() as u64,
+                                    "Special logic completed"
+                                );
                             }
                             Err(err) => {
                                 error!(target = version_str, error = ?err, "Special logic failed; exiting");
@@ -97,7 +107,10 @@ pub fn database_upgrade(
                             }
                         }
                     } else {
-                        debug!(target = version_str, "Skipping special logic; already at or past version");
+                        debug!(
+                            target = version_str,
+                            "Skipping special logic; already at or past version"
+                        );
                     }
                 }
 
@@ -452,9 +465,7 @@ fn special_logic_0_0_5(
         .map_err(|e| format!("创建 SubTaskDatabase 失败: {}", e.to_string()))?;
 
     // 创建 sub task 相关表
-    sub_task_db
-        .create_tables()
-        .map_err(|e| format!("创建 sub task 表失败: {}", e.to_string()))?;
+    sub_task_db.create_tables().map_err(|e| format!("创建 sub task 表失败: {}", e.to_string()))?;
 
     info!("special_logic_0_0_5 done: sub task 表创建完成");
     Ok(())

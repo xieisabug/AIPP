@@ -127,9 +127,7 @@ fn test_get_plugins() {
     }
 
     // Count plugins
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM Plugins", [], |row| row.get(0))
-        .unwrap();
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM Plugins", [], |row| row.get(0)).unwrap();
 
     assert_eq!(count, 3);
 }
@@ -187,16 +185,13 @@ fn test_delete_plugin() {
     let plugin_id = conn.last_insert_rowid();
 
     // Delete
-    conn.execute("DELETE FROM Plugins WHERE plugin_id = ?", [plugin_id])
-        .unwrap();
+    conn.execute("DELETE FROM Plugins WHERE plugin_id = ?", [plugin_id]).unwrap();
 
     // Verify
     let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM Plugins WHERE plugin_id = ?",
-            [plugin_id],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM Plugins WHERE plugin_id = ?", [plugin_id], |row| {
+            row.get(0)
+        })
         .unwrap();
 
     assert_eq!(count, 0);
@@ -305,11 +300,9 @@ fn test_update_plugin_status() {
 
     // Verify
     let is_active: i64 = conn
-        .query_row(
-            "SELECT is_active FROM PluginStatus WHERE status_id = ?",
-            [status_id],
-            |row| row.get(0),
-        )
+        .query_row("SELECT is_active FROM PluginStatus WHERE status_id = ?", [status_id], |row| {
+            row.get(0)
+        })
         .unwrap();
 
     assert_eq!(is_active, 0);
@@ -461,11 +454,7 @@ fn test_delete_configuration() {
     let config_id = conn.last_insert_rowid();
 
     // Delete
-    conn.execute(
-        "DELETE FROM PluginConfigurations WHERE config_id = ?",
-        [config_id],
-    )
-    .unwrap();
+    conn.execute("DELETE FROM PluginConfigurations WHERE config_id = ?", [config_id]).unwrap();
 
     // Verify
     let count: i64 = conn
@@ -606,11 +595,9 @@ fn test_update_plugin_data() {
 
     // Verify
     let data_value: String = conn
-        .query_row(
-            "SELECT data_value FROM PluginData WHERE data_id = ?",
-            [data_id],
-            |row| row.get(0),
-        )
+        .query_row("SELECT data_value FROM PluginData WHERE data_id = ?", [data_id], |row| {
+            row.get(0)
+        })
         .unwrap();
 
     assert_eq!(data_value, "new");
@@ -643,16 +630,11 @@ fn test_delete_plugin_data() {
     let data_id = conn.last_insert_rowid();
 
     // Delete
-    conn.execute("DELETE FROM PluginData WHERE data_id = ?", [data_id])
-        .unwrap();
+    conn.execute("DELETE FROM PluginData WHERE data_id = ?", [data_id]).unwrap();
 
     // Verify
     let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM PluginData WHERE data_id = ?",
-            [data_id],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM PluginData WHERE data_id = ?", [data_id], |row| row.get(0))
         .unwrap();
 
     assert_eq!(count, 0);
@@ -686,11 +668,9 @@ fn test_null_data_value() {
 
     // Verify NULL handling
     let data_value: Option<String> = conn
-        .query_row(
-            "SELECT data_value FROM PluginData WHERE data_id = ?",
-            [data_id],
-            |row| row.get(0),
-        )
+        .query_row("SELECT data_value FROM PluginData WHERE data_id = ?", [data_id], |row| {
+            row.get(0)
+        })
         .unwrap();
 
     assert!(data_value.is_none());

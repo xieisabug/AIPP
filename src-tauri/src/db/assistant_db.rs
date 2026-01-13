@@ -543,13 +543,20 @@ impl AssistantDatabase {
         if models.is_empty() {
             let model_id = self.add_assistant_model(1, 0, "", "")?;
             // 重新读取，供下面使用
-            models = vec![AssistantModel { id: model_id, assistant_id: 1, provider_id: 0, model_code: "".to_string(), alias: "".to_string() }];
+            models = vec![AssistantModel {
+                id: model_id,
+                assistant_id: 1,
+                provider_id: 0,
+                model_code: "".to_string(),
+                alias: "".to_string(),
+            }];
         }
         let model_id = models[0].id;
 
         // 4) 默认配置：仅当同名配置不存在时插入（按助手维度去重）
         let existing_configs = self.get_assistant_model_configs(1)?;
-        let mut existing_names: std::collections::HashSet<String> = existing_configs.into_iter().map(|c| c.name).collect();
+        let mut existing_names: std::collections::HashSet<String> =
+            existing_configs.into_iter().map(|c| c.name).collect();
 
         let defaults = vec![
             ("max_tokens", "1000", "number"),
@@ -650,7 +657,9 @@ impl AssistantDatabase {
     pub fn get_assistant_mcp_servers_with_tools(
         &self,
         assistant_id: i64,
-    ) -> Result<Vec<(i64, String, Option<String>, bool, Vec<(i64, String, String, bool, bool, String)>)>> {
+    ) -> Result<
+        Vec<(i64, String, Option<String>, bool, Vec<(i64, String, String, bool, bool, String)>)>,
+    > {
         // 使用一条 SQL 语句获取所有需要的数据，避免 N+1 查询问题
         // 注意：由于涉及两个数据库（assistant.db 和 mcp.db），我们需要分两步查询，但可以优化为批量查询
 
@@ -664,7 +673,13 @@ impl AssistantDatabase {
         ",
         )?;
         let servers: Vec<(i64, String, Option<String>)> = server_stmt
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)))?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
 
         if servers.is_empty() {

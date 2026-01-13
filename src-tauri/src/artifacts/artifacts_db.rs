@@ -346,7 +346,8 @@ mod tests {
         let types = ["vue", "react", "html", "svg", "xml", "markdown", "mermaid"];
 
         for artifact_type in types {
-            let artifact = create_sample_artifact(&format!("{} Component", artifact_type), artifact_type);
+            let artifact =
+                create_sample_artifact(&format!("{} Component", artifact_type), artifact_type);
             let result = db.save_artifact(artifact);
             assert!(result.is_ok(), "Should save {} artifact successfully", artifact_type);
         }
@@ -606,13 +607,8 @@ mod tests {
         let db = setup_test_db();
         let id = db.save_artifact(create_sample_artifact("NoChange", "react")).unwrap();
 
-        let update = UpdateArtifactCollection {
-            id,
-            name: None,
-            icon: None,
-            description: None,
-            tags: None,
-        };
+        let update =
+            UpdateArtifactCollection { id, name: None, icon: None, description: None, tags: None };
 
         let result = db.update_artifact(update);
         assert!(result.is_ok(), "Update with no changes should succeed");
@@ -737,7 +733,7 @@ mod tests {
 
         let artifacts = db.get_artifacts(None).unwrap();
         assert_eq!(artifacts[0].name, "HighUse"); // 3 uses
-        assert_eq!(artifacts[1].name, "LowUse");  // 1 use
-        assert_eq!(artifacts[2].name, "NoUse");   // 0 uses
+        assert_eq!(artifacts[1].name, "LowUse"); // 1 use
+        assert_eq!(artifacts[2].name, "NoUse"); // 0 uses
     }
 }

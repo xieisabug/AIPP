@@ -23,9 +23,13 @@ async fn test_regenerate_logic_validation() {
         start_time: None,
         finish_time: None,
         token_count: 10,
+        input_token_count: 0,
+        output_token_count: 0,
         generation_group_id: Some(group_id.clone()),
         parent_group_id: None,
         tool_calls_json: None,
+        first_token_time: None,
+        ttft_ms: None,
     };
 
     let response_msg = Message {
@@ -40,9 +44,13 @@ async fn test_regenerate_logic_validation() {
         start_time: None,
         finish_time: None,
         token_count: 5,
+        input_token_count: 0,
+        output_token_count: 0,
         generation_group_id: Some(group_id.clone()),
         parent_group_id: None,
         tool_calls_json: None,
+        first_token_time: None,
+        ttft_ms: None,
     };
 
     // 验证消息结构

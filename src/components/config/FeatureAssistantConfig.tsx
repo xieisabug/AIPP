@@ -1,5 +1,5 @@
 import React, { useCallback, useState, useMemo, useEffect } from "react";
-import { MessageSquare, Eye, FolderOpen, Settings, Wifi, Monitor, Keyboard, Power } from "lucide-react";
+import { MessageSquare, Eye, FolderOpen, Settings, Wifi, Monitor, Keyboard, Power, Info } from "lucide-react";
 import { useForm } from "react-hook-form";
 
 // 导入公共组件
@@ -78,6 +78,13 @@ const FeatureAssistantConfig: React.FC = () => {
             icon: <Power className="h-5 w-5" />,
             code: "other",
         },
+        {
+            id: "about",
+            name: "关于",
+            description: "查看应用信息和检查更新",
+            icon: <Info className="h-5 w-5" />,
+            code: "about",
+        },
     ];
 
     const [selectedFeature, setSelectedFeature] = useState<FeatureItem>(featureList[0]);
@@ -141,6 +148,10 @@ const FeatureAssistantConfig: React.FC = () => {
         defaultValues: {
             autostart_enabled: "false",
         },
+    });
+
+    const aboutForm = useForm({
+        defaultValues: {},
     });
 
     // 监听 featureConfig 变化，更新表单值
@@ -339,6 +350,7 @@ const FeatureAssistantConfig: React.FC = () => {
                     dataFolderForm,
                     shortcutsForm,
                     otherForm,
+                    aboutForm,
                 }}
                 versionManager={versionManager}
                 onSaveDisplay={handleSaveDisplayConfig}
@@ -347,7 +359,7 @@ const FeatureAssistantConfig: React.FC = () => {
                 onSaveShortcuts={handleSaveShortcutsConfig}
             />
         </div>
-    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, otherForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig]);
+    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, otherForm, aboutForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig]);
 
     return (
         <ConfigPageLayout

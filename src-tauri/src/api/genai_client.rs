@@ -63,7 +63,7 @@ pub fn infer_adapter_kind_simple(api_type: &str) -> AdapterKind {
         "deepseek" => AdapterKind::DeepSeek,
         "ollama" => AdapterKind::Ollama,
         "github_copilot" => AdapterKind::Copilot, // Copilot 使用 OpenAI 兼容 API
-        _ => AdapterKind::OpenAI, // 默认
+        _ => AdapterKind::OpenAI,                 // 默认
     }
 }
 

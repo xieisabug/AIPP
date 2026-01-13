@@ -8,30 +8,26 @@ impl DuckDuckGoEngine {
     pub fn display_name() -> &'static str {
         "DuckDuckGo"
     }
-    
+
     pub fn homepage_url() -> &'static str {
         "https://duckduckgo.com"
     }
-    
+
     pub fn search_input_selectors() -> Vec<&'static str> {
         vec![
             "#search_form_input",
             "input[name='q']",
-            "#searchbox_input", 
+            "#searchbox_input",
             ".js-search-input",
             "input[placeholder*='搜索']",
             "input[placeholder*='Search']",
         ]
     }
-    
+
     pub fn search_button_selectors() -> Vec<&'static str> {
-        vec![
-            "input[type='submit']",
-            "#search_button_homepage",
-            ".search-wrap__button",
-        ]
+        vec!["input[type='submit']", "#search_button_homepage", ".search-wrap__button"]
     }
-    
+
     pub fn default_wait_selectors() -> Vec<String> {
         vec![
             "#links".to_string(),
@@ -40,18 +36,15 @@ impl DuckDuckGoEngine {
             "#web_content".to_string(),
         ]
     }
-    
-    
+
     /// 解析DuckDuckGo搜索结果HTML，提取结构化信息（HTML解析器版）
     pub fn parse_search_results(html: &str, query: &str) -> SearchResults {
         let mut items = Vec::new();
         let document = Html::parse_document(html);
 
         // 结果卡片选择器（DuckDuckGo通常使用 .result 类）
-        let selectors = [
-            Selector::parse("div.result").ok(),
-            Selector::parse("article.result").ok(),
-        ];
+        let selectors =
+            [Selector::parse("div.result").ok(), Selector::parse("article.result").ok()];
 
         let mut rank = 1usize;
         for sel in selectors.iter().flatten() {
@@ -59,10 +52,14 @@ impl DuckDuckGoEngine {
                 if let Some(item) = Self::parse_card_element(card, rank) {
                     items.push(item);
                     rank += 1;
-                    if items.len() >= 20 { break; }
+                    if items.len() >= 20 {
+                        break;
+                    }
                 }
             }
-            if !items.is_empty() { break; }
+            if !items.is_empty() {
+                break;
+            }
         }
 
         SearchResults {
@@ -75,7 +72,7 @@ impl DuckDuckGoEngine {
             search_time_ms: None,
         }
     }
-    
+
     /// 从结果卡片元素中抽取一个条目
     fn parse_card_element(card: scraper::ElementRef<'_>, rank: usize) -> Option<SearchItem> {
         // 标题：DuckDuckGo 通常使用 h2 a 或 .result__title 类
@@ -83,10 +80,13 @@ impl DuckDuckGoEngine {
             .unwrap_or_else(|| format!("DuckDuckGo Result {}", rank));
 
         // URL：寻找标题链接
-        let url = Self::first_href_in(card, &["h2 a", "h3 a", "a.result__title", "a[href]"]).unwrap_or_default();
+        let url = Self::first_href_in(card, &["h2 a", "h3 a", "a.result__title", "a[href]"])
+            .unwrap_or_default();
 
         // 摘要：DuckDuckGo 使用 .result__snippet 类或其他描述元素
-        let snippet = Self::first_text_in(card, &["span.result__snippet", "div.result__snippet", "p", "div"]).unwrap_or_default();
+        let snippet =
+            Self::first_text_in(card, &["span.result__snippet", "div.result__snippet", "p", "div"])
+                .unwrap_or_default();
 
         if !title.trim().is_empty() && !url.trim().is_empty() {
             Some(SearchItem {
@@ -108,7 +108,9 @@ impl DuckDuckGoEngine {
                 if let Some(node) = root.select(&selector).next() {
                     let text = node.text().collect::<String>();
                     let text = text.trim();
-                    if !text.is_empty() { return Some(text.to_string()); }
+                    if !text.is_empty() {
+                        return Some(text.to_string());
+                    }
                 }
             }
         }
@@ -220,7 +222,7 @@ mod tests {
         assert_eq!(results.query, "test");
         assert_eq!(results.search_engine, "DuckDuckGo");
         assert!(!results.items.is_empty());
-        
+
         let first = &results.items[0];
         assert_eq!(first.title, "Test Title");
         assert_eq!(first.url, "https://example.com");

@@ -39,6 +39,7 @@ fn create_mcp_test_db() -> Connection {
             is_enabled BOOLEAN NOT NULL DEFAULT 1,
             is_builtin BOOLEAN NOT NULL DEFAULT 0,
             is_deletable BOOLEAN NOT NULL DEFAULT 1,
+            proxy_enabled BOOLEAN NOT NULL DEFAULT 0,
             created_time DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
         [],
@@ -132,21 +133,21 @@ fn create_mcp_db() -> MCPDatabase {
 }
 
 /// 创建测试用的 MCP Server 并返回其 ID
-/// 参数顺序: name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, is_builtin, is_deletable
 fn create_test_server(db: &MCPDatabase) -> i64 {
     db.upsert_mcp_server_with_builtin(
         "test-server",
         Some("Test Server Description"),
         "stdio",
         Some("node server.js"),
-        None,  // environment_variables
-        None,  // headers
-        None,  // url
+        None, // environment_variables
+        None, // headers
+        None, // url
         Some(30000),
         false,
         true,
         false,
         true,  // is_deletable
+        false, // proxy_enabled
     )
     .unwrap()
 }
@@ -167,7 +168,6 @@ fn test_mcp_server_crud() {
     let db = create_mcp_db();
 
     // Create (via upsert)
-    // 参数: name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, is_builtin, is_deletable
     let id = db
         .upsert_mcp_server_with_builtin(
             "my-server",
@@ -175,13 +175,14 @@ fn test_mcp_server_crud() {
             "stdio",
             Some("node index.js"),
             Some("KEY=value"),
-            None,  // headers
-            None,  // url
+            None, // headers
+            None, // url
             Some(60000),
             false,
             true,
             false,
             true,  // is_deletable
+            false, // proxy_enabled
         )
         .unwrap();
     assert!(id > 0);
@@ -202,20 +203,20 @@ fn test_mcp_server_crud() {
     assert_eq!(servers.len(), 1);
 
     // Update
-    // 参数: id, name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, is_builtin
     db.update_mcp_server_with_builtin(
         id,
         "my-server-updated",
         Some("Updated Desc"),
         "sse",
-        None,  // command
-        None,  // environment_variables
-        None,  // headers
+        None, // command
+        None, // environment_variables
+        None, // headers
         Some("http://localhost:3000"),
         Some(90000),
         true,
         false,
         true,
+        false, // proxy_enabled
     )
     .unwrap();
 
@@ -249,11 +250,15 @@ fn test_mcp_server_upsert() {
             Some("Original"),
             "stdio",
             Some("cmd1"),
-            None, None, None, None,
+            None,
+            None,
+            None,
+            None,
             false,
             true,
             false,
             true,  // is_deletable
+            false, // proxy_enabled
         )
         .unwrap();
 
@@ -264,11 +269,15 @@ fn test_mcp_server_upsert() {
             Some("Updated"),
             "sse",
             Some("cmd2"),
-            None, None, None, None,
+            None,
+            None,
+            None,
+            None,
             false,
             false,
             true,
             true,  // is_deletable
+            false, // proxy_enabled
         )
         .unwrap();
 
@@ -550,8 +559,7 @@ fn test_mcp_tool_call_atomic_transition() {
     let db = create_mcp_db();
     let server_id = create_test_server(&db);
 
-    let tool_call =
-        db.create_mcp_tool_call(1, None, server_id, "server", "tool", "{}").unwrap();
+    let tool_call = db.create_mcp_tool_call(1, None, server_id, "server", "tool", "{}").unwrap();
 
     // pending -> executing
     let transitioned = db.mark_mcp_tool_call_executing_if_pending(tool_call.id).unwrap();
@@ -671,12 +679,40 @@ fn test_mcp_server_empty_name() {
     let db = create_mcp_db();
 
     let id1 = db
-        .upsert_mcp_server_with_builtin("", Some("Empty Name"), "stdio", None, None, None, None, None, false, true, false, true)
+        .upsert_mcp_server_with_builtin(
+            "",
+            Some("Empty Name"),
+            "stdio",
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false,
+            true,
+            false,
+        )
         .unwrap();
 
     // 同名 upsert
     let id2 = db
-        .upsert_mcp_server_with_builtin("", Some("Updated"), "sse", None, None, None, None, None, false, false, false, true)
+        .upsert_mcp_server_with_builtin(
+            "",
+            Some("Updated"),
+            "sse",
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            true,
+            false,
+        )
         .unwrap();
 
     assert_eq!(id1, id2);
@@ -694,7 +730,21 @@ fn test_mcp_very_long_text() {
     let long_desc = "D".repeat(10000);
 
     let id = db
-        .upsert_mcp_server_with_builtin(&long_name, Some(&long_desc), "stdio", None, None, None, None, None, false, true, false, true)
+        .upsert_mcp_server_with_builtin(
+            &long_name,
+            Some(&long_desc),
+            "stdio",
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false,
+            true,
+            false,
+        )
         .unwrap();
 
     let server = db.get_mcp_server(id).unwrap();
@@ -713,7 +763,21 @@ fn test_mcp_special_characters() {
 
     // 中文和 Emoji
     let id = db
-        .upsert_mcp_server_with_builtin("搜索服务 🔍", Some("网络搜索 ✨"), "stdio", None, None, None, None, None, false, true, false, true)
+        .upsert_mcp_server_with_builtin(
+            "搜索服务 🔍",
+            Some("网络搜索 ✨"),
+            "stdio",
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false,
+            true,
+            false,
+        )
         .unwrap();
 
     let server = db.get_mcp_server(id).unwrap();
@@ -722,7 +786,21 @@ fn test_mcp_special_characters() {
 
     // SQL 注入尝试
     let id2 = db
-        .upsert_mcp_server_with_builtin("'; DROP TABLE mcp_server; --", Some("Injection test"), "stdio", None, None, None, None, None, false, true, false, true)
+        .upsert_mcp_server_with_builtin(
+            "'; DROP TABLE mcp_server; --",
+            Some("Injection test"),
+            "stdio",
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false,
+            true,
+            false,
+        )
         .unwrap();
     assert!(id2 > 0);
 
@@ -740,8 +818,7 @@ fn test_mcp_tool_call_invalid_transition() {
     let db = create_mcp_db();
     let server_id = create_test_server(&db);
 
-    let tool_call =
-        db.create_mcp_tool_call(1, None, server_id, "server", "tool", "{}").unwrap();
+    let tool_call = db.create_mcp_tool_call(1, None, server_id, "server", "tool", "{}").unwrap();
 
     // pending -> executing -> success
     db.update_mcp_tool_call_status(tool_call.id, "executing", None, None).unwrap();
@@ -770,13 +847,18 @@ fn test_mcp_server_transport_types() {
         let id = db
             .upsert_mcp_server_with_builtin(
                 &format!("server-{}", transport),
-                Some(&format!("{} server", transport)),  // 提供描述，避免 NULL
+                Some(&format!("{} server", transport)), // 提供描述，避免 NULL
                 transport,
-                None, None, None, None, None,
+                None,
+                None,
+                None,
+                None,
+                None,
                 false,
                 true,
                 *transport == "builtin",
-                true, // is_deletable
+                true,  // is_deletable
+                false, // proxy_enabled
             )
             .unwrap();
 
@@ -798,8 +880,7 @@ fn test_mcp_tool_call_error_handling() {
     let db = create_mcp_db();
     let server_id = create_test_server(&db);
 
-    let tool_call =
-        db.create_mcp_tool_call(1, None, server_id, "server", "tool", "{}").unwrap();
+    let tool_call = db.create_mcp_tool_call(1, None, server_id, "server", "tool", "{}").unwrap();
 
     // 更新为 failed 并携带错误信息
     db.update_mcp_tool_call_status(

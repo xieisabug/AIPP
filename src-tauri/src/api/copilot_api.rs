@@ -72,8 +72,7 @@ pub async fn start_github_copilot_device_flow(
     // 1. 请求 device code
     let client = if let Some(proxy_url) = &network_proxy {
         info!(proxy_url = %proxy_url, "[Copilot] Using network proxy");
-        let proxy = reqwest::Proxy::all(proxy_url)
-            .map_err(|e| format!("代理配置失败: {}", e))?;
+        let proxy = reqwest::Proxy::all(proxy_url).map_err(|e| format!("代理配置失败: {}", e))?;
         reqwest::Client::builder()
             .proxy(proxy)
             .build()
@@ -170,8 +169,7 @@ pub async fn poll_github_copilot_token(
 
     let client = if let Some(proxy_url) = &network_proxy {
         info!(proxy_url = %proxy_url, "[Copilot] Using network proxy for polling");
-        let proxy = reqwest::Proxy::all(proxy_url)
-            .map_err(|e| format!("代理配置失败: {}", e))?;
+        let proxy = reqwest::Proxy::all(proxy_url).map_err(|e| format!("代理配置失败: {}", e))?;
         reqwest::Client::builder()
             .proxy(proxy)
             .build()

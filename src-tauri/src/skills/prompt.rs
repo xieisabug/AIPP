@@ -20,10 +20,7 @@ pub async fn collect_skills_info_for_assistant(
 ) -> Result<SkillsInfoForAssistant, AppError> {
     let enabled_skills = get_enabled_assistant_skills_internal(app_handle, assistant_id).await?;
 
-    debug!(
-        enabled_skills_count = enabled_skills.len(),
-        "Collected skills info for assistant"
-    );
+    debug!(enabled_skills_count = enabled_skills.len(), "Collected skills info for assistant");
 
     Ok(SkillsInfoForAssistant { enabled_skills })
 }
@@ -78,10 +75,7 @@ pub async fn format_skills_prompt(
         skills_content.push_str("---\n\n");
     }
 
-    info!(
-        skills_count = skills_info.enabled_skills.len(),
-        "Formatted skills prompt"
-    );
+    info!(skills_count = skills_info.enabled_skills.len(), "Formatted skills prompt");
 
     format!("{}\n{}{}", assistant_prompt_result, skills_header, skills_content)
 }

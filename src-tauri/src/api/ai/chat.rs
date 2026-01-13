@@ -1489,8 +1489,8 @@ async fn attempt_stream_chat(
 
     let mut current_output_type: OutputType = OutputType::None;
     let mut reasoning_start_time: Option<chrono::DateTime<chrono::Utc>> = None;
-    let mut response_start_time: Option<chrono::DateTime<chrono::Utc>> =
-        Some(stream_request_start_time);
+    let mut reasoning_end_time: Option<chrono::DateTime<chrono::Utc>> = None; // 记录 reasoning 结束时间
+    let mut response_start_time: Option<chrono::DateTime<chrono::Utc>> = None; // 改为 None，在创建 response 时动态确定
     let mut response_first_token_time: Option<chrono::DateTime<chrono::Utc>> = None; // 首字到达时间
     let mut first_any_token_time: Option<chrono::DateTime<chrono::Utc>> = None; // 任意类型首字到达时间（用于 TPS 计算备用）
 
@@ -1518,6 +1518,10 @@ async fn attempt_stream_chat(
                             if let (Some(msg_id), Some(start_time)) =
                                 (reasoning_message_id, reasoning_start_time)
                             {
+                                // 记录 reasoning 结束时间，用于后续 response 创建时使用
+                                let now = chrono::Utc::now();
+                                reasoning_end_time = Some(now);
+
                                 if let Err(e) = super::conversation::handle_message_type_end(
                                     msg_id,
                                     "reasoning",
@@ -1543,10 +1547,15 @@ async fn attempt_stream_chat(
                         response_content.push_str(&chunk.content);
 
                         if response_message_id.is_none() {
-                            response_start_time.get_or_insert(stream_request_start_time);
+                            // 如果有 reasoning 结束时间，使用它作为 response 的 start_time
+                            // 这样可以确保 reasoning 的 created_time 早于 response 的 created_time
+                            let actual_start_time = reasoning_end_time.unwrap_or_else(|| {
+                                response_start_time.get_or_insert(stream_request_start_time);
+                                response_start_time.unwrap()
+                            });
+                            response_start_time = Some(actual_start_time);
 
-                            let start_time =
-                                response_start_time.clone().unwrap_or(stream_request_start_time);
+                            let start_time = actual_start_time;
                             let ttft_ms = response_first_token_time.as_ref().map(|ft| {
                                 (ft.timestamp_millis() - start_time.timestamp_millis()).max(0)
                             });
@@ -1876,6 +1885,11 @@ async fn attempt_stream_chat(
                                 if let (Some(msg_id), Some(start_time)) =
                                     (reasoning_message_id, reasoning_start_time)
                                 {
+                                    // 记录 reasoning 结束时间
+                                    if reasoning_end_time.is_none() {
+                                        reasoning_end_time = Some(chrono::Utc::now());
+                                    }
+
                                     if let Err(e) = super::conversation::handle_message_type_end(
                                         msg_id,
                                         "reasoning",
