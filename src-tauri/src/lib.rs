@@ -70,7 +70,7 @@ use crate::artifacts::env_installer::{
 };
 use crate::artifacts::preview_router::{
     confirm_environment_install, preview_react_component, retry_preview_after_install,
-    run_artifacts,
+    run_artifacts, restore_artifact_preview,
 };
 use crate::artifacts::react_preview::{
     close_react_preview, create_react_preview, create_react_preview_for_artifact,
@@ -466,6 +466,7 @@ pub fn run() {
             update_conversation,
             update_message_content,
             run_artifacts,
+            restore_artifact_preview,
             save_artifact_to_collection,
             get_artifacts_collection,
             get_artifact_by_id,

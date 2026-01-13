@@ -20,6 +20,9 @@ import { useTheme } from '../hooks/useTheme';
 import { useArtifactEvents, ArtifactData, EnvironmentCheckData } from '../hooks/useArtifactEvents';
 import { Button } from '@/components/ui/button';
 
+// localStorage 键名：用于缓存当前 artifact 信息，实现刷新后恢复
+const ARTIFACT_CACHE_KEY = 'artifact_preview_cache';
+
 /**
  * 仅用于 "artifact_preview" 窗口。
  * - 监听后端发出的 artifact-log / artifact-error / artifact-success 事件并展示。
@@ -75,9 +78,103 @@ export default function ArtifactPreviewWindow() {
         currentInputStrRef.current = currentInputStr;
     }, [currentLang, currentInputStr]);
 
+    // ====== 缓存相关函数 ======
+
+    // 保存当前 artifact 到 localStorage 缓存
+    const saveArtifactToCache = useCallback((type: string, code: string) => {
+        try {
+            const cache = {
+                type,
+                code,
+                timestamp: Date.now(),
+            };
+            localStorage.setItem(ARTIFACT_CACHE_KEY, JSON.stringify(cache));
+            console.log('🔧 [ArtifactPreviewWindow] 已缓存 artifact:', type);
+        } catch (e) {
+            console.warn('缓存 artifact 失败:', e);
+        }
+    }, []);
+
+    // 从缓存加载 artifact（刷新恢复）
+    const loadArtifactFromCache = useCallback(async () => {
+        try {
+            const cached = localStorage.getItem(ARTIFACT_CACHE_KEY);
+            if (!cached) return false;
+
+            const cache = JSON.parse(cached);
+
+            // 检查缓存是否过期（24小时）
+            const CACHE_EXPIRY = 24 * 60 * 60 * 1000;
+            if (Date.now() - cache.timestamp > CACHE_EXPIRY) {
+                localStorage.removeItem(ARTIFACT_CACHE_KEY);
+                return false;
+            }
+
+            console.log('🔧 [ArtifactPreviewWindow] 从缓存恢复 artifact:', cache.type);
+
+            // 调用后端恢复命令
+            const result = await invoke<string | null>('restore_artifact_preview');
+            return result !== null;
+        } catch (e) {
+            console.warn('从缓存恢复 artifact 失败:', e);
+            return false;
+        }
+    }, []);
+
+    // 标记是否已尝试从缓存恢复，防止无限循环
+    const hasTriedRestoreRef = useRef(false);
+
+    // ====== 重置函数 ======
+
+    // 完整的状态重置函数 - 在切换 artifact 时调用
+    const resetPreviewState = useCallback(async () => {
+        console.log('🔧 [ArtifactPreviewWindow] 重置预览状态');
+
+        // 设置恢复标记，防止切换 artifact 时触发缓存恢复
+        hasTriedRestoreRef.current = true;
+
+        // 1. 清理旧的预览服务器
+        const currentType = previewTypeRef.current;
+        if (currentType === 'vue') {
+            try {
+                await invoke('close_vue_preview', { previewId: 'vue' });
+                console.log('🔧 已关闭 Vue 预览服务器');
+            } catch (e) {
+                console.warn('关闭 Vue 预览失败:', e);
+            }
+        } else if (currentType === 'react') {
+            try {
+                await invoke('close_react_preview', { previewId: 'react' });
+                console.log('🔧 已关闭 React 预览服务器');
+            } catch (e) {
+                console.warn('关闭 React 预览失败:', e);
+            }
+        }
+
+        // 2. 清除所有内容状态
+        setPreviewUrl(null);
+        setPreviewType(null);
+        setMermaidContent('');
+        setHtmlContent('');
+        setMarkdownContent('');
+        setDrawioXmlContent('');
+        setOriginalCode('');
+        setIsPreviewReady(false);
+
+        // 3. 切换到日志视图（显示加载状态）
+        setCurrentView('logs');
+
+        console.log('🔧 [ArtifactPreviewWindow] 状态重置完成');
+    }, []);
+
+    // ====== 事件处理函数 ======
+
     // 处理 artifact 数据
     const handleArtifactData = useCallback((data: ArtifactData) => {
         if (data.original_code && data.type) {
+            // 保存到缓存，用于刷新恢复
+            saveArtifactToCache(data.type, data.original_code);
+
             switch (data.type) {
                 case 'vue':
                 case 'react':
@@ -119,7 +216,7 @@ export default function ArtifactPreviewWindow() {
             }
             setOriginalCode(data.original_code);
         }
-    }, []);
+    }, [saveArtifactToCache]);
 
     // 处理重定向
     const handleRedirect = useCallback((url: string) => {
@@ -192,6 +289,7 @@ export default function ArtifactPreviewWindow() {
         onEnvironmentInstallStarted: handleEnvironmentInstallStarted,
         onBunInstallFinished: handleBunInstallFinished,
         onUvInstallFinished: handleUvInstallFinished,
+        onReset: resetPreviewState,
     });
 
     // 初始化 mermaid - 根据主题动态配置
@@ -213,6 +311,25 @@ export default function ArtifactPreviewWindow() {
             }
         });
     }, []);
+
+    // 组件初始化时尝试从缓存恢复（用于刷新后恢复预览）
+    // 使用 ref 防止重复执行，避免无限循环
+    useEffect(() => {
+        const initFromCache = async () => {
+            // 只在首次加载且没有任何数据时尝试恢复
+            const hasData = previewUrl || previewType || mermaidContent || htmlContent || markdownContent || drawioXmlContent;
+            if (!hasData && !artifactEvents.hasReceivedData && !hasTriedRestoreRef.current) {
+                hasTriedRestoreRef.current = true;  // 标记已尝试
+                const restored = await loadArtifactFromCache();
+                if (restored) {
+                    artifactEvents.addLog('log', '正在恢复上次的预览...');
+                }
+            }
+        };
+
+        initFromCache();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [loadArtifactFromCache]);
 
     // 自动滚动到底部
     useEffect(() => {
