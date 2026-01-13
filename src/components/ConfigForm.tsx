@@ -13,6 +13,7 @@ import { Switch } from "./ui/switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import { useModels } from "../hooks/useModels";
 import { useMcpServers } from "../hooks/useMcpServers";
+import { FolderPicker } from "./config/FolderPicker";
 
 interface ConfigFieldButton {
     text: string;
@@ -325,6 +326,16 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                         </div>
                     );
                 case "custom":
+                    // 特殊处理：ACP 工作目录使用文件夹选择器
+                    if (name === "acp_working_directory") {
+                        return (
+                            <FolderPicker
+                                value={fieldRenderData.value as string || ""}
+                                onChange={(value) => fieldRenderData.onChange(value)}
+                                placeholder="选择工作目录"
+                            />
+                        );
+                    }
                     const customElement = useMemo(() => {
                         return field.customRender ? field.customRender(fieldRenderData) : null;
                     }, [field.customRender, fieldRenderData]);

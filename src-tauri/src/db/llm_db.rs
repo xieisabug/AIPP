@@ -444,6 +444,17 @@ impl LLMDatabase {
             "INSERT OR IGNORE INTO llm_provider (id, name, api_type, description, is_official) VALUES (30, 'DeepSeek', 'deepseek', 'DeepSeek API', 1);",
             [],
         )?;
+        // 添加 ACP (Agent Client Protocol) 提供商
+        self.conn.execute(
+            "INSERT OR IGNORE INTO llm_provider (id, name, api_type, description, is_official, is_enabled) VALUES (40, 'Claude Code', 'claude_code_acp', 'Claude Code Agent via ACP', 1, 1);",
+            [],
+        )?;
+        // 为 ACP 提供商添加占位模型
+        let acp_provider_id: i64 = 40;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO llm_model (name, llm_provider_id, code, description, vision_support, audio_support, video_support) VALUES ('Claude Code Agent', ?, 'claude-code', 'Claude Code via ACP Protocol', 0, 0, 0);",
+            [&acp_provider_id],
+        )?;
 
         Ok(())
     }

@@ -1,4 +1,5 @@
 use super::assistant_api::AssistantDetail;
+use crate::api::ai::acp::{execute_acp_session, extract_acp_config};
 use crate::api::ai::chat::{
     extract_assistant_from_message, handle_non_stream_chat as ai_handle_non_stream_chat,
     handle_stream_chat as ai_handle_stream_chat,
@@ -322,6 +323,80 @@ pub async fn ask_ai(
     let model_configs = model_detail.configs.clone(); // 提前获取模型配置
     let provider_api_type = model_detail.provider.api_type.clone(); // 提前获取API类型
     let assistant_model_configs = assistant_detail.model_configs.clone(); // 提前获取助手模型配置
+
+    // 检查是否是 ACP 提供商
+    if provider_api_type == "claude_code_acp" {
+        // 提取 ACP 配置
+        let acp_config = extract_acp_config(&assistant_model_configs)?;
+
+        // 创建初始响应消息
+        let response_message = add_message(
+            &app_handle,
+            None,
+            conversation_id,
+            "response".to_string(),
+            String::new(), // 初始为空，通过流式更新
+            Some(model_id),
+            Some(model_code.clone()),
+            Some(chrono::Utc::now()),
+            None,
+            0,
+            None,
+            None,
+        )?;
+
+        // 发送消息添加事件
+        let add_event = ConversationEvent {
+            r#type: "message_add".to_string(),
+            data: serde_json::to_value(MessageAddEvent {
+                message_id: response_message.id,
+                message_type: "response".to_string(),
+            })
+            .unwrap(),
+        };
+        let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
+
+        // Clone prompt before moving into async block
+        let prompt_clone = processed_request.prompt.clone();
+
+        // 在后台执行 ACP 会话
+        // 注意：ACP 使用 !Send futures，需要在独立线程中运行 LocalSet
+        let acp_task = tokio::task::spawn_blocking(move || {
+            // Create a new runtime for this thread with LocalSet support
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+
+            rt.block_on(async move {
+                let local_set = tokio::task::LocalSet::new();
+                local_set
+                    .run_until(async move {
+                        let result = execute_acp_session(
+                            app_handle_clone,
+                            window_clone,
+                            conversation_id,
+                            response_message.id,
+                            &prompt_clone,
+                            acp_config,
+                        )
+                        .await;
+
+                        if let Err(e) = result {
+                            error!(error = %e, "ACP session failed");
+                            // TODO: 发送错误事件到 UI
+                        }
+
+                        Ok::<(), anyhow::Error>(())
+                    })
+                    .await
+            })
+        });
+
+        message_token_manager.store_task_handle(conversation_id, acp_task).await;
+
+        return Ok(AiResponse {
+            conversation_id,
+            request_prompt_result_with_context: processed_request.prompt,
+        });
+    }
 
     let task_handle = tokio::spawn(async move {
         // 直接创建数据库连接（避免线程安全问题）

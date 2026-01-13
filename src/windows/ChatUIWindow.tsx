@@ -19,6 +19,8 @@ import { Menu, Plus } from "lucide-react";
 import { appDataDir } from "@tauri-apps/api/path";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+// 导入内置 ACP 插件
+import acpAssistantTypePlugin from "../plugins/acp/AcpAssistantTypePlugin";
 
 function ChatUIWindow() {
     // 集成主题系统
@@ -126,6 +128,13 @@ function ChatUIWindow() {
                 code: "deepresearch",
                 pluginType: ["assistantType"],
                 instance: null,
+            },
+            // 内置 ACP 插件
+            {
+                name: "ACP Assistant Type",
+                code: "acp",
+                pluginType: ["assistantType"],
+                instance: acpAssistantTypePlugin,
             },
         ];
 
