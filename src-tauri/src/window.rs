@@ -589,6 +589,38 @@ pub fn awaken_aipp(app_handle: &AppHandle) {
     }
 }
 
+/// 内部函数：显示配置窗口（用于托盘菜单）
+pub fn open_config_window_inner(_app: &AppHandle, window: &tauri::WebviewWindow) {
+    #[cfg(desktop)]
+    {
+        if window.is_minimized().unwrap_or(false) {
+            let _ = window.unminimize();
+        }
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// 内部函数：显示聊天窗口（用于托盘菜单）
+pub fn open_chat_ui_window_inner(app: &AppHandle, window: &tauri::WebviewWindow) {
+    #[cfg(desktop)]
+    {
+        if window.is_minimized().unwrap_or(false) {
+            let _ = window.unminimize();
+        }
+        // 首次显示时最大化
+        if !window.is_visible().unwrap_or(false) {
+            let _ = window.maximize();
+        }
+        let _ = window.show();
+        let _ = window.set_focus();
+        // 显示聊天窗口时隐藏 Ask 窗口
+        if let Some(ask_window) = app.get_webview_window("ask") {
+            let _ = ask_window.hide();
+        }
+    }
+}
+
 // Create artifact collections window to manage saved artifacts
 fn create_artifact_collections_window(app_handle: &AppHandle) {
     #[cfg(desktop)]

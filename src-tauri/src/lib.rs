@@ -115,12 +115,11 @@ use crate::api::skill_api::{
     update_assistant_skill_config,
 };
 use crate::window::{
-    awaken_aipp, create_ask_window, create_chat_ui_window, create_chat_ui_window_hidden,
-    create_config_window_hidden, ensure_hidden_search_window, handle_open_ask_window,
-    open_artifact_collections_window, open_artifact_preview_window, open_chat_ui_window,
-    open_config_window, open_plugin_store_window, open_plugin_window,
+    create_ask_window, create_chat_ui_window_hidden, create_config_window_hidden,
+    ensure_hidden_search_window, handle_open_ask_window, open_artifact_collections_window,
+    open_artifact_preview_window, open_chat_ui_window, open_chat_ui_window_inner,
+    open_config_window, open_config_window_inner, open_plugin_store_window, open_plugin_window,
 };
-use chrono::Local;
 use db::conversation_db::ConversationDatabase;
 use db::database_upgrade;
 use db::plugin_db::PluginDatabase;
@@ -135,7 +134,8 @@ use tauri::path::BaseDirectory;
 use tauri::Emitter;
 #[cfg(desktop)]
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder},
+    menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconEvent},
     Manager, RunEvent,
 };
 #[cfg(mobile)]
@@ -324,22 +324,56 @@ pub fn run() {
             // 系统托盘菜单和图标初始化
             #[cfg(desktop)]
             {
-                let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
-                let show = MenuItemBuilder::with_id("show", "显示").build(app)?;
-                let tray_menu = MenuBuilder::new(app).items(&[&show, &quit]).build()?;
+                let ask_item = MenuItemBuilder::with_id("ask", "Ask").build(app)?;
+                let chat_item = MenuItemBuilder::with_id("chat", "Chat").build(app)?;
+                let config_item = MenuItemBuilder::with_id("config", "配置").build(app)?;
+                let separator = PredefinedMenuItem::separator(app)?;
+                let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;
+                let tray_menu = MenuBuilder::new(app)
+                    .items(&[&ask_item, &chat_item, &config_item, &separator, &quit_item])
+                    .build()?;
 
                 let tray = app.tray_by_id("aipp").unwrap();
                 tray.set_menu(Some(tray_menu))?;
+
+                // 左键点击直接打开 Ask 窗口
+                let app_handle_for_click = app_handle.clone();
+                tray.on_tray_icon_event(move |_app, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        handle_open_ask_window(&app_handle_for_click);
+                    }
+                });
+
+                // 右键菜单事件处理
                 tray.on_menu_event(move |app, event| match event.id().as_ref() {
+                    "ask" => {
+                        handle_open_ask_window(app);
+                    }
+                    "chat" => {
+                        if let Some(chat_window) = app.get_webview_window("chat_ui") {
+                            open_chat_ui_window_inner(app, &chat_window);
+                        } else {
+                            crate::window::create_chat_ui_window(app);
+                        }
+                    }
+                    "config" => {
+                        if let Some(config_window) = app.get_webview_window("config") {
+                            open_config_window_inner(app, &config_window);
+                        } else {
+                            crate::window::create_config_window(app);
+                        }
+                    }
                     "quit" => {
                         std::process::exit(0);
                     }
-                    "show" => {
-                        awaken_aipp(&app);
-                    }
                     _ => {}
                 });
-                let _ = tray.set_show_menu_on_left_click(true);
+                let _ = tray.set_show_menu_on_left_click(false);
             }
 
             let resource_path = app.path().resolve(
