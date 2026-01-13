@@ -10,12 +10,10 @@ use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
 use crate::api::ai_api::{sanitize_tool_name, tool_result_continue_ask_ai_impl};
 use crate::db::conversation_db::{ConversationDatabase, Repository};
-use crate::mcp::builtin_mcp::{execute_aipp_builtin_tool, is_builtin_mcp_call};
 use crate::db::mcp_db::{MCPDatabase, MCPServer, MCPToolCall};
+use crate::mcp::builtin_mcp::{execute_aipp_builtin_tool, is_builtin_mcp_call};
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use anyhow::{anyhow, bail, Context, Result};
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use rmcp::{
     model::{CallToolRequestParam, ClientCapabilities, ClientInfo, Implementation},
@@ -26,6 +24,8 @@ use rmcp::{
     ServiceExt,
 };
 use serde_json::Map as JsonMap;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -288,8 +288,7 @@ pub async fn create_mcp_tool_call(
     let server = servers
         .iter()
         .find(|s| {
-            s.is_enabled
-                && (s.name == server_name || sanitize_tool_name(&s.name) == server_name)
+            s.is_enabled && (s.name == server_name || sanitize_tool_name(&s.name) == server_name)
         })
         .ok_or_else(|| format!("服务器 '{}' 未找到或已禁用", server_name))?;
 
@@ -403,8 +402,14 @@ pub async fn execute_mcp_tool_call(
     // 执行工具
     let cancel_token = register_cancel_token(call_id).await;
     let execution_result = {
-        let exec_future =
-            execute_tool_by_transport(&app_handle, &feature_config_state, &server, &tool_call.tool_name, &tool_call.parameters, Some(tool_call.conversation_id));
+        let exec_future = execute_tool_by_transport(
+            &app_handle,
+            &feature_config_state,
+            &server,
+            &tool_call.tool_name,
+            &tool_call.parameters,
+            Some(tool_call.conversation_id),
+        );
         tokio::select! {
             _ = cancel_token.cancelled() => Err("Cancelled by user".to_string()),
             res = exec_future => res,
@@ -454,9 +459,8 @@ pub async fn cancel_mcp_tool_calls_by_conversation(
     conversation_id: i64,
 ) -> std::result::Result<Vec<i64>, String> {
     let db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    let calls = db
-        .get_mcp_tool_calls_by_conversation(conversation_id)
-        .map_err(|e| e.to_string())?;
+    let calls =
+        db.get_mcp_tool_calls_by_conversation(conversation_id).map_err(|e| e.to_string())?;
 
     let mut cancelled_ids = Vec::new();
     for call in calls.into_iter().filter(|c| c.status == "executing" || c.status == "pending") {
@@ -496,22 +500,15 @@ pub async fn stop_mcp_tool_call(
     let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
     // 获取当前工具调用状态
-    let current_call = db.get_mcp_tool_call(call_id)
-        .map_err(|e| e.to_string())?;
+    let current_call = db.get_mcp_tool_call(call_id).map_err(|e| e.to_string())?;
 
     // 只对 pending 或 executing 状态的工具进行停止操作
     if current_call.status == "pending" || current_call.status == "executing" {
-        db.update_mcp_tool_call_status(
-            call_id,
-            "failed",
-            None,
-            Some("Stopped by user")
-        )
-        .map_err(|e| e.to_string())?;
+        db.update_mcp_tool_call_status(call_id, "failed", None, Some("Stopped by user"))
+            .map_err(|e| e.to_string())?;
 
         // 3. 广播状态更新事件
-        let updated_call = db.get_mcp_tool_call(call_id)
-            .map_err(|e| e.to_string())?;
+        let updated_call = db.get_mcp_tool_call(call_id).map_err(|e| e.to_string())?;
         broadcast_mcp_tool_call_update(&app_handle, &updated_call);
     }
 
@@ -725,13 +722,17 @@ pub async fn execute_tool_by_transport(
         "sse" => execute_sse_tool(app_handle, feature_config_state, server, tool_name, parameters)
             .await
             .map_err(|e| e.to_string()),
-        "http" => execute_http_tool(app_handle, feature_config_state, server, tool_name, parameters)
-            .await
-            .map_err(|e| e.to_string()),
+        "http" => {
+            execute_http_tool(app_handle, feature_config_state, server, tool_name, parameters)
+                .await
+                .map_err(|e| e.to_string())
+        }
         // Legacy builtin type is no longer used, but keep for backward compatibility
-        "builtin" => execute_builtin_tool(app_handle, server, tool_name, parameters, conversation_id)
-            .await
-            .map_err(|e| e.to_string()),
+        "builtin" => {
+            execute_builtin_tool(app_handle, server, tool_name, parameters, conversation_id)
+                .await
+                .map_err(|e| e.to_string())
+        }
         _ => {
             let error_msg = format!("不支持的传输类型: {}", server.transport_type);
             Err(error_msg)
@@ -852,9 +853,7 @@ async fn execute_sse_tool(
             }
         }
 
-        let client = client_builder
-            .build()
-            .context("Failed to build reqwest client for SSE")?;
+        let client = client_builder.build().context("Failed to build reqwest client for SSE")?;
         // Requires rmcp feature `transport-sse-client-reqwest`
         SseClientTransport::start_with_client(
             client,
@@ -880,9 +879,7 @@ async fn execute_sse_tool(
             }
         }
 
-        let client = client_builder
-            .build()
-            .context("Failed to build reqwest client for SSE")?;
+        let client = client_builder.build().context("Failed to build reqwest client for SSE")?;
         SseClientTransport::start_with_client(
             client,
             SseClientConfig { sse_endpoint: url.as_str().into(), ..Default::default() },
@@ -1051,9 +1048,7 @@ async fn execute_http_tool(
             }
         }
 
-        let client = client_builder
-            .build()
-            .context("Failed to build reqwest client for HTTP")?;
+        let client = client_builder.build().context("Failed to build reqwest client for HTTP")?;
         StreamableHttpClientTransport::with_client(client, config)
     };
     let client_info = ClientInfo {

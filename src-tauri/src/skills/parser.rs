@@ -32,11 +32,8 @@ impl SkillParser {
         // Load additional files if specified
         let additional_files = Self::load_additional_files(file_path, &metadata.requires_files)?;
 
-        let skill_content = SkillContent {
-            identifier: identifier.to_string(),
-            content: body,
-            additional_files,
-        };
+        let skill_content =
+            SkillContent { identifier: identifier.to_string(), content: body, additional_files };
 
         Ok((metadata, skill_content))
     }
@@ -97,10 +94,7 @@ impl SkillParser {
 
         // Fallback name from filename if not specified
         if metadata.name.is_none() {
-            metadata.name = file_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_string());
+            metadata.name = file_path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string());
         }
 
         Ok(metadata)
@@ -145,10 +139,7 @@ impl SkillParser {
 
     /// Create metadata from content when no frontmatter exists
     fn metadata_from_content(content: &str, file_path: &Path) -> SkillMetadata {
-        let name = file_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string());
+        let name = file_path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string());
 
         // Try to extract description from first paragraph or heading
         let description = Self::extract_first_paragraph(content);
@@ -203,16 +194,10 @@ impl SkillParser {
             if file_path.exists() {
                 match fs::read_to_string(&file_path) {
                     Ok(content) => {
-                        files.push(SkillFile {
-                            path: relative_path.clone(),
-                            content,
-                        });
+                        files.push(SkillFile { path: relative_path.clone(), content });
                     }
                     Err(e) => {
-                        warn!(
-                            "Failed to read additional file {:?}: {}",
-                            file_path, e
-                        );
+                        warn!("Failed to read additional file {:?}: {}", file_path, e);
                     }
                 }
             } else {
@@ -251,10 +236,7 @@ This is the main content.
         let metadata = SkillParser::parse_metadata(file.path()).unwrap();
 
         assert_eq!(metadata.name, Some("code_review".to_string()));
-        assert_eq!(
-            metadata.description,
-            Some("Expert code review assistant".to_string())
-        );
+        assert_eq!(metadata.description, Some("Expert code review assistant".to_string()));
         assert_eq!(metadata.version, Some("1.0".to_string()));
         assert_eq!(metadata.author, Some("Test Author".to_string()));
         assert_eq!(metadata.tags, vec!["coding", "security", "review"]);
@@ -295,17 +277,8 @@ Body content here."#;
 
     #[test]
     fn test_parse_yaml_array() {
-        assert_eq!(
-            SkillParser::parse_yaml_array("[a, b, c]"),
-            vec!["a", "b", "c"]
-        );
-        assert_eq!(
-            SkillParser::parse_yaml_array("a, b, c"),
-            vec!["a", "b", "c"]
-        );
-        assert_eq!(
-            SkillParser::parse_yaml_array("[\"item1\", 'item2']"),
-            vec!["item1", "item2"]
-        );
+        assert_eq!(SkillParser::parse_yaml_array("[a, b, c]"), vec!["a", "b", "c"]);
+        assert_eq!(SkillParser::parse_yaml_array("a, b, c"), vec!["a", "b", "c"]);
+        assert_eq!(SkillParser::parse_yaml_array("[\"item1\", 'item2']"), vec!["item1", "item2"]);
     }
 }

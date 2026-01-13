@@ -123,10 +123,8 @@ pub async fn run_artifacts(
     // 缓存当前 artifact 信息，用于刷新恢复
     {
         let mut cache = LAST_ARTIFACT_CACHE.lock().await;
-        *cache = Some(LastArtifactCache {
-            lang: lang.to_string(),
-            input_str: input_str.to_string(),
-        });
+        *cache =
+            Some(LastArtifactCache { lang: lang.to_string(), input_str: input_str.to_string() });
         tracing::debug!("Cached artifact: lang={}, input_len={}", lang, input_str.len());
     }
 
@@ -368,7 +366,9 @@ pub async fn retry_preview_after_install(
 ///
 /// 从后端缓存中读取最后一次预览的 artifact 信息，重新执行预览流程
 #[tauri::command]
-pub async fn restore_artifact_preview(app_handle: tauri::AppHandle) -> Result<Option<String>, String> {
+pub async fn restore_artifact_preview(
+    app_handle: tauri::AppHandle,
+) -> Result<Option<String>, String> {
     let cache = LAST_ARTIFACT_CACHE.lock().await;
 
     if let Some(artifact) = cache.as_ref() {

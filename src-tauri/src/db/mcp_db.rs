@@ -17,8 +17,8 @@ pub struct MCPServer {
     pub timeout: Option<i32>,
     pub is_long_running: bool,
     pub is_enabled: bool,
-    pub is_builtin: bool, // 标识是否为内置服务器
-    pub is_deletable: bool, // 标识是否可删除（系统初始化的内置工具集不可删除）
+    pub is_builtin: bool,    // 标识是否为内置服务器
+    pub is_deletable: bool,  // 标识是否可删除（系统初始化的内置工具集不可删除）
     pub proxy_enabled: bool, // 是否使用全局网络代理
     pub created_time: String,
 }
@@ -264,15 +264,17 @@ impl MCPDatabase {
             }
             if !has_is_deletable {
                 // 添加 is_deletable 字段，默认为 1（可删除）
-                let _ = self
-                    .conn
-                    .execute("ALTER TABLE mcp_server ADD COLUMN is_deletable BOOLEAN NOT NULL DEFAULT 1", []);
+                let _ = self.conn.execute(
+                    "ALTER TABLE mcp_server ADD COLUMN is_deletable BOOLEAN NOT NULL DEFAULT 1",
+                    [],
+                );
             }
             if !has_proxy_enabled {
                 // 添加 proxy_enabled 字段，默认为 0（不使用代理）
-                let _ = self
-                    .conn
-                    .execute("ALTER TABLE mcp_server ADD COLUMN proxy_enabled BOOLEAN NOT NULL DEFAULT 0", []);
+                let _ = self.conn.execute(
+                    "ALTER TABLE mcp_server ADD COLUMN proxy_enabled BOOLEAN NOT NULL DEFAULT 0",
+                    [],
+                );
             }
         }
         Ok(())
@@ -565,17 +567,15 @@ impl MCPDatabase {
     ) -> rusqlite::Result<usize> {
         if keep_names.is_empty() {
             // 如果没有需要保留的工具，直接删除该服务器下所有工具
-            let rows = self.conn.execute(
-                "DELETE FROM mcp_server_tool WHERE server_id = ?",
-                params![server_id],
-            )?;
+            let rows = self
+                .conn
+                .execute("DELETE FROM mcp_server_tool WHERE server_id = ?", params![server_id])?;
             return Ok(rows as usize);
         }
 
         // 构造 NOT IN (?, ?, ...) 语句
-        let mut sql = String::from(
-            "DELETE FROM mcp_server_tool WHERE server_id = ? AND tool_name NOT IN (",
-        );
+        let mut sql =
+            String::from("DELETE FROM mcp_server_tool WHERE server_id = ? AND tool_name NOT IN (");
         for (i, _) in keep_names.iter().enumerate() {
             if i > 0 {
                 sql.push_str(", ");
@@ -793,10 +793,9 @@ impl MCPDatabase {
         keep_names: &[String],
     ) -> rusqlite::Result<usize> {
         if keep_names.is_empty() {
-            let rows = self.conn.execute(
-                "DELETE FROM mcp_server_prompt WHERE server_id = ?",
-                params![server_id],
-            )?;
+            let rows = self
+                .conn
+                .execute("DELETE FROM mcp_server_prompt WHERE server_id = ?", params![server_id])?;
             return Ok(rows as usize);
         }
 

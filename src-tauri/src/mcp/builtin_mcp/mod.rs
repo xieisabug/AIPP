@@ -143,9 +143,10 @@ pub async fn execute_aipp_builtin_tool(
         }
         "operation" => {
             use operation::types::*;
-            
+
             // 获取或创建 OperationState（从 app state 管理）
-            let state = app_handle.try_state::<OperationState>()
+            let state = app_handle
+                .try_state::<OperationState>()
                 .map(|s| s.inner().clone())
                 .unwrap_or_else(|| {
                     let state = OperationState::new();
@@ -153,10 +154,10 @@ pub async fn execute_aipp_builtin_tool(
                     // 这里创建临时 state，每次调用独立
                     state
                 });
-            
+
             let handler = OperationHandler::new(app_handle.clone());
             // conversation_id 从函数参数传入，不再从 args 中获取
-            
+
             match tool_name.as_str() {
                 "read_file" => {
                     let file_path = args
@@ -165,13 +166,10 @@ pub async fn execute_aipp_builtin_tool(
                         .ok_or_else(|| "Missing required parameter: file_path".to_string())?;
                     let offset = args.get("offset").and_then(|v| v.as_u64()).map(|v| v as usize);
                     let limit = args.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
-                    
-                    let request = ReadFileRequest {
-                        file_path: file_path.to_string(),
-                        offset,
-                        limit,
-                    };
-                    
+
+                    let request =
+                        ReadFileRequest { file_path: file_path.to_string(), offset, limit };
+
                     match handler.read_file(&state, request, conversation_id).await {
                         Ok(response) => serde_json::json!({
                             "content": [{"type": "text", "text": response.content}],
@@ -202,12 +200,12 @@ pub async fn execute_aipp_builtin_tool(
                         .get("content")
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| "Missing required parameter: content".to_string())?;
-                    
+
                     let request = WriteFileRequest {
                         file_path: file_path.to_string(),
                         content: content.to_string(),
                     };
-                    
+
                     match handler.write_file(&state, request, conversation_id).await {
                         Ok(response) => serde_json::json!({
                             "content": [{"type": "text", "text": response.message}],
@@ -240,14 +238,14 @@ pub async fn execute_aipp_builtin_tool(
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| "Missing required parameter: new_string".to_string())?;
                     let replace_all = args.get("replace_all").and_then(|v| v.as_bool());
-                    
+
                     let request = EditFileRequest {
                         file_path: file_path.to_string(),
                         old_string: old_string.to_string(),
                         new_string: new_string.to_string(),
                         replace_all,
                     };
-                    
+
                     match handler.edit_file(&state, request, conversation_id).await {
                         Ok(response) => serde_json::json!({
                             "content": [{"type": "text", "text": response.message}],
@@ -271,18 +269,18 @@ pub async fn execute_aipp_builtin_tool(
                         .get("path")
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| "Missing required parameter: path".to_string())?;
-                    let pattern = args.get("pattern").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let pattern =
+                        args.get("pattern").and_then(|v| v.as_str()).map(|s| s.to_string());
                     let recursive = args.get("recursive").and_then(|v| v.as_bool());
-                    
-                    let request = ListDirectoryRequest {
-                        path: path.to_string(),
-                        pattern,
-                        recursive,
-                    };
-                    
+
+                    let request =
+                        ListDirectoryRequest { path: path.to_string(), pattern, recursive };
+
                     match handler.list_directory(&state, request, conversation_id).await {
                         Ok(response) => {
-                            let entries_text = response.entries.iter()
+                            let entries_text = response
+                                .entries
+                                .iter()
                                 .map(|e| {
                                     let type_indicator = if e.is_directory { "/" } else { "" };
                                     format!("{}{}", e.name, type_indicator)
@@ -313,17 +311,18 @@ pub async fn execute_aipp_builtin_tool(
                         .get("command")
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| "Missing required parameter: command".to_string())?;
-                    let description = args.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let description =
+                        args.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
                     let timeout = args.get("timeout").and_then(|v| v.as_u64());
                     let run_in_background = args.get("run_in_background").and_then(|v| v.as_bool());
-                    
+
                     let request = ExecuteBashRequest {
                         command: command.to_string(),
                         description,
                         timeout,
                         run_in_background,
                     };
-                    
+
                     match handler.execute_bash(&state, request).await {
                         Ok(response) => {
                             let text = if let Some(output) = &response.output {
@@ -358,12 +357,9 @@ pub async fn execute_aipp_builtin_tool(
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| "Missing required parameter: bash_id".to_string())?;
                     let filter = args.get("filter").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    
-                    let request = GetBashOutputRequest {
-                        bash_id: bash_id.to_string(),
-                        filter,
-                    };
-                    
+
+                    let request = GetBashOutputRequest { bash_id: bash_id.to_string(), filter };
+
                     match handler.get_bash_output(&state, request).await {
                         Ok(response) => serde_json::json!({
                             "content": [{"type": "text", "text": response.output}],
@@ -391,9 +387,9 @@ pub async fn execute_aipp_builtin_tool(
         }
         "agent" => {
             use agent::types::*;
-            
+
             let handler = AgentHandler::new(app_handle.clone());
-            
+
             match tool_name.as_str() {
                 "load_skill" => {
                     let command = args
@@ -404,26 +400,29 @@ pub async fn execute_aipp_builtin_tool(
                         .get("source_type")
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| "Missing required parameter: source_type".to_string())?;
-                    
+
                     let request = LoadSkillRequest {
                         command: command.to_string(),
                         source_type: source_type.to_string(),
                     };
-                    
+
                     match handler.load_skill(request).await {
                         Ok(response) => {
                             if response.found {
                                 // Build the content text
                                 let mut text = response.content.clone();
-                                
+
                                 // Append additional files if any
                                 if !response.additional_files.is_empty() {
                                     text.push_str("\n\n---\n## Additional Files\n\n");
                                     for file in &response.additional_files {
-                                        text.push_str(&format!("### {}\n```\n{}\n```\n\n", file.path, file.content));
+                                        text.push_str(&format!(
+                                            "### {}\n```\n{}\n```\n\n",
+                                            file.path, file.content
+                                        ));
                                     }
                                 }
-                                
+
                                 serde_json::json!({
                                     "content": [{"type": "text", "text": text}],
                                     "isError": false,

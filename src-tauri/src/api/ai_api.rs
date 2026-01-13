@@ -251,10 +251,7 @@ pub async fn ask_ai(
         collect_skills_info_for_assistant(&app_handle, processed_request.assistant_id).await?;
     let assistant_prompt_result = if !skills_info.enabled_skills.is_empty() {
         let prompt = format_skills_prompt(&app_handle, assistant_prompt_result, &skills_info).await;
-        info!(
-            enabled_skills = skills_info.enabled_skills.len(),
-            "Skills formatted into prompt"
-        );
+        info!(enabled_skills = skills_info.enabled_skills.len(), "Skills formatted into prompt");
         debug!(formatted_prompt = prompt.as_str(), "Skills formatted prompt");
         prompt
     } else {
@@ -1520,7 +1517,10 @@ async fn initialize_conversation(
             for attachment in message_attachment_list.iter() {
                 let mut updated_attachment = attachment.clone();
                 updated_attachment.message_id = user_message.id;
-                db.attachment_repo().unwrap().update(&updated_attachment).map_err(AppError::from)?;
+                db.attachment_repo()
+                    .unwrap()
+                    .update(&updated_attachment)
+                    .map_err(AppError::from)?;
             }
 
             // 发送消息添加事件

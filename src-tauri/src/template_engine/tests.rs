@@ -164,20 +164,13 @@ async fn test_file_command() {
     let context = HashMap::new();
 
     // 测试正常文件读取
-    let result = engine
-        .parse(&format!("!file({})", file_path.display()), &context)
-        .await;
-    let expected = format!(
-        "<bangfile path=\"{}\">\n{}\n</bangfile>",
-        file_path.display(),
-        test_content
-    );
+    let result = engine.parse(&format!("!file({})", file_path.display()), &context).await;
+    let expected =
+        format!("<bangfile path=\"{}\">\n{}\n</bangfile>", file_path.display(), test_content);
     assert_eq!(result, expected);
 
     // 测试带引号的路径
-    let result2 = engine
-        .parse(&format!("!file(\"{}\")", file_path.display()), &context)
-        .await;
+    let result2 = engine.parse(&format!("!file(\"{}\")", file_path.display()), &context).await;
     assert_eq!(result2, expected);
 
     // 测试不存在的文件

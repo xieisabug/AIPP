@@ -232,9 +232,8 @@ impl SkillDatabase {
 
     /// Get all unique skill identifiers that are configured (for validation)
     pub fn get_all_configured_skill_identifiers(&self) -> rusqlite::Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT DISTINCT skill_identifier FROM assistant_skill_config")?;
+        let mut stmt =
+            self.conn.prepare("SELECT DISTINCT skill_identifier FROM assistant_skill_config")?;
 
         let identifiers = stmt.query_map([], |row| row.get(0))?;
 
@@ -278,8 +277,7 @@ mod tests {
         .unwrap();
 
         // Insert a test assistant
-        conn.execute("INSERT INTO assistant (name) VALUES ('Test Assistant')", [])
-            .unwrap();
+        conn.execute("INSERT INTO assistant (name) VALUES ('Test Assistant')", []).unwrap();
 
         let db = SkillDatabase { conn };
         db.create_tables().unwrap();
@@ -291,9 +289,7 @@ mod tests {
         let db = create_test_db();
 
         // Insert a config
-        let id = db
-            .upsert_assistant_skill_config(1, "aipp:test_skill", true, 0)
-            .unwrap();
+        let id = db.upsert_assistant_skill_config(1, "aipp:test_skill", true, 0).unwrap();
         assert!(id > 0);
 
         // Get configs
@@ -303,9 +299,7 @@ mod tests {
         assert!(configs[0].is_enabled);
 
         // Update the same config
-        let id2 = db
-            .upsert_assistant_skill_config(1, "aipp:test_skill", false, 1)
-            .unwrap();
+        let id2 = db.upsert_assistant_skill_config(1, "aipp:test_skill", false, 1).unwrap();
         assert_eq!(id, id2);
 
         // Verify update
@@ -319,12 +313,9 @@ mod tests {
     fn test_get_enabled_skill_configs() {
         let db = create_test_db();
 
-        db.upsert_assistant_skill_config(1, "aipp:skill1", true, 0)
-            .unwrap();
-        db.upsert_assistant_skill_config(1, "aipp:skill2", false, 1)
-            .unwrap();
-        db.upsert_assistant_skill_config(1, "aipp:skill3", true, 2)
-            .unwrap();
+        db.upsert_assistant_skill_config(1, "aipp:skill1", true, 0).unwrap();
+        db.upsert_assistant_skill_config(1, "aipp:skill2", false, 1).unwrap();
+        db.upsert_assistant_skill_config(1, "aipp:skill3", true, 2).unwrap();
 
         let enabled = db.get_enabled_skill_configs(1).unwrap();
         assert_eq!(enabled.len(), 2);
@@ -336,8 +327,7 @@ mod tests {
         let db = create_test_db();
 
         // Initial configs
-        db.upsert_assistant_skill_config(1, "aipp:old_skill", true, 0)
-            .unwrap();
+        db.upsert_assistant_skill_config(1, "aipp:old_skill", true, 0).unwrap();
 
         // Bulk update
         let new_configs = vec![
@@ -358,10 +348,8 @@ mod tests {
     fn test_delete_skill_configs_by_identifier() {
         let db = create_test_db();
 
-        db.upsert_assistant_skill_config(1, "aipp:to_delete", true, 0)
-            .unwrap();
-        db.upsert_assistant_skill_config(1, "aipp:to_keep", true, 1)
-            .unwrap();
+        db.upsert_assistant_skill_config(1, "aipp:to_delete", true, 0).unwrap();
+        db.upsert_assistant_skill_config(1, "aipp:to_keep", true, 1).unwrap();
 
         let deleted = db.delete_skill_configs_by_identifier("aipp:to_delete").unwrap();
         assert_eq!(deleted, 1);

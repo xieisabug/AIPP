@@ -1,7 +1,7 @@
 use crate::db::mcp_db::MCPServer;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use tracing::{warn, debug};
+use tracing::{debug, warn};
 
 /// Parse server.headers JSON string into:
 /// - Option<String> Authorization header value (after env placeholder replacement)
@@ -97,7 +97,9 @@ fn build_server_env_map(server: &MCPServer) -> HashMap<String, String> {
     if let Some(env_lines) = &server.environment_variables {
         for line in env_lines.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with('#') { continue; }
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
             if let Some((k, v)) = line.split_once('=') {
                 map.insert(k.trim().to_string(), v.trim().to_string());
             }
@@ -295,7 +297,7 @@ mod tests {
         headers.insert("Content-Type".to_string(), "text/plain".to_string()); // short enough (10 chars)
 
         let result = sanitize_headers_for_log(&headers);
-        
+
         // Authorization should be masked
         assert!(result.get("Authorization").unwrap().contains("****"));
         // Content-Type should remain as-is (it's 10 chars, under threshold of 12)
@@ -309,7 +311,7 @@ mod tests {
     #[test]
     fn test_build_server_env_map_basic() {
         let server = create_test_server(None, Some("KEY1=value1\nKEY2=value2".to_string()));
-        
+
         let map = build_server_env_map(&server);
         assert_eq!(map.get("KEY1"), Some(&"value1".to_string()));
         assert_eq!(map.get("KEY2"), Some(&"value2".to_string()));
@@ -321,7 +323,7 @@ mod tests {
             None,
             Some("# This is a comment\nKEY=value\n# Another comment".to_string()),
         );
-        
+
         let map = build_server_env_map(&server);
         assert_eq!(map.len(), 1);
         assert_eq!(map.get("KEY"), Some(&"value".to_string()));
@@ -330,18 +332,16 @@ mod tests {
     #[test]
     fn test_build_server_env_map_empty_lines() {
         let server = create_test_server(None, Some("\n\nKEY=value\n\n".to_string()));
-        
+
         let map = build_server_env_map(&server);
         assert_eq!(map.len(), 1);
     }
 
     #[test]
     fn test_build_server_env_map_value_with_equals() {
-        let server = create_test_server(
-            None,
-            Some("URL=https://api.example.com?key=value".to_string()),
-        );
-        
+        let server =
+            create_test_server(None, Some("URL=https://api.example.com?key=value".to_string()));
+
         let map = build_server_env_map(&server);
         // split_once only splits on first '='
         assert_eq!(map.get("URL"), Some(&"https://api.example.com?key=value".to_string()));
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn test_build_server_env_map_none() {
         let server = create_test_server(None, None);
-        
+
         let map = build_server_env_map(&server);
         assert!(map.is_empty());
     }
@@ -379,10 +379,8 @@ mod tests {
 
     #[test]
     fn test_parse_server_headers_with_authorization() {
-        let server = create_test_server(
-            Some(r#"{"Authorization": "Bearer test_token"}"#.to_string()),
-            None,
-        );
+        let server =
+            create_test_server(Some(r#"{"Authorization": "Bearer test_token"}"#.to_string()), None);
 
         let (auth, headers) = parse_server_headers(&server);
         assert_eq!(auth, Some("Bearer test_token".to_string()));
@@ -393,16 +391,14 @@ mod tests {
     #[test]
     fn test_parse_server_headers_with_env_replacement() {
         std::env::set_var("TEST_API_KEY_789", "secret_key");
-        
-        let server = create_test_server(
-            Some(r#"{"X-API-Key": "${TEST_API_KEY_789}"}"#.to_string()),
-            None,
-        );
+
+        let server =
+            create_test_server(Some(r#"{"X-API-Key": "${TEST_API_KEY_789}"}"#.to_string()), None);
 
         let (_, headers) = parse_server_headers(&server);
         assert!(headers.is_some());
         assert_eq!(headers.unwrap().get("X-API-Key"), Some(&"secret_key".to_string()));
-        
+
         std::env::remove_var("TEST_API_KEY_789");
     }
 

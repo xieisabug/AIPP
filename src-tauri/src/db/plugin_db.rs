@@ -112,7 +112,11 @@ impl PluginDatabase {
     }
 
     // Plugin CRUD
-    #[instrument(level = "debug", skip(self, description, author), fields(name, version, folder_name))]
+    #[instrument(
+        level = "debug",
+        skip(self, description, author),
+        fields(name, version, folder_name)
+    )]
     pub fn add_plugin(
         &self,
         name: &str,
@@ -147,7 +151,7 @@ impl PluginDatabase {
                 updated_at: row.get(7)?,
             })
         })?;
-    let plugins: Vec<Plugin> = rows.collect::<Result<Vec<_>>>()?;
+        let plugins: Vec<Plugin> = rows.collect::<Result<Vec<_>>>()?;
         debug!(count = plugins.len(), "Fetched plugins");
         Ok(plugins)
     }
@@ -249,7 +253,8 @@ impl PluginDatabase {
 
     #[instrument(level = "debug", skip(self), fields(status_id))]
     pub fn delete_plugin_status(&self, status_id: i64) -> Result<()> {
-        let affected = self.conn.execute("DELETE FROM PluginStatus WHERE status_id = ?", [status_id])?;
+        let affected =
+            self.conn.execute("DELETE FROM PluginStatus WHERE status_id = ?", [status_id])?;
         debug!(affected, "Deleted plugin status");
         Ok(())
     }
@@ -268,7 +273,7 @@ impl PluginDatabase {
                 config_value: row.get(3)?,
             })
         })?;
-    let configs: Vec<PluginConfiguration> = rows.collect::<Result<Vec<_>>>()?;
+        let configs: Vec<PluginConfiguration> = rows.collect::<Result<Vec<_>>>()?;
         debug!(count = configs.len(), "Fetched plugin configs");
         Ok(configs)
     }
@@ -283,7 +288,9 @@ impl PluginDatabase {
         // try update first
         let existing_id: Option<i64> = self
             .conn
-            .prepare("SELECT config_id FROM PluginConfigurations WHERE plugin_id = ? AND config_key = ?")?
+            .prepare(
+                "SELECT config_id FROM PluginConfigurations WHERE plugin_id = ? AND config_key = ?",
+            )?
             .query_row(params![plugin_id, config_key], |row| row.get(0))
             .optional()?;
 
@@ -338,7 +345,7 @@ impl PluginDatabase {
                 updated_at: row.get(6)?,
             })
         })?;
-    let data: Vec<PluginData> = rows.collect::<Result<Vec<_>>>()?;
+        let data: Vec<PluginData> = rows.collect::<Result<Vec<_>>>()?;
         debug!(count = data.len(), "Fetched plugin data by session");
         Ok(data)
     }
@@ -362,7 +369,12 @@ impl PluginDatabase {
     }
 
     #[instrument(level = "debug", skip(self, data_value), fields(data_id))]
-    pub fn update_plugin_data(&self, data_id: i64, data_value: Option<&str>, updated_at: DateTime<Utc>) -> Result<()> {
+    pub fn update_plugin_data(
+        &self,
+        data_id: i64,
+        data_value: Option<&str>,
+        updated_at: DateTime<Utc>,
+    ) -> Result<()> {
         let affected = self.conn.execute(
             "UPDATE PluginData SET data_value = ?, updated_at = ? WHERE data_id = ?",
             params![data_value, updated_at, data_id],

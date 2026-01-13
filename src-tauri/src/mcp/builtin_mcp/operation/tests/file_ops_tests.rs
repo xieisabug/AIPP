@@ -23,8 +23,7 @@ fn create_temp_dir() -> TempDir {
 fn create_temp_file(dir: &TempDir, name: &str, content: &str) -> String {
     let path = dir.path().join(name);
     let mut file = fs::File::create(&path).expect("Failed to create temp file");
-    file.write_all(content.as_bytes())
-        .expect("Failed to write to temp file");
+    file.write_all(content.as_bytes()).expect("Failed to write to temp file");
     path.to_string_lossy().to_string()
 }
 
@@ -84,17 +83,11 @@ fn test_read_file_line_formatting() {
 #[test]
 fn test_read_file_offset_and_limit() {
     let temp_dir = create_temp_dir();
-    let content = (1..=10)
-        .map(|i| format!("line {}", i))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let content = (1..=10).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
     let file_path = create_temp_file(&temp_dir, "lines.txt", &content);
 
-    let lines: Vec<String> = fs::read_to_string(&file_path)
-        .unwrap()
-        .lines()
-        .map(String::from)
-        .collect();
+    let lines: Vec<String> =
+        fs::read_to_string(&file_path).unwrap().lines().map(String::from).collect();
 
     let total_lines = lines.len();
     assert_eq!(total_lines, 10);
@@ -118,11 +111,8 @@ fn test_read_file_offset_beyond_file() {
     let content = "line 1\nline 2\nline 3";
     let file_path = create_temp_file(&temp_dir, "short.txt", content);
 
-    let lines: Vec<String> = fs::read_to_string(&file_path)
-        .unwrap()
-        .lines()
-        .map(String::from)
-        .collect();
+    let lines: Vec<String> =
+        fs::read_to_string(&file_path).unwrap().lines().map(String::from).collect();
 
     let total_lines = lines.len();
     assert_eq!(total_lines, 3);
@@ -259,18 +249,13 @@ fn test_list_directory_entries() {
     create_temp_file(&temp_dir, "file2.rs", "fn main() {}");
     fs::create_dir(temp_dir.path().join("subdir")).unwrap();
 
-    let entries: Vec<_> = fs::read_dir(temp_dir.path())
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .collect();
+    let entries: Vec<_> = fs::read_dir(temp_dir.path()).unwrap().filter_map(|e| e.ok()).collect();
 
     assert_eq!(entries.len(), 3);
 
     // 验证包含预期的项
-    let names: Vec<String> = entries
-        .iter()
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .collect();
+    let names: Vec<String> =
+        entries.iter().map(|e| e.file_name().to_string_lossy().to_string()).collect();
 
     assert!(names.contains(&"file1.txt".to_string()));
     assert!(names.contains(&"file2.rs".to_string()));
@@ -326,10 +311,7 @@ fn test_list_directory_glob_pattern() {
 
     // 匹配所有文件
     let pattern_all = format!("{}/*", temp_dir.path().display());
-    let all_matches: Vec<_> = glob::glob(&pattern_all)
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .collect();
+    let all_matches: Vec<_> = glob::glob(&pattern_all).unwrap().filter_map(|r| r.ok()).collect();
     assert_eq!(all_matches.len(), 4);
 }
 
@@ -346,11 +328,10 @@ fn test_directory_entry_structure() {
         path: file_path.clone(),
         is_directory: false,
         size: Some(metadata.len()),
-        modified: metadata.modified().ok().and_then(|t| {
-            t.duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_secs())
-        }),
+        modified: metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())),
     };
 
     assert_eq!(entry.name, "test.txt");

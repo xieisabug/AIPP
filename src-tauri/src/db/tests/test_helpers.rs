@@ -125,7 +125,8 @@ pub fn create_test_message(
 }
 
 /// 创建共享的测试数据库连接，包含对话和消息表
-pub fn create_shared_test_db() -> (Connection, ConversationRepository, MessageRepository, Conversation) {
+pub fn create_shared_test_db(
+) -> (Connection, ConversationRepository, MessageRepository, Conversation) {
     let conn = create_test_db();
 
     // 创建一个共享的测试数据库用于对话和消息

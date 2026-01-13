@@ -178,7 +178,8 @@ pub async fn create_conversation_with_messages(
     conversation_name: Option<String>,
 ) -> Result<CreateConversationResponse, AppError> {
     // 验证 assistant 是否存在
-    let assistant_db = crate::db::assistant_db::AssistantDatabase::new(&app_handle).map_err(AppError::from)?;
+    let assistant_db =
+        crate::db::assistant_db::AssistantDatabase::new(&app_handle).map_err(AppError::from)?;
     let assistant = assistant_db
         .get_assistant(assistant_id)
         .map_err(|e| AppError::DatabaseError(format!("Failed to get assistant: {}", e)))?;
@@ -187,7 +188,7 @@ pub async fn create_conversation_with_messages(
     let assistant_models = assistant_db
         .get_assistant_model(assistant_id)
         .map_err(|e| AppError::DatabaseError(format!("Failed to get assistant models: {}", e)))?;
-    
+
     // 使用第一个模型，如果没有模型则使用默认值
     let (model_id, model_code) = if let Some(first_model) = assistant_models.first() {
         (first_model.provider_id, first_model.model_code.clone())
@@ -228,15 +229,14 @@ pub async fn create_conversation_with_messages(
         if !name.trim().is_empty() {
             conversation.name = name;
             let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
-            db.conversation_repo()
-                .unwrap()
-                .update(&conversation)
-                .map_err(AppError::from)?;
+            db.conversation_repo().unwrap().update(&conversation).map_err(AppError::from)?;
         }
     }
 
     // 获取消息ID
-    if created_messages.len() >= 1 && messages.get(0).map(|(t, _, _)| t) == Some(&"system".to_string()) {
+    if created_messages.len() >= 1
+        && messages.get(0).map(|(t, _, _)| t) == Some(&"system".to_string())
+    {
         system_message_id = Some(created_messages[0].id);
         if created_messages.len() >= 2 {
             user_message_id = Some(created_messages[1].id);
@@ -247,7 +247,7 @@ pub async fn create_conversation_with_messages(
 
     // 发送事件通知前端更新
     let _ = app_handle.emit("conversation_created", conversation.id);
-    
+
     // 更新助手名称缓存（确保UI显示正确）
     let mut assistant_name_cache = name_cache_state.assistant_names.lock().await;
     assistant_name_cache.insert(assistant_id, assistant.name.clone());
@@ -296,9 +296,9 @@ pub async fn get_conversation_with_messages(
 ) -> Result<ConversationWithMessages, String> {
     use std::time::Instant;
     let start_time = Instant::now();
-    
+
     let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    
+
     // 查询 conversation
     let conv_query_start = Instant::now();
     let conversation = db
@@ -440,35 +440,32 @@ pub async fn fork_conversation(
     message_id: i64,
 ) -> Result<i64, String> {
     let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    
+
     // 获取原对话信息
     let conversation_repo = db.conversation_repo().unwrap();
     let original_conversation = conversation_repo
         .read(conversation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Conversation not found".to_string())?;
-    
+
     // 获取原对话的所有消息
     let message_repo = db.message_repo().unwrap();
-    let all_messages_with_attachments = message_repo
-        .list_by_conversation_id(conversation_id)
-        .map_err(|e| e.to_string())?;
-    
+    let all_messages_with_attachments =
+        message_repo.list_by_conversation_id(conversation_id).map_err(|e| e.to_string())?;
+
     // 提取消息部分
-    let all_messages: Vec<Message> = all_messages_with_attachments
-        .iter()
-        .map(|(message, _)| message.clone())
-        .collect();
-    
+    let all_messages: Vec<Message> =
+        all_messages_with_attachments.iter().map(|(message, _)| message.clone()).collect();
+
     // 找到目标消息的位置
     let target_message_index = all_messages
         .iter()
         .position(|m| m.id == message_id)
         .ok_or_else(|| "Message not found".to_string())?;
-    
+
     // 只复制到目标消息为止的消息
     let messages_to_copy = &all_messages[..=target_message_index];
-    
+
     // 生成新对话标题（添加版本号）
     let version_pattern = regex::Regex::new(r"版本(\d+)$").unwrap();
     let mut version = 1;
@@ -478,9 +475,9 @@ pub async fn fork_conversation(
     } else {
         original_conversation.name.clone()
     };
-    
+
     let new_conversation_name = format!("{} 版本{}", base_name, version);
-    
+
     // 创建新对话
     let new_conversation = crate::db::conversation_db::Conversation {
         id: 0,
@@ -488,23 +485,20 @@ pub async fn fork_conversation(
         assistant_id: original_conversation.assistant_id,
         created_time: chrono::Utc::now(),
     };
-    
-    let created_conversation = conversation_repo
-        .create(&new_conversation)
-        .map_err(|e| e.to_string())?;
-    
+
+    let created_conversation =
+        conversation_repo.create(&new_conversation).map_err(|e| e.to_string())?;
+
     // 复制消息到新对话
     for message in messages_to_copy {
         let mut new_message = message.clone();
         new_message.id = 0;
         new_message.conversation_id = created_conversation.id;
         new_message.created_time = chrono::Utc::now();
-        
-        message_repo
-            .create(&new_message)
-            .map_err(|e| e.to_string())?;
+
+        message_repo.create(&new_message).map_err(|e| e.to_string())?;
     }
-    
+
     Ok(created_conversation.id)
 }
 
@@ -555,29 +549,29 @@ pub async fn update_assistant_message(
     markdown_text: String,
 ) -> Result<(), String> {
     use crate::db::conversation_db::{ConversationDatabase, Repository};
-    
+
     let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let repo = db.message_repo().map_err(|e| e.to_string())?;
-    
+
     // First, verify the message exists and is an assistant message
     let existing_message = repo.read(message_id).map_err(|e| e.to_string())?;
-    
+
     match existing_message {
         Some(message) => {
             // Only allow updating assistant messages
             if message.message_type != "assistant" {
                 return Err(format!(
-                    "Cannot update {} message. Only assistant messages can be updated.", 
+                    "Cannot update {} message. Only assistant messages can be updated.",
                     message.message_type
                 ));
             }
-            
+
             // Update message content
             repo.update_content(message_id, &markdown_text).map_err(|e| e.to_string())?;
-            
+
             // Update finish time to mark when the update was completed
             repo.update_finish_time(message_id).map_err(|e| e.to_string())?;
-            
+
             Ok(())
         }
         None => Err(format!("Message with ID {} not found", message_id)),

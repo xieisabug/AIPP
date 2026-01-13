@@ -180,10 +180,7 @@ async fn test_execute_bash_stderr_capture() {
     let resp = response.unwrap();
     let output = resp.output.unwrap_or_default();
     // stderr 应该被捕获并标记
-    assert!(
-        output.contains("error") || output.contains("[stderr]"),
-        "stderr should be captured"
-    );
+    assert!(output.contains("error") || output.contains("[stderr]"), "stderr should be captured");
 }
 
 // ============= 超时测试 =============
@@ -276,10 +273,7 @@ async fn test_execute_bash_background() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // 获取输出
-    let output_request = GetBashOutputRequest {
-        bash_id: bash_id.clone(),
-        filter: None,
-    };
+    let output_request = GetBashOutputRequest { bash_id: bash_id.clone(), filter: None };
 
     let output_response = BashOperations::get_bash_output(&state, output_request).await;
     assert!(output_response.is_ok());
@@ -299,10 +293,7 @@ async fn test_execute_bash_background() {
 async fn test_get_bash_output_not_found() {
     let state = OperationState::new();
 
-    let request = GetBashOutputRequest {
-        bash_id: "non-existent-id".to_string(),
-        filter: None,
-    };
+    let request = GetBashOutputRequest { bash_id: "non-existent-id".to_string(), filter: None };
 
     let response = BashOperations::get_bash_output(&state, request).await;
     assert!(response.is_err());
@@ -331,10 +322,8 @@ async fn test_get_bash_output_with_filter() {
     }
 
     // 使用正则过滤只包含 "error" 的行
-    let request = GetBashOutputRequest {
-        bash_id: bash_id.to_string(),
-        filter: Some("error".to_string()),
-    };
+    let request =
+        GetBashOutputRequest { bash_id: bash_id.to_string(), filter: Some("error".to_string()) };
 
     let response = BashOperations::get_bash_output(&state, request).await;
     assert!(response.is_ok());
@@ -395,10 +384,7 @@ async fn test_incremental_output() {
     state.append_bash_output(bash_id, "output 2\n").await;
 
     // 获取第一次增量
-    let request = GetBashOutputRequest {
-        bash_id: bash_id.to_string(),
-        filter: None,
-    };
+    let request = GetBashOutputRequest { bash_id: bash_id.to_string(), filter: None };
     let resp1 = BashOperations::get_bash_output(&state, request.clone()).await.unwrap();
     assert_eq!(resp1.output, "output 1\noutput 2\n");
 

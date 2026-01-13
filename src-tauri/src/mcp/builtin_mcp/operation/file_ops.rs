@@ -51,10 +51,7 @@ impl FileOperations {
         // 读取文件
         let file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
         let reader = BufReader::new(file);
-        let lines: Vec<String> = reader
-            .lines()
-            .map(|l| l.unwrap_or_default())
-            .collect();
+        let lines: Vec<String> = reader.lines().map(|l| l.unwrap_or_default()).collect();
 
         let total_lines = lines.len();
         let offset = request.offset.unwrap_or(1).max(1);
@@ -136,8 +133,7 @@ impl FileOperations {
         // 写入文件
         let mut file = File::create(path).map_err(|e| format!("Failed to create file: {}", e))?;
         let bytes = request.content.as_bytes();
-        file.write_all(bytes)
-            .map_err(|e| format!("Failed to write file: {}", e))?;
+        file.write_all(bytes).map_err(|e| format!("Failed to write file: {}", e))?;
 
         info!(path = %path, bytes = bytes.len(), "File written successfully");
 
@@ -230,10 +226,7 @@ impl FileOperations {
         Ok(EditFileResponse {
             file_path: path.to_string(),
             replacements_made,
-            message: format!(
-                "Successfully made {} replacement(s) in {}",
-                replacements_made, path
-            ),
+            message: format!("Successfully made {} replacement(s) in {}", replacements_made, path),
         })
     }
 
@@ -284,18 +277,15 @@ impl FileOperations {
 
         info!(path = %path, count = total_count, recursive = recursive, "Directory listed successfully");
 
-        Ok(ListDirectoryResponse {
-            path: path.to_string(),
-            entries,
-            total_count,
-        })
+        Ok(ListDirectoryResponse { path: path.to_string(), entries, total_count })
     }
 
     /// 普通目录列表
     fn list_entries(path: &str, recursive: bool) -> Result<Vec<DirectoryEntry>, String> {
         let mut entries = Vec::new();
 
-        let read_dir = fs::read_dir(path).map_err(|e| format!("Failed to read directory: {}", e))?;
+        let read_dir =
+            fs::read_dir(path).map_err(|e| format!("Failed to read directory: {}", e))?;
 
         for entry in read_dir {
             let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
@@ -306,7 +296,9 @@ impl FileOperations {
                 name: entry.file_name().to_string_lossy().to_string(),
                 path: entry_path.to_string_lossy().to_string(),
                 is_directory: entry_path.is_dir(),
-                size: metadata.as_ref().and_then(|m| if m.is_file() { Some(m.len()) } else { None }),
+                size: metadata
+                    .as_ref()
+                    .and_then(|m| if m.is_file() { Some(m.len()) } else { None }),
                 modified: metadata.as_ref().and_then(|m| {
                     m.modified().ok().and_then(|t| {
                         t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
@@ -333,7 +325,11 @@ impl FileOperations {
     }
 
     /// 使用 glob 模式列出文件
-    fn list_with_glob(base_path: &str, pattern: &str, _recursive: bool) -> Result<Vec<DirectoryEntry>, String> {
+    fn list_with_glob(
+        base_path: &str,
+        pattern: &str,
+        _recursive: bool,
+    ) -> Result<Vec<DirectoryEntry>, String> {
         let full_pattern = if pattern.starts_with('/') || pattern.contains(':') {
             pattern.to_string()
         } else {
@@ -351,13 +347,24 @@ impl FileOperations {
                         Ok(path) => {
                             let metadata = fs::metadata(&path).ok();
                             let entry = DirectoryEntry {
-                                name: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                                name: path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_default(),
                                 path: path.to_string_lossy().to_string(),
                                 is_directory: path.is_dir(),
-                                size: metadata.as_ref().and_then(|m| if m.is_file() { Some(m.len()) } else { None }),
+                                size: metadata.as_ref().and_then(|m| {
+                                    if m.is_file() {
+                                        Some(m.len())
+                                    } else {
+                                        None
+                                    }
+                                }),
                                 modified: metadata.as_ref().and_then(|m| {
                                     m.modified().ok().and_then(|t| {
-                                        t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
+                                        t.duration_since(std::time::UNIX_EPOCH)
+                                            .ok()
+                                            .map(|d| d.as_secs())
                                     })
                                 }),
                             };

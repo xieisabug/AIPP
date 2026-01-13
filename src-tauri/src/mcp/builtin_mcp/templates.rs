@@ -417,17 +417,17 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
 #[instrument(skip(app_handle))]
 pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
     use tracing::info;
-    
+
     let db = MCPDatabase::new(app_handle).context("Create MCPDatabase failed")?;
     let templates = builtin_templates();
-    
+
     for tpl in templates {
         // 检查是否已存在该内置工具集（通过 command 匹配）
         let exists = db.conn
             .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1 AND is_deletable = 0")?
             .query_row([&tpl.command], |row| row.get::<_, i64>(0))
             .optional()?;
-        
+
         if exists.is_none() {
             info!(template_id = %tpl.id, name = %tpl.name, "Initializing builtin MCP server");
 
@@ -460,11 +460,11 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
                 )
                 .with_context(|| format!("Insert server tool failed: {}", tool.name))?;
             }
-            
+
             info!(template_id = %tpl.id, server_id = server_id, "Builtin MCP server initialized");
         }
     }
-    
+
     Ok(())
 }
 
@@ -509,8 +509,8 @@ pub async fn add_or_update_aipp_builtin_server(
                 false,                                             // is_long_running
                 true,                                              // is_enabled
                 true,                                              // is_builtin
-                true,                                              // is_deletable - 用户添加的可删除
-                false,                                             // proxy_enabled - builtin 不使用代理
+                true,  // is_deletable - 用户添加的可删除
+                false, // proxy_enabled - builtin 不使用代理
             )
             .context("Upsert builtin server failed")?;
 
@@ -565,7 +565,7 @@ mod tests {
     fn test_agent_template_has_required_fields() {
         let templates = builtin_templates();
         let agent = templates.iter().find(|t| t.id == "agent").unwrap();
-        
+
         assert!(!agent.name.is_empty());
         assert!(!agent.description.is_empty());
         assert_eq!(agent.command, "aipp:agent");
@@ -591,14 +591,14 @@ mod tests {
     fn test_agent_load_skill_tool_schema() {
         let tools = get_builtin_tools_for_command("aipp:agent");
         let load_skill = tools.iter().find(|t| t.name == "load_skill").unwrap();
-        
+
         assert!(!load_skill.description.is_empty());
-        
+
         let schema = &load_skill.input_schema;
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["command"].is_object());
         assert!(schema["properties"]["source_type"].is_object());
-        
+
         let required = schema["required"].as_array().unwrap();
         assert!(required.iter().any(|r| r == "command"));
         assert!(required.iter().any(|r| r == "source_type"));
@@ -608,7 +608,7 @@ mod tests {
     fn test_search_template_has_required_fields() {
         let templates = builtin_templates();
         let search = templates.iter().find(|t| t.id == "search").unwrap();
-        
+
         assert!(!search.name.is_empty());
         assert!(!search.description.is_empty());
         assert!(!search.command.is_empty());
@@ -619,22 +619,25 @@ mod tests {
     fn test_search_template_has_env_vars() {
         let templates = builtin_templates();
         let search = templates.iter().find(|t| t.id == "search").unwrap();
-        
-        assert!(!search.required_envs.is_empty(), "Search template should have environment variables");
+
+        assert!(
+            !search.required_envs.is_empty(),
+            "Search template should have environment variables"
+        );
     }
 
     #[test]
     fn test_search_template_browser_type_env() {
         let templates = builtin_templates();
         let search = templates.iter().find(|t| t.id == "search").unwrap();
-        
+
         let browser_env = search.required_envs.iter().find(|e| e.key == "BROWSER_TYPE");
         assert!(browser_env.is_some(), "BROWSER_TYPE env should exist");
-        
+
         let env = browser_env.unwrap();
         assert_eq!(env.field_type, "select");
         assert!(env.options.is_some());
-        
+
         let options = env.options.as_ref().unwrap();
         assert!(options.iter().any(|o| o.value == "chrome"));
         assert!(options.iter().any(|o| o.value == "edge"));
@@ -644,14 +647,14 @@ mod tests {
     fn test_search_template_search_engine_env() {
         let templates = builtin_templates();
         let search = templates.iter().find(|t| t.id == "search").unwrap();
-        
+
         let engine_env = search.required_envs.iter().find(|e| e.key == "SEARCH_ENGINE");
         assert!(engine_env.is_some(), "SEARCH_ENGINE env should exist");
-        
+
         let env = engine_env.unwrap();
         assert!(env.required, "SEARCH_ENGINE should be required");
         assert_eq!(env.default_value, Some("google".into()));
-        
+
         let options = env.options.as_ref().unwrap();
         assert!(options.iter().any(|o| o.value == "google"));
         assert!(options.iter().any(|o| o.value == "bing"));
@@ -663,10 +666,10 @@ mod tests {
     fn test_search_template_headless_env() {
         let templates = builtin_templates();
         let search = templates.iter().find(|t| t.id == "search").unwrap();
-        
+
         let headless_env = search.required_envs.iter().find(|e| e.key == "HEADLESS");
         assert!(headless_env.is_some(), "HEADLESS env should exist");
-        
+
         let env = headless_env.unwrap();
         assert_eq!(env.field_type, "boolean");
         assert_eq!(env.default_value, Some("true".into()));
@@ -700,13 +703,13 @@ mod tests {
     fn test_search_web_tool_schema() {
         let tools = get_builtin_tools_for_command("aipp:search");
         let search_web = tools.iter().find(|t| t.name == "search_web").unwrap();
-        
+
         assert!(!search_web.description.is_empty());
-        
+
         let schema = &search_web.input_schema;
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["query"].is_object());
-        
+
         let required = schema["required"].as_array().unwrap();
         assert!(required.iter().any(|r| r == "query"));
     }
@@ -715,13 +718,13 @@ mod tests {
     fn test_fetch_url_tool_schema() {
         let tools = get_builtin_tools_for_command("aipp:search");
         let fetch_url = tools.iter().find(|t| t.name == "fetch_url").unwrap();
-        
+
         assert!(!fetch_url.description.is_empty());
-        
+
         let schema = &fetch_url.input_schema;
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["url"].is_object());
-        
+
         let required = schema["required"].as_array().unwrap();
         assert!(required.iter().any(|r| r == "url"));
     }
@@ -746,7 +749,7 @@ mod tests {
     fn test_all_env_vars_have_valid_field_type() {
         let templates = builtin_templates();
         let valid_types = ["text", "select", "boolean", "number", "textarea"];
-        
+
         for template in templates {
             for env in template.required_envs {
                 assert!(
@@ -762,7 +765,7 @@ mod tests {
     #[test]
     fn test_select_env_vars_have_options() {
         let templates = builtin_templates();
-        
+
         for template in templates {
             for env in template.required_envs {
                 if env.field_type == "select" {

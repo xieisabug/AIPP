@@ -24,10 +24,7 @@ impl AgentHandler {
 
     /// Get app data directory path
     fn get_app_data_dir(&self) -> PathBuf {
-        self.app_handle
-            .path()
-            .app_data_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
+        self.app_handle.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."))
     }
 
     /// Create a skill scanner
@@ -38,10 +35,7 @@ impl AgentHandler {
     /// Load a skill's content by name and source type
     #[instrument(skip(self), fields(command = %request.command, source_type = %request.source_type))]
     pub async fn load_skill(&self, request: LoadSkillRequest) -> Result<LoadSkillResponse, String> {
-        info!(
-            "Loading skill: command={}, source_type={}",
-            request.command, request.source_type
-        );
+        info!("Loading skill: command={}, source_type={}", request.command, request.source_type);
 
         // Create the identifier from source_type and command
         // The identifier format is "{source_type}:{relative_path}"
@@ -54,10 +48,7 @@ impl AgentHandler {
             let source_matches = skill.source_type.as_str() == request.source_type;
             let name_matches = skill.display_name.eq_ignore_ascii_case(&request.command)
                 || skill.relative_path.eq_ignore_ascii_case(&request.command)
-                || skill
-                    .relative_path
-                    .to_lowercase()
-                    .contains(&request.command.to_lowercase())
+                || skill.relative_path.to_lowercase().contains(&request.command.to_lowercase())
                 || skill
                     .metadata
                     .name
@@ -77,10 +68,7 @@ impl AgentHandler {
                         let additional_files = content
                             .additional_files
                             .into_iter()
-                            .map(|f| SkillFileContent {
-                                path: f.path,
-                                content: f.content,
-                            })
+                            .map(|f| SkillFileContent { path: f.path, content: f.content })
                             .collect();
 
                         Ok(LoadSkillResponse {

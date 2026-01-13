@@ -1,7 +1,7 @@
+use base64::Engine;
 use std::cmp::Ord;
 use std::collections::HashMap;
 use tauri::{Emitter, Manager, State};
-use base64::Engine;
 
 use crate::template_engine::{BangType, TemplateEngine};
 use crate::AppState;
@@ -109,7 +109,10 @@ pub async fn get_selected_text_api(state: tauri::State<'_, AppState>) -> Result<
 }
 
 #[tauri::command]
-pub async fn set_shortcut_recording(state: tauri::State<'_, AppState>, active: bool) -> Result<(), String> {
+pub async fn set_shortcut_recording(
+    state: tauri::State<'_, AppState>,
+    active: bool,
+) -> Result<(), String> {
     let mut flag = state.recording_shortcut.lock().await;
     *flag = active;
     Ok(())
@@ -156,23 +159,24 @@ pub async fn copy_image_to_clipboard(image_data: String) -> Result<(), String> {
     // 使用 image crate 解码图片
     let img = image::load_from_memory(&image_bytes)
         .map_err(|e| format!("Failed to load image: {}", e))?;
-    
+
     let rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
-    
+
     // 使用 arboard 复制到剪贴板
-    let mut clipboard = arboard::Clipboard::new()
-        .map_err(|e| format!("Failed to access clipboard: {}", e))?;
-    
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("Failed to access clipboard: {}", e))?;
+
     let img_data = arboard::ImageData {
         width: width as usize,
         height: height as usize,
         bytes: std::borrow::Cow::Owned(rgba.into_raw()),
     };
-    
-    clipboard.set_image(img_data)
+
+    clipboard
+        .set_image(img_data)
         .map_err(|e| format!("Failed to copy image to clipboard: {}", e))?;
-    
+
     Ok(())
 }
 
@@ -191,10 +195,7 @@ pub async fn get_autostart_state(app: tauri::AppHandle) -> Result<bool, String> 
         use tauri_plugin_autostart::ManagerExt;
         let autostart_manager = app.autolaunch();
         let enabled = autostart_manager.is_enabled().map_err(|e| e.to_string())?;
-        tracing::info!(
-            "get_autostart_state: enabled={}, bundle_id=com.aipp.app",
-            enabled
-        );
+        tracing::info!("get_autostart_state: enabled={}, bundle_id=com.aipp.app", enabled);
         Ok(enabled)
     }
     #[cfg(mobile)]
@@ -205,10 +206,7 @@ pub async fn get_autostart_state(app: tauri::AppHandle) -> Result<bool, String> 
 
 /// 设置开机自启动
 #[tauri::command]
-pub async fn set_autostart(
-    app: tauri::AppHandle,
-    enabled: bool,
-) -> Result<(), String> {
+pub async fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     #[cfg(desktop)]
     {
         use tauri_plugin_autostart::ManagerExt;
@@ -256,7 +254,7 @@ pub async fn open_image(
             .strip_prefix("data:")
             .and_then(|s| s.split(';').next())
             .unwrap_or("image/png");
-        
+
         // 确定文件扩展名
         let ext = match mime_type {
             "image/png" => "png",
@@ -267,18 +265,15 @@ pub async fn open_image(
             "image/bmp" => "bmp",
             _ => "png",
         };
-        
+
         // 移除 data URL 前缀
-        let base64_data = image_data
-            .split(',')
-            .last()
-            .ok_or("Invalid data URL format")?;
-        
+        let base64_data = image_data.split(',').last().ok_or("Invalid data URL format")?;
+
         // 解码 base64
         let image_bytes = base64::engine::general_purpose::STANDARD
             .decode(base64_data)
             .map_err(|e| format!("Failed to decode base64: {}", e))?;
-        
+
         // 创建临时文件，使用 conversationId 和 messageId 生成固定文件名
         let temp_dir = std::env::temp_dir();
         let filename = match (&conversation_id, &message_id) {
@@ -287,7 +282,7 @@ pub async fn open_image(
             }
             _ => {
                 // 如果没有 id，使用图片内容的哈希值作为文件名
-                use sha2::{Sha256, Digest};
+                use sha2::{Digest, Sha256};
                 let mut hasher = Sha256::new();
                 hasher.update(&image_bytes);
                 let hash = hex::encode(&hasher.finalize()[..8]);
@@ -295,19 +290,17 @@ pub async fn open_image(
             }
         };
         let temp_path = temp_dir.join(filename);
-        
+
         // 写入文件
         std::fs::write(&temp_path, &image_bytes)
             .map_err(|e| format!("Failed to write temp file: {}", e))?;
-        
+
         // 用系统默认应用打开
-        open::that(&temp_path)
-            .map_err(|e| format!("Failed to open image: {}", e))?;
+        open::that(&temp_path).map_err(|e| format!("Failed to open image: {}", e))?;
     } else {
         // 直接打开 URL
-        open::that(&image_data)
-            .map_err(|e| format!("Failed to open URL: {}", e))?;
+        open::that(&image_data).map_err(|e| format!("Failed to open URL: {}", e))?;
     }
-    
+
     Ok(())
 }

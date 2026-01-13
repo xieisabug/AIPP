@@ -22,12 +22,12 @@
 
 mod test_helpers;
 
-mod conversation_db_tests;
-mod message_db_tests;
-mod attachment_db_tests;
 mod assistant_db_tests;
+mod attachment_db_tests;
+mod conversation_db_tests;
 mod llm_db_tests;
 mod mcp_db_tests;
+mod message_db_tests;
+mod plugin_db_tests;
 mod sub_task_db_tests;
 mod system_db_tests;
-mod plugin_db_tests;

@@ -34,7 +34,8 @@ pub struct OperationState {
     /// 后台 Bash 进程（bash_id -> 进程信息）
     pub(crate) bash_processes: Arc<Mutex<HashMap<String, BashProcessInfo>>>,
     /// 待处理的权限请求（request_id -> 发送通道）
-    pub(crate) pending_permissions: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<super::types::PermissionDecision>>>>,
+    pub(crate) pending_permissions:
+        Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<super::types::PermissionDecision>>>>,
 }
 
 impl OperationState {
@@ -53,13 +54,7 @@ impl OperationState {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        files.insert(
-            path.to_string(),
-            FileReadRecord {
-                path: path.to_string(),
-                read_time: now,
-            },
-        );
+        files.insert(path.to_string(), FileReadRecord { path: path.to_string(), read_time: now });
         debug!(path = %path, "Recorded file read");
     }
 
@@ -97,7 +92,10 @@ impl OperationState {
     }
 
     /// 获取后台 Bash 进程的增量输出
-    pub async fn get_bash_incremental_output(&self, bash_id: &str) -> Option<(String, bool, Option<i32>)> {
+    pub async fn get_bash_incremental_output(
+        &self,
+        bash_id: &str,
+    ) -> Option<(String, bool, Option<i32>)> {
         let mut processes = self.bash_processes.lock().await;
         if let Some(info) = processes.get_mut(bash_id) {
             let new_output = if info.last_read_pos < info.output_buffer.len() {

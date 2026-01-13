@@ -92,7 +92,7 @@ fn test_conversation_with_none_assistant() {
         created_time: chrono::Utc::now(),
     };
     let created = repo.create(&conversation).unwrap();
-    
+
     let read = repo.read(created.id).unwrap().unwrap();
     assert!(read.assistant_id.is_none());
 }
@@ -114,7 +114,7 @@ fn test_conversation_unicode_name() {
         created_time: chrono::Utc::now(),
     };
     let created = repo.create(&conversation).unwrap();
-    
+
     let read = repo.read(created.id).unwrap().unwrap();
     assert_eq!(read.name, "中文对话名称 🎉");
 }
@@ -234,7 +234,7 @@ fn test_conversation_empty_name() {
         created_time: chrono::Utc::now(),
     };
     let created = repo.create(&conversation).unwrap();
-    
+
     let read = repo.read(created.id).unwrap().unwrap();
     assert_eq!(read.name, "");
 }
@@ -257,7 +257,7 @@ fn test_conversation_very_long_name() {
         created_time: chrono::Utc::now(),
     };
     let created = repo.create(&conversation).unwrap();
-    
+
     let read = repo.read(created.id).unwrap().unwrap();
     assert_eq!(read.name.len(), 10000);
 }

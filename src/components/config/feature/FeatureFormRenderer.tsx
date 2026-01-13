@@ -7,6 +7,7 @@ import { NetworkConfigForm } from "./forms/NetworkConfigForm";
 import { DataFolderConfigForm } from "./forms/DataFolderConfigForm";
 import { ShortcutsConfigForm } from "./forms/ShortcutsConfigForm";
 import { OtherConfigForm } from "./forms/OtherConfigForm";
+import { AboutConfigForm } from "./forms/AboutConfigForm";
 
 interface FeatureItem {
     id: string;
@@ -26,6 +27,7 @@ interface FeatureFormRendererProps {
         dataFolderForm: UseFormReturn<any>;
         shortcutsForm: UseFormReturn<any>;
         otherForm: UseFormReturn<any>;
+        aboutForm: UseFormReturn<any>;
     };
     versionManager: {
         bunVersion: string;
@@ -143,6 +145,12 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
             return (
                 <OtherConfigForm
                     form={forms.otherForm}
+                />
+            );
+        case "about":
+            return (
+                <AboutConfigForm
+                    form={forms.aboutForm}
                 />
             );
         default:

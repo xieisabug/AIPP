@@ -8,11 +8,11 @@ impl KagiEngine {
     pub fn display_name() -> &'static str {
         "Kagi"
     }
-    
+
     pub fn homepage_url() -> &'static str {
         "https://kagi.com"
     }
-    
+
     pub fn search_input_selectors() -> Vec<&'static str> {
         vec![
             "input[name='q']",
@@ -22,15 +22,11 @@ impl KagiEngine {
             "input[placeholder*='Search']",
         ]
     }
-    
+
     pub fn search_button_selectors() -> Vec<&'static str> {
-        vec![
-            "button[type='submit']",
-            ".search-button",
-            "input[type='submit']",
-        ]
+        vec!["button[type='submit']", ".search-button", "input[type='submit']"]
     }
-    
+
     pub fn default_wait_selectors() -> Vec<String> {
         vec![
             "._0_SRI".to_string(),
@@ -39,8 +35,7 @@ impl KagiEngine {
             ".__sri-title".to_string(),
         ]
     }
-    
-    
+
     /// 解析Kagi搜索结果HTML，提取结构化信息
     /// 基于实际 Kagi HTML 结构：
     /// - 主要结果卡片: div._0_SRI.search-result
@@ -57,7 +52,9 @@ impl KagiEngine {
                     items.push(item);
                     rank += 1;
                 }
-                if items.len() >= 30 { break; }
+                if items.len() >= 30 {
+                    break;
+                }
             }
         }
 
@@ -68,7 +65,9 @@ impl KagiEngine {
                     items.push(item);
                     rank += 1;
                 }
-                if items.len() >= 30 { break; }
+                if items.len() >= 30 {
+                    break;
+                }
             }
         }
 
@@ -82,42 +81,33 @@ impl KagiEngine {
             search_time_ms: None,
         }
     }
-    
+
     /// 解析主要搜索结果卡片 (div._0_SRI.search-result)
     fn parse_main_result_card(card: scraper::ElementRef<'_>, rank: usize) -> Option<SearchItem> {
         // 标题：从 a.__sri_title_link 或 a._0_sri_title_link 获取
-        let title = Self::first_text_in(card, &[
-            "a.__sri_title_link",
-            "a._0_sri_title_link",
-            "h3.__sri-title-box a",
-            "h3 a",
-        ]);
+        let title = Self::first_text_in(
+            card,
+            &["a.__sri_title_link", "a._0_sri_title_link", "h3.__sri-title-box a", "h3 a"],
+        );
 
         // URL：从标题链接获取 href
-        let url = Self::first_href_in(card, &[
-            "a.__sri_title_link",
-            "a._0_sri_title_link",
-            "h3.__sri-title-box a",
-            "a._0_URL",
-        ]);
+        let url = Self::first_href_in(
+            card,
+            &["a.__sri_title_link", "a._0_sri_title_link", "h3.__sri-title-box a", "a._0_URL"],
+        );
 
         // 摘要：从 div._0_DESC.__sri-desc 获取
-        let snippet = Self::first_text_in(card, &[
-            "div._0_DESC.__sri-desc",
-            "div.__sri-desc",
-            "div._0_DESC",
-            "div.__sri-body",
-        ]);
+        let snippet = Self::first_text_in(
+            card,
+            &["div._0_DESC.__sri-desc", "div.__sri-desc", "div._0_DESC", "div.__sri-body"],
+        );
 
         // 显示 URL：从 a.__sri-url 或 div.__sri_url_path_box 获取
-        let display_url = Self::first_text_in(card, &[
-            "div.__sri_url_path_box",
-            "a.__sri-url",
-        ]);
+        let display_url = Self::first_text_in(card, &["div.__sri_url_path_box", "a.__sri-url"]);
 
         let title = title?;
         let url = url?;
-        
+
         if title.trim().is_empty() || url.trim().is_empty() {
             return None;
         }
@@ -134,27 +124,18 @@ impl KagiEngine {
     /// 解析分组内的子结果卡片 (div.__srgi)
     fn parse_group_item_card(card: scraper::ElementRef<'_>, rank: usize) -> Option<SearchItem> {
         // 标题：从 h3.__srgi-title a 获取
-        let title = Self::first_text_in(card, &[
-            "h3.__srgi-title a",
-            "h3.__srgi-title",
-            "a._0_URL",
-        ]);
+        let title =
+            Self::first_text_in(card, &["h3.__srgi-title a", "h3.__srgi-title", "a._0_URL"]);
 
         // URL：从标题链接获取 href
-        let url = Self::first_href_in(card, &[
-            "h3.__srgi-title a",
-            "a._0_URL",
-        ]);
+        let url = Self::first_href_in(card, &["h3.__srgi-title a", "a._0_URL"]);
 
         // 摘要：从 div.__sri-desc 获取
-        let snippet = Self::first_text_in(card, &[
-            "div.__sri-desc",
-            "div.__sri-body",
-        ]);
+        let snippet = Self::first_text_in(card, &["div.__sri-desc", "div.__sri-body"]);
 
         let title = title?;
         let url = url?;
-        
+
         if title.trim().is_empty() || url.trim().is_empty() {
             return None;
         }
@@ -175,7 +156,9 @@ impl KagiEngine {
                 if let Some(node) = root.select(&selector).next() {
                     let text = node.text().collect::<String>();
                     let text = text.trim();
-                    if !text.is_empty() { return Some(text.to_string()); }
+                    if !text.is_empty() {
+                        return Some(text.to_string());
+                    }
                 }
             }
         }
@@ -285,7 +268,7 @@ mod tests {
         assert_eq!(results.query, "test");
         assert_eq!(results.search_engine, "Kagi");
         assert!(!results.items.is_empty());
-        
+
         let first = &results.items[0];
         assert_eq!(first.title, "Test Title");
         assert_eq!(first.url, "https://example.com");

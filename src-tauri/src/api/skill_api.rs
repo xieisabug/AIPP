@@ -3,9 +3,7 @@
 use crate::db::skill_db::SkillDatabase;
 use crate::skills::parser::SkillParser;
 use crate::skills::scanner::SkillScanner;
-use crate::skills::types::{
-    ScannedSkill, SkillContent, SkillSourceConfig, SkillWithConfig,
-};
+use crate::skills::types::{ScannedSkill, SkillContent, SkillSourceConfig, SkillWithConfig};
 use std::path::PathBuf;
 use tauri::Manager;
 use tracing::{debug, info, warn};
@@ -49,9 +47,7 @@ pub async fn get_skill_content(
     app_handle: tauri::AppHandle,
     identifier: String,
 ) -> Result<SkillContent, String> {
-    get_skill_content_internal(&app_handle, &identifier)
-        .await
-        .map_err(|e| e.to_string())
+    get_skill_content_internal(&app_handle, &identifier).await.map_err(|e| e.to_string())
 }
 
 /// Internal function to get skill content (for use by other modules)
@@ -62,14 +58,15 @@ pub async fn get_skill_content_internal(
     let scanner = create_scanner(app_handle);
 
     // Find the skill
-    let skill = scanner
-        .get_skill(identifier)
-        .ok_or_else(|| crate::errors::AppError::InternalError(format!("Skill not found: {}", identifier)))?;
+    let skill = scanner.get_skill(identifier).ok_or_else(|| {
+        crate::errors::AppError::InternalError(format!("Skill not found: {}", identifier))
+    })?;
 
     // Parse full content
     let file_path = PathBuf::from(&skill.file_path);
-    let (_metadata, content) = SkillParser::parse_full(&file_path, identifier)
-        .map_err(|e| crate::errors::AppError::UnknownError(format!("Failed to parse skill: {}", e)))?;
+    let (_metadata, content) = SkillParser::parse_full(&file_path, identifier).map_err(|e| {
+        crate::errors::AppError::UnknownError(format!("Failed to parse skill: {}", e))
+    })?;
 
     Ok(content)
 }
@@ -86,7 +83,10 @@ pub async fn get_skill(
 
 /// Check if a skill exists
 #[tauri::command]
-pub async fn skill_exists(app_handle: tauri::AppHandle, identifier: String) -> Result<bool, String> {
+pub async fn skill_exists(
+    app_handle: tauri::AppHandle,
+    identifier: String,
+) -> Result<bool, String> {
     let scanner = create_scanner(&app_handle);
     Ok(scanner.skill_exists(&identifier))
 }
@@ -98,9 +98,7 @@ pub async fn get_assistant_skills(
     assistant_id: i64,
 ) -> Result<Vec<SkillWithConfig>, String> {
     let db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let configs = db
-        .get_assistant_skill_configs(assistant_id)
-        .map_err(|e| e.to_string())?;
+    let configs = db.get_assistant_skill_configs(assistant_id).map_err(|e| e.to_string())?;
 
     // Scan all skills to check existence
     let scanner = create_scanner(&app_handle);
@@ -112,11 +110,7 @@ pub async fn get_assistant_skills(
         .map(|config| {
             let skill = existing_skills.get(&config.skill_identifier).cloned();
             let exists = skill.is_some();
-            SkillWithConfig {
-                skill,
-                config,
-                exists,
-            }
+            SkillWithConfig { skill, config, exists }
         })
         .collect();
 
@@ -140,9 +134,8 @@ pub async fn get_enabled_assistant_skills_internal(
     assistant_id: i64,
 ) -> Result<Vec<ScannedSkill>, crate::errors::AppError> {
     let db = SkillDatabase::new(app_handle).map_err(crate::errors::AppError::from)?;
-    let configs = db
-        .get_enabled_skill_configs(assistant_id)
-        .map_err(crate::errors::AppError::from)?;
+    let configs =
+        db.get_enabled_skill_configs(assistant_id).map_err(crate::errors::AppError::from)?;
 
     if configs.is_empty() {
         return Ok(Vec::new());
@@ -162,7 +155,10 @@ pub async fn get_enabled_assistant_skills_internal(
 }
 
 /// 检查 Agent load_skill 是否已就绪（全局 + 助手级）
-fn check_agent_load_skill_ready(app_handle: &tauri::AppHandle, assistant_id: i64) -> Result<bool, String> {
+fn check_agent_load_skill_ready(
+    app_handle: &tauri::AppHandle,
+    assistant_id: i64,
+) -> Result<bool, String> {
     crate::mcp::registry_api::is_agent_load_skill_ready(app_handle, assistant_id)
 }
 
@@ -176,7 +172,7 @@ pub async fn update_assistant_skill_config(
     priority: i32,
 ) -> Result<i64, String> {
     let db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    
+
     // 后端校验：启用 skill 时需要 Agent load_skill 可用
     if is_enabled {
         let agent_ready = check_agent_load_skill_ready(&app_handle, assistant_id)?;
@@ -184,7 +180,7 @@ pub async fn update_assistant_skill_config(
             return Err("AGENT_LOAD_SKILL_REQUIRED".to_string());
         }
     }
-    
+
     let id = db
         .upsert_assistant_skill_config(assistant_id, &skill_identifier, is_enabled, priority)
         .map_err(|e| e.to_string())?;
@@ -204,8 +200,7 @@ pub async fn toggle_assistant_skill(
     is_enabled: bool,
 ) -> Result<(), String> {
     let db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    db.update_skill_config_enabled(config_id, is_enabled)
-        .map_err(|e| e.to_string())?;
+    db.update_skill_config_enabled(config_id, is_enabled).map_err(|e| e.to_string())?;
 
     debug!("Toggled skill config {} to enabled={}", config_id, is_enabled);
     Ok(())
@@ -233,7 +228,7 @@ pub async fn bulk_update_assistant_skills(
     configs: Vec<(String, bool, i32)>, // (skill_identifier, is_enabled, priority)
 ) -> Result<(), String> {
     let db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    
+
     // 后端校验：如果新配置中有启用的 skills，检查当前是否有启用的 skills
     let has_enabled_in_new = configs.iter().any(|(_, enabled, _)| *enabled);
     if has_enabled_in_new {
@@ -242,15 +237,10 @@ pub async fn bulk_update_assistant_skills(
             return Err("AGENT_LOAD_SKILL_REQUIRED".to_string());
         }
     }
-    
-    db.bulk_update_assistant_skills(assistant_id, &configs)
-        .map_err(|e| e.to_string())?;
 
-    info!(
-        "Bulk updated {} skill configs for assistant {}",
-        configs.len(),
-        assistant_id
-    );
+    db.bulk_update_assistant_skills(assistant_id, &configs).map_err(|e| e.to_string())?;
+
+    info!("Bulk updated {} skill configs for assistant {}", configs.len(), assistant_id);
     Ok(())
 }
 
@@ -261,18 +251,15 @@ pub async fn cleanup_orphaned_skill_configs(app_handle: tauri::AppHandle) -> Res
     let scanner = create_scanner(&app_handle);
 
     // Get all configured identifiers
-    let configured = db
-        .get_all_configured_skill_identifiers()
-        .map_err(|e| e.to_string())?;
+    let configured = db.get_all_configured_skill_identifiers().map_err(|e| e.to_string())?;
 
     let mut deleted_count = 0;
 
     // Check each and delete if not found
     for identifier in configured {
         if !scanner.skill_exists(&identifier) {
-            let deleted = db
-                .delete_skill_configs_by_identifier(&identifier)
-                .map_err(|e| e.to_string())?;
+            let deleted =
+                db.delete_skill_configs_by_identifier(&identifier).map_err(|e| e.to_string())?;
             deleted_count += deleted;
             warn!("Cleaned up orphaned skill config: {}", identifier);
         }
@@ -296,10 +283,7 @@ pub async fn open_skills_folder(app_handle: tauri::AppHandle) -> Result<(), Stri
     // Open with system file manager
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg(&skills_dir)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        std::process::Command::new("open").arg(&skills_dir).spawn().map_err(|e| e.to_string())?;
     }
 
     #[cfg(target_os = "windows")]
@@ -334,26 +318,17 @@ pub async fn open_skill_parent_folder(file_path: String) -> Result<(), String> {
     // Open with system file manager
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg(parent)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        std::process::Command::new("open").arg(parent).spawn().map_err(|e| e.to_string())?;
     }
 
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
-            .arg(parent)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        std::process::Command::new("explorer").arg(parent).spawn().map_err(|e| e.to_string())?;
     }
 
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open")
-            .arg(parent)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        std::process::Command::new("xdg-open").arg(parent).spawn().map_err(|e| e.to_string())?;
     }
 
     Ok(())

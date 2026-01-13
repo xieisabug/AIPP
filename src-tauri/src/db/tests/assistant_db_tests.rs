@@ -232,9 +232,9 @@ fn test_assistant_model_config_operations() {
     let model_id = db.add_assistant_model(assistant_id, 1, "gpt-4", "GPT-4").unwrap();
 
     // 添加配置
-    let config_id =
-        db.add_assistant_model_config(assistant_id, model_id, "temperature", "0.7", "float")
-            .unwrap();
+    let config_id = db
+        .add_assistant_model_config(assistant_id, model_id, "temperature", "0.7", "float")
+        .unwrap();
     assert!(config_id > 0);
 
     // 获取配置
@@ -362,8 +362,7 @@ fn test_assistant_special_characters() {
     assert_eq!(a1.description, Some("这是描述 ✨".to_string()));
 
     // SQL 注入尝试
-    let id2 =
-        db.add_assistant("'; DROP TABLE assistant; --", "Normal desc", None, false).unwrap();
+    let id2 = db.add_assistant("'; DROP TABLE assistant; --", "Normal desc", None, false).unwrap();
     let a2 = db.get_assistant(id2).unwrap();
     assert_eq!(a2.name, "'; DROP TABLE assistant; --");
 

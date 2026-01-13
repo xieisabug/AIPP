@@ -98,7 +98,7 @@ pub struct Message {
     pub tool_calls_json: Option<String>, // 保存原始 tool_calls JSON
     #[serde(serialize_with = "serialize_option_datetime_millis")]
     pub first_token_time: Option<DateTime<Utc>>, // 首个 token 到达时间
-    pub ttft_ms: Option<i64>, // Time to First Token (毫秒)
+    pub ttft_ms: Option<i64>,            // Time to First Token (毫秒)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -860,10 +860,9 @@ impl ConversationDatabase {
             // to avoid negative/zero durations which lead to N/A or extreme TPS.
             if finish_time.is_some()
                 && end_point.timestamp_subsec_millis() == 0
-                && [first_token_time, start_time]
-                    .into_iter()
-                    .flatten()
-                    .any(|t| t.timestamp() == end_point.timestamp() && t.timestamp_subsec_millis() > 0)
+                && [first_token_time, start_time].into_iter().flatten().any(|t| {
+                    t.timestamp() == end_point.timestamp() && t.timestamp_subsec_millis() > 0
+                })
             {
                 end_point = end_point + chrono::Duration::milliseconds(999);
             }
@@ -990,14 +989,13 @@ impl ConversationDatabase {
                 let finish_time = get_datetime_from_row(row, 7)?;
                 let start_time = get_datetime_from_row(row, 8)?;
                 let created_time = get_required_datetime_from_row(row, 9, "created_time")?;
-                let ttft_ms: Option<i64> = row.get(5).ok().or_else(|| {
-                    match (start_time, first_token_time) {
+                let ttft_ms: Option<i64> =
+                    row.get(5).ok().or_else(|| match (start_time, first_token_time) {
                         (Some(start), Some(first_token)) => {
                             Some((first_token.timestamp_millis() - start.timestamp_millis()).max(0))
                         }
                         _ => None,
-                    }
-                });
+                    });
 
                 // 计算 TPS (Tokens Per Second)，优先使用输出 token，缺失时回退到总 token
                 let tokens_for_speed: i64 = if output_tokens > 0 {
@@ -1014,13 +1012,10 @@ impl ConversationDatabase {
                     let mut end_point = finish_time.unwrap_or_else(chrono::Utc::now);
                     if finish_time.is_some()
                         && end_point.timestamp_subsec_millis() == 0
-                        && [first_token_time, start_time]
-                            .into_iter()
-                            .flatten()
-                            .any(|t| {
-                                t.timestamp() == end_point.timestamp()
-                                    && t.timestamp_subsec_millis() > 0
-                            })
+                        && [first_token_time, start_time].into_iter().flatten().any(|t| {
+                            t.timestamp() == end_point.timestamp()
+                                && t.timestamp_subsec_millis() > 0
+                        })
                     {
                         end_point = end_point + chrono::Duration::milliseconds(999);
                     }
@@ -1105,5 +1100,5 @@ pub struct MessageTokenStats {
     pub output_tokens: i32,
     pub model_name: Option<String>,
     pub ttft_ms: Option<i64>, // Time to First Token (毫秒)
-    pub tps: Option<f64>,      // Tokens Per Second
+    pub tps: Option<f64>,     // Tokens Per Second
 }

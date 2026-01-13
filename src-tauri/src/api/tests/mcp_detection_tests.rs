@@ -23,7 +23,7 @@ fn get_mcp_tool_call_regex() -> Regex {
 #[test]
 fn test_mcp_tool_call_basic_detection() {
     let regex = get_mcp_tool_call_regex();
-    
+
     let content = r#"
 <mcp_tool_call>
 <server_name>weather-server</server_name>
@@ -34,7 +34,7 @@ fn test_mcp_tool_call_basic_detection() {
 
     let captures = regex.captures(content);
     assert!(captures.is_some());
-    
+
     let cap = captures.unwrap();
     assert_eq!(cap.get(1).unwrap().as_str(), "weather-server");
     assert_eq!(cap.get(2).unwrap().as_str(), "get_weather");
@@ -45,12 +45,12 @@ fn test_mcp_tool_call_basic_detection() {
 #[test]
 fn test_mcp_tool_call_compact_format() {
     let regex = get_mcp_tool_call_regex();
-    
+
     let content = r#"<mcp_tool_call><server_name>test</server_name><tool_name>do_thing</tool_name><parameters>{}</parameters></mcp_tool_call>"#;
 
     let captures = regex.captures(content);
     assert!(captures.is_some());
-    
+
     let cap = captures.unwrap();
     assert_eq!(cap.get(1).unwrap().as_str(), "test");
     assert_eq!(cap.get(2).unwrap().as_str(), "do_thing");
@@ -61,7 +61,7 @@ fn test_mcp_tool_call_compact_format() {
 #[test]
 fn test_mcp_tool_call_multiline_parameters() {
     let regex = get_mcp_tool_call_regex();
-    
+
     let content = r#"
 <mcp_tool_call>
 <server_name>code-server</server_name>
@@ -75,11 +75,11 @@ fn test_mcp_tool_call_multiline_parameters() {
 
     let captures = regex.captures(content);
     assert!(captures.is_some());
-    
+
     let cap = captures.unwrap();
     assert_eq!(cap.get(1).unwrap().as_str(), "code-server");
     assert_eq!(cap.get(2).unwrap().as_str(), "execute");
-    
+
     let params = cap.get(3).unwrap().as_str();
     assert!(params.contains("hello"));
     assert!(params.contains("world"));
@@ -89,7 +89,7 @@ fn test_mcp_tool_call_multiline_parameters() {
 #[test]
 fn test_mcp_tool_call_multiple() {
     let regex = get_mcp_tool_call_regex();
-    
+
     let content = r#"
 Let me check the weather and then search for restaurants.
 
@@ -125,12 +125,12 @@ Based on the weather, I'll search for outdoor restaurants.
 #[test]
 fn test_mcp_tool_call_no_match() {
     let regex = get_mcp_tool_call_regex();
-    
+
     let contents = vec![
         "This is a normal message without any tool calls.",
         "<mcp_tool_call>incomplete tag",
         "<server_name>test</server_name>", // missing wrapper
-        "", // empty
+        "",                                // empty
     ];
 
     for content in contents {
@@ -143,7 +143,7 @@ fn test_mcp_tool_call_no_match() {
 #[test]
 fn test_mcp_tool_call_special_names() {
     let regex = get_mcp_tool_call_regex();
-    
+
     let content = r#"
 <mcp_tool_call>
 <server_name>my-server_v2.0</server_name>
@@ -154,7 +154,7 @@ fn test_mcp_tool_call_special_names() {
 
     let captures = regex.captures(content);
     assert!(captures.is_some());
-    
+
     let cap = captures.unwrap();
     assert_eq!(cap.get(1).unwrap().as_str(), "my-server_v2.0");
     assert_eq!(cap.get(2).unwrap().as_str(), "get_data-v1");
@@ -164,7 +164,7 @@ fn test_mcp_tool_call_special_names() {
 #[test]
 fn test_mcp_tool_call_empty_parameters() {
     let regex = get_mcp_tool_call_regex();
-    
+
     let content = r#"
 <mcp_tool_call>
 <server_name>test</server_name>
@@ -175,7 +175,7 @@ fn test_mcp_tool_call_empty_parameters() {
 
     let captures = regex.captures(content);
     assert!(captures.is_some());
-    
+
     let cap = captures.unwrap();
     assert_eq!(cap.get(3).unwrap().as_str(), "");
 }
@@ -184,7 +184,7 @@ fn test_mcp_tool_call_empty_parameters() {
 #[test]
 fn test_mcp_tool_call_xml_special_chars() {
     let regex = get_mcp_tool_call_regex();
-    
+
     let content = r#"
 <mcp_tool_call>
 <server_name>test</server_name>
@@ -195,7 +195,7 @@ fn test_mcp_tool_call_xml_special_chars() {
 
     let captures = regex.captures(content);
     assert!(captures.is_some());
-    
+
     let cap = captures.unwrap();
     let params = cap.get(3).unwrap().as_str();
     assert!(params.contains("&amp;"));
@@ -211,7 +211,7 @@ fn test_mcp_tool_call_xml_special_chars() {
 fn test_parse_json_parameters() {
     let params_str = r#"{"city": "Beijing", "units": "celsius"}"#;
     let parsed: Result<Value, _> = serde_json::from_str(params_str);
-    
+
     assert!(parsed.is_ok());
     let value = parsed.unwrap();
     assert_eq!(value["city"], "Beijing");
@@ -228,10 +228,10 @@ fn test_parse_nested_json_parameters() {
             "filters": ["active", "verified"]
         }
     }"#;
-    
+
     let parsed: Result<Value, _> = serde_json::from_str(params_str);
     assert!(parsed.is_ok());
-    
+
     let value = parsed.unwrap();
     assert_eq!(value["query"], "test");
     assert_eq!(value["options"]["limit"], 10);
@@ -245,7 +245,7 @@ fn test_parse_invalid_json_parameters() {
         "{missing: quotes}",
         "{'single': 'quotes'}", // Python style
     ];
-    
+
     for params in invalid_params {
         let parsed: Result<Value, _> = serde_json::from_str(params);
         assert!(parsed.is_err(), "Should fail to parse: {}", params);
@@ -266,7 +266,7 @@ fn test_tool_call_status_transitions() {
         ("running", "failed"),
         ("pending", "cancelled"),
     ];
-    
+
     for (from, to) in valid_transitions {
         // 验证有效转换
         let is_valid = match (from, to) {
@@ -278,14 +278,11 @@ fn test_tool_call_status_transitions() {
         };
         assert!(is_valid, "Transition from {} to {} should be valid", from, to);
     }
-    
+
     // 无效转换
-    let invalid_transitions = vec![
-        ("success", "running"),
-        ("failed", "success"),
-        ("cancelled", "running"),
-    ];
-    
+    let invalid_transitions =
+        vec![("success", "running"), ("failed", "success"), ("cancelled", "running")];
+
     for (from, to) in invalid_transitions {
         let is_valid = match (from, to) {
             ("pending", "running") => true,
@@ -319,11 +316,11 @@ I found the results.
 
     let regex = get_mcp_tool_call_regex();
     let call_id = 42;
-    
+
     // 替换为注释标记
     let replacement = format!("<!-- MCP_TOOL_CALL:{} -->", call_id);
     let replaced = regex.replace_all(original_content, replacement.as_str());
-    
+
     assert!(replaced.contains("<!-- MCP_TOOL_CALL:42 -->"));
     assert!(!replaced.contains("<mcp_tool_call>"));
     assert!(!replaced.contains("</mcp_tool_call>"));
@@ -347,14 +344,14 @@ fn test_mcp_multiple_tool_calls_replacement() {
 "#;
 
     let regex = get_mcp_tool_call_regex();
-    
+
     // 计数替换
     let mut count = 0;
     let replaced = regex.replace_all(content, |_: &regex::Captures| {
         count += 1;
         format!("<!-- REPLACED:{} -->", count)
     });
-    
+
     assert_eq!(count, 2);
     assert!(replaced.contains("<!-- REPLACED:1 -->"));
     assert!(replaced.contains("<!-- REPLACED:2 -->"));
@@ -368,22 +365,25 @@ fn test_mcp_multiple_tool_calls_replacement() {
 #[test]
 fn test_mcp_tool_call_very_long_parameters() {
     let regex = get_mcp_tool_call_regex();
-    
+
     // 创建一个 10KB 的 JSON 参数
     let long_value = "x".repeat(10 * 1024);
     let params = format!(r#"{{"data": "{}"}}"#, long_value);
-    
-    let content = format!(r#"
+
+    let content = format!(
+        r#"
 <mcp_tool_call>
 <server_name>test</server_name>
 <tool_name>process</tool_name>
 <parameters>{}</parameters>
 </mcp_tool_call>
-"#, params);
+"#,
+        params
+    );
 
     let captures = regex.captures(&content);
     assert!(captures.is_some());
-    
+
     let cap = captures.unwrap();
     let extracted_params = cap.get(3).unwrap().as_str();
     assert!(extracted_params.len() > 10 * 1024);
@@ -393,7 +393,7 @@ fn test_mcp_tool_call_very_long_parameters() {
 #[test]
 fn test_mcp_tool_call_unicode_content() {
     let regex = get_mcp_tool_call_regex();
-    
+
     let content = r#"
 <mcp_tool_call>
 <server_name>翻译服务</server_name>
@@ -404,10 +404,10 @@ fn test_mcp_tool_call_unicode_content() {
 
     let captures = regex.captures(content);
     assert!(captures.is_some());
-    
+
     let cap = captures.unwrap();
     assert_eq!(cap.get(1).unwrap().as_str(), "翻译服务");
-    
+
     let params = cap.get(3).unwrap().as_str();
     assert!(params.contains("世界"));
 }
@@ -416,7 +416,7 @@ fn test_mcp_tool_call_unicode_content() {
 #[test]
 fn test_mcp_tool_call_name_with_spaces() {
     let regex = get_mcp_tool_call_regex();
-    
+
     let content = r#"
 <mcp_tool_call>
 <server_name>  spaced server  </server_name>
@@ -427,12 +427,12 @@ fn test_mcp_tool_call_name_with_spaces() {
 
     let captures = regex.captures(content);
     assert!(captures.is_some());
-    
+
     let cap = captures.unwrap();
     // 正则会捕获包含空格的名称
     let server_name = cap.get(1).unwrap().as_str();
     let tool_name = cap.get(2).unwrap().as_str();
-    
+
     // 应用程序代码应该使用 .trim() 处理
     assert_eq!(server_name.trim(), "spaced server");
     assert_eq!(tool_name.trim(), "spaced tool");

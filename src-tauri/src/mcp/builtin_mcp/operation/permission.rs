@@ -62,11 +62,8 @@ impl PermissionManager {
         }
 
         let path = Path::new(path);
-        let path = if path.is_relative() {
-            path.canonicalize().ok()
-        } else {
-            Some(path.to_path_buf())
-        };
+        let path =
+            if path.is_relative() { path.canonicalize().ok() } else { Some(path.to_path_buf()) };
 
         if let Some(abs_path) = path {
             for allowed_dir in &whitelist {
@@ -149,7 +146,8 @@ impl PermissionManager {
             .unwrap_or(None);
 
         // 解析并更新白名单
-        let mut env_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut env_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         if let Some(text) = &env_text {
             for line in text.lines() {
                 let line = line.trim();
@@ -180,11 +178,8 @@ impl PermissionManager {
         }
 
         // 重建环境变量字符串
-        let new_env_text = env_map
-            .into_iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let new_env_text =
+            env_map.into_iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join("\n");
 
         // 更新数据库
         db.conn
@@ -212,9 +207,8 @@ impl PermissionManager {
         }
 
         // 请求用户权限
-        let decision = self
-            .request_permission(operation_state, operation, path, conversation_id)
-            .await?;
+        let decision =
+            self.request_permission(operation_state, operation, path, conversation_id).await?;
 
         match decision {
             PermissionDecision::Allow => Ok(true),

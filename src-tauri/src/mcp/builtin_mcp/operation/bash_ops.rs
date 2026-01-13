@@ -43,10 +43,8 @@ impl BashOperations {
     ) -> Result<ExecuteBashResponse, String> {
         let command = &request.command;
         let run_in_background = request.run_in_background.unwrap_or(false);
-        let timeout_ms = request
-            .timeout
-            .unwrap_or(Self::DEFAULT_TIMEOUT_MS)
-            .min(Self::MAX_TIMEOUT_MS);
+        let timeout_ms =
+            request.timeout.unwrap_or(Self::DEFAULT_TIMEOUT_MS).min(Self::MAX_TIMEOUT_MS);
 
         let (shell, shell_arg) = Self::get_shell();
         info!(shell = %shell, command = %command, background = run_in_background, timeout_ms = timeout_ms, "Executing bash command");
@@ -68,10 +66,7 @@ impl BashOperations {
         timeout_ms: u64,
     ) -> Result<ExecuteBashResponse, String> {
         let mut cmd = Command::new(shell);
-        cmd.arg(shell_arg)
-            .arg(command)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.arg(shell_arg).arg(command).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let child = cmd.spawn().map_err(|e| format!("Failed to spawn command: {}", e))?;
 
@@ -133,10 +128,7 @@ impl BashOperations {
         );
 
         let mut cmd = Command::new(shell);
-        cmd.arg(shell_arg)
-            .arg(command)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.arg(shell_arg).arg(command).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| {
             error!(error = %e, command = %command, "Failed to spawn background command");
@@ -158,7 +150,8 @@ impl BashOperations {
         let command_clone = command.to_string();
 
         tokio::spawn(async move {
-            Self::read_output_streams(&state_clone, &bash_id_clone, &command_clone, stdout, stderr).await;
+            Self::read_output_streams(&state_clone, &bash_id_clone, &command_clone, stdout, stderr)
+                .await;
         });
 
         info!(bash_id = %bash_id, "Command started in background");
@@ -279,11 +272,9 @@ impl BashOperations {
         // 可选的正则过滤
         let filtered_output = if let Some(filter) = &request.filter {
             match regex::Regex::new(filter) {
-                Ok(re) => output
-                    .lines()
-                    .filter(|line| re.is_match(line))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+                Ok(re) => {
+                    output.lines().filter(|line| re.is_match(line)).collect::<Vec<_>>().join("\n")
+                }
                 Err(e) => {
                     warn!(error = %e, filter = %filter, "Invalid regex filter, returning unfiltered output");
                     output
