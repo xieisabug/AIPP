@@ -61,7 +61,7 @@ use crate::api::system_api::{
     save_feature_config, set_autostart, set_shortcut_recording, suspend_global_shortcut,
 };
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
-use crate::api::updater_api::{check_update, download_and_install_update, get_app_version};
+use crate::api::updater_api::{check_update, check_update_with_proxy, download_and_install_update, get_app_version};
 use crate::artifacts::artifacts_db::ArtifactsDatabase;
 use crate::artifacts::collection_api::{
     delete_artifact_collection, generate_artifact_metadata, get_artifact_by_id,
@@ -657,6 +657,7 @@ pub fn run() {
             set_autostart,
             // Updater commands
             check_update,
+            check_update_with_proxy,
             download_and_install_update,
             get_app_version,
         ])

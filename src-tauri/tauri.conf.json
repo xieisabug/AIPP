@@ -32,9 +32,7 @@
     "plugins": {
         "updater": {
             "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJBMjJFMjM1ODIxRTY2RDMKUldUVFpoNkNOZUlpS3RWbDNQajVXM2ZTa1A3eXZRSDdIY3c3M3Y5SXJJa1BWTWh4K1laOG1xUWEK",
-            "endpoints": [
-                "https://github.com/xieisabug/aipp/releases/latest/download/latest.json"
-            ],
+            "endpoints": "https://github.com/xieisabug/aipp/releases/latest/download/latest.json",
             "dialog": false,
             "windows": {
                 "installMode": "passive"

@@ -1,5 +1,7 @@
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
 use serde::{Deserialize, Serialize};
+
+use crate::FeatureConfigState;
 
 /// 更新状态信息
 #[derive(Clone, Serialize, Deserialize)]
@@ -14,6 +16,42 @@ pub struct UpdateInfo {
 /// 检查更新
 #[tauri::command]
 pub async fn check_update(app_handle: AppHandle) -> Result<UpdateInfo, String> {
+    check_update_impl(app_handle, None).await
+}
+
+/// 使用代理检查更新
+#[tauri::command]
+pub async fn check_update_with_proxy(
+    app_handle: AppHandle,
+    state: State<'_, FeatureConfigState>,
+) -> Result<UpdateInfo, String> {
+    // 从配置中获取代理
+    let config_feature_map = state.config_feature_map.lock().await;
+    let proxy = if let Some(network_config) = config_feature_map.get("network_config") {
+        if let Some(proxy_config) = network_config.get("network_proxy") {
+            let proxy_url = proxy_config.value.trim();
+            if !proxy_url.is_empty() {
+                Some(proxy_url.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    drop(config_feature_map);
+
+    if proxy.is_none() {
+        return Err("未配置代理，请在网络配置中设置代理".to_string());
+    }
+
+    check_update_impl(app_handle, proxy).await
+}
+
+/// 检查更新的内部实现
+async fn check_update_impl(app_handle: AppHandle, proxy: Option<String>) -> Result<UpdateInfo, String> {
     #[cfg(desktop)]
     {
         use tauri_plugin_updater::UpdaterExt;
@@ -21,7 +59,13 @@ pub async fn check_update(app_handle: AppHandle) -> Result<UpdateInfo, String> {
         let updater = app_handle.updater()
             .map_err(|e| format!("获取 updater 失败: {}", e))?;
 
-        match updater.check().await {
+        // 设置代理环境变量
+        if let Some(ref proxy_url) = proxy {
+            std::env::set_var("HTTP_PROXY", proxy_url);
+            std::env::set_var("HTTPS_PROXY", proxy_url);
+        }
+
+        let result = match updater.check().await {
             Ok(Some(update)) => {
                 Ok(UpdateInfo {
                     available: true,
@@ -40,8 +84,26 @@ pub async fn check_update(app_handle: AppHandle) -> Result<UpdateInfo, String> {
                     date: None,
                 })
             }
-            Err(e) => Err(format!("检查更新失败: {}", e))
+            Err(e) => {
+                let error_msg = e.to_string();
+                // 提供更友好的错误提示
+                if error_msg.contains("Could not fetch") || error_msg.contains("valid release") {
+                    Err("检查更新失败: GitHub Releases 中未找到 latest.json 文件。请确保已发布新版本并在 Assets 中包含 latest.json".to_string())
+                } else if error_msg.contains("signature") {
+                    Err(format!("检查更新失败: 签名验证错误 - {}", e))
+                } else {
+                    Err(format!("检查更新失败: {}", e))
+                }
+            }
+        };
+
+        // 清除代理环境变量
+        if proxy.is_some() {
+            std::env::remove_var("HTTP_PROXY");
+            std::env::remove_var("HTTPS_PROXY");
         }
+
+        result
     }
     #[cfg(mobile)]
     {

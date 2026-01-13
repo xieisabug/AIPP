@@ -3,7 +3,7 @@ import { UseFormReturn } from "react-hook-form";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, Download, CheckCircle2, Info } from "lucide-react";
+import { Loader2, Download, CheckCircle2, Info, Globe } from "lucide-react";
 import { useAppUpdater } from "@/hooks/useAppUpdater";
 
 interface AboutConfigFormProps {
@@ -15,13 +15,15 @@ export const AboutConfigForm: React.FC<AboutConfigFormProps> = ({ form: _form })
         currentVersion,
         updateInfo,
         isChecking,
+        isCheckingWithProxy,
         isDownloading,
         checkUpdate,
+        checkUpdateWithProxy,
         downloadAndInstall,
     } = useAppUpdater();
 
     const getUpdateStatusBadge = () => {
-        if (isChecking) {
+        if (isChecking || isCheckingWithProxy) {
             return <Badge variant="outline"><Loader2 className="h-3 w-3 animate-spin mr-1" />检查中</Badge>;
         }
         if (updateInfo?.available) {
@@ -46,6 +48,8 @@ export const AboutConfigForm: React.FC<AboutConfigFormProps> = ({ form: _form })
         if (updateInfo?.available) return "开始更新";
         return "检查更新";
     };
+
+    const isAnyChecking = isChecking || isCheckingWithProxy;
 
     return (
         <Card className="shadow-sm border-l-4 border-l-primary">
@@ -84,13 +88,25 @@ export const AboutConfigForm: React.FC<AboutConfigFormProps> = ({ form: _form })
                 <div className="flex gap-3">
                     <Button
                         onClick={handleUpdateButtonClick}
-                        disabled={isChecking || isDownloading}
+                        disabled={isAnyChecking || isDownloading}
                         className="flex-1"
+                        variant={updateInfo?.available ? "default" : "outline"}
                     >
-                        {(isChecking || isDownloading) && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                        {!isChecking && !isDownloading && <Download className="h-4 w-4 mr-2" />}
+                        {(isAnyChecking || isDownloading) && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                        {!isAnyChecking && !isDownloading && <Download className="h-4 w-4 mr-2" />}
                         {getUpdateButtonText()}
                     </Button>
+                    {!updateInfo?.available && (
+                        <Button
+                            onClick={checkUpdateWithProxy}
+                            disabled={isAnyChecking || isDownloading}
+                            variant="outline"
+                            className="shrink-0"
+                            title="使用网络配置中的代理检查更新"
+                        >
+                            {isCheckingWithProxy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4" />}
+                        </Button>
+                    )}
                 </div>
             </CardContent>
         </Card>

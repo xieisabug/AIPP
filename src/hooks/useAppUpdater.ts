@@ -7,6 +7,7 @@ export const useAppUpdater = () => {
     const [currentVersion, setCurrentVersion] = useState<string>("");
     const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
     const [isChecking, setIsChecking] = useState(false);
+    const [isCheckingWithProxy, setIsCheckingWithProxy] = useState(false);
     const [isDownloading, setIsDownloading] = useState(false);
 
     // 获取当前版本
@@ -32,6 +33,24 @@ export const useAppUpdater = () => {
         }
     }, []);
 
+    // 使用代理检查更新
+    const checkUpdateWithProxy = useCallback(async () => {
+        setIsCheckingWithProxy(true);
+        try {
+            const info = await invoke<UpdateInfo>("check_update_with_proxy");
+            setUpdateInfo(info);
+            if (info.available) {
+                toast.success(`发现新版本: ${info.latest_version}`);
+            } else {
+                toast.info("当前已是最新版本");
+            }
+        } catch (e) {
+            toast.error("代理检查更新失败: " + e);
+        } finally {
+            setIsCheckingWithProxy(false);
+        }
+    }, []);
+
     // 下载并安装更新
     const downloadAndInstall = useCallback(async () => {
         setIsDownloading(true);
@@ -48,8 +67,10 @@ export const useAppUpdater = () => {
         currentVersion,
         updateInfo,
         isChecking,
+        isCheckingWithProxy,
         isDownloading,
         checkUpdate,
+        checkUpdateWithProxy,
         downloadAndInstall,
     };
 };

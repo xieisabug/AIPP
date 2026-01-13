@@ -13,22 +13,74 @@ jobs:
         outputs:
             release_id: ${{ steps.create-release.outputs.id }}
             release_upload_url: ${{ steps.create-release.outputs.upload_url }}
-            release_body: "${{ steps.tag.outputs.message }}"
+            release_body: "${{ steps.changelog.outputs.changelog }}"
 
         steps:
             - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
 
             - name: Get version
               id: get_version
               uses: battila7/get-version-action@v2
 
-            - name: Get tag message
-              id: tag
+            - name: Generate changelog
+              id: changelog
               run: |
-                  git fetch --depth=1 origin +refs/tags/*:refs/tags/*
-                  echo "message<<EOF" >> $GITHUB_OUTPUT
-                  echo "$(git tag -l --format='%(contents)' ${{ steps.get_version.outputs.version }})" >> $GITHUB_OUTPUT
-                  echo "EOF" >> $GITHUB_OUTPUT
+                  # 获取当前版本 tag
+                  CURRENT_TAG="${{ steps.get_version.outputs.version }}"
+
+                  # 获取上一个版本 tag
+                  PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+                  if [ -z "$PREV_TAG" ]; then
+                      # 如果没有上一个 tag，获取所有 commit
+                      COMMITS=$(git log --pretty=format:"- %s (%h)" --reverse)
+                      CHANGELOG="## 🎉 Release $CURRENT_TAG
+
+                  这是首次发布！
+
+                  ### 📝 更新内容
+
+                  $COMMITS"
+                  else
+                      # 获取两个 tag 之间的 commits
+                      COMMITS=$(git log ${PREV_TAG}..${CURRENT_TAG} --pretty=format:"- %s (%h)" --reverse)
+
+                      # 按类型分组 commit
+                  FEATURES=$(echo "$COMMITS" | grep -i "^-.*feat\|^-.*新增\|^-.*添加" || echo "")
+                  FIXES=$(echo "$COMMITS" | grep -i "^-.*fix\|^-.*修复\|^-.*bug" || echo "")
+                  DOCS=$(echo "$COMMITS" | grep -i "^-.*doc\|^-.*文档\|^-.*更新说明" || echo "")
+                  REFACTOR=$(echo "$COMMITS" | grep -i "^-.*refactor\|^-.*重构\|^-.*优化" || echo "")
+                  OTHER=$(echo "$COMMITS" | grep -v -i "^-.*feat\|^-.*新增\|^-.*添加\|^-.*fix\|^-.*修复\|^-.*bug\|^-.*doc\|^-.*文档\|^-.*更新说明\|^-.*refactor\|^-.*重构\|^-.*优化" || echo "")
+
+                  CHANGELOG="## 🎉 Release $CURRENT_TAG
+
+                  ### ✨ 新功能
+                  $FEATURES
+
+                  ### 🐛 Bug 修复
+                  $FIXES
+
+                  ### 📚 文档
+                  $DOCS
+
+                  ### ♻️ 重构 & 优化
+                  $REFACTOR
+
+                  ### 🔧 其他
+                  $OTHER"
+                  fi
+
+                  # 保存到文件供后续使用
+                  echo "$CHANGELOG" > changelog.md
+
+                  # 设置输出（注意处理多行内容）
+                  {
+                      echo 'changelog<<EOF'
+                      cat changelog.md
+                      echo EOF
+                  } >> $GITHUB_OUTPUT
 
             - name: Create Release
               id: create-release
@@ -37,7 +89,7 @@ jobs:
                   draft: true
                   name: ${{ steps.get_version.outputs.version }}
                   tag: ${{ steps.get_version.outputs.version }}
-                  body: "${{ steps.tag.outputs.message }}"
+                  body: "${{ steps.changelog.outputs.changelog }}"
 
     build-tauri:
         needs: create-release
@@ -50,15 +102,19 @@ jobs:
                     - os: ubuntu-latest
                       arch: x86_64
                       target: x86_64-unknown-linux-gnu
+                      bundle_target: appimage
                     - os: macos-latest
                       arch: x64
                       target: x86_64-apple-darwin
+                      bundle_target: dmg
                     - os: macos-latest
                       arch: arm64
                       target: aarch64-apple-darwin
+                      bundle_target: dmg
                     - os: windows-latest
                       arch: x86_64
                       target: x86_64-pc-windows-msvc
+                      bundle_target: msi
 
         runs-on: ${{ matrix.os }}
         steps:
@@ -91,19 +147,155 @@ jobs:
                       libxdo-dev
 
             - name: Build Tauri App
+              id: build
               uses: tauri-apps/tauri-action@v0.5.6
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
               with:
                   releaseId: ${{ needs.create-release.outputs.release_id }}
                   releaseBody: ${{ needs.create-release.outputs.release_body }}
                   tauriScript: pnpm run tauri
 
+    # 生成并上传 latest.json 文件（带签名）
+    generate-latest-json:
+        needs: [create-release, build-tauri]
+        permissions:
+            contents: write
+        runs-on: ubuntu-latest
+        outputs:
+            version: ${{ steps.get_version.outputs.version }}
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Get version
+              id: get_version
+              uses: battila7/get-version-action@v2
+
+            - name: Get release assets and signatures
+              id: get_assets
+              uses: actions/github-script@v6
+              env:
+                  release_id: ${{ needs.create-release.outputs.release_id }}
+              with:
+                script: |
+                  const release = await github.rest.repos.getRelease({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    release_id: process.env.release_id,
+                  });
+
+                  // 收集签名文件
+                  const signatures = {};
+                  const bundleUrls = {};
+
+                  for (const asset of release.data.assets) {
+                    const name = asset.name;
+
+                    // .sig 文件是 tauri-action 自动生成的签名
+                    if (name.endsWith('.sig')) {
+                      const assetName = name.replace('.sig', '').replace(/^bundle\//, '');
+                      // 读取签名内容
+                      const response = await github.request(asset.browser_download_url);
+                      signatures[assetName] = Buffer.from(response.data).toString('base64');
+                    }
+
+                    // 记录 bundle URL
+                    if (name.includes('.AppImage.tar.gz') || name.includes('.dmg.zip') || name.includes('.msi.zip')) {
+                      const ext = name.includes('.AppImage') ? 'linux-x86_64' :
+                                  name.includes('x64.dmg') ? 'darwin-x86_64' :
+                                  name.includes('aarch64.dmg') ? 'darwin-aarch64' :
+                                  name.includes('msi') ? 'windows-x86_64' : '';
+                      if (ext) {
+                        bundleUrls[ext] = asset.browser_download_url;
+                      }
+                    }
+                  }
+
+                  console.log('Signatures:', JSON.stringify(signatures, null, 2));
+                  console.log('Bundle URLs:', JSON.stringify(bundleUrls, null, 2));
+
+                  // 输出为环境变量供下一步使用
+                  const fs = require('fs');
+                  fs.writeFileSync('signatures.json', JSON.stringify(signatures, null, 2));
+                  fs.writeFileSync('urls.json', JSON.stringify(bundleUrls, null, 2));
+
+            - name: Generate latest.json with signatures
+              id: generate_json
+              run: |
+                  # 获取当前时间（ISO 8601 格式）
+                  PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+                  # 读取 changelog
+                  CHANGELOG="${{ needs.create-release.outputs.release_body }}"
+                  # 转义换行符为 JSON 字符串
+                  NOTES_JSON=$(echo "$CHANGELOG" | jq -Rs .)
+
+                  # 读取签名和 URLs
+                  SIGNATURES=$(cat signatures.json)
+                  URLS=$(cat urls.json)
+
+                  # 获取版本号（去掉 v 前缀）
+                  VERSION="${{ steps.get_version.outputs.version }}"
+                  VERSION=${VERSION#v}
+
+                  # 生成 latest.json 文件
+                  cat > latest.json << EOF
+                  {
+                    "version": "${VERSION}",
+                    "notes": $NOTES_JSON,
+                    "pub_date": "$PUB_DATE",
+                    "platforms": {
+                      "linux-x86_64": {
+                        "signature": "$(echo "$SIGNATURES" | jq -r '.["Aipp_'${VERSION}'_amd64.AppImage.tar.gz"] // ""')",
+                        "url": "$(echo "$URLS" | jq -r '.["linux-x86_64"] // ""')"
+                      },
+                      "darwin-x86_64": {
+                        "signature": "$(echo "$SIGNATURES" | jq -r '.["Aipp_'${VERSION}'_x64.dmg.zip"] // ""')",
+                        "url": "$(echo "$URLS" | jq -r '.["darwin-x86_64"] // ""')"
+                      },
+                      "darwin-aarch64": {
+                        "signature": "$(echo "$SIGNATURES" | jq -r '.["Aipp_'${VERSION}'_aarch64.dmg.zip"] // ""')",
+                        "url": "$(echo "$URLS" | jq -r '.["darwin-aarch64"] // ""')"
+                      },
+                      "windows-x86_64": {
+                        "signature": "$(echo "$SIGNATURES" | jq -r '.["Aipp_'${VERSION}'_x64_en-US.msi.zip"] // ""')",
+                        "url": "$(echo "$URLS" | jq -r '.["windows-x86_64"] // ""')"
+                      }
+                    }
+                  }
+                  EOF
+
+                  # 格式化 JSON
+                  jq . latest.json > latest.json.tmp
+                  mv latest.json.tmp latest.json
+
+                  echo "Generated latest.json:"
+                  cat latest.json
+
+            - name: Upload latest.json to Release
+              uses: actions/github-script@v6
+              env:
+                  release_id: ${{ needs.create-release.outputs.release_id }}
+              with:
+                script: |
+                  const fs = require('fs');
+                  const latestJson = fs.readFileSync('latest.json', 'utf8');
+
+                  await github.rest.repos.uploadReleaseAsset({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    release_id: process.env.release_id,
+                    name: 'latest.json',
+                    data: latestJson
+                  });
+
     publish-release:
         permissions:
             contents: write
         runs-on: ubuntu-latest
-        needs: [create-release, build-tauri]
+        needs: [create-release, build-tauri, generate-latest-json]
 
         steps:
             - name: publish release
