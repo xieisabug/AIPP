@@ -10,7 +10,7 @@ interface StatsCardProps {
 
 const StatsCard: React.FC<StatsCardProps> = ({ title, value, description, icon }) => {
     return (
-        <Card className="bg-gradient-to-br from-gray-50 to-gray-100 border-gray-200 hover:shadow-md transition-shadow">
+        <Card className="bg-gradient-to-br from-gray-50 to-gray-100 border-gray-200 hover:shadow-none transition-shadow">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
                 <CardTitle className="text-sm font-medium text-gray-700">{title}</CardTitle>
                 {icon}

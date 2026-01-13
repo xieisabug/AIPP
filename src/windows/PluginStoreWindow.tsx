@@ -168,7 +168,7 @@ export default function PluginStoreWindow() {
                                 {currentPlugins.map((plugin) => (
                                     <div
                                         key={plugin.id}
-                                        className="border rounded-lg p-4 cursor-pointer hover:shadow-md transition-shadow bg-card"
+                                        className="border rounded-lg p-4 cursor-pointer hover:shadow-none transition-shadow bg-card"
                                         onClick={() => handlePluginClick(plugin)}
                                     >
                                         <div className="flex items-start gap-3 mb-3">
@@ -268,7 +268,7 @@ export default function PluginStoreWindow() {
                                     {currentPlugins.map((plugin) => (
                                         <div
                                             key={plugin.id}
-                                            className="border rounded-lg p-4 cursor-pointer hover:shadow-md transition-shadow bg-card"
+                                            className="border rounded-lg p-4 cursor-pointer hover:shadow-none transition-shadow bg-card"
                                             onClick={() => handlePluginClick(plugin)}
                                         >
                                             <div className="flex items-start gap-3 mb-3">

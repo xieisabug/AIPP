@@ -17,7 +17,7 @@ const SidebarList: React.FC<SidebarListProps> = ({
     addButton
 }) => {
     return (
-        <Card className="bg-gradient-to-br from-muted/20 to-muted/40 border-border h-fit sticky top-6">
+        <Card className="bg-gradient-to-br from-muted/20 to-muted/40 border-border h-fit sticky top-6 shadow-none">
             <CardHeader className="pb-3">
                 <div className="flex items-start justify-between">
                     <div className="flex-1 min-w-0">

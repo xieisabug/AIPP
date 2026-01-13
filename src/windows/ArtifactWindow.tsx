@@ -544,7 +544,7 @@ export default function ArtifactWindow() {
 
                             {/* Log 信息展示区域 */}
                             <div className="w-full max-w-2xl">
-                                <div className="bg-card border border-border rounded-lg shadow-sm overflow-hidden">
+                                <div className="bg-card border border-border rounded-lg shadow-none overflow-hidden">
                                     <div className="px-4 py-3 text-center">
                                         {artifactEvents.logs.length === 0 ? (
                                             <div className="text-muted-foreground text-sm py-2">等待启动...</div>
