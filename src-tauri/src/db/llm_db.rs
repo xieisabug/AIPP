@@ -462,7 +462,10 @@ impl LLMDatabase {
     /// ACP 助手 (assistant_type = 4): 只返回 ACP 提供商 (api_type = 'acp') 的模型
     /// 普通助手: 排除 ACP 提供商的模型
     #[instrument(level = "debug", skip(self))]
-    pub fn get_filtered_models_for_select(&self, assistant_type: i64) -> Result<Vec<(String, String, i64, i64)>, String> {
+    pub fn get_filtered_models_for_select(
+        &self,
+        assistant_type: i64,
+    ) -> Result<Vec<(String, String, i64, i64)>, String> {
         let (filter_condition, exclude_condition) = if assistant_type == 4 {
             // ACP 助手：只要 ACP 提供商
             ("p.api_type = 'acp'", "")

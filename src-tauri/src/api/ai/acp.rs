@@ -53,24 +53,47 @@ fn resolve_acp_cli_path(cli_command: &str) -> PathBuf {
     
     // Check ~/.bun/bin/ first (bun-installed global packages)
     if let Some(home) = dirs::home_dir() {
-        let bun_bin_path = home.join(".bun").join("bin").join(cli_command);
+        // On Windows, bun creates .exe files for global packages
+        #[cfg(target_os = "windows")]
+        let exe_name = format!("{}.exe", cli_command);
+        #[cfg(not(target_os = "windows"))]
+        let exe_name = cli_command.to_string();
+        
+        let bun_bin_path = home.join(".bun").join("bin").join(&exe_name);
         info!("ACP: Checking bun bin path: {}", bun_bin_path.display());
         if bun_bin_path.exists() {
             info!("ACP: Found CLI in bun bin: {}", bun_bin_path.display());
             return bun_bin_path;
         }
+        
+        // Also check without .exe on Windows (in case user provides full name)
+        #[cfg(target_os = "windows")]
+        {
+            let bun_bin_path_no_ext = home.join(".bun").join("bin").join(cli_command);
+            if bun_bin_path_no_ext.exists() {
+                info!("ACP: Found CLI in bun bin (no ext): {}", bun_bin_path_no_ext.display());
+                return bun_bin_path_no_ext;
+            }
+        }
     }
     
-    // Check system PATH using `which` command
-    if let Ok(output) = std::process::Command::new("which")
+    // Check system PATH using platform-specific command
+    #[cfg(target_os = "windows")]
+    let which_cmd = "where";
+    #[cfg(not(target_os = "windows"))]
+    let which_cmd = "which";
+    
+    if let Ok(output) = std::process::Command::new(which_cmd)
         .arg(cli_command)
         .output()
     {
         if output.status.success() {
             let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path_str.is_empty() {
-                info!("ACP: Found CLI in system PATH: {}", path_str);
-                return PathBuf::from(path_str);
+            // On Windows, `where` may return multiple lines, take the first one
+            let first_path = path_str.lines().next().unwrap_or("").trim();
+            if !first_path.is_empty() {
+                info!("ACP: Found CLI in system PATH: {}", first_path);
+                return PathBuf::from(first_path);
             }
         }
     }
