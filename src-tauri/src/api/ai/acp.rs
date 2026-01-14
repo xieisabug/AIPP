@@ -812,6 +812,7 @@ pub async fn execute_acp_session(
     let response_buffer = Arc::new(TokioMutex::new(String::new()));
     let reasoning_buffer = Arc::new(TokioMutex::new(String::new()));
     let response_buffer_clone = response_buffer.clone();
+    let app_handle_for_db = app_handle.clone();
 
     // Create the ACP client with state
     let client_impl = AcpTauriClient {
@@ -925,28 +926,64 @@ pub async fn execute_acp_session(
         }
         info!("ACP: Prompt completed successfully");
 
-        // Wait for process to finish
-        info!("ACP: Waiting for process to finish...");
-        let exit_status = child.wait().await;
-        match &exit_status {
-            Ok(status) => {
-                info!("ACP: Process finished with status: {:?}", status);
+        // Prompt 完成后，获取最终内容并更新数据库
+        // 注意：不等待进程退出，因为某些 ACP agent（如 Claude Code ACP）
+        // 可能会保持会话活跃等待下一个 prompt
+        let final_content = {
+            let content = response_buffer_clone.lock().await.clone();
+            info!("ACP: Final content length: {}", content.len());
+            
+            // 更新数据库（使用保存的 app_handle）
+            if let Ok(db) = crate::ConversationDatabase::new(&app_handle_for_db) {
+                if let Ok(repo) = db.message_repo() {
+                    if let Err(e) = repo.update_content(message_id, &content) {
+                        error!("ACP: Failed to update message content: {:?}", e);
+                    } else {
+                        info!("ACP: Final content saved to database");
+                    }
+                }
             }
-            Err(e) => {
-                error!("ACP: Process wait failed: {:?}", e);
-            }
+            
+            content
+        };
+        
+        // 发送完成事件（在 local_set 内部发送，确保消息能及时到达）
+        let done_event = ConversationEvent {
+            r#type: "message_update".to_string(),
+            data: serde_json::to_value(MessageUpdateEvent {
+                message_id,
+                message_type: "response".to_string(),
+                content: final_content.clone(),
+                is_done: true,
+                token_count: None,
+                input_token_count: None,
+                output_token_count: None,
+                ttft_ms: None,
+                tps: None,
+            }).unwrap(),
+        };
+        let event_name = format!("conversation_event_{}", conversation_id);
+        if let Err(e) = window.emit(&event_name, done_event) {
+            error!("ACP: Failed to emit done event: {:?}", e);
+        } else {
+            info!("ACP: Done event emitted");
+        }
+
+        // 终止进程（可选，但推荐）
+        // 因为我们只发送了一个 prompt，之后不再需要这个会话
+        info!("ACP: Killing child process...");
+        if let Err(e) = child.kill().await {
+            // 进程可能已经退出，忽略错误
+            debug!("ACP: Kill process result: {:?}", e);
         }
 
         Ok::<(), AppError>(())
     }).await;
 
-    // Handle result and send appropriate events
+    // Handle result
     match result {
         Ok(()) => {
-            // Get final content and send done event
-            let final_content = response_buffer_clone.lock().await.clone();
-            info!("ACP: Session completed successfully, final content length: {}", final_content.len());
-            send_done(&window_for_local, &final_content);
+            info!("ACP: Session completed successfully");
         }
         Err(e) => {
             let err_msg = format!("{}", e);
