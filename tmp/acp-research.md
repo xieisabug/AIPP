@@ -295,6 +295,117 @@ if !info_update.title.is_undefined() {
 }
 ```
 
+### 15. `client_impl` 被 move 后无法访问其成员
+
+`ClientSideConnection::new(client_impl)` 会消费 `client_impl`，之后无法再访问其字段（如 `response_content_buffer`）。
+
+```rust
+// ❌ 错误 - client_impl 被 move 了
+let connection = ClientSideConnection::new(client_impl);
+// ... 后续代码
+let content = client_impl.response_content_buffer.lock().await; // E0382: borrow of moved value
+
+// ✅ 正确 - 在 move 之前 clone 需要的数据
+let response_buffer_clone = client_impl.response_content_buffer.clone();
+let app_handle_for_db = client_impl.app_handle.clone();
+let connection = ClientSideConnection::new(client_impl);
+// ... 后续代码
+let content = response_buffer_clone.lock().await; // OK
+```
+
+### 16. `child.wait().await` 会阻塞 - 某些 ACP agent 保持会话活跃
+
+某些 ACP agent（如 Claude Code ACP）在 prompt 完成后不会退出进程，而是保持会话活跃等待下一个 prompt。
+这会导致 `child.wait().await` 永久阻塞。
+
+```rust
+// ❌ 错误 - 会永久阻塞
+let result = prompt_fn(...).await?;
+child.wait().await?; // 阻塞！
+send_done_event(...);
+
+// ✅ 正确 - prompt 完成后立即发送 done 事件，然后 kill 进程
+let result = prompt_fn(...).await?;
+send_done_event(...); // 先发送完成事件
+child.kill().await.ok(); // 然后终止进程（忽略错误，进程可能已退出）
+```
+
+### 17. CLI 路径解析 - bun 安装的包不在系统 PATH 中
+
+通过 `bun add -g @zed-industries/claude-code-acp` 安装的包位于 `~/.bun/bin/`，
+但这个目录通常不在系统 PATH 中，导致 `which claude-code-acp` 找不到。
+
+```rust
+// ❌ 错误 - 只检查系统 PATH
+let cli_path = which::which("claude-code-acp")?;
+
+// ✅ 正确 - 优先检查 ~/.bun/bin/
+fn resolve_acp_cli_path(cli_command: &str) -> Option<String> {
+    // 1. 首先检查 ~/.bun/bin/
+    if let Some(home) = dirs::home_dir() {
+        let bun_bin_path = home.join(".bun").join("bin").join(cli_command);
+        if bun_bin_path.exists() {
+            return Some(bun_bin_path.to_string_lossy().to_string());
+        }
+    }
+    // 2. 回退到系统 PATH
+    which::which(cli_command).ok().map(|p| p.to_string_lossy().to_string())
+}
+```
+
+### 18. 配置读取位置问题 - provider 级别 vs assistant 级别
+
+`acp_cli_command` 是 LLM Provider 级别的配置，存储在 `llm_provider_config` 表中，
+而不是 `assistant_model_config` 表中。
+
+```rust
+// ❌ 错误 - 从 assistant_model_config 读取
+let config = get_config_from_assistant_model_config(...);
+
+// ✅ 正确 - 从 llm_provider_config 读取
+fn extract_acp_config(
+    model_configs: &[AssistantModelConfig],  // 用于其他配置
+    provider_configs: &[LlmProviderConfig],  // 用于 acp_cli_command
+) -> AcpConfig {
+    // acp_cli_command 只从 provider_configs 读取
+    for config in provider_configs {
+        if config.key == "acp_cli_command" {
+            acp_config.cli_command = config.value.clone();
+        }
+    }
+    // 其他配置可以从 model_configs 读取
+    ...
+}
+```
+
+### 19. 数据库表关联 - `provider_id` 必须正确设置
+
+`assistant_model` 表的 `provider_id` 必须正确关联到 `llm_provider` 表，
+否则无法正确加载 provider 级别的配置。
+
+```sql
+-- 检查 provider_id 是否正确
+SELECT am.*, lp.name as provider_name 
+FROM assistant_model am 
+LEFT JOIN llm_provider lp ON am.provider_id = lp.id 
+WHERE am.assistant_id = 36;
+
+-- 如果 provider_id 为 0 或 NULL，需要修复
+UPDATE assistant_model SET provider_id = 40 WHERE assistant_id = 36;
+```
+
+### 20. Tauri 模块导入路径
+
+`ConversationDatabase` 在 crate 根级别重新导出，不能通过 `crate::db::` 路径访问。
+
+```rust
+// ❌ 错误 - db 模块内部是 private
+use crate::db::ConversationDatabase; // E0603: private struct import
+
+// ✅ 正确 - 使用 crate 根级别的重新导出
+use crate::ConversationDatabase;
+```
+
 ## 最终实现代码结构
 
 ```rust
