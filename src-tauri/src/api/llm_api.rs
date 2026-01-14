@@ -50,6 +50,23 @@ pub async fn get_llm_providers(app_handle: tauri::AppHandle) -> Result<Vec<LlmPr
     Ok(result)
 }
 
+/// 根据助手类型获取过滤后的提供商列表
+/// ACP 助手 (assistant_type = 4): 只返回 ACP 提供商 (api_type = 'acp')
+/// 普通助手: 排除 ACP 提供商
+#[tauri::command]
+pub async fn get_filtered_providers(
+    app_handle: tauri::AppHandle,
+    assistant_type: i64,
+) -> Result<Vec<LlmProvider>, String> {
+    let db = LLMDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let providers = db.get_filtered_providers(assistant_type).map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+    for (id, name, api_type, description, is_official, is_enabled) in providers {
+        result.push(LlmProvider { id, name, api_type, description, is_official, is_enabled });
+    }
+    Ok(result)
+}
+
 #[tauri::command]
 pub async fn add_llm_provider(
     app: tauri::AppHandle,
@@ -353,6 +370,28 @@ pub async fn preview_model_list(
 pub fn get_models_for_select(app_handle: tauri::AppHandle) -> Result<Vec<ModelForSelect>, String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let result = db.get_models_for_select().unwrap();
+    let models = result
+        .iter()
+        .map(|(name, code, id, llm_provider_id)| ModelForSelect {
+            name: name.clone(),
+            code: code.clone(),
+            id: *id,
+            llm_provider_id: *llm_provider_id,
+        })
+        .collect();
+    Ok(models)
+}
+
+/// 根据助手类型获取过滤后的模型列表
+/// ACP 助手 (assistant_type = 4): 只返回 ACP 提供商的模型
+/// 普通助手: 排除 ACP 提供商的模型
+#[tauri::command]
+pub fn get_filtered_models_for_select(
+    app_handle: tauri::AppHandle,
+    assistant_type: i64,
+) -> Result<Vec<ModelForSelect>, String> {
+    let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let result = db.get_filtered_models_for_select(assistant_type).map_err(|e| e.to_string())?;
     let models = result
         .iter()
         .map(|(name, code, id, llm_provider_id)| ModelForSelect {

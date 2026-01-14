@@ -1120,3 +1120,236 @@ pub fn install_python3(
 
     Ok(())
 }
+
+// ============================================================================
+// ACP 环境检测和安装
+// ============================================================================
+
+/// ACP 库信息
+#[derive(serde::Serialize, Clone)]
+pub struct AcpLibraryInfo {
+    /// CLI 命令名称
+    pub cli_command: String,
+    /// 对应的 npm 包名
+    pub package_name: String,
+    /// 是否已安装
+    pub installed: bool,
+    /// 安装的版本（如果已安装）
+    pub version: Option<String>,
+    /// 是否需要外部安装（如 gemini 需要用户自行安装）
+    pub requires_external_install: bool,
+    /// 安装说明
+    pub install_hint: String,
+}
+
+/// 获取 ACP 库的配置信息
+fn get_acp_library_config(cli_command: &str) -> (String, bool, String) {
+    match cli_command {
+        "claude-code-acp" => (
+            "@zed-industries/claude-code-acp".to_string(),
+            false,
+            "需要设置 ANTHROPIC_API_KEY 环境变量".to_string(),
+        ),
+        "codex-acp" => (
+            "@zed-industries/codex-acp".to_string(),
+            false,
+            "需要设置 OPENAI_API_KEY 环境变量".to_string(),
+        ),
+        "gemini" => (
+            "gemini".to_string(),
+            true,
+            "请参考 Google Gemini CLI 官方文档安装".to_string(),
+        ),
+        _ => (
+            cli_command.to_string(),
+            true,
+            "请手动安装该 CLI 工具".to_string(),
+        ),
+    }
+}
+
+/// 检查 ACP CLI 工具是否已安装
+#[tauri::command]
+pub async fn check_acp_library(
+    app: tauri::AppHandle,
+    cli_command: String,
+) -> Result<AcpLibraryInfo, String> {
+    let app_clone = app.clone();
+    let cli_command_clone = cli_command.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let (package_name, requires_external, install_hint) =
+            get_acp_library_config(&cli_command_clone);
+
+        // 对于需要外部安装的工具，直接检查系统 PATH
+        if requires_external {
+            let output = std::process::Command::new(&cli_command_clone)
+                .arg("--version")
+                .output();
+
+            return match output {
+                Ok(out) if out.status.success() => {
+                    let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    AcpLibraryInfo {
+                        cli_command: cli_command_clone,
+                        package_name,
+                        installed: true,
+                        version: Some(version),
+                        requires_external_install: true,
+                        install_hint,
+                    }
+                }
+                _ => AcpLibraryInfo {
+                    cli_command: cli_command_clone,
+                    package_name,
+                    installed: false,
+                    version: None,
+                    requires_external_install: true,
+                    install_hint,
+                },
+            };
+        }
+
+        // 对于可以通过 bun 安装的包，检查全局安装目录
+        let bun_path = match crate::utils::bun_utils::BunUtils::get_bun_executable(&app_clone) {
+            Ok(path) => path,
+            Err(_) => {
+                return AcpLibraryInfo {
+                    cli_command: cli_command_clone,
+                    package_name,
+                    installed: false,
+                    version: None,
+                    requires_external_install: false,
+                    install_hint: "需要先安装 Bun 运行时".to_string(),
+                };
+            }
+        };
+
+        // 使用 bun pm ls -g 检查全局包
+        let output = std::process::Command::new(&bun_path)
+            .args(["pm", "ls", "-g"])
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let is_installed = stdout.contains(&package_name);
+
+                // 如果已安装，尝试获取版本
+                let version = if is_installed {
+                    // 尝试运行命令获取版本
+                    std::process::Command::new(&cli_command_clone)
+                        .arg("--version")
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                };
+
+                AcpLibraryInfo {
+                    cli_command: cli_command_clone,
+                    package_name,
+                    installed: is_installed,
+                    version,
+                    requires_external_install: false,
+                    install_hint,
+                }
+            }
+            _ => AcpLibraryInfo {
+                cli_command: cli_command_clone,
+                package_name,
+                installed: false,
+                version: None,
+                requires_external_install: false,
+                install_hint,
+            },
+        }
+    })
+    .await
+    .map_err(|e| format!("任务执行失败: {}", e))
+}
+
+/// 安装 ACP 库
+#[tauri::command]
+pub async fn install_acp_library(
+    app: tauri::AppHandle,
+    cli_command: String,
+) -> Result<(), String> {
+    let (package_name, requires_external, _) = get_acp_library_config(&cli_command);
+
+    if requires_external {
+        return Err(format!(
+            "{} 需要手动安装，无法自动安装",
+            cli_command
+        ));
+    }
+
+    let bun_path = crate::utils::bun_utils::BunUtils::get_bun_executable(&app)
+        .map_err(|e| format!("获取 Bun 路径失败: {}", e))?;
+
+    tracing::info!("开始安装 ACP 库: {}", package_name);
+
+    // 发送安装开始事件
+    let _ = app.emit("acp-install-log", format!("开始安装 {}...", package_name));
+
+    // 启动后台安装任务
+    let app_clone = app.clone();
+    let package_name_clone = package_name.clone();
+    let cli_command_clone = cli_command.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let emit_log = |msg: &str| {
+            tracing::info!("ACP Install: {}", msg);
+            let _ = app_clone.emit("acp-install-log", msg.to_string());
+        };
+
+        let emit_finished = |success: bool| {
+            let _ = app_clone.emit("acp-install-finished", serde_json::json!({
+                "success": success,
+                "cli_command": cli_command_clone,
+                "package_name": package_name_clone,
+            }));
+        };
+
+        emit_log(&format!("执行: bun add -g {}", package_name_clone));
+
+        let output = std::process::Command::new(&bun_path)
+            .args(["add", "-g", &package_name_clone])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output();
+
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+
+                if !stdout.is_empty() {
+                    emit_log(&stdout);
+                }
+                if !stderr.is_empty() {
+                    emit_log(&stderr);
+                }
+
+                if out.status.success() {
+                    emit_log(&format!("{} 安装成功!", package_name_clone));
+                    emit_finished(true);
+                } else {
+                    emit_log(&format!(
+                        "安装失败，退出码: {}",
+                        out.status.code().unwrap_or(-1)
+                    ));
+                    emit_finished(false);
+                }
+            }
+            Err(e) => {
+                emit_log(&format!("执行安装命令失败: {}", e));
+                emit_finished(false);
+            }
+        }
+    });
+
+    Ok(())
+}

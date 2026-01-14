@@ -169,6 +169,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         (event: any) => {
             const conversationEvent = event.payload as ConversationEvent;
 
+            // ACP DEBUG: 记录所有接收到的事件
+            console.log("[ACP DEBUG] Received event:", conversationEvent.type, conversationEvent.data);
+
             if (conversationEvent.type === "message_add") {
                 // 处理消息添加事件
                 const messageAddData = conversationEvent.data as any;
@@ -421,8 +424,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             return;
         }
 
+        const eventName = `conversation_event_${options.conversationId}`;
         console.log(
-            `Setting up conversation event listener for: conversation_event_${options.conversationId}`,
+            `[ACP DEBUG] Setting up conversation event listener for: ${eventName}`,
         );
 
         // 取消之前的事件监听（只执行一次）
@@ -438,14 +442,15 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
         // 设置新的事件监听
         hasUnsubscribedRef.current = false;
+        console.log(`[ACP DEBUG] Listening to event: ${eventName}`);
         unsubscribeRef.current = listen(
-            `conversation_event_${options.conversationId}`,
+            eventName,
             handleConversationEvent,
         );
 
         return () => {
             if (unsubscribeRef.current && !hasUnsubscribedRef.current) {
-                console.log("unsubscribe conversation events");
+                console.log("[ACP DEBUG] Unsubscribing from events");
                 const p = unsubscribeRef.current;
                 unsubscribeRef.current = null;
                 hasUnsubscribedRef.current = true;

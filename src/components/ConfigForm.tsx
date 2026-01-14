@@ -12,6 +12,8 @@ import { Checkbox } from "./ui/checkbox";
 import { Switch } from "./ui/switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import { useModels } from "../hooks/useModels";
+import { useFilteredModels } from "../hooks/useFilteredModels";
+import { useFilteredProviders } from "../hooks/useFilteredProviders";
 import { useMcpServers } from "../hooks/useMcpServers";
 import { FolderPicker } from "./config/FolderPicker";
 
@@ -36,6 +38,7 @@ interface ConfigField {
     | "button"
     | "switch"
     | "model-select"
+    | "provider-select"
     | "mcp-select"
     | "inline-buttons";
     label: string;
@@ -62,6 +65,7 @@ interface ConfigFormProps {
     useFormReturn: UseFormReturn<any, any, any>;
     assistantConfigApi?: AssistantConfigApi;
     layout?: "default" | "prompt" | "provider";
+    assistantType?: number | null;  // 用于过滤模型（ACP 助手 vs 普通助手）
     onSave?: SubmitHandler<any>;
     onCopy?: () => void;
     onDelete?: () => void;
@@ -80,6 +84,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
     layout = "default",
     useFormReturn,
     assistantConfigApi,
+    assistantType,
     onSave,
     onCopy,
     onDelete,
@@ -95,13 +100,25 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
         return config.some(item => item.config.type === "model-select");
     }, [config]);
 
+    // 检查是否需要获取提供商数据
+    const hasProviderSelect = useMemo(() => {
+        return config.some(item => item.config.type === "provider-select");
+    }, [config]);
+
     // 检查是否需要获取MCP服务器数据
     const hasMcpSelect = useMemo(() => {
         return config.some(item => item.config.type === "mcp-select");
     }, [config]);
 
-    // 条件获取模型数据用于 model-select 类型
-    const { models, loading: modelsLoading, error: modelsError } = useModels(hasModelSelect);
+    // 条件获取模型数据：如果有 assistantType，使用过滤后的模型；否则使用全部模型
+    const { models, loading: modelsLoading, error: modelsError } = assistantType !== null && assistantType !== undefined
+        ? useFilteredModels(assistantType, hasModelSelect)
+        : useModels(hasModelSelect);
+
+    // 条件获取提供商数据
+    const { providers, loading: providersLoading, error: providersError } = assistantType !== null && assistantType !== undefined
+        ? useFilteredProviders(assistantType, hasProviderSelect)
+        : { providers: [], loading: false, error: null };
 
     // 条件获取MCP服务器数据用于 mcp-select 类型
     const { mcpServers, loading: mcpServersLoading, error: mcpServersError } = useMcpServers(hasMcpSelect);
@@ -159,6 +176,17 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
             return [];
         }, [field.type, models]);
 
+        // 生成提供商选项用于 provider-select 类型
+        const providerOptions = useMemo(() => {
+            if (field.type === "provider-select" && providers) {
+                return providers.map((provider) => ({
+                    value: provider.id.toString(),
+                    label: provider.name,
+                }));
+            }
+            return [];
+        }, [field.type, providers]);
+
         // 生成MCP服务器选项用于 mcp-select 类型
         const mcpOptions = useMemo(() => {
             if (field.type === "mcp-select" && mcpServers) {
@@ -205,6 +233,27 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                             </SelectTrigger>
                             <SelectContent>
                                 {modelOptions.map((option) => (
+                                    <SelectItem key={option.value} value={option.value}>
+                                        {option.label}
+                                    </SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
+                    );
+                case "provider-select":
+                    return (
+                        <Select
+                            disabled={field.disabled || providersLoading}
+                            value={fieldRenderData.value}
+                            onValueChange={fieldRenderData.onChange}
+                        >
+                            <SelectTrigger className="w-full max-w-full focus:ring-ring/20 focus:border-ring overflow-hidden">
+                                <SelectValue
+                                    placeholder={providersLoading ? "加载中..." : providersError ? "加载失败" : "选择提供商"}
+                                />
+                            </SelectTrigger>
+                            <SelectContent>
+                                {providerOptions.map((option) => (
                                     <SelectItem key={option.value} value={option.value}>
                                         {option.label}
                                     </SelectItem>

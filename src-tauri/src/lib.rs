@@ -37,9 +37,9 @@ use crate::api::copilot_lsp::{
 use crate::api::highlight_api::{highlight_code, list_syntect_themes};
 use crate::api::llm_api::{
     add_llm_model, add_llm_provider, delete_llm_model, delete_llm_provider, export_llm_provider,
-    fetch_model_list, get_llm_models, get_llm_provider_config, get_llm_providers,
-    get_models_for_select, import_llm_provider, preview_model_list, update_llm_provider,
-    update_llm_provider_config, update_selected_models,
+    fetch_model_list, get_filtered_models_for_select, get_filtered_providers, get_llm_models,
+    get_llm_provider_config, get_llm_providers, get_models_for_select, import_llm_provider,
+    preview_model_list, update_llm_provider, update_llm_provider_config, update_selected_models,
 };
 use crate::api::operation_api::confirm_operation_permission;
 use crate::api::skill_api::{
@@ -72,9 +72,10 @@ use crate::artifacts::collection_api::{
     update_artifact_collection,
 };
 use crate::artifacts::env_installer::{
-    check_bun_update, check_bun_update_with_proxy, check_bun_version, check_uv_update,
-    check_uv_update_with_proxy, check_uv_version, get_python_info, install_bun, install_python3,
-    install_uv, update_bun, update_bun_with_proxy, update_uv, update_uv_with_proxy,
+    check_acp_library, check_bun_update, check_bun_update_with_proxy, check_bun_version,
+    check_uv_update, check_uv_update_with_proxy, check_uv_version, get_python_info, install_acp_library,
+    install_bun, install_python3, install_uv, update_bun, update_bun_with_proxy, update_uv,
+    update_uv_with_proxy,
 };
 use crate::artifacts::preview_router::{
     confirm_environment_install, preview_react_component, restore_artifact_preview,
@@ -486,6 +487,7 @@ pub fn run() {
             save_feature_config,
             open_data_folder,
             get_llm_providers,
+            get_filtered_providers,
             update_llm_provider,
             add_llm_provider,
             delete_llm_provider,
@@ -496,6 +498,7 @@ pub fn run() {
             preview_model_list,
             update_selected_models,
             get_models_for_select,
+            get_filtered_models_for_select,
             add_llm_model,
             delete_llm_model,
             export_llm_provider,
@@ -551,6 +554,8 @@ pub fn run() {
             update_uv_with_proxy,
             get_python_info,
             install_python3,
+            check_acp_library,
+            install_acp_library,
             preview_react_component,
             create_react_preview,
             create_react_preview_for_artifact,

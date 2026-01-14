@@ -259,6 +259,12 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     const config = currentAssistant.model_configs.find((config) => config.name === key);
                     const customField = assistantTypeCustomField.find((field) => field.key === key);
 
+                    // ACP 助手专用字段（assistant_type === 4）
+                    const isAcpField = key.startsWith("acp_") && currentAssistant.assistant.assistant_type === 4;
+                    if (isAcpField) {
+                        return true;
+                    }
+
                     // 内置字段（如 reasoning_effort）允许保存
                     if (key === "reasoning_effort") {
                         return true;
@@ -284,7 +290,12 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
 
                     // 为插件自定义字段和内置字段确定正确的 value_type
                     let valueType = config?.value_type ?? "string";
-                    if (customField) {
+
+                    // ACP 助手专用字段
+                    const isAcpField = key.startsWith("acp_") && currentAssistant.assistant.assistant_type === 4;
+                    if (isAcpField) {
+                        valueType = "string";
+                    } else if (customField) {
                         // 根据插件字段的类型映射到数据库的 value_type
                         const fieldType = customField.value.type;
                         if (fieldType === "checkbox" || fieldType === "switch") {

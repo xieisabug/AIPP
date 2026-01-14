@@ -41,6 +41,7 @@ export const AssistantFormRenderer: React.FC<AssistantFormRendererProps> = ({
             config={formConfig}
             layout="prompt"
             classNames="bottom-space"
+            assistantType={currentAssistant.assistant.assistant_type}
             onSave={onSave}
             onCopy={currentAssistant.assistant.id === 1 ? undefined : onCopy}
             onDelete={currentAssistant.assistant.id === 1 ? undefined : onDelete}

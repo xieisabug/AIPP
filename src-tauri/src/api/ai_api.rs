@@ -289,7 +289,110 @@ pub async fn ask_ai(
     let _request_prompt_result_with_context_clone = request_prompt_result_with_context.clone();
 
     let app_handle_clone = app_handle.clone();
+    let window_clone = window.clone(); // 提前克隆，供 ACP 分支使用
 
+    // 检查是否是 ACP 助手类型（assistant_type === 4）
+    // 这个检查必须在获取 model_detail 之前，因为 ACP 助手可能没有有效的模型配置
+    if assistant_detail.assistant.assistant_type == Some(4) {
+        info!("ACP assistant detected (type=4), routing to ACP session");
+
+        // 获取 provider 配置
+        // ACP 配置可能在 llm_provider_config 表中（如 acp_cli_command）
+        let provider_configs = if let Some(model) = assistant_detail.model.first() {
+            let provider_id = model.provider_id;
+            debug!("ACP: Getting provider config for provider_id={}", provider_id);
+            
+            let llm_db = LLMDatabase::new(&app_handle).map_err(|e| {
+                AppError::UnknownError(format!("Failed to open LLM database: {}", e))
+            })?;
+            
+            llm_db.get_llm_provider_config(provider_id).unwrap_or_else(|e| {
+                warn!("ACP: Failed to get provider config: {}", e);
+                Vec::new()
+            })
+        } else {
+            debug!("ACP: No model found, using empty provider configs");
+            Vec::new()
+        };
+        
+        debug!("ACP: Loaded {} provider configs", provider_configs.len());
+
+        // 从 assistant_model_configs 和 llm_provider_configs 提取 ACP 配置
+        let acp_config = extract_acp_config(&assistant_detail.model_configs, &provider_configs)?;
+        info!(
+            "ACP config: cli_command={}, working_directory={}, env_vars={}, additional_args={}",
+            acp_config.cli_command,
+            acp_config.working_directory.display(),
+            acp_config.env_vars.len(),
+            acp_config.additional_args.len()
+        );
+
+        // 创建初始响应消息（ACP 不需要真实的 model_id，使用占位值）
+        let response_message = add_message(
+            &app_handle,
+            None,
+            conversation_id,
+            "response".to_string(),
+            String::new(), // 初始为空，通过流式更新
+            Some(0), // ACP 使用占位 model_id = 0
+            Some("acp".to_string()), // ACP 使用占位 model_code
+            Some(chrono::Utc::now()),
+            None,
+            0,
+            None,
+            None,
+        )?;
+
+        // 发送消息添加事件
+        let add_event = ConversationEvent {
+            r#type: "message_add".to_string(),
+            data: serde_json::to_value(MessageAddEvent {
+                message_id: response_message.id,
+                message_type: "response".to_string(),
+            })
+            .unwrap(),
+        };
+        let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
+
+        // Clone prompt before moving into async block
+        let prompt_clone = processed_request.prompt.clone();
+
+        // 在后台执行 ACP 会话
+        let acp_task = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async move {
+                let local_set = tokio::task::LocalSet::new();
+                local_set
+                    .run_until(async move {
+                        let result = execute_acp_session(
+                            app_handle_clone,
+                            window_clone,
+                            conversation_id,
+                            response_message.id,
+                            &prompt_clone,
+                            acp_config,
+                        )
+                        .await;
+
+                        if let Err(e) = result {
+                            error!(error = %e, "ACP session failed");
+                        }
+
+                        Ok::<(), anyhow::Error>(())
+                    })
+                    .await
+            })
+        });
+
+        message_token_manager.store_task_handle(conversation_id, acp_task).await;
+
+        return Ok(AiResponse {
+            conversation_id,
+            request_prompt_result_with_context: processed_request.prompt,
+        });
+    }
+
+    // 非 ACP 助手，继续原有流程
     // 在异步任务外获取模型详情（避免线程安全问题）
     let llm_db = LLMDatabase::new(&app_handle).map_err(AppError::from)?;
 
@@ -317,6 +420,7 @@ pub async fn ask_ai(
             .context("Failed to get LLM model detail")?
     };
 
+    // 重新克隆 window，因为前面的 ACP 分支可能已经消费了
     let window_clone = window.clone(); // 在移动之前克隆
     let model_id = model_detail.model.id; // 提前获取模型ID
     let model_code = model_detail.model.code.clone(); // 提前获取模型代码
@@ -324,79 +428,10 @@ pub async fn ask_ai(
     let provider_api_type = model_detail.provider.api_type.clone(); // 提前获取API类型
     let assistant_model_configs = assistant_detail.model_configs.clone(); // 提前获取助手模型配置
 
-    // 检查是否是 ACP 提供商
-    if provider_api_type == "claude_code_acp" {
-        // 提取 ACP 配置
-        let acp_config = extract_acp_config(&assistant_model_configs)?;
-
-        // 创建初始响应消息
-        let response_message = add_message(
-            &app_handle,
-            None,
-            conversation_id,
-            "response".to_string(),
-            String::new(), // 初始为空，通过流式更新
-            Some(model_id),
-            Some(model_code.clone()),
-            Some(chrono::Utc::now()),
-            None,
-            0,
-            None,
-            None,
-        )?;
-
-        // 发送消息添加事件
-        let add_event = ConversationEvent {
-            r#type: "message_add".to_string(),
-            data: serde_json::to_value(MessageAddEvent {
-                message_id: response_message.id,
-                message_type: "response".to_string(),
-            })
-            .unwrap(),
-        };
-        let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
-
-        // Clone prompt before moving into async block
-        let prompt_clone = processed_request.prompt.clone();
-
-        // 在后台执行 ACP 会话
-        // 注意：ACP 使用 !Send futures，需要在独立线程中运行 LocalSet
-        let acp_task = tokio::task::spawn_blocking(move || {
-            // Create a new runtime for this thread with LocalSet support
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-
-            rt.block_on(async move {
-                let local_set = tokio::task::LocalSet::new();
-                local_set
-                    .run_until(async move {
-                        let result = execute_acp_session(
-                            app_handle_clone,
-                            window_clone,
-                            conversation_id,
-                            response_message.id,
-                            &prompt_clone,
-                            acp_config,
-                        )
-                        .await;
-
-                        if let Err(e) = result {
-                            error!(error = %e, "ACP session failed");
-                            // TODO: 发送错误事件到 UI
-                        }
-
-                        Ok::<(), anyhow::Error>(())
-                    })
-                    .await
-            })
-        });
-
-        message_token_manager.store_task_handle(conversation_id, acp_task).await;
-
-        return Ok(AiResponse {
-            conversation_id,
-            request_prompt_result_with_context: processed_request.prompt,
-        });
-    }
+    info!(
+        "ask_ai: provider_api_type={}, conversation_id={}, assistant_id={}",
+        provider_api_type, conversation_id, request.assistant_id
+    );
 
     let task_handle = tokio::spawn(async move {
         // 直接创建数据库连接（避免线程安全问题）

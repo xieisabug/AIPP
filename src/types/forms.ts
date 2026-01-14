@@ -21,18 +21,19 @@ export interface FieldConfig {
     customRender?: () => React.ReactNode;
 }
 
-export type FieldType = 
-    | "input" 
-    | "textarea" 
-    | "select" 
-    | "checkbox" 
+export type FieldType =
+    | "input"
+    | "textarea"
+    | "select"
+    | "checkbox"
     | "radio"
-    | "button" 
-    | "static" 
+    | "button"
+    | "static"
     | "custom"
     | "switch"
     | "password"
-    | "model-select";
+    | "model-select"
+    | "provider-select";
 
 export interface SelectOption {
     value: string;
