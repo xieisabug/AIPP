@@ -190,6 +190,32 @@ let config = state.configs.lock().await;
 10. **Artifact Collections**: Managing and organizing generated artifacts
 11. **Assistant Types**: Different assistant configurations with custom forms
 
+## ACP Integration Notes
+
+### Current Implementation
+
+- **Per-conversation process model**: ACP runs one long-lived process per conversation, stored in `AcpSessionState` (keyed by `conversation_id`).
+- **Session handle routing**: ACP prompts are sent through `AcpSessionHandle` to a background task that keeps a single `ClientSideConnection` alive.
+- **Session persistence**: `session_id` is stored in `conversation.db` table `acp_session` keyed by `conversation_id` and updated on session creation/load.
+- **Session load logic**: On ACP startup, the client checks `initialize` capabilities. If `loadSession` is supported and a stored `session_id` exists, it calls `session/load`; otherwise it falls back to `session/new`.
+- **Replay suppression**: During `session/load`, ACP `session/update` notifications are suppressed to avoid replay content polluting UI/DB.
+- **Prompt flow**: Each new user request creates a new response message; ACP streams content into that message, emits `message_update` events, and persists content to DB.
+- **Tool call mapping**: ACP tool calls are translated to MCP tool call UI events; tool status is mapped to `pending/executing/success/failed`.
+- **File/terminal operations**: ACP file read/write and terminal commands are bridged to built-in operations with permission manager; permission requests are currently auto-denied.
+- **Config inputs**: ACP CLI command, working directory, env vars, and additional args are read from `llm_provider_config` and `assistant_model_config` (provider defaults, assistant overrides).
+- **CLI resolution**: ACP CLI is resolved via absolute path, then `~/.bun/bin`, then `PATH` lookup, then raw command.
+- **Session task runtime**: ACP session task runs on a dedicated single-thread runtime with `LocalSet` to support non-`Send` futures.
+
+### Known Limitations / Observations
+
+- **loadSession support varies**: `claude-code-acp` reports `agent_capabilities.load_session=false`, so session load is skipped and history is not restored by the agent.
+- **Session persistence is local**: Stored `session_id` only helps if the agent supports `loadSession` and maintains session state.
+- **Cancel behavior**: `cancel_ai` currently aborts the ACP session task, which tears down the process for that conversation.
+
+### Planned Fallback (Not Implemented Yet)
+
+- If `loadSession` is unsupported or fails, build a prompt from stored conversation history and send it as context to the ACP agent so it can continue with prior context.
+
 ## Development Guidelines
 
 1. **Cross-Platform**: Ensure compatibility across Windows, macOS, and Linux
