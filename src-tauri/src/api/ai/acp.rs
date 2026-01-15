@@ -1029,6 +1029,10 @@ async fn run_acp_session(
                 "ACP: Initialize success, protocol_version={:?}",
                 init_response.protocol_version
             );
+            info!(
+                "ACP: Agent capabilities load_session={}",
+                init_response.agent_capabilities.load_session
+            );
 
             let conversation_db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
             let mut session_id: Option<String> = None;
@@ -1057,14 +1061,27 @@ async fn run_acp_session(
                                 conversation_id,
                                 session_id.as_deref().unwrap_or_default(),
                             )?;
+                            info!(
+                                "ACP: session/load succeeded (conversation_id={}, session_id={})",
+                                conversation_id,
+                                session_id.as_deref().unwrap_or_default()
+                            );
                         }
                         Err(e) => {
                             error!("ACP: session/load failed: {:?}", e);
                         }
                     }
                 } else {
-                    info!("ACP: Agent does not support loadSession; creating new session");
+                    info!(
+                        "ACP: Agent does not support loadSession; creating new session (conversation_id={})",
+                        conversation_id
+                    );
                 }
+            } else {
+                info!(
+                    "ACP: No stored session_id found for conversation_id={}",
+                    conversation_id
+                );
             }
 
             let session_id = if let Some(session_id) = session_id {
