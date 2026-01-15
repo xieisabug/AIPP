@@ -1,5 +1,5 @@
 use super::assistant_api::AssistantDetail;
-use crate::api::ai::acp::{execute_acp_session, extract_acp_config};
+use crate::api::ai::acp::{extract_acp_config, spawn_acp_session_task};
 use crate::api::ai::chat::{
     extract_assistant_from_message, handle_non_stream_chat as ai_handle_non_stream_chat,
     handle_stream_chat as ai_handle_stream_chat,
@@ -24,7 +24,7 @@ use crate::skills::{collect_skills_info_for_assistant, format_skills_prompt};
 use crate::state::message_token::MessageTokenManager;
 use crate::template_engine::TemplateEngine;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
-use crate::{AppState, FeatureConfigState};
+use crate::{AcpSessionState, AppState, FeatureConfigState};
 use anyhow::Context;
 use genai::chat::ChatRequest;
 use genai::chat::Tool;
@@ -167,10 +167,11 @@ fn sanitize_messages_for_non_native(
 }
 
 #[tauri::command]
-#[instrument(skip(app_handle, state, feature_config_state, message_token_manager, window, request, override_model_config, override_prompt, override_mcp_config), fields(assistant_id = request.assistant_id, conversation_id = %request.conversation_id, override_model_id = request.override_model_id))]
+#[instrument(skip(app_handle, state, acp_session_state, feature_config_state, message_token_manager, window, request, override_model_config, override_prompt, override_mcp_config), fields(assistant_id = request.assistant_id, conversation_id = %request.conversation_id, override_model_id = request.override_model_id))]
 pub async fn ask_ai(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
+    acp_session_state: State<'_, AcpSessionState>,
     feature_config_state: State<'_, FeatureConfigState>,
     message_token_manager: State<'_, MessageTokenManager>,
     window: tauri::Window,
@@ -354,37 +355,31 @@ pub async fn ask_ai(
         };
         let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
 
-        // Clone prompt before moving into async block
+        // Clone prompt before moving into session dispatcher
         let prompt_clone = processed_request.prompt.clone();
 
-        // 在后台执行 ACP 会话
-        let acp_task = tokio::task::spawn_blocking(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-            rt.block_on(async move {
-                let local_set = tokio::task::LocalSet::new();
-                local_set
-                    .run_until(async move {
-                        let result = execute_acp_session(
-                            app_handle_clone,
-                            window_clone,
-                            conversation_id,
-                            response_message.id,
-                            &prompt_clone,
-                            acp_config,
-                        )
-                        .await;
+        let session_handle = {
+            let mut sessions = acp_session_state.sessions.lock().await;
+            if let Some(handle) = sessions.get(&conversation_id) {
+                handle.clone()
+            } else {
+                let (handle, join_handle) =
+                    spawn_acp_session_task(app_handle_clone, conversation_id, acp_config);
+                sessions.insert(conversation_id, handle.clone());
+                message_token_manager
+                    .store_task_handle(conversation_id, join_handle)
+                    .await;
+                handle
+            }
+        };
 
-                        if let Err(e) = result {
-                            error!(error = %e, "ACP session failed");
-                        }
-
-                        Ok::<(), anyhow::Error>(())
-                    })
-                    .await
-            })
-        });
-
-        message_token_manager.store_task_handle(conversation_id, acp_task).await;
+        if let Err(e) = session_handle.send_prompt(
+            response_message.id,
+            prompt_clone,
+            window_clone,
+        ) {
+            error!(error = %e, "ACP session send prompt failed");
+        }
 
         return Ok(AiResponse {
             conversation_id,

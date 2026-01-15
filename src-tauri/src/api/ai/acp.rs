@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, error, info};
@@ -33,6 +34,36 @@ pub struct AcpConfig {
     pub working_directory: PathBuf,
     pub env_vars: HashMap<String, String>,
     pub additional_args: Vec<String>,
+}
+
+enum AcpSessionCommand {
+    Prompt {
+        message_id: i64,
+        prompt: String,
+        window: tauri::Window,
+    },
+}
+
+#[derive(Clone)]
+pub struct AcpSessionHandle {
+    sender: mpsc::UnboundedSender<AcpSessionCommand>,
+}
+
+impl AcpSessionHandle {
+    pub fn send_prompt(
+        &self,
+        message_id: i64,
+        prompt: String,
+        window: tauri::Window,
+    ) -> Result<(), AppError> {
+        self.sender
+            .send(AcpSessionCommand::Prompt {
+                message_id,
+                prompt,
+                window,
+            })
+            .map_err(|_| AppError::UnknownError("ACP session closed".to_string()))
+    }
 }
 
 /// Resolve ACP CLI command to its full path
@@ -150,17 +181,19 @@ fn tool_call_id_to_i64(id: &acp::ToolCallId) -> i64 {
 }
 
 /// Tauri client implementation that forwards ACP events to the frontend
+#[derive(Clone)]
 pub struct AcpTauriClient {
     pub app_handle: tauri::AppHandle,
     pub conversation_id: i64,
-    pub message_id: i64,
-    pub window: tauri::Window,
+    pub message_id: Arc<TokioMutex<i64>>,
+    pub window: Arc<TokioMutex<tauri::Window>>,
     operation_state: Arc<OperationState>,
     permission_manager: Arc<PermissionManager>,
     /// Accumulated response content buffer for database persistence
     response_content_buffer: Arc<TokioMutex<String>>,
     /// Accumulated reasoning content buffer for database persistence
     reasoning_content_buffer: Arc<TokioMutex<String>>,
+    suppress_updates: Arc<TokioMutex<bool>>,
 }
 
 impl AcpTauriClient {
@@ -175,12 +208,13 @@ impl AcpTauriClient {
         Self {
             app_handle,
             conversation_id,
-            message_id,
-            window,
+            message_id: Arc::new(TokioMutex::new(message_id)),
+            window: Arc::new(TokioMutex::new(window)),
             operation_state,
             permission_manager,
             response_content_buffer: Arc::new(TokioMutex::new(String::new())),
             reasoning_content_buffer: Arc::new(TokioMutex::new(String::new())),
+            suppress_updates: Arc::new(TokioMutex::new(false)),
         }
     }
 
@@ -190,10 +224,11 @@ impl AcpTauriClient {
     }
 
     /// Update message content in database
-    fn update_message_in_db(&self, content: &str) {
+    async fn update_message_in_db(&self, content: &str) {
+        let message_id = *self.message_id.lock().await;
         if let Ok(db) = ConversationDatabase::new(&self.app_handle) {
             if let Ok(repo) = db.message_repo() {
-                if let Err(e) = repo.update_content(self.message_id, content) {
+                if let Err(e) = repo.update_content(message_id, content) {
                     error!("ACP: Failed to update message in DB: {}", e);
                 }
             }
@@ -210,12 +245,38 @@ impl AcpTauriClient {
         self.reasoning_content_buffer.lock().await.clone()
     }
 
+    pub async fn reset_buffers(&self) {
+        *self.response_content_buffer.lock().await = String::new();
+        *self.reasoning_content_buffer.lock().await = String::new();
+    }
+
+    pub async fn set_current_message(&self, message_id: i64) {
+        *self.message_id.lock().await = message_id;
+    }
+
+    pub async fn set_window(&self, window: tauri::Window) {
+        *self.window.lock().await = window;
+    }
+
+    pub async fn set_suppress_updates(&self, suppress: bool) {
+        *self.suppress_updates.lock().await = suppress;
+    }
+
+    async fn emit_event(&self, event: ConversationEvent) {
+        let window = self.window.lock().await.clone();
+        let event_name = format!("conversation_event_{}", self.conversation_id);
+        if let Err(e) = window.emit(&event_name, event) {
+            error!("ACP: Failed to emit event: {}", e);
+        }
+    }
+
     /// Send completion event to frontend
-    pub fn send_done_event(&self, message_type: &str, content: &str) {
+    pub async fn send_done_event(&self, message_type: &str, content: &str) {
+        let message_id = *self.message_id.lock().await;
         let event = ConversationEvent {
             r#type: "message_update".to_string(),
             data: serde_json::to_value(MessageUpdateEvent {
-                message_id: self.message_id,
+                message_id,
                 message_type: message_type.to_string(),
                 content: content.to_string(),
                 is_done: true,
@@ -227,21 +288,19 @@ impl AcpTauriClient {
             }).unwrap(),
         };
 
-        let event_name = format!("conversation_event_{}", self.conversation_id);
-        if let Err(e) = self.window.emit(&event_name, event) {
-            error!("ACP: Failed to emit done event: {}", e);
-        }
+        self.emit_event(event).await;
     }
 
     /// Send error event to frontend
-    pub fn send_error_event(&self, error_message: &str) {
+    pub async fn send_error_event(&self, error_message: &str) {
         // Update database with error message
-        self.update_message_in_db(error_message);
+        self.update_message_in_db(error_message).await;
 
+        let message_id = *self.message_id.lock().await;
         let event = ConversationEvent {
             r#type: "message_update".to_string(),
             data: serde_json::to_value(MessageUpdateEvent {
-                message_id: self.message_id,
+                message_id,
                 message_type: "error".to_string(),
                 content: error_message.to_string(),
                 is_done: true,
@@ -253,23 +312,26 @@ impl AcpTauriClient {
             }).unwrap(),
         };
 
-        let event_name = format!("conversation_event_{}", self.conversation_id);
-        if let Err(e) = self.window.emit(&event_name, event) {
-            error!("ACP: Failed to emit error event: {}", e);
-        }
+        self.emit_event(event).await;
     }
 }
 
 #[async_trait::async_trait(?Send)]
 impl AcpClient for AcpTauriClient {
     async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<(), acp::Error> {
+        if *self.suppress_updates.lock().await {
+            debug!("ACP session_notification suppressed");
+            return Ok(());
+        }
+
         // Log the notification type for debugging
         let update_type = std::format!("{:?}", args.update)
             .split('(')
             .next()
             .unwrap_or("Unknown")
             .to_string();
-        debug!("ACP session_notification: type={}, message_id={}", update_type, self.message_id);
+        let message_id = *self.message_id.lock().await;
+        debug!("ACP session_notification: type={}, message_id={}", update_type, message_id);
 
         match args.update {
             // User message streaming - just log, don't emit to UI (user message is already shown)
@@ -294,13 +356,14 @@ impl AcpClient for AcpTauriClient {
                 };
 
                 // Persist to database
-                self.update_message_in_db(&full_content);
+                self.update_message_in_db(&full_content).await;
 
                 // Emit full content to frontend (matching existing UI behavior)
+                let message_id = *self.message_id.lock().await;
                 let event = ConversationEvent {
                     r#type: "message_update".to_string(),
                     data: serde_json::to_value(MessageUpdateEvent {
-                        message_id: self.message_id,
+                        message_id,
                         message_type: "response".to_string(),
                         content: full_content,
                         is_done: false,
@@ -312,8 +375,9 @@ impl AcpClient for AcpTauriClient {
                     }).unwrap(),
                 };
 
+                let window = self.window.lock().await.clone();
                 let event_name = format!("conversation_event_{}", self.conversation_id);
-                match self.window.emit(&event_name, event) {
+                match window.emit(&event_name, event) {
                     Ok(_) => debug!("ACP: Emitted AgentMessageChunk event"),
                     Err(e) => error!("ACP: Failed to emit AgentMessageChunk event: {}", e),
                 }
@@ -332,10 +396,11 @@ impl AcpClient for AcpTauriClient {
                 };
 
                 // Emit full reasoning content to frontend
+                let message_id = *self.message_id.lock().await;
                 let event = ConversationEvent {
                     r#type: "message_update".to_string(),
                     data: serde_json::to_value(MessageUpdateEvent {
-                        message_id: self.message_id,
+                        message_id,
                         message_type: "reasoning".to_string(),
                         content: full_reasoning,
                         is_done: false,
@@ -347,10 +412,7 @@ impl AcpClient for AcpTauriClient {
                     }).unwrap(),
                 };
 
-                let _ = self.window.emit(
-                    format!("conversation_event_{}", self.conversation_id).as_str(),
-                    event
-                );
+                self.emit_event(event).await;
             }
 
             // New tool call initiated - emit as MCP tool call update with pending status
@@ -372,10 +434,7 @@ impl AcpClient for AcpTauriClient {
                     }).unwrap(),
                 };
 
-                let _ = self.window.emit(
-                    format!("conversation_event_{}", self.conversation_id).as_str(),
-                    event
-                );
+                self.emit_event(event).await;
             }
 
             // Tool call status update - emit as MCP tool call update
@@ -411,10 +470,7 @@ impl AcpClient for AcpTauriClient {
                     }).unwrap(),
                 };
 
-                let _ = self.window.emit(
-                    format!("conversation_event_{}", self.conversation_id).as_str(),
-                    event
-                );
+                self.emit_event(event).await;
             }
 
             // Agent execution plan - log only, no UI support yet
@@ -446,10 +502,7 @@ impl AcpClient for AcpTauriClient {
                             data: serde_json::json!({ "title": title }),
                         };
 
-                        let _ = self.window.emit(
-                            format!("conversation_event_{}", self.conversation_id).as_str(),
-                            event
-                        );
+                        self.emit_event(event).await;
                     }
                 }
             }
@@ -676,22 +729,95 @@ impl AcpClient for AcpTauriClient {
 }
 
 /// Execute an ACP session
-pub async fn execute_acp_session(
+pub fn spawn_acp_session_task(
     app_handle: tauri::AppHandle,
-    window: tauri::Window,
+    conversation_id: i64,
+    acp_config: AcpConfig,
+) -> (AcpSessionHandle, tokio::task::JoinHandle<Result<(), anyhow::Error>>) {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let handle = AcpSessionHandle { sender };
+
+    let join_handle = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| anyhow::Error::msg(e.to_string()))?;
+        rt.block_on(async move {
+            let local_set = tokio::task::LocalSet::new();
+            local_set
+                .run_until(async move {
+                    run_acp_session(app_handle, conversation_id, acp_config, receiver)
+                        .await
+                        .map_err(|e| anyhow::Error::msg(e.to_string()))?;
+                    Ok::<(), anyhow::Error>(())
+                })
+                .await
+        })
+    });
+
+    (handle, join_handle)
+}
+
+async fn process_acp_prompt(
+    client_handle: &AcpTauriClient,
+    conn: &ClientSideConnection,
+    session_id: &str,
     conversation_id: i64,
     message_id: i64,
-    user_prompt: &str,
-    acp_config: AcpConfig,
+    prompt: String,
+    window: tauri::Window,
 ) -> Result<(), AppError> {
-    info!(
-        "execute_acp_session: START - conversation_id={}, message_id={}, prompt='{}'",
-        conversation_id, message_id, user_prompt
-    );
+    client_handle.set_current_message(message_id).await;
+    client_handle.set_window(window).await;
+    client_handle.reset_buffers().await;
 
-    // Helper function to send error event
-    let send_error = |window: &tauri::Window, msg: &str| {
-        // Update database with error
+    info!(
+        "ACP: Sending prompt (conversation_id={}, message_id={})",
+        conversation_id, message_id
+    );
+    let prompt_response = conn
+        .prompt(acp::PromptRequest::new(session_id.to_string(), vec![prompt.into()]))
+        .await;
+
+    if let Err(e) = &prompt_response {
+        let err_msg = format!("ACP prompt failed: {:?}", e);
+        error!("ACP: {}", err_msg);
+        client_handle.send_error_event(&err_msg).await;
+        return Err(AppError::UnknownError(err_msg));
+    }
+    info!("ACP: Prompt completed successfully");
+
+    let final_content = client_handle.get_response_content().await;
+    client_handle.update_message_in_db(&final_content).await;
+    client_handle.send_done_event("response", &final_content).await;
+    Ok(())
+}
+
+async fn run_acp_session(
+    app_handle: tauri::AppHandle,
+    conversation_id: i64,
+    acp_config: AcpConfig,
+    mut receiver: mpsc::UnboundedReceiver<AcpSessionCommand>,
+) -> Result<(), AppError> {
+    info!("ACP session task started: conversation_id={}", conversation_id);
+
+    let first_command = match receiver.recv().await {
+        Some(command) => command,
+        None => {
+            info!("ACP session task ended before start: conversation_id={}", conversation_id);
+            return Ok(());
+        }
+    };
+
+    let (first_message_id, first_prompt, first_window) = match first_command {
+        AcpSessionCommand::Prompt {
+            message_id,
+            prompt,
+            window,
+        } => (message_id, prompt, window),
+    };
+
+    let send_startup_error = |window: &tauri::Window, message_id: i64, msg: &str| {
         if let Ok(db) = ConversationDatabase::new(&app_handle) {
             if let Ok(repo) = db.message_repo() {
                 let _ = repo.update_content(message_id, msg);
@@ -710,27 +836,8 @@ pub async fn execute_acp_session(
                 output_token_count: None,
                 ttft_ms: None,
                 tps: None,
-            }).unwrap(),
-        };
-        let event_name = format!("conversation_event_{}", conversation_id);
-        let _ = window.emit(&event_name, event);
-    };
-
-    // Helper function to send done event
-    let send_done = |window: &tauri::Window, content: &str| {
-        let event = ConversationEvent {
-            r#type: "message_update".to_string(),
-            data: serde_json::to_value(MessageUpdateEvent {
-                message_id,
-                message_type: "response".to_string(),
-                content: content.to_string(),
-                is_done: true,
-                token_count: None,
-                input_token_count: None,
-                output_token_count: None,
-                ttft_ms: None,
-                tps: None,
-            }).unwrap(),
+            })
+            .unwrap(),
         };
         let event_name = format!("conversation_event_{}", conversation_id);
         let _ = window.emit(&event_name, event);
@@ -741,7 +848,6 @@ pub async fn execute_acp_session(
     let permission_manager = Arc::new(PermissionManager::new(app_handle.clone()));
 
     // Resolve the actual executable path
-    // For bun-installed packages, they are in ~/.bun/bin/
     let resolved_cli_command = resolve_acp_cli_path(&acp_config.cli_command);
     info!("ACP: Original CLI command: {}", acp_config.cli_command);
     info!("ACP: Resolved CLI path: {}", resolved_cli_command.display());
@@ -757,15 +863,23 @@ pub async fn execute_acp_session(
 
     let mut cmd = Command::new(&resolved_cli_command);
     cmd.current_dir(&acp_config.working_directory)
-       .stdin(std::process::Stdio::piped())
-       .stdout(std::process::Stdio::piped())
-       .stderr(std::process::Stdio::piped())
-       .kill_on_drop(true);
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
 
     // Add environment variables
     for (key, value) in &acp_config.env_vars {
         cmd.env(key, value);
-        debug!("ACP: Set env var: {}={}", key, if key.to_lowercase().contains("key") || key.to_lowercase().contains("token") { "***" } else { value });
+        debug!(
+            "ACP: Set env var: {}={}",
+            key,
+            if key.to_lowercase().contains("key") || key.to_lowercase().contains("token") {
+                "***"
+            } else {
+                value
+            }
+        );
     }
     if !acp_config.env_vars.is_empty() {
         info!("ACP: Environment variables set: {}", acp_config.env_vars.len());
@@ -782,7 +896,6 @@ pub async fn execute_acp_session(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            // 提供更友好的安装帮助信息
             let help_msg = match acp_config.cli_command.as_str() {
                 "claude-code-acp" => "\n\n安装方法: bun add -g @zed-industries/claude-code-acp\n注意: 需要设置 ANTHROPIC_API_KEY 环境变量",
                 "codex-acp" => "\n\n安装方法: bun add -g @zed-industries/codex-acp",
@@ -790,233 +903,243 @@ pub async fn execute_acp_session(
                 _ => "",
             };
             let err_msg = format!(
-                "无法启动 ACP 进程 '{}' (resolved: {}): {}{}", 
+                "无法启动 ACP 进程 '{}' (resolved: {}): {}{}",
                 acp_config.cli_command,
                 resolved_cli_command.display(),
                 e,
                 help_msg
             );
             error!("ACP: {}", err_msg);
-            send_error(&window, &err_msg);
+            send_startup_error(&first_window, first_message_id, &err_msg);
             return Err(AppError::UnknownError(err_msg));
         }
     };
     info!("ACP: Process spawned successfully, PID={:?}", child.id());
 
     let stdin = match child.stdin.take() {
-        Some(s) => s,
+        Some(value) => value,
         None => {
             let err_msg = "Failed to open stdin for ACP process".to_string();
-            error!("ACP: {}", err_msg);
-            send_error(&window, &err_msg);
+            send_startup_error(&first_window, first_message_id, &err_msg);
             return Err(AppError::UnknownError(err_msg));
         }
     };
     let stdout = match child.stdout.take() {
-        Some(s) => s,
+        Some(value) => value,
         None => {
             let err_msg = "Failed to open stdout for ACP process".to_string();
-            error!("ACP: {}", err_msg);
-            send_error(&window, &err_msg);
+            send_startup_error(&first_window, first_message_id, &err_msg);
             return Err(AppError::UnknownError(err_msg));
         }
     };
     let stderr = match child.stderr.take() {
-        Some(s) => s,
+        Some(value) => value,
         None => {
             let err_msg = "Failed to open stderr for ACP process".to_string();
-            error!("ACP: {}", err_msg);
-            send_error(&window, &err_msg);
+            send_startup_error(&first_window, first_message_id, &err_msg);
             return Err(AppError::UnknownError(err_msg));
         }
     };
 
-    // Create shared buffers that will be accessible after the session
-    let response_buffer = Arc::new(TokioMutex::new(String::new()));
-    let reasoning_buffer = Arc::new(TokioMutex::new(String::new()));
-    let response_buffer_clone = response_buffer.clone();
-    let app_handle_for_db = app_handle.clone();
-
-    // Create the ACP client with state
-    let client_impl = AcpTauriClient {
-        app_handle: app_handle.clone(),
+    let client_impl = AcpTauriClient::new(
+        app_handle.clone(),
         conversation_id,
-        message_id,
-        window: window.clone(),
+        first_message_id,
+        first_window.clone(),
         operation_state,
         permission_manager,
-        response_content_buffer: response_buffer,
-        reasoning_content_buffer: reasoning_buffer,
-    };
+    );
+    let client_handle = client_impl.clone();
 
-    // Use LocalSet for !Send futures
     let local_set = tokio::task::LocalSet::new();
-    let window_for_local = window.clone();
+    let session_result = local_set
+        .run_until(async move {
+            info!("ACP: Creating ClientSideConnection...");
+            let (conn, handle_io) = ClientSideConnection::new(
+                client_impl,
+                stdin.compat_write(),
+                stdout.compat(),
+                |fut| {
+                    tokio::task::spawn_local(fut);
+                },
+            );
 
-    let result = local_set.run_until(async move {
-        info!("ACP: Creating ClientSideConnection...");
-        let (conn, handle_io) = ClientSideConnection::new(
-            client_impl,
-            stdin.compat_write(),
-            stdout.compat(),
-            |fut| { tokio::task::spawn_local(fut); },
-        );
+            // Handle I/O in background with logging
+            let _io_handle = tokio::task::spawn_local(async move {
+                info!("ACP I/O: Starting I/O handler...");
+                let _ = handle_io.await;
+                info!("ACP I/O: I/O handler finished");
+            });
+            info!("ACP: I/O handler spawned");
 
-        // Handle I/O in background with logging
-        let io_handle = tokio::task::spawn_local(async move {
-            info!("ACP I/O: Starting I/O handler...");
-            handle_io.await;
-            info!("ACP I/O: I/O handler finished");
-        });
-        info!("ACP: I/O handler spawned");
+            // Spawn stderr reader to capture any error/debug output from the ACP process
+            let _stderr_task = tokio::task::spawn_local(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
 
-        // Spawn stderr reader to capture any error/debug output from the ACP process
-        let _stderr_task = tokio::task::spawn_local(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-
-            let mut stderr_reader = BufReader::new(stderr).lines();
-            loop {
-                match stderr_reader.next_line().await {
-                    Ok(Some(line)) => {
-                        info!("[ACP stderr] {}", line);
-                    }
-                    Ok(None) => {
-                        info!("[ACP stderr] Stream closed (EOF)");
-                        break;
-                    }
-                    Err(e) => {
-                        error!("[ACP stderr] Read error: {}", e);
-                        break;
+                let mut stderr_reader = BufReader::new(stderr).lines();
+                loop {
+                    match stderr_reader.next_line().await {
+                        Ok(Some(line)) => {
+                            info!("[ACP stderr] {}", line);
+                        }
+                        Ok(None) => {
+                            info!("[ACP stderr] Stream closed (EOF)");
+                            break;
+                        }
+                        Err(e) => {
+                            error!("[ACP stderr] Read error: {}", e);
+                            break;
+                        }
                     }
                 }
-            }
-        });
-        info!("ACP: Stderr reader spawned");
+            });
+            info!("ACP: Stderr reader spawned");
 
-        // Initialize with timeout
-        info!("ACP: Initializing connection (timeout: 30s)...");
-        let init_future = conn.initialize(
-            acp::InitializeRequest::new(acp::ProtocolVersion::V1)
-                .client_info(acp::Implementation::new("AIPP", "0.4.1"))
-        );
-        
-        let init_response = tokio::time::timeout(
-            tokio::time::Duration::from_secs(30),
-            init_future
-        ).await;
+            // Initialize with timeout
+            info!("ACP: Initializing connection (timeout: 30s)...");
+            let init_future = conn.initialize(
+                acp::InitializeRequest::new(acp::ProtocolVersion::V1)
+                    .client_info(acp::Implementation::new("AIPP", "0.4.1")),
+            );
 
-        let init_response = match init_response {
-            Ok(result) => result,
-            Err(_) => {
-                let err_msg = "ACP initialize timed out after 30 seconds. The CLI might not support ACP protocol or needs '--mcp' flag.".to_string();
+            let init_response = tokio::time::timeout(
+                tokio::time::Duration::from_secs(30),
+                init_future,
+            )
+            .await;
+
+            let init_response = match init_response {
+                Ok(result) => result,
+                Err(_) => {
+                    let err_msg = "ACP initialize timed out after 30 seconds. The CLI might not support ACP protocol or needs '--mcp' flag.".to_string();
+                    error!("ACP: {}", err_msg);
+                    client_handle.send_error_event(&err_msg).await;
+                    return Err(AppError::UnknownError(err_msg));
+                }
+            };
+
+            if let Err(e) = &init_response {
+                let err_msg = format!("ACP initialize failed: {:?}", e);
                 error!("ACP: {}", err_msg);
+                client_handle.send_error_event(&err_msg).await;
                 return Err(AppError::UnknownError(err_msg));
             }
-        };
+            let init_response = init_response.unwrap();
+            info!(
+                "ACP: Initialize success, protocol_version={:?}",
+                init_response.protocol_version
+            );
 
-        if let Err(e) = &init_response {
-            let err_msg = format!("ACP initialize failed: {:?}", e);
-            error!("ACP: {}", err_msg);
-            return Err(AppError::UnknownError(err_msg));
-        }
-        let _init_response = init_response.unwrap();
-        info!("ACP: Initialize success, protocol_version={:?}", _init_response.protocol_version);
+            let conversation_db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
+            let mut session_id: Option<String> = None;
 
-        // Create session
-        info!("ACP: Creating session...");
-        let session_response = conn.new_session(
-            acp::NewSessionRequest::new(acp_config.working_directory.clone())
-        ).await;
+            if let Some(stored_session_id) =
+                conversation_db.get_acp_session_id(conversation_id)?
+            {
+                if init_response.agent_capabilities.load_session {
+                    info!(
+                        "ACP: Loading existing session (conversation_id={}, session_id={})",
+                        conversation_id, stored_session_id
+                    );
+                    client_handle.set_suppress_updates(true).await;
+                    let load_result = conn
+                        .load_session(acp::LoadSessionRequest::new(
+                            stored_session_id.clone(),
+                            acp_config.working_directory.clone(),
+                        ))
+                        .await;
+                    client_handle.set_suppress_updates(false).await;
 
-        if let Err(e) = &session_response {
-            let err_msg = format!("ACP new_session failed: {:?}", e);
-            error!("ACP: {}", err_msg);
-            return Err(AppError::UnknownError(err_msg));
-        }
-        let session_response = session_response.unwrap();
-        info!("ACP: Session created, session_id={:?}", session_response.session_id);
-
-        // Send prompt
-        info!("ACP: Sending prompt...");
-        let prompt_response = conn.prompt(
-            acp::PromptRequest::new(session_response.session_id, vec![user_prompt.into()])
-        ).await;
-
-        if let Err(e) = &prompt_response {
-            let err_msg = format!("ACP prompt failed: {:?}", e);
-            error!("ACP: {}", err_msg);
-            return Err(AppError::UnknownError(err_msg));
-        }
-        info!("ACP: Prompt completed successfully");
-
-        // Prompt 完成后，获取最终内容并更新数据库
-        // 注意：不等待进程退出，因为某些 ACP agent（如 Claude Code ACP）
-        // 可能会保持会话活跃等待下一个 prompt
-        let final_content = {
-            let content = response_buffer_clone.lock().await.clone();
-            info!("ACP: Final content length: {}", content.len());
-            
-            // 更新数据库（使用保存的 app_handle）
-            if let Ok(db) = crate::ConversationDatabase::new(&app_handle_for_db) {
-                if let Ok(repo) = db.message_repo() {
-                    if let Err(e) = repo.update_content(message_id, &content) {
-                        error!("ACP: Failed to update message content: {:?}", e);
-                    } else {
-                        info!("ACP: Final content saved to database");
+                    match load_result {
+                        Ok(_) => {
+                            session_id = Some(stored_session_id);
+                            conversation_db.upsert_acp_session_id(
+                                conversation_id,
+                                session_id.as_deref().unwrap_or_default(),
+                            )?;
+                        }
+                        Err(e) => {
+                            error!("ACP: session/load failed: {:?}", e);
+                        }
                     }
+                } else {
+                    info!("ACP: Agent does not support loadSession; creating new session");
                 }
             }
-            
-            content
-        };
-        
-        // 发送完成事件（在 local_set 内部发送，确保消息能及时到达）
-        let done_event = ConversationEvent {
-            r#type: "message_update".to_string(),
-            data: serde_json::to_value(MessageUpdateEvent {
-                message_id,
-                message_type: "response".to_string(),
-                content: final_content.clone(),
-                is_done: true,
-                token_count: None,
-                input_token_count: None,
-                output_token_count: None,
-                ttft_ms: None,
-                tps: None,
-            }).unwrap(),
-        };
-        let event_name = format!("conversation_event_{}", conversation_id);
-        if let Err(e) = window.emit(&event_name, done_event) {
-            error!("ACP: Failed to emit done event: {:?}", e);
-        } else {
-            info!("ACP: Done event emitted");
-        }
 
-        // 终止进程（可选，但推荐）
-        // 因为我们只发送了一个 prompt，之后不再需要这个会话
-        info!("ACP: Killing child process...");
-        if let Err(e) = child.kill().await {
-            // 进程可能已经退出，忽略错误
-            debug!("ACP: Kill process result: {:?}", e);
-        }
+            let session_id = if let Some(session_id) = session_id {
+                session_id
+            } else {
+                info!("ACP: Creating session...");
+                let session_response = conn
+                    .new_session(acp::NewSessionRequest::new(
+                        acp_config.working_directory.clone(),
+                    ))
+                    .await;
 
-        Ok::<(), AppError>(())
-    }).await;
+                if let Err(e) = &session_response {
+                    let err_msg = format!("ACP new_session failed: {:?}", e);
+                    error!("ACP: {}", err_msg);
+                    client_handle.send_error_event(&err_msg).await;
+                    return Err(AppError::UnknownError(err_msg));
+                }
+                let session_response = session_response.unwrap();
+                let session_id = session_response.session_id.to_string();
+                info!("ACP: Session created, session_id={:?}", session_id);
 
-    // Handle result
-    match result {
-        Ok(()) => {
-            info!("ACP: Session completed successfully");
+                conversation_db.upsert_acp_session_id(conversation_id, &session_id)?;
+                session_id
+            };
+
+            process_acp_prompt(
+                &client_handle,
+                &conn,
+                &session_id,
+                conversation_id,
+                first_message_id,
+                first_prompt,
+                first_window,
+            )
+            .await?;
+
+            while let Some(command) = receiver.recv().await {
+                let (message_id, prompt, window) = match command {
+                    AcpSessionCommand::Prompt {
+                        message_id,
+                        prompt,
+                        window,
+                    } => (message_id, prompt, window),
+                };
+
+                process_acp_prompt(
+                    &client_handle,
+                    &conn,
+                    &session_id,
+                    conversation_id,
+                    message_id,
+                    prompt,
+                    window,
+                )
+                .await?;
+            }
+
+            Ok::<(), AppError>(())
+        })
+        .await;
+
+    if let Err(e) = session_result {
+        error!("ACP: Session failed: {}", e);
+        if let Err(kill_err) = child.kill().await {
+            debug!("ACP: Kill process result: {:?}", kill_err);
         }
-        Err(e) => {
-            let err_msg = format!("{}", e);
-            error!("ACP: Session failed: {}", err_msg);
-            send_error(&window_for_local, &err_msg);
-            return Err(e);
-        }
+        return Err(e);
     }
 
-    info!("execute_acp_session: END - conversation_id={}", conversation_id);
+    info!("ACP: Session ended, cleaning up process");
+    if let Err(e) = child.kill().await {
+        debug!("ACP: Kill process result: {:?}", e);
+    }
+
     Ok(())
 }
 

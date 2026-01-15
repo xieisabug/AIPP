@@ -169,6 +169,19 @@ struct AppState {
 }
 
 #[derive(Clone)]
+struct AcpSessionState {
+    sessions: Arc<TokioMutex<HashMap<i64, crate::api::ai::acp::AcpSessionHandle>>>,
+}
+
+impl AcpSessionState {
+    fn new() -> Self {
+        Self {
+            sessions: Arc::new(TokioMutex::new(HashMap::new())),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct FeatureConfigState {
     configs: Arc<TokioMutex<Vec<FeatureConfig>>>,
     config_feature_map: Arc<TokioMutex<HashMap<String, HashMap<String, FeatureConfig>>>>,
@@ -463,6 +476,7 @@ pub fn run() {
             selected_text: TokioMutex::new(String::new()),
             recording_shortcut: TokioMutex::new(false),
         })
+        .manage(AcpSessionState::new())
         .manage(MessageTokenManager::new())
         .manage(OperationState::new());
     #[cfg(desktop)]
