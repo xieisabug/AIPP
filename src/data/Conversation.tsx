@@ -98,6 +98,9 @@ export interface MCPToolCallUpdateEvent {
     call_id: number;
     conversation_id: number;
     status: 'pending' | 'executing' | 'success' | 'failed';
+    server_name?: string;
+    tool_name?: string;
+    parameters?: string;
     result?: string;
     error?: string;
     started_time?: Date;

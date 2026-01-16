@@ -6,6 +6,7 @@ use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent, MCPToolCallU
 use crate::db::assistant_db::AssistantModelConfig;
 use crate::db::conversation_db::ConversationDatabase;
 use crate::db::llm_db::LLMProviderConfig;
+use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
 use crate::mcp::builtin_mcp::operation::{
     bash_ops::BashOperations,
@@ -20,9 +21,11 @@ use crate::mcp::builtin_mcp::operation::{
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
+use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, error, info};
@@ -34,6 +37,65 @@ pub struct AcpConfig {
     pub working_directory: PathBuf,
     pub env_vars: HashMap<String, String>,
     pub additional_args: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum AcpPermissionDecision {
+    Selected(String),
+    Cancelled,
+}
+
+#[derive(Default)]
+pub struct AcpPermissionState {
+    pending_requests: TokioMutex<HashMap<String, oneshot::Sender<AcpPermissionDecision>>>,
+}
+
+impl AcpPermissionState {
+    pub fn new() -> Self {
+        Self {
+            pending_requests: TokioMutex::new(HashMap::new()),
+        }
+    }
+
+    pub async fn store_request(
+        &self,
+        request_id: String,
+        sender: oneshot::Sender<AcpPermissionDecision>,
+    ) {
+        let mut pending = self.pending_requests.lock().await;
+        pending.insert(request_id, sender);
+    }
+
+    pub async fn resolve_request(
+        &self,
+        request_id: &str,
+        decision: AcpPermissionDecision,
+    ) -> bool {
+        let mut pending = self.pending_requests.lock().await;
+        if let Some(sender) = pending.remove(request_id) {
+            sender.send(decision).is_ok()
+        } else {
+            false
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct AcpPermissionOptionPayload {
+    option_id: String,
+    name: String,
+    kind: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct AcpPermissionRequestEvent {
+    request_id: String,
+    conversation_id: Option<i64>,
+    tool_call_id: String,
+    title: Option<String>,
+    kind: Option<String>,
+    parameters: Option<String>,
+    options: Vec<AcpPermissionOptionPayload>,
 }
 
 enum AcpSessionCommand {
@@ -180,6 +242,228 @@ fn tool_call_id_to_i64(id: &acp::ToolCallId) -> i64 {
     })
 }
 
+fn permission_option_kind_to_string(kind: &acp::PermissionOptionKind) -> String {
+    match kind {
+        acp::PermissionOptionKind::AllowOnce => "allow_once".to_string(),
+        acp::PermissionOptionKind::AllowAlways => "allow_always".to_string(),
+        acp::PermissionOptionKind::RejectOnce => "reject_once".to_string(),
+        acp::PermissionOptionKind::RejectAlways => "reject_always".to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn extract_string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(v) = value.get(*key) {
+            if let Some(s) = v.as_str() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn extract_bool_field(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
+    for key in keys {
+        if let Some(v) = value.get(*key) {
+            if let Some(b) = v.as_bool() {
+                return Some(b);
+            }
+        }
+    }
+    None
+}
+
+fn extract_params_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(v) = value.get(*key) {
+            return Some(match v {
+                serde_json::Value::String(s) => s.to_string(),
+                _ => serde_json::to_string(v).unwrap_or_else(|_| v.to_string()),
+            });
+        }
+    }
+    None
+}
+
+fn extract_tool_call_info_from_value(value: &serde_json::Value) -> Option<(String, String, String)> {
+    if !value.is_object() {
+        return None;
+    }
+
+    if let Some(nested) = value
+        .get("tool")
+        .or_else(|| value.get("mcp"))
+        .or_else(|| value.get("claudeCode"))
+    {
+        if let Some(info) = extract_tool_call_info_from_value(nested) {
+            return Some(info);
+        }
+    }
+
+    let server_name = extract_string_field(
+        value,
+        &[
+            "server_name",
+            "serverName",
+            "server",
+            "mcp_server",
+            "mcpServer",
+        ],
+    )?;
+    let tool_name = extract_string_field(
+        value,
+        &["tool_name", "toolName", "tool", "name", "mcp_tool", "mcpTool"],
+    )?;
+    let parameters = extract_params_field(
+        value,
+        &["parameters", "params", "arguments", "args", "input"],
+    )
+    .unwrap_or_else(|| "{}".to_string());
+
+    Some((server_name, tool_name, parameters))
+}
+
+fn extract_acp_tool_call_info(
+    raw_input: Option<&serde_json::Value>,
+    meta: Option<&acp::Meta>,
+) -> Option<(String, String, String)> {
+    if let Some(raw_input) = raw_input {
+        if let Some(info) = extract_tool_call_info_from_value(raw_input) {
+            return Some(info);
+        }
+    }
+
+    if let Some(meta) = meta {
+        let meta_value = serde_json::Value::Object(meta.clone());
+        if let Some(info) = extract_tool_call_info_from_value(&meta_value) {
+            return Some(info);
+        }
+    }
+
+    None
+}
+
+fn extract_tool_name_from_meta(meta: Option<&acp::Meta>) -> Option<String> {
+    let meta = meta?;
+    let meta_value = serde_json::Value::Object(meta.clone());
+    extract_string_field(&meta_value, &["toolName", "tool_name", "name"])
+        .or_else(|| meta_value.get("claudeCode").and_then(|v| extract_string_field(v, &["toolName", "tool_name", "name"])) )
+}
+
+fn extract_tool_response_from_meta(meta: Option<&acp::Meta>) -> Option<String> {
+    let meta = meta?;
+    let meta_value = serde_json::Value::Object(meta.clone());
+    let response_value = meta_value
+        .get("claudeCode")
+        .and_then(|v| v.get("toolResponse"))
+        .or_else(|| meta_value.get("toolResponse"));
+    response_value.map(|v| serde_json::to_string(v).unwrap_or_else(|_| v.to_string()))
+}
+
+fn build_params_from_raw_input(
+    raw_input: Option<&serde_json::Value>,
+    meta: Option<&acp::Meta>,
+) -> String {
+    if let Some(raw_input) = raw_input {
+        return serde_json::to_string(raw_input).unwrap_or_else(|_| raw_input.to_string());
+    }
+
+    if let Some(meta) = meta {
+        let meta_value = serde_json::Value::Object(meta.clone());
+        return serde_json::to_string(&meta_value).unwrap_or_else(|_| meta_value.to_string());
+    }
+
+    "{}".to_string()
+}
+
+fn meta_requires_confirmation(meta: Option<&acp::Meta>) -> Option<bool> {
+    let meta = meta?;
+    let meta_value = serde_json::Value::Object(meta.clone());
+    extract_bool_field(
+        &meta_value,
+        &[
+            "requires_confirmation",
+            "requiresConfirmation",
+            "approval_required",
+            "needs_confirmation",
+        ],
+    )
+}
+
+fn display_server_name(title: &str, fallback: &str) -> String {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn resolve_operation_server_name(app_handle: &tauri::AppHandle) -> String {
+    if let Ok(db) = MCPDatabase::new(app_handle) {
+        if let Ok(name) = db
+            .conn
+            .query_row(
+                "SELECT name FROM mcp_server WHERE command = ? AND is_builtin = 1 LIMIT 1",
+                ["aipp:operation"],
+                |row| row.get::<_, String>(0),
+            )
+        {
+            return name;
+        }
+    }
+
+    "操作工具".to_string()
+}
+
+fn extract_command_from_title(title: &str) -> Option<String> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.starts_with('`') && trimmed.ends_with('`') && trimmed.len() > 2 {
+        return Some(trimmed.trim_matches('`').trim().to_string());
+    }
+
+    if trimmed == "Terminal" {
+        return None;
+    }
+
+    Some(trimmed.to_string())
+}
+
+fn fallback_acp_tool_call_info(
+    app_handle: &tauri::AppHandle,
+    tool_call: &acp::ToolCall,
+) -> Option<(String, String, String)> {
+    let server_name = resolve_operation_server_name(app_handle);
+
+    match tool_call.kind {
+        acp::ToolKind::Execute => {
+            let command = extract_command_from_title(&tool_call.title)
+                .unwrap_or_else(|| "".to_string());
+            let params = serde_json::json!({
+                "command": command,
+            })
+            .to_string();
+            Some((server_name, "execute_bash".to_string(), params))
+        }
+        acp::ToolKind::Read => {
+            let location = tool_call.locations.first()?;
+            let mut params = serde_json::json!({
+                "file_path": location.path.to_string_lossy(),
+            });
+            if let Some(line) = location.line {
+                params["offset"] = serde_json::Value::from(line as i64);
+            }
+            Some((server_name, "read_file".to_string(), params.to_string()))
+        }
+        _ => None,
+    }
+}
+
 /// Tauri client implementation that forwards ACP events to the frontend
 #[derive(Clone)]
 pub struct AcpTauriClient {
@@ -194,6 +478,7 @@ pub struct AcpTauriClient {
     /// Accumulated reasoning content buffer for database persistence
     reasoning_content_buffer: Arc<TokioMutex<String>>,
     suppress_updates: Arc<TokioMutex<bool>>,
+    tool_call_id_map: Arc<TokioMutex<HashMap<String, i64>>>,
 }
 
 impl AcpTauriClient {
@@ -215,6 +500,7 @@ impl AcpTauriClient {
             response_content_buffer: Arc::new(TokioMutex::new(String::new())),
             reasoning_content_buffer: Arc::new(TokioMutex::new(String::new())),
             suppress_updates: Arc::new(TokioMutex::new(false)),
+            tool_call_id_map: Arc::new(TokioMutex::new(HashMap::new())),
         }
     }
 
@@ -263,11 +549,57 @@ impl AcpTauriClient {
     }
 
     async fn emit_event(&self, event: ConversationEvent) {
-        let window = self.window.lock().await.clone();
-        let event_name = format!("conversation_event_{}", self.conversation_id);
-        if let Err(e) = window.emit(&event_name, event) {
-            error!("ACP: Failed to emit event: {}", e);
-        }
+        send_conversation_event_to_chat_windows(&self.app_handle, self.conversation_id, event);
+    }
+
+    async fn append_tool_call_ui_hint(
+        &self,
+        server_name: &str,
+        tool_name: &str,
+        parameters: &str,
+        call_id: i64,
+        llm_call_id: &str,
+    ) {
+        let ui_hint = format!(
+            "\n\n<!-- MCP_TOOL_CALL:{} -->\n",
+            serde_json::json!({
+                "server_name": server_name,
+                "tool_name": tool_name,
+                "parameters": parameters,
+                "call_id": call_id,
+                "llm_call_id": llm_call_id,
+            })
+        );
+
+        let full_content = {
+            let mut buffer = self.response_content_buffer.lock().await;
+            if buffer.contains(&format!("\"llm_call_id\":\"{}\"", llm_call_id)) {
+                return;
+            }
+            buffer.push_str(&ui_hint);
+            buffer.clone()
+        };
+
+        self.update_message_in_db(&full_content).await;
+
+        let message_id = *self.message_id.lock().await;
+        let event = ConversationEvent {
+            r#type: "message_update".to_string(),
+            data: serde_json::to_value(MessageUpdateEvent {
+                message_id,
+                message_type: "response".to_string(),
+                content: full_content,
+                is_done: false,
+                token_count: None,
+                input_token_count: None,
+                output_token_count: None,
+                ttft_ms: None,
+                tps: None,
+            })
+            .unwrap(),
+        };
+
+        self.emit_event(event).await;
     }
 
     /// Send completion event to frontend
@@ -417,21 +749,276 @@ impl AcpClient for AcpTauriClient {
 
             // New tool call initiated - emit as MCP tool call update with pending status
             acp::SessionUpdate::ToolCall(tool_call) => {
-                info!("ACP ToolCall: id={:?}, title={:?}", tool_call.tool_call_id, tool_call.title);
+                info!(
+                    "ACP ToolCall: id={:?}, title={:?}, status={:?}, kind={:?}",
+                    tool_call.tool_call_id,
+                    tool_call.title,
+                    tool_call.status,
+                    tool_call.kind
+                );
+                debug!(?tool_call, "ACP ToolCall detail");
 
-                let call_id = tool_call_id_to_i64(&tool_call.tool_call_id);
+                if let Some(existing_call_id) = {
+                    let map = self.tool_call_id_map.lock().await;
+                    map.get(tool_call.tool_call_id.0.as_ref()).cloned()
+                } {
+                    let (server_name, tool_name, parameters) = match extract_acp_tool_call_info(
+                        tool_call.raw_input.as_ref(),
+                        tool_call.meta.as_ref(),
+                    )
+                    .or_else(|| fallback_acp_tool_call_info(&self.app_handle, &tool_call))
+                    {
+                        Some(info) => info,
+                        None => {
+                            let display_name = display_server_name(&tool_call.title, "ACP ToolCall");
+                            let derived_tool_name = extract_tool_name_from_meta(tool_call.meta.as_ref())
+                                .unwrap_or_else(|| "acp_tool".to_string());
+                            let derived_params = build_params_from_raw_input(
+                                tool_call.raw_input.as_ref(),
+                                tool_call.meta.as_ref(),
+                            );
+                            (display_name, derived_tool_name, derived_params)
+                        }
+                    };
+
+                    let display_name = display_server_name(&tool_call.title, &server_name);
+
+                    if let Ok(db) = MCPDatabase::new(&self.app_handle) {
+                        let _ = db.update_mcp_tool_call_metadata(
+                            existing_call_id,
+                            &display_name,
+                            &tool_name,
+                            &parameters,
+                        );
+                    }
+
+                    let mut status_str = tool_status_to_string(tool_call.status);
+                    if status_str == "pending" {
+                        if let Some(false) = meta_requires_confirmation(tool_call.meta.as_ref()) {
+                            status_str = "executing".to_string();
+                        }
+                    }
+
+                    let (finished_time, result, error) = match tool_call.status {
+                        acp::ToolCallStatus::Completed => {
+                            (Some(chrono::Utc::now()), tool_call.raw_output.as_ref(), None)
+                        }
+                        acp::ToolCallStatus::Failed => {
+                            (Some(chrono::Utc::now()), None, tool_call.raw_output.as_ref())
+                        }
+                        _ => (None, None, None),
+                    };
+
+                    let result_str = result.map(|r| r.to_string());
+                    let error_str = error.map(|e| e.to_string());
+
+                    if let Ok(db) = MCPDatabase::new(&self.app_handle) {
+                        let _ = db.update_mcp_tool_call_status(
+                            existing_call_id,
+                            &status_str,
+                            result_str.as_deref(),
+                            error_str.as_deref(),
+                        );
+                    }
+
+                    let event = ConversationEvent {
+                        r#type: "mcp_tool_call_update".to_string(),
+                        data: serde_json::to_value(MCPToolCallUpdateEvent {
+                            call_id: existing_call_id,
+                            conversation_id: self.conversation_id,
+                            status: status_str,
+                            server_name: Some(display_name),
+                            tool_name: Some(tool_name),
+                            parameters: Some(parameters),
+                            result: result_str,
+                            error: error_str,
+                            started_time: None,
+                            finished_time,
+                        })
+                        .unwrap(),
+                    };
+
+                    self.emit_event(event).await;
+                    return Ok(());
+                }
+
+                let (server_name, tool_name, parameters) = match extract_acp_tool_call_info(
+                    tool_call.raw_input.as_ref(),
+                    tool_call.meta.as_ref(),
+                )
+                .or_else(|| fallback_acp_tool_call_info(&self.app_handle, &tool_call))
+                {
+                    Some(info) => info,
+                    None => {
+                        tracing::warn!(
+                            title = %tool_call.title,
+                            kind = ?tool_call.kind,
+                            locations = tool_call.locations.len(),
+                            raw_input = ?tool_call.raw_input,
+                            meta = ?tool_call.meta,
+                            "ACP ToolCall missing server/tool info; using display-only UI hint"
+                        );
+
+                        let display_name = display_server_name(&tool_call.title, "ACP ToolCall");
+                        let derived_tool_name = extract_tool_name_from_meta(tool_call.meta.as_ref())
+                            .unwrap_or_else(|| "acp_tool".to_string());
+                        let derived_params = build_params_from_raw_input(
+                            tool_call.raw_input.as_ref(),
+                            tool_call.meta.as_ref(),
+                        );
+
+                        let call_id = tool_call_id_to_i64(&tool_call.tool_call_id);
+                        {
+                            let mut map = self.tool_call_id_map.lock().await;
+                            map.insert(tool_call.tool_call_id.0.to_string(), call_id);
+                        }
+
+                        self.append_tool_call_ui_hint(
+                            &display_name,
+                            &derived_tool_name,
+                            &derived_params,
+                            call_id,
+                            &tool_call.tool_call_id.0,
+                        )
+                        .await;
+
+                        let mut status_str = tool_status_to_string(tool_call.status);
+                        if status_str == "pending" {
+                            if let Some(false) = meta_requires_confirmation(tool_call.meta.as_ref()) {
+                                status_str = "executing".to_string();
+                            }
+                        }
+
+                        let (finished_time, result, error) = match tool_call.status {
+                            acp::ToolCallStatus::Completed => {
+                                (Some(chrono::Utc::now()), tool_call.raw_output.as_ref(), None)
+                            }
+                            acp::ToolCallStatus::Failed => {
+                                (Some(chrono::Utc::now()), None, tool_call.raw_output.as_ref())
+                            }
+                            _ => (None, None, None),
+                        };
+
+                        let event = ConversationEvent {
+                            r#type: "mcp_tool_call_update".to_string(),
+                            data: serde_json::to_value(MCPToolCallUpdateEvent {
+                                call_id,
+                                conversation_id: self.conversation_id,
+                                status: status_str,
+                                server_name: Some(display_name),
+                                tool_name: Some(derived_tool_name),
+                                parameters: Some(derived_params),
+                                result: result.map(|r| r.to_string()),
+                                error: error.map(|e| e.to_string()),
+                                started_time: Some(chrono::Utc::now()),
+                                finished_time,
+                            })
+                            .unwrap(),
+                        };
+
+                        self.emit_event(event).await;
+                        return Ok(());
+                    }
+                };
+
+                let message_id = *self.message_id.lock().await;
+                let display_name = display_server_name(&tool_call.title, &server_name);
+                let tool_call_record = match crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
+                    self.app_handle.clone(),
+                    self.conversation_id,
+                    Some(message_id),
+                    server_name.clone(),
+                    tool_name.clone(),
+                    parameters.clone(),
+                    Some(&tool_call.tool_call_id.0),
+                    Some(message_id),
+                )
+                .await
+                {
+                    Ok(record) => record,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "ACP failed to create MCP tool call record");
+                        let call_id = tool_call_id_to_i64(&tool_call.tool_call_id);
+                        let event = ConversationEvent {
+                            r#type: "mcp_tool_call_update".to_string(),
+                            data: serde_json::to_value(MCPToolCallUpdateEvent {
+                                call_id,
+                                conversation_id: self.conversation_id,
+                                status: "pending".to_string(),
+                                server_name: None,
+                                tool_name: None,
+                                parameters: None,
+                                result: None,
+                                error: None,
+                                started_time: Some(chrono::Utc::now()),
+                                finished_time: None,
+                            })
+                            .unwrap(),
+                        };
+
+                        self.emit_event(event).await;
+                        return Ok(());
+                    }
+                };
+
+                {
+                    let mut map = self.tool_call_id_map.lock().await;
+                    map.insert(tool_call.tool_call_id.0.to_string(), tool_call_record.id);
+                }
+
+                self.append_tool_call_ui_hint(
+                    &display_name,
+                    &tool_name,
+                    &parameters,
+                    tool_call_record.id,
+                    &tool_call.tool_call_id.0,
+                )
+                .await;
+
+                let mut status_str = tool_status_to_string(tool_call.status);
+                if status_str == "pending" {
+                    if let Some(false) = meta_requires_confirmation(tool_call.meta.as_ref()) {
+                        status_str = "executing".to_string();
+                    }
+                }
+
+                let (finished_time, result, error) = match tool_call.status {
+                    acp::ToolCallStatus::Completed => {
+                        (Some(chrono::Utc::now()), tool_call.raw_output.as_ref(), None)
+                    }
+                    acp::ToolCallStatus::Failed => {
+                        (Some(chrono::Utc::now()), None, tool_call.raw_output.as_ref())
+                    }
+                    _ => (None, None, None),
+                };
+
+                let result_str = result.map(|r| r.to_string());
+                let error_str = error.map(|e| e.to_string());
+
+                if let Ok(db) = MCPDatabase::new(&self.app_handle) {
+                    let _ = db.update_mcp_tool_call_status(
+                        tool_call_record.id,
+                        &status_str,
+                        result_str.as_deref(),
+                        error_str.as_deref(),
+                    );
+                }
 
                 let event = ConversationEvent {
                     r#type: "mcp_tool_call_update".to_string(),
                     data: serde_json::to_value(MCPToolCallUpdateEvent {
-                        call_id,
+                        call_id: tool_call_record.id,
                         conversation_id: self.conversation_id,
-                        status: "pending".to_string(),
-                        result: None,
-                        error: None,
-                        started_time: Some(chrono::Utc::now()),
-                        finished_time: None,
-                    }).unwrap(),
+                        status: status_str,
+                        server_name: Some(display_name),
+                        tool_name: Some(tool_name),
+                        parameters: Some(parameters),
+                        result: result_str,
+                        error: error_str,
+                        started_time: None,
+                        finished_time,
+                    })
+                    .unwrap(),
                 };
 
                 self.emit_event(event).await;
@@ -440,14 +1027,164 @@ impl AcpClient for AcpTauriClient {
             // Tool call status update - emit as MCP tool call update
             acp::SessionUpdate::ToolCallUpdate(update) => {
                 info!("ACP ToolCallUpdate: id={:?}, status={:?}", update.tool_call_id, update.fields.status);
+                debug!(?update, "ACP ToolCallUpdate detail");
 
-                let call_id = tool_call_id_to_i64(&update.tool_call_id);
+                let mut call_id_opt = {
+                    let map = self.tool_call_id_map.lock().await;
+                    map.get(update.tool_call_id.0.as_ref())
+                        .cloned()
+                };
 
-                let status_str = update.fields.status.as_ref()
-                    .map(|s| tool_status_to_string(s.clone()))
-                    .unwrap_or_else(|| "unknown".to_string());
+                if call_id_opt.is_none() {
+                    if let Some((server_name, tool_name, parameters)) = extract_acp_tool_call_info(
+                        update.fields.raw_input.as_ref(),
+                        update.meta.as_ref(),
+                    )
+                    .or_else(|| {
+                        update.fields.title.as_ref().map(|title| {
+                            let mut tool_call =
+                                acp::ToolCall::new(update.tool_call_id.clone(), title.clone());
+                            if let Some(kind) = update.fields.kind {
+                                tool_call.kind = kind;
+                            }
+                            if let Some(locations) = update.fields.locations.clone() {
+                                tool_call.locations = locations;
+                            }
+                            tool_call
+                        })
+                        .and_then(|tool_call| fallback_acp_tool_call_info(&self.app_handle, &tool_call))
+                    })
+                    {
+                        let message_id = *self.message_id.lock().await;
+                        let display_name = update
+                            .fields
+                            .title
+                            .as_ref()
+                            .map(|title| display_server_name(title, &server_name))
+                            .unwrap_or_else(|| server_name.clone());
+                        if let Ok(record) = crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
+                            self.app_handle.clone(),
+                            self.conversation_id,
+                            Some(message_id),
+                            server_name.clone(),
+                            tool_name.clone(),
+                            parameters.clone(),
+                            Some(&update.tool_call_id.0),
+                            Some(message_id),
+                        )
+                        .await
+                        {
+                            {
+                                let mut map = self.tool_call_id_map.lock().await;
+                                map.insert(update.tool_call_id.0.to_string(), record.id);
+                            }
+                            call_id_opt = Some(record.id);
+                            self.append_tool_call_ui_hint(
+                                &display_name,
+                                &tool_name,
+                                &parameters,
+                                record.id,
+                                &update.tool_call_id.0,
+                            )
+                            .await;
+                        }
+                    } else {
+                        let display_name = update
+                            .fields
+                            .title
+                            .as_ref()
+                            .map(|title| display_server_name(title, "ACP ToolCall"))
+                            .unwrap_or_else(|| "ACP ToolCall".to_string());
+                        let derived_tool_name = extract_tool_name_from_meta(update.meta.as_ref())
+                            .unwrap_or_else(|| "acp_tool".to_string());
+                        let derived_params = build_params_from_raw_input(
+                            update.fields.raw_input.as_ref(),
+                            update.meta.as_ref(),
+                        );
+                        let derived_call_id = tool_call_id_to_i64(&update.tool_call_id);
+                        {
+                            let mut map = self.tool_call_id_map.lock().await;
+                            map.insert(update.tool_call_id.0.to_string(), derived_call_id);
+                        }
+                        self.append_tool_call_ui_hint(
+                            &display_name,
+                            &derived_tool_name,
+                            &derived_params,
+                            derived_call_id,
+                            &update.tool_call_id.0,
+                        )
+                        .await;
+                        call_id_opt = Some(derived_call_id);
+                    }
+                }
 
-                let (finished_time, result, error) = match &update.fields.status {
+                let call_id = call_id_opt.unwrap_or_else(|| tool_call_id_to_i64(&update.tool_call_id));
+
+                let mut status_str = if let Some(status) = update.fields.status.as_ref() {
+                    tool_status_to_string(status.clone())
+                } else if let Ok(db) = MCPDatabase::new(&self.app_handle) {
+                    db.get_mcp_tool_call(call_id)
+                        .map(|call| call.status)
+                        .unwrap_or_else(|_| "executing".to_string())
+                } else {
+                    "executing".to_string()
+                };
+
+                if status_str == "pending" {
+                    if let Some(false) = meta_requires_confirmation(update.meta.as_ref()) {
+                        status_str = "executing".to_string();
+                    }
+                }
+
+                let meta_result = extract_tool_response_from_meta(update.meta.as_ref());
+
+                let mut updated_server_name: Option<String> = None;
+                let mut updated_tool_name: Option<String> = None;
+                let mut updated_parameters: Option<String> = None;
+
+                if update.fields.title.is_some() || update.fields.raw_input.is_some() {
+                    let title = update.fields.title.as_ref().map(|t| t.as_str()).unwrap_or("ACP ToolCall");
+                    let (server_name, tool_name, parameters) = extract_acp_tool_call_info(
+                        update.fields.raw_input.as_ref(),
+                        update.meta.as_ref(),
+                    )
+                    .or_else(|| {
+                        let mut tool_call = acp::ToolCall::new(update.tool_call_id.clone(), title.to_string());
+                        if let Some(kind) = update.fields.kind {
+                            tool_call.kind = kind;
+                        }
+                        if let Some(locations) = update.fields.locations.clone() {
+                            tool_call.locations = locations;
+                        }
+                        fallback_acp_tool_call_info(&self.app_handle, &tool_call)
+                    })
+                    .unwrap_or_else(|| {
+                        let display_name = display_server_name(title, "ACP ToolCall");
+                        let derived_tool_name = extract_tool_name_from_meta(update.meta.as_ref())
+                            .unwrap_or_else(|| "acp_tool".to_string());
+                        let derived_params = build_params_from_raw_input(
+                            update.fields.raw_input.as_ref(),
+                            update.meta.as_ref(),
+                        );
+                        (display_name, derived_tool_name, derived_params)
+                    });
+
+                    let display_name = display_server_name(title, &server_name);
+                    updated_server_name = Some(display_name.clone());
+                    updated_tool_name = Some(tool_name.clone());
+                    updated_parameters = Some(parameters.clone());
+
+                    if let Ok(db) = MCPDatabase::new(&self.app_handle) {
+                        let _ = db.update_mcp_tool_call_metadata(
+                            call_id,
+                            &display_name,
+                            &tool_name,
+                            &parameters,
+                        );
+                    }
+                }
+
+                let (mut finished_time, result, error) = match &update.fields.status {
                     Some(acp::ToolCallStatus::Completed) => {
                         (Some(chrono::Utc::now()), update.fields.raw_output.as_ref(), None)
                     }
@@ -457,17 +1194,44 @@ impl AcpClient for AcpTauriClient {
                     _ => (None, None, None),
                 };
 
+                let mut result_str = result.map(|r| r.to_string());
+                if result_str.is_none() {
+                    result_str = meta_result.clone();
+                }
+                if result_str.is_some() {
+                    if finished_time.is_none() {
+                        finished_time = Some(chrono::Utc::now());
+                    }
+                    if status_str == "executing" {
+                        status_str = "success".to_string();
+                    }
+                }
+                let error_str = error.map(|e| e.to_string());
+
+                if let Ok(db) = MCPDatabase::new(&self.app_handle) {
+                    let _ = db.update_mcp_tool_call_status(
+                        call_id,
+                        &status_str,
+                        result_str.as_deref(),
+                        error_str.as_deref(),
+                    );
+                }
+
                 let event = ConversationEvent {
                     r#type: "mcp_tool_call_update".to_string(),
                     data: serde_json::to_value(MCPToolCallUpdateEvent {
                         call_id,
                         conversation_id: self.conversation_id,
                         status: status_str,
-                        result: result.map(|r| r.to_string()),
-                        error: error.map(|e| e.to_string()),
+                        server_name: updated_server_name,
+                        tool_name: updated_tool_name,
+                        parameters: updated_parameters,
+                        result: result_str,
+                        error: error_str,
                         started_time: None,
                         finished_time: finished_time,
-                    }).unwrap(),
+                    })
+                    .unwrap(),
                 };
 
                 self.emit_event(event).await;
@@ -524,9 +1288,62 @@ impl AcpClient for AcpTauriClient {
     async fn request_permission(&self, args: acp::RequestPermissionRequest) -> acp::Result<acp::RequestPermissionResponse, acp::Error> {
         info!("ACP permission request: {:?}", args);
 
-        // For now, we auto-deny permission requests for safety
-        // TODO: Integrate with the permission manager to show UI dialogs
-        Ok(acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled))
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+
+        let state = self.app_handle.state::<AcpPermissionState>();
+        state.store_request(request_id.clone(), tx).await;
+
+        let options = args
+            .options
+            .iter()
+            .map(|option| AcpPermissionOptionPayload {
+                option_id: option.option_id.0.to_string(),
+                name: option.name.clone(),
+                kind: permission_option_kind_to_string(&option.kind),
+            })
+            .collect::<Vec<_>>();
+
+        let parameters = args
+            .tool_call
+            .fields
+            .raw_input
+            .as_ref()
+            .map(|raw| serde_json::to_string(raw).unwrap_or_else(|_| raw.to_string()));
+
+        let kind = args
+            .tool_call
+            .fields
+            .kind
+            .map(|k| format!("{:?}", k));
+
+        let event = AcpPermissionRequestEvent {
+            request_id: request_id.clone(),
+            conversation_id: Some(self.conversation_id),
+            tool_call_id: args.tool_call.tool_call_id.0.to_string(),
+            title: args.tool_call.fields.title.clone(),
+            kind,
+            parameters,
+            options,
+        };
+
+        if let Err(e) = self.app_handle.emit("acp-permission-request", &event) {
+            error!(error = %e, "ACP permission request emit failed");
+            return Ok(acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled));
+        }
+
+        match rx.await {
+            Ok(AcpPermissionDecision::Selected(option_id)) => Ok(
+                acp::RequestPermissionResponse::new(
+                    acp::RequestPermissionOutcome::Selected(
+                        acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new(option_id)),
+                    ),
+                ),
+            ),
+            Ok(AcpPermissionDecision::Cancelled) | Err(_) => Ok(
+                acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled),
+            ),
+        }
     }
 
     async fn write_text_file(&self, args: acp::WriteTextFileRequest) -> acp::Result<acp::WriteTextFileResponse, acp::Error> {
@@ -673,7 +1490,7 @@ impl AcpClient for AcpTauriClient {
             }
 
             // Check if completed
-            let (output, completed, exit_code) = {
+            let (_output, completed, exit_code) = {
                 let processes = self.operation_state.bash_processes.lock().await;
                 if let Some(info) = processes.get(&bash_id) {
                     (

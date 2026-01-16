@@ -91,6 +91,13 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     callId,
     mcpToolCallStates,
 }) => {
+    const [toolCallId, setToolCallId] = useState<number | null>(callId || null);
+
+    const metaOverride = toolCallId && mcpToolCallStates ? mcpToolCallStates.get(toolCallId) : undefined;
+    const effectiveServerName = metaOverride?.server_name ?? serverName;
+    const effectiveToolName = metaOverride?.tool_name ?? toolName;
+    const effectiveParameters = metaOverride?.parameters ?? parameters;
+
     // 防泄露模式
     const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
     const shouldMask = antiLeakageEnabled && !isRevealed;
@@ -98,10 +105,10 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     // 脱敏处理
     const maskedData = useMemo(() => {
         if (!shouldMask) {
-            return { serverName, toolName, parameters };
+            return { serverName: effectiveServerName, toolName: effectiveToolName, parameters: effectiveParameters };
         }
-        return maskToolCall(serverName, toolName, parameters);
-    }, [shouldMask, serverName, toolName, parameters]);
+        return maskToolCall(effectiveServerName, effectiveToolName, effectiveParameters);
+    }, [shouldMask, effectiveServerName, effectiveToolName, effectiveParameters]);
 
     const displayServerName = maskedData.serverName;
     const displayToolName = maskedData.toolName;
@@ -114,7 +121,6 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const [isExpanded, setIsExpanded] = useState<boolean>(!callId);
     // 自动收起定时器引用
     const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
-    const [toolCallId, setToolCallId] = useState<number | null>(callId || null);
     // 移除前端自动执行，避免与后端 detect_and_process_mcp_calls 的自动执行叠加
 
     // 监听全局MCP状态变化

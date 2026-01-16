@@ -5,11 +5,11 @@ import ChatUIToolbar from "../components/ChatUIToolbar";
 import ConversationList from "../components/ConversationList";
 import ChatUIInfomation from "../components/ChatUIInfomation";
 import ConversationUI, { ConversationUIRef } from "../components/ConversationUI";
-import { OperationPermissionDialog } from "../components/OperationPermissionDialog";
+import { AcpPermissionDialog, OperationPermissionDialog } from "../components/OperationPermissionDialog";
 import { Conversation } from "../data/Conversation";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
-import { useOperationPermission } from "../hooks/useOperationPermission";
+import { useAcpPermission, useOperationPermission } from "../hooks/useOperationPermission";
 import { useFeatureConfig } from "../hooks/feature/useFeatureConfig";
 import { AntiLeakageProvider } from "../contexts/AntiLeakageContext";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
@@ -40,6 +40,13 @@ function ChatUIWindow() {
 
     // 操作权限对话框
     const { pendingRequest, isDialogOpen, handleDecision } = useOperationPermission({
+        conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
+    });
+    const {
+        pendingRequest: pendingAcpRequest,
+        isDialogOpen: isAcpDialogOpen,
+        handleDecision: handleAcpDecision,
+    } = useAcpPermission({
         conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
     });
 
@@ -240,6 +247,11 @@ function ChatUIWindow() {
                         isOpen={isDialogOpen}
                         onDecision={handleDecision}
                     />
+                    <AcpPermissionDialog
+                        request={pendingAcpRequest}
+                        isOpen={isAcpDialogOpen}
+                        onDecision={handleAcpDecision}
+                    />
                 </div>
             </AntiLeakageProvider>
         );
@@ -272,6 +284,11 @@ function ChatUIWindow() {
                     request={pendingRequest}
                     isOpen={isDialogOpen}
                     onDecision={handleDecision}
+                />
+                <AcpPermissionDialog
+                    request={pendingAcpRequest}
+                    isOpen={isAcpDialogOpen}
+                    onDecision={handleAcpDecision}
                 />
             </div>
         </AntiLeakageProvider>

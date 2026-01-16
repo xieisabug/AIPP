@@ -1046,6 +1046,21 @@ impl MCPDatabase {
         Ok(())
     }
 
+    #[instrument(level = "trace", skip(self, parameters), fields(id))]
+    pub fn update_mcp_tool_call_metadata(
+        &self,
+        id: i64,
+        server_name: &str,
+        tool_name: &str,
+        parameters: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE mcp_tool_call SET server_name = ?, tool_name = ?, parameters = ? WHERE id = ?",
+            params![server_name, tool_name, parameters, id],
+        )?;
+        Ok(())
+    }
+
     /// Try to transition a tool call to executing state only if it is currently pending/failed and not yet started.
     /// Returns true if the transition happened, false if another executor already took it.
     #[instrument(level = "trace", skip(self), fields(id))]

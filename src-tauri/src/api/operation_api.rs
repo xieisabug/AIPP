@@ -3,6 +3,7 @@ use tracing::{info, instrument, warn};
 
 use crate::mcp::builtin_mcp::operation::types::PermissionDecision;
 use crate::mcp::builtin_mcp::OperationState;
+use crate::api::ai::acp::{AcpPermissionDecision, AcpPermissionState};
 
 /// 确认操作权限
 #[tauri::command]
@@ -38,5 +39,39 @@ pub async fn confirm_operation_permission(
     } else {
         warn!(request_id = %request_id, "Permission request not found or already resolved");
         Err("Permission request not found or already resolved".to_string())
+    }
+}
+
+/// 确认 ACP 工具调用权限
+#[tauri::command]
+#[instrument(skip(app_handle))]
+pub async fn confirm_acp_permission(
+    app_handle: AppHandle,
+    request_id: String,
+    option_id: Option<String>,
+    cancelled: Option<bool>,
+) -> Result<bool, String> {
+    info!(request_id = %request_id, option_id = ?option_id, cancelled = ?cancelled, "Processing ACP permission confirmation");
+
+    let state = app_handle
+        .try_state::<AcpPermissionState>()
+        .ok_or_else(|| "AcpPermissionState not found".to_string())?;
+
+    let decision = if cancelled.unwrap_or(false) {
+        AcpPermissionDecision::Cancelled
+    } else if let Some(option_id) = option_id {
+        AcpPermissionDecision::Selected(option_id)
+    } else {
+        return Err("Invalid ACP permission decision".to_string());
+    };
+
+    let resolved = state.resolve_request(&request_id, decision).await;
+
+    if resolved {
+        info!(request_id = %request_id, "ACP permission request resolved successfully");
+        Ok(true)
+    } else {
+        warn!(request_id = %request_id, "ACP permission request not found or already resolved");
+        Err("ACP permission request not found or already resolved".to_string())
     }
 }

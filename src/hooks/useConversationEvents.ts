@@ -115,6 +115,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 call_id: call.id,
                 conversation_id: call.conversation_id,
                 status: call.status,
+                server_name: call.server_name,
+                tool_name: call.tool_name,
+                parameters: call.parameters,
                 result: call.result,
                 error: call.error,
                 started_time: call.started_time ? new Date(call.started_time) : undefined,
@@ -350,23 +353,36 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 // 更新MCP工具调用状态
                 setMCPToolCallStates((prev) => {
                     const newMap = new Map(prev);
-                    newMap.set(mcpUpdateData.call_id, mcpUpdateData);
+                    const existing = newMap.get(mcpUpdateData.call_id);
+                    const merged: MCPToolCallUpdateEvent = {
+                        ...(existing || mcpUpdateData),
+                        ...mcpUpdateData,
+                        server_name: mcpUpdateData.server_name ?? existing?.server_name,
+                        tool_name: mcpUpdateData.tool_name ?? existing?.tool_name,
+                        parameters: mcpUpdateData.parameters ?? existing?.parameters,
+                        result: mcpUpdateData.result ?? existing?.result,
+                        error: mcpUpdateData.error ?? existing?.error,
+                        started_time: mcpUpdateData.started_time ?? existing?.started_time,
+                        finished_time: mcpUpdateData.finished_time ?? existing?.finished_time,
+                    };
+                    newMap.set(mcpUpdateData.call_id, merged);
                     return newMap;
                 });
 
                 // 更新活跃的 MCP 调用状态
                 setActiveMcpCallIds((prev) => {
                     const newSet = new Set(prev);
+                    const mergedStatus = mcpUpdateData.status;
 
-                    if (mcpUpdateData.status === "executing" || mcpUpdateData.status === "pending") {
+                    if (mergedStatus === "executing" || mergedStatus === "pending") {
                         // MCP 开始执行，添加到活跃集合
                         newSet.add(mcpUpdateData.call_id);
-                    } else if (mcpUpdateData.status === "success" || mcpUpdateData.status === "failed") {
+                    } else if (mergedStatus === "success" || mergedStatus === "failed") {
                         // MCP 执行完成，从活跃集合中移除
                         newSet.delete(mcpUpdateData.call_id);
                     } else {
                         // 兜底：任何其他终态都认为不再活跃
-                        console.log(`[MCP] Treating status '${mcpUpdateData.status}' as inactive for call ${mcpUpdateData.call_id}`);
+                        console.log(`[MCP] Treating status '${mergedStatus}' as inactive for call ${mcpUpdateData.call_id}`);
                         newSet.delete(mcpUpdateData.call_id);
                     }
 

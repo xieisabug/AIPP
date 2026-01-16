@@ -41,7 +41,8 @@ use crate::api::llm_api::{
     get_llm_provider_config, get_llm_providers, get_models_for_select, import_llm_provider,
     preview_model_list, update_llm_provider, update_llm_provider_config, update_selected_models,
 };
-use crate::api::operation_api::confirm_operation_permission;
+use crate::api::operation_api::{confirm_acp_permission, confirm_operation_permission};
+use crate::api::ai::acp::AcpPermissionState;
 use crate::api::skill_api::{
     bulk_update_assistant_skills, cleanup_orphaned_skill_configs, get_assistant_skills,
     get_enabled_assistant_skills, get_skill, get_skill_content, get_skill_sources,
@@ -478,7 +479,8 @@ pub fn run() {
         })
         .manage(AcpSessionState::new())
         .manage(MessageTokenManager::new())
-        .manage(OperationState::new());
+        .manage(OperationState::new())
+        .manage(AcpPermissionState::new());
     #[cfg(desktop)]
     let app = app.manage(CopilotLspState::default());
     let app = app
@@ -636,6 +638,7 @@ pub fn run() {
             add_or_update_aipp_builtin_server,
             execute_aipp_builtin_tool,
             confirm_operation_permission,
+            confirm_acp_permission,
             register_sub_task_definition,
             run_sub_task_sync,
             run_sub_task_with_mcp_loop,
