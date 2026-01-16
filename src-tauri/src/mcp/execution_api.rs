@@ -218,6 +218,7 @@ async fn handle_tool_execution_result(
             broadcast_mcp_tool_call_update(app_handle, &tool_call);
 
             // 处理对话继续逻辑
+            info!("准备触发工具成功续写，call_id={}, is_retry={}", call_id, is_retry);
             if let Err(e) = handle_tool_success_continuation(
                 app_handle,
                 state,
@@ -519,7 +520,7 @@ pub async fn stop_mcp_tool_call(
 }
 
 /// 工具成功后的续写逻辑调度：区分首次与重试。
-#[instrument(skip(app_handle,state,feature_config_state,window,tool_call,result), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id, retry=?is_retry))]
+#[instrument(skip(app_handle,state,feature_config_state,window,result), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id, retry=?is_retry))]
 async fn handle_tool_success_continuation(
     app_handle: &tauri::AppHandle,
     state: &tauri::State<'_, crate::AppState>,
@@ -529,6 +530,7 @@ async fn handle_tool_success_continuation(
     result: &str,
     is_retry: bool,
 ) -> Result<()> {
+    info!("进入 handle_tool_success_continuation，is_retry={}, call_id={}", is_retry, tool_call.id);
     if is_retry {
         // For retries, we need to update the existing tool_result message instead of creating a new one
         handle_retry_success_continuation(
@@ -556,7 +558,7 @@ async fn handle_tool_success_continuation(
 
 /// 处理重试成功的情况：更新现有工具结果消息并触发新的AI响应
 /// 重试成功：若存在旧的 tool_result 消息则更新其内容，然后统一触发续写。
-#[instrument(skip(app_handle,state,feature_config_state,window,tool_call,result), fields(call_id=tool_call.id))]
+#[instrument(skip(app_handle,state,feature_config_state,window,result), fields(call_id=tool_call.id))]
 async fn handle_retry_success_continuation(
     app_handle: &tauri::AppHandle,
     state: &tauri::State<'_, crate::AppState>,
@@ -617,7 +619,7 @@ async fn handle_retry_success_continuation(
 }
 
 /// 触发会话继续：把工具结果作为 tool_result 语义传递给 AI 继续生成。
-#[instrument(skip(app_handle, _state, _feature_config_state, window, tool_call, result), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
+#[instrument(skip(app_handle, _state, _feature_config_state, window, result), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
 async fn trigger_conversation_continuation(
     app_handle: &tauri::AppHandle,
     _state: &tauri::State<'_, crate::AppState>,
@@ -626,6 +628,7 @@ async fn trigger_conversation_continuation(
     tool_call: &MCPToolCall,
     result: &str,
 ) -> Result<()> {
+    info!("触发会话续写，conversation_id={}, call_id={}", tool_call.conversation_id, tool_call.id);
     let conversation_db = ConversationDatabase::new(app_handle).context("初始化对话数据库失败")?;
 
     // 获取对话详情
