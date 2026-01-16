@@ -1,7 +1,7 @@
 //! ACP (Agent Client Protocol) integration module
 //! Handles communication with ACP-compatible agents via stdio
 
-use agent_client_protocol::{self as acp, Agent as _, Client as AcpClient, ClientSideConnection};
+use agent_client_protocol::{self as acp, Agent as _, Client as AcpClient, ClientSideConnection, ToolCallLocation};
 use crate::api::ai::conversation::extract_tool_result;
 use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent, MCPToolCallUpdateEvent};
 use crate::db::assistant_db::AssistantModelConfig;
@@ -551,6 +551,22 @@ fn fallback_acp_tool_call_info(
         }
         _ => None,
     }
+}
+
+fn fallback_acp_tool_call_info_from_locations(
+    app_handle: &tauri::AppHandle,
+    locations: Option<&[ToolCallLocation]>,
+) -> Option<(String, String, String)> {
+    let locations = locations?;
+    let location = locations.first()?;
+    let server_name = resolve_operation_server_name(app_handle);
+    let mut params = serde_json::json!({
+        "file_path": location.path.to_string_lossy(),
+    });
+    if let Some(line) = location.line {
+        params["offset"] = serde_json::Value::from(line as i64);
+    }
+    Some((server_name, "read_file".to_string(), params.to_string()))
 }
 
 /// Tauri client implementation that forwards ACP events to the frontend
@@ -1143,6 +1159,12 @@ impl AcpClient for AcpTauriClient {
                         })
                         .and_then(|tool_call| fallback_acp_tool_call_info(&self.app_handle, &tool_call))
                     })
+                    .or_else(|| {
+                        fallback_acp_tool_call_info_from_locations(
+                            &self.app_handle,
+                            update.fields.locations.as_deref(),
+                        )
+                    })
                     {
                         let message_id = *self.message_id.lock().await;
                         let display_name = update
@@ -1231,8 +1253,17 @@ impl AcpClient for AcpTauriClient {
                 let mut updated_tool_name: Option<String> = None;
                 let mut updated_parameters: Option<String> = None;
 
-                if update.fields.title.is_some() || update.fields.raw_input.is_some() {
-                    let title = update.fields.title.as_ref().map(|t| t.as_str()).unwrap_or("ACP ToolCall");
+                if update.fields.title.is_some()
+                    || update.fields.raw_input.is_some()
+                    || update.fields.locations.is_some()
+                    || update.fields.kind.is_some()
+                {
+                    let title = update
+                        .fields
+                        .title
+                        .as_ref()
+                        .map(|t| t.as_str())
+                        .unwrap_or("ACP ToolCall");
                     let (server_name, tool_name, parameters) = extract_acp_tool_call_info(
                         update.fields.raw_input.as_ref(),
                         update.meta.as_ref(),
@@ -1246,6 +1277,12 @@ impl AcpClient for AcpTauriClient {
                             tool_call.locations = locations;
                         }
                         fallback_acp_tool_call_info(&self.app_handle, &tool_call)
+                            .or_else(|| {
+                                fallback_acp_tool_call_info_from_locations(
+                                    &self.app_handle,
+                                    update.fields.locations.as_deref(),
+                                )
+                            })
                     })
                     .unwrap_or_else(|| {
                         let display_name = display_server_name(title, "ACP ToolCall");
