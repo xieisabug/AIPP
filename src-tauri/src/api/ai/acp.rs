@@ -2,9 +2,11 @@
 //! Handles communication with ACP-compatible agents via stdio
 
 use agent_client_protocol::{self as acp, Agent as _, Client as AcpClient, ClientSideConnection};
+use crate::api::ai::conversation::extract_tool_result;
 use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent, MCPToolCallUpdateEvent};
 use crate::db::assistant_db::AssistantModelConfig;
 use crate::db::conversation_db::ConversationDatabase;
+use crate::db::conversation_db::Message;
 use crate::db::llm_db::LLMProviderConfig;
 use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
@@ -18,7 +20,7 @@ use crate::mcp::builtin_mcp::operation::{
         WriteFileRequest,
     },
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -29,6 +31,7 @@ use tokio::sync::oneshot;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, error, info};
+use regex::Regex;
 
 /// ACP configuration extracted from assistant_model_config
 #[derive(Debug, Clone)]
@@ -359,6 +362,92 @@ fn extract_tool_response_from_meta(meta: Option<&acp::Meta>) -> Option<String> {
         .and_then(|v| v.get("toolResponse"))
         .or_else(|| meta_value.get("toolResponse"));
     response_value.map(|v| serde_json::to_string(v).unwrap_or_else(|_| v.to_string()))
+}
+
+fn strip_mcp_tool_call_hints(content: &str) -> String {
+    let re = Regex::new(r"<!--\s*MCP_TOOL_CALL:.*?-->").ok();
+    match re {
+        Some(re) => re.replace_all(content, "").to_string(),
+        None => content.to_string(),
+    }
+}
+
+fn build_acp_history_prompt(app_handle: &tauri::AppHandle, conversation_id: i64) -> Option<String> {
+    let db = ConversationDatabase::new(app_handle).ok()?;
+    let messages = db.message_repo().ok()?.list_by_conversation_id(conversation_id).ok()?;
+    if messages.is_empty() {
+        return None;
+    }
+
+    let mut latest_children: HashMap<i64, Message> = HashMap::new();
+    let mut child_ids: HashSet<i64> = HashSet::new();
+    let mut latest_user_id: Option<i64> = None;
+
+    for (message, _) in &messages {
+        if message.message_type == "user" {
+            latest_user_id = Some(message.id);
+        }
+        if let Some(parent_id) = message.parent_id {
+            child_ids.insert(message.id);
+            let should_replace = match latest_children.get(&parent_id) {
+                Some(existing) => message.id > existing.id,
+                None => true,
+            };
+            if should_replace {
+                latest_children.insert(parent_id, message.clone());
+            }
+        }
+    }
+
+    let mut entries: Vec<String> = Vec::new();
+
+    for (message, _) in &messages {
+        if child_ids.contains(&message.id) {
+            continue;
+        }
+
+        let final_message = latest_children.get(&message.id).unwrap_or(message);
+
+        if Some(final_message.id) == latest_user_id {
+            continue;
+        }
+
+        let mut content = strip_mcp_tool_call_hints(&final_message.content);
+        let content_trimmed = content.trim();
+        if content_trimmed.is_empty() {
+            continue;
+        }
+
+        let label = match final_message.message_type.as_str() {
+            "system" => "系统",
+            "user" => "用户",
+            "response" | "assistant" | "reasoning" => "助手",
+            "tool_result" => "工具结果",
+            _ => "助手",
+        };
+
+        if final_message.message_type == "tool_result" {
+            if let Some(result) = extract_tool_result(content_trimmed) {
+                content = result;
+            }
+        }
+
+        let cleaned = content.trim();
+        if cleaned.is_empty() {
+            continue;
+        }
+
+        entries.push(format!("{}: {}", label, cleaned));
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "以下是历史对话，请在此基础上继续：\n\n{}",
+        entries.join("\n\n")
+    ))
 }
 
 fn build_params_from_raw_input(
@@ -1583,17 +1672,24 @@ async fn process_acp_prompt(
     message_id: i64,
     prompt: String,
     window: tauri::Window,
+    history_prefix: Option<String>,
 ) -> Result<(), AppError> {
     client_handle.set_current_message(message_id).await;
     client_handle.set_window(window).await;
     client_handle.reset_buffers().await;
+
+    let prompt_to_send = if let Some(prefix) = history_prefix {
+        format!("{}\n\n当前用户请求:\n{}", prefix, prompt)
+    } else {
+        prompt
+    };
 
     info!(
         "ACP: Sending prompt (conversation_id={}, message_id={})",
         conversation_id, message_id
     );
     let prompt_response = conn
-        .prompt(acp::PromptRequest::new(session_id.to_string(), vec![prompt.into()]))
+        .prompt(acp::PromptRequest::new(session_id.to_string(), vec![prompt_to_send.into()]))
         .await;
 
     if let Err(e) = &prompt_response {
@@ -1853,6 +1949,7 @@ async fn run_acp_session(
 
             let conversation_db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
             let mut session_id: Option<String> = None;
+            let mut should_build_history_fallback = false;
 
             if let Some(stored_session_id) =
                 conversation_db.get_acp_session_id(conversation_id)?
@@ -1886,6 +1983,7 @@ async fn run_acp_session(
                         }
                         Err(e) => {
                             error!("ACP: session/load failed: {:?}", e);
+                            should_build_history_fallback = true;
                         }
                     }
                 } else {
@@ -1893,6 +1991,7 @@ async fn run_acp_session(
                         "ACP: Agent does not support loadSession; creating new session (conversation_id={})",
                         conversation_id
                     );
+                    should_build_history_fallback = true;
                 }
             } else {
                 info!(
@@ -1925,6 +2024,12 @@ async fn run_acp_session(
                 session_id
             };
 
+            let history_fallback_prompt = if should_build_history_fallback {
+                build_acp_history_prompt(&app_handle, conversation_id)
+            } else {
+                None
+            };
+
             process_acp_prompt(
                 &client_handle,
                 &conn,
@@ -1933,6 +2038,7 @@ async fn run_acp_session(
                 first_message_id,
                 first_prompt,
                 first_window,
+                history_fallback_prompt,
             )
             .await?;
 
@@ -1953,6 +2059,7 @@ async fn run_acp_session(
                     message_id,
                     prompt,
                     window,
+                    None,
                 )
                 .await?;
             }
