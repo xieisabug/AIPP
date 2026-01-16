@@ -23,8 +23,9 @@ import {
     DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
-import { Trash2, ChevronDown, Share, Copy, Search, KeyRound, Edit } from "lucide-react";
+import { Trash2, ChevronDown, Share, Copy, Search, KeyRound, Edit, CheckCircle2, XCircle, Loader2, AlertTriangle } from "lucide-react";
 import { useCopilot } from "@/hooks/useCopilot";
+import { useAcpEnvironment } from "@/hooks/feature/useAcpEnvironment";
 
 interface LLMProviderConfig {
     name: string;
@@ -94,6 +95,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const [newProviderName, setNewProviderName] = useState<string>("");
 
     const isCopilotProvider = apiType === "github_copilot";
+    const isAcpProvider = apiType === "acp";
 
     // API 类型显示标签映射
     const apiTypeLabels: Record<string, string> = {
@@ -103,8 +105,20 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         'cohere': 'Cohere API',
         'deepseek': 'DeepSeek API',
         'github_copilot': 'GitHub Copilot',
+        'acp': 'ACP(Agent Client Protocol)',
     };
     const apiTypeLabel = apiTypeLabels[apiType] || apiType;
+
+    // ACP CLI 命令选项
+    // 注意：大多数 AI 需要安装专门的 ACP 适配器
+    // - Claude Code: npm install -g @zed-industries/claude-code-acp -> 命令 claude-code-acp
+    // - Codex: npm install -g @zed-industries/codex-acp -> 命令 codex-acp  
+    // - Gemini: 原生支持 ACP，直接使用 gemini 命令
+    const acpCliOptions = [
+        { value: "claude-code-acp", label: "Claude Code (需安装 @zed-industries/claude-code-acp)" },
+        { value: "codex-acp", label: "Codex (需安装 @zed-industries/codex-acp)" },
+        { value: "gemini", label: "Gemini CLI (原生支持)" },
+    ];
 
     // GitHub Copilot 授权管理
     const copilot = useCopilot({
@@ -131,6 +145,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             endpoint: "",
             api_key: "",
             proxy_enabled: "false",
+            acp_cli_command: "",
         }),
         [],
     );
@@ -141,6 +156,12 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
 
     // 监听 proxy_enabled 字段变化
     const proxyEnabled = form.watch("proxy_enabled");
+
+    // 监听 ACP CLI 命令变化
+    const acpCliCommand = form.watch("acp_cli_command");
+
+    // ACP 环境检测 Hook
+    const acpEnv = useAcpEnvironment(isAcpProvider ? (acpCliCommand || "") : "");
 
     // 更新字段
     const updateField = useCallback(
@@ -478,6 +499,172 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             ];
         }
 
+        // ACP 提供商：特殊表单
+        if (isAcpProvider) {
+            // ACP 环境状态渲染
+            const renderAcpEnvironmentStatus = () => {
+                const { status, libraryInfo, installAcpLibrary, checkAcpLibrary } = acpEnv;
+
+                // 未选择 CLI 命令时不显示环境状态
+                if (!acpCliCommand) {
+                    return (
+                        <div className="p-3 border border-border rounded-lg bg-muted/50">
+                            <div className="flex items-center gap-2 text-muted-foreground">
+                                <AlertTriangle className="h-4 w-4" />
+                                <span className="text-sm">请先选择 CLI 命令</span>
+                            </div>
+                        </div>
+                    );
+                }
+
+                switch (status) {
+                    case "checking":
+                        return (
+                            <div className="p-3 border border-border rounded-lg bg-muted/50">
+                                <div className="flex items-center gap-2 text-muted-foreground">
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                    <span className="text-sm">正在检测环境...</span>
+                                </div>
+                            </div>
+                        );
+
+                    case "bun-not-installed":
+                        return (
+                            <div className="p-3 border border-destructive/50 rounded-lg bg-destructive/10">
+                                <div className="flex items-center gap-2 text-destructive mb-2">
+                                    <XCircle className="h-4 w-4" />
+                                    <span className="text-sm font-medium">Bun 运行时未安装</span>
+                                </div>
+                                <p className="text-xs text-muted-foreground mb-2">
+                                    ACP 库需要 Bun 运行时来安装。请前往【设置 → 预览配置】安装 Bun。
+                                </p>
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => {
+                                        // 打开配置窗口的预览配置页面
+                                        invoke("open_config_window_inner", { path: "preview" });
+                                    }}
+                                >
+                                    前往安装 Bun
+                                </Button>
+                            </div>
+                        );
+
+                    case "not-installed":
+                        return (
+                            <div className="p-3 border border-yellow-500/50 rounded-lg bg-yellow-500/10">
+                                <div className="flex items-center gap-2 text-yellow-600 dark:text-yellow-400 mb-2">
+                                    <AlertTriangle className="h-4 w-4" />
+                                    <span className="text-sm font-medium">ACP 库未安装</span>
+                                </div>
+                                <p className="text-xs text-muted-foreground mb-2">
+                                    需要安装 {libraryInfo?.package_name || acpCliCommand} 才能使用此功能。
+                                    {libraryInfo?.install_hint && (
+                                        <span className="block mt-1 text-yellow-600 dark:text-yellow-400">
+                                            提示: {libraryInfo.install_hint}
+                                        </span>
+                                    )}
+                                </p>
+                                <Button
+                                    variant="default"
+                                    size="sm"
+                                    onClick={() => installAcpLibrary()}
+                                >
+                                    一键安装
+                                </Button>
+                            </div>
+                        );
+
+                    case "installing":
+                        return (
+                            <div className="p-3 border border-border rounded-lg bg-muted/50">
+                                <div className="flex items-center gap-2 text-muted-foreground mb-2">
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                    <span className="text-sm font-medium">正在安装...</span>
+                                </div>
+                                <pre className="text-xs bg-background p-2 rounded max-h-32 overflow-auto whitespace-pre-wrap">
+                                    {acpEnv.installLog || "等待安装日志..."}
+                                </pre>
+                            </div>
+                        );
+
+                    case "external-required":
+                        return (
+                            <div className="p-3 border border-yellow-500/50 rounded-lg bg-yellow-500/10">
+                                <div className="flex items-center gap-2 text-yellow-600 dark:text-yellow-400 mb-2">
+                                    <AlertTriangle className="h-4 w-4" />
+                                    <span className="text-sm font-medium">需要手动安装</span>
+                                </div>
+                                <p className="text-xs text-muted-foreground mb-2">
+                                    {libraryInfo?.install_hint || `请手动安装 ${acpCliCommand}`}
+                                </p>
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => checkAcpLibrary()}
+                                >
+                                    重新检测
+                                </Button>
+                            </div>
+                        );
+
+                    case "installed":
+                        return (
+                            <div className="p-3 border border-green-500/50 rounded-lg bg-green-500/10">
+                                <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
+                                    <CheckCircle2 className="h-4 w-4" />
+                                    <span className="text-sm font-medium">环境就绪</span>
+                                    {libraryInfo?.version && (
+                                        <span className="text-xs text-muted-foreground">
+                                            (v{libraryInfo.version})
+                                        </span>
+                                    )}
+                                </div>
+                                {libraryInfo?.install_hint && (
+                                    <p className="text-xs text-muted-foreground mt-1">
+                                        提示: {libraryInfo.install_hint}
+                                    </p>
+                                )}
+                            </div>
+                        );
+
+                    default:
+                        return null;
+                }
+            };
+
+            return [
+                {
+                    key: "apiType",
+                    config: {
+                        type: "static" as const,
+                        label: "提供商类型",
+                        value: "ACP(Agent Client Protocol)",
+                    },
+                },
+                {
+                    key: "acp_cli_command",
+                    config: {
+                        type: "select" as const,
+                        label: "CLI 命令",
+                        value: "",
+                        options: acpCliOptions,
+                        tooltip: "选择要使用的 ACP 兼容 CLI 工具",
+                    },
+                },
+                {
+                    key: "acp_environment",
+                    config: {
+                        type: "custom" as const,
+                        label: "环境状态",
+                        value: "",
+                        customRender: renderAcpEnvironmentStatus,
+                    },
+                },
+            ];
+        }
+
         // 其它提供商：保持原有表单
         return [
             {
@@ -572,7 +759,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 },
             },
         ];
-    }, [apiType, apiTypeLabel, isCopilotProvider, tagInputRender, isAdvancedConfigExpanded, form, updateField, proxyEnabled, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange]);
+    }, [apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, acpCliOptions, tagInputRender, isAdvancedConfigExpanded, form, updateField, proxyEnabled, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange]);
 
     // 打开改名对话框
     const handleOpenRenameDialog = useCallback(() => {

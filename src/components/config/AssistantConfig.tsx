@@ -131,9 +131,9 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                             acc[field.key] =
                                 field.value.type === "checkbox"
                                     ? assistantDetail.model_configs.find((config) => config.name === field.key)
-                                          ?.value === "true"
+                                        ?.value === "true"
                                     : assistantDetail.model_configs.find((config) => config.name === field.key)
-                                          ?.value ?? "";
+                                        ?.value ?? "";
                             return acc;
                         }, {} as Record<string, any>),
                     });
@@ -170,24 +170,24 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     const newConfigs =
                         index !== -1
                             ? prev.model_configs.map((config, i) =>
-                                  i === index
-                                      ? {
-                                            ...config,
-                                            value: parsedValue.toString(),
-                                        }
-                                      : config
-                              )
+                                i === index
+                                    ? {
+                                        ...config,
+                                        value: parsedValue.toString(),
+                                    }
+                                    : config
+                            )
                             : [
-                                  ...prev.model_configs,
-                                  {
-                                      name: key,
-                                      value: parsedValue.toString(),
-                                      value_type: value_type,
-                                      id: 0,
-                                      assistant_id: prev.assistant.id,
-                                      assistant_model_id: prev.model[0]?.id ?? 0,
-                                  },
-                              ];
+                                ...prev.model_configs,
+                                {
+                                    name: key,
+                                    value: parsedValue.toString(),
+                                    value_type: value_type,
+                                    id: 0,
+                                    assistant_id: prev.assistant.id,
+                                    assistant_model_id: prev.model[0]?.id ?? 0,
+                                },
+                            ];
                     return { ...prev, model_configs: newConfigs };
                 });
             }
@@ -243,14 +243,27 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 name: currentAssistant.assistant.name,
                 description: currentAssistant.assistant.description,
             },
-            model: [
-                {
-                    ...currentAssistant.model[0],
-                    model_code: values.model.split("%%")[0],
-                    provider_id: parseInt(values.model.split("%%")[1]),
-                    alias: "",
-                },
-            ],
+            model: (() => {
+                // 如果模型选择是 "-1" 或无效，保留原有模型信息
+                const modelValue = values.model;
+                const modelParts = modelValue?.split("%%") || [];
+                const hasValidModel = modelParts.length === 2 && modelValue !== "-1";
+
+                if (hasValidModel) {
+                    return [{
+                        ...currentAssistant.model[0],
+                        model_code: modelParts[0],
+                        provider_id: parseInt(modelParts[1]) || 0,
+                        alias: "",
+                    }];
+                } else if (currentAssistant.model.length > 0) {
+                    // 保留原有模型配置
+                    return currentAssistant.model;
+                } else {
+                    // 没有模型配置，返回空数组
+                    return [];
+                }
+            })(),
             model_configs: Object.entries(values)
                 .filter(
                     ([key]) => key !== "assistantType" && key !== "model" && key !== "prompt" && key !== "mcp_config" && key !== "skills_config"
@@ -258,6 +271,12 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 .filter(([key]) => {
                     const config = currentAssistant.model_configs.find((config) => config.name === key);
                     const customField = assistantTypeCustomField.find((field) => field.key === key);
+
+                    // ACP 助手专用字段（assistant_type === 4）
+                    const isAcpField = key.startsWith("acp_") && currentAssistant.assistant.assistant_type === 4;
+                    if (isAcpField) {
+                        return true;
+                    }
 
                     // 内置字段（如 reasoning_effort）允许保存
                     if (key === "reasoning_effort") {
@@ -284,7 +303,12 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
 
                     // 为插件自定义字段和内置字段确定正确的 value_type
                     let valueType = config?.value_type ?? "string";
-                    if (customField) {
+
+                    // ACP 助手专用字段
+                    const isAcpField = key.startsWith("acp_") && currentAssistant.assistant.assistant_type === 4;
+                    if (isAcpField) {
+                        valueType = "string";
+                    } else if (customField) {
                         // 根据插件字段的类型映射到数据库的 value_type
                         const fieldType = customField.value.type;
                         if (fieldType === "checkbox" || fieldType === "switch") {

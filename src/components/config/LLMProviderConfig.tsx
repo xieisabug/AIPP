@@ -85,6 +85,7 @@ const LLMProviderConfig: React.FC = () => {
         { value: 'cohere', label: 'Cohere API' },
         { value: 'deepseek', label: 'DeepSeek API' },
         { value: 'github_copilot', label: 'GitHub Copilot' },
+        { value: 'acp', label: 'ACP (Agent Client Protocol)' },
     ]
 
     const openNewProviderDialog = useCallback(() => {

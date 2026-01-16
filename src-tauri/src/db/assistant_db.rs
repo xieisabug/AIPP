@@ -8,7 +8,7 @@ pub struct Assistant {
     pub id: i64,
     pub name: String,
     pub description: Option<String>,
-    pub assistant_type: Option<i64>, // 0: 普通对话助手, 1: 多模型对比助手，2: 工作流助手，3: 展示助手
+    pub assistant_type: Option<i64>, // 0: 普通对话助手, 1: 多模型对比助手，2: 工作流助手，3: 展示助手，4: ACP 助手
     pub is_addition: bool,
     pub created_time: String,
 }

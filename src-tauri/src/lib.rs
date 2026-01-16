@@ -37,11 +37,12 @@ use crate::api::copilot_lsp::{
 use crate::api::highlight_api::{highlight_code, list_syntect_themes};
 use crate::api::llm_api::{
     add_llm_model, add_llm_provider, delete_llm_model, delete_llm_provider, export_llm_provider,
-    fetch_model_list, get_llm_models, get_llm_provider_config, get_llm_providers,
-    get_models_for_select, import_llm_provider, preview_model_list, update_llm_provider,
-    update_llm_provider_config, update_selected_models,
+    fetch_model_list, get_filtered_models_for_select, get_filtered_providers, get_llm_models,
+    get_llm_provider_config, get_llm_providers, get_models_for_select, import_llm_provider,
+    preview_model_list, update_llm_provider, update_llm_provider_config, update_selected_models,
 };
-use crate::api::operation_api::confirm_operation_permission;
+use crate::api::operation_api::{confirm_acp_permission, confirm_operation_permission};
+use crate::api::ai::acp::AcpPermissionState;
 use crate::api::skill_api::{
     bulk_update_assistant_skills, cleanup_orphaned_skill_configs, get_assistant_skills,
     get_enabled_assistant_skills, get_skill, get_skill_content, get_skill_sources,
@@ -72,9 +73,10 @@ use crate::artifacts::collection_api::{
     update_artifact_collection,
 };
 use crate::artifacts::env_installer::{
-    check_bun_update, check_bun_update_with_proxy, check_bun_version, check_uv_update,
-    check_uv_update_with_proxy, check_uv_version, get_python_info, install_bun, install_python3,
-    install_uv, update_bun, update_bun_with_proxy, update_uv, update_uv_with_proxy,
+    check_acp_library, check_bun_update, check_bun_update_with_proxy, check_bun_version,
+    check_uv_update, check_uv_update_with_proxy, check_uv_version, get_python_info, install_acp_library,
+    install_bun, install_python3, install_uv, update_bun, update_bun_with_proxy, update_uv,
+    update_uv_with_proxy,
 };
 use crate::artifacts::preview_router::{
     confirm_environment_install, preview_react_component, restore_artifact_preview,
@@ -165,6 +167,19 @@ use tracing_subscriber::{EnvFilter, FmtSubscriber};
 struct AppState {
     selected_text: TokioMutex<String>,
     recording_shortcut: TokioMutex<bool>,
+}
+
+#[derive(Clone)]
+struct AcpSessionState {
+    sessions: Arc<TokioMutex<HashMap<i64, crate::api::ai::acp::AcpSessionHandle>>>,
+}
+
+impl AcpSessionState {
+    fn new() -> Self {
+        Self {
+            sessions: Arc::new(TokioMutex::new(HashMap::new())),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -462,8 +477,10 @@ pub fn run() {
             selected_text: TokioMutex::new(String::new()),
             recording_shortcut: TokioMutex::new(false),
         })
+        .manage(AcpSessionState::new())
         .manage(MessageTokenManager::new())
-        .manage(OperationState::new());
+        .manage(OperationState::new())
+        .manage(AcpPermissionState::new());
     #[cfg(desktop)]
     let app = app.manage(CopilotLspState::default());
     let app = app
@@ -486,6 +503,7 @@ pub fn run() {
             save_feature_config,
             open_data_folder,
             get_llm_providers,
+            get_filtered_providers,
             update_llm_provider,
             add_llm_provider,
             delete_llm_provider,
@@ -496,6 +514,7 @@ pub fn run() {
             preview_model_list,
             update_selected_models,
             get_models_for_select,
+            get_filtered_models_for_select,
             add_llm_model,
             delete_llm_model,
             export_llm_provider,
@@ -551,6 +570,8 @@ pub fn run() {
             update_uv_with_proxy,
             get_python_info,
             install_python3,
+            check_acp_library,
+            install_acp_library,
             preview_react_component,
             create_react_preview,
             create_react_preview_for_artifact,
@@ -617,6 +638,7 @@ pub fn run() {
             add_or_update_aipp_builtin_server,
             execute_aipp_builtin_tool,
             confirm_operation_permission,
+            confirm_acp_permission,
             register_sub_task_definition,
             run_sub_task_sync,
             run_sub_task_with_mcp_loop,

@@ -31,7 +31,10 @@ export const useAssistantTypePlugin = (pluginList: any[]) => {
     const [assistantTypeHideField, setAssistantTypeHideField] = useState<Array<string>>([]);
 
     // 助手类型
-    const [assistantTypes, setAssistantTypes] = useState<AssistantType[]>([{ code: 0, name: "普通对话助手" }]);
+    const [assistantTypes, setAssistantTypes] = useState<AssistantType[]>([
+        { code: 0, name: "普通对话助手" },
+        { code: 4, name: "ACP 助手" },
+    ]);
 
     // 使用 useMemo 缓存 assistantTypeApi
     const assistantTypeApi: AssistantTypeApi = useMemo(

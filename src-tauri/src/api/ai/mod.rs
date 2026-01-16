@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod chat;
 pub mod config;
 pub mod conversation;

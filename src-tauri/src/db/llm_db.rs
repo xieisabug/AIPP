@@ -137,6 +137,39 @@ impl LLMDatabase {
         Ok(result)
     }
 
+    /// 根据助手类型获取过滤后的提供商列表
+    /// ACP 助手 (assistant_type = 4): 只返回 ACP 提供商 (api_type = 'acp')
+    /// 普通助手: 排除 ACP 提供商
+    #[instrument(level = "debug", skip(self))]
+    pub fn get_filtered_providers(
+        &self,
+        assistant_type: i64,
+    ) -> rusqlite::Result<Vec<(i64, String, String, String, bool, bool)>> {
+        let where_clause = if assistant_type == 4 {
+            // ACP 助手：只要 ACP 提供商
+            "api_type = 'acp'"
+        } else {
+            // 普通助手：排除 ACP 提供商
+            "api_type != 'acp'"
+        };
+
+        let sql = format!(
+            "SELECT id, name, api_type, description, is_official, is_enabled FROM llm_provider WHERE {}",
+            where_clause
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let llm_providers = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+        })?;
+
+        let mut result = Vec::new();
+        for llm_provider in llm_providers {
+            result.push(llm_provider?);
+        }
+        Ok(result)
+    }
+
     #[instrument(level = "debug", skip(self), fields(id = id))]
     pub fn get_llm_provider(&self, id: i64) -> rusqlite::Result<LLMProvider> {
         let mut stmt = self.conn.prepare("SELECT id, name, api_type, description, is_official, is_enabled FROM llm_provider WHERE id = ?")?;
@@ -420,6 +453,67 @@ impl LLMDatabase {
             match model {
                 Ok(model) => result.push(model),
                 Err(e) => return Err(e.to_string()), // Convert rusqlite::Error to String
+            }
+        }
+        Ok(result)
+    }
+
+    /// 根据助手类型获取过滤后的模型列表
+    /// ACP 助手 (assistant_type = 4): 只返回 ACP 提供商 (api_type = 'acp') 的模型
+    /// 普通助手: 排除 ACP 提供商的模型
+    #[instrument(level = "debug", skip(self))]
+    pub fn get_filtered_models_for_select(
+        &self,
+        assistant_type: i64,
+    ) -> Result<Vec<(String, String, i64, i64)>, String> {
+        let (filter_condition, exclude_condition) = if assistant_type == 4 {
+            // ACP 助手：只要 ACP 提供商
+            ("p.api_type = 'acp'", "")
+        } else {
+            // 普通助手：排除 ACP 提供商
+            ("", "p.api_type != 'acp'")
+        };
+
+        let where_clause = match (filter_condition, exclude_condition) {
+            ("", "") => "p.is_enabled = 1".to_string(),
+            (f, "") => format!("p.is_enabled = 1 AND {}", f),
+            ("", e) => format!("p.is_enabled = 1 AND {}", e),
+            (f, e) => format!("p.is_enabled = 1 AND {} AND {}", f, e),
+        };
+
+        let sql = format!(
+            "
+            SELECT
+                (p.name || ' / ' || m.name) AS name,
+                m.code,
+                m.id,
+                m.llm_provider_id
+            FROM
+                llm_model m
+            JOIN
+                llm_provider p ON m.llm_provider_id = p.id
+            WHERE {}
+        ",
+            where_clause
+        );
+
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(stmt) => stmt,
+            Err(e) => return Err(e.to_string()),
+        };
+
+        let models = match stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        {
+            Ok(models) => models,
+            Err(e) => return Err(e.to_string()),
+        };
+
+        let mut result = Vec::new();
+        for model in models {
+            match model {
+                Ok(model) => result.push(model),
+                Err(e) => return Err(e.to_string()),
             }
         }
         Ok(result)

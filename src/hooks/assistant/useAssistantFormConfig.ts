@@ -53,9 +53,80 @@ export const useAssistantFormConfig = ({
         [currentAssistant, onConfigChange]
     );
 
+    // 获取 ACP 配置值的辅助函数
+    const getAcpConfigValue = useCallback((configName: string, defaultValue: string) => {
+        return currentAssistant?.model_configs?.find(c => c.name === configName)?.value ?? defaultValue;
+    }, [currentAssistant]);
+
     // 生成表单配置
     const formConfig: AssistantFormConfig[] = useMemo(() => {
         if (!currentAssistant) return [];
+
+        // ACP 助手类型 (assistant_type === 4) 的专用配置
+        if (currentAssistant?.assistant.assistant_type === 4) {
+            // 获取当前选择的提供商 ID
+            const currentProviderId = currentAssistant?.model.length ?? 0 > 0
+                ? currentAssistant.model[0].provider_id.toString()
+                : "-1";
+
+            return [
+                {
+                    key: "assistantType",
+                    config: {
+                        type: "static" as const,
+                        label: "助手类型",
+                        value: "ACP 助手",
+                    },
+                },
+                {
+                    key: "acp_provider",
+                    config: {
+                        type: "provider-select" as const,
+                        label: "选择提供商",
+                        value: currentProviderId,
+                        onChange: (value: string | boolean) => {
+                            // 保存提供商 ID 到 model 字段的 provider_id 部分
+                            // 使用特殊格式 "%%{provider_id}" 让保存逻辑正确处理
+                            onConfigChange("model", `%%${value}` as string, "string");
+                        },
+                    },
+                },
+                {
+                    key: "acp_working_directory",
+                    config: {
+                        type: "input" as const,
+                        label: "工作目录",
+                        value: getAcpConfigValue("acp_working_directory", ""),
+                        tooltip: "Agent 将在此目录下运行",
+                        onChange: (value: string | boolean) =>
+                            handleConfigChange("acp_working_directory", value, "string"),
+                    },
+                },
+                {
+                    key: "acp_env_vars",
+                    config: {
+                        type: "textarea" as const,
+                        label: "环境变量",
+                        value: getAcpConfigValue("acp_env_vars", ""),
+                        tooltip: "每行一个，格式: KEY=VALUE",
+                        className: "h-32",
+                        onChange: (value: string | boolean) =>
+                            handleConfigChange("acp_env_vars", value, "string"),
+                    },
+                },
+                {
+                    key: "acp_additional_args",
+                    config: {
+                        type: "input" as const,
+                        label: "附加启动参数",
+                        value: getAcpConfigValue("acp_additional_args", ""),
+                        tooltip: "传递给 CLI 的额外参数，空格分隔",
+                        onChange: (value: string | boolean) =>
+                            handleConfigChange("acp_additional_args", value, "string"),
+                    },
+                },
+            ];
+        }
 
         // 去重：同名配置只保留最后一次（避免界面重复渲染同一字段）
         const uniqueModelConfigs = (() => {
@@ -227,6 +298,7 @@ export const useAssistantFormConfig = ({
         handleModelChange,
         navigateTo,
         onPromptChange,
+        getAcpConfigValue,
     ]);
 
     return { formConfig };

@@ -281,7 +281,8 @@ export function useConversationOperations({
             }
 
             const assistantData = assistants.find((a) => a.id === parsedAssistantId);
-            const isPluginAssistant = assistantData?.assistant_type !== 0;
+            // ACP 助手 (assistant_type === 4) 走后端 ask_ai 路径，不作为插件处理
+            const isPluginAssistant = assistantData?.assistant_type !== 0 && assistantData?.assistant_type !== 4;
 
             if (isPluginAssistant) {
                 // 如果是通过 @ 指定的插件助手，但当前选中的助手与其不同，
@@ -340,6 +341,12 @@ export function useConversationOperations({
                         ?.onAssistantTypeRun(assistantRunApi);
                 }
             } else {
+                console.log("[ACP DEBUG] Calling ask_ai with:", {
+                    prompt: finalPrompt,
+                    conversation_id: conversationId,
+                    assistant_id: parsedAssistantId,
+                    assistant_type: assistantData?.assistant_type,
+                });
                 invoke<AiResponse>("ask_ai", {
                     request: {
                         prompt: finalPrompt,

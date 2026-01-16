@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use chrono::{prelude::*, SecondsFormat};
-use rusqlite::{Connection, OptionalExtension, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize, Serializer};
 use tracing::{debug, instrument};
 
@@ -632,6 +632,15 @@ impl ConversationDatabase {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS acp_session (
+                conversation_id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                updated_time DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+
         // 添加迁移逻辑：如果parent_group_id、tool_calls_json、input_token_count或output_token_count列不存在，则添加它们
         let mut stmt = conn.prepare("PRAGMA table_info(message)")?;
         let column_info: Vec<String> = stmt
@@ -694,6 +703,49 @@ impl ConversationDatabase {
             [],
         )?;
 
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip(self), err)]
+    pub fn get_acp_session_id(&self, conversation_id: i64) -> Result<Option<String>, AppError> {
+        let conn = self.get_connection().map_err(AppError::from)?;
+        let session_id = conn
+            .query_row(
+                "SELECT session_id FROM acp_session WHERE conversation_id = ?1",
+                params![conversation_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(AppError::from)?;
+        Ok(session_id)
+    }
+
+    #[instrument(level = "debug", skip(self), err)]
+    pub fn upsert_acp_session_id(
+        &self,
+        conversation_id: i64,
+        session_id: &str,
+    ) -> Result<(), AppError> {
+        let conn = self.get_connection().map_err(AppError::from)?;
+        conn.execute(
+            "INSERT INTO acp_session (conversation_id, session_id, updated_time)
+             VALUES (?1, ?2, CURRENT_TIMESTAMP)
+             ON CONFLICT(conversation_id)
+             DO UPDATE SET session_id = excluded.session_id, updated_time = CURRENT_TIMESTAMP",
+            params![conversation_id, session_id],
+        )
+        .map_err(AppError::from)?;
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip(self), err)]
+    pub fn delete_acp_session_id(&self, conversation_id: i64) -> Result<(), AppError> {
+        let conn = self.get_connection().map_err(AppError::from)?;
+        conn.execute(
+            "DELETE FROM acp_session WHERE conversation_id = ?1",
+            params![conversation_id],
+        )
+        .map_err(AppError::from)?;
         Ok(())
     }
 
