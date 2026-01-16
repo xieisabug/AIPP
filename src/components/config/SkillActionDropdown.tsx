@@ -77,7 +77,7 @@ const SkillActionDropdown: React.FC<SkillActionDropdownProps> = ({
                         className="flex items-center gap-2 cursor-pointer"
                     >
                         <div className="flex flex-col">
-                            <span className="font-medium">安装指南</span>
+                            <span className="font-medium">安装</span>
                             <span className="text-xs text-muted-foreground">查看如何安装和配置Skills</span>
                         </div>
                     </DropdownMenuItem>
