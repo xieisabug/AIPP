@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from "react";
-import { Play, Loader2, CheckCircle, XCircle, Blocks, ChevronDown, ChevronUp, RotateCcw, Square } from "lucide-react";
+import { Play, Loader2, CheckCircle, XCircle, Blocks, ChevronDown, ChevronUp, RotateCcw, Square, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ShineBorder } from "@/components/magicui/shine-border";
@@ -353,6 +353,22 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         }
     }, [toolCallId]);
 
+    const handleContinueWithError = useCallback(async () => {
+        if (!toolCallId) {
+            console.error("Cannot continue: no tool call ID");
+            return;
+        }
+
+        try {
+            await invoke("continue_with_error", { callId: toolCallId });
+            // 继续对话，状态保持为 failed
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "继续失败";
+            console.error("Failed to continue with error:", errorMessage);
+            setExecutionError(errorMessage);
+        }
+    }, [toolCallId]);
+
     const renderResult = () => {
         // 防泄露模式：结果也需要脱敏
         const displayResult = shouldMask && executionResult ? "******" : executionResult;
@@ -426,6 +442,17 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             )}
                         </Button>
                     )}
+                    {!isExpanded && isFailed && (
+                        <Button
+                            onClick={handleContinueWithError}
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 w-7 p-0 flex-shrink-0"
+                            title="以错误继续对话"
+                        >
+                            <ArrowRight className="h-3 w-3" />
+                        </Button>
+                    )}
                     <Button
                         onClick={handleToggleExpand}
                         size="sm"
@@ -459,18 +486,31 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                                     </Button>
                                 </>
                             ) : (
-                                <Button
-                                    onClick={handleExecute}
-                                    size="sm"
-                                    className="flex items-center gap-1 h-7 text-xs"
-                                >
-                                    {isFailed ? (
-                                        <RotateCcw className="h-3 w-3" />
-                                    ) : (
-                                        <Play className="h-3 w-3" />
+                                <>
+                                    <Button
+                                        onClick={handleExecute}
+                                        size="sm"
+                                        className="flex items-center gap-1 h-7 text-xs"
+                                    >
+                                        {isFailed ? (
+                                            <RotateCcw className="h-3 w-3" />
+                                        ) : (
+                                            <Play className="h-3 w-3" />
+                                        )}
+                                        {isFailed ? "重新执行" : "执行"}
+                                    </Button>
+                                    {isFailed && (
+                                        <Button
+                                            onClick={handleContinueWithError}
+                                            size="sm"
+                                            variant="outline"
+                                            className="flex items-center gap-1 h-7 text-xs"
+                                        >
+                                            <ArrowRight className="h-3 w-3" />
+                                            以错误继续
+                                        </Button>
                                     )}
-                                    {isFailed ? "重新执行" : "执行"}
-                                </Button>
+                                </>
                             )}
                         </div>
                     )}
