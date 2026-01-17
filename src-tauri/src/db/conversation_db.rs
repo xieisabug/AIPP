@@ -1253,4 +1253,13 @@ impl ConversationSummaryRepository {
         )?;
         Ok(count > 0)
     }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn delete_by_conversation_id(&self, conversation_id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM conversation_summary WHERE conversation_id = ?",
+            rusqlite::params![&conversation_id],
+        )?;
+        Ok(())
+    }
 }

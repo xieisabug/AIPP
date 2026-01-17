@@ -1486,6 +1486,14 @@ fn add_message(
             ttft_ms: None,
         })
         .map_err(AppError::from)?;
+
+    // 如果是用户消息，删除已有的对话总结，下次空闲时自动重新生成
+    if message.message_type == "user" {
+        if let Ok(summary_repo) = db.conversation_summary_repo() {
+            let _ = summary_repo.delete_by_conversation_id(conversation_id);
+        }
+    }
+
     Ok(message.clone())
 }
 
