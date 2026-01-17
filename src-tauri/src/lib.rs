@@ -44,10 +44,11 @@ use crate::api::llm_api::{
 use crate::api::operation_api::{confirm_acp_permission, confirm_operation_permission};
 use crate::api::ai::acp::AcpPermissionState;
 use crate::api::skill_api::{
-    bulk_update_assistant_skills, cleanup_orphaned_skill_configs, get_assistant_skills,
-    get_enabled_assistant_skills, get_skill, get_skill_content, get_skill_sources,
-    get_skills_directory, open_skill_parent_folder, open_skills_folder, remove_assistant_skill,
-    scan_skills, skill_exists, toggle_assistant_skill, update_assistant_skill_config,
+    bulk_update_assistant_skills, cleanup_orphaned_skill_configs, delete_skill, fetch_official_skills,
+    get_assistant_skills, get_enabled_assistant_skills, get_skill, get_skill_content,
+    get_skill_sources, get_skills_directory, install_official_skill, open_skill_parent_folder,
+    open_skills_folder, open_source_url, remove_assistant_skill, scan_skills, skill_exists,
+    toggle_assistant_skill, update_assistant_skill_config,
 };
 use crate::api::sub_task_api::{
     cancel_sub_task_execution, cancel_sub_task_execution_for_ui, create_sub_task_execution,
@@ -102,7 +103,7 @@ use crate::mcp::builtin_mcp::{
     list_aipp_builtin_templates, OperationState,
 };
 use crate::mcp::execution_api::{
-    create_mcp_tool_call, execute_mcp_tool_call, get_mcp_tool_call,
+    continue_with_error, create_mcp_tool_call, execute_mcp_tool_call, get_mcp_tool_call,
     get_mcp_tool_calls_by_conversation, stop_mcp_tool_call,
 };
 use crate::mcp::registry_api::{
@@ -634,6 +635,7 @@ pub fn run() {
             get_mcp_tool_call,
             get_mcp_tool_calls_by_conversation,
             stop_mcp_tool_call,
+            continue_with_error,
             list_aipp_builtin_templates,
             add_or_update_aipp_builtin_server,
             execute_aipp_builtin_tool,
@@ -673,6 +675,10 @@ pub fn run() {
             open_skills_folder,
             open_skill_parent_folder,
             get_skills_directory,
+            fetch_official_skills,
+            install_official_skill,
+            open_source_url,
+            delete_skill,
             // Token statistics commands
             get_conversation_token_stats,
             get_message_token_stats,

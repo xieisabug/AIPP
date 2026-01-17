@@ -4,9 +4,24 @@ use crate::db::skill_db::SkillDatabase;
 use crate::skills::parser::SkillParser;
 use crate::skills::scanner::SkillScanner;
 use crate::skills::types::{ScannedSkill, SkillContent, SkillSourceConfig, SkillWithConfig};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::Manager;
 use tracing::{debug, info, warn};
+
+/// Official skill from the skills store API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OfficialSkill {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub download_url: String,
+    pub source_url: String,
+}
+
+/// Official skills API endpoint
+const OFFICIAL_SKILLS_API: &str = "https://aipp-helper.xieisabug.workers.dev/api/skills";
 
 /// Get the home directory path
 fn get_home_dir() -> PathBuf {
@@ -339,4 +354,264 @@ pub async fn open_skill_parent_folder(file_path: String) -> Result<(), String> {
 pub async fn get_skills_directory(app_handle: tauri::AppHandle) -> Result<String, String> {
     let skills_dir = get_app_data_dir(&app_handle).join("skills");
     Ok(skills_dir.to_string_lossy().to_string())
+}
+
+/// Fetch official skills from the skills store API
+#[tauri::command]
+pub async fn fetch_official_skills(
+    app_handle: tauri::AppHandle,
+    use_proxy: bool,
+) -> Result<Vec<OfficialSkill>, String> {
+    use crate::api::ai::config::get_network_proxy_from_config;
+    use std::time::Duration;
+
+    // 5 second timeout
+    const TIMEOUT_SECS: u64 = 5;
+
+    // Get proxy configuration if requested
+    let proxy_url = if use_proxy {
+        let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+        let config_feature_map = feature_config_state.config_feature_map.lock().await;
+        get_network_proxy_from_config(&config_feature_map)
+    } else {
+        None
+    };
+
+    // Build client with optional proxy
+    let client = if let Some(ref proxy) = proxy_url {
+        info!(proxy_url = %proxy, "Using proxy for fetching official skills");
+        let proxy = reqwest::Proxy::all(proxy)
+            .map_err(|e| format!("代理配置失败: {}", e))?;
+        reqwest::Client::builder()
+            .proxy(proxy)
+            .build()
+            .map_err(|e| format!("Failed to build client: {}", e))?
+    } else {
+        reqwest::Client::new()
+    };
+
+    // Fetch with timeout
+    let fetch_future = async {
+        let response = client
+            .get(OFFICIAL_SKILLS_API)
+            .timeout(Duration::from_secs(TIMEOUT_SECS))
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    format!("请求超时（超过{}秒），请尝试使用代理访问", TIMEOUT_SECS)
+                } else if e.is_connect() {
+                    format!("网络连接失败，请检查网络或尝试使用代理")
+                } else {
+                    format!("获取官方技能列表失败: {}", e)
+                }
+            })?;
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "Official skills API returned error: {}",
+                response.status()
+            ));
+        }
+
+        let skills = response
+            .json::<Vec<OfficialSkill>>()
+            .await
+            .map_err(|e| format!("Failed to parse skills response: {}", e))?;
+
+        info!("Fetched {} official skills", skills.len());
+        Ok::<Vec<OfficialSkill>, String>(skills)
+    };
+
+    fetch_future.await
+}
+
+/// Install an official skill by downloading and extracting the zip file
+#[tauri::command]
+pub async fn install_official_skill(
+    app_handle: tauri::AppHandle,
+    download_url: String,
+) -> Result<(), String> {
+    info!("Downloading skill from: {}", download_url);
+
+    // Create skills directory if it doesn't exist
+    let skills_dir = get_app_data_dir(&app_handle).join("skills");
+    std::fs::create_dir_all(&skills_dir)
+        .map_err(|e| format!("Failed to create skills directory: {}", e))?;
+
+    // Download zip file to a temporary location
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&download_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download skill: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Download failed with status: {}",
+            response.status()
+        ));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read download: {}", e))?;
+
+    // Create a unique temporary extraction directory
+    let temp_extract_dir = std::env::temp_dir().join(format!("skill_extract_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_extract_dir)
+        .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+
+    info!("Extracting zip file to: {}", temp_extract_dir.display());
+
+    // Use zip crate to extract and preserve directory structure
+    {
+        use std::io::Cursor;
+
+        let cursor = Cursor::new(bytes.as_ref());
+        let mut zip = zip::ZipArchive::new(cursor)
+            .map_err(|e| format!("Failed to open zip archive: {}", e))?;
+
+        for i in 0..zip.len() {
+            let mut file = zip.by_index(i)
+                .map_err(|e| format!("Failed to get file from zip: {}", e))?;
+            let file_path = temp_extract_dir.join(file.mangled_name());
+
+            // Create parent directories if needed
+            if let Some(parent) = file_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create directory: {}", e))?;
+            }
+
+            // Skip directories (they will be created when extracting files)
+            if file.name().ends_with('/') {
+                continue;
+            }
+
+            let mut output = std::fs::File::create(&file_path)
+                .map_err(|e| format!("Failed to create file: {}", e))?;
+            std::io::copy(&mut file, &mut output)
+                .map_err(|e| format!("Failed to write file: {}", e))?;
+
+            // Set file permissions if available
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Some(mode) = file.unix_mode() {
+                    let mut perms = std::fs::Permissions::from_mode(0o644);
+                    perms.set_mode(mode);
+                    output.set_permissions(perms)
+                        .map_err(|e| format!("Failed to set permissions: {}", e))?;
+                }
+            }
+        }
+    }
+
+    // Now move the extracted content to skills directory
+    // Check what's in the temp_extract_dir
+    let entries = std::fs::read_dir(&temp_extract_dir)
+        .map_err(|e| format!("Failed to read temp directory: {}", e))?;
+
+    let entries: Vec<_> = entries.collect::<Result<_, _>>()
+        .map_err(|e| format!("Failed to collect directory entries: {}", e))?;
+
+    info!("Found {} entries in extracted zip", entries.len());
+
+    // Move each entry to the skills directory
+    for entry in entries {
+        let entry_path = entry.path();
+        let dest_path = skills_dir.join(entry.file_name());
+
+        // Use rename for efficiency (works if on same filesystem)
+        if std::fs::rename(&entry_path, &dest_path).is_err() {
+            // If rename fails (cross-device), fall back to copy
+            if entry_path.is_dir() {
+                copy_dir_recursive(&entry_path, &dest_path)?;
+            } else {
+                std::fs::copy(&entry_path, &dest_path)
+                    .map_err(|e| format!("Failed to copy file: {}", e))?;
+            }
+        }
+    }
+
+    // Clean up the temporary extraction directory
+    let _ = std::fs::remove_dir_all(&temp_extract_dir);
+
+    info!("Skill installed successfully to {}", skills_dir.display());
+    Ok(())
+}
+
+/// Recursively copy a directory
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst)
+        .map_err(|e| format!("Failed to create directory: {}", e))?;
+
+    for entry in std::fs::read_dir(src)
+        .map_err(|e| format!("Failed to read directory: {}", e))?
+    {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)
+                .map_err(|e| format!("Failed to copy file: {}", e))?;
+        }
+    }
+    Ok(())
+}
+
+/// Open a URL in the default browser
+#[tauri::command]
+pub async fn open_source_url(url: String) -> Result<(), String> {
+    info!("Opening URL in browser: {}", url);
+    if let Err(e) = open::that(&url) {
+        warn!(error = ?e, "Failed to open browser automatically");
+        // Still return Ok - the user can open manually
+    }
+    Ok(())
+}
+
+/// Delete a skill folder from the filesystem
+/// Only AIPP-sourced skills can be deleted (not system directories like Claude Code, Codex, etc.)
+#[tauri::command]
+pub async fn delete_skill(app_handle: tauri::AppHandle, identifier: String) -> Result<(), String> {
+    use crate::skills::types::SkillSourceType;
+
+    let scanner = create_scanner(&app_handle);
+
+    // Find the skill
+    let skill = scanner.get_skill(&identifier).ok_or_else(|| {
+        format!("Skill not found: {}", identifier)
+    })?;
+
+    // Only allow deleting AIPP-sourced skills
+    if skill.source_type != SkillSourceType::Aipp {
+        return Err(format!(
+            "Cannot delete skills from '{}' source. Only AIPP-sourced skills can be deleted.",
+            skill.source_display_name
+        ));
+    }
+
+    // Get the skill folder path (parent of the skill file)
+    let skill_path = PathBuf::from(&skill.file_path);
+    let skill_folder = skill_path.parent().ok_or_else(|| {
+        "Invalid skill file path".to_string()
+    })?;
+
+    // Check if folder exists
+    if !skill_folder.exists() {
+        return Err("Skill folder does not exist".to_string());
+    }
+
+    // Delete the folder recursively
+    std::fs::remove_dir_all(skill_folder)
+        .map_err(|e| format!("Failed to delete skill folder: {}", e))?;
+
+    info!("Deleted skill folder: {}", skill_folder.display());
+    Ok(())
 }

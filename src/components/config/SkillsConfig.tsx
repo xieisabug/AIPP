@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { Badge } from "../ui/badge";
-import { Folder, Sparkles, RefreshCw, FolderOpen, FileText } from "lucide-react";
+import { Folder, Sparkles, RefreshCw, FolderOpen, FileText, Trash2 } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { toast } from 'sonner';
 import ConfirmDialog from "../ConfirmDialog";
@@ -47,6 +47,10 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
     const [pendingSkillEnable, setPendingSkillEnable] = useState<{ skill: ScannedSkill; enabled: boolean } | null>(null);
     // 安装指南对话框
     const [installGuideOpen, setInstallGuideOpen] = useState(false);
+
+    // 删除确认对话框
+    const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+    const [skillToDelete, setSkillToDelete] = useState<ScannedSkill | null>(null);
 
     const { checkOperationMcpForSkills, enableOperationMcpAndSkill, isAgentLoadSkillError } = useSkillsMcpValidation();
 
@@ -220,6 +224,33 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
         setInstallGuideOpen(true);
     }, []);
 
+    // Open delete confirmation dialog
+    const handleDeleteSkill = useCallback((skill: ScannedSkill) => {
+        setSkillToDelete(skill);
+        setDeleteConfirmOpen(true);
+    }, []);
+
+    // Confirm delete skill
+    const handleConfirmDelete = useCallback(async () => {
+        if (!skillToDelete) return;
+
+        try {
+            await invoke('delete_skill', { identifier: skillToDelete.identifier });
+            toast.success(`技能 "${skillToDelete.display_name}" 已删除`);
+
+            // Refresh skills list
+            await scanSkills();
+
+            // Clear selection
+            setSelectedSkill(null);
+        } catch (e) {
+            toast.error('删除技能失败: ' + e);
+        } finally {
+            setDeleteConfirmOpen(false);
+            setSkillToDelete(null);
+        }
+    }, [skillToDelete, scanSkills]);
+
     // Group skills by source
     const groupedSkills = useMemo(() => {
         return groupSkillsBySource(skills);
@@ -352,6 +383,16 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
                             />
                         </div>
                     )}
+                    {selectedSkill.source_type === 'aipp' && (
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            className="text-muted-foreground"
+                            onClick={() => handleDeleteSkill(selectedSkill)}
+                        >
+                            <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
+                    )}
                 </div>
 
                 <div className="flex flex-wrap gap-4 text-sm">
@@ -393,7 +434,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
                             <Button
                                 variant="ghost"
                                 size="icon"
-                                className="h-6 w-6 flex-shrink-0"
+                                className="text-muted-foreground"
                                 onClick={() => handleOpenSkillFolder(selectedSkill.file_path)}
                             >
                                 <FolderOpen className="h-4 w-4" />
@@ -500,6 +541,19 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
             <SkillInstallGuideDialog
                 isOpen={installGuideOpen}
                 onClose={() => setInstallGuideOpen(false)}
+                onSkillInstalled={() => scanSkills()}
+            />
+
+            {/* 删除技能确认对话框 */}
+            <ConfirmDialog
+                isOpen={deleteConfirmOpen}
+                title="删除技能"
+                confirmText={`确定要删除技能 "${skillToDelete?.display_name}" 吗？此操作不可恢复。`}
+                onConfirm={handleConfirmDelete}
+                onCancel={() => {
+                    setDeleteConfirmOpen(false);
+                    setSkillToDelete(null);
+                }}
             />
         </>
     );

@@ -31,6 +31,8 @@ pub enum SkillSourceType {
     ClaudeCodeSkills,
     /// Codex CLI instructions
     Codex,
+    /// Copilot CLI skills
+    Copilot,
     /// Custom user-defined source
     Custom(String),
 }
@@ -41,6 +43,7 @@ impl SkillSourceType {
             SkillSourceType::Aipp => "aipp",
             SkillSourceType::ClaudeCodeSkills => "claude_code_skills",
             SkillSourceType::Codex => "codex",
+            SkillSourceType::Copilot => "copilot",
             SkillSourceType::Custom(name) => name.as_str(),
         }
     }
@@ -50,6 +53,7 @@ impl SkillSourceType {
             "aipp" => SkillSourceType::Aipp,
             "claude_code_skills" => SkillSourceType::ClaudeCodeSkills,
             "codex" => SkillSourceType::Codex,
+            "copilot" => SkillSourceType::Copilot,
             other => SkillSourceType::Custom(other.to_string()),
         }
     }
@@ -59,6 +63,7 @@ impl SkillSourceType {
             SkillSourceType::Aipp => "AIPP Skills",
             SkillSourceType::ClaudeCodeSkills => "Claude Code Skills",
             SkillSourceType::Codex => "Codex",
+            SkillSourceType::Copilot => "Copilot",
             SkillSourceType::Custom(name) => name.as_str(),
         }
     }
@@ -109,6 +114,15 @@ impl SkillSourceConfig {
                 source_type: SkillSourceType::Codex,
                 display_name: SkillSourceType::Codex.display_name().to_string(),
                 paths: vec!["~/.codex/skills/".to_string()],
+                file_pattern: "*.md".to_string(),
+                is_enabled: true,
+                is_builtin: true,
+            },
+            // Copilot skills (each subdirectory with .md is a skill)
+            SkillSourceConfig {
+                source_type: SkillSourceType::Copilot,
+                display_name: SkillSourceType::Copilot.display_name().to_string(),
+                paths: vec!["~/.copilot/skills/".to_string()],
                 file_pattern: "*.md".to_string(),
                 is_enabled: true,
                 is_builtin: true,
