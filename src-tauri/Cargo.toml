@@ -15,6 +15,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+zip = "2.2"
 zip-extract = "0.1.2"
 dirs = "5.0.1"
 tauri = { version = "2", features = [ "test", "protocol-asset", "tray-icon", "devtools"] }

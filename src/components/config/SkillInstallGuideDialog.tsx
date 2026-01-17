@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
     Dialog,
     DialogContent,
@@ -10,7 +10,7 @@ import {
 import { Button } from '../ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import { Card, CardDescription, CardHeader, CardTitle } from '../ui/card';
-import { BookOpen, FolderOpen, ExternalLink, Download } from 'lucide-react';
+import { BookOpen, FolderOpen, ExternalLink, Download, Loader2, RefreshCw, ShieldAlert } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 
 interface InstallStep {
@@ -21,42 +21,19 @@ interface InstallStep {
 interface SkillInstallGuideDialogProps {
     isOpen: boolean;
     onClose: () => void;
+    onSkillInstalled?: () => void;
 }
 
-interface RecommendedSkill {
+interface OfficialSkill {
     id: string;
     name: string;
     description: string;
     version: string;
+    download_url: string;
+    source_url: string;
 }
 
-// 官方推荐技能 Mock 数据
-const recommendedSkills: RecommendedSkill[] = [
-    {
-        id: 'frontend-design',
-        name: '前端设计专家',
-        description: '创建独特、生产级的前端界面，具有高设计质量。支持 React、Tailwind CSS 和 shadcn/ui。',
-        version: '1.0.0'
-    },
-    {
-        id: 'doc-coauthoring',
-        name: '文档协作助手',
-        description: '引导用户完成结构化的文档协作工作流程，适用于编写文档、提案、技术规范等。',
-        version: '1.2.0'
-    },
-    {
-        id: 'pdf-tools',
-        name: 'PDF处理工具',
-        description: '全面的 PDF 操作工具包，支持提取文本和表格、创建新 PDF、合并/拆分文档以及处理表单。',
-        version: '2.0.1'
-    },
-    {
-        id: 'spreadsheet',
-        name: '电子表格专家',
-        description: '综合电子表格创建、编辑和分析，支持公式、格式化、数据分析和可视化。',
-        version: '1.5.0'
-    }
-];
+type FetchStatus = 'idle' | 'loading' | 'success' | 'error' | 'timeout';
 
 // 安装步骤（占位内容，可根据实际需求修改）
 const installSteps: InstallStep[] = [
@@ -80,10 +57,44 @@ const installSteps: InstallStep[] = [
 
 const SkillInstallGuideDialog: React.FC<SkillInstallGuideDialogProps> = ({
     isOpen,
-    onClose
+    onClose,
+    onSkillInstalled
 }) => {
-    const [activeTab, setActiveTab] = useState<'manual' | 'recommended'>('manual');
+    const [activeTab, setActiveTab] = useState<'manual' | 'recommended'>('recommended');
     const [isOpeningFolder, setIsOpeningFolder] = useState(false);
+    const [officialSkills, setOfficialSkills] = useState<OfficialSkill[]>([]);
+    const [fetchStatus, setFetchStatus] = useState<FetchStatus>('idle');
+    const [fetchError, setFetchError] = useState<string>('');
+    const [isUsingProxy, setIsUsingProxy] = useState(false);
+    const [installingSkillId, setInstallingSkillId] = useState<string | null>(null);
+
+    // Fetch official skills when dialog opens
+    useEffect(() => {
+        if (isOpen && officialSkills.length === 0 && fetchStatus === 'idle') {
+            fetchOfficialSkills(false);
+        }
+    }, [isOpen]);
+
+    const fetchOfficialSkills = async (useProxy: boolean) => {
+        setFetchStatus('loading');
+        setIsUsingProxy(useProxy);
+        setFetchError('');
+        try {
+            const skills = await invoke<OfficialSkill[]>('fetch_official_skills', { useProxy });
+            setOfficialSkills(skills);
+            setFetchStatus('success');
+        } catch (error) {
+            const errorMsg = String(error);
+            setFetchError(errorMsg);
+            console.error('Failed to fetch official skills:', error);
+            // Check if it's a timeout
+            if (errorMsg.includes('超时') || errorMsg.includes('timeout')) {
+                setFetchStatus('timeout');
+            } else {
+                setFetchStatus('error');
+            }
+        }
+    };
 
     const handleOpenSkillsFolder = async () => {
         setIsOpeningFolder(true);
@@ -96,14 +107,39 @@ const SkillInstallGuideDialog: React.FC<SkillInstallGuideDialogProps> = ({
         }
     };
 
-    const handleInstall = (skillId: string) => {
-        // TODO: 实现安装功能
-        console.log('Install skill:', skillId);
+    const handleInstall = async (skill: OfficialSkill) => {
+        setInstallingSkillId(skill.id);
+        try {
+            await invoke('install_official_skill', { downloadUrl: skill.download_url });
+            // Trigger skill scan to refresh the list
+            await invoke('scan_skills');
+            // Call the callback if provided
+            onSkillInstalled?.();
+            // Close the dialog
+            onClose();
+        } catch (error) {
+            console.error('Failed to install skill:', error);
+            alert(`安装失败: ${error}`);
+        } finally {
+            setInstallingSkillId(null);
+        }
     };
 
-    const handleSource = (skillId: string) => {
-        // TODO: 实现来源功能
-        console.log('View source:', skillId);
+    const handleSource = async (skill: OfficialSkill) => {
+        try {
+            await invoke('open_source_url', { url: skill.source_url });
+        } catch (error) {
+            console.error('Failed to open source URL:', error);
+        }
+    };
+
+    const handleRetry = () => {
+        // Retry with proxy if it was a timeout
+        fetchOfficialSkills(true);
+    };
+
+    const handleRetryWithoutProxy = () => {
+        fetchOfficialSkills(false);
     };
 
     return (
@@ -158,42 +194,112 @@ const SkillInstallGuideDialog: React.FC<SkillInstallGuideDialogProps> = ({
                     </TabsContent>
 
                     <TabsContent value="recommended" className="flex-1 overflow-y-auto mt-4">
-                        <div className="space-y-3">
-                            {recommendedSkills.map((skill) => (
-                                <Card key={skill.id} className="py-4">
-                                    <CardHeader className="px-4 py-2">
-                                        <div className="flex items-start justify-between gap-4">
-                                            <div className="flex-1 min-w-0">
-                                                <CardTitle className="text-base">{skill.name}</CardTitle>
-                                                <CardDescription className="mt-1">{skill.description}</CardDescription>
+                        {fetchStatus === 'loading' ? (
+                            <div className="flex flex-col items-center justify-center py-8">
+                                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                                <span className="ml-2 text-sm text-muted-foreground">
+                                    {isUsingProxy ? '使用代理加载中...' : '加载中...'}
+                                </span>
+                            </div>
+                        ) : fetchStatus === 'timeout' ? (
+                            <div className="flex flex-col items-center justify-center py-8 text-center px-4">
+                                <ShieldAlert className="h-10 w-10 text-muted-foreground mb-3" />
+                                <p className="text-sm text-muted-foreground mb-1">请求超时</p>
+                                <p className="text-xs text-muted-foreground mb-4">{fetchError}</p>
+                                <Button
+                                    variant="default"
+                                    size="sm"
+                                    onClick={handleRetry}
+                                    className="gap-1"
+                                >
+                                    <RefreshCw className="h-3.5 w-3.5" />
+                                    使用代理重试
+                                </Button>
+                            </div>
+                        ) : fetchStatus === 'error' ? (
+                            <div className="flex flex-col items-center justify-center py-8 text-center px-4">
+                                <ShieldAlert className="h-10 w-10 text-muted-foreground mb-3" />
+                                <p className="text-sm text-muted-foreground mb-1">加载失败</p>
+                                <p className="text-xs text-muted-foreground mb-4">{fetchError}</p>
+                                <div className="flex gap-2">
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={handleRetryWithoutProxy}
+                                    >
+                                        直接重试
+                                    </Button>
+                                    <Button
+                                        variant="default"
+                                        size="sm"
+                                        onClick={handleRetry}
+                                        className="gap-1"
+                                    >
+                                        <RefreshCw className="h-3.5 w-3.5" />
+                                        使用代理
+                                    </Button>
+                                </div>
+                            </div>
+                        ) : officialSkills.length === 0 ? (
+                            <div className="flex flex-col items-center justify-center py-8 text-center">
+                                <p className="text-sm text-muted-foreground">暂无官方技能</p>
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => fetchOfficialSkills(false)}
+                                    className="mt-2"
+                                >
+                                    重试
+                                </Button>
+                            </div>
+                        ) : (
+                            <div className="space-y-3">
+                                {officialSkills.map((skill) => (
+                                    <Card key={skill.id} className="py-4">
+                                        <CardHeader className="px-4 py-2">
+                                            <div className="flex items-start justify-between gap-4">
+                                                <div className="flex-1 min-w-0">
+                                                    <CardTitle className="text-base">{skill.name}</CardTitle>
+                                                    <CardDescription className="mt-1">{skill.description}</CardDescription>
+                                                </div>
+                                                <div className="flex items-center gap-2 flex-shrink-0">
+                                                    <Button
+                                                        variant="outline"
+                                                        size="sm"
+                                                        onClick={() => handleSource(skill)}
+                                                        className="gap-1"
+                                                    >
+                                                        <ExternalLink className="h-3.5 w-3.5" />
+                                                        来源
+                                                    </Button>
+                                                    <Button
+                                                        size="sm"
+                                                        onClick={() => handleInstall(skill)}
+                                                        disabled={installingSkillId === skill.id}
+                                                        className="gap-1"
+                                                    >
+                                                        {installingSkillId === skill.id ? (
+                                                            <>
+                                                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                                                安装中
+                                                            </>
+                                                        ) : (
+                                                            <>
+                                                                <Download className="h-3.5 w-3.5" />
+                                                                安装
+                                                            </>
+                                                        )}
+                                                    </Button>
+                                                </div>
                                             </div>
-                                            <div className="flex items-center gap-2 flex-shrink-0">
-                                                <Button
-                                                    variant="outline"
-                                                    size="sm"
-                                                    onClick={() => handleSource(skill.id)}
-                                                    className="gap-1"
-                                                >
-                                                    <ExternalLink className="h-3.5 w-3.5" />
-                                                    来源
-                                                </Button>
-                                                <Button
-                                                    size="sm"
-                                                    onClick={() => handleInstall(skill.id)}
-                                                    className="gap-1"
-                                                >
-                                                    <Download className="h-3.5 w-3.5" />
-                                                    安装
-                                                </Button>
+                                            <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+                                                <span className="px-2 py-0.5 rounded-md bg-muted">v{skill.version}</span>
                                             </div>
-                                        </div>
-                                        <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-                                            <span className="px-2 py-0.5 rounded-md bg-muted">v{skill.version}</span>
-                                        </div>
-                                    </CardHeader>
-                                </Card>
-                            ))}
-                        </div>
+                                        </CardHeader>
+                                    </Card>
+                                ))}
+                            </div>
+                        )}
                     </TabsContent>
                 </Tabs>
 

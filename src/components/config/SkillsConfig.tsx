@@ -500,6 +500,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
             <SkillInstallGuideDialog
                 isOpen={installGuideOpen}
                 onClose={() => setInstallGuideOpen(false)}
+                onSkillInstalled={() => scanSkills()}
             />
         </>
     );
