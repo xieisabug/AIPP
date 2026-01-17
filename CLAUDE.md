@@ -225,6 +225,7 @@ let config = state.configs.lock().await;
 5. **Error Handling**: Provide meaningful error messages to users
 6. **Testing**: Write tests for new functionality, especially AI-related features
 7. **Code Organization**: Follow domain-driven structure for both frontend and backend
+8. **No Model Fallback**: 当用户配置的模型（如对话总结模型、助手模型等）在数据库中不存在时，禁止自动回退到其他模型。应该直接返回错误信息，在界面上提示用户检查配置，而不是随意选择其他模型执行任务
 
 ## Testing Changes
 
@@ -435,5 +436,6 @@ Do what has been asked; nothing more, nothing less.
 NEVER create files unless they're absolutely necessary for achieving your goal.
 ALWAYS prefer editing an existing file to creating a new one.
 NEVER proactively create documentation files (\*.md) or README files. Only create documentation files if explicitly requested by the User.
+NEVER add fallback logic to features unless explicitly requested by the user. When a feature fails, it should return an error rather than silently degrading to a fallback behavior.
 
 IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.

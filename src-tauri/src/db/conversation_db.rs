@@ -597,6 +597,12 @@ impl ConversationDatabase {
     }
 
     #[instrument(level = "debug", skip(self), err)]
+    pub fn conversation_summary_repo(&self) -> Result<ConversationSummaryRepository, AppError> {
+        let conn = self.get_connection().map_err(AppError::from)?;
+        Ok(ConversationSummaryRepository::new(conn))
+    }
+
+    #[instrument(level = "debug", skip(self), err)]
     pub fn create_tables(&self) -> rusqlite::Result<()> {
         let conn = self.get_connection().unwrap();
 
@@ -700,6 +706,24 @@ impl ConversationDatabase {
         conn.execute("CREATE INDEX IF NOT EXISTS idx_message_parent_id ON message(parent_id)", [])?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_message_attachment_message_id ON message_attachment(message_id)",
+            [],
+        )?;
+
+        // 创建对话总结表
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS conversation_summary (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                summary TEXT NOT NULL,
+                user_intent TEXT,
+                key_outcomes TEXT,
+                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (conversation_id) REFERENCES conversation(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversation_summary_conversation_id ON conversation_summary(conversation_id)",
             [],
         )?;
 
@@ -1153,4 +1177,80 @@ pub struct MessageTokenStats {
     pub model_name: Option<String>,
     pub ttft_ms: Option<i64>, // Time to First Token (毫秒)
     pub tps: Option<f64>,     // Tokens Per Second
+}
+
+/// 对话总结结构体
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ConversationSummary {
+    pub id: i64,
+    pub conversation_id: i64,
+    pub summary: String,       // 对话整体总结
+    pub user_intent: String,   // 用户目的
+    pub key_outcomes: String,  // 关键成果
+    #[serde(serialize_with = "serialize_datetime_millis")]
+    pub created_time: DateTime<Utc>,
+}
+
+pub struct ConversationSummaryRepository {
+    conn: Connection,
+}
+
+impl ConversationSummaryRepository {
+    #[instrument(level = "debug", skip(conn))]
+    pub fn new(conn: Connection) -> Self {
+        ConversationSummaryRepository { conn }
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn create(&self, summary: &ConversationSummary) -> Result<ConversationSummary> {
+        self.conn.execute(
+            "INSERT INTO conversation_summary (conversation_id, summary, user_intent, key_outcomes, created_time) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                &summary.conversation_id,
+                &summary.summary,
+                &summary.user_intent,
+                &summary.key_outcomes,
+                &summary.created_time,
+            ],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        Ok(ConversationSummary {
+            id,
+            conversation_id: summary.conversation_id,
+            summary: summary.summary.clone(),
+            user_intent: summary.user_intent.clone(),
+            key_outcomes: summary.key_outcomes.clone(),
+            created_time: summary.created_time,
+        })
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn get_by_conversation_id(&self, conversation_id: i64) -> Result<Option<ConversationSummary>> {
+        self.conn
+            .query_row(
+                "SELECT id, conversation_id, summary, user_intent, key_outcomes, created_time FROM conversation_summary WHERE conversation_id = ?",
+                &[&conversation_id],
+                |row| {
+                    Ok(ConversationSummary {
+                        id: row.get(0)?,
+                        conversation_id: row.get(1)?,
+                        summary: row.get(2)?,
+                        user_intent: row.get(3)?,
+                        key_outcomes: row.get(4)?,
+                        created_time: get_required_datetime_from_row(row, 5, "created_time")?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn exists(&self, conversation_id: i64) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM conversation_summary WHERE conversation_id = ?",
+            &[&conversation_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
 }

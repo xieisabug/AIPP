@@ -23,18 +23,32 @@ pub async fn generate_title(
     config_feature_map: HashMap<String, HashMap<String, FeatureConfig>>,
     window: tauri::Window,
 ) -> Result<(), AppError> {
-    // 1) 读取会话总结配置，允许缺省并做智能回退
+    // 0) 检查总结标题功能是否启用
     let feature_config_opt = config_feature_map.get("conversation_summary");
+    let title_enabled = feature_config_opt
+        .and_then(|fc| fc.get("title_summary_enabled"))
+        .map(|c| c.value.clone())
+        .unwrap_or_else(|| "true".to_string());
 
+    if title_enabled != "true" && title_enabled != "1" {
+        debug!("总结标题功能已禁用，跳过标题生成");
+        return Ok(());
+    }
+
+    // 1) 读取会话总结配置，允许缺省并做智能回退
     // 默认提示词（当未配置时回退使用）
     let default_prompt = "请根据提供的大模型问答对话,总结一个简洁明了的标题。标题要求:\n- 字数在5-15个字左右，必须是中文，不要包含标点符号\n- 准确概括对话的核心主题，尽量贴近用户的提问\n- 不要透露任何私人信息\n- 用祈使句或陈述句".to_string();
 
     // 解析 summary_length 与 prompt，缺省有默认值
     let (summary_length, prompt) = if let Some(feature_config) = feature_config_opt {
-        let prompt =
-            feature_config.get("prompt").map(|c| c.value.clone()).unwrap_or(default_prompt.clone());
+        let prompt = feature_config
+            .get("title_prompt")
+            .or(feature_config.get("prompt"))
+            .map(|c| c.value.clone())
+            .unwrap_or(default_prompt.clone());
         let summary_length = feature_config
-            .get("summary_length")
+            .get("title_summary_length")
+            .or(feature_config.get("summary_length"))
             .map(|c| c.value.clone())
             .unwrap_or_else(|| "100".to_string());
         let summary_length = summary_length.parse::<i32>().unwrap_or(100);
@@ -43,23 +57,40 @@ pub async fn generate_title(
         (100, default_prompt.clone())
     };
 
-    // 解析 provider_id 与 model_code，若缺失/非法，则回退为“使用当前对话的回复消息模型”
+    // 解析 provider_id 与 model_code，若缺失/非法，则回退为"使用当前对话的回复消息模型"
     enum ModelSource {
         FromConfig { provider_id: i64, model_code: String },
         FromConversationMessage,
     }
 
     let model_source = if let Some(feature_config) = feature_config_opt {
+        // 优先读取新配置键
         let provider_id_res = feature_config
+            .get("title_provider_id")
+            .or(feature_config.get("provider_id"))
+            .map(|c| c.value.clone())
+            .and_then(|v| v.parse::<i64>().ok());
+        let model_code_opt = feature_config.get("title_model").map(|c| c.value.clone());
+        // 兼容旧配置
+        let legacy_model_code_opt = feature_config.get("model_code").map(|c| c.value.clone());
+        let legacy_provider_id_res = feature_config
             .get("provider_id")
             .map(|c| c.value.clone())
             .and_then(|v| v.parse::<i64>().ok());
-        let model_code_opt = feature_config.get("model_code").map(|c| c.value.clone());
+
         match (provider_id_res, model_code_opt) {
             (Some(pid), Some(mcode)) if !mcode.is_empty() => {
                 ModelSource::FromConfig { provider_id: pid, model_code: mcode }
             }
-            _ => ModelSource::FromConversationMessage,
+            _ => {
+                // 回退到旧配置
+                match (legacy_provider_id_res, legacy_model_code_opt) {
+                    (Some(pid), Some(mcode)) if !mcode.is_empty() => {
+                        ModelSource::FromConfig { provider_id: pid, model_code: mcode }
+                    }
+                    _ => ModelSource::FromConversationMessage,
+                }
+            }
         }
     } else {
         ModelSource::FromConversationMessage
@@ -153,7 +184,7 @@ pub async fn generate_title(
                 })?
             } else {
                 return Err(AppError::UnknownError(
-                    "未配置『会话标题生成』且无法从对话消息推断模型，请在设置中为“AI总结”选择模型"
+                    "未配置会话标题生成且无法从对话消息推断模型，请在设置中为辅助AI-总结标题选择模型"
                         .to_string(),
                 ));
             }

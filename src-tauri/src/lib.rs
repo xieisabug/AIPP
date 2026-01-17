@@ -6,6 +6,7 @@ mod db;
 mod errors;
 mod mcp;
 mod plugin;
+mod scheduler;
 mod skills;
 mod state;
 mod template_engine;
@@ -451,6 +452,11 @@ pub fn run() {
 
             app.manage(initialize_state(&app_handle));
             app.manage(initialize_name_cache_state(&app_handle));
+
+            // 初始化并启动定时任务调度器
+            let scheduler_state = scheduler::SchedulerState::new();
+            app.manage(scheduler_state.clone());
+            scheduler::start_scheduler(app_handle.clone(), scheduler_state);
 
             // 注册全局快捷键（必须在 state 初始化之后）
             #[cfg(desktop)]
@@ -1028,3 +1034,5 @@ pub(crate) async fn reconfigure_global_shortcuts_async(app_handle: &tauri::AppHa
         }
     }
 }
+
+

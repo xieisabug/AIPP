@@ -393,6 +393,17 @@ pub async fn generate_artifact_metadata(
     let feature_config = config_feature_map.get("conversation_summary");
 
     if let Some(config) = feature_config {
+        // 检查表单自动填写功能是否启用
+        let autofill_enabled = config
+            .get("form_autofill_enabled")
+            .map(|c| c.value.clone())
+            .unwrap_or_else(|| "true".to_string());
+
+        if autofill_enabled != "true" && autofill_enabled != "1" {
+            return Err("表单自动填写功能已禁用，请在辅助AI配置中开启".to_string());
+        }
+
+        // 解析模型配置 - 优先新格式，其次兼容旧格式
         let (provider_id, model_code) = if let Some(form_model) = config.get("form_autofill_model")
         {
             let form_model_value = &form_model.value;
@@ -408,13 +419,20 @@ pub async fn generate_artifact_metadata(
                 }
             } else {
                 return Err(
-                    "表单填写模型未配置，请在设置 -> 功能助手配置 -> AI总结 中配置表单填写模型"
+                    "表单填写模型未配置，请在设置 -> 功能助手配置 -> 辅助AI 中配置表单填写模型"
                         .to_string(),
                 );
             }
+        } else if let (Some(provider_id), Some(model_code)) = (
+            config.get("form_autofill_provider_id")
+                .or(config.get("provider_id"))
+                .and_then(|c| c.value.parse::<i64>().ok()),
+            config.get("form_autofill_model").or(config.get("model_code")).map(|c| c.value.clone()),
+        ) {
+            (provider_id, model_code)
         } else {
             return Err(
-                "表单填写模型未配置，请在设置 -> 功能助手配置 -> AI总结 中配置表单填写模型"
+                "表单填写模型未配置，请在设置 -> 功能助手配置 -> 辅助AI 中配置表单填写模型"
                     .to_string(),
             );
         };
