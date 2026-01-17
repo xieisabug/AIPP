@@ -575,3 +575,43 @@ pub async fn open_source_url(url: String) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Delete a skill folder from the filesystem
+/// Only AIPP-sourced skills can be deleted (not system directories like Claude Code, Codex, etc.)
+#[tauri::command]
+pub async fn delete_skill(app_handle: tauri::AppHandle, identifier: String) -> Result<(), String> {
+    use crate::skills::types::SkillSourceType;
+
+    let scanner = create_scanner(&app_handle);
+
+    // Find the skill
+    let skill = scanner.get_skill(&identifier).ok_or_else(|| {
+        format!("Skill not found: {}", identifier)
+    })?;
+
+    // Only allow deleting AIPP-sourced skills
+    if skill.source_type != SkillSourceType::Aipp {
+        return Err(format!(
+            "Cannot delete skills from '{}' source. Only AIPP-sourced skills can be deleted.",
+            skill.source_display_name
+        ));
+    }
+
+    // Get the skill folder path (parent of the skill file)
+    let skill_path = PathBuf::from(&skill.file_path);
+    let skill_folder = skill_path.parent().ok_or_else(|| {
+        "Invalid skill file path".to_string()
+    })?;
+
+    // Check if folder exists
+    if !skill_folder.exists() {
+        return Err("Skill folder does not exist".to_string());
+    }
+
+    // Delete the folder recursively
+    std::fs::remove_dir_all(skill_folder)
+        .map_err(|e| format!("Failed to delete skill folder: {}", e))?;
+
+    info!("Deleted skill folder: {}", skill_folder.display());
+    Ok(())
+}
