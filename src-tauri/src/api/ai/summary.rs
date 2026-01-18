@@ -159,6 +159,8 @@ pub async fn generate_conversation_summary(
 
     if relevant_messages.is_empty() {
         debug!(conversation_id, "对话没有有效消息，跳过总结");
+        // 创建一个空的总结记录，避免重复处理
+        save_empty_summary_to_db(&conversation_db, conversation_id)?;
         return Ok(());
     }
 
@@ -521,5 +523,29 @@ fn save_summary_to_db(
         .map_err(AppError::from)?;
 
     info!(conversation_id, "对话总结已保存");
+    Ok(())
+}
+
+/// 为没有有效消息的对话创建空总结记录，避免定时任务重复处理
+fn save_empty_summary_to_db(
+    conversation_db: &ConversationDatabase,
+    conversation_id: i64,
+) -> Result<(), AppError> {
+    let conversation_summary = ConversationSummary {
+        id: 0,
+        conversation_id,
+        summary: "(无有效内容可总结)".to_string(),
+        user_intent: "".to_string(),
+        key_outcomes: "".to_string(),
+        created_time: chrono::Utc::now(),
+    };
+
+    conversation_db
+        .conversation_summary_repo()
+        .map_err(AppError::from)?
+        .create(&conversation_summary)
+        .map_err(AppError::from)?;
+
+    info!(conversation_id, "已为空对话创建占位总结记录");
     Ok(())
 }
