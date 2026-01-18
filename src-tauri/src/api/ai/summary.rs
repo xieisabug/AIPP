@@ -3,7 +3,7 @@ use crate::api::ai::config::{
     get_retry_attempts_from_config,
 };
 use crate::api::genai_client;
-use crate::db::conversation_db::{ConversationDatabase, ConversationSummary};
+use crate::db::conversation_db::{ConversationDatabase, ConversationSummary, Message};
 use crate::db::llm_db::LLMDatabase;
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
@@ -12,6 +12,45 @@ use regex::Regex;
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
+
+/// Get latest branch messages (keep the latest branch flow intact).
+///
+/// Algorithm:
+/// 1. Sort messages by created_time then id.
+/// 2. When a parent_group_id appears, truncate to the parent group.
+/// 3. Append current message to form the latest branch.
+pub(crate) fn get_latest_branch_messages(
+    messages: &[(Message, Option<crate::db::conversation_db::MessageAttachment>)],
+) -> Vec<Message> {
+    if messages.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ordered: Vec<&Message> = messages.iter().map(|(m, _)| m).collect();
+    ordered.sort_by(|a, b| {
+        let by_time = a.created_time.cmp(&b.created_time);
+        if by_time == std::cmp::Ordering::Equal {
+            a.id.cmp(&b.id)
+        } else {
+            by_time
+        }
+    });
+
+    let mut result: Vec<Message> = Vec::new();
+    for msg in ordered {
+        if let Some(parent_group_id) = &msg.parent_group_id {
+            if let Some(first_index) = result.iter().position(|m| {
+                m.generation_group_id.as_ref().map(|id| id == parent_group_id).unwrap_or(false)
+            }) {
+                result.truncate(first_index);
+            }
+        }
+
+        result.push(msg.clone());
+    }
+
+    result
+}
 
 /// 生成对话总结
 pub async fn generate_conversation_summary(
@@ -41,18 +80,82 @@ pub async fn generate_conversation_summary(
     }
 
     // 1) 获取对话的所有消息
-    let messages = conversation_db
+    let all_messages = conversation_db
         .message_repo()
         .map_err(AppError::from)?
         .list_by_conversation_id(conversation_id)
         .map_err(AppError::from)?;
 
-    // 过滤出 user 和 response 类型的消息，并清理 base64 图片数据
-    let relevant_messages: Vec<(String, String)> = messages
+    // 只获取最新分支的消息（过滤掉废弃分支的消息）
+    let messages = get_latest_branch_messages(&all_messages);
+
+    // For conversation summary, convert all messages to simple user/assistant text format.
+    // This avoids ToolCall/ToolResponse format issues with the API.
+    // - user -> user message
+    // - response -> assistant message (strip MCP_TOOL_CALL comments, just keep text)
+    // - tool_result -> assistant message (simplified description)
+    let mcp_tool_call_regex = Regex::new(r"<!--\s*MCP_TOOL_CALL:.*?-->").unwrap();
+
+    let mut relevant_messages: Vec<(
+        String,
+        String,
+        Vec<crate::db::conversation_db::MessageAttachment>,
+    )> = messages
         .iter()
-        .filter(|(m, _)| m.message_type == "user" || m.message_type == "response")
-        .map(|(m, _)| (m.message_type.clone(), strip_base64_images(&m.content)))
+        .filter(|m| {
+            m.message_type == "user"
+                || m.message_type == "response"
+                || m.message_type == "tool_result"
+        })
+        .map(|m| {
+            let content = strip_base64_images(&m.content);
+
+            match m.message_type.as_str() {
+                "user" => ("user".to_string(), content.trim().to_string(), Vec::new()),
+                "response" => {
+                    // Remove MCP_TOOL_CALL comments, keep only the text content
+                    let content = mcp_tool_call_regex.replace_all(&content, "").to_string();
+                    ("response".to_string(), content.trim().to_string(), Vec::new())
+                }
+                "tool_result" => {
+                    // Simplify tool_result to a brief description for summary purposes
+                    // Extract tool name and result status, skip detailed content
+                    let simplified = simplify_tool_result_for_summary(&content);
+                    ("response".to_string(), simplified, Vec::new())
+                }
+                _ => (m.message_type.clone(), content.trim().to_string(), Vec::new()),
+            }
+        })
+        .filter(|(_, content, _)| !content.is_empty())
         .collect();
+
+    // Merge consecutive messages of the same role to avoid API errors
+    // This can happen after filtering out tool_result and empty response messages
+    let mut merged_messages: Vec<(
+        String,
+        String,
+        Vec<crate::db::conversation_db::MessageAttachment>,
+    )> = Vec::new();
+    for (msg_type, content, attachments) in relevant_messages {
+        if let Some((last_type, last_content, _)) = merged_messages.last_mut() {
+            if last_type == &msg_type {
+                // Merge consecutive messages of the same type
+                last_content.push_str("\n\n");
+                last_content.push_str(&content);
+                continue;
+            }
+        }
+        merged_messages.push((msg_type, content, attachments));
+    }
+    let mut relevant_messages = merged_messages;
+
+    // Remove trailing user message to avoid consecutive user messages
+    // (since we'll add a summary request as user message later)
+    if let Some((msg_type, _, _)) = relevant_messages.last() {
+        if msg_type == "user" {
+            relevant_messages.pop();
+        }
+    }
 
     if relevant_messages.is_empty() {
         debug!(conversation_id, "对话没有有效消息，跳过总结");
@@ -135,14 +238,16 @@ pub async fn generate_conversation_summary(
     )?;
 
     // 构建消息列表：system + 原始对话 + 总结请求
+    // 不使用 build_chat_messages_with_context，因为我们已经将所有消息转为纯文本格式
+    // 避免 ToolCall/ToolResponse 格式导致的 API 错误
     let mut chat_messages = vec![ChatMessage::system(system_prompt)];
 
-    // 添加原始对话消息（保持 user/assistant 角色）
-    for (msg_type, content) in &relevant_messages {
-        if msg_type == "user" {
-            chat_messages.push(ChatMessage::user(content));
-        } else {
-            chat_messages.push(ChatMessage::assistant(content));
+    // 直接构建 user/assistant 消息，不经过工具调用处理
+    for (msg_type, content, _) in &relevant_messages {
+        match msg_type.as_str() {
+            "user" => chat_messages.push(ChatMessage::user(content)),
+            "response" => chat_messages.push(ChatMessage::assistant(content)),
+            _ => {}
         }
     }
 
@@ -161,6 +266,21 @@ pub async fn generate_conversation_summary(
             Ok(chat_response) => break Ok(chat_response.first_text().unwrap_or("").to_string()),
             Err(e) => {
                 attempts += 1;
+                // 400/422 错误时打印完整请求内容用于调试
+                let error_text = e.to_string();
+                let is_400_or_422 = error_text.contains("400") || error_text.contains("422");
+                if is_400_or_422 {
+                    if let Ok(request_json) = serde_json::to_string_pretty(&chat_request) {
+                        error!(
+                            conversation_id,
+                            "
+========== 总结请求内容（调试 400/422 错误）==========
+{}
+==========================================",
+                            request_json
+                        );
+                    }
+                }
                 if attempts >= max_retry_attempts {
                     error!(attempts, error = %e, conversation_id, "对话总结生成失败，已达最大重试次数");
                     break Err(e.to_string());
@@ -190,45 +310,9 @@ fn parse_and_save_summary(
     conversation_id: i64,
     response_text: &str,
 ) -> Result<(), AppError> {
-    // 清理可能的 markdown 代码块标记
-    let cleaned = response_text
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim()
-        .to_string();
-
-    // 解析 JSON
-    let json_value: serde_json::Value = match serde_json::from_str(&cleaned) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(error = %e, response = %response_text, "无法解析对话总结JSON，尝试清理后重试");
-            // 尝试提取 JSON 部分
-            if let Some(start) = cleaned.find('{') {
-                if let Some(end) = cleaned.rfind('}') {
-                    let json_str = &cleaned[start..=end];
-                    match serde_json::from_str(json_str) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return Err(AppError::UnknownError(format!(
-                                "无法解析对话总结JSON: {}",
-                                e
-                            )));
-                        }
-                    }
-                } else {
-                    return Err(AppError::UnknownError(
-                        "对话总结响应中未找到有效的JSON结构".to_string(),
-                    ));
-                }
-            } else {
-                return Err(AppError::UnknownError(
-                    "对话总结响应中未找到有效的JSON结构".to_string(),
-                ));
-            }
-        }
-    };
+    // 使用健壮的 JSON 提取函数
+    let json_value = extract_json_from_response(response_text)
+        .ok_or_else(|| AppError::UnknownError("对话总结响应中未找到有效的JSON结构".to_string()))?;
 
     let summary = json_value.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let user_intent =
@@ -244,12 +328,173 @@ fn parse_and_save_summary(
     save_summary_to_db(conversation_db, conversation_id, &summary, &user_intent, &key_outcomes)
 }
 
-/// 清理消息中的 base64 图片数据，将 ![alt](data:image/...) 替换为 ![alt]
+// Keep system/user/response messages and strip base64 images.
 fn strip_base64_images(content: &str) -> String {
     // 匹配 ![任意文本](data:image/任意内容)
-    // 例如: ![image](data:image/png;base64,iVBORw0KGgo...)
+    // Keep system/user/response messages and strip base64 images.
     let re = Regex::new(r"!\[([^\]]*)\]\(data:image/[^)]+\)").unwrap();
     re.replace_all(content, "![$1]").to_string()
+}
+
+/// Simplify tool_result content for summary purposes.
+/// Extract tool name and basic status, skip detailed result content.
+fn simplify_tool_result_for_summary(content: &str) -> String {
+    // Expected format: "Tool execution completed:\n\nTool Call ID: {id}\nTool: {name}\nServer: {server}\nParameters: {params}\nResult:\n{result}"
+    // Or: "Tool execution failed:\n\n..."
+
+    let is_success = content.contains("Tool execution completed");
+    let is_failure = content.contains("Tool execution failed");
+
+    // Extract tool name
+    let tool_name = if let Some(start) = content.find("Tool: ") {
+        let start_pos = start + "Tool: ".len();
+        if let Some(end) = content[start_pos..].find('\n') {
+            Some(content[start_pos..start_pos + end].to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Extract server name
+    let server_name = if let Some(start) = content.find("Server: ") {
+        let start_pos = start + "Server: ".len();
+        if let Some(end) = content[start_pos..].find('\n') {
+            Some(content[start_pos..start_pos + end].to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    match (tool_name, server_name, is_success, is_failure) {
+        (Some(tool), Some(server), true, _) => {
+            format!("[已执行工具 {}/{} 并获得结果]", server, tool)
+        }
+        (Some(tool), Some(server), _, true) => {
+            format!("[执行工具 {}/{} 失败]", server, tool)
+        }
+        (Some(tool), None, true, _) => {
+            format!("[已执行工具 {} 并获得结果]", tool)
+        }
+        (Some(tool), None, _, true) => {
+            format!("[执行工具 {} 失败]", tool)
+        }
+        _ => {
+            // Fallback: just indicate a tool was executed
+            if is_success {
+                "[已执行工具调用并获得结果]".to_string()
+            } else if is_failure {
+                "[工具调用执行失败]".to_string()
+            } else {
+                "[工具调用结果]".to_string()
+            }
+        }
+    }
+}
+
+/// 从 AI 响应中提取 JSON，支持多种格式：
+/// 1. 纯 JSON 字符串
+/// 2. Markdown 代码块包裹的 JSON (```json ... ```)
+/// 3. 包含前后缀文本的 JSON
+/// 4. 嵌套的 JSON 结构（查找最外层的 {}）
+fn extract_json_from_response(response: &str) -> Option<serde_json::Value> {
+    let trimmed = response.trim();
+
+    // 1. 直接尝试解析
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return Some(v);
+    }
+
+    // 2. 尝试去除 markdown 代码块
+    let without_markdown = strip_markdown_code_block(trimmed);
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&without_markdown) {
+        return Some(v);
+    }
+
+    // 3. 查找并提取 JSON 对象（查找匹配的 {} 对）
+    if let Some(json_str) = extract_balanced_json(&without_markdown) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
+            return Some(v);
+        }
+    }
+
+    // 4. 回退：简单的 find/rfind 方法
+    if let Some(start) = without_markdown.find('{') {
+        if let Some(end) = without_markdown.rfind('}') {
+            if end > start {
+                let json_str = &without_markdown[start..=end];
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    return Some(v);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// 去除 markdown 代码块包裹
+fn strip_markdown_code_block(s: &str) -> String {
+    let trimmed = s.trim();
+
+    // 处理 ```json ... ``` 或 ``` ... ``` 格式
+    if trimmed.starts_with("```") {
+        let without_start = trimmed.trim_start_matches("```");
+        // 跳过语言标识符（如 json）
+        let content = match without_start.find('\n') {
+            Some(idx) => &without_start[idx + 1..],
+            None => without_start,
+        };
+        // 去掉结尾的 ```
+        let without_end = content.trim_end_matches("```").trim();
+        return without_end.to_string();
+    }
+
+    trimmed.to_string()
+}
+
+/// 提取平衡的 JSON 对象（正确匹配 {} 对）
+fn extract_balanced_json(s: &str) -> Option<String> {
+    let mut start_idx = None;
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for (i, c) in s.char_indices() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+
+        match c {
+            '\\' if in_string => {
+                escape_next = true;
+            }
+            '"' => {
+                in_string = !in_string;
+            }
+            '{' if !in_string => {
+                if depth == 0 {
+                    start_idx = Some(i);
+                }
+                depth += 1;
+            }
+            '}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(start) = start_idx {
+                        return Some(s[start..=i].to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 /// 保存总结到数据库
