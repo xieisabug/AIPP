@@ -12,6 +12,7 @@ use crate::api::ai_api::{sanitize_tool_name, tool_result_continue_ask_ai_impl};
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::{MCPDatabase, MCPServer, MCPToolCall};
 use crate::mcp::builtin_mcp::{execute_aipp_builtin_tool, is_builtin_mcp_call};
+use crate::state::activity_state::ConversationActivityManager;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -26,6 +27,7 @@ use rmcp::{
 use serde_json::Map as JsonMap;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use tauri::Manager;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -245,6 +247,13 @@ async fn handle_tool_execution_result(
 
             // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
             broadcast_mcp_tool_call_update(app_handle, &tool_call);
+
+            // 工具执行失败后，恢复 MCP 执行前的活动状态
+            if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+                activity_manager
+                    .restore_after_mcp(app_handle, tool_call.conversation_id)
+                    .await;
+            }
         }
     }
 
@@ -403,6 +412,13 @@ pub async fn execute_mcp_tool_call(
     broadcast_mcp_tool_call_update(&app_handle, &tool_call);
     debug!(call_id=call_id, status=%tool_call.status, "broadcasted executing status event");
 
+    // 设置 MCP 执行中的活动状态（闪亮边框）
+    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+        activity_manager
+            .set_mcp_executing(&app_handle, tool_call.conversation_id, call_id)
+            .await;
+    }
+
     // 执行工具
     let cancel_token = register_cancel_token(call_id).await;
     let execution_result = {
@@ -558,6 +574,13 @@ pub async fn stop_mcp_tool_call(
         // 3. 广播状态更新事件
         let updated_call = db.get_mcp_tool_call(call_id).map_err(|e| e.to_string())?;
         broadcast_mcp_tool_call_update(&app_handle, &updated_call);
+
+        // 4. 恢复 MCP 执行前的活动状态
+        if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+            activity_manager
+                .restore_after_mcp(&app_handle, current_call.conversation_id)
+                .await;
+        }
     }
 
     Ok(())

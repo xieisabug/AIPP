@@ -6,6 +6,7 @@ use crate::db::assistant_db::Assistant;
 use crate::db::conversation_db::{ConversationDatabase, Message, Repository};
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
+use crate::state::activity_state::ConversationActivityManager;
 use crate::utils::window_utils::send_error_to_appropriate_window;
 use anyhow::Context as _;
 use futures::StreamExt;
@@ -305,6 +306,7 @@ fn split_tool_name(fn_name: &str) -> (String, String) {
 }
 
 /// 创建并发出 message_add 事件，返回消息ID
+/// 同时设置活动状态以显示闪亮边框
 async fn ensure_stream_message(
     conversation_db: &ConversationDatabase,
     window: &tauri::Window,
@@ -361,6 +363,16 @@ async fn ensure_stream_message(
         .unwrap(),
     };
     let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
+
+    // 设置 Assistant 消息的活动状态（闪亮边框）
+    if message_type == "response" || message_type == "reasoning" {
+        let app_handle = window.app_handle();
+        if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+            activity_manager
+                .set_assistant_streaming(&app_handle, conversation_id, new_message.id)
+                .await;
+        }
+    }
 
     Ok(new_message.id)
 }
@@ -2028,6 +2040,16 @@ async fn attempt_stream_chat(
                             format!("conversation_event_{}", conversation_id).as_str(),
                             stream_complete_event,
                         );
+
+                        // 清除活动状态（闪亮边框）
+                        let app_handle = window.app_handle();
+                        if let Some(activity_manager) =
+                            app_handle.try_state::<ConversationActivityManager>()
+                        {
+                            activity_manager
+                                .clear_focus(&app_handle, conversation_id)
+                                .await;
+                        }
 
                         return Ok(());
                     }

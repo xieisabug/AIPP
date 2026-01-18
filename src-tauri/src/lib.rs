@@ -150,6 +150,7 @@ use db::system_db::FeatureConfig;
 use get_selected_text::get_selected_text;
 use serde::{Deserialize, Serialize};
 use state::message_token::MessageTokenManager;
+use state::activity_state::ConversationActivityManager;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::path::BaseDirectory;
@@ -486,6 +487,7 @@ pub fn run() {
         })
         .manage(AcpSessionState::new())
         .manage(MessageTokenManager::new())
+        .manage(ConversationActivityManager::new())
         .manage(OperationState::new())
         .manage(AcpPermissionState::new());
     #[cfg(desktop)]

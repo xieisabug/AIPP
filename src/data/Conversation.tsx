@@ -122,6 +122,19 @@ export interface StreamCompleteEvent {
     reasoning_length?: number;
 }
 
+// 活动焦点类型 - 用于控制闪亮边框的显示
+export type ActivityFocus =
+    | { focus_type: 'none' }
+    | { focus_type: 'user_pending'; message_id: number }
+    | { focus_type: 'assistant_streaming'; message_id: number }
+    | { focus_type: 'mcp_executing'; call_id: number };
+
+// 活动焦点变化事件
+export interface ActivityFocusChangeEvent {
+    conversation_id: number;
+    focus: ActivityFocus;
+}
+
 // 消息类型枚举
 export type MessageType = 'system' | 'user' | 'assistant' | 'reasoning' | 'response' | 'error';
 

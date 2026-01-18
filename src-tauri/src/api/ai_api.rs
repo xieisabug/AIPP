@@ -21,6 +21,7 @@ use crate::errors::AppError;
 use crate::mcp::execution_api::cancel_mcp_tool_calls_by_conversation;
 use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt};
 use crate::skills::{collect_skills_info_for_assistant, format_skills_prompt};
+use crate::state::activity_state::ConversationActivityManager;
 use crate::state::message_token::MessageTokenManager;
 use crate::template_engine::TemplateEngine;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
@@ -167,13 +168,14 @@ fn sanitize_messages_for_non_native(
 }
 
 #[tauri::command]
-#[instrument(skip(app_handle, state, acp_session_state, feature_config_state, message_token_manager, window, request, override_model_config, override_prompt, override_mcp_config), fields(assistant_id = request.assistant_id, conversation_id = %request.conversation_id, override_model_id = request.override_model_id))]
+#[instrument(skip(app_handle, state, acp_session_state, feature_config_state, message_token_manager, activity_manager, window, request, override_model_config, override_prompt, override_mcp_config), fields(assistant_id = request.assistant_id, conversation_id = %request.conversation_id, override_model_id = request.override_model_id))]
 pub async fn ask_ai(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     acp_session_state: State<'_, AcpSessionState>,
     feature_config_state: State<'_, FeatureConfigState>,
     message_token_manager: State<'_, MessageTokenManager>,
+    activity_manager: State<'_, ConversationActivityManager>,
     window: tauri::Window,
     request: AiRequest,
     override_model_config: Option<HashMap<String, serde_json::Value>>,
@@ -265,7 +267,7 @@ pub async fn ask_ai(
         template_engine.parse(&processed_request.prompt, &template_context).await;
 
     let app_handle_clone = app_handle.clone();
-    let (conversation_id, _new_message_id, request_prompt_result_with_context, init_message_list) =
+    let (conversation_id, _new_message_id, user_message_id, request_prompt_result_with_context, init_message_list) =
         initialize_conversation(
             &app_handle_clone,
             &processed_request,
@@ -275,6 +277,11 @@ pub async fn ask_ai(
             override_prompt.clone(),
         )
         .await?;
+
+    // 设置用户消息的活动状态（闪亮边框）
+    activity_manager
+        .set_user_pending(&app_handle, conversation_id, user_message_id)
+        .await;
 
     // 非原生 toolcall 时，将历史中的 tool_result 在“发送给 LLM 的消息”里当作用户消息。
     // 注意：DB 与 UI 不变，仅用于请求时的上下文构造。
@@ -1504,10 +1511,11 @@ async fn initialize_conversation(
     assistant_prompt_result: String,
     request_prompt_result: String,
     override_prompt: Option<String>,
-) -> Result<(i64, Option<i64>, String, Vec<(String, String, Vec<MessageAttachment>)>), AppError> {
+) -> Result<(i64, Option<i64>, i64, String, Vec<(String, String, Vec<MessageAttachment>)>), AppError> {
+    // 返回值：(conversation_id, add_message_id, user_message_id, request_prompt_with_context, init_message_list)
     let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
 
-    let (conversation_id, add_message_id, request_prompt_result_with_context, init_message_list) =
+    let (conversation_id, add_message_id, user_message_id, request_prompt_result_with_context, init_message_list) =
         if request.conversation_id.is_empty() {
             let message_attachment_list = db
                 .attachment_repo()
@@ -1545,16 +1553,23 @@ async fn initialize_conversation(
                 ?init_message_list,
                 "initialize new conversation"
             );
-            let (conversation, _) = init_conversation(
+            let (conversation, created_messages) = init_conversation(
                 app_handle,
                 request.assistant_id,
                 assistant_detail.model[0].id,
                 assistant_detail.model[0].model_code.clone(),
                 &init_message_list,
             )?;
+            // 获取用户消息的 ID（第二条消息是 user 类型）
+            let user_msg_id = created_messages
+                .iter()
+                .find(|m| m.message_type == "user")
+                .map(|m| m.id)
+                .unwrap_or(0);
             (
                 conversation.id,
                 None, // 不预先创建空的assistant消息，让流式处理动态创建
+                user_msg_id,
                 request_prompt_result_with_context,
                 init_message_list,
             )
@@ -1677,11 +1692,12 @@ async fn initialize_conversation(
             (
                 conversation_id,
                 None, // 不预先创建空的assistant消息，让流式处理动态创建
+                user_message.id,
                 request_prompt_result_with_context,
                 updated_message_list,
             )
         };
-    Ok((conversation_id, add_message_id, request_prompt_result_with_context, init_message_list))
+    Ok((conversation_id, add_message_id, user_message_id, request_prompt_result_with_context, init_message_list))
 }
 
 /// 重新生成对话标题
