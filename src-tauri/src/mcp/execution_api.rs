@@ -137,7 +137,6 @@ fn serialize_tool_response(response: &rmcp::model::CallToolResult) -> Result<Str
     }
 }
 
-// MCP Tool Execution API
 
 // 发送MCP工具调用状态更新事件
 /// 向前端发送工具调用状态更新事件（包括执行中 / 成功 / 失败）。
@@ -218,6 +217,14 @@ async fn handle_tool_execution_result(
 
             // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
             broadcast_mcp_tool_call_update(app_handle, &tool_call);
+
+            // Restore focus before continuation so the UI keeps shining while waiting.
+            if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+                activity_manager
+                    .restore_after_mcp(app_handle, tool_call.conversation_id)
+                    .await;
+            }
+
 
             // 处理对话继续逻辑
             info!("准备触发工具成功续写，call_id={}, is_retry={}", call_id, is_retry);
