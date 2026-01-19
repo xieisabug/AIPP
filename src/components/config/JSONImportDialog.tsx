@@ -128,6 +128,7 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
                 timeout: config.timeout || 30000,
                 is_long_running: config.is_long_running || false,
                 is_enabled: config.is_enabled !== false, // Default to true
+                proxy_enabled: false,
             });
         }
 
@@ -172,6 +173,7 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
             timeout: config.timeout || 30000,
             is_long_running: config.is_long_running || false,
             is_enabled: config.is_enabled !== false, // Default to true
+            proxy_enabled: false,
         };
     };
 

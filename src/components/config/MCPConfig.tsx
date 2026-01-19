@@ -786,6 +786,7 @@ const MCPConfig: React.FC = () => {
                                 is_long_running: editingServer.is_long_running,
                                 is_enabled: editingServer.is_enabled,
                                 is_builtin: editingServer.is_builtin,
+                                proxy_enabled: editingServer.proxy_enabled || false,
                             };
                             await invoke('update_mcp_server', { id: editingServer.id, request: req });
 

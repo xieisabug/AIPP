@@ -742,7 +742,7 @@ impl ContentFetcher {
             .arg("--disable-extensions")
             .arg("--disable-blink-features=AutomationControlled")
             .arg("--virtual-time-budget=15000")
-            .arg("--timeout=45000")
+            .arg(format!("--timeout={}", self.config.wait_timeout_ms * 3))
             .arg("--hide-scrollbars")
             .arg("--window-size=1280,800")
             .arg("--dump-dom")
@@ -808,7 +808,7 @@ impl ContentFetcher {
         let mut client_builder = reqwest::Client::builder()
             .user_agent(user_agent)
             .redirect(reqwest::redirect::Policy::limited(10))
-            .timeout(Duration::from_secs(15));
+            .timeout(Duration::from_millis(self.config.wait_timeout_ms));
 
         if let Some(ref proxy) = self.config.proxy_server {
             let proxy = reqwest::Proxy::all(proxy)
@@ -1139,8 +1139,8 @@ impl ContentFetcher {
         // 人性化的搜索触发
         self.humanized_search_submit(page, search_engine).await?;
 
-        // 等待结果加载，带随机延时
-        let wait_time = self.timing_config.page_load_timeout + fastrand::u64(0..2000);
+        // 等待结果加载，使用配置的等待时间加随机延时
+        let wait_time = self.config.wait_timeout_ms + fastrand::u64(0..2000);
         self.wait_for_results_with_timeout(page, wait_time, search_engine).await?;
 
         // 增强的HTML提取，带重试机制
