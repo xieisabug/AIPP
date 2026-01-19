@@ -8,7 +8,7 @@ use crate::api::ai::config::{
     get_network_proxy_from_config, get_request_timeout_from_config, ChatConfig, ConfigBuilder,
 };
 use crate::api::ai::conversation::{build_chat_messages, init_conversation};
-use crate::api::ai::events::{ConversationEvent, MessageAddEvent, MessageUpdateEvent};
+use crate::api::ai::events::{ActivityFocus, ConversationEvent, MessageAddEvent, MessageUpdateEvent};
 use crate::api::ai::title::generate_title;
 use crate::api::ai::types::{AiRequest, AiResponse, McpOverrideConfig};
 use crate::api::assistant_api::{get_assistant, get_assistants};
@@ -1698,6 +1698,15 @@ async fn initialize_conversation(
             )
         };
     Ok((conversation_id, add_message_id, user_message_id, request_prompt_result_with_context, init_message_list))
+}
+
+/// 获取指定对话的当前活动焦点状态（用于前端闪亮边框同步）
+#[tauri::command]
+pub async fn get_activity_focus(
+    activity_manager: State<'_, ConversationActivityManager>,
+    conversation_id: i64,
+) -> Result<ActivityFocus, String> {
+    Ok(activity_manager.get_focus(conversation_id).await)
 }
 
 /// 重新生成对话标题

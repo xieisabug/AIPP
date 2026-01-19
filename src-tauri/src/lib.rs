@@ -14,7 +14,8 @@ mod utils;
 mod window;
 
 use crate::api::ai_api::{
-    ask_ai, cancel_ai, regenerate_ai, regenerate_conversation_title, tool_result_continue_ask_ai,
+    ask_ai, cancel_ai, get_activity_focus, regenerate_ai, regenerate_conversation_title,
+    tool_result_continue_ask_ai,
 };
 use crate::api::assistant_api::{
     add_assistant, bulk_update_assistant_mcp_tools, copy_assistant, delete_assistant,
@@ -497,6 +498,7 @@ pub fn run() {
             ask_ai,
             tool_result_continue_ask_ai,
             regenerate_ai,
+            get_activity_focus,
             regenerate_conversation_title,
             generate_artifact_metadata,
             cancel_ai,
@@ -1036,5 +1038,3 @@ pub(crate) async fn reconfigure_global_shortcuts_async(app_handle: &tauri::AppHa
         }
     }
 }
-
-

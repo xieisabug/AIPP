@@ -63,6 +63,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     // 事件监听取消订阅引用
     const unsubscribeRef = useRef<Promise<() => void> | null>(null);
     const hasUnsubscribedRef = useRef<boolean>(false);
+    const focusSyncRequestIdRef = useRef<number>(0);
 
     // 使用 ref 存储最新的回调函数，避免依赖项变化
     const callbacksRef = useRef(options);
@@ -122,6 +123,27 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         // 不再自动更新 shiningMessageIds，而是触发 updateShiningMessagesFromFocus
         updateShiningMessagesFromFocus();
     }, [updateShiningMessagesFromFocus]);
+
+    // 主动从后端同步当前活动焦点，避免在监听尚未建立时丢失状态
+    const syncActivityFocus = useCallback((conversationIdNum: number) => {
+        if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
+            return;
+        }
+
+        const requestId = focusSyncRequestIdRef.current + 1;
+        focusSyncRequestIdRef.current = requestId;
+
+        invoke<ActivityFocus>("get_activity_focus", { conversationId: conversationIdNum })
+            .then((focus) => {
+                if (focusSyncRequestIdRef.current !== requestId) return;
+                console.log("[ActivityFocus] Synced initial focus from backend:", focus);
+                setActivityFocus(focus);
+            })
+            .catch((error) => {
+                if (focusSyncRequestIdRef.current !== requestId) return;
+                console.warn("[ActivityFocus] Failed to sync focus state", error);
+            });
+    }, []);
 
     const applyMcpToolCalls = useCallback((calls: MCPToolCall[]) => {
         const stateMap = new Map<number, MCPToolCallUpdateEvent>();
@@ -454,6 +476,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     useEffect(() => {
         if (!options.conversationId) {
             // 清理状态
+            focusSyncRequestIdRef.current += 1; // 使之前的同步请求失效
             setStreamingMessages(new Map());
             setShiningMessageIds(new Set());
             setMCPToolCallStates(new Map());
@@ -464,7 +487,14 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             return;
         }
 
-        const eventName = `conversation_event_${options.conversationId}`;
+        const conversationIdNum = Number(options.conversationId);
+        if (Number.isNaN(conversationIdNum)) {
+            focusSyncRequestIdRef.current += 1; // 避免旧同步影响
+            console.warn("[ActivityFocus] Invalid conversationId for event subscription:", options.conversationId);
+            return;
+        }
+
+        const eventName = `conversation_event_${conversationIdNum}`;
         console.log(
             `[ACP DEBUG] Setting up conversation event listener for: ${eventName}`,
         );
@@ -487,6 +517,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             eventName,
             handleConversationEvent,
         );
+
+        // 主动同步一次当前焦点，避免在订阅前发生的事件导致闪烁状态缺失
+        syncActivityFocus(conversationIdNum);
 
         return () => {
             if (unsubscribeRef.current && !hasUnsubscribedRef.current) {

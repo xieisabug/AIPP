@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import {
     ConversationEvent,
@@ -34,6 +35,7 @@ export interface ActivityFocusState {
 export function useActivityFocus(options: UseActivityFocusOptions): ActivityFocusState {
     const [focus, setFocus] = useState<ActivityFocus>({ focus_type: 'none' });
     const unsubscribeRef = useRef<UnlistenFn | null>(null);
+    const focusSyncRequestIdRef = useRef<number>(0);
 
     // 从 focus 派生出闪亮状态
     const shiningMessageId: number | null =
@@ -90,11 +92,19 @@ export function useActivityFocus(options: UseActivityFocusOptions): ActivityFocu
         const { conversationId } = options;
 
         if (!conversationId) {
+            focusSyncRequestIdRef.current += 1; // 避免旧请求落到新对话
             setFocus({ focus_type: 'none' });
             return;
         }
 
-        const eventName = `conversation_event_${conversationId}`;
+        const conversationIdNum = Number(conversationId);
+        if (Number.isNaN(conversationIdNum)) {
+            focusSyncRequestIdRef.current += 1;
+            setFocus({ focus_type: 'none' });
+            return;
+        }
+
+        const eventName = `conversation_event_${conversationIdNum}`;
         console.log('[ActivityFocus] Setting up listener for:', eventName);
 
         // 清理之前的监听
@@ -107,6 +117,20 @@ export function useActivityFocus(options: UseActivityFocusOptions): ActivityFocu
         listen(eventName, handleEvent).then((unsubscribe) => {
             unsubscribeRef.current = unsubscribe;
         });
+
+        // 同步当前的焦点状态，避免在订阅前的事件导致状态缺失
+        const requestId = focusSyncRequestIdRef.current + 1;
+        focusSyncRequestIdRef.current = requestId;
+        invoke<ActivityFocus>("get_activity_focus", { conversationId: conversationIdNum })
+            .then((currentFocus) => {
+                if (focusSyncRequestIdRef.current !== requestId) return;
+                console.log("[ActivityFocus] Synced focus from backend:", currentFocus);
+                setFocus(currentFocus);
+            })
+            .catch((error) => {
+                if (focusSyncRequestIdRef.current !== requestId) return;
+                console.warn("[ActivityFocus] Failed to sync focus state", error);
+            });
 
         return () => {
             if (unsubscribeRef.current) {
