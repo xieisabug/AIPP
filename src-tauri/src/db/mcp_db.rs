@@ -1151,4 +1151,45 @@ impl MCPDatabase {
         }
         Ok(result)
     }
+
+    /// Fetch MCP tool calls linked to a specific message
+    #[instrument(level = "trace", skip(self), fields(message_id))]
+    pub fn get_mcp_tool_calls_by_message(
+        &self,
+        message_id: i64,
+    ) -> rusqlite::Result<Vec<MCPToolCall>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, conversation_id, message_id, server_id, server_name, tool_name,
+             parameters, status, result, error, created_time, started_time, finished_time,
+             llm_call_id, assistant_message_id, subtask_id
+             FROM mcp_tool_call WHERE message_id = ? ORDER BY id ASC",
+        )?;
+
+        let calls = stmt.query_map([message_id], |row| {
+            Ok(MCPToolCall {
+                id: row.get(0)?,
+                conversation_id: row.get(1)?,
+                message_id: row.get(2)?,
+                subtask_id: row.get(15)?,
+                server_id: row.get(3)?,
+                server_name: row.get(4)?,
+                tool_name: row.get(5)?,
+                parameters: row.get(6)?,
+                status: row.get(7)?,
+                result: row.get(8)?,
+                error: row.get(9)?,
+                created_time: row.get(10)?,
+                started_time: row.get(11)?,
+                finished_time: row.get(12)?,
+                llm_call_id: row.get(13)?,
+                assistant_message_id: row.get(14)?,
+            })
+        })?;
+
+        let mut result = Vec::new();
+        for call in calls {
+            result.push(call?);
+        }
+        Ok(result)
+    }
 }

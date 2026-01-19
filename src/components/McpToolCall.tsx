@@ -18,6 +18,7 @@ interface McpToolCallProps {
     messageId?: number;
     callId?: number; // If provided, this is an existing call
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>; // Global MCP states
+    isLastCall?: boolean; // 是否是消息中的最后一个工具调用
 }
 
 type ExecutionState = "idle" | "pending" | "executing" | "success" | "failed";
@@ -90,6 +91,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     messageId,
     callId,
     mcpToolCallStates,
+    isLastCall = true, // 默认为 true，向后兼容
 }) => {
     const [toolCallId, setToolCallId] = useState<number | null>(callId || null);
 
@@ -345,9 +347,10 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             }
 
             // Execute the tool call
+            // 只有当这是消息中最后一个工具调用时才触发续写
             const result = await invoke<MCPToolCall>("execute_mcp_tool_call", {
                 callId: currentCallId,
-                triggerContinuation: false, // 手动执行不触发续写
+                triggerContinuation: isLastCall,
             });
 
             if (result.status === "success" && result.result) {

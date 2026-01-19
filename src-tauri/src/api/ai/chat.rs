@@ -2079,16 +2079,24 @@ async fn attempt_stream_chat(
                                 {
                                     // 批量续写：所有工具执行完成后统一触发
                                     if !exec_ids.is_empty() {
+                                        debug!(
+                                            exec_ids = ?exec_ids,
+                                            "triggering batch continuation after concurrent tool execution"
+                                        );
                                         let state = app_handle.state::<crate::AppState>();
                                         let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
-                                        let _ = crate::mcp::execution_api::trigger_conversation_continuation_batch(
+                                        if let Err(e) = crate::mcp::execution_api::trigger_conversation_continuation_batch(
                                             &app_handle,
                                             state,
                                             feature_config_state,
                                             window.clone(),
                                             conversation_id,
                                             exec_ids,
-                                        ).await;
+                                        ).await {
+                                            warn!(error = %e, "batch continuation failed after concurrent tool execution");
+                                        }
+                                    } else {
+                                        debug!("no exec_ids, skipping batch continuation");
                                     }
                                 }
                             }
@@ -2572,16 +2580,24 @@ pub async fn handle_non_stream_chat(
                 {
                     // 批量续写：所有工具执行完成后统一触发
                     if !exec_ids.is_empty() {
+                        debug!(
+                            exec_ids = ?exec_ids,
+                            "triggering batch continuation after non-stream concurrent tool execution"
+                        );
                         let state = app_handle.state::<crate::AppState>();
                         let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
-                        let _ = crate::mcp::execution_api::trigger_conversation_continuation_batch(
+                        if let Err(e) = crate::mcp::execution_api::trigger_conversation_continuation_batch(
                             app_handle,
                             state,
                             feature_config_state,
                             window.clone(),
                             conversation_id,
                             exec_ids,
-                        ).await;
+                        ).await {
+                            warn!(error = %e, "batch continuation failed after non-stream concurrent tool execution");
+                        }
+                    } else {
+                        debug!("no exec_ids in non-stream, skipping batch continuation");
                     }
                 }
             }

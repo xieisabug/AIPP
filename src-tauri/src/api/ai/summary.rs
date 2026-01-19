@@ -17,8 +17,9 @@ use tracing::{debug, error, info, warn};
 ///
 /// Algorithm:
 /// 1. Sort messages by created_time then id.
-/// 2. When a parent_group_id appears, truncate to the parent group.
-/// 3. Append current message to form the latest branch.
+/// 2. When a parent_group_id appears, truncate to after the parent group.
+/// 3. For messages with the same generation_group_id, only keep the latest one.
+/// 4. Append current message to form the latest branch.
 pub(crate) fn get_latest_branch_messages(
     messages: &[(Message, Option<crate::db::conversation_db::MessageAttachment>)],
 ) -> Vec<Message> {
@@ -38,12 +39,23 @@ pub(crate) fn get_latest_branch_messages(
 
     let mut result: Vec<Message> = Vec::new();
     for msg in ordered {
+        // 处理分支：当遇到带有 parent_group_id 的消息时，截断到该 parent 之后
         if let Some(parent_group_id) = &msg.parent_group_id {
             if let Some(first_index) = result.iter().position(|m| {
                 m.generation_group_id.as_ref().map(|id| id == parent_group_id).unwrap_or(false)
             }) {
-                result.truncate(first_index);
+                // 保留 parent group 消息，截断之后的所有消息
+                result.truncate(first_index + 1);
             }
+        }
+
+        // 处理同一 generation_group_id 的多个消息：只保留最新的
+        // 如果当前消息有 generation_group_id，检查 result 中是否已有相同 group_id 的消息
+        if let Some(current_group_id) = &msg.generation_group_id {
+            // 找到并移除所有具有相同 generation_group_id 的旧消息
+            result.retain(|m| {
+                m.generation_group_id.as_ref().map(|id| id != current_group_id).unwrap_or(true)
+            });
         }
 
         result.push(msg.clone());
