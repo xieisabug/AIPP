@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import React, { useState, useCallback, useMemo, useEffect, useRef, useLayoutEffect } from "react";
 import { Play, Loader2, CheckCircle, XCircle, Blocks, ChevronDown, ChevronUp, RotateCcw, Square, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -282,6 +282,26 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
 
     // 注意：后端 `detect_and_process_mcp_calls` 已根据助手配置自动执行，这里不再做自动执行
 
+    // 展开/收起动画相关
+    const contentRef = useRef<HTMLDivElement>(null);
+    const innerContentRef = useRef<HTMLDivElement>(null);
+    const [contentHeight, setContentHeight] = useState<number>(0);
+
+    // 计算内容高度用于动画（使用内部容器的高度）
+    useLayoutEffect(() => {
+        if (innerContentRef.current) {
+            const resizeObserver = new ResizeObserver((entries) => {
+                for (const entry of entries) {
+                    setContentHeight(entry.contentRect.height);
+                }
+            });
+            resizeObserver.observe(innerContentRef.current);
+            // 初始设置高度
+            setContentHeight(innerContentRef.current.offsetHeight);
+            return () => resizeObserver.disconnect();
+        }
+    }, []);
+
     // 切换展开/收起状态，同时清除自动收起的定时器
     const handleToggleExpand = useCallback(() => {
         if (collapseTimerRef.current) {
@@ -464,8 +484,16 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 </div>
             </div>
 
-            {isExpanded && (
-                <div className="mt-2 space-y-2 max-w-full overflow-hidden">
+            {/* 带动画的可折叠内容区域 */}
+            <div
+                ref={contentRef}
+                className="overflow-hidden transition-all duration-300 ease-in-out"
+                style={{
+                    height: isExpanded ? `${contentHeight}px` : '0px',
+                    opacity: isExpanded ? 1 : 0,
+                }}
+            >
+                <div ref={innerContentRef} className="mt-2 space-y-2 max-w-full overflow-hidden">
                     <div className="max-w-full overflow-hidden">
                         <span className="text-xs font-medium mb-1 text-muted-foreground">参数:</span>
                         <JsonDisplay content={displayParameters} maxHeight="120px" className="mt-1" />
@@ -516,7 +544,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     )}
                     <div className="max-w-full overflow-hidden">{renderResult()}</div>
                 </div>
-            )}
+            </div>
         </div>
     );
 };
