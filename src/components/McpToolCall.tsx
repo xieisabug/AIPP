@@ -347,6 +347,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             // Execute the tool call
             const result = await invoke<MCPToolCall>("execute_mcp_tool_call", {
                 callId: currentCallId,
+                triggerContinuation: false, // 手动执行不触发续写
             });
 
             if (result.status === "success" && result.result) {
