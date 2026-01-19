@@ -1,4 +1,5 @@
 pub mod browser;
+pub mod browser_pool;
 pub mod engine_manager;
 pub mod engines;
 pub mod fetcher;

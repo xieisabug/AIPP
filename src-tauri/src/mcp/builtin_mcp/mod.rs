@@ -66,7 +66,7 @@ pub async fn execute_aipp_builtin_tool(
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| "Missing required parameter: query".to_string())?;
 
-                    // 获取result_type参数，默认为html
+                    // 获取result_type参数，默认为markdown
                     let result_type_str = args.get("result_type").and_then(|v| v.as_str());
 
                     let result_type = SearchResultType::from_str(result_type_str);

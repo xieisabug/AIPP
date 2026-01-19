@@ -210,9 +210,10 @@ pub async fn detect_and_process_mcp_calls(
     let result = async {
         let mcp_regex = regex::Regex::new(r"<mcp_tool_call>\s*<server_name>([^<]*)</server_name>\s*<tool_name>([^<]*)</tool_name>\s*<parameters>([\s\S]*?)</parameters>\s*</mcp_tool_call>").unwrap();
         let mut updated_content: Option<String> = None;
+        let mut temp_content = content.to_string();
 
-        // 只处理第一个匹配的 MCP 调用，避免单次回复中执行多个工具
-        if let Some(cap) = mcp_regex.captures_iter(content).next() {
+        // 处理所有匹配的 MCP 调用，支持多工具并发执行
+        for cap in mcp_regex.captures_iter(content) {
             let server_name = cap[1].trim().to_string();
             let tool_name = cap[2].trim().to_string();
             let parameters = cap[3].trim().to_string();
@@ -264,7 +265,9 @@ pub async fn detect_and_process_mcp_calls(
                             "llm_call_id": tool_call.llm_call_id,
                         })
                     );
-                    updated_content = Some(mcp_regex.replacen(content, 1, ui_hint).to_string());
+                    // 替换当前内容中的第一个匹配（使用 temp_content 累积更新）
+                    temp_content = mcp_regex.replacen(&temp_content, 1, &ui_hint).to_string();
+                    updated_content = Some(temp_content.clone());
 
                     // 尝试根据助手配置自动执行（is_auto_run）
                     if let Ok(conversation_db) = crate::db::conversation_db::ConversationDatabase::new(app_handle) {
@@ -301,6 +304,7 @@ pub async fn detect_and_process_mcp_calls(
                                                     feature_config_state,
                                                     window.clone(),
                                                     tool_call.id,
+                                                    true, // trigger_continuation
                                                 )
                                                 .await
                                                 {
@@ -323,9 +327,13 @@ pub async fn detect_and_process_mcp_calls(
                     error!(error = %e, "Failed to create MCP tool call");
                 }
             }
-        } else {
+        }
+
+        // 如果没有检测到任何工具调用，输出日志
+        if updated_content.is_none() {
             debug!("No MCP tool calls detected in message content");
         }
+
         Ok(updated_content)
     }
     .await;

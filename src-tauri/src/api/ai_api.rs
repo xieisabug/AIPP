@@ -866,6 +866,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         let mut chat_messages = Vec::new();
         let mut tool_call_to_response: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        let mut message_trace: Vec<String> = Vec::new();
 
         // 收集所有工具调用ID到响应的映射
         for (message_type, content, _) in init_message_list.iter() {
@@ -884,16 +885,19 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             match message_type.as_str() {
                 "system" => {
                     chat_messages.push(genai::chat::ChatMessage::system(content));
+                    message_trace.push("system".to_string());
                 }
                 "user" => {
                     if attachment_list.is_empty() {
                         chat_messages.push(genai::chat::ChatMessage::user(content));
+                        message_trace.push("user".to_string());
                     } else {
                         // 处理附件（与原来逻辑相同）
                         let mut parts = Vec::new();
                         parts.push(genai::chat::ContentPart::from_text(content));
                         // 这里简化处理，实际情况下需要完整的附件逻辑
                         chat_messages.push(genai::chat::ChatMessage::user(parts));
+                        message_trace.push("user:attachment".to_string());
                     }
                 }
                 "response" => {
@@ -901,7 +905,14 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
 
                     // 尝试从内容中提取工具调用信息重建Assistant消息
                     if let Some(assistant_with_calls) = crate::api::ai::conversation::reconstruct_assistant_with_tool_calls_from_content(content) {
+                        let tool_call_ids = assistant_with_calls
+                            .content
+                            .tool_calls()
+                            .iter()
+                            .map(|tc| tc.call_id.clone())
+                            .collect::<Vec<_>>();
                         chat_messages.push(assistant_with_calls.clone());
+                        message_trace.push(format!("assistant:tool_calls={:?}", tool_call_ids));
 
                         // 立即添加对应的 Tool 响应
                         let tool_calls = assistant_with_calls.content.tool_calls();
@@ -909,11 +920,13 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
                             if let Some(response_content) = tool_call_to_response.get(&tool_call.call_id) {
                                 let tool_response = genai::chat::ToolResponse::new(tool_call.call_id.clone(), response_content.clone());
                                 chat_messages.push(genai::chat::ChatMessage::from(tool_response));
+                                message_trace.push(format!("tool:call_id={}", tool_call.call_id));
                             }
                         }
                     } else {
                         // 普通的 Assistant 消息
                         chat_messages.push(genai::chat::ChatMessage::assistant(content));
+                        message_trace.push("assistant".to_string());
                     }
                 }
                 "tool_result" => {
@@ -921,9 +934,12 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
                 }
                 _ => {
                     chat_messages.push(genai::chat::ChatMessage::assistant(content));
+                    message_trace.push("assistant".to_string());
                 }
             }
         }
+
+        debug!(?message_trace, "toolcall continue message order");
 
         // 注入 MCP 工具，同时构建映射表
         let (tools, tool_name_mapping) = build_tools_with_mapping(&mcp_info.enabled_servers);

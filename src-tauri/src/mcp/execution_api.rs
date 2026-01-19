@@ -191,7 +191,7 @@ fn validate_server_status(server: &MCPServer) -> Result<()> {
 
 // 处理工具执行结果
 /// 根据执行结果更新状态并尝试触发会话续写。即使续写失败也不影响主执行成功标记。
-#[instrument(skip(app_handle,state,feature_config_state,window,tool_call,execution_result), fields(call_id=call_id, conversation_id=?tool_call.conversation_id, retry=?is_retry))]
+#[instrument(skip(app_handle,state,feature_config_state,window,tool_call,execution_result), fields(call_id=call_id, conversation_id=?tool_call.conversation_id, retry=?is_retry, trigger_continuation))]
 async fn handle_tool_execution_result(
     app_handle: &tauri::AppHandle,
     state: &tauri::State<'_, crate::AppState>,
@@ -201,6 +201,7 @@ async fn handle_tool_execution_result(
     mut tool_call: MCPToolCall,
     execution_result: std::result::Result<String, String>,
     is_retry: bool,
+    trigger_continuation: bool,
 ) -> Result<MCPToolCall, String> {
     let db = MCPDatabase::new(app_handle).map_err(|e| format!("初始化数据库失败: {}", e))?;
 
@@ -225,21 +226,24 @@ async fn handle_tool_execution_result(
                     .await;
             }
 
-
-            // 处理对话继续逻辑
-            info!("准备触发工具成功续写，call_id={}, is_retry={}", call_id, is_retry);
-            if let Err(e) = handle_tool_success_continuation(
-                app_handle,
-                state,
-                feature_config_state,
-                window,
-                &tool_call,
-                &result,
-                is_retry,
-            )
-            .await
-            {
-                warn!(error=%e, "tool execution succeeded but continuation failed");
+            // 处理对话继续逻辑（仅当 trigger_continuation 为 true 时）
+            if trigger_continuation {
+                info!("准备触发工具成功续写，call_id={}, is_retry={}", call_id, is_retry);
+                if let Err(e) = handle_tool_success_continuation(
+                    app_handle,
+                    state,
+                    feature_config_state,
+                    window,
+                    &tool_call,
+                    &result,
+                    is_retry,
+                )
+                .await
+                {
+                    warn!(error=%e, "tool execution succeeded but continuation failed");
+                }
+            } else {
+                debug!("trigger_continuation=false, skipping tool continuation, call_id={}", call_id);
             }
         }
         Err(error) => {
@@ -375,13 +379,14 @@ pub async fn create_mcp_tool_call_with_llm_id(
 /// 1. 原子更新状态到 executing
 /// 2. 按服务器传输类型派发执行
 /// 3. 持久化结果并触发续写
-#[instrument(skip(app_handle,state,feature_config_state,window), fields(call_id=call_id))]
+#[instrument(skip(app_handle,state,feature_config_state,window), fields(call_id=call_id, trigger_continuation))]
 pub async fn execute_mcp_tool_call(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, crate::AppState>,
     feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
     window: tauri::Window,
     call_id: i64,
+    trigger_continuation: bool,
 ) -> std::result::Result<MCPToolCall, String> {
     let db = MCPDatabase::new(&app_handle).map_err(|e| format!("初始化数据库失败: {}", e))?;
 
@@ -455,6 +460,7 @@ pub async fn execute_mcp_tool_call(
         tool_call,
         execution_result,
         is_retry,
+        trigger_continuation,
     )
     .await
 }
@@ -798,9 +804,21 @@ async fn trigger_conversation_continuation_with_error(
         tool_call.llm_call_id.clone().unwrap_or_else(|| format!("mcp_tool_call_{}", tool_call.id));
 
     // 格式化错误消息作为 tool_result，与成功结果的格式保持一致但标识为错误
+    // 限制错误消息长度，避免请求过大导致 400 错误
+    let error_preview = if error_message.chars().count() > 5000 {
+        let truncated: String = error_message.chars().take(5000).collect();
+        format!(
+            "{}...\n[Error truncated, total length: {}]",
+            truncated,
+            error_message.chars().count()
+        )
+    } else {
+        error_message.to_string()
+    };
+
     let error_result = format!(
         "Tool execution failed:\n\nTool Call ID: {}\nTool: {}\nServer: {}\nParameters: {}\nError:\n{}",
-        tool_call.id, tool_call.tool_name, tool_call.server_name, tool_call.parameters, error_message
+        tool_call.id, tool_call.tool_name, tool_call.server_name, tool_call.parameters, error_preview
     );
 
     // 异步派发续写，避免同步栈递归导致栈溢出
@@ -850,6 +868,141 @@ async fn trigger_conversation_continuation_with_error(
     }?;
 
     Ok(())
+}
+
+/// 批量续写：将多个工具执行结果一次性传递给 AI
+/// 只有所有执行的工具都成功时才触发续写
+#[instrument(skip(app_handle, state, feature_config_state, window), fields(conversation_id, tool_call_count = tool_call_ids.len()))]
+pub async fn trigger_conversation_continuation_batch(
+    app_handle: &tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+    feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
+    window: tauri::Window,
+    conversation_id: i64,
+    tool_call_ids: Vec<i64>,
+) -> Result<()> {
+    if tool_call_ids.is_empty() {
+        debug!("No tool calls to continue, skipping batch continuation");
+        return Ok(());
+    }
+
+    info!(
+        conversation_id,
+        tool_call_count = tool_call_ids.len(),
+        "Starting batch tool continuation"
+    );
+
+    let db = MCPDatabase::new(app_handle).context("初始化 MCP 数据库失败")?;
+
+    // 获取所有工具调用结果，并按 tool_call_id 升序排序
+    let mut tool_calls = Vec::new();
+    for call_id in &tool_call_ids {
+        match db.get_mcp_tool_call(*call_id) {
+            Ok(tc) => tool_calls.push(tc),
+            Err(e) => {
+                warn!(
+                    call_id,
+                    error = %e,
+                    "Failed to get tool call for batch continuation"
+                );
+                return Err(anyhow!("获取工具调用信息失败: {}", e));
+            }
+        }
+    }
+
+    // 按 tool_call_id 升序排序，确保与 AI 返回顺序一致
+    tool_calls.sort_by_key(|tc| tc.id);
+
+    // 检查是否所有工具都执行成功（有任何失败则不续写）
+    let all_success = tool_calls.iter().all(|tc| tc.status == "success");
+    if !all_success {
+        let failed_calls: Vec<_> = tool_calls
+            .iter()
+            .filter(|tc| tc.status != "success")
+            .map(|tc| (tc.id, &tc.server_name, &tc.tool_name, &tc.status))
+            .collect();
+        warn!(
+            ?failed_calls,
+            "Not all tools succeeded, skipping batch continuation"
+        );
+        return Ok(());
+    }
+
+    // 合并所有工具结果
+    let mut results = Vec::new();
+    for tc in &tool_calls {
+        if let Some(result) = &tc.result {
+            results.push(format!(
+                "{}. Tool: {}/{} (ID: {})\n   Status: success\n   Result: {}",
+                results.len() + 1,
+                tc.server_name,
+                tc.tool_name,
+                tc.id,
+                result
+            ));
+        }
+    }
+
+    let combined_result = format!(
+        "Tool execution results:\n\n{}",
+        results.join("\n\n")
+    );
+
+    // 获取对话和助手信息
+    let conversation_db = ConversationDatabase::new(app_handle)
+        .context("初始化对话数据库失败")?;
+    let conversation = conversation_db
+        .conversation_repo()
+        .unwrap()
+        .read(conversation_id)
+        .map_err(|e| anyhow!("获取对话信息失败: {}", e))?
+        .ok_or_else(|| anyhow!("未找到对话"))?;
+
+    let assistant_id = conversation
+        .assistant_id
+        .ok_or_else(|| anyhow!("对话未关联助手"))?;
+
+    // 使用会话级锁保证续写串行
+    let continuation_lock = {
+        let registry = continuation_lock_registry();
+        let mut guard = registry.lock().await;
+        guard
+            .entry(conversation_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+
+    let _lock_guard = continuation_lock.lock().await;
+
+    // 触发单次续写
+    let tool_call_id = format!("batch_mcp_tool_call_{}", conversation_id);
+    match tool_result_continue_ask_ai_impl(
+        app_handle.clone(),
+        window,
+        conversation_id.to_string(),
+        assistant_id,
+        tool_call_id,
+        combined_result,
+    )
+    .await
+    {
+        Ok(_) => {
+            info!(
+                conversation_id,
+                tool_count = tool_calls.len(),
+                "Batch tool continuation succeeded"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            warn!(
+                conversation_id,
+                error = %e,
+                "Batch tool continuation failed"
+            );
+            Err(anyhow!(e.to_string()))
+        }
+    }
 }
 
 /// 统一的工具执行函数，根据传输类型选择相应的执行策略（公开供子任务复用）

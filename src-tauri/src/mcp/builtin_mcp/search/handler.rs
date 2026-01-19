@@ -1,12 +1,17 @@
 use super::browser::BrowserManager;
+use super::browser_pool::{BrowserPool, BrowserPoolConfig};
 use super::engine_manager::{SearchEngine, SearchEngineManager};
 use super::engines::base::SearchEngineBase;
+use super::fingerprint::FingerprintManager;
 use super::fetcher::{ContentFetcher, FetchConfig};
 use super::types::{SearchRequest, SearchResponse, SearchResultType};
 use anyhow::Result;
 use std::collections::HashMap;
 use tauri::AppHandle;
+use tokio::sync::OnceCell;
 use tracing::{debug, error, info, instrument};
+
+static GLOBAL_BROWSER_POOL: OnceCell<BrowserPool> = OnceCell::const_new();
 
 #[derive(Clone)]
 pub struct SearchHandler {
@@ -17,6 +22,50 @@ impl SearchHandler {
     pub fn new(app_handle: AppHandle) -> Self {
         debug!("Creating SearchHandler");
         Self { app_handle }
+    }
+
+    /// 获取或创建浏览器池
+    async fn get_or_create_browser_pool(&self) -> Result<Option<BrowserPool>, String> {
+        // 从配置中读取是否启用池
+        let config = self.load_search_config()?;
+        let enable_pool = config
+            .get("ENABLE_BROWSER_POOL")
+            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(true); // 默认启用
+
+        if !enable_pool {
+            return Ok(None);
+        }
+
+        let browser_manager =
+            BrowserManager::new(config.get("BROWSER_TYPE").map(|s| s.as_str()));
+        let (_browser_type, browser_path) = browser_manager.get_available_browser()?;
+
+        let pool_config = BrowserPoolConfig {
+            max_pages: config
+                .get("MAX_CONCURRENT_PAGES")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5), // 默认最多5个并发页面
+            page_idle_timeout_secs: config
+                .get("PAGE_IDLE_TIMEOUT_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+            user_data_dir: config.get("USER_DATA_DIR").cloned(),
+            browser_path,
+            headless: config
+                .get("HEADLESS")
+                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
+                .unwrap_or(true),
+            launch_args: FingerprintManager::get_stealth_launch_args(),
+        };
+
+        let pool = GLOBAL_BROWSER_POOL
+            .get_or_try_init(|| async move {
+                Ok::<BrowserPool, String>(BrowserPool::new(pool_config))
+            })
+            .await?;
+
+        Ok(Some(pool.clone()))
     }
 
     /// 执行带结果类型的网络搜索
@@ -63,7 +112,13 @@ impl SearchHandler {
         let fetch_config =
             self.build_fetch_config(config, &SearchEngineManager::new(None), search_engine)?;
         let mut fetcher = ContentFetcher::new(self.app_handle.clone(), fetch_config);
-        fetcher.fetch_search_content(query, search_engine, browser_manager).await
+
+        // 获取浏览器池
+        let browser_pool = self.get_or_create_browser_pool().await?;
+
+        fetcher
+            .fetch_search_content(query, search_engine, browser_manager, browser_pool.as_ref())
+            .await
     }
 
     /// 根据结果类型处理HTML
@@ -143,7 +198,13 @@ impl SearchHandler {
         let fetch_config = self.build_general_fetch_config(&config)?;
         let mut fetcher = ContentFetcher::new(self.app_handle.clone(), fetch_config);
 
-        match fetcher.fetch_content(url, &browser_manager).await {
+        // 获取浏览器池
+        let browser_pool = self.get_or_create_browser_pool().await?;
+
+        match fetcher
+            .fetch_content(url, &browser_manager, browser_pool.as_ref())
+            .await
+        {
             Ok(html) => {
                 info!("Successfully fetched URL content");
 

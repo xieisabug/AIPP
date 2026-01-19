@@ -117,7 +117,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const [executionState, setExecutionState] = useState<ExecutionState>("idle");
     const [executionResult, setExecutionResult] = useState<string | null>(null);
     const [executionError, setExecutionError] = useState<string | null>(null);
-    // 默认展开：新工具调用（无 callId）默认展开，历史调用根据状态决定
+    // 默认展开：新工具调用默认展开，历史调用根据状态决定
     const [isExpanded, setIsExpanded] = useState<boolean>(!callId);
     // 自动收起定时器引用
     const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -146,14 +146,17 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             switch (globalState.status) {
                 case "pending":
                     setExecutionState("pending");
+                    setIsExpanded(true); // 待执行的调用默认展开
                     break;
                 case "executing":
                     setExecutionState("executing");
+                    setIsExpanded(true); // 执行中的调用默认展开
                     break;
                 case "success":
                     setExecutionState("success");
                     setExecutionResult(globalState.result || null);
                     setExecutionError(null);
+                    // 成功后不改变展开状态，保持用户的选择或使用3秒自动收起逻辑
                     break;
                 case "failed":
                     setExecutionState("failed");
@@ -164,6 +167,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         setExecutionError(globalState.error || null);
                     }
                     setExecutionResult(null);
+                    setIsExpanded(true); // 失败的调用默认展开，方便查看错误
                     break;
             }
         } else {
@@ -234,10 +238,13 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         } else if (matchingCall.status === "failed" && matchingCall.error) {
                             setExecutionError(matchingCall.error);
                             setExecutionState("failed");
+                            setIsExpanded(true); // 失败的调用默认展开，方便查看错误
                         } else if (matchingCall.status === "executing") {
                             setExecutionState("executing");
+                            setIsExpanded(true); // 执行中的调用默认展开，显示进度
                         } else if (matchingCall.status === "pending") {
                             setExecutionState("pending");
+                            setIsExpanded(true); // 待执行的调用默认展开，显示状态
                         }
                     } else {
                         console.log("[MCP] no matching tool call found for message", {
