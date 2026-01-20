@@ -7,7 +7,6 @@ use crate::db::conversation_db::{ConversationDatabase, ConversationSummary, Mess
 use crate::db::llm_db::LLMDatabase;
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
-use genai::chat::{ChatMessage, ChatRequest};
 use regex::Regex;
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
@@ -17,7 +16,7 @@ use tracing::{debug, error, info, warn};
 ///
 /// Algorithm:
 /// 1. Sort messages by created_time then id.
-/// 2. When a parent_group_id appears, truncate to after the parent group.
+/// 2. When a parent_group_id appears, truncate before the parent group (replace it).
 /// 3. For messages with the same generation_group_id, only keep the latest one.
 /// 4. Append current message to form the latest branch.
 pub(crate) fn get_latest_branch_messages(
@@ -39,13 +38,13 @@ pub(crate) fn get_latest_branch_messages(
 
     let mut result: Vec<Message> = Vec::new();
     for msg in ordered {
-        // 处理分支：当遇到带有 parent_group_id 的消息时，截断到该 parent 之后
+        // 处理分支：当遇到带有 parent_group_id 的消息时，移除 parent group 并截断后续消息
         if let Some(parent_group_id) = &msg.parent_group_id {
             if let Some(first_index) = result.iter().position(|m| {
                 m.generation_group_id.as_ref().map(|id| id == parent_group_id).unwrap_or(false)
             }) {
-                // 保留 parent group 消息，截断之后的所有消息
-                result.truncate(first_index + 1);
+                // 移除 parent group 消息，截断之后的所有消息
+                result.truncate(first_index);
             }
         }
 
@@ -108,7 +107,7 @@ pub async fn generate_conversation_summary(
     // - tool_result -> assistant message (simplified description)
     let mcp_tool_call_regex = Regex::new(r"<!--\s*MCP_TOOL_CALL:.*?-->").unwrap();
 
-    let mut relevant_messages: Vec<(
+    let relevant_messages: Vec<(
         String,
         String,
         Vec<crate::db::conversation_db::MessageAttachment>,
@@ -252,23 +251,23 @@ pub async fn generate_conversation_summary(
     )?;
 
     // 构建消息列表：system + 原始对话 + 总结请求
-    // 不使用 build_chat_messages_with_context，因为我们已经将所有消息转为纯文本格式
-    // 避免 ToolCall/ToolResponse 格式导致的 API 错误
-    let mut chat_messages = vec![ChatMessage::system(system_prompt)];
-
-    // 直接构建 user/assistant 消息，不经过工具调用处理
-    for (msg_type, content, _) in &relevant_messages {
-        match msg_type.as_str() {
-            "user" => chat_messages.push(ChatMessage::user(content)),
-            "response" => chat_messages.push(ChatMessage::assistant(content)),
-            _ => {}
-        }
+    let mut summary_message_list: Vec<(
+        String,
+        String,
+        Vec<crate::db::conversation_db::MessageAttachment>,
+    )> = Vec::new();
+    summary_message_list.push(("system".to_string(), system_prompt.to_string(), Vec::new()));
+    for (msg_type, content, attachments) in &relevant_messages {
+        summary_message_list.push((msg_type.clone(), content.clone(), attachments.clone()));
     }
+    summary_message_list.push(("user".to_string(), summary_request_prompt.to_string(), Vec::new()));
 
-    // 添加总结请求
-    chat_messages.push(ChatMessage::user(summary_request_prompt));
-
-    let chat_request = ChatRequest::new(chat_messages);
+    let chat_request = crate::api::ai::conversation::build_chat_request_from_messages(
+        &summary_message_list,
+        crate::api::ai::conversation::ToolCallStrategy::NonNative,
+        None,
+    )
+    .chat_request;
     let model_name = model_detail.model.code.clone();
 
     // 5) 调用 AI 生成总结

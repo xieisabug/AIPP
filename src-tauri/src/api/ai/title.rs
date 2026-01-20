@@ -9,11 +9,10 @@ use crate::db::llm_db::LLMDatabase;
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
 use crate::utils::window_utils::send_error_to_appropriate_window;
-use genai::chat::{ChatMessage, ChatRequest};
 use std::collections::HashMap;
 use tauri::Emitter;
 use tokio::time::{sleep, Duration};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 pub async fn generate_title(
     app_handle: &tauri::AppHandle,
@@ -207,8 +206,15 @@ pub async fn generate_title(
         Some(request_timeout),
     )?;
 
-    let chat_messages = vec![ChatMessage::system(&prompt), ChatMessage::user(&context)];
-    let chat_request = ChatRequest::new(chat_messages);
+    let chat_request = crate::api::ai::conversation::build_chat_request_from_messages(
+        &[
+            ("system".to_string(), prompt.clone(), Vec::new()),
+            ("user".to_string(), context.clone(), Vec::new()),
+        ],
+        crate::api::ai::conversation::ToolCallStrategy::NonNative,
+        None,
+    )
+    .chat_request;
     let model_name = &model_detail.model.code;
 
     // 从配置中获取最大重试次数

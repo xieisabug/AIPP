@@ -1,17 +1,110 @@
-use crate::api::ai_api::build_tool_name;
+use crate::api::ai::summary::get_latest_branch_messages;
+use crate::api::ai_api::{build_tool_name, ToolNameMapping};
 use crate::db::conversation_db::AttachmentType;
 use crate::db::conversation_db::Repository;
 use crate::db::conversation_db::{Conversation, ConversationDatabase, Message, MessageAttachment};
 use crate::errors::AppError;
 use base64::Engine;
-use genai::chat::{ChatMessage, ToolCall, ToolResponse};
+use genai::chat::{ChatMessage, ChatRequest, Tool, ToolCall, ToolResponse};
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use uuid::Uuid;
+
+fn build_user_message_with_attachments(
+    content: &str,
+    attachment_list: &[MessageAttachment],
+) -> ChatMessage {
+    if attachment_list.is_empty() {
+        return ChatMessage::user(content);
+    }
+
+    let mut parts = Vec::new();
+    parts.push(genai::chat::ContentPart::from_text(content));
+    for attachment in attachment_list {
+        // 优先处理图片附件（OpenAI 不支持 file:// 本地 URL，需要转为 base64）
+        if attachment.attachment_type == AttachmentType::Image {
+            // 1) 若 attachment_content 为 data:URL，直接解析
+            if let Some(content) = &attachment.attachment_content {
+                if content.starts_with("data:") {
+                    if let Some((mime, b64)) = parse_data_url(content) {
+                        parts.push(genai::chat::ContentPart::from_binary_base64(mime, b64, None));
+                        continue;
+                    }
+                }
+            }
+
+            // 2) 若 attachment_url 为 http/https，则可直接使用 URL
+            if let Some(url) = &attachment.attachment_url {
+                let url_lower = url.to_lowercase();
+                if url_lower.starts_with("http://") || url_lower.starts_with("https://") {
+                    let mime = infer_media_type_from_url(url);
+                    parts.push(genai::chat::ContentPart::from_binary_url(
+                        mime,
+                        url.clone(),
+                        None,
+                    ));
+                    continue;
+                }
+
+                // 3) 若 attachment_url 是 data:URL，则解析为 base64
+                if url_lower.starts_with("data:") {
+                    if let Some((mime, b64)) = parse_data_url(url) {
+                        parts.push(genai::chat::ContentPart::from_binary_base64(mime, b64, None));
+                        continue;
+                    }
+                }
+
+                // 4) 其他情况（如 file:// 或本地路径）：读取文件转 base64
+                let path = if url_lower.starts_with("file://") {
+                    // 去掉 file:// 前缀
+                    url.trim_start_matches("file://").to_string()
+                } else {
+                    url.clone()
+                };
+                // 尝试读取文件并转换
+                if let Ok(bytes) = std::fs::read(&path) {
+                    let mime = infer_media_type_from_url(url);
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    parts.push(genai::chat::ContentPart::from_binary_base64(mime, b64, None));
+                    continue;
+                } else {
+                    // 无法读取则跳过为安全
+                    warn!(url, "failed to read image file for attachment");
+                }
+            }
+        }
+
+        // 非图片类型或图片回退处理
+        if let Some(attachment_content) = &attachment.attachment_content {
+            if matches!(
+                attachment.attachment_type,
+                AttachmentType::Text
+                    | AttachmentType::PDF
+                    | AttachmentType::Word
+                    | AttachmentType::PowerPoint
+                    | AttachmentType::Excel
+            ) {
+                let file_name = attachment.attachment_url.as_deref().unwrap_or("未知文档");
+                let file_type = match attachment.attachment_type {
+                    AttachmentType::PDF => "PDF文档",
+                    AttachmentType::Word => "Word文档",
+                    AttachmentType::PowerPoint => "PowerPoint文档",
+                    AttachmentType::Excel => "Excel文档",
+                    _ => "文档",
+                };
+                parts.push(genai::chat::ContentPart::from_text(format!(
+                    "\n\n[{}: {}]\n{}",
+                    file_type, file_name, attachment_content
+                )));
+            }
+        }
+    }
+    ChatMessage::user(parts)
+}
 
 pub fn build_chat_messages(
     init_message_list: &[(String, String, Vec<MessageAttachment>)],
@@ -32,102 +125,7 @@ pub fn build_chat_messages_with_context(
         match message_type.as_str() {
             "system" => chat_messages.push(ChatMessage::system(content)),
             "user" => {
-                if attachment_list.is_empty() {
-                    chat_messages.push(ChatMessage::user(content));
-                } else {
-                    let mut parts = Vec::new();
-                    parts.push(genai::chat::ContentPart::from_text(content));
-                    for attachment in attachment_list {
-                        // 优先处理图片附件（OpenAI 不支持 file:// 本地 URL，需要转为 base64）
-                        if attachment.attachment_type == AttachmentType::Image {
-                            // 1) 若 attachment_content 为 data:URL，直接解析
-                            if let Some(content) = &attachment.attachment_content {
-                                if content.starts_with("data:") {
-                                    if let Some((mime, b64)) = parse_data_url(content) {
-                                        parts.push(genai::chat::ContentPart::from_binary_base64(
-                                            mime, b64, None,
-                                        ));
-                                        continue;
-                                    }
-                                }
-                            }
-
-                            // 2) 若 attachment_url 为 http/https，则可直接使用 URL
-                            if let Some(url) = &attachment.attachment_url {
-                                let url_lower = url.to_lowercase();
-                                if url_lower.starts_with("http://")
-                                    || url_lower.starts_with("https://")
-                                {
-                                    let mime = infer_media_type_from_url(url);
-                                    parts.push(genai::chat::ContentPart::from_binary_url(
-                                        mime,
-                                        url.clone(),
-                                        None,
-                                    ));
-                                    continue;
-                                }
-
-                                // 3) 若 attachment_url 是 data:URL，则解析为 base64
-                                if url_lower.starts_with("data:") {
-                                    if let Some((mime, b64)) = parse_data_url(url) {
-                                        parts.push(genai::chat::ContentPart::from_binary_base64(
-                                            mime, b64, None,
-                                        ));
-                                        continue;
-                                    }
-                                }
-
-                                // 4) 其他情况（如 file:// 或本地路径）：读取文件转 base64
-                                let path = if url_lower.starts_with("file://") {
-                                    // 去掉 file:// 前缀
-                                    url.trim_start_matches("file://").to_string()
-                                } else {
-                                    url.clone()
-                                };
-                                // 尝试读取文件并转换
-                                if let Ok(bytes) = std::fs::read(&path) {
-                                    let mime = infer_media_type_from_url(url);
-                                    let b64 =
-                                        base64::engine::general_purpose::STANDARD.encode(bytes);
-                                    parts.push(genai::chat::ContentPart::from_binary_base64(
-                                        mime, b64, None,
-                                    ));
-                                    continue;
-                                } else {
-                                    // 无法读取则跳过为安全
-                                    warn!(url, "failed to read image file for attachment");
-                                }
-                            }
-                        }
-
-                        // 非图片类型或图片回退处理
-                        if let Some(attachment_content) = &attachment.attachment_content {
-                            if matches!(
-                                attachment.attachment_type,
-                                AttachmentType::Text
-                                    | AttachmentType::PDF
-                                    | AttachmentType::Word
-                                    | AttachmentType::PowerPoint
-                                    | AttachmentType::Excel
-                            ) {
-                                let file_name =
-                                    attachment.attachment_url.as_deref().unwrap_or("未知文档");
-                                let file_type = match attachment.attachment_type {
-                                    AttachmentType::PDF => "PDF文档",
-                                    AttachmentType::Word => "Word文档",
-                                    AttachmentType::PowerPoint => "PowerPoint文档",
-                                    AttachmentType::Excel => "Excel文档",
-                                    _ => "文档",
-                                };
-                                parts.push(genai::chat::ContentPart::from_text(format!(
-                                    "\n\n[{}: {}]\n{}",
-                                    file_type, file_name, attachment_content
-                                )));
-                            }
-                        }
-                    }
-                    chat_messages.push(ChatMessage::user(parts));
-                }
+                chat_messages.push(build_user_message_with_attachments(content, attachment_list));
             }
             "tool_result" => {
                 debug!("processing tool_result message");
@@ -172,6 +170,333 @@ pub fn build_chat_messages_with_context(
         }
     }
     chat_messages
+}
+
+/// 在非原生 toolcall 场景下，移除 MCP 注释并将 tool_result 转换为 user 消息，避免重新构建原生 tool_calls
+pub fn sanitize_messages_for_non_native(
+    init_message_list: &[(String, String, Vec<MessageAttachment>)],
+) -> Vec<(String, String, Vec<MessageAttachment>)> {
+    let mcp_hint_regex = Regex::new(r"<!--\s*MCP_TOOL_CALL:.*?-->").unwrap();
+
+    init_message_list
+        .iter()
+        .map(|(message_type, content, attachments)| {
+            let sanitized_content = mcp_hint_regex.replace_all(content, "").to_string();
+            if message_type == "tool_result" {
+                (String::from("user"), sanitized_content, Vec::new())
+            } else {
+                (message_type.clone(), sanitized_content, attachments.clone())
+            }
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ToolCallStrategy {
+    Native,
+    NativeWithToolResponsePairing,
+    NonNative,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolConfig {
+    pub tools: Vec<Tool>,
+    pub tool_name_mapping: ToolNameMapping,
+}
+
+pub struct ChatRequestBuildResult {
+    pub chat_request: ChatRequest,
+    pub tool_name_mapping: ToolNameMapping,
+}
+
+pub fn build_chat_request_from_messages(
+    init_message_list: &[(String, String, Vec<MessageAttachment>)],
+    tool_call_strategy: ToolCallStrategy,
+    tool_config: Option<ToolConfig>,
+) -> ChatRequestBuildResult {
+    let chat_messages = match tool_call_strategy {
+        ToolCallStrategy::NativeWithToolResponsePairing => {
+            build_native_toolcall_paired_messages(init_message_list)
+        }
+        ToolCallStrategy::NonNative => {
+            let sanitized = sanitize_messages_for_non_native(init_message_list);
+            build_chat_messages(&sanitized)
+        }
+        ToolCallStrategy::Native => build_chat_messages(init_message_list),
+    };
+
+    let mut chat_request = ChatRequest::new(chat_messages);
+    let tool_name_mapping = tool_config
+        .as_ref()
+        .map(|config| config.tool_name_mapping.clone())
+        .unwrap_or_default();
+    if let Some(config) = tool_config {
+        if !config.tools.is_empty() {
+            chat_request = chat_request.with_tools(config.tools);
+        }
+    }
+
+    ChatRequestBuildResult { chat_request, tool_name_mapping }
+}
+
+fn build_native_toolcall_paired_messages(
+    init_message_list: &[(String, String, Vec<MessageAttachment>)],
+) -> Vec<ChatMessage> {
+    let mut chat_messages = Vec::new();
+    let mut tool_call_to_response: HashMap<String, String> = HashMap::new();
+    let mut message_trace: Vec<String> = Vec::new();
+
+    for (message_type, content, _) in init_message_list.iter() {
+        if message_type == "tool_result" {
+            if let Some(call_id) = extract_tool_call_id(content) {
+                if let Some(result) = extract_tool_result(content) {
+                    tool_call_to_response.insert(call_id, result);
+                }
+            }
+        }
+    }
+
+    for (message_type, content, attachment_list) in init_message_list.iter() {
+        match message_type.as_str() {
+            "system" => {
+                chat_messages.push(ChatMessage::system(content));
+                message_trace.push("system".to_string());
+            }
+            "user" => {
+                chat_messages.push(build_user_message_with_attachments(content, attachment_list));
+                message_trace.push("user".to_string());
+            }
+            "response" => {
+                if let Some(assistant_with_calls) =
+                    reconstruct_assistant_with_tool_calls_from_content(content)
+                {
+                    let tool_call_ids = assistant_with_calls
+                        .content
+                        .tool_calls()
+                        .iter()
+                        .map(|tc| tc.call_id.clone())
+                        .collect::<Vec<_>>();
+                    chat_messages.push(assistant_with_calls.clone());
+                    message_trace.push(format!("assistant:tool_calls={:?}", tool_call_ids));
+
+                    for tool_call in assistant_with_calls.content.tool_calls() {
+                        if let Some(response_content) = tool_call_to_response.get(&tool_call.call_id)
+                        {
+                            let tool_response =
+                                ToolResponse::new(tool_call.call_id.clone(), response_content.clone());
+                            chat_messages.push(ChatMessage::from(tool_response));
+                            message_trace.push(format!("tool:call_id={}", tool_call.call_id));
+                        }
+                    }
+                } else {
+                    chat_messages.push(ChatMessage::assistant(content));
+                    message_trace.push("assistant".to_string());
+                }
+            }
+            "tool_result" => {}
+            _ => {
+                chat_messages.push(ChatMessage::assistant(content));
+                message_trace.push("assistant".to_string());
+            }
+        }
+    }
+
+    debug!(?message_trace, "toolcall paired message order");
+
+    chat_messages
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BranchSelection {
+    All,
+    LatestBranch,
+    LatestChildren,
+}
+
+pub fn build_message_list_from_selected_messages(
+    selected_messages: &[Message],
+    all_messages: &[(Message, Option<MessageAttachment>)],
+) -> Vec<(String, String, Vec<MessageAttachment>)> {
+    let msg_to_attachment: HashMap<i64, Option<MessageAttachment>> = all_messages
+        .iter()
+        .map(|(msg, att)| (msg.id, att.clone()))
+        .collect();
+
+    selected_messages
+        .iter()
+        .map(|message| {
+            let attachment = msg_to_attachment.get(&message.id).cloned().flatten();
+            (
+                message.message_type.clone(),
+                message.content.clone(),
+                attachment.map(|a| vec![a]).unwrap_or_else(Vec::new),
+            )
+        })
+        .collect()
+}
+
+pub fn build_message_list_from_db(
+    all_messages: &[(Message, Option<MessageAttachment>)],
+    branch_selection: BranchSelection,
+) -> Vec<(String, String, Vec<MessageAttachment>)> {
+    match branch_selection {
+        BranchSelection::LatestBranch => {
+            let latest_branch = get_latest_branch_messages(all_messages);
+            build_message_list_from_selected_messages(&latest_branch, all_messages)
+        }
+        BranchSelection::LatestChildren => {
+            let (latest_children, child_ids) = get_latest_child_messages(all_messages);
+            let message_list: Vec<(String, String, Vec<MessageAttachment>)> = all_messages
+                .iter()
+                .filter(|(message, _)| !child_ids.contains(&message.id))
+                .map(|(message, attachment)| {
+                    let (final_message, final_attachment) = latest_children
+                        .get(&message.id)
+                        .cloned()
+                        .unwrap_or((message.clone(), attachment.clone()));
+
+                    (
+                        final_message.message_type,
+                        final_message.content,
+                        final_attachment.map(|a| vec![a]).unwrap_or_else(Vec::new),
+                    )
+                })
+                .collect();
+            sort_messages_by_group_and_id(message_list, all_messages)
+        }
+        BranchSelection::All => {
+            let mut seen = HashSet::new();
+            all_messages
+                .iter()
+                .filter(|(message, _)| seen.insert(message.id))
+                .map(|(message, attachment)| {
+                    (
+                        message.message_type.clone(),
+                        message.content.clone(),
+                        attachment.clone().map(|a| vec![a]).unwrap_or_else(Vec::new),
+                    )
+                })
+                .collect()
+        }
+    }
+}
+
+/// 获取每个父消息的最新子消息（统一的排序逻辑）
+/// 返回: (latest_children_map, child_ids_set)
+pub(crate) fn get_latest_child_messages(
+    messages: &[(Message, Option<MessageAttachment>)],
+) -> (HashMap<i64, (Message, Option<MessageAttachment>)>, HashSet<i64>) {
+    let mut latest_children: HashMap<i64, (Message, Option<MessageAttachment>)> = HashMap::new();
+    let mut child_ids: HashSet<i64> = HashSet::new();
+
+    // 按 generation_group_id 分组，每组只保留 ID 最大的消息
+    let mut group_to_latest: HashMap<String, (Message, Option<MessageAttachment>)> = HashMap::new();
+
+    for (message, attachment) in messages.iter() {
+        if let Some(parent_id) = message.parent_id {
+            child_ids.insert(message.id);
+            latest_children
+                .entry(parent_id)
+                .and_modify(|existing| {
+                    // 选择ID更大的消息作为最新版本
+                    if message.id > existing.0.id {
+                        *existing = (message.clone(), attachment.clone());
+                    }
+                })
+                .or_insert((message.clone(), attachment.clone()));
+        }
+
+        // 按 generation_group_id 分组，每组只保留最新的消息
+        if let Some(ref group_id) = message.generation_group_id {
+            group_to_latest
+                .entry(group_id.clone())
+                .and_modify(|existing| {
+                    if message.id > existing.0.id {
+                        *existing = (message.clone(), attachment.clone());
+                    }
+                })
+                .or_insert((message.clone(), attachment.clone()));
+        }
+    }
+
+    // 将被 group 机制过滤掉的消息加入 child_ids
+    for (message, _) in messages.iter() {
+        if let Some(ref group_id) = message.generation_group_id {
+            if let Some((latest_msg, _)) = group_to_latest.get(group_id) {
+                if message.id != latest_msg.id {
+                    child_ids.insert(message.id);
+                }
+            }
+        }
+    }
+
+    (latest_children, child_ids)
+}
+
+/// 按照group和ID排序消息列表
+/// 规则：
+/// 1. 按照root group的最小消息ID排序
+/// 2. 同一group内的消息按ID排序
+/// 3. 没有generation_group_id的消息排在最前面（按ID排序）
+pub(crate) fn sort_messages_by_group_and_id(
+    messages: Vec<(String, String, Vec<MessageAttachment>)>,
+    original_messages: &[(Message, Option<MessageAttachment>)],
+) -> Vec<(String, String, Vec<MessageAttachment>)> {
+    let mut result = messages;
+
+    // 创建消息内容到原始消息的映射，用于获取group信息
+    let mut content_to_message: HashMap<String, &Message> = HashMap::new();
+    for (msg, _) in original_messages {
+        content_to_message.insert(msg.content.clone(), msg);
+    }
+
+    // 创建group到最小ID的映射
+    let mut group_to_min_id: HashMap<String, i64> = HashMap::new();
+    for (msg, _) in original_messages {
+        if let Some(ref group_id) = msg.generation_group_id {
+            group_to_min_id
+                .entry(group_id.clone())
+                .and_modify(|min_id| {
+                    if msg.id < *min_id {
+                        *min_id = msg.id;
+                    }
+                })
+                .or_insert(msg.id);
+        }
+    }
+
+    // 排序逻辑
+    result.sort_by(|a, b| {
+        let msg_a = content_to_message.get(&a.1);
+        let msg_b = content_to_message.get(&b.1);
+
+        match (msg_a, msg_b) {
+            (Some(ma), Some(mb)) => match (&ma.generation_group_id, &mb.generation_group_id) {
+                // 两个都有group_id
+                (Some(group_a), Some(group_b)) => {
+                    if group_a == group_b {
+                        // 同一个group内，按消息ID排序
+                        ma.id.cmp(&mb.id)
+                    } else {
+                        // 不同group，按group的最小ID排序
+                        let min_a = group_to_min_id.get(group_a).unwrap_or(&ma.id);
+                        let min_b = group_to_min_id.get(group_b).unwrap_or(&mb.id);
+                        min_a.cmp(min_b)
+                    }
+                }
+                // 只有A有group_id，按消息ID排序（而不是固定让B排前面）
+                (Some(_), None) => ma.id.cmp(&mb.id),
+                // 只有B有group_id，按消息ID排序（而不是固定让A排前面）
+                (None, Some(_)) => ma.id.cmp(&mb.id),
+                // 两个都没有group_id，按消息ID排序
+                (None, None) => ma.id.cmp(&mb.id),
+            },
+            // 如果找不到对应的原始消息，保持原顺序
+            _ => std::cmp::Ordering::Equal,
+        }
+    });
+
+    result
 }
 
 // Helper function to extract tool call ID from tool result content

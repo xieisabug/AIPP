@@ -7,7 +7,10 @@ use crate::api::ai::chat::{
 use crate::api::ai::config::{
     get_network_proxy_from_config, get_request_timeout_from_config, ChatConfig, ConfigBuilder,
 };
-use crate::api::ai::conversation::{build_chat_messages, init_conversation};
+use crate::api::ai::conversation::{
+    build_chat_request_from_messages, build_message_list_from_db, init_conversation,
+    BranchSelection, ChatRequestBuildResult, ToolCallStrategy, ToolConfig,
+};
 use crate::api::ai::events::{ActivityFocus, ConversationEvent, MessageAddEvent, MessageUpdateEvent};
 use crate::api::ai::title::generate_title;
 use crate::api::ai::types::{AiRequest, AiResponse, McpOverrideConfig};
@@ -27,10 +30,8 @@ use crate::template_engine::TemplateEngine;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use crate::{AcpSessionState, AppState, FeatureConfigState};
 use anyhow::Context;
-use genai::chat::ChatRequest;
+use std::collections::HashMap;
 use genai::chat::Tool;
-use regex::Regex;
-use std::collections::{HashMap, HashSet};
 use tauri::Emitter;
 use tauri::State;
 use tracing::{debug, error, info, instrument, warn};
@@ -148,23 +149,16 @@ pub fn build_tools_with_mapping(
     (tools, mapping)
 }
 
-/// 在非原生 toolcall 场景下，移除 MCP 注释并将 tool_result 转换为 user 消息，避免重新构建原生 tool_calls
-fn sanitize_messages_for_non_native(
-    init_message_list: &[(String, String, Vec<MessageAttachment>)],
-) -> Vec<(String, String, Vec<MessageAttachment>)> {
-    let mcp_hint_regex = Regex::new(r"<!--\s*MCP_TOOL_CALL:.*?-->").unwrap();
-
-    init_message_list
-        .iter()
-        .map(|(message_type, content, attachments)| {
-            let sanitized_content = mcp_hint_regex.replace_all(content, "").to_string();
-            if message_type == "tool_result" {
-                (String::from("user"), sanitized_content, Vec::new())
-            } else {
-                (message_type.clone(), sanitized_content, attachments.clone())
-            }
-        })
-        .collect()
+fn build_tool_config(
+    mcp_info: &crate::mcp::MCPInfoForAssistant,
+    enable_tools: bool,
+) -> Option<ToolConfig> {
+    if !enable_tools {
+        return None;
+    }
+    let (tools, tool_name_mapping) = build_tools_with_mapping(&mcp_info.enabled_servers);
+    debug!(tools = ?tools, "injected MCP tools");
+    Some(ToolConfig { tools, tool_name_mapping })
 }
 
 #[tauri::command]
@@ -282,15 +276,6 @@ pub async fn ask_ai(
     activity_manager
         .set_user_pending(&app_handle, conversation_id, user_message_id)
         .await;
-
-    // 非原生 toolcall 时，将历史中的 tool_result 在“发送给 LLM 的消息”里当作用户消息。
-    // 注意：DB 与 UI 不变，仅用于请求时的上下文构造。
-    let final_message_list_for_llm: Vec<(String, String, Vec<MessageAttachment>)> =
-        if is_native_toolcall {
-            init_message_list.clone()
-        } else {
-            sanitize_messages_for_non_native(&init_message_list)
-        };
 
     // 总是启动流式处理，即使没有预先创建消息
     let _config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
@@ -536,17 +521,14 @@ pub async fn ask_ai(
             "chat configuration established"
         );
 
-        // 将消息转换为 ChatMessage（已按是否原生 toolcall 处理过 tool_result）
-        let chat_messages = build_chat_messages(&final_message_list_for_llm);
-        // 原生模式：把 MCP 工具映射为 genai::chat::Tool 并注入到请求，并附加轻量提示
-        // 同时构建工具名称映射表，用于将 sanitized 名称还原为原始名称
-        let (chat_request, tool_name_mapping) = if has_available_tools {
-            let (tools, mapping) = build_tools_with_mapping(&mcp_info.enabled_servers);
-            debug!(tools = ?tools, "injected MCP tools");
-            (ChatRequest::new(chat_messages).with_tools(tools), mapping)
+        let tool_call_strategy = if has_available_tools {
+            ToolCallStrategy::Native
         } else {
-            (ChatRequest::new(chat_messages), HashMap::new())
+            ToolCallStrategy::NonNative
         };
+        let tool_config = build_tool_config(&mcp_info, has_available_tools);
+        let ChatRequestBuildResult { chat_request, tool_name_mapping } =
+            build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
         if chat_config.stream {
             // 使用 genai 流式处理
@@ -713,24 +695,8 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             .and_then(|m| m.generation_group_id.clone())
     };
 
-    // 构建消息列表（从最新分支的消息）
-    // 需要从 all_messages 中获取对应的附件
-    let msg_to_attachment: std::collections::HashMap<i64, Option<MessageAttachment>> = all_messages
-        .iter()
-        .map(|(msg, att)| (msg.id, att.clone()))
-        .collect();
-
-    let init_message_list: Vec<(String, String, Vec<MessageAttachment>)> = latest_branch
-        .iter()
-        .map(|message| {
-            let attachment = msg_to_attachment.get(&message.id).cloned().flatten();
-            (
-                message.message_type.clone(),
-                message.content.clone(),
-                attachment.map(|a| vec![a]).unwrap_or_else(Vec::new),
-            )
-        })
-        .collect();
+    let init_message_list =
+        build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
     // 收集 MCP 信息
     let mcp_info = collect_mcp_info_for_assistant(&app_handle, assistant_id, None, None).await?;
@@ -848,102 +814,14 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         "chat configuration (tool_result_continue)"
     );
 
-    // 根据是否为原生 toolcall 选择不同的消息组织策略：
-    // - 原生：将 "tool_result" 转为 ToolResponse（含 tool_call_id）
-    // - 非原生：把所有 "tool_result" 在内存里映射成 "user" 文本消息，避免向提供商发送 ToolResponse 导致 4xx/5xx
-    // 兼容：Gemini 通过 OpenAI 适配时，服务端要求 function_response.name 不为空。通用 ToolResponse 不带 name。
-    // 为避免 400，这里在该场景下对"继续对话"强制降级为非原生。
-    let use_native_for_continue = has_available_tools;
-    let (chat_request, tool_name_mapping) = if use_native_for_continue {
-        // 重新构建消息序列，确保 Assistant-Tool 消息正确配对
-        // 而不是让 build_chat_messages_with_context 自动重建，我们手动控制顺序
-        let mut chat_messages = Vec::new();
-        let mut tool_call_to_response: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        let mut message_trace: Vec<String> = Vec::new();
-
-        // 收集所有工具调用ID到响应的映射
-        for (message_type, content, _) in init_message_list.iter() {
-            if message_type == "tool_result" {
-                if let Some(call_id) = crate::api::ai::conversation::extract_tool_call_id(content) {
-                    if let Some(result) = crate::api::ai::conversation::extract_tool_result(content)
-                    {
-                        tool_call_to_response.insert(call_id, result);
-                    }
-                }
-            }
-        }
-
-        // 按顺序处理消息，确保 Assistant-Tool 配对
-        for (message_type, content, attachment_list) in init_message_list.iter() {
-            match message_type.as_str() {
-                "system" => {
-                    chat_messages.push(genai::chat::ChatMessage::system(content));
-                    message_trace.push("system".to_string());
-                }
-                "user" => {
-                    if attachment_list.is_empty() {
-                        chat_messages.push(genai::chat::ChatMessage::user(content));
-                        message_trace.push("user".to_string());
-                    } else {
-                        // 处理附件（与原来逻辑相同）
-                        let mut parts = Vec::new();
-                        parts.push(genai::chat::ContentPart::from_text(content));
-                        // 这里简化处理，实际情况下需要完整的附件逻辑
-                        chat_messages.push(genai::chat::ChatMessage::user(parts));
-                        message_trace.push("user:attachment".to_string());
-                    }
-                }
-                "response" => {
-                    // 从数据库重建完整的 Assistant 消息和其对应的 Tool 响应
-
-                    // 尝试从内容中提取工具调用信息重建Assistant消息
-                    if let Some(assistant_with_calls) = crate::api::ai::conversation::reconstruct_assistant_with_tool_calls_from_content(content) {
-                        let tool_call_ids = assistant_with_calls
-                            .content
-                            .tool_calls()
-                            .iter()
-                            .map(|tc| tc.call_id.clone())
-                            .collect::<Vec<_>>();
-                        chat_messages.push(assistant_with_calls.clone());
-                        message_trace.push(format!("assistant:tool_calls={:?}", tool_call_ids));
-
-                        // 立即添加对应的 Tool 响应
-                        let tool_calls = assistant_with_calls.content.tool_calls();
-                        for tool_call in tool_calls {
-                            if let Some(response_content) = tool_call_to_response.get(&tool_call.call_id) {
-                                let tool_response = genai::chat::ToolResponse::new(tool_call.call_id.clone(), response_content.clone());
-                                chat_messages.push(genai::chat::ChatMessage::from(tool_response));
-                                message_trace.push(format!("tool:call_id={}", tool_call.call_id));
-                            }
-                        }
-                    } else {
-                        // 普通的 Assistant 消息
-                        chat_messages.push(genai::chat::ChatMessage::assistant(content));
-                        message_trace.push("assistant".to_string());
-                    }
-                }
-                "tool_result" => {
-                    // 跳过，因为已经在上面的 response 处理中配对处理了
-                }
-                _ => {
-                    chat_messages.push(genai::chat::ChatMessage::assistant(content));
-                    message_trace.push("assistant".to_string());
-                }
-            }
-        }
-
-        debug!(?message_trace, "toolcall continue message order");
-
-        // 注入 MCP 工具，同时构建映射表
-        let (tools, tool_name_mapping) = build_tools_with_mapping(&mcp_info.enabled_servers);
-        debug!(tools = ?tools, "injected MCP tools (continue)");
-        (ChatRequest::new(chat_messages).with_tools(tools), tool_name_mapping)
+    let tool_call_strategy = if has_available_tools {
+        ToolCallStrategy::NativeWithToolResponsePairing
     } else {
-        let transformed_list = sanitize_messages_for_non_native(&init_message_list);
-        let chat_messages = build_chat_messages(&transformed_list);
-        (ChatRequest::new(chat_messages), HashMap::new())
+        ToolCallStrategy::NonNative
     };
+    let tool_config = build_tool_config(&mcp_info, has_available_tools);
+    let ChatRequestBuildResult { chat_request, tool_name_mapping } =
+        build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
     if chat_config.stream {
         Box::pin(ai_handle_stream_chat(
@@ -1044,24 +922,8 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
             .and_then(|m| m.generation_group_id.clone())
     };
 
-    // 构建消息列表（从最新分支的消息）
-    // 需要从 all_messages 中获取对应的附件
-    let msg_to_attachment: std::collections::HashMap<i64, Option<MessageAttachment>> = all_messages
-        .iter()
-        .map(|(msg, att)| (msg.id, att.clone()))
-        .collect();
-
-    let init_message_list: Vec<(String, String, Vec<MessageAttachment>)> = latest_branch
-        .iter()
-        .map(|message| {
-            let attachment = msg_to_attachment.get(&message.id).cloned().flatten();
-            (
-                message.message_type.clone(),
-                message.content.clone(),
-                attachment.map(|a| vec![a]).unwrap_or_else(Vec::new),
-            )
-        })
-        .collect();
+    let init_message_list =
+        build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
     // 收集 MCP 信息
     let mcp_info = collect_mcp_info_for_assistant(&app_handle, assistant_id, None, None).await?;
@@ -1168,88 +1030,14 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         "chat configuration (batch_tool_result_continue)"
     );
 
-    let use_native_for_continue = has_available_tools;
-    let (chat_request, tool_name_mapping) = if use_native_for_continue {
-        let mut chat_messages = Vec::new();
-        let mut tool_call_to_response: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        let mut message_trace: Vec<String> = Vec::new();
-
-        // 收集所有工具调用ID到响应的映射
-        for (message_type, content, _) in init_message_list.iter() {
-            if message_type == "tool_result" {
-                if let Some(call_id) = crate::api::ai::conversation::extract_tool_call_id(content) {
-                    if let Some(result) = crate::api::ai::conversation::extract_tool_result(content)
-                    {
-                        tool_call_to_response.insert(call_id, result);
-                    }
-                }
-            }
-        }
-
-        // 按顺序处理消息，确保 Assistant-Tool 配对
-        for (message_type, content, attachment_list) in init_message_list.iter() {
-            match message_type.as_str() {
-                "system" => {
-                    chat_messages.push(genai::chat::ChatMessage::system(content));
-                    message_trace.push("system".to_string());
-                }
-                "user" => {
-                    if attachment_list.is_empty() {
-                        chat_messages.push(genai::chat::ChatMessage::user(content));
-                        message_trace.push("user".to_string());
-                    } else {
-                        let mut parts = Vec::new();
-                        parts.push(genai::chat::ContentPart::from_text(content));
-                        chat_messages.push(genai::chat::ChatMessage::user(parts));
-                        message_trace.push("user:attachment".to_string());
-                    }
-                }
-                "response" => {
-                    if let Some(assistant_with_calls) = crate::api::ai::conversation::reconstruct_assistant_with_tool_calls_from_content(content) {
-                        let tool_call_ids = assistant_with_calls
-                            .content
-                            .tool_calls()
-                            .iter()
-                            .map(|tc| tc.call_id.clone())
-                            .collect::<Vec<_>>();
-                        chat_messages.push(assistant_with_calls.clone());
-                        message_trace.push(format!("assistant:tool_calls={:?}", tool_call_ids));
-
-                        // 立即添加对应的 Tool 响应
-                        let tool_calls = assistant_with_calls.content.tool_calls();
-                        for tool_call in tool_calls {
-                            if let Some(response_content) = tool_call_to_response.get(&tool_call.call_id) {
-                                let tool_response = genai::chat::ToolResponse::new(tool_call.call_id.clone(), response_content.clone());
-                                chat_messages.push(genai::chat::ChatMessage::from(tool_response));
-                                message_trace.push(format!("tool:call_id={}", tool_call.call_id));
-                            }
-                        }
-                    } else {
-                        chat_messages.push(genai::chat::ChatMessage::assistant(content));
-                        message_trace.push("assistant".to_string());
-                    }
-                }
-                "tool_result" => {
-                    // 跳过，因为已经在上面的 response 处理中配对处理了
-                }
-                _ => {
-                    chat_messages.push(genai::chat::ChatMessage::assistant(content));
-                    message_trace.push("assistant".to_string());
-                }
-            }
-        }
-
-        debug!(?message_trace, "batch toolcall continue message order");
-
-        let (tools, tool_name_mapping) = build_tools_with_mapping(&mcp_info.enabled_servers);
-        debug!(tools = ?tools, "injected MCP tools (batch continue)");
-        (ChatRequest::new(chat_messages).with_tools(tools), tool_name_mapping)
+    let tool_call_strategy = if has_available_tools {
+        ToolCallStrategy::NativeWithToolResponsePairing
     } else {
-        let transformed_list = sanitize_messages_for_non_native(&init_message_list);
-        let chat_messages = build_chat_messages(&transformed_list);
-        (ChatRequest::new(chat_messages), HashMap::new())
+        ToolCallStrategy::NonNative
     };
+    let tool_config = build_tool_config(&mcp_info, has_available_tools);
+    let ChatRequestBuildResult { chat_request, tool_name_mapping } =
+        build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
     if chat_config.stream {
         Box::pin(ai_handle_stream_chat(
@@ -1395,31 +1183,8 @@ pub async fn regenerate_ai(
         (filtered_messages, Some(message_id)) // 使用被重发消息的ID作为parent_id表示这是它的一个版本
     };
 
-    // 使用统一的排序逻辑
-    let (latest_children, child_ids) = get_latest_child_messages(&filtered_messages);
-
-    // 构建最终的消息列表：
-    //    - 对于没有子消息的根消息(包括 system / user / assistant)，直接保留
-    //    - 对于有子消息的根消息，仅保留最新的子消息
-    let mut init_message_list: Vec<(String, String, Vec<MessageAttachment>)> = Vec::new();
-
-    for (msg, attach) in filtered_messages.iter() {
-        if child_ids.contains(&msg.id) {
-            // 这是子消息，跳过（会在父消息处理时包含最新的子消息）
-            continue;
-        }
-
-        // 使用最新的子消息（如果存在）替换当前消息
-        let (final_msg, final_attach_opt) =
-            latest_children.get(&msg.id).cloned().unwrap_or((msg.clone(), attach.clone()));
-
-        let attachments_vec = final_attach_opt.map(|a| vec![a]).unwrap_or_else(Vec::new);
-
-        init_message_list.push((final_msg.message_type, final_msg.content, attachments_vec));
-    }
-
-    // 使用统一的排序函数进行排序
-    let init_message_list = sort_messages_by_group_and_id(init_message_list, &filtered_messages);
+    let init_message_list =
+        build_message_list_from_db(&filtered_messages, BranchSelection::LatestChildren);
 
     debug!(?init_message_list, "initial message list for regenerate");
 
@@ -1587,21 +1352,12 @@ pub async fn regenerate_ai(
             "chat configuration (regenerate)"
         );
 
-        // 将历史消息转换为 ChatMessage：
-        // - 原生 toolcall：按默认逻辑（tool_result -> ToolResponse）
-        // - 非原生：把所有 tool_result 映射成 "user" 文本，仅用于请求
-        let final_message_list_for_llm: Vec<(String, String, Vec<MessageAttachment>)> =
-            if has_available_tools {
-                init_message_list.clone()
-            } else {
-                sanitize_messages_for_non_native(&init_message_list)
-            };
-
-        let chat_messages = build_chat_messages(&final_message_list_for_llm);
-        debug!(?chat_messages, "final chat messages (regenerate)");
-        // 原生：注入 MCP 工具，同时构建映射表
-        let (chat_request, tool_name_mapping) = if has_available_tools {
-            // 重新拉取一次助手的 MCP 工具，确保一致
+        let tool_call_strategy = if has_available_tools {
+            ToolCallStrategy::Native
+        } else {
+            ToolCallStrategy::NonNative
+        };
+        let tool_config = if has_available_tools {
             if let Ok(mcp_info) = crate::mcp::collect_mcp_info_for_assistant(
                 &app_handle_clone,
                 assistant_id,
@@ -1610,14 +1366,15 @@ pub async fn regenerate_ai(
             )
             .await
             {
-                let (tools, mapping) = build_tools_with_mapping(&mcp_info.enabled_servers);
-                (ChatRequest::new(chat_messages).with_tools(tools), mapping)
+                build_tool_config(&mcp_info, true)
             } else {
-                (ChatRequest::new(chat_messages), HashMap::new())
+                None
             }
         } else {
-            (ChatRequest::new(chat_messages), HashMap::new())
+            None
         };
+        let ChatRequestBuildResult { chat_request, tool_name_mapping } =
+            build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
         if chat_config.stream {
             // 使用 genai 流式处理
@@ -1674,126 +1431,6 @@ pub async fn regenerate_ai(
     info!("Regenerate AI dispatched (background task started)");
 
     Ok(AiResponse { conversation_id, request_prompt_result_with_context: String::new() })
-}
-
-/// 获取每个父消息的最新子消息（统一的排序逻辑）
-/// 返回: (latest_children_map, child_ids_set)
-fn get_latest_child_messages(
-    messages: &[(Message, Option<MessageAttachment>)],
-) -> (HashMap<i64, (Message, Option<MessageAttachment>)>, HashSet<i64>) {
-    let mut latest_children: HashMap<i64, (Message, Option<MessageAttachment>)> = HashMap::new();
-    let mut child_ids: HashSet<i64> = HashSet::new();
-
-    // 按 generation_group_id 分组，每组只保留 ID 最大的消息
-    let mut group_to_latest: HashMap<String, (Message, Option<MessageAttachment>)> = HashMap::new();
-
-    for (message, attachment) in messages.iter() {
-        if let Some(parent_id) = message.parent_id {
-            child_ids.insert(message.id);
-            latest_children
-                .entry(parent_id)
-                .and_modify(|existing| {
-                    // 选择ID更大的消息作为最新版本
-                    if message.id > existing.0.id {
-                        *existing = (message.clone(), attachment.clone());
-                    }
-                })
-                .or_insert((message.clone(), attachment.clone()));
-        }
-
-        // 按 generation_group_id 分组，每组只保留最新的消息
-        if let Some(ref group_id) = message.generation_group_id {
-            group_to_latest
-                .entry(group_id.clone())
-                .and_modify(|existing| {
-                    if message.id > existing.0.id {
-                        *existing = (message.clone(), attachment.clone());
-                    }
-                })
-                .or_insert((message.clone(), attachment.clone()));
-        }
-    }
-
-    // 将被 group 机制过滤掉的消息加入 child_ids
-    for (message, _) in messages.iter() {
-        if let Some(ref group_id) = message.generation_group_id {
-            if let Some((latest_msg, _)) = group_to_latest.get(group_id) {
-                if message.id != latest_msg.id {
-                    child_ids.insert(message.id);
-                }
-            }
-        }
-    }
-
-    (latest_children, child_ids)
-}
-
-/// 按照group和ID排序消息列表
-/// 规则：
-/// 1. 按照root group的最小消息ID排序
-/// 2. 同一group内的消息按ID排序
-/// 3. 没有generation_group_id的消息排在最前面（按ID排序）
-fn sort_messages_by_group_and_id(
-    messages: Vec<(String, String, Vec<MessageAttachment>)>,
-    original_messages: &[(Message, Option<MessageAttachment>)],
-) -> Vec<(String, String, Vec<MessageAttachment>)> {
-    let mut result = messages;
-
-    // 创建消息内容到原始消息的映射，用于获取group信息
-    let mut content_to_message: HashMap<String, &Message> = HashMap::new();
-    for (msg, _) in original_messages {
-        content_to_message.insert(msg.content.clone(), msg);
-    }
-
-    // 创建group到最小ID的映射
-    let mut group_to_min_id: HashMap<String, i64> = HashMap::new();
-    for (msg, _) in original_messages {
-        if let Some(ref group_id) = msg.generation_group_id {
-            group_to_min_id
-                .entry(group_id.clone())
-                .and_modify(|min_id| {
-                    if msg.id < *min_id {
-                        *min_id = msg.id;
-                    }
-                })
-                .or_insert(msg.id);
-        }
-    }
-
-    // 排序逻辑
-    result.sort_by(|a, b| {
-        let msg_a = content_to_message.get(&a.1);
-        let msg_b = content_to_message.get(&b.1);
-
-        match (msg_a, msg_b) {
-            (Some(ma), Some(mb)) => {
-                match (&ma.generation_group_id, &mb.generation_group_id) {
-                    // 两个都有group_id
-                    (Some(group_a), Some(group_b)) => {
-                        if group_a == group_b {
-                            // 同一个group内，按消息ID排序
-                            ma.id.cmp(&mb.id)
-                        } else {
-                            // 不同group，按group的最小ID排序
-                            let min_a = group_to_min_id.get(group_a).unwrap_or(&ma.id);
-                            let min_b = group_to_min_id.get(group_b).unwrap_or(&mb.id);
-                            min_a.cmp(min_b)
-                        }
-                    }
-                    // 只有A有group_id，按消息ID排序（而不是固定让B排前面）
-                    (Some(_), None) => ma.id.cmp(&mb.id),
-                    // 只有B有group_id，按消息ID排序（而不是固定让A排前面）
-                    (None, Some(_)) => ma.id.cmp(&mb.id),
-                    // 两个都没有group_id，按消息ID排序
-                    (None, None) => ma.id.cmp(&mb.id),
-                }
-            }
-            // 如果找不到对应的原始消息，保持原顺序
-            _ => std::cmp::Ordering::Equal,
-        }
-    });
-
-    result
 }
 
 pub(crate) fn add_message(
@@ -1921,29 +1558,7 @@ async fn initialize_conversation(
             let all_messages =
                 db.message_repo().unwrap().list_by_conversation_id(conversation_id)?;
 
-            // 使用统一的排序逻辑
-            let (latest_children, child_ids) = get_latest_child_messages(&all_messages);
-
-            // 构建最终的消息列表
-            let message_list: Vec<(String, String, Vec<MessageAttachment>)> = all_messages
-                .iter()
-                .filter(|(message, _)| !child_ids.contains(&message.id))
-                .map(|(message, attachment)| {
-                    let (final_message, final_attachment) = latest_children
-                        .get(&message.id)
-                        .map(|child| child.clone())
-                        .unwrap_or((message.clone(), attachment.clone()));
-
-                    (
-                        final_message.message_type,
-                        final_message.content, // 使用修改后的 content
-                        final_attachment.map(|a| vec![a]).unwrap_or_else(Vec::new),
-                    )
-                })
-                .collect();
-
-            // 使用统一的排序函数进行排序
-            let message_list = sort_messages_by_group_and_id(message_list, &all_messages);
+            let message_list = build_message_list_from_db(&all_messages, BranchSelection::LatestChildren);
 
             // 获取到消息的附件列表
             let message_attachment_list = db

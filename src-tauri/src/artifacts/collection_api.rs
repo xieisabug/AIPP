@@ -476,11 +476,15 @@ pub async fn generate_artifact_metadata(
         )
         .map_err(|e| format!("AI客户端创建失败: {}", e))?;
 
-        let chat_messages = vec![
-            genai::chat::ChatMessage::system(system_prompt),
-            genai::chat::ChatMessage::user(&user_prompt),
-        ];
-        let chat_request = genai::chat::ChatRequest::new(chat_messages);
+        let chat_request = crate::api::ai::conversation::build_chat_request_from_messages(
+            &[
+                ("system".to_string(), system_prompt.to_string(), Vec::new()),
+                ("user".to_string(), user_prompt.clone(), Vec::new()),
+            ],
+            crate::api::ai::conversation::ToolCallStrategy::NonNative,
+            None,
+        )
+        .chat_request;
         let model_name = &model_detail.model.code;
 
         let response = client
