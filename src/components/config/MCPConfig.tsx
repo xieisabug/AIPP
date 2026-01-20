@@ -46,6 +46,7 @@ const MCPConfig: React.FC = () => {
     const [builtinEditOpen, setBuiltinEditOpen] = useState(false);
     const [builtinEditEnv, setBuiltinEditEnv] = useState<string>("");
     const [builtinEditName, setBuiltinEditName] = useState<string>("");
+    const [builtinEditTimeout, setBuiltinEditTimeout] = useState<number | null>(null);
 
     // Dialog initial data
     const [dialogInitialServerType, setDialogInitialServerType] = useState<string | undefined>(undefined);
@@ -240,6 +241,7 @@ const MCPConfig: React.FC = () => {
             setEditingServer(server);
             setBuiltinEditEnv(server.environment_variables || "");
             setBuiltinEditName(server.name || "");
+            setBuiltinEditTimeout(server.timeout);
             setBuiltinEditOpen(true);
             return;
         }
@@ -769,8 +771,10 @@ const MCPConfig: React.FC = () => {
                     initialDescription={editingServer.description || ''}
                     initialCommand={editingServer.command || ''}
                     initialEnvText={builtinEditEnv}
+                    initialTimeout={editingServer.timeout}
                     onEnvChange={setBuiltinEditEnv}
                     onNameChange={setBuiltinEditName}
+                    onTimeoutChange={setBuiltinEditTimeout}
                     onClose={() => setBuiltinEditOpen(false)}
                     onSubmit={async () => {
                         // Save name and env changes via update API
@@ -782,7 +786,7 @@ const MCPConfig: React.FC = () => {
                                 command: editingServer.command || undefined,
                                 environment_variables: builtinEditEnv,
                                 url: editingServer.url || undefined,
-                                timeout: editingServer.timeout || undefined,
+                                timeout: builtinEditTimeout ?? editingServer.timeout ?? undefined,
                                 is_long_running: editingServer.is_long_running,
                                 is_enabled: editingServer.is_enabled,
                                 is_builtin: editingServer.is_builtin,
@@ -796,6 +800,7 @@ const MCPConfig: React.FC = () => {
                                     ...selectedServer,
                                     name: builtinEditName || editingServer.name,
                                     environment_variables: builtinEditEnv,
+                                    timeout: builtinEditTimeout ?? editingServer.timeout,
                                 });
                             }
 

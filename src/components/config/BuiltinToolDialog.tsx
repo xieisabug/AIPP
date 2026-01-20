@@ -32,6 +32,7 @@ type BuiltinTemplate = {
     command: string;
     transport_type: string;
     required_envs: BuiltinTemplateEnvVar[];
+    default_timeout?: number;
 };
 
 interface BuiltinToolDialogProps {
@@ -43,8 +44,10 @@ interface BuiltinToolDialogProps {
     initialDescription?: string;
     initialCommand?: string;
     initialEnvText?: string;
+    initialTimeout?: number | null;
     onEnvChange?: (v: string) => void;
     onNameChange?: (v: string) => void;
+    onTimeoutChange?: (v: number | null) => void;
 }
 
 const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
@@ -56,8 +59,10 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
     initialDescription,
     initialCommand,
     initialEnvText,
+    initialTimeout,
     onEnvChange,
     onNameChange,
+    onTimeoutChange,
 }) => {
     const [templates, setTemplates] = useState<BuiltinTemplate[]>([]);
     const [selectedId, setSelectedId] = useState<string>("search");
@@ -65,6 +70,7 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
     const [busy, setBusy] = useState(false);
     const [initialized, setInitialized] = useState(false);
     const [editedName, setEditedName] = useState<string>("");
+    const [timeout, setTimeout] = useState<number | null>(null);
 
     const selected = useMemo(() => templates.find((t) => t.id === selectedId), [templates, selectedId]);
 
@@ -135,6 +141,7 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
             setInitialized(false);
             setEnvValues({});
             setEditedName("");
+            setTimeout(null);
         }
     }, [isOpen]);
 
@@ -145,12 +152,28 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
         }
     }, [isOpen, editing, initialName]);
 
+    // Initialize timeout when dialog opens
+    useEffect(() => {
+        if (isOpen && editing && initialTimeout !== undefined) {
+            setTimeout(initialTimeout);
+        } else if (isOpen && !editing && selected?.default_timeout) {
+            setTimeout(selected.default_timeout);
+        }
+    }, [isOpen, editing, initialTimeout, selected]);
+
     // Notify parent when name changes
     useEffect(() => {
         if (editing && onNameChange && editedName) {
             onNameChange(editedName);
         }
     }, [editing, editedName, onNameChange]);
+
+    // Notify parent when timeout changes
+    useEffect(() => {
+        if (onTimeoutChange && timeout !== null) {
+            onTimeoutChange(timeout);
+        }
+    }, [timeout, onTimeoutChange]);
 
     useEffect(() => {
         if (!isOpen) return;
@@ -193,6 +216,7 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
                     name: selected!.name,
                     description: selected!.description,
                     envs,
+                    timeout: timeout ?? selected!.default_timeout ?? null,
                 });
             } else {
                 // In editing mode, just call onSubmit with the parsed environment variables
@@ -381,6 +405,23 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
                                 {editing ? initialCommand || "" : selected?.command ?? ""}
                             </div>
                         </div>
+                    </div>
+
+                    {/* 超时时间配置 */}
+                    <div className="space-y-2">
+                        <Label htmlFor="timeout" className="text-base font-semibold">工具超时时间</Label>
+                        <div className="flex items-center gap-2">
+                            <Input
+                                id="timeout"
+                                type="number"
+                                value={timeout ?? (templateForFields?.default_timeout ?? 30000)}
+                                placeholder="30000"
+                                onChange={(e) => setTimeout(e.target.value ? parseInt(e.target.value, 10) : null)}
+                                className="w-40"
+                            />
+                            <span className="text-sm text-muted-foreground">毫秒</span>
+                        </div>
+                        <p className="text-xs text-muted-foreground">整个工具调用的最大超时时间，超时后工具执行将被中止</p>
                     </div>
 
                     {/* Environment Variables */}
