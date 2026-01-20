@@ -110,6 +110,7 @@ pub async fn detect_and_process_mcp_calls_for_subtask(
             broadcast_mcp_tool_call_update(app_handle, &tool_call);
 
             // 直接执行工具调用（复用现有执行逻辑）
+            // 注意：子任务执行不使用 cancel_token，因为它们应该完整执行
             let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
             let execution_result = crate::mcp::execution_api::execute_tool_by_transport(
                 app_handle,
@@ -118,6 +119,7 @@ pub async fn detect_and_process_mcp_calls_for_subtask(
                 &tool_name,
                 &parameters,
                 Some(conversation_id),
+                None,
             )
             .await;
 

@@ -441,6 +441,7 @@ pub async fn execute_mcp_tool_call(
             &tool_call.tool_name,
             &tool_call.parameters,
             Some(tool_call.conversation_id),
+            Some(cancel_token.clone()),
         );
         tokio::select! {
             _ = cancel_token.cancelled() => Err("Cancelled by user".to_string()),
@@ -1255,7 +1256,8 @@ pub async fn trigger_conversation_continuation_batch(
 
 /// 统一的工具执行函数，根据传输类型选择相应的执行策略（公开供子任务复用）
 /// 根据服务器配置的传输类型选择执行方式。
-#[instrument(skip(app_handle,feature_config_state,server,parameters), fields(server_id=server.id, transport=%server.transport_type, tool_name=%tool_name))]
+/// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
+#[instrument(skip(app_handle,feature_config_state,server,parameters,cancel_token), fields(server_id=server.id, transport=%server.transport_type, tool_name=%tool_name))]
 pub async fn execute_tool_by_transport(
     app_handle: &tauri::AppHandle,
     feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
@@ -1263,37 +1265,41 @@ pub async fn execute_tool_by_transport(
     tool_name: &str,
     parameters: &str,
     conversation_id: Option<i64>,
+    cancel_token: Option<CancellationToken>,
 ) -> std::result::Result<String, String> {
+    // 如果没有提供 cancel_token，创建一个永远不会取消的令牌
+    let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
+
     match server.transport_type.as_str() {
         // If stdio but command is aipp:*, route to builtin executor
         "stdio" => {
             if let Some(cmd) = &server.command {
                 if crate::mcp::builtin_mcp::is_builtin_mcp_call(cmd) {
-                    execute_builtin_tool(app_handle, server, tool_name, parameters, conversation_id)
+                    execute_builtin_tool(app_handle, server, tool_name, parameters, conversation_id, Some(cancel_token.clone()))
                         .await
                         .map_err(|e| e.to_string())
                 } else {
-                    execute_stdio_tool(app_handle, server, tool_name, parameters)
+                    execute_stdio_tool(app_handle, server, tool_name, parameters, Some(cancel_token.clone()))
                         .await
                         .map_err(|e| e.to_string())
                 }
             } else {
-                execute_stdio_tool(app_handle, server, tool_name, parameters)
+                execute_stdio_tool(app_handle, server, tool_name, parameters, Some(cancel_token.clone()))
                     .await
                     .map_err(|e| e.to_string())
             }
         }
-        "sse" => execute_sse_tool(app_handle, feature_config_state, server, tool_name, parameters)
+        "sse" => execute_sse_tool(app_handle, feature_config_state, server, tool_name, parameters, Some(cancel_token.clone()))
             .await
             .map_err(|e| e.to_string()),
         "http" => {
-            execute_http_tool(app_handle, feature_config_state, server, tool_name, parameters)
+            execute_http_tool(app_handle, feature_config_state, server, tool_name, parameters, Some(cancel_token.clone()))
                 .await
                 .map_err(|e| e.to_string())
         }
         // Legacy builtin type is no longer used, but keep for backward compatibility
         "builtin" => {
-            execute_builtin_tool(app_handle, server, tool_name, parameters, conversation_id)
+            execute_builtin_tool(app_handle, server, tool_name, parameters, conversation_id, Some(cancel_token.clone()))
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -1306,13 +1312,16 @@ pub async fn execute_tool_by_transport(
 // Reuse shared MCP header parsing utilities
 use crate::mcp::util::{parse_server_headers, sanitize_headers_for_log};
 /// 通过 stdio 传输执行工具（外部进程）。
-#[instrument(skip(app_handle,server,parameters), fields(server_id=server.id, tool_name=%tool_name))]
+/// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
+#[instrument(skip(app_handle,server,parameters,cancel_token), fields(server_id=server.id, tool_name=%tool_name))]
 async fn execute_stdio_tool(
     app_handle: &tauri::AppHandle,
     server: &MCPServer,
     tool_name: &str,
     parameters: &str,
+    cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
+    let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
     let command = server.command.as_ref().ok_or_else(|| anyhow!("未为 stdio 传输指定命令"))?;
     let parts: Vec<&str> = command.split_whitespace().collect();
     if parts.is_empty() {
@@ -1321,7 +1330,9 @@ async fn execute_stdio_tool(
 
     let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
     let start = std::time::Instant::now();
-    let client_result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
+
+    // 定义实际的执行逻辑
+    let execution = async {
         let client = (())
             .serve(
                 TokioChildProcess::new(Command::new(parts[0]).configure(|cmd| {
@@ -1348,34 +1359,46 @@ async fn execute_stdio_tool(
         client.cancel().await.context("关闭客户端连接失败")?;
         // 不再包裹错误上下文，直接返回底层错误以保留真实原因（例如服务器返回的错误信息）
         serialize_tool_response(&response)
-    })
-    .await;
+    };
 
-    match client_result {
-        Ok(Ok(r)) => {
+    // 使用 select! 同时监听取消信号和超时
+    let result: Result<String, anyhow::Error> = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            Err(anyhow!("Cancelled by user"))
+        }
+        result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), execution) => {
+            match result {
+                Ok(Ok(r)) => Ok(r),
+                Ok(Err(e)) => Err(anyhow!("工具执行失败: {}", e)),
+                Err(_) => Err(anyhow!("工具执行超时")),
+            }
+        }
+    };
+
+    match result {
+        Ok(r) => {
             info!(elapsed_ms=?start.elapsed().as_millis(), "stdio tool executed successfully");
             Ok(r)
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             error!(elapsed_ms=?start.elapsed().as_millis(), error=%e, "stdio tool execution failed");
-            Err(anyhow!("工具执行失败: {}", e))
-        }
-        Err(_) => {
-            error!(elapsed_ms=?start.elapsed().as_millis(), timeout_ms=timeout_ms, "stdio tool execution timeout");
-            Err(anyhow!("工具执行超时"))
+            Err(e)
         }
     }
 }
 
 /// 通过 SSE 传输执行工具。
-#[instrument(skip(feature_config_state,server,parameters), fields(server_id=server.id, tool_name=%tool_name))]
+/// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
+#[instrument(skip(feature_config_state,server,parameters,cancel_token), fields(server_id=server.id, tool_name=%tool_name))]
 async fn execute_sse_tool(
     _app_handle: &tauri::AppHandle,
     feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
     server: &MCPServer,
     tool_name: &str,
     parameters: &str,
+    cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
+    let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
     let url = server.url.as_ref().ok_or_else(|| anyhow!("No URL specified for SSE transport"))?;
 
     // 获取代理配置
@@ -1457,64 +1480,74 @@ async fn execute_sse_tool(
     let (_auth_header, _all) = parse_server_headers(server);
 
     let start = std::time::Instant::now();
-    let client_result = tokio::time::timeout(
-        std::time::Duration::from_millis(
-            server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS),
-        ),
-        async move {
-            let transport = sse_transport;
-            let client_info = ClientInfo {
-                protocol_version: Default::default(),
-                capabilities: ClientCapabilities::default(),
-                client_info: Implementation {
-                    name: "AIPP MCP SSE Client".to_string(),
-                    version: "0.1.0".to_string(),
-                    ..Default::default()
-                },
-            };
-            let client =
-                client_info.serve(transport).await.context("Failed to initialize SSE client")?;
-            let args = parse_tool_arguments(parameters).context("解析工具参数失败")?;
-            let request_param = build_call_tool_request(tool_name, args);
+    let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
 
-            // TODO: rmcp 当前 SseClientTransport::send 未暴露 auth_token; 通过自定义 client 已用于初始化，后续调用暂不重复 header
-            let response = client.call_tool(request_param).await.context("Tool call failed")?;
-            debug!(is_error=?response.is_error, parts=?response.content.len(), "received sse tool response");
+    // 定义实际的执行逻辑
+    let execution = async move {
+        let transport = sse_transport;
+        let client_info = ClientInfo {
+            protocol_version: Default::default(),
+            capabilities: ClientCapabilities::default(),
+            client_info: Implementation {
+                name: "AIPP MCP SSE Client".to_string(),
+                version: "0.1.0".to_string(),
+                ..Default::default()
+            },
+        };
+        let client =
+            client_info.serve(transport).await.context("Failed to initialize SSE client")?;
+        let args = parse_tool_arguments(parameters).context("解析工具参数失败")?;
+        let request_param = build_call_tool_request(tool_name, args);
 
-            // Cancel the client connection
-            client.cancel().await.context("Failed to cancel client")?;
+        // TODO: rmcp 当前 SseClientTransport::send 未暴露 auth_token; 通过自定义 client 已用于初始化，后续调用暂不重复 header
+        let response = client.call_tool(request_param).await.context("Tool call failed")?;
+        debug!(is_error=?response.is_error, parts=?response.content.len(), "received sse tool response");
 
-            // 不包裹序列化错误上下文，避免将服务器端错误误标为“序列化失败”
-            serialize_tool_response(&response)
-        },
-    )
-    .await;
+        // Cancel the client connection
+        client.cancel().await.context("Failed to cancel client")?;
 
-    match client_result {
-        Ok(Ok(result)) => {
+        // 不包裹序列化错误上下文，避免将服务器端错误误标为"序列化失败"
+        serialize_tool_response(&response)
+    };
+
+    // 使用 select! 同时监听取消信号和超时
+    let result: Result<String, anyhow::Error> = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            Err(anyhow!("Cancelled by user"))
+        }
+        result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), execution) => {
+            match result {
+                Ok(Ok(r)) => Ok(r),
+                Ok(Err(e)) => Err(anyhow!("Tool execution failed: {}", e)),
+                Err(_) => Err(anyhow!("Timeout while executing tool")),
+            }
+        }
+    };
+
+    match result {
+        Ok(result) => {
             info!(elapsed_ms=?start.elapsed().as_millis(), "sse tool executed successfully");
             Ok(result)
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             error!(elapsed_ms=?start.elapsed().as_millis(), error=%e, "sse tool execution failed");
-            Err(anyhow!("Tool execution failed: {}", e))
-        }
-        Err(_) => {
-            error!(elapsed_ms=?start.elapsed().as_millis(), timeout_ms=server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS), "sse tool execution timeout");
-            Err(anyhow!("Timeout while executing tool"))
+            Err(e)
         }
     }
 }
 
 /// 执行内置（aipp:*）工具：不经网络，直接在本地实现。
-#[instrument(skip(app_handle,server,parameters), fields(server_id=server.id, tool_name=%tool_name))]
+/// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
+#[instrument(skip(app_handle,server,parameters,cancel_token), fields(server_id=server.id, tool_name=%tool_name))]
 async fn execute_builtin_tool(
     app_handle: &tauri::AppHandle,
     server: &MCPServer,
     tool_name: &str,
     parameters: &str,
     conversation_id: Option<i64>,
+    cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
+    let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
     // 获取超时配置，使用服务器配置的超时或默认值
     let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
 
@@ -1525,22 +1558,31 @@ async fn execute_builtin_tool(
         bail!("Unknown builtin tool: {} for command: {}", tool_name, command);
     }
 
-    // 通过 tokio::time::timeout 包裹工具调用，确保超时保护生效
-    // 注意：内置工具入口当前接受原始字符串，因此这里仍传入 normalize 后的原始 JSON 文本；
-    // parse_tool_arguments 在 builtin 情况下不需要提前结构化（保持行为一致）。
-    let raw = tokio::time::timeout(
-        std::time::Duration::from_millis(timeout_ms),
+    // 定义实际的执行逻辑
+    let execution = async {
         execute_aipp_builtin_tool(
             app_handle.clone(),
             command.clone(),
             tool_name.to_string(),
             normalize_parameters_json(parameters),
             conversation_id,
-        ),
-    )
-    .await
-    .map_err(|_| anyhow!("工具执行超时（{}ms）", timeout_ms))?
-    .map_err(|e| anyhow!(e))?; // map String error to anyhow
+        )
+        .await
+    };
+
+    // 使用 select! 同时监听取消信号和超时
+    let raw: String = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            return Err(anyhow!("Cancelled by user"));
+        }
+        result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), execution) => {
+            match result {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => return Err(anyhow!("工具执行失败: {}", e)),
+                Err(_) => return Err(anyhow!("工具执行超时（{}ms）", timeout_ms)),
+            }
+        }
+    };
 
     // raw 是序列化后的 ToolResult，提取其中的 content 字段以与其他传输保持一致
     let v: serde_json::Value = serde_json::from_str(&raw).context("解析内置工具结果失败")?;
@@ -1555,14 +1597,17 @@ async fn execute_builtin_tool(
 }
 
 /// 通过 HTTP (streamable) 传输执行工具。
-#[instrument(skip(feature_config_state,server,parameters), fields(server_id=server.id, tool_name=%tool_name))]
+/// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
+#[instrument(skip(feature_config_state,server,parameters,cancel_token), fields(server_id=server.id, tool_name=%tool_name))]
 async fn execute_http_tool(
     _app_handle: &tauri::AppHandle,
     feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
     server: &MCPServer,
     tool_name: &str,
     parameters: &str,
+    cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
+    let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
     let url = server.url.as_ref().ok_or_else(|| anyhow!("No URL specified for HTTP transport"))?;
 
     // 获取代理配置
@@ -1626,39 +1671,46 @@ async fn execute_http_tool(
     };
 
     let start = std::time::Instant::now();
-    let client_result = tokio::time::timeout(
-        std::time::Duration::from_millis(
-            server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS),
-        ),
-        async move {
-            let client =
-                client_info.serve(transport).await.context("Failed to initialize HTTP client")?;
-            let args = parse_tool_arguments(parameters).context("解析工具参数失败")?;
-            let request_param = build_call_tool_request(tool_name, args);
+    let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
 
-            let response = client.call_tool(request_param).await.context("Tool call failed")?;
-            debug!(is_error=?response.is_error, parts=?response.content.len(), "received http tool response");
+    // 定义实际的执行逻辑
+    let execution = async move {
+        let client =
+            client_info.serve(transport).await.context("Failed to initialize HTTP client")?;
+        let args = parse_tool_arguments(parameters).context("解析工具参数失败")?;
+        let request_param = build_call_tool_request(tool_name, args);
 
-            // Cancel the client connection
-            client.cancel().await.context("Failed to cancel client")?;
+        let response = client.call_tool(request_param).await.context("Tool call failed")?;
+        debug!(is_error=?response.is_error, parts=?response.content.len(), "received http tool response");
 
-            serialize_tool_response(&response)
-        },
-    )
-    .await;
+        // Cancel the client connection
+        client.cancel().await.context("Failed to cancel client")?;
 
-    match client_result {
-        Ok(Ok(result)) => {
+        serialize_tool_response(&response)
+    };
+
+    // 使用 select! 同时监听取消信号和超时
+    let result: Result<String, anyhow::Error> = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            Err(anyhow!("Cancelled by user"))
+        }
+        result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), execution) => {
+            match result {
+                Ok(Ok(r)) => Ok(r),
+                Ok(Err(e)) => Err(anyhow!("Tool execution failed: {}", e)),
+                Err(_) => Err(anyhow!("Timeout while executing tool")),
+            }
+        }
+    };
+
+    match result {
+        Ok(result) => {
             info!(elapsed_ms=?start.elapsed().as_millis(), "http tool executed successfully");
             Ok(result)
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             error!(elapsed_ms=?start.elapsed().as_millis(), error=%e, "http tool execution failed");
-            Err(anyhow!("Tool execution failed: {}", e))
-        }
-        Err(_) => {
-            error!(elapsed_ms=?start.elapsed().as_millis(), timeout_ms=server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS), "http tool execution timeout");
-            Err(anyhow!("Timeout while executing tool"))
+            Err(e)
         }
     }
 }
