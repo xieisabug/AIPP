@@ -64,6 +64,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     const unsubscribeRef = useRef<Promise<() => void> | null>(null);
     const hasUnsubscribedRef = useRef<boolean>(false);
     const focusSyncRequestIdRef = useRef<number>(0);
+    const hasSyncedAfterMessageAddRef = useRef<boolean>(false);
 
     // 使用 ref 存储最新的回调函数，避免依赖项变化
     const callbacksRef = useRef(options);
@@ -222,6 +223,14 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 // 如果是用户消息，设置为等待回复的消息，而不是直接设置边框
                 if (messageAddData.message_type === "user") {
                     setPendingUserMessageId(messageAddData.message_id);
+                }
+
+                if (!hasSyncedAfterMessageAddRef.current) {
+                    const conversationIdNum = Number(callbacksRef.current.conversationId);
+                    if (!Number.isNaN(conversationIdNum)) {
+                        syncActivityFocus(conversationIdNum);
+                        hasSyncedAfterMessageAddRef.current = true;
+                    }
                 }
 
                 // 调用外部的消息添加处理函数
@@ -484,6 +493,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             setStreamingAssistantMessageIds(new Set());
             setPendingUserMessageId(null);
             setActivityFocus({ focus_type: 'none' });
+            hasSyncedAfterMessageAddRef.current = false;
             return;
         }
 
@@ -493,6 +503,8 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             console.warn("[ActivityFocus] Invalid conversationId for event subscription:", options.conversationId);
             return;
         }
+
+        hasSyncedAfterMessageAddRef.current = false;
 
         const eventName = `conversation_event_${conversationIdNum}`;
         console.log(

@@ -1,5 +1,5 @@
 use crate::api::ai::config::{calculate_retry_delay, get_retry_attempts_from_config};
-use crate::api::ai::events::{ConversationEvent, MessageAddEvent, MessageUpdateEvent};
+use crate::api::ai::events::{ActivityFocus, ConversationEvent, MessageAddEvent, MessageUpdateEvent};
 use crate::api::ai::types::McpOverrideConfig;
 use crate::api::ai_api::{resolve_tool_name, sanitize_tool_name, ToolNameMapping};
 use crate::db::assistant_db::Assistant;
@@ -1568,6 +1568,13 @@ pub async fn handle_stream_chat(
                         Some(conversation_id),
                     );
 
+                    // 清除活动焦点（闪亮边框）
+                    if let Some(activity_manager) =
+                        app_handle.try_state::<ConversationActivityManager>()
+                    {
+                        activity_manager.clear_focus(app_handle, conversation_id).await;
+                    }
+
                     // 创建错误消息
                     create_error_message(
                         conversation_db,
@@ -2257,9 +2264,17 @@ async fn attempt_stream_chat(
                         if let Some(activity_manager) =
                             app_handle.try_state::<ConversationActivityManager>()
                         {
-                            activity_manager
-                                .clear_focus(&app_handle, conversation_id)
-                                .await;
+                            let current_focus = activity_manager.get_focus(conversation_id).await;
+                            if !matches!(current_focus, ActivityFocus::McpExecuting { .. }) {
+                                activity_manager
+                                    .clear_focus(&app_handle, conversation_id)
+                                    .await;
+                            } else {
+                                debug!(
+                                    conversation_id = conversation_id,
+                                    "Skip clearing activity focus during MCP execution"
+                                );
+                            }
                         }
 
                         return Ok(());
@@ -2446,6 +2461,13 @@ pub async fn handle_non_stream_chat(
                             &final_error,
                             Some(conversation_id),
                         );
+
+                        // 清除活动焦点（闪亮边框）
+                        if let Some(activity_manager) =
+                            app_handle.try_state::<ConversationActivityManager>()
+                        {
+                            activity_manager.clear_focus(app_handle, conversation_id).await;
+                        }
 
                         break Err(anyhow::anyhow!("{}", final_error));
                     }
@@ -2710,6 +2732,11 @@ pub async fn handle_non_stream_chat(
             );
             let now = chrono::Utc::now();
             send_error_to_appropriate_window(&window, &user_friendly_error, Some(conversation_id));
+
+            // 清除活动焦点（闪亮边框）
+            if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+                activity_manager.clear_focus(app_handle, conversation_id).await;
+            }
 
             let generation_group_id = generation_group_id_override
                 .clone()
