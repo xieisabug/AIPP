@@ -102,6 +102,11 @@ export const conversationExportService = {
     ): Promise<HTMLCanvasElement> {
         const { default: html2canvas } = await import("html2canvas");
 
+        // 检测当前是否为暗色模式
+        const isDarkMode = document.documentElement.classList.contains("dark");
+        // 使用明确的 RGB 背景色避免 oklch 兼容性问题
+        const backgroundColor = isDarkMode ? "#0a0a0b" : "#ffffff";
+
         // 创建容器，使用固定定位但放在可见区域外
         const container = document.createElement("div");
         container.id = "export-render-container";
@@ -109,8 +114,8 @@ export const conversationExportService = {
         container.style.left = "-9999px";
         container.style.top = "0";
         container.style.width = `${width}px`;
-        container.style.background = "hsl(var(--background))";
-        container.style.color = "hsl(var(--foreground))";
+        container.style.background = backgroundColor;
+        container.style.color = isDarkMode ? "#fafafa" : "#0a0a0b";
         container.style.minHeight = "100vh";
         document.body.appendChild(container);
 
@@ -121,12 +126,12 @@ export const conversationExportService = {
             // 等待 React 渲染完成和代码高亮
             await new Promise((resolve) => setTimeout(resolve, 800));
 
-            // 转换为 canvas
+            // 转换为 canvas，使用明确的背景色
             const canvas = await html2canvas(container, {
                 scale: 2, // 提高清晰度
                 useCORS: true,
                 logging: false,
-                backgroundColor: null, // 使用容器本身的背景色
+                backgroundColor: backgroundColor,
             });
 
             return canvas;
