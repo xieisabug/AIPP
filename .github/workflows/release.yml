@@ -22,7 +22,13 @@ jobs:
 
             - name: Get version
               id: get_version
-              uses: battila7/get-version-action@v2
+              shell: bash
+              run: |
+                  VERSION="${GITHUB_REF_NAME}"
+                  if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+                      VERSION=$(git describe --tags --abbrev=0)
+                  fi
+                  echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
             - name: Generate changelog
               id: changelog
@@ -122,7 +128,13 @@ jobs:
 
             - name: Get version
               id: get_version
-              uses: battila7/get-version-action@v2
+              shell: bash
+              run: |
+                  VERSION="${GITHUB_REF_NAME}"
+                  if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+                      VERSION=$(git describe --tags --abbrev=0)
+                  fi
+                  echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
             - name: Setup pnpm
               uses: pnpm/action-setup@v4
@@ -152,6 +164,7 @@ jobs:
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                   TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+                  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
               with:
                   releaseId: ${{ needs.create-release.outputs.release_id }}
                   releaseBody: ${{ needs.create-release.outputs.release_body }}
@@ -171,7 +184,13 @@ jobs:
 
             - name: Get version
               id: get_version
-              uses: battila7/get-version-action@v2
+              shell: bash
+              run: |
+                  VERSION="${GITHUB_REF_NAME}"
+                  if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+                      VERSION=$(git describe --tags --abbrev=0)
+                  fi
+                  echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
             - name: Get release assets and signatures
               id: get_assets
