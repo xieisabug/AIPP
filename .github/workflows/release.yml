@@ -273,65 +273,65 @@ jobs:
             - name: Generate latest.json with signatures
               id: generate_json
               run: |
-                    # 获取当前时间（ISO 8601 格式）
-                    PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+                # 获取当前时间（ISO 8601 格式）
+                PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-                    # 读取 changelog
-                    CHANGELOG="${{ needs.create-release.outputs.release_body }}"
-                    # 转义换行符为 JSON 字符串
-                    NOTES_JSON=$(echo "$CHANGELOG" | jq -Rs .)
+                # 读取 changelog
+                CHANGELOG="${{ needs.create-release.outputs.release_body }}"
+                # 转义换行符为 JSON 字符串
+                NOTES_JSON=$(echo "$CHANGELOG" | jq -Rs .)
 
-                    # 读取签名和 URLs
-                    SIGNATURES=$(cat signatures.json)
-                    URLS=$(cat urls.json)
+                # 读取签名和 URLs
+                SIGNATURES=$(cat signatures.json)
+                URLS=$(cat urls.json)
 
-                    # 获取版本号（去掉 v 前缀）
-                    VERSION="${{ steps.get_version.outputs.version }}"
-                    VERSION=${VERSION#v}
+                # 获取版本号（去掉 v 前缀）
+                VERSION="${{ steps.get_version.outputs.version }}"
+                VERSION=${VERSION#v}
 
-                    # 检查必需平台资源是否齐全
-                    for PLATFORM in linux-x86_64 darwin-x86_64 darwin-aarch64 windows-x86_64; do
-                      SIG=$(echo "$SIGNATURES" | jq -r --arg p "$PLATFORM" '.[$p] // ""')
-                      URL=$(echo "$URLS" | jq -r --arg p "$PLATFORM" '.[$p] // ""')
-                      if [ -z "$SIG" ] || [ -z "$URL" ]; then
-                        echo "Missing updater asset for $PLATFORM (signature or url)."
-                        exit 1
-                      fi
-                    done
+                # 检查必需平台资源是否齐全
+                for PLATFORM in linux-x86_64 darwin-x86_64 darwin-aarch64 windows-x86_64; do
+                  SIG=$(echo "$SIGNATURES" | jq -r --arg p "$PLATFORM" '.[$p] // ""')
+                  URL=$(echo "$URLS" | jq -r --arg p "$PLATFORM" '.[$p] // ""')
+                  if [ -z "$SIG" ] || [ -z "$URL" ]; then
+                    echo "Missing updater asset for $PLATFORM (signature or url)."
+                    exit 1
+                  fi
+                done
 
-                    # 生成 latest.json 文件
-                    cat > latest.json << EOF
-                    {
-                      "version": "${VERSION}",
-                      "notes": $NOTES_JSON,
-                      "pub_date": "$PUB_DATE",
-                      "platforms": {
-                        "linux-x86_64": {
-                        "signature": "$(echo "$SIGNATURES" | jq -r '.["linux-x86_64"] // ""')",
-                        "url": "$(echo "$URLS" | jq -r '.["linux-x86_64"] // ""')"
-                        },
-                        "darwin-x86_64": {
-                        "signature": "$(echo "$SIGNATURES" | jq -r '.["darwin-x86_64"] // ""')",
-                        "url": "$(echo "$URLS" | jq -r '.["darwin-x86_64"] // ""')"
-                        },
-                        "darwin-aarch64": {
-                        "signature": "$(echo "$SIGNATURES" | jq -r '.["darwin-aarch64"] // ""')",
-                        "url": "$(echo "$URLS" | jq -r '.["darwin-aarch64"] // ""')"
-                        },
-                        "windows-x86_64": {
-                        "signature": "$(echo "$SIGNATURES" | jq -r '.["windows-x86_64"] // ""')",
-                        "url": "$(echo "$URLS" | jq -r '.["windows-x86_64"] // ""')"
-                        }
-                      }
+                # 生成 latest.json 文件
+                cat > latest.json << EOF
+                {
+                  "version": "${VERSION}",
+                  "notes": $NOTES_JSON,
+                  "pub_date": "$PUB_DATE",
+                  "platforms": {
+                    "linux-x86_64": {
+                      "signature": "$(echo "$SIGNATURES" | jq -r '.["linux-x86_64"] // ""')",
+                      "url": "$(echo "$URLS" | jq -r '.["linux-x86_64"] // ""')"
+                    },
+                    "darwin-x86_64": {
+                      "signature": "$(echo "$SIGNATURES" | jq -r '.["darwin-x86_64"] // ""')",
+                      "url": "$(echo "$URLS" | jq -r '.["darwin-x86_64"] // ""')"
+                    },
+                    "darwin-aarch64": {
+                      "signature": "$(echo "$SIGNATURES" | jq -r '.["darwin-aarch64"] // ""')",
+                      "url": "$(echo "$URLS" | jq -r '.["darwin-aarch64"] // ""')"
+                    },
+                    "windows-x86_64": {
+                      "signature": "$(echo "$SIGNATURES" | jq -r '.["windows-x86_64"] // ""')",
+                      "url": "$(echo "$URLS" | jq -r '.["windows-x86_64"] // ""')"
                     }
-                    EOF
+                  }
+                }
+                EOF
 
-                    # 格式化 JSON
-                    jq . latest.json > latest.json.tmp
-                    mv latest.json.tmp latest.json
+                # 格式化 JSON
+                jq . latest.json > latest.json.tmp
+                mv latest.json.tmp latest.json
 
-                    echo "Generated latest.json:"
-                    cat latest.json
+                echo "Generated latest.json:"
+                cat latest.json
 
             - name: Upload latest.json to Release
               uses: actions/github-script@v6
