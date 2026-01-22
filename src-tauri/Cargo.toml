@@ -1,6 +1,6 @@
 [package]
 name = "Aipp"
-version = "0.4.1"
+version = "0.4.3"
 description = "Chat with LLM use powerful tools"
 authors = ["xieisabug"]
 edition = "2021"

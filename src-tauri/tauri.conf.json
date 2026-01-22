@@ -27,7 +27,7 @@
     },
     "productName": "Aipp",
     "mainBinaryName": "Aipp",
-    "version": "0.4.1",
+    "version": "0.4.3",
     "identifier": "com.xieisabug.aipp",
     "plugins": {
         "updater": {

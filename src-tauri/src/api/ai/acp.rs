@@ -1,9 +1,8 @@
 //! ACP (Agent Client Protocol) integration module
 //! Handles communication with ACP-compatible agents via stdio
 
-use agent_client_protocol::{self as acp, Agent as _, Client as AcpClient, ClientSideConnection, ToolCallLocation};
 use crate::api::ai::conversation::extract_tool_result;
-use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent, MCPToolCallUpdateEvent};
+use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent, MessageUpdateEvent};
 use crate::db::assistant_db::AssistantModelConfig;
 use crate::db::conversation_db::ConversationDatabase;
 use crate::db::conversation_db::Message;
@@ -20,18 +19,21 @@ use crate::mcp::builtin_mcp::operation::{
         WriteFileRequest,
     },
 };
+use crate::utils::window_utils::send_conversation_event_to_chat_windows;
+use agent_client_protocol::{
+    self as acp, Agent as _, Client as AcpClient, ClientSideConnection, ToolCallLocation,
+};
+use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
-use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, error, info};
-use regex::Regex;
 
 /// ACP configuration extracted from assistant_model_config
 #[derive(Debug, Clone)]
@@ -55,9 +57,7 @@ pub struct AcpPermissionState {
 
 impl AcpPermissionState {
     pub fn new() -> Self {
-        Self {
-            pending_requests: TokioMutex::new(HashMap::new()),
-        }
+        Self { pending_requests: TokioMutex::new(HashMap::new()) }
     }
 
     pub async fn store_request(
@@ -69,11 +69,7 @@ impl AcpPermissionState {
         pending.insert(request_id, sender);
     }
 
-    pub async fn resolve_request(
-        &self,
-        request_id: &str,
-        decision: AcpPermissionDecision,
-    ) -> bool {
+    pub async fn resolve_request(&self, request_id: &str, decision: AcpPermissionDecision) -> bool {
         let mut pending = self.pending_requests.lock().await;
         if let Some(sender) = pending.remove(request_id) {
             sender.send(decision).is_ok()
@@ -102,11 +98,7 @@ struct AcpPermissionRequestEvent {
 }
 
 enum AcpSessionCommand {
-    Prompt {
-        message_id: i64,
-        prompt: String,
-        window: tauri::Window,
-    },
+    Prompt { message_id: i64, prompt: String, window: tauri::Window },
 }
 
 #[derive(Clone)]
@@ -122,17 +114,13 @@ impl AcpSessionHandle {
         window: tauri::Window,
     ) -> Result<(), AppError> {
         self.sender
-            .send(AcpSessionCommand::Prompt {
-                message_id,
-                prompt,
-                window,
-            })
+            .send(AcpSessionCommand::Prompt { message_id, prompt, window })
             .map_err(|_| AppError::UnknownError("ACP session closed".to_string()))
     }
 }
 
 /// Resolve ACP CLI command to its full path
-/// 
+///
 /// This function tries to find the CLI executable in the following order:
 /// 1. If the command is already an absolute path, use it directly
 /// 2. Check ~/.bun/bin/ for bun-installed global packages
@@ -140,13 +128,13 @@ impl AcpSessionHandle {
 /// 4. Fall back to the original command (let the system handle it)
 fn resolve_acp_cli_path(cli_command: &str) -> PathBuf {
     let cli_path = PathBuf::from(cli_command);
-    
+
     // If it's already an absolute path, use it directly
     if cli_path.is_absolute() {
         info!("ACP: CLI command is already an absolute path");
         return cli_path;
     }
-    
+
     // Check ~/.bun/bin/ first (bun-installed global packages)
     if let Some(home) = dirs::home_dir() {
         // On Windows, bun creates .exe files for global packages
@@ -154,14 +142,14 @@ fn resolve_acp_cli_path(cli_command: &str) -> PathBuf {
         let exe_name = format!("{}.exe", cli_command);
         #[cfg(not(target_os = "windows"))]
         let exe_name = cli_command.to_string();
-        
+
         let bun_bin_path = home.join(".bun").join("bin").join(&exe_name);
         info!("ACP: Checking bun bin path: {}", bun_bin_path.display());
         if bun_bin_path.exists() {
             info!("ACP: Found CLI in bun bin: {}", bun_bin_path.display());
             return bun_bin_path;
         }
-        
+
         // Also check without .exe on Windows (in case user provides full name)
         #[cfg(target_os = "windows")]
         {
@@ -172,17 +160,14 @@ fn resolve_acp_cli_path(cli_command: &str) -> PathBuf {
             }
         }
     }
-    
+
     // Check system PATH using platform-specific command
     #[cfg(target_os = "windows")]
     let which_cmd = "where";
     #[cfg(not(target_os = "windows"))]
     let which_cmd = "which";
-    
-    if let Ok(output) = std::process::Command::new(which_cmd)
-        .arg(cli_command)
-        .output()
-    {
+
+    if let Ok(output) = std::process::Command::new(which_cmd).arg(cli_command).output() {
         if output.status.success() {
             let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
             // On Windows, `where` may return multiple lines, take the first one
@@ -193,7 +178,7 @@ fn resolve_acp_cli_path(cli_command: &str) -> PathBuf {
             }
         }
     }
-    
+
     info!("ACP: CLI not found in known paths, using original command: {}", cli_command);
     cli_path
 }
@@ -237,8 +222,8 @@ fn tool_status_to_string(status: acp::ToolCallStatus) -> String {
 /// Convert ACP ToolCallId to i64 for frontend
 fn tool_call_id_to_i64(id: &acp::ToolCallId) -> i64 {
     id.0.parse().unwrap_or_else(|_| {
-        use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
         id.0.hash(&mut hasher);
         hasher.finish() as i64
@@ -289,15 +274,15 @@ fn extract_params_field(value: &serde_json::Value, keys: &[&str]) -> Option<Stri
     None
 }
 
-fn extract_tool_call_info_from_value(value: &serde_json::Value) -> Option<(String, String, String)> {
+fn extract_tool_call_info_from_value(
+    value: &serde_json::Value,
+) -> Option<(String, String, String)> {
     if !value.is_object() {
         return None;
     }
 
-    if let Some(nested) = value
-        .get("tool")
-        .or_else(|| value.get("mcp"))
-        .or_else(|| value.get("claudeCode"))
+    if let Some(nested) =
+        value.get("tool").or_else(|| value.get("mcp")).or_else(|| value.get("claudeCode"))
     {
         if let Some(info) = extract_tool_call_info_from_value(nested) {
             return Some(info);
@@ -306,23 +291,15 @@ fn extract_tool_call_info_from_value(value: &serde_json::Value) -> Option<(Strin
 
     let server_name = extract_string_field(
         value,
-        &[
-            "server_name",
-            "serverName",
-            "server",
-            "mcp_server",
-            "mcpServer",
-        ],
+        &["server_name", "serverName", "server", "mcp_server", "mcpServer"],
     )?;
     let tool_name = extract_string_field(
         value,
         &["tool_name", "toolName", "tool", "name", "mcp_tool", "mcpTool"],
     )?;
-    let parameters = extract_params_field(
-        value,
-        &["parameters", "params", "arguments", "args", "input"],
-    )
-    .unwrap_or_else(|| "{}".to_string());
+    let parameters =
+        extract_params_field(value, &["parameters", "params", "arguments", "args", "input"])
+            .unwrap_or_else(|| "{}".to_string());
 
     Some((server_name, tool_name, parameters))
 }
@@ -350,8 +327,11 @@ fn extract_acp_tool_call_info(
 fn extract_tool_name_from_meta(meta: Option<&acp::Meta>) -> Option<String> {
     let meta = meta?;
     let meta_value = serde_json::Value::Object(meta.clone());
-    extract_string_field(&meta_value, &["toolName", "tool_name", "name"])
-        .or_else(|| meta_value.get("claudeCode").and_then(|v| extract_string_field(v, &["toolName", "tool_name", "name"])) )
+    extract_string_field(&meta_value, &["toolName", "tool_name", "name"]).or_else(|| {
+        meta_value
+            .get("claudeCode")
+            .and_then(|v| extract_string_field(v, &["toolName", "tool_name", "name"]))
+    })
 }
 
 fn extract_tool_response_from_meta(meta: Option<&acp::Meta>) -> Option<String> {
@@ -444,10 +424,7 @@ fn build_acp_history_prompt(app_handle: &tauri::AppHandle, conversation_id: i64)
         return None;
     }
 
-    Some(format!(
-        "以下是历史对话，请在此基础上继续：\n\n{}",
-        entries.join("\n\n")
-    ))
+    Some(format!("以下是历史对话，请在此基础上继续：\n\n{}", entries.join("\n\n")))
 }
 
 fn build_params_from_raw_input(
@@ -491,14 +468,11 @@ fn display_server_name(title: &str, fallback: &str) -> String {
 
 fn resolve_operation_server_name(app_handle: &tauri::AppHandle) -> String {
     if let Ok(db) = MCPDatabase::new(app_handle) {
-        if let Ok(name) = db
-            .conn
-            .query_row(
-                "SELECT name FROM mcp_server WHERE command = ? AND is_builtin = 1 LIMIT 1",
-                ["aipp:operation"],
-                |row| row.get::<_, String>(0),
-            )
-        {
+        if let Ok(name) = db.conn.query_row(
+            "SELECT name FROM mcp_server WHERE command = ? AND is_builtin = 1 LIMIT 1",
+            ["aipp:operation"],
+            |row| row.get::<_, String>(0),
+        ) {
             return name;
         }
     }
@@ -531,8 +505,8 @@ fn fallback_acp_tool_call_info(
 
     match tool_call.kind {
         acp::ToolKind::Execute => {
-            let command = extract_command_from_title(&tool_call.title)
-                .unwrap_or_else(|| "".to_string());
+            let command =
+                extract_command_from_title(&tool_call.title).unwrap_or_else(|| "".to_string());
             let params = serde_json::json!({
                 "command": command,
             })
@@ -722,7 +696,8 @@ impl AcpTauriClient {
                 output_token_count: None,
                 ttft_ms: None,
                 tps: None,
-            }).unwrap(),
+            })
+            .unwrap(),
         };
 
         self.emit_event(event).await;
@@ -746,7 +721,8 @@ impl AcpTauriClient {
                 output_token_count: None,
                 ttft_ms: None,
                 tps: None,
-            }).unwrap(),
+            })
+            .unwrap(),
         };
 
         self.emit_event(event).await;
@@ -755,18 +731,18 @@ impl AcpTauriClient {
 
 #[async_trait::async_trait(?Send)]
 impl AcpClient for AcpTauriClient {
-    async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<(), acp::Error> {
+    async fn session_notification(
+        &self,
+        args: acp::SessionNotification,
+    ) -> acp::Result<(), acp::Error> {
         if *self.suppress_updates.lock().await {
             debug!("ACP session_notification suppressed");
             return Ok(());
         }
 
         // Log the notification type for debugging
-        let update_type = std::format!("{:?}", args.update)
-            .split('(')
-            .next()
-            .unwrap_or("Unknown")
-            .to_string();
+        let update_type =
+            std::format!("{:?}", args.update).split('(').next().unwrap_or("Unknown").to_string();
         let message_id = *self.message_id.lock().await;
         debug!("ACP session_notification: type={}, message_id={}", update_type, message_id);
 
@@ -809,7 +785,8 @@ impl AcpClient for AcpTauriClient {
                         output_token_count: None,
                         ttft_ms: None,
                         tps: None,
-                    }).unwrap(),
+                    })
+                    .unwrap(),
                 };
 
                 let window = self.window.lock().await.clone();
@@ -846,7 +823,8 @@ impl AcpClient for AcpTauriClient {
                         output_token_count: None,
                         ttft_ms: None,
                         tps: None,
-                    }).unwrap(),
+                    })
+                    .unwrap(),
                 };
 
                 self.emit_event(event).await;
@@ -856,10 +834,7 @@ impl AcpClient for AcpTauriClient {
             acp::SessionUpdate::ToolCall(tool_call) => {
                 info!(
                     "ACP ToolCall: id={:?}, title={:?}, status={:?}, kind={:?}",
-                    tool_call.tool_call_id,
-                    tool_call.title,
-                    tool_call.status,
-                    tool_call.kind
+                    tool_call.tool_call_id, tool_call.title, tool_call.status, tool_call.kind
                 );
                 debug!(?tool_call, "ACP ToolCall detail");
 
@@ -875,9 +850,11 @@ impl AcpClient for AcpTauriClient {
                     {
                         Some(info) => info,
                         None => {
-                            let display_name = display_server_name(&tool_call.title, "ACP ToolCall");
-                            let derived_tool_name = extract_tool_name_from_meta(tool_call.meta.as_ref())
-                                .unwrap_or_else(|| "acp_tool".to_string());
+                            let display_name =
+                                display_server_name(&tool_call.title, "ACP ToolCall");
+                            let derived_tool_name =
+                                extract_tool_name_from_meta(tool_call.meta.as_ref())
+                                    .unwrap_or_else(|| "acp_tool".to_string());
                             let derived_params = build_params_from_raw_input(
                                 tool_call.raw_input.as_ref(),
                                 tool_call.meta.as_ref(),
@@ -965,8 +942,9 @@ impl AcpClient for AcpTauriClient {
                         );
 
                         let display_name = display_server_name(&tool_call.title, "ACP ToolCall");
-                        let derived_tool_name = extract_tool_name_from_meta(tool_call.meta.as_ref())
-                            .unwrap_or_else(|| "acp_tool".to_string());
+                        let derived_tool_name =
+                            extract_tool_name_from_meta(tool_call.meta.as_ref())
+                                .unwrap_or_else(|| "acp_tool".to_string());
                         let derived_params = build_params_from_raw_input(
                             tool_call.raw_input.as_ref(),
                             tool_call.meta.as_ref(),
@@ -989,7 +967,8 @@ impl AcpClient for AcpTauriClient {
 
                         let mut status_str = tool_status_to_string(tool_call.status);
                         if status_str == "pending" {
-                            if let Some(false) = meta_requires_confirmation(tool_call.meta.as_ref()) {
+                            if let Some(false) = meta_requires_confirmation(tool_call.meta.as_ref())
+                            {
                                 status_str = "executing".to_string();
                             }
                         }
@@ -1028,43 +1007,44 @@ impl AcpClient for AcpTauriClient {
 
                 let message_id = *self.message_id.lock().await;
                 let display_name = display_server_name(&tool_call.title, &server_name);
-                let tool_call_record = match crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
-                    self.app_handle.clone(),
-                    self.conversation_id,
-                    Some(message_id),
-                    server_name.clone(),
-                    tool_name.clone(),
-                    parameters.clone(),
-                    Some(&tool_call.tool_call_id.0),
-                    Some(message_id),
-                )
-                .await
-                {
-                    Ok(record) => record,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "ACP failed to create MCP tool call record");
-                        let call_id = tool_call_id_to_i64(&tool_call.tool_call_id);
-                        let event = ConversationEvent {
-                            r#type: "mcp_tool_call_update".to_string(),
-                            data: serde_json::to_value(MCPToolCallUpdateEvent {
-                                call_id,
-                                conversation_id: self.conversation_id,
-                                status: "pending".to_string(),
-                                server_name: None,
-                                tool_name: None,
-                                parameters: None,
-                                result: None,
-                                error: None,
-                                started_time: Some(chrono::Utc::now()),
-                                finished_time: None,
-                            })
-                            .unwrap(),
-                        };
+                let tool_call_record =
+                    match crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
+                        self.app_handle.clone(),
+                        self.conversation_id,
+                        Some(message_id),
+                        server_name.clone(),
+                        tool_name.clone(),
+                        parameters.clone(),
+                        Some(&tool_call.tool_call_id.0),
+                        Some(message_id),
+                    )
+                    .await
+                    {
+                        Ok(record) => record,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "ACP failed to create MCP tool call record");
+                            let call_id = tool_call_id_to_i64(&tool_call.tool_call_id);
+                            let event = ConversationEvent {
+                                r#type: "mcp_tool_call_update".to_string(),
+                                data: serde_json::to_value(MCPToolCallUpdateEvent {
+                                    call_id,
+                                    conversation_id: self.conversation_id,
+                                    status: "pending".to_string(),
+                                    server_name: None,
+                                    tool_name: None,
+                                    parameters: None,
+                                    result: None,
+                                    error: None,
+                                    started_time: Some(chrono::Utc::now()),
+                                    finished_time: None,
+                                })
+                                .unwrap(),
+                            };
 
-                        self.emit_event(event).await;
-                        return Ok(());
-                    }
-                };
+                            self.emit_event(event).await;
+                            return Ok(());
+                        }
+                    };
 
                 {
                     let mut map = self.tool_call_id_map.lock().await;
@@ -1131,13 +1111,15 @@ impl AcpClient for AcpTauriClient {
 
             // Tool call status update - emit as MCP tool call update
             acp::SessionUpdate::ToolCallUpdate(update) => {
-                info!("ACP ToolCallUpdate: id={:?}, status={:?}", update.tool_call_id, update.fields.status);
+                info!(
+                    "ACP ToolCallUpdate: id={:?}, status={:?}",
+                    update.tool_call_id, update.fields.status
+                );
                 debug!(?update, "ACP ToolCallUpdate detail");
 
                 let mut call_id_opt = {
                     let map = self.tool_call_id_map.lock().await;
-                    map.get(update.tool_call_id.0.as_ref())
-                        .cloned()
+                    map.get(update.tool_call_id.0.as_ref()).cloned()
                 };
 
                 if call_id_opt.is_none() {
@@ -1146,26 +1128,31 @@ impl AcpClient for AcpTauriClient {
                         update.meta.as_ref(),
                     )
                     .or_else(|| {
-                        update.fields.title.as_ref().map(|title| {
-                            let mut tool_call =
-                                acp::ToolCall::new(update.tool_call_id.clone(), title.clone());
-                            if let Some(kind) = update.fields.kind {
-                                tool_call.kind = kind;
-                            }
-                            if let Some(locations) = update.fields.locations.clone() {
-                                tool_call.locations = locations;
-                            }
-                            tool_call
-                        })
-                        .and_then(|tool_call| fallback_acp_tool_call_info(&self.app_handle, &tool_call))
+                        update
+                            .fields
+                            .title
+                            .as_ref()
+                            .map(|title| {
+                                let mut tool_call =
+                                    acp::ToolCall::new(update.tool_call_id.clone(), title.clone());
+                                if let Some(kind) = update.fields.kind {
+                                    tool_call.kind = kind;
+                                }
+                                if let Some(locations) = update.fields.locations.clone() {
+                                    tool_call.locations = locations;
+                                }
+                                tool_call
+                            })
+                            .and_then(|tool_call| {
+                                fallback_acp_tool_call_info(&self.app_handle, &tool_call)
+                            })
                     })
                     .or_else(|| {
                         fallback_acp_tool_call_info_from_locations(
                             &self.app_handle,
                             update.fields.locations.as_deref(),
                         )
-                    })
-                    {
+                    }) {
                         let message_id = *self.message_id.lock().await;
                         let display_name = update
                             .fields
@@ -1173,17 +1160,18 @@ impl AcpClient for AcpTauriClient {
                             .as_ref()
                             .map(|title| display_server_name(title, &server_name))
                             .unwrap_or_else(|| server_name.clone());
-                        if let Ok(record) = crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
-                            self.app_handle.clone(),
-                            self.conversation_id,
-                            Some(message_id),
-                            server_name.clone(),
-                            tool_name.clone(),
-                            parameters.clone(),
-                            Some(&update.tool_call_id.0),
-                            Some(message_id),
-                        )
-                        .await
+                        if let Ok(record) =
+                            crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
+                                self.app_handle.clone(),
+                                self.conversation_id,
+                                Some(message_id),
+                                server_name.clone(),
+                                tool_name.clone(),
+                                parameters.clone(),
+                                Some(&update.tool_call_id.0),
+                                Some(message_id),
+                            )
+                            .await
                         {
                             {
                                 let mut map = self.tool_call_id_map.lock().await;
@@ -1229,7 +1217,8 @@ impl AcpClient for AcpTauriClient {
                     }
                 }
 
-                let call_id = call_id_opt.unwrap_or_else(|| tool_call_id_to_i64(&update.tool_call_id));
+                let call_id =
+                    call_id_opt.unwrap_or_else(|| tool_call_id_to_i64(&update.tool_call_id));
 
                 let mut status_str = if let Some(status) = update.fields.status.as_ref() {
                     tool_status_to_string(status.clone())
@@ -1258,31 +1247,27 @@ impl AcpClient for AcpTauriClient {
                     || update.fields.locations.is_some()
                     || update.fields.kind.is_some()
                 {
-                    let title = update
-                        .fields
-                        .title
-                        .as_ref()
-                        .map(|t| t.as_str())
-                        .unwrap_or("ACP ToolCall");
+                    let title =
+                        update.fields.title.as_ref().map(|t| t.as_str()).unwrap_or("ACP ToolCall");
                     let (server_name, tool_name, parameters) = extract_acp_tool_call_info(
                         update.fields.raw_input.as_ref(),
                         update.meta.as_ref(),
                     )
                     .or_else(|| {
-                        let mut tool_call = acp::ToolCall::new(update.tool_call_id.clone(), title.to_string());
+                        let mut tool_call =
+                            acp::ToolCall::new(update.tool_call_id.clone(), title.to_string());
                         if let Some(kind) = update.fields.kind {
                             tool_call.kind = kind;
                         }
                         if let Some(locations) = update.fields.locations.clone() {
                             tool_call.locations = locations;
                         }
-                        fallback_acp_tool_call_info(&self.app_handle, &tool_call)
-                            .or_else(|| {
-                                fallback_acp_tool_call_info_from_locations(
-                                    &self.app_handle,
-                                    update.fields.locations.as_deref(),
-                                )
-                            })
+                        fallback_acp_tool_call_info(&self.app_handle, &tool_call).or_else(|| {
+                            fallback_acp_tool_call_info_from_locations(
+                                &self.app_handle,
+                                update.fields.locations.as_deref(),
+                            )
+                        })
                     })
                     .unwrap_or_else(|| {
                         let display_name = display_server_name(title, "ACP ToolCall");
@@ -1371,7 +1356,10 @@ impl AcpClient for AcpTauriClient {
 
             // Available commands update - log only, no UI support yet
             acp::SessionUpdate::AvailableCommandsUpdate(commands_update) => {
-                info!("ACP AvailableCommandsUpdate: {} commands", commands_update.available_commands.len());
+                info!(
+                    "ACP AvailableCommandsUpdate: {} commands",
+                    commands_update.available_commands.len()
+                );
             }
 
             // Session mode change - log only, no UI support yet
@@ -1411,7 +1399,10 @@ impl AcpClient for AcpTauriClient {
         Ok(())
     }
 
-    async fn request_permission(&self, args: acp::RequestPermissionRequest) -> acp::Result<acp::RequestPermissionResponse, acp::Error> {
+    async fn request_permission(
+        &self,
+        args: acp::RequestPermissionRequest,
+    ) -> acp::Result<acp::RequestPermissionResponse, acp::Error> {
         info!("ACP permission request: {:?}", args);
 
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -1437,11 +1428,7 @@ impl AcpClient for AcpTauriClient {
             .as_ref()
             .map(|raw| serde_json::to_string(raw).unwrap_or_else(|_| raw.to_string()));
 
-        let kind = args
-            .tool_call
-            .fields
-            .kind
-            .map(|k| format!("{:?}", k));
+        let kind = args.tool_call.fields.kind.map(|k| format!("{:?}", k));
 
         let event = AcpPermissionRequestEvent {
             request_id: request_id.clone(),
@@ -1455,24 +1442,27 @@ impl AcpClient for AcpTauriClient {
 
         if let Err(e) = self.app_handle.emit("acp-permission-request", &event) {
             error!(error = %e, "ACP permission request emit failed");
-            return Ok(acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled));
+            return Ok(acp::RequestPermissionResponse::new(
+                acp::RequestPermissionOutcome::Cancelled,
+            ));
         }
 
         match rx.await {
-            Ok(AcpPermissionDecision::Selected(option_id)) => Ok(
-                acp::RequestPermissionResponse::new(
-                    acp::RequestPermissionOutcome::Selected(
-                        acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new(option_id)),
-                    ),
-                ),
-            ),
-            Ok(AcpPermissionDecision::Cancelled) | Err(_) => Ok(
-                acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled),
-            ),
+            Ok(AcpPermissionDecision::Selected(option_id)) => {
+                Ok(acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Selected(
+                    acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new(option_id)),
+                )))
+            }
+            Ok(AcpPermissionDecision::Cancelled) | Err(_) => {
+                Ok(acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled))
+            }
         }
     }
 
-    async fn write_text_file(&self, args: acp::WriteTextFileRequest) -> acp::Result<acp::WriteTextFileResponse, acp::Error> {
+    async fn write_text_file(
+        &self,
+        args: acp::WriteTextFileRequest,
+    ) -> acp::Result<acp::WriteTextFileResponse, acp::Error> {
         info!("ACP write_text_file: path={}", args.path.display());
 
         let request = WriteFileRequest {
@@ -1485,7 +1475,9 @@ impl AcpClient for AcpTauriClient {
             &self.permission_manager,
             request,
             self.get_conversation_id(),
-        ).await {
+        )
+        .await
+        {
             Ok(_) => {
                 info!("File written successfully: {}", args.path.display());
                 Ok(acp::WriteTextFileResponse::new())
@@ -1497,7 +1489,10 @@ impl AcpClient for AcpTauriClient {
         }
     }
 
-    async fn read_text_file(&self, args: acp::ReadTextFileRequest) -> acp::Result<acp::ReadTextFileResponse, acp::Error> {
+    async fn read_text_file(
+        &self,
+        args: acp::ReadTextFileRequest,
+    ) -> acp::Result<acp::ReadTextFileResponse, acp::Error> {
         info!("ACP read_text_file: path={}", args.path.display());
 
         let request = ReadFileRequest {
@@ -1511,7 +1506,9 @@ impl AcpClient for AcpTauriClient {
             &self.permission_manager,
             request,
             self.get_conversation_id(),
-        ).await {
+        )
+        .await
+        {
             Ok(response) => {
                 info!("File read successfully: {} bytes", response.content.len());
                 Ok(acp::ReadTextFileResponse::new(response.content))
@@ -1523,7 +1520,10 @@ impl AcpClient for AcpTauriClient {
         }
     }
 
-    async fn create_terminal(&self, args: acp::CreateTerminalRequest) -> acp::Result<acp::CreateTerminalResponse, acp::Error> {
+    async fn create_terminal(
+        &self,
+        args: acp::CreateTerminalRequest,
+    ) -> acp::Result<acp::CreateTerminalResponse, acp::Error> {
         info!("ACP create_terminal: command={}", args.command);
 
         // Build the full command with args
@@ -1560,25 +1560,23 @@ impl AcpClient for AcpTauriClient {
         }
     }
 
-    async fn terminal_output(&self, args: acp::TerminalOutputRequest) -> acp::Result<acp::TerminalOutputResponse, acp::Error> {
+    async fn terminal_output(
+        &self,
+        args: acp::TerminalOutputRequest,
+    ) -> acp::Result<acp::TerminalOutputResponse, acp::Error> {
         debug!("ACP terminal_output: terminal_id={}", args.terminal_id.0);
 
         let bash_id = args.terminal_id.0.to_string();
 
-        let request = GetBashOutputRequest {
-            bash_id: bash_id.clone(),
-            filter: None,
-        };
+        let request = GetBashOutputRequest { bash_id: bash_id.clone(), filter: None };
 
         match BashOperations::get_bash_output(&self.operation_state, request).await {
             Ok(response) => {
                 let exit_status = match response.status {
                     BashProcessStatus::Running => None,
-                    BashProcessStatus::Completed | BashProcessStatus::Error => {
-                        response.exit_code.map(|code| {
-                            acp::TerminalExitStatus::new().exit_code(Some(code as u32))
-                        })
-                    }
+                    BashProcessStatus::Completed | BashProcessStatus::Error => response
+                        .exit_code
+                        .map(|code| acp::TerminalExitStatus::new().exit_code(Some(code as u32))),
                 };
 
                 Ok(acp::TerminalOutputResponse::new(response.output, false)
@@ -1591,7 +1589,10 @@ impl AcpClient for AcpTauriClient {
         }
     }
 
-    async fn release_terminal(&self, args: acp::ReleaseTerminalRequest) -> acp::Result<acp::ReleaseTerminalResponse, acp::Error> {
+    async fn release_terminal(
+        &self,
+        args: acp::ReleaseTerminalRequest,
+    ) -> acp::Result<acp::ReleaseTerminalResponse, acp::Error> {
         info!("ACP release_terminal: terminal_id={}", args.terminal_id.0);
 
         let bash_id = args.terminal_id.0.to_string();
@@ -1603,7 +1604,10 @@ impl AcpClient for AcpTauriClient {
         Ok(acp::ReleaseTerminalResponse::new())
     }
 
-    async fn wait_for_terminal_exit(&self, args: acp::WaitForTerminalExitRequest) -> acp::Result<acp::WaitForTerminalExitResponse, acp::Error> {
+    async fn wait_for_terminal_exit(
+        &self,
+        args: acp::WaitForTerminalExitRequest,
+    ) -> acp::Result<acp::WaitForTerminalExitResponse, acp::Error> {
         info!("ACP wait_for_terminal_exit: terminal_id={}", args.terminal_id.0);
 
         let bash_id = args.terminal_id.0.to_string();
@@ -1619,19 +1623,15 @@ impl AcpClient for AcpTauriClient {
             let (_output, completed, exit_code) = {
                 let processes = self.operation_state.bash_processes.lock().await;
                 if let Some(info) = processes.get(&bash_id) {
-                    (
-                        info.output_buffer.clone(),
-                        info.completed,
-                        info.exit_code,
-                    )
+                    (info.output_buffer.clone(), info.completed, info.exit_code)
                 } else {
                     break;
                 }
             };
 
             if completed {
-                let exit_status = acp::TerminalExitStatus::new()
-                    .exit_code(exit_code.map(|c| c as u32));
+                let exit_status =
+                    acp::TerminalExitStatus::new().exit_code(exit_code.map(|c| c as u32));
                 info!("Terminal exited: terminal_id={}, exit_code={:?}", bash_id, exit_code);
                 return Ok(acp::WaitForTerminalExitResponse::new(exit_status));
             }
@@ -1645,7 +1645,10 @@ impl AcpClient for AcpTauriClient {
         Ok(acp::WaitForTerminalExitResponse::new(exit_status))
     }
 
-    async fn kill_terminal_command(&self, args: acp::KillTerminalCommandRequest) -> acp::Result<acp::KillTerminalCommandResponse, acp::Error> {
+    async fn kill_terminal_command(
+        &self,
+        args: acp::KillTerminalCommandRequest,
+    ) -> acp::Result<acp::KillTerminalCommandResponse, acp::Error> {
         info!("ACP kill_terminal_command: terminal_id={}", args.terminal_id.0);
 
         let bash_id = args.terminal_id.0.to_string();
@@ -1721,10 +1724,7 @@ async fn process_acp_prompt(
         prompt
     };
 
-    info!(
-        "ACP: Sending prompt (conversation_id={}, message_id={})",
-        conversation_id, message_id
-    );
+    info!("ACP: Sending prompt (conversation_id={}, message_id={})", conversation_id, message_id);
     let prompt_response = conn
         .prompt(acp::PromptRequest::new(session_id.to_string(), vec![prompt_to_send.into()]))
         .await;
@@ -1760,11 +1760,7 @@ async fn run_acp_session(
     };
 
     let (first_message_id, first_prompt, first_window) = match first_command {
-        AcpSessionCommand::Prompt {
-            message_id,
-            prompt,
-            window,
-        } => (message_id, prompt, window),
+        AcpSessionCommand::Prompt { message_id, prompt, window } => (message_id, prompt, window),
     };
 
     let send_startup_error = |window: &tauri::Window, message_id: i64, msg: &str| {
@@ -1949,7 +1945,7 @@ async fn run_acp_session(
             info!("ACP: Initializing connection (timeout: 30s)...");
             let init_future = conn.initialize(
                 acp::InitializeRequest::new(acp::ProtocolVersion::V1)
-                    .client_info(acp::Implementation::new("AIPP", "0.4.1")),
+                    .client_info(acp::Implementation::new("AIPP", "0.4.3")),
             );
 
             let init_response = tokio::time::timeout(
@@ -2122,7 +2118,7 @@ async fn run_acp_session(
 }
 
 /// Extract ACP configuration from assistant_model_config and llm_provider_config
-/// 
+///
 /// Configuration priority:
 /// 1. assistant_model_config (assistant-level override)
 /// 2. llm_provider_config (provider-level default)
@@ -2135,18 +2131,12 @@ pub fn extract_acp_config(
 
     // Helper to get value from provider_configs
     let get_provider_config = |name: &str| -> Option<String> {
-        provider_configs
-            .iter()
-            .find(|c| c.name == name)
-            .map(|c| c.value.clone())
+        provider_configs.iter().find(|c| c.name == name).map(|c| c.value.clone())
     };
 
     // Helper to get value from model_configs
     let get_model_config = |name: &str| -> Option<String> {
-        model_configs
-            .iter()
-            .find(|c| c.name == name)
-            .and_then(|c| c.value.clone())
+        model_configs.iter().find(|c| c.name == name).and_then(|c| c.value.clone())
     };
 
     // 获取 CLI 命令
@@ -2155,9 +2145,9 @@ pub fn extract_acp_config(
     // - Claude Code: 需要安装 @zed-industries/claude-code-acp，命令是 "claude-code-acp"
     // - Codex: 需要安装 @zed-industries/codex-acp，命令是 "codex-acp"
     // - Gemini: 原生支持 ACP，命令是 "gemini"
-    let cli_command = get_provider_config("acp_cli_command")
-        .unwrap_or_else(|| "claude-code-acp".to_string());
-    
+    let cli_command =
+        get_provider_config("acp_cli_command").unwrap_or_else(|| "claude-code-acp".to_string());
+
     debug!("ACP: cli_command from provider_config: {:?}", get_provider_config("acp_cli_command"));
     debug!("ACP: final cli_command: {}", cli_command);
 
@@ -2166,21 +2156,19 @@ pub fn extract_acp_config(
     let working_directory = get_model_config("acp_working_directory")
         .or_else(|| get_provider_config("acp_working_directory"))
         .map(|p| PathBuf::from(p))
-        .unwrap_or_else(|| {
-            dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
-        });
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
 
     // 收集环境变量
     // 从两个配置源收集，model_config 优先级更高
     let mut env_vars = HashMap::new();
-    
+
     // 先从 provider_configs 收集
     for config in provider_configs {
         if let Some(key) = config.name.strip_prefix("acp_env_") {
             env_vars.insert(key.to_uppercase(), config.value.clone());
         }
     }
-    
+
     // 再从 model_configs 收集（会覆盖 provider 的同名配置）
     for config in model_configs {
         if let Some(key) = config.name.strip_prefix("acp_env_") {
@@ -2194,11 +2182,7 @@ pub fn extract_acp_config(
     // 优先级: assistant_model_config > llm_provider_config > empty
     let additional_args = get_model_config("acp_additional_args")
         .or_else(|| get_provider_config("acp_additional_args"))
-        .map(|args| {
-            args.split_whitespace()
-                .map(|s| s.to_string())
-                .collect()
-        })
+        .map(|args| args.split_whitespace().map(|s| s.to_string()).collect())
         .unwrap_or_default();
 
     // Log the extracted configuration for debugging
@@ -2210,10 +2194,5 @@ pub fn extract_acp_config(
         additional_args
     );
 
-    Ok(AcpConfig {
-        cli_command,
-        working_directory,
-        env_vars,
-        additional_args,
-    })
+    Ok(AcpConfig { cli_command, working_directory, env_vars, additional_args })
 }
