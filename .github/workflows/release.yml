@@ -272,14 +272,16 @@ jobs:
 
             - name: Generate latest.json with signatures
               id: generate_json
+              env:
+                RELEASE_BODY: ${{ needs.create-release.outputs.release_body }}
               run: |
                 # 获取当前时间（ISO 8601 格式）
                 PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
                 # 读取 changelog
-                CHANGELOG="${{ needs.create-release.outputs.release_body }}"
+                CHANGELOG="$RELEASE_BODY"
                 # 转义换行符为 JSON 字符串
-                NOTES_JSON=$(echo "$CHANGELOG" | jq -Rs .)
+                NOTES_JSON=$(printf '%s' "$CHANGELOG" | jq -Rs .)
 
                 # 读取签名和 URLs
                 SIGNATURES=$(cat signatures.json)
