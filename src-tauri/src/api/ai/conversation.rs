@@ -106,6 +106,53 @@ fn build_user_message_with_attachments(
     ChatMessage::user(parts)
 }
 
+fn extract_tool_call_ids_from_mcp_comments(content: &str) -> HashSet<String> {
+    let mcp_call_regex = Regex::new(r"<!-- MCP_TOOL_CALL:(.*?) -->").unwrap();
+    let mut ids = HashSet::new();
+    for capture in mcp_call_regex.captures_iter(content) {
+        if let Ok(tool_data) = serde_json::from_str::<serde_json::Value>(&capture[1]) {
+            if let Some(llm_call_id) = tool_data["llm_call_id"].as_str() {
+                let llm_call_id = llm_call_id.trim();
+                if !llm_call_id.is_empty() {
+                    ids.insert(llm_call_id.to_string());
+                }
+            }
+            if let Some(call_id) = tool_data["call_id"].as_u64() {
+                ids.insert(call_id.to_string());
+            }
+        }
+    }
+    ids
+}
+
+fn collect_sticky_response_ids(
+    all_messages: &[(Message, Option<MessageAttachment>)],
+) -> HashSet<i64> {
+    let mut tool_result_ids = HashSet::new();
+    for (message, _) in all_messages.iter() {
+        if message.message_type != "tool_result" {
+            continue;
+        }
+        if let Some(tool_call_id) = extract_tool_call_id(&message.content) {
+            tool_result_ids.insert(tool_call_id);
+        }
+    }
+    if tool_result_ids.is_empty() {
+        return HashSet::new();
+    }
+    let mut sticky = HashSet::new();
+    for (message, _) in all_messages.iter() {
+        if message.message_type != "response" {
+            continue;
+        }
+        let tool_call_ids = extract_tool_call_ids_from_mcp_comments(&message.content);
+        if tool_call_ids.iter().any(|id| tool_result_ids.contains(id)) {
+            sticky.insert(message.id);
+        }
+    }
+    sticky
+}
+
 pub fn build_chat_messages(
     init_message_list: &[(String, String, Vec<MessageAttachment>)],
 ) -> Vec<ChatMessage> {
@@ -118,6 +165,29 @@ pub fn build_chat_messages_with_context(
 ) -> Vec<ChatMessage> {
     debug!(?current_tool_call_id, "build_chat_messages_with_context called");
 
+    let mut valid_tool_call_ids: HashSet<String> = HashSet::new();
+    let mcp_call_regex = Regex::new(r"<!-- MCP_TOOL_CALL:(.*?) -->").unwrap();
+    for (message_type, content, _) in init_message_list.iter() {
+        if message_type != "response" {
+            continue;
+        }
+        for capture in mcp_call_regex.captures_iter(content) {
+            if let Ok(tool_data) = serde_json::from_str::<serde_json::Value>(&capture[1]) {
+                if let Some(llm_call_id) = tool_data["llm_call_id"].as_str() {
+                    let llm_call_id = llm_call_id.trim();
+                    if !llm_call_id.is_empty() {
+                        valid_tool_call_ids.insert(llm_call_id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if let Some(ref tool_call_id) = current_tool_call_id {
+        if !tool_call_id.trim().is_empty() {
+            valid_tool_call_ids.insert(tool_call_id.clone());
+        }
+    }
+
     let mut chat_messages = Vec::new();
     for (message_type, content, attachment_list) in init_message_list.iter() {
         debug!(message_type, preview = %content.chars().take(50).collect::<String>(), "processing message");
@@ -129,26 +199,32 @@ pub fn build_chat_messages_with_context(
             }
             "tool_result" => {
                 debug!("processing tool_result message");
-                // Priority: 1. current_tool_call_id, 2. extracted from content, 3. random
-                let tool_call_id = current_tool_call_id
-                    .clone()
-                    .or_else(|| extract_tool_call_id(content))
-                    .unwrap_or_else(|| {
-                        format!("tool_call_{}", Uuid::new_v4().to_string()[..8].to_string())
-                    });
+                let tool_call_id = current_tool_call_id.clone().or_else(|| extract_tool_call_id(content));
+                if let Some(tool_call_id) = tool_call_id {
+                    if !valid_tool_call_ids.contains(&tool_call_id) {
+                        debug!(tool_call_id, "tool_result without matching tool_call; downgrading");
+                        chat_messages.push(ChatMessage::user(content));
+                        continue;
+                    }
+                    debug!(tool_call_id, "using tool_call_id");
 
-                debug!(tool_call_id, "using tool_call_id");
+                    // Try to extract clean result, fallback to full content
+                    let tool_result =
+                        extract_tool_result(content).unwrap_or_else(|| content.to_string());
 
-                // Try to extract clean result, fallback to full content
-                let tool_result =
-                    extract_tool_result(content).unwrap_or_else(|| content.to_string());
+                    debug!(
+                        preview = %tool_result.chars().take(100).collect::<String>(),
+                        "tool result preview"
+                    );
 
-                debug!(preview = %tool_result.chars().take(100).collect::<String>(), "tool result preview");
-
-                // Create ToolResponse from genai crate
-                let tool_response = ToolResponse::new(tool_call_id.clone(), tool_result);
-                debug!(tool_call_id, "created ToolResponse");
-                chat_messages.push(ChatMessage::from(tool_response));
+                    // Create ToolResponse from genai crate
+                    let tool_response = ToolResponse::new(tool_call_id.clone(), tool_result);
+                    debug!(tool_call_id, "created ToolResponse");
+                    chat_messages.push(ChatMessage::from(tool_response));
+                } else {
+                    debug!("missing tool_call_id; downgrading tool_result to user message");
+                    chat_messages.push(ChatMessage::user(content));
+                }
             }
             other => {
                 // 将 response 统一视为 assistant 历史
@@ -339,29 +415,53 @@ pub fn build_message_list_from_db(
     all_messages: &[(Message, Option<MessageAttachment>)],
     branch_selection: BranchSelection,
 ) -> Vec<(String, String, Vec<MessageAttachment>)> {
+    let sticky_response_ids = collect_sticky_response_ids(all_messages);
     match branch_selection {
         BranchSelection::LatestBranch => {
-            let latest_branch = get_latest_branch_messages(all_messages);
+            let mut latest_branch = get_latest_branch_messages(all_messages);
+            if !sticky_response_ids.is_empty() {
+                for (message, _) in all_messages.iter() {
+                    if sticky_response_ids.contains(&message.id)
+                        && !latest_branch.iter().any(|m| m.id == message.id)
+                    {
+                        latest_branch.push(message.clone());
+                    }
+                }
+            }
             build_message_list_from_selected_messages(&latest_branch, all_messages)
         }
         BranchSelection::LatestChildren => {
             let (latest_children, child_ids) = get_latest_child_messages(all_messages);
-            let message_list: Vec<(String, String, Vec<MessageAttachment>)> = all_messages
-                .iter()
-                .filter(|(message, _)| !child_ids.contains(&message.id))
-                .map(|(message, attachment)| {
-                    let (final_message, final_attachment) = latest_children
-                        .get(&message.id)
-                        .cloned()
-                        .unwrap_or((message.clone(), attachment.clone()));
+            let mut message_list: Vec<(String, String, Vec<MessageAttachment>)> = Vec::new();
+            let mut included_ids: HashSet<i64> = HashSet::new();
+            for (message, attachment) in all_messages.iter() {
+                if child_ids.contains(&message.id) {
+                    continue;
+                }
+                let (final_message, final_attachment) = latest_children
+                    .get(&message.id)
+                    .cloned()
+                    .unwrap_or((message.clone(), attachment.clone()));
 
-                    (
-                        final_message.message_type,
-                        final_message.content,
-                        final_attachment.map(|a| vec![a]).unwrap_or_else(Vec::new),
-                    )
-                })
-                .collect();
+                included_ids.insert(final_message.id);
+                message_list.push((
+                    final_message.message_type,
+                    final_message.content,
+                    final_attachment.map(|a| vec![a]).unwrap_or_else(Vec::new),
+                ));
+            }
+            if !sticky_response_ids.is_empty() {
+                for (message, attachment) in all_messages.iter() {
+                    if sticky_response_ids.contains(&message.id) && !included_ids.contains(&message.id)
+                    {
+                        message_list.push((
+                            message.message_type.clone(),
+                            message.content.clone(),
+                            attachment.clone().map(|a| vec![a]).unwrap_or_else(Vec::new),
+                        ));
+                    }
+                }
+            }
             sort_messages_by_group_and_id(message_list, all_messages)
         }
         BranchSelection::All => {

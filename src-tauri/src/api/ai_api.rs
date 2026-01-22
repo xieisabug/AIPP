@@ -815,7 +815,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     );
 
     let tool_call_strategy = if has_available_tools {
-        ToolCallStrategy::NativeWithToolResponsePairing
+        ToolCallStrategy::Native
     } else {
         ToolCallStrategy::NonNative
     };
@@ -1031,7 +1031,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     );
 
     let tool_call_strategy = if has_available_tools {
-        ToolCallStrategy::NativeWithToolResponsePairing
+        ToolCallStrategy::Native
     } else {
         ToolCallStrategy::NonNative
     };
