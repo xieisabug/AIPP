@@ -272,18 +272,18 @@ jobs:
 
             - name: Generate latest.json with signatures
               id: generate_json
-                run: |
+              run: |
                     # 获取当前时间（ISO 8601 格式）
                     PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
                     # 读取 changelog
                     CHANGELOG="${{ needs.create-release.outputs.release_body }}"
-                  # 转义换行符为 JSON 字符串
-                  NOTES_JSON=$(echo "$CHANGELOG" | jq -Rs .)
+                    # 转义换行符为 JSON 字符串
+                    NOTES_JSON=$(echo "$CHANGELOG" | jq -Rs .)
 
-                  # 读取签名和 URLs
-                  SIGNATURES=$(cat signatures.json)
-                  URLS=$(cat urls.json)
+                    # 读取签名和 URLs
+                    SIGNATURES=$(cat signatures.json)
+                    URLS=$(cat urls.json)
 
                     # 获取版本号（去掉 v 前缀）
                     VERSION="${{ steps.get_version.outputs.version }}"
@@ -326,12 +326,12 @@ jobs:
                     }
                     EOF
 
-                  # 格式化 JSON
-                  jq . latest.json > latest.json.tmp
-                  mv latest.json.tmp latest.json
+                    # 格式化 JSON
+                    jq . latest.json > latest.json.tmp
+                    mv latest.json.tmp latest.json
 
-                  echo "Generated latest.json:"
-                  cat latest.json
+                    echo "Generated latest.json:"
+                    cat latest.json
 
             - name: Upload latest.json to Release
               uses: actions/github-script@v6
