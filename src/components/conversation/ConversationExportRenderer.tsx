@@ -516,7 +516,7 @@ const ConversationExportRenderer: React.FC<ConversationExportRendererProps> = ({
 };
 
 /**
- * 渲染导出内容到指定的 DOM 容器
+ * 渲染导出内容到指定的 DOM 容器（用于图片导出）
  */
 export function renderExportContent(
     container: HTMLElement,
@@ -537,6 +537,176 @@ export function renderExportContent(
             isDarkMode={isDarkMode}
         />
     );
+}
+
+/**
+ * 生成 PDF 导出的 HTML 内容（简洁文档样式，无气泡）
+ * 适合打印和阅读的纯文档格式
+ */
+export function renderPdfExportContent(
+    container: HTMLElement,
+    data: ExportData,
+    options: ConversationExportOptions,
+): void {
+    // PDF 始终使用浅色主题，更适合打印
+    const { conversation, toolCalls } = data;
+    const { messages } = conversation;
+
+    // 构建工具调用映射
+    const toolCallMap = mapToolCallsToMessages(toolCalls);
+
+    // 过滤消息
+    const filteredMessages = messages.filter((msg) => {
+        if (msg.message_type === "system") return options.includeSystemPrompt;
+        if (msg.message_type === "reasoning") return options.includeReasoning;
+        return true;
+    });
+
+    const formatDate = (date: Date) => {
+        return new Date(date).toLocaleString("zh-CN", {
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+        });
+    };
+
+    const getMessageLabel = (messageType: string) => {
+        const labels: Record<string, string> = {
+            system: "系统提示",
+            user: "用户",
+            assistant: "助手",
+            reasoning: "推理过程",
+            response: "回复",
+            error: "错误",
+        };
+        return labels[messageType] || messageType;
+    };
+
+    const escapeHtml = (str: string) => {
+        return str
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+    };
+
+    // 简单的 Markdown 转 HTML（保留基本格式）
+    const markdownToHtml = (md: string) => {
+        let html = escapeHtml(md);
+        
+        // 代码块 ```
+        html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, _lang, code) => {
+            return `<pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; margin: 8px 0; border: 1px solid #e0e0e0; overflow-x: auto;"><code style="font-family: Consolas, Monaco, monospace; font-size: 11px; color: #333; white-space: pre-wrap; word-break: break-word;">${code}</code></pre>`;
+        });
+        
+        // 行内代码
+        html = html.replace(/`([^`]+)`/g, '<code style="background: #f5f5f5; padding: 1px 4px; border-radius: 3px; font-family: Consolas, Monaco, monospace; font-size: 0.9em; color: #333;">$1</code>');
+        
+        // 标题
+        html = html.replace(/^### (.*$)/gm, '<h4 style="font-size: 13px; font-weight: 600; margin: 10px 0 5px; color: #111;">$1</h4>');
+        html = html.replace(/^## (.*$)/gm, '<h3 style="font-size: 14px; font-weight: 600; margin: 10px 0 5px; color: #111;">$1</h3>');
+        html = html.replace(/^# (.*$)/gm, '<h2 style="font-size: 15px; font-weight: 600; margin: 10px 0 5px; color: #111;">$1</h2>');
+        
+        // 粗体和斜体
+        html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+        html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+        
+        // 无序列表
+        html = html.replace(/^\s*[-*+]\s+(.*)$/gm, '<li style="margin: 2px 0;">$1</li>');
+        html = html.replace(/(<li[^>]*>.*<\/li>\n?)+/g, '<ul style="margin: 5px 0; padding-left: 18px;">$&</ul>');
+        
+        // 有序列表
+        html = html.replace(/^\s*\d+\.\s+(.*)$/gm, '<li style="margin: 2px 0;">$1</li>');
+        
+        // 链接
+        html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" style="color: #2563eb; text-decoration: underline;">$1</a>');
+        
+        // 换行
+        html = html.replace(/\n\n/g, '</p><p style="margin: 5px 0;">');
+        html = html.replace(/\n/g, '<br>');
+        
+        return `<p style="margin: 5px 0;">${html}</p>`;
+    };
+
+    // 生成消息 HTML（简洁文档样式，无气泡）
+    const generateMessagesHtml = () => {
+        return filteredMessages.map((message) => {
+            const label = getMessageLabel(message.message_type);
+
+            let toolCallsHtml = "";
+            
+            // 工具调用参数
+            if (options.includeToolParams && message.tool_calls_json) {
+                const parsedCalls = parseToolCalls(message.tool_calls_json);
+                if (parsedCalls.length > 0) {
+                    toolCallsHtml += parsedCalls.map((tc) => {
+                        const parts = tc.fn_name.split("__");
+                        const toolName = parts.length > 1 ? parts.slice(1).join("__") : tc.fn_name;
+                        const serverName = parts[0] || "unknown";
+                        return `
+                            <div style="margin-top: 8px; padding: 8px; background: #f9f9f9; border-left: 3px solid #2563eb; font-size: 11px;">
+                                <div style="font-weight: 500; margin-bottom: 4px; color: #333;">🔧 ${escapeHtml(serverName)} / ${escapeHtml(toolName)}</div>
+                                <pre style="background: #f0f0f0; padding: 6px; border-radius: 3px; margin: 0; overflow-x: auto;"><code style="font-family: Consolas, Monaco, monospace; font-size: 10px; color: #333; white-space: pre-wrap; word-break: break-word;">${escapeHtml(JSON.stringify(tc.fn_arguments, null, 2))}</code></pre>
+                            </div>
+                        `;
+                    }).join("");
+                }
+            }
+
+            // 工具执行结果
+            if (options.includeToolResults && toolCallMap.has(message.id)) {
+                const relatedCalls = toolCallMap.get(message.id);
+                if (relatedCalls && relatedCalls.length > 0) {
+                    toolCallsHtml += relatedCalls.map((tc) => {
+                        const statusText = tc.status === "success" ? "✓" : tc.status === "failed" ? "✗" : "...";
+                        let resultHtml = "";
+                        if (tc.status === "success" && tc.result) {
+                            resultHtml = `<pre style="background: #f0f0f0; padding: 6px; border-radius: 3px; margin: 4px 0 0; overflow-x: auto;"><code style="font-family: Consolas, Monaco, monospace; font-size: 10px; color: #333; white-space: pre-wrap; word-break: break-word;">${escapeHtml(tc.result)}</code></pre>`;
+                        } else if (tc.status === "failed" && tc.error) {
+                            resultHtml = `<div style="color: #dc2626; font-size: 10px; margin-top: 4px;">错误: ${escapeHtml(tc.error)}</div>`;
+                        }
+                        return `
+                            <div style="margin-top: 8px; padding: 8px; background: #f9f9f9; border-left: 3px solid ${tc.status === "success" ? "#22c55e" : tc.status === "failed" ? "#dc2626" : "#666"}; font-size: 11px;">
+                                <div style="font-weight: 500; margin-bottom: 4px; color: #333;">${statusText} ${escapeHtml(tc.server_name)} / ${escapeHtml(tc.tool_name)}</div>
+                                ${resultHtml}
+                            </div>
+                        `;
+                    }).join("");
+                }
+            }
+
+            return `
+                <div style="margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #e5e5e5;">
+                    <div style="font-size: 11px; font-weight: 600; color: #666; margin-bottom: 6px;">${escapeHtml(label)}</div>
+                    <div style="color: #111; font-size: 12px; line-height: 1.6;">${markdownToHtml(message.content || "")}</div>
+                    ${toolCallsHtml}
+                </div>
+            `;
+        }).join("");
+    };
+
+    // 设置容器样式并填充内容
+    container.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif';
+    container.style.lineHeight = "1.5";
+    container.style.color = "#111";
+    container.style.background = "#ffffff";
+    container.style.fontSize = "12px";
+    container.style.padding = "24px";
+
+    container.innerHTML = `
+        <div style="margin-bottom: 20px; padding-bottom: 12px; border-bottom: 2px solid #111;">
+            <h1 style="font-size: 18px; font-weight: 600; margin: 0 0 6px 0; color: #111;">${escapeHtml(data.conversation.conversation.name)}</h1>
+            <p style="font-size: 11px; color: #666; margin: 0;">
+                助手: ${escapeHtml(data.conversation.conversation.assistant_name)} | 
+                创建时间: ${formatDate(new Date(data.conversation.conversation.created_time))}
+            </p>
+        </div>
+        ${generateMessagesHtml()}
+    `;
 }
 
 export default ConversationExportRenderer;
