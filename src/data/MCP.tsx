@@ -56,7 +56,7 @@ export interface MCPServerRequest {
     is_long_running: boolean;
     is_enabled: boolean;
     is_builtin?: boolean; // 可选字段，用于创建内置服务器
-    proxy_enabled?: boolean; // 是否使用全局网络代理
+    proxy_enabled: boolean; // 是否使用全局网络代理
 }
 
 export interface MCPToolConfig {

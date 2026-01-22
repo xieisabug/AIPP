@@ -7,3 +7,4 @@ pub mod integration_tests;
 pub mod mcp_detection_tests;
 pub mod mcp_registry_tests;
 pub mod regenerate_tests;
+pub mod summary_tests;

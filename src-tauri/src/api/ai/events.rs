@@ -62,5 +62,39 @@ pub struct ErrorNotificationPayload {
     pub error_message: String,
 }
 
+/// 活动焦点类型，用于统一控制闪亮边框显示
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "focus_type")]
+pub enum ActivityFocus {
+    /// 无活动焦点（空闲状态）
+    #[serde(rename = "none")]
+    None,
+
+    /// 用户消息等待响应
+    #[serde(rename = "user_pending")]
+    UserPending { message_id: i64 },
+
+    /// Assistant 消息流式输出中
+    #[serde(rename = "assistant_streaming")]
+    AssistantStreaming { message_id: i64 },
+
+    /// MCP 工具调用执行中
+    #[serde(rename = "mcp_executing")]
+    McpExecuting { call_id: i64 },
+}
+
+impl Default for ActivityFocus {
+    fn default() -> Self {
+        ActivityFocus::None
+    }
+}
+
+/// 活动焦点变更事件
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityFocusChangeEvent {
+    pub conversation_id: i64,
+    pub focus: ActivityFocus,
+}
+
 pub const TITLE_CHANGE_EVENT: &str = "title_change";
 pub const ERROR_NOTIFICATION_EVENT: &str = "conversation-window-error-notification";

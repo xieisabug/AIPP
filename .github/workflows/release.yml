@@ -189,27 +189,76 @@ jobs:
                   // 收集签名文件
                   const signatures = {};
                   const bundleUrls = {};
+                  const urlPreference = {};
+                  const sigPreference = {};
+
+                  const detectPlatform = (name) => {
+                    const lower = name.toLowerCase();
+                    if (lower.includes('appimage')) {
+                      return 'linux-x86_64';
+                    }
+                    if (lower.includes('.msi')) {
+                      return 'windows-x86_64';
+                    }
+                    if (lower.includes('.dmg') || lower.includes('.app.tar.gz')) {
+                      if (lower.includes('aarch64') || lower.includes('arm64')) {
+                        return 'darwin-aarch64';
+                      }
+                      if (lower.includes('x64') || lower.includes('x86_64')) {
+                        return 'darwin-x86_64';
+                      }
+                      return 'darwin-x86_64';
+                    }
+                    return null;
+                  };
+
+                  const isPreferredBundle = (name, platform) => {
+                    const lower = name.toLowerCase();
+                    if (platform === 'linux-x86_64') {
+                      return lower.includes('.appimage.tar.gz');
+                    }
+                    if (platform === 'windows-x86_64') {
+                      return lower.includes('.msi.zip');
+                    }
+                    if (platform && platform.startsWith('darwin')) {
+                      return lower.includes('.app.tar.gz');
+                    }
+                    return false;
+                  };
 
                   for (const asset of release.data.assets) {
                     const name = asset.name;
+                    const isSignature = name.endsWith('.sig');
+                    const baseName = name.replace(/^bundle\//, '').replace(/\.sig$/, '');
+                    const platform = detectPlatform(baseName);
+                    if (!platform) {
+                      continue;
+                    }
 
                     // .sig 文件是 tauri-action 自动生成的签名
-                    if (name.endsWith('.sig')) {
-                      const assetName = name.replace('.sig', '').replace(/^bundle\//, '');
-                      // 读取签名内容
-                      const response = await github.request(asset.browser_download_url);
-                      signatures[assetName] = Buffer.from(response.data).toString('base64');
+                    if (isSignature) {
+                      // 读取签名内容（.sig 文件内容已是 base64 文本）
+                      const response = await github.request({
+                        method: 'GET',
+                        url: asset.url,
+                        headers: { accept: 'application/octet-stream' },
+                      });
+                      const signatureText = Buffer.isBuffer(response.data)
+                        ? response.data.toString('utf8').trim()
+                        : Buffer.from(response.data).toString('utf8').trim();
+                      const preferred = isPreferredBundle(baseName, platform);
+                      if (!signatures[platform] || (preferred && !sigPreference[platform])) {
+                        signatures[platform] = signatureText;
+                        sigPreference[platform] = preferred;
+                      }
+                      continue;
                     }
 
                     // 记录 bundle URL
-                    if (name.includes('.AppImage.tar.gz') || name.includes('.dmg.zip') || name.includes('.msi.zip')) {
-                      const ext = name.includes('.AppImage') ? 'linux-x86_64' :
-                                  name.includes('x64.dmg') ? 'darwin-x86_64' :
-                                  name.includes('aarch64.dmg') ? 'darwin-aarch64' :
-                                  name.includes('msi') ? 'windows-x86_64' : '';
-                      if (ext) {
-                        bundleUrls[ext] = asset.browser_download_url;
-                      }
+                    const preferred = isPreferredBundle(baseName, platform);
+                    if (!bundleUrls[platform] || (preferred && !urlPreference[platform])) {
+                      bundleUrls[platform] = asset.browser_download_url;
+                      urlPreference[platform] = preferred;
                     }
                   }
 
@@ -223,12 +272,12 @@ jobs:
 
             - name: Generate latest.json with signatures
               id: generate_json
-              run: |
-                  # 获取当前时间（ISO 8601 格式）
-                  PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+                run: |
+                    # 获取当前时间（ISO 8601 格式）
+                    PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-                  # 读取 changelog
-                  CHANGELOG="${{ needs.create-release.outputs.release_body }}"
+                    # 读取 changelog
+                    CHANGELOG="${{ needs.create-release.outputs.release_body }}"
                   # 转义换行符为 JSON 字符串
                   NOTES_JSON=$(echo "$CHANGELOG" | jq -Rs .)
 
@@ -236,36 +285,46 @@ jobs:
                   SIGNATURES=$(cat signatures.json)
                   URLS=$(cat urls.json)
 
-                  # 获取版本号（去掉 v 前缀）
-                  VERSION="${{ steps.get_version.outputs.version }}"
-                  VERSION=${VERSION#v}
+                    # 获取版本号（去掉 v 前缀）
+                    VERSION="${{ steps.get_version.outputs.version }}"
+                    VERSION=${VERSION#v}
 
-                  # 生成 latest.json 文件
-                  cat > latest.json << EOF
-                  {
-                    "version": "${VERSION}",
-                    "notes": $NOTES_JSON,
-                    "pub_date": "$PUB_DATE",
-                    "platforms": {
-                      "linux-x86_64": {
-                        "signature": "$(echo "$SIGNATURES" | jq -r '.["Aipp_'${VERSION}'_amd64.AppImage.tar.gz"] // ""')",
+                    # 检查必需平台资源是否齐全
+                    for PLATFORM in linux-x86_64 darwin-x86_64 darwin-aarch64 windows-x86_64; do
+                      SIG=$(echo "$SIGNATURES" | jq -r --arg p "$PLATFORM" '.[$p] // ""')
+                      URL=$(echo "$URLS" | jq -r --arg p "$PLATFORM" '.[$p] // ""')
+                      if [ -z "$SIG" ] || [ -z "$URL" ]; then
+                        echo "Missing updater asset for $PLATFORM (signature or url)."
+                        exit 1
+                      fi
+                    done
+
+                    # 生成 latest.json 文件
+                    cat > latest.json << EOF
+                    {
+                      "version": "${VERSION}",
+                      "notes": $NOTES_JSON,
+                      "pub_date": "$PUB_DATE",
+                      "platforms": {
+                        "linux-x86_64": {
+                        "signature": "$(echo "$SIGNATURES" | jq -r '.["linux-x86_64"] // ""')",
                         "url": "$(echo "$URLS" | jq -r '.["linux-x86_64"] // ""')"
-                      },
-                      "darwin-x86_64": {
-                        "signature": "$(echo "$SIGNATURES" | jq -r '.["Aipp_'${VERSION}'_x64.dmg.zip"] // ""')",
+                        },
+                        "darwin-x86_64": {
+                        "signature": "$(echo "$SIGNATURES" | jq -r '.["darwin-x86_64"] // ""')",
                         "url": "$(echo "$URLS" | jq -r '.["darwin-x86_64"] // ""')"
-                      },
-                      "darwin-aarch64": {
-                        "signature": "$(echo "$SIGNATURES" | jq -r '.["Aipp_'${VERSION}'_aarch64.dmg.zip"] // ""')",
+                        },
+                        "darwin-aarch64": {
+                        "signature": "$(echo "$SIGNATURES" | jq -r '.["darwin-aarch64"] // ""')",
                         "url": "$(echo "$URLS" | jq -r '.["darwin-aarch64"] // ""')"
-                      },
-                      "windows-x86_64": {
-                        "signature": "$(echo "$SIGNATURES" | jq -r '.["Aipp_'${VERSION}'_x64_en-US.msi.zip"] // ""')",
+                        },
+                        "windows-x86_64": {
+                        "signature": "$(echo "$SIGNATURES" | jq -r '.["windows-x86_64"] // ""')",
                         "url": "$(echo "$URLS" | jq -r '.["windows-x86_64"] // ""')"
+                        }
                       }
                     }
-                  }
-                  EOF
+                    EOF
 
                   # 格式化 JSON
                   jq . latest.json > latest.json.tmp

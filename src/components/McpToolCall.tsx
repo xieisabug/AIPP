@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import React, { useState, useCallback, useMemo, useEffect, useRef, useLayoutEffect } from "react";
 import { Play, Loader2, CheckCircle, XCircle, Blocks, ChevronDown, ChevronUp, RotateCcw, Square, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -18,6 +18,7 @@ interface McpToolCallProps {
     messageId?: number;
     callId?: number; // If provided, this is an existing call
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>; // Global MCP states
+    isLastCall?: boolean; // 是否是消息中的最后一个工具调用
 }
 
 type ExecutionState = "idle" | "pending" | "executing" | "success" | "failed";
@@ -90,6 +91,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     messageId,
     callId,
     mcpToolCallStates,
+    isLastCall = true, // 默认为 true，向后兼容
 }) => {
     const [toolCallId, setToolCallId] = useState<number | null>(callId || null);
 
@@ -117,7 +119,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const [executionState, setExecutionState] = useState<ExecutionState>("idle");
     const [executionResult, setExecutionResult] = useState<string | null>(null);
     const [executionError, setExecutionError] = useState<string | null>(null);
-    // 默认展开：新工具调用（无 callId）默认展开，历史调用根据状态决定
+    // 默认展开：新工具调用默认展开，历史调用根据状态决定
     const [isExpanded, setIsExpanded] = useState<boolean>(!callId);
     // 自动收起定时器引用
     const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -146,14 +148,17 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             switch (globalState.status) {
                 case "pending":
                     setExecutionState("pending");
+                    setIsExpanded(true); // 待执行的调用默认展开
                     break;
                 case "executing":
                     setExecutionState("executing");
+                    setIsExpanded(true); // 执行中的调用默认展开
                     break;
                 case "success":
                     setExecutionState("success");
                     setExecutionResult(globalState.result || null);
                     setExecutionError(null);
+                    // 成功后不改变展开状态，保持用户的选择或使用3秒自动收起逻辑
                     break;
                 case "failed":
                     setExecutionState("failed");
@@ -164,6 +169,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         setExecutionError(globalState.error || null);
                     }
                     setExecutionResult(null);
+                    setIsExpanded(true); // 失败的调用默认展开，方便查看错误
                     break;
             }
         } else {
@@ -234,10 +240,13 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         } else if (matchingCall.status === "failed" && matchingCall.error) {
                             setExecutionError(matchingCall.error);
                             setExecutionState("failed");
+                            setIsExpanded(true); // 失败的调用默认展开，方便查看错误
                         } else if (matchingCall.status === "executing") {
                             setExecutionState("executing");
+                            setIsExpanded(true); // 执行中的调用默认展开，显示进度
                         } else if (matchingCall.status === "pending") {
                             setExecutionState("pending");
+                            setIsExpanded(true); // 待执行的调用默认展开，显示状态
                         }
                     } else {
                         console.log("[MCP] no matching tool call found for message", {
@@ -282,6 +291,26 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
 
     // 注意：后端 `detect_and_process_mcp_calls` 已根据助手配置自动执行，这里不再做自动执行
 
+    // 展开/收起动画相关
+    const contentRef = useRef<HTMLDivElement>(null);
+    const innerContentRef = useRef<HTMLDivElement>(null);
+    const [contentHeight, setContentHeight] = useState<number>(0);
+
+    // 计算内容高度用于动画（使用内部容器的高度）
+    useLayoutEffect(() => {
+        if (innerContentRef.current) {
+            const resizeObserver = new ResizeObserver((entries) => {
+                for (const entry of entries) {
+                    setContentHeight(entry.contentRect.height);
+                }
+            });
+            resizeObserver.observe(innerContentRef.current);
+            // 初始设置高度
+            setContentHeight(innerContentRef.current.offsetHeight);
+            return () => resizeObserver.disconnect();
+        }
+    }, []);
+
     // 切换展开/收起状态，同时清除自动收起的定时器
     const handleToggleExpand = useCallback(() => {
         if (collapseTimerRef.current) {
@@ -318,8 +347,10 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             }
 
             // Execute the tool call
+            // 只有当这是消息中最后一个工具调用时才触发续写
             const result = await invoke<MCPToolCall>("execute_mcp_tool_call", {
                 callId: currentCallId,
+                triggerContinuation: isLastCall,
             });
 
             if (result.status === "success" && result.result) {
@@ -464,8 +495,16 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 </div>
             </div>
 
-            {isExpanded && (
-                <div className="mt-2 space-y-2 max-w-full overflow-hidden">
+            {/* 带动画的可折叠内容区域 */}
+            <div
+                ref={contentRef}
+                className="overflow-hidden transition-all duration-300 ease-in-out"
+                style={{
+                    height: isExpanded ? `${contentHeight}px` : '0px',
+                    opacity: isExpanded ? 1 : 0,
+                }}
+            >
+                <div ref={innerContentRef} className="mt-2 space-y-2 max-w-full overflow-hidden">
                     <div className="max-w-full overflow-hidden">
                         <span className="text-xs font-medium mb-1 text-muted-foreground">参数:</span>
                         <JsonDisplay content={displayParameters} maxHeight="120px" className="mt-1" />
@@ -516,7 +555,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     )}
                     <div className="max-w-full overflow-hidden">{renderResult()}</div>
                 </div>
-            )}
+            </div>
         </div>
     );
 };

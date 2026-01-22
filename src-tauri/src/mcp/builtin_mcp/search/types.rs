@@ -14,7 +14,7 @@ pub enum SearchResultType {
 
 impl Default for SearchResultType {
     fn default() -> Self {
-        SearchResultType::Html
+        SearchResultType::Markdown
     }
 }
 
@@ -34,7 +34,7 @@ impl SearchResultType {
 pub struct SearchRequest {
     /// 搜索关键词
     pub query: String,
-    /// 期望的结果类型（默认 Html）
+    /// 期望的结果类型（默认 Markdown）
     #[serde(default)]
     pub result_type: SearchResultType,
 }
@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn test_search_result_type_default() {
         let result_type = SearchResultType::default();
-        assert_eq!(result_type, SearchResultType::Html);
+        assert_eq!(result_type, SearchResultType::Markdown);
     }
 
     #[test]
@@ -136,19 +136,19 @@ mod tests {
     #[test]
     fn test_search_result_type_from_str_none() {
         let result = SearchResultType::from_str(None);
-        assert_eq!(result, SearchResultType::Html); // default
+        assert_eq!(result, SearchResultType::Markdown); // default
     }
 
     #[test]
     fn test_search_result_type_from_str_invalid() {
         let result = SearchResultType::from_str(Some("invalid"));
-        assert_eq!(result, SearchResultType::Html); // default
+        assert_eq!(result, SearchResultType::Markdown); // default
     }
 
     #[test]
     fn test_search_result_type_from_str_empty() {
         let result = SearchResultType::from_str(Some(""));
-        assert_eq!(result, SearchResultType::Html); // default
+        assert_eq!(result, SearchResultType::Markdown); // default
     }
 
     // ============================================

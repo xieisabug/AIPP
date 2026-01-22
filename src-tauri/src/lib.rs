@@ -6,6 +6,7 @@ mod db;
 mod errors;
 mod mcp;
 mod plugin;
+mod scheduler;
 mod skills;
 mod state;
 mod template_engine;
@@ -13,7 +14,8 @@ mod utils;
 mod window;
 
 use crate::api::ai_api::{
-    ask_ai, cancel_ai, regenerate_ai, regenerate_conversation_title, tool_result_continue_ask_ai,
+    ask_ai, cancel_ai, get_activity_focus, regenerate_ai, regenerate_conversation_title,
+    tool_result_continue_ask_ai,
 };
 use crate::api::assistant_api::{
     add_assistant, bulk_update_assistant_mcp_tools, copy_assistant, delete_assistant,
@@ -104,7 +106,7 @@ use crate::mcp::builtin_mcp::{
 };
 use crate::mcp::execution_api::{
     continue_with_error, create_mcp_tool_call, execute_mcp_tool_call, get_mcp_tool_call,
-    get_mcp_tool_calls_by_conversation, stop_mcp_tool_call,
+    get_mcp_tool_calls_by_conversation, send_mcp_tool_results, stop_mcp_tool_call,
 };
 use crate::mcp::registry_api::{
     add_mcp_server,
@@ -149,6 +151,7 @@ use db::system_db::FeatureConfig;
 use get_selected_text::get_selected_text;
 use serde::{Deserialize, Serialize};
 use state::message_token::MessageTokenManager;
+use state::activity_state::ConversationActivityManager;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::path::BaseDirectory;
@@ -452,6 +455,11 @@ pub fn run() {
             app.manage(initialize_state(&app_handle));
             app.manage(initialize_name_cache_state(&app_handle));
 
+            // 初始化并启动定时任务调度器
+            let scheduler_state = scheduler::SchedulerState::new();
+            app.manage(scheduler_state.clone());
+            scheduler::start_scheduler(app_handle.clone(), scheduler_state);
+
             // 注册全局快捷键（必须在 state 初始化之后）
             #[cfg(desktop)]
             {
@@ -480,6 +488,7 @@ pub fn run() {
         })
         .manage(AcpSessionState::new())
         .manage(MessageTokenManager::new())
+        .manage(ConversationActivityManager::new())
         .manage(OperationState::new())
         .manage(AcpPermissionState::new());
     #[cfg(desktop)]
@@ -489,6 +498,7 @@ pub fn run() {
             ask_ai,
             tool_result_continue_ask_ai,
             regenerate_ai,
+            get_activity_focus,
             regenerate_conversation_title,
             generate_artifact_metadata,
             cancel_ai,
@@ -636,6 +646,7 @@ pub fn run() {
             get_mcp_tool_calls_by_conversation,
             stop_mcp_tool_call,
             continue_with_error,
+            send_mcp_tool_results,
             list_aipp_builtin_templates,
             add_or_update_aipp_builtin_server,
             execute_aipp_builtin_tool,

@@ -11,7 +11,6 @@ use crate::{
                 calculate_retry_delay, get_network_proxy_from_config,
                 get_request_timeout_from_config, get_retry_attempts_from_config,
             },
-            conversation::build_chat_messages,
         },
         assistant_api::get_assistant,
         genai_client::create_client_with_config,
@@ -29,7 +28,7 @@ use crate::{
     },
     FeatureConfigState,
 };
-use genai::chat::{ChatOptions, ChatRequest};
+use genai::chat::ChatOptions;
 use tauri::State;
 use tokio::time::{sleep, Duration};
 use tracing::instrument;
@@ -368,8 +367,12 @@ pub async fn run_sub_task_sync(
             ("user".to_string(), task_prompt.clone(), vec![]),
         ];
 
-        let chat_messages = build_chat_messages(&init_messages);
-        let chat_request = ChatRequest::new(chat_messages);
+        let chat_request = crate::api::ai::conversation::build_chat_request_from_messages(
+            &init_messages,
+            crate::api::ai::conversation::ToolCallStrategy::NonNative,
+            None,
+        )
+        .chat_request;
 
         // 构建聊天选项
         let mut chat_options = ChatOptions::default();
@@ -1388,8 +1391,12 @@ async fn execute_mcp_loop(
         debug!(subtask_id = subtask_id, iteration = loops_count, "mcp iteration start");
 
         // 执行 AI 调用（带重试）
-        let chat_messages = build_chat_messages(&current_messages);
-        let chat_request = ChatRequest::new(chat_messages);
+        let chat_request = crate::api::ai::conversation::build_chat_request_from_messages(
+            &current_messages,
+            crate::api::ai::conversation::ToolCallStrategy::NonNative,
+            None,
+        )
+        .chat_request;
         let max_retry_attempts = get_retry_attempts_from_config(config_map);
         let mut attempt: u32 = 0;
         let (ai_response, ai_latency_ms) = loop {

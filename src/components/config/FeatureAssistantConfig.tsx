@@ -38,8 +38,8 @@ const FeatureAssistantConfig: React.FC = () => {
         },
         {
             id: "conversation_summary",
-            name: "AI总结",
-            description: "对话开始时总结该对话并且生成标题，表单自动填写",
+            name: "辅助AI",
+            description: "配置AI辅助功能：对话标题生成、表单自动填写、对话摘要、记忆生成",
             icon: <MessageSquare className="h-5 w-5" />,
             code: "conversation_summary",
         },
@@ -107,10 +107,22 @@ const FeatureAssistantConfig: React.FC = () => {
 
     const summaryForm = useForm({
         defaultValues: {
-            model: "",
-            summary_length: "100",
+            // 总开关
+            assistant_ai_enabled: true,
+            // 总结标题
+            title_summary_enabled: true,
+            title_model: "",
+            title_summary_length: "100",
+            title_prompt: "",
+            // 表单自动填写
+            form_autofill_enabled: true,
             form_autofill_model: "",
-            prompt: "",
+            // 对话总结（实验功能，默认关闭）
+            conversation_summary_enabled: false,
+            conversation_summary_model: "",
+            // 记忆总结（实验功能，默认关闭）
+            memory_summary_enabled: false,
+            memory_summary_model: "",
         },
     });
 
@@ -172,18 +184,45 @@ const FeatureAssistantConfig: React.FC = () => {
                 });
             }
 
-            // 更新 summary 表单
+            // 更新 summary 表单 - 支持新旧配置键兼容
             const summaryConfig = featureConfig.get("conversation_summary");
             if (summaryConfig) {
-                const providerId = summaryConfig.get("provider_id") || "";
-                const modelCode = summaryConfig.get("model_code") || "";
+                // 读取新配置键
+                const titleModel = summaryConfig.get("title_model") || "";
+                const titleProviderId = summaryConfig.get("title_provider_id") || "";
+                // 兼容旧配置键（旧配置保存的是 model_code 和 provider_id 分开的）
+                const legacyModel = summaryConfig.get("model_code") || "";
+                const legacyProviderId = summaryConfig.get("provider_id") || "";
+                // 新配置优先，旧配置兜底
+                const modelCode = titleModel || legacyModel;
+                const providerId = titleProviderId || legacyProviderId;
+
                 summaryForm.reset({
+                    // 总开关
+                    assistant_ai_enabled: summaryConfig.get("assistant_ai_enabled") !== "false",
+                    // 总结标题
+                    title_summary_enabled: summaryConfig.get("title_summary_enabled") !== "false",
                     // ConfigForm's model-select uses value format: `${model.code}%%${model.llm_provider_id}`
-                    // Keep the same order here when restoring the form value
-                    model: `${modelCode}%%${providerId}`,
-                    summary_length: summaryConfig.get("summary_length") || "100",
+                    title_model: modelCode && providerId ? `${modelCode}%%${providerId}` : "",
+                    title_summary_length: summaryConfig.get("title_summary_length") || summaryConfig.get("summary_length") || "100",
+                    title_prompt: summaryConfig.get("title_prompt") || summaryConfig.get("prompt") || "",
+                    // 表单自动填写
+                    form_autofill_enabled: summaryConfig.get("form_autofill_enabled") !== "false",
                     form_autofill_model: summaryConfig.get("form_autofill_model") || "",
-                    prompt: summaryConfig.get("prompt") || "",
+                    // 对话总结
+                    conversation_summary_enabled: summaryConfig.get("conversation_summary_enabled") !== "false",
+                    conversation_summary_model: (() => {
+                        const model = summaryConfig.get("conversation_summary_model") || "";
+                        const providerId = summaryConfig.get("conversation_summary_provider_id") || "";
+                        return model && providerId ? `${model}%%${providerId}` : "";
+                    })(),
+                    // 记忆总结
+                    memory_summary_enabled: summaryConfig.get("memory_summary_enabled") !== "false",
+                    memory_summary_model: (() => {
+                        const model = summaryConfig.get("memory_summary_model") || "";
+                        const providerId = summaryConfig.get("memory_summary_provider_id") || "";
+                        return model && providerId ? `${model}%%${providerId}` : "";
+                    })(),
                 });
             }
 
@@ -258,18 +297,48 @@ const FeatureAssistantConfig: React.FC = () => {
 
     const handleSaveSummaryConfig = useCallback(async () => {
         const values = summaryForm.getValues();
-        // model-select value format is `${model_code}%%${provider_id}`
-        const [model_code, provider_id] = (values.model as string).split("%%");
-        // Ensure provider_id is numeric string
-        if (!provider_id || isNaN(Number(provider_id))) {
-            throw new Error("provider_id 必须是数字，请重新选择模型");
+
+        // 解析模型选择器值 - 格式: `${model_code}%%${provider_id}`
+        const parseModel = (modelValue: string) => {
+            if (!modelValue) return { model_code: "", provider_id: "" };
+            const parts = modelValue.split("%%");
+            return {
+                model_code: parts[0] || "",
+                provider_id: parts[1] || "",
+            };
+        };
+
+        const titleModel = parseModel(values.title_model as string);
+        const formAutofillModel = parseModel(values.form_autofill_model as string);
+        const conversationSummaryModel = parseModel(values.conversation_summary_model as string);
+        const memorySummaryModel = parseModel(values.memory_summary_model as string);
+
+        // 验证标题模型
+        if (values.title_summary_enabled && (!titleModel.provider_id || isNaN(Number(titleModel.provider_id)))) {
+            throw new Error("请为总结标题选择一个模型");
         }
+
         await saveFeatureConfig("conversation_summary", {
-            provider_id,
-            model_code,
-            summary_length: values.summary_length,
+            // 总开关
+            assistant_ai_enabled: values.assistant_ai_enabled.toString(),
+            // 总结标题
+            title_summary_enabled: values.title_summary_enabled.toString(),
+            title_model: titleModel.model_code,
+            title_provider_id: titleModel.provider_id,
+            title_summary_length: values.title_summary_length,
+            title_prompt: values.title_prompt,
+            // 表单自动填写
+            form_autofill_enabled: values.form_autofill_enabled.toString(),
             form_autofill_model: values.form_autofill_model,
-            prompt: values.prompt,
+            form_autofill_provider_id: formAutofillModel.provider_id,
+            // 对话总结
+            conversation_summary_enabled: values.conversation_summary_enabled.toString(),
+            conversation_summary_model: conversationSummaryModel.model_code,
+            conversation_summary_provider_id: conversationSummaryModel.provider_id,
+            // 记忆总结
+            memory_summary_enabled: values.memory_summary_enabled.toString(),
+            memory_summary_model: memorySummaryModel.model_code,
+            memory_summary_provider_id: memorySummaryModel.provider_id,
         });
     }, [summaryForm, saveFeatureConfig]);
 

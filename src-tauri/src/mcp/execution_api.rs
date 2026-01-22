@@ -8,10 +8,11 @@
 //! 5. 在工具成功后继续驱动 AI 对话（包含重试场景）
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
-use crate::api::ai_api::{sanitize_tool_name, tool_result_continue_ask_ai_impl};
+use crate::api::ai_api::{batch_tool_result_continue_ask_ai_impl, sanitize_tool_name, tool_result_continue_ask_ai_impl};
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::{MCPDatabase, MCPServer, MCPToolCall};
 use crate::mcp::builtin_mcp::{execute_aipp_builtin_tool, is_builtin_mcp_call};
+use crate::state::activity_state::ConversationActivityManager;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -26,6 +27,7 @@ use rmcp::{
 use serde_json::Map as JsonMap;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use tauri::Manager;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -135,7 +137,6 @@ fn serialize_tool_response(response: &rmcp::model::CallToolResult) -> Result<Str
     }
 }
 
-// MCP Tool Execution API
 
 // 发送MCP工具调用状态更新事件
 /// 向前端发送工具调用状态更新事件（包括执行中 / 成功 / 失败）。
@@ -190,7 +191,7 @@ fn validate_server_status(server: &MCPServer) -> Result<()> {
 
 // 处理工具执行结果
 /// 根据执行结果更新状态并尝试触发会话续写。即使续写失败也不影响主执行成功标记。
-#[instrument(skip(app_handle,state,feature_config_state,window,tool_call,execution_result), fields(call_id=call_id, conversation_id=?tool_call.conversation_id, retry=?is_retry))]
+#[instrument(skip(app_handle,state,feature_config_state,window,tool_call,execution_result), fields(call_id=call_id, conversation_id=?tool_call.conversation_id, retry=?is_retry, trigger_continuation))]
 async fn handle_tool_execution_result(
     app_handle: &tauri::AppHandle,
     state: &tauri::State<'_, crate::AppState>,
@@ -200,6 +201,7 @@ async fn handle_tool_execution_result(
     mut tool_call: MCPToolCall,
     execution_result: std::result::Result<String, String>,
     is_retry: bool,
+    trigger_continuation: bool,
 ) -> Result<MCPToolCall, String> {
     let db = MCPDatabase::new(app_handle).map_err(|e| format!("初始化数据库失败: {}", e))?;
 
@@ -217,20 +219,31 @@ async fn handle_tool_execution_result(
             // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
             broadcast_mcp_tool_call_update(app_handle, &tool_call);
 
-            // 处理对话继续逻辑
-            info!("准备触发工具成功续写，call_id={}, is_retry={}", call_id, is_retry);
-            if let Err(e) = handle_tool_success_continuation(
-                app_handle,
-                state,
-                feature_config_state,
-                window,
-                &tool_call,
-                &result,
-                is_retry,
-            )
-            .await
-            {
-                warn!(error=%e, "tool execution succeeded but continuation failed");
+            // Restore focus before continuation so the UI keeps shining while waiting.
+            if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+                activity_manager
+                    .restore_after_mcp(app_handle, tool_call.conversation_id)
+                    .await;
+            }
+
+            // 处理对话继续逻辑（仅当 trigger_continuation 为 true 时）
+            if trigger_continuation {
+                info!("准备触发工具成功续写，call_id={}, is_retry={}", call_id, is_retry);
+                if let Err(e) = handle_tool_success_continuation(
+                    app_handle,
+                    state,
+                    feature_config_state,
+                    window,
+                    &tool_call,
+                    &result,
+                    is_retry,
+                )
+                .await
+                {
+                    warn!(error=%e, "tool execution succeeded but continuation failed");
+                }
+            } else {
+                debug!("trigger_continuation=false, skipping tool continuation, call_id={}", call_id);
             }
         }
         Err(error) => {
@@ -245,6 +258,13 @@ async fn handle_tool_execution_result(
 
             // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
             broadcast_mcp_tool_call_update(app_handle, &tool_call);
+
+            // 工具执行失败后，恢复 MCP 执行前的活动状态
+            if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+                activity_manager
+                    .restore_after_mcp(app_handle, tool_call.conversation_id)
+                    .await;
+            }
         }
     }
 
@@ -359,13 +379,14 @@ pub async fn create_mcp_tool_call_with_llm_id(
 /// 1. 原子更新状态到 executing
 /// 2. 按服务器传输类型派发执行
 /// 3. 持久化结果并触发续写
-#[instrument(skip(app_handle,state,feature_config_state,window), fields(call_id=call_id))]
+#[instrument(skip(app_handle,state,feature_config_state,window), fields(call_id=call_id, trigger_continuation))]
 pub async fn execute_mcp_tool_call(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, crate::AppState>,
     feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
     window: tauri::Window,
     call_id: i64,
+    trigger_continuation: bool,
 ) -> std::result::Result<MCPToolCall, String> {
     let db = MCPDatabase::new(&app_handle).map_err(|e| format!("初始化数据库失败: {}", e))?;
 
@@ -403,6 +424,13 @@ pub async fn execute_mcp_tool_call(
     broadcast_mcp_tool_call_update(&app_handle, &tool_call);
     debug!(call_id=call_id, status=%tool_call.status, "broadcasted executing status event");
 
+    // 设置 MCP 执行中的活动状态（闪亮边框）
+    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+        activity_manager
+            .set_mcp_executing(&app_handle, tool_call.conversation_id, call_id)
+            .await;
+    }
+
     // 执行工具
     let cancel_token = register_cancel_token(call_id).await;
     let execution_result = {
@@ -413,6 +441,7 @@ pub async fn execute_mcp_tool_call(
             &tool_call.tool_name,
             &tool_call.parameters,
             Some(tool_call.conversation_id),
+            Some(cancel_token.clone()),
         );
         tokio::select! {
             _ = cancel_token.cancelled() => Err("Cancelled by user".to_string()),
@@ -432,6 +461,7 @@ pub async fn execute_mcp_tool_call(
         tool_call,
         execution_result,
         is_retry,
+        trigger_continuation,
     )
     .await
 }
@@ -558,9 +588,197 @@ pub async fn stop_mcp_tool_call(
         // 3. 广播状态更新事件
         let updated_call = db.get_mcp_tool_call(call_id).map_err(|e| e.to_string())?;
         broadcast_mcp_tool_call_update(&app_handle, &updated_call);
+
+        // 4. 恢复 MCP 执行前的活动状态
+        if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+            activity_manager
+                .restore_after_mcp(&app_handle, current_call.conversation_id)
+                .await;
+        }
     }
 
     Ok(())
+}
+
+/// 批量发送工具调用结果：将指定消息下的所有工具调用结果发送给 AI 继续对话
+/// 支持包含成功和失败的工具调用
+///
+/// 关键实现：
+/// - 为每个工具调用创建独立的 tool_result 消息（使用正确的格式）
+/// - 只在最后一个工具结果处理后触发 AI 续写
+/// - 使用 llm_call_id 作为工具调用标识（用于原生 toolcall 模式匹配）
+#[tauri::command]
+#[instrument(skip(app_handle, _state, _feature_config_state, window), fields(message_id))]
+pub async fn send_mcp_tool_results(
+    app_handle: tauri::AppHandle,
+    _state: tauri::State<'_, crate::AppState>,
+    _feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
+    window: tauri::Window,
+    message_id: i64,
+) -> std::result::Result<(), String> {
+    use crate::api::ai::events::{ConversationEvent, MessageAddEvent, MessageUpdateEvent};
+    use crate::db::conversation_db::Repository;
+    use tauri::Emitter;
+
+    let mcp_db = MCPDatabase::new(&app_handle).map_err(|e| format!("初始化 MCP 数据库失败: {}", e))?;
+
+    // 获取指定消息下的所有工具调用
+    let tool_calls = mcp_db
+        .get_mcp_tool_calls_by_message(message_id)
+        .map_err(|e| format!("获取工具调用列表失败: {}", e))?;
+
+    if tool_calls.is_empty() {
+        return Err("该消息下没有找到工具调用".to_string());
+    }
+
+    // 检查是否所有工具调用都已完成（非 pending/executing）
+    let has_pending = tool_calls.iter().any(|tc| tc.status == "pending" || tc.status == "executing");
+    if has_pending {
+        return Err("有工具调用尚未完成，请等待所有工具执行完成后再发送结果".to_string());
+    }
+
+    let conversation_id = tool_calls[0].conversation_id;
+
+    // 获取对话和助手信息
+    let conversation_db = ConversationDatabase::new(&app_handle)
+        .map_err(|e| format!("初始化对话数据库失败: {}", e))?;
+    let conversation = conversation_db
+        .conversation_repo()
+        .unwrap()
+        .read(conversation_id)
+        .map_err(|e| format!("获取对话信息失败: {}", e))?
+        .ok_or_else(|| "未找到对话".to_string())?;
+
+    let assistant_id = conversation
+        .assistant_id
+        .ok_or_else(|| "对话未关联助手".to_string())?;
+
+    // 获取助手信息以获取模型详情
+    let assistant_detail = crate::api::assistant_api::get_assistant(app_handle.clone(), assistant_id)
+        .map_err(|e| format!("获取助手信息失败: {}", e))?;
+    if assistant_detail.model.is_empty() {
+        return Err("助手未配置模型".to_string());
+    }
+    let model_id = assistant_detail.model[0].id;
+    let model_code = assistant_detail.model[0].model_code.clone();
+
+    // 为每个工具调用创建独立的 tool_result 消息
+    // 使用与 tool_result_continue_ask_ai_impl 相同的格式
+    for tc in &tool_calls {
+        // 使用 llm_call_id（如果存在），否则使用数据库 id 作为 fallback
+        let tool_call_id = tc.llm_call_id.clone()
+            .unwrap_or_else(|| format!("mcp_tool_call_{}", tc.id));
+
+        // 构建工具结果内容
+        let result_content = match tc.status.as_str() {
+            "success" => {
+                tc.result.clone().unwrap_or_else(|| "(空)".to_string())
+            }
+            "failed" => {
+                format!("Error: {}", tc.error.as_deref().unwrap_or("未知错误"))
+            }
+            _ => continue,
+        };
+
+        // 使用与 tool_result_continue_ask_ai_impl 相同的格式
+        let tool_result_content = format!(
+            "Tool execution completed:\n\nTool Call ID: {}\nTool: {}\nServer: {}\nParameters: {}\nResult:\n{}",
+            tool_call_id,
+            tc.tool_name,
+            tc.server_name,
+            tc.parameters,
+            result_content
+        );
+
+        // 创建 tool_result 消息
+        let tool_result_message = crate::api::ai_api::add_message(
+            &app_handle,
+            None,
+            conversation_id,
+            "tool_result".to_string(),
+            tool_result_content.clone(),
+            Some(model_id),
+            Some(model_code.clone()),
+            Some(chrono::Utc::now()),
+            Some(chrono::Utc::now()),
+            0,
+            None,
+            None,
+        ).map_err(|e| format!("创建工具结果消息失败: {}", e))?;
+
+        // 发送 UI 事件
+        let add_event = ConversationEvent {
+            r#type: "message_add".to_string(),
+            data: serde_json::to_value(MessageAddEvent {
+                message_id: tool_result_message.id,
+                message_type: "tool_result".to_string(),
+            })
+            .unwrap(),
+        };
+        let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
+
+        let update_event = ConversationEvent {
+            r#type: "message_update".to_string(),
+            data: serde_json::to_value(MessageUpdateEvent {
+                message_id: tool_result_message.id,
+                message_type: "tool_result".to_string(),
+                content: tool_result_content,
+                is_done: true,
+                token_count: None,
+                input_token_count: None,
+                output_token_count: None,
+                ttft_ms: None,
+                tps: None,
+            })
+            .unwrap(),
+        };
+        let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+
+        debug!(
+            tool_call_id = %tool_call_id,
+            message_id = tool_result_message.id,
+            "Created tool_result message"
+        );
+    }
+
+    // 使用会话级锁保证续写串行
+    let continuation_lock = {
+        let registry = continuation_lock_registry();
+        let mut guard = registry.lock().await;
+        guard
+            .entry(conversation_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+
+    let _lock_guard = continuation_lock.lock().await;
+
+    // 触发续写 - 使用专门的批量续写实现
+    match batch_tool_result_continue_ask_ai_impl(
+        app_handle.clone(),
+        window,
+        conversation_id,
+        assistant_id,
+    )
+    .await
+    {
+        Ok(_) => {
+            info!(
+                message_id,
+                tool_count = tool_calls.len(),
+                "Batch tool results sent successfully"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            warn!(
+                message_id,
+                error = %e,
+                "Failed to send batch tool results"
+            );
+            Err(format!("Anyhow错误: {}", e))
+        }
+    }
 }
 
 /// 工具成功后的续写逻辑调度：区分首次与重试。
@@ -768,9 +986,21 @@ async fn trigger_conversation_continuation_with_error(
         tool_call.llm_call_id.clone().unwrap_or_else(|| format!("mcp_tool_call_{}", tool_call.id));
 
     // 格式化错误消息作为 tool_result，与成功结果的格式保持一致但标识为错误
+    // 限制错误消息长度，避免请求过大导致 400 错误
+    let error_preview = if error_message.chars().count() > 5000 {
+        let truncated: String = error_message.chars().take(5000).collect();
+        format!(
+            "{}...\n[Error truncated, total length: {}]",
+            truncated,
+            error_message.chars().count()
+        )
+    } else {
+        error_message.to_string()
+    };
+
     let error_result = format!(
         "Tool execution failed:\n\nTool Call ID: {}\nTool: {}\nServer: {}\nParameters: {}\nError:\n{}",
-        tool_call.id, tool_call.tool_name, tool_call.server_name, tool_call.parameters, error_message
+        tool_call.id, tool_call.tool_name, tool_call.server_name, tool_call.parameters, error_preview
     );
 
     // 异步派发续写，避免同步栈递归导致栈溢出
@@ -822,9 +1052,212 @@ async fn trigger_conversation_continuation_with_error(
     Ok(())
 }
 
+/// 批量续写：将多个工具执行结果一次性传递给 AI
+/// 只有所有执行的工具都成功时才触发续写
+///
+/// 修复：为每个工具调用创建独立的 tool_result 消息，使用正确的格式
+#[instrument(skip(app_handle, _state, _feature_config_state, window), fields(conversation_id, tool_call_count = tool_call_ids.len()))]
+pub async fn trigger_conversation_continuation_batch(
+    app_handle: &tauri::AppHandle,
+    _state: tauri::State<'_, crate::AppState>,
+    _feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
+    window: tauri::Window,
+    conversation_id: i64,
+    tool_call_ids: Vec<i64>,
+) -> Result<()> {
+    use crate::api::ai::events::{ConversationEvent, MessageAddEvent, MessageUpdateEvent};
+    use crate::db::conversation_db::Repository;
+    use tauri::Emitter;
+
+    if tool_call_ids.is_empty() {
+        debug!("No tool calls to continue, skipping batch continuation");
+        return Ok(());
+    }
+
+    info!(
+        conversation_id,
+        tool_call_count = tool_call_ids.len(),
+        "Starting batch tool continuation"
+    );
+
+    let db = MCPDatabase::new(app_handle).context("初始化 MCP 数据库失败")?;
+
+    // 获取所有工具调用结果，并按 tool_call_id 升序排序
+    let mut tool_calls = Vec::new();
+    for call_id in &tool_call_ids {
+        match db.get_mcp_tool_call(*call_id) {
+            Ok(tc) => tool_calls.push(tc),
+            Err(e) => {
+                warn!(
+                    call_id,
+                    error = %e,
+                    "Failed to get tool call for batch continuation"
+                );
+                return Err(anyhow!("获取工具调用信息失败: {}", e));
+            }
+        }
+    }
+
+    // 按 tool_call_id 升序排序，确保与 AI 返回顺序一致
+    tool_calls.sort_by_key(|tc| tc.id);
+
+    // 检查是否所有工具都执行成功（有任何失败则不续写）
+    let all_success = tool_calls.iter().all(|tc| tc.status == "success");
+    debug!(
+        all_success,
+        tool_statuses = ?tool_calls.iter().map(|tc| (&tc.id, &tc.status)).collect::<Vec<_>>(),
+        "checking tool call statuses for batch continuation"
+    );
+    if !all_success {
+        let failed_calls: Vec<_> = tool_calls
+            .iter()
+            .filter(|tc| tc.status != "success")
+            .map(|tc| (tc.id, &tc.server_name, &tc.tool_name, &tc.status))
+            .collect();
+        warn!(
+            ?failed_calls,
+            "Not all tools succeeded, skipping batch continuation"
+        );
+        return Ok(());
+    }
+
+    // 获取对话和助手信息
+    let conversation_db = ConversationDatabase::new(app_handle)
+        .context("初始化对话数据库失败")?;
+    let conversation = conversation_db
+        .conversation_repo()
+        .unwrap()
+        .read(conversation_id)
+        .map_err(|e| anyhow!("获取对话信息失败: {}", e))?
+        .ok_or_else(|| anyhow!("未找到对话"))?;
+
+    let assistant_id = conversation
+        .assistant_id
+        .ok_or_else(|| anyhow!("对话未关联助手"))?;
+
+    // 获取助手信息以获取模型详情
+    let assistant_detail = crate::api::assistant_api::get_assistant(app_handle.clone(), assistant_id)
+        .map_err(|e| anyhow!("获取助手信息失败: {}", e))?;
+    if assistant_detail.model.is_empty() {
+        return Err(anyhow!("助手未配置模型"));
+    }
+    let model_id = assistant_detail.model[0].id;
+    let model_code = assistant_detail.model[0].model_code.clone();
+
+    // 为每个工具调用创建独立的 tool_result 消息
+    for tc in &tool_calls {
+        // 使用 llm_call_id（如果存在），否则使用数据库 id 作为 fallback
+        let tool_call_id = tc.llm_call_id.clone()
+            .unwrap_or_else(|| format!("mcp_tool_call_{}", tc.id));
+
+        // 构建工具结果内容
+        let result_content = tc.result.clone().unwrap_or_else(|| "(空)".to_string());
+
+        // 使用正确的格式
+        let tool_result_content = format!(
+            "Tool execution completed:\n\nTool Call ID: {}\nTool: {}\nServer: {}\nParameters: {}\nResult:\n{}",
+            tool_call_id,
+            tc.tool_name,
+            tc.server_name,
+            tc.parameters,
+            result_content
+        );
+
+        // 创建 tool_result 消息
+        let tool_result_message = crate::api::ai_api::add_message(
+            app_handle,
+            None,
+            conversation_id,
+            "tool_result".to_string(),
+            tool_result_content.clone(),
+            Some(model_id),
+            Some(model_code.clone()),
+            Some(chrono::Utc::now()),
+            Some(chrono::Utc::now()),
+            0,
+            None,
+            None,
+        ).map_err(|e| anyhow!("创建工具结果消息失败: {}", e))?;
+
+        // 发送 UI 事件
+        let add_event = ConversationEvent {
+            r#type: "message_add".to_string(),
+            data: serde_json::to_value(MessageAddEvent {
+                message_id: tool_result_message.id,
+                message_type: "tool_result".to_string(),
+            })
+            .unwrap(),
+        };
+        let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
+
+        let update_event = ConversationEvent {
+            r#type: "message_update".to_string(),
+            data: serde_json::to_value(MessageUpdateEvent {
+                message_id: tool_result_message.id,
+                message_type: "tool_result".to_string(),
+                content: tool_result_content,
+                is_done: true,
+                token_count: None,
+                input_token_count: None,
+                output_token_count: None,
+                ttft_ms: None,
+                tps: None,
+            })
+            .unwrap(),
+        };
+        let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+
+        debug!(
+            tool_call_id = %tool_call_id,
+            message_id = tool_result_message.id,
+            "Created tool_result message for batch continuation"
+        );
+    }
+
+    // 使用会话级锁保证续写串行
+    let continuation_lock = {
+        let registry = continuation_lock_registry();
+        let mut guard = registry.lock().await;
+        guard
+            .entry(conversation_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+
+    let _lock_guard = continuation_lock.lock().await;
+
+    // 触发续写
+    match batch_tool_result_continue_ask_ai_impl(
+        app_handle.clone(),
+        window,
+        conversation_id,
+        assistant_id,
+    )
+    .await
+    {
+        Ok(_) => {
+            info!(
+                conversation_id,
+                tool_count = tool_calls.len(),
+                "Batch tool continuation succeeded"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            warn!(
+                conversation_id,
+                error = %e,
+                "Batch tool continuation failed"
+            );
+            Err(anyhow!(e.to_string()))
+        }
+    }
+}
+
 /// 统一的工具执行函数，根据传输类型选择相应的执行策略（公开供子任务复用）
 /// 根据服务器配置的传输类型选择执行方式。
-#[instrument(skip(app_handle,feature_config_state,server,parameters), fields(server_id=server.id, transport=%server.transport_type, tool_name=%tool_name))]
+/// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
+#[instrument(skip(app_handle,feature_config_state,server,parameters,cancel_token), fields(server_id=server.id, transport=%server.transport_type, tool_name=%tool_name))]
 pub async fn execute_tool_by_transport(
     app_handle: &tauri::AppHandle,
     feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
@@ -832,37 +1265,41 @@ pub async fn execute_tool_by_transport(
     tool_name: &str,
     parameters: &str,
     conversation_id: Option<i64>,
+    cancel_token: Option<CancellationToken>,
 ) -> std::result::Result<String, String> {
+    // 如果没有提供 cancel_token，创建一个永远不会取消的令牌
+    let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
+
     match server.transport_type.as_str() {
         // If stdio but command is aipp:*, route to builtin executor
         "stdio" => {
             if let Some(cmd) = &server.command {
                 if crate::mcp::builtin_mcp::is_builtin_mcp_call(cmd) {
-                    execute_builtin_tool(app_handle, server, tool_name, parameters, conversation_id)
+                    execute_builtin_tool(app_handle, server, tool_name, parameters, conversation_id, Some(cancel_token.clone()))
                         .await
                         .map_err(|e| e.to_string())
                 } else {
-                    execute_stdio_tool(app_handle, server, tool_name, parameters)
+                    execute_stdio_tool(app_handle, server, tool_name, parameters, Some(cancel_token.clone()))
                         .await
                         .map_err(|e| e.to_string())
                 }
             } else {
-                execute_stdio_tool(app_handle, server, tool_name, parameters)
+                execute_stdio_tool(app_handle, server, tool_name, parameters, Some(cancel_token.clone()))
                     .await
                     .map_err(|e| e.to_string())
             }
         }
-        "sse" => execute_sse_tool(app_handle, feature_config_state, server, tool_name, parameters)
+        "sse" => execute_sse_tool(app_handle, feature_config_state, server, tool_name, parameters, Some(cancel_token.clone()))
             .await
             .map_err(|e| e.to_string()),
         "http" => {
-            execute_http_tool(app_handle, feature_config_state, server, tool_name, parameters)
+            execute_http_tool(app_handle, feature_config_state, server, tool_name, parameters, Some(cancel_token.clone()))
                 .await
                 .map_err(|e| e.to_string())
         }
         // Legacy builtin type is no longer used, but keep for backward compatibility
         "builtin" => {
-            execute_builtin_tool(app_handle, server, tool_name, parameters, conversation_id)
+            execute_builtin_tool(app_handle, server, tool_name, parameters, conversation_id, Some(cancel_token.clone()))
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -875,13 +1312,16 @@ pub async fn execute_tool_by_transport(
 // Reuse shared MCP header parsing utilities
 use crate::mcp::util::{parse_server_headers, sanitize_headers_for_log};
 /// 通过 stdio 传输执行工具（外部进程）。
-#[instrument(skip(app_handle,server,parameters), fields(server_id=server.id, tool_name=%tool_name))]
+/// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
+#[instrument(skip(app_handle,server,parameters,cancel_token), fields(server_id=server.id, tool_name=%tool_name))]
 async fn execute_stdio_tool(
     app_handle: &tauri::AppHandle,
     server: &MCPServer,
     tool_name: &str,
     parameters: &str,
+    cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
+    let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
     let command = server.command.as_ref().ok_or_else(|| anyhow!("未为 stdio 传输指定命令"))?;
     let parts: Vec<&str> = command.split_whitespace().collect();
     if parts.is_empty() {
@@ -890,7 +1330,9 @@ async fn execute_stdio_tool(
 
     let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
     let start = std::time::Instant::now();
-    let client_result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
+
+    // 定义实际的执行逻辑
+    let execution = async {
         let client = (())
             .serve(
                 TokioChildProcess::new(Command::new(parts[0]).configure(|cmd| {
@@ -917,34 +1359,46 @@ async fn execute_stdio_tool(
         client.cancel().await.context("关闭客户端连接失败")?;
         // 不再包裹错误上下文，直接返回底层错误以保留真实原因（例如服务器返回的错误信息）
         serialize_tool_response(&response)
-    })
-    .await;
+    };
 
-    match client_result {
-        Ok(Ok(r)) => {
+    // 使用 select! 同时监听取消信号和超时
+    let result: Result<String, anyhow::Error> = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            Err(anyhow!("Cancelled by user"))
+        }
+        result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), execution) => {
+            match result {
+                Ok(Ok(r)) => Ok(r),
+                Ok(Err(e)) => Err(anyhow!("工具执行失败: {}", e)),
+                Err(_) => Err(anyhow!("工具执行超时")),
+            }
+        }
+    };
+
+    match result {
+        Ok(r) => {
             info!(elapsed_ms=?start.elapsed().as_millis(), "stdio tool executed successfully");
             Ok(r)
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             error!(elapsed_ms=?start.elapsed().as_millis(), error=%e, "stdio tool execution failed");
-            Err(anyhow!("工具执行失败: {}", e))
-        }
-        Err(_) => {
-            error!(elapsed_ms=?start.elapsed().as_millis(), timeout_ms=timeout_ms, "stdio tool execution timeout");
-            Err(anyhow!("工具执行超时"))
+            Err(e)
         }
     }
 }
 
 /// 通过 SSE 传输执行工具。
-#[instrument(skip(feature_config_state,server,parameters), fields(server_id=server.id, tool_name=%tool_name))]
+/// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
+#[instrument(skip(feature_config_state,server,parameters,cancel_token), fields(server_id=server.id, tool_name=%tool_name))]
 async fn execute_sse_tool(
     _app_handle: &tauri::AppHandle,
     feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
     server: &MCPServer,
     tool_name: &str,
     parameters: &str,
+    cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
+    let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
     let url = server.url.as_ref().ok_or_else(|| anyhow!("No URL specified for SSE transport"))?;
 
     // 获取代理配置
@@ -1026,64 +1480,74 @@ async fn execute_sse_tool(
     let (_auth_header, _all) = parse_server_headers(server);
 
     let start = std::time::Instant::now();
-    let client_result = tokio::time::timeout(
-        std::time::Duration::from_millis(
-            server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS),
-        ),
-        async move {
-            let transport = sse_transport;
-            let client_info = ClientInfo {
-                protocol_version: Default::default(),
-                capabilities: ClientCapabilities::default(),
-                client_info: Implementation {
-                    name: "AIPP MCP SSE Client".to_string(),
-                    version: "0.1.0".to_string(),
-                    ..Default::default()
-                },
-            };
-            let client =
-                client_info.serve(transport).await.context("Failed to initialize SSE client")?;
-            let args = parse_tool_arguments(parameters).context("解析工具参数失败")?;
-            let request_param = build_call_tool_request(tool_name, args);
+    let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
 
-            // TODO: rmcp 当前 SseClientTransport::send 未暴露 auth_token; 通过自定义 client 已用于初始化，后续调用暂不重复 header
-            let response = client.call_tool(request_param).await.context("Tool call failed")?;
-            debug!(is_error=?response.is_error, parts=?response.content.len(), "received sse tool response");
+    // 定义实际的执行逻辑
+    let execution = async move {
+        let transport = sse_transport;
+        let client_info = ClientInfo {
+            protocol_version: Default::default(),
+            capabilities: ClientCapabilities::default(),
+            client_info: Implementation {
+                name: "AIPP MCP SSE Client".to_string(),
+                version: "0.1.0".to_string(),
+                ..Default::default()
+            },
+        };
+        let client =
+            client_info.serve(transport).await.context("Failed to initialize SSE client")?;
+        let args = parse_tool_arguments(parameters).context("解析工具参数失败")?;
+        let request_param = build_call_tool_request(tool_name, args);
 
-            // Cancel the client connection
-            client.cancel().await.context("Failed to cancel client")?;
+        // TODO: rmcp 当前 SseClientTransport::send 未暴露 auth_token; 通过自定义 client 已用于初始化，后续调用暂不重复 header
+        let response = client.call_tool(request_param).await.context("Tool call failed")?;
+        debug!(is_error=?response.is_error, parts=?response.content.len(), "received sse tool response");
 
-            // 不包裹序列化错误上下文，避免将服务器端错误误标为“序列化失败”
-            serialize_tool_response(&response)
-        },
-    )
-    .await;
+        // Cancel the client connection
+        client.cancel().await.context("Failed to cancel client")?;
 
-    match client_result {
-        Ok(Ok(result)) => {
+        // 不包裹序列化错误上下文，避免将服务器端错误误标为"序列化失败"
+        serialize_tool_response(&response)
+    };
+
+    // 使用 select! 同时监听取消信号和超时
+    let result: Result<String, anyhow::Error> = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            Err(anyhow!("Cancelled by user"))
+        }
+        result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), execution) => {
+            match result {
+                Ok(Ok(r)) => Ok(r),
+                Ok(Err(e)) => Err(anyhow!("Tool execution failed: {}", e)),
+                Err(_) => Err(anyhow!("Timeout while executing tool")),
+            }
+        }
+    };
+
+    match result {
+        Ok(result) => {
             info!(elapsed_ms=?start.elapsed().as_millis(), "sse tool executed successfully");
             Ok(result)
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             error!(elapsed_ms=?start.elapsed().as_millis(), error=%e, "sse tool execution failed");
-            Err(anyhow!("Tool execution failed: {}", e))
-        }
-        Err(_) => {
-            error!(elapsed_ms=?start.elapsed().as_millis(), timeout_ms=server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS), "sse tool execution timeout");
-            Err(anyhow!("Timeout while executing tool"))
+            Err(e)
         }
     }
 }
 
 /// 执行内置（aipp:*）工具：不经网络，直接在本地实现。
-#[instrument(skip(app_handle,server,parameters), fields(server_id=server.id, tool_name=%tool_name))]
+/// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
+#[instrument(skip(app_handle,server,parameters,cancel_token), fields(server_id=server.id, tool_name=%tool_name))]
 async fn execute_builtin_tool(
     app_handle: &tauri::AppHandle,
     server: &MCPServer,
     tool_name: &str,
     parameters: &str,
     conversation_id: Option<i64>,
+    cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
+    let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
     // 获取超时配置，使用服务器配置的超时或默认值
     let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
 
@@ -1094,22 +1558,31 @@ async fn execute_builtin_tool(
         bail!("Unknown builtin tool: {} for command: {}", tool_name, command);
     }
 
-    // 通过 tokio::time::timeout 包裹工具调用，确保超时保护生效
-    // 注意：内置工具入口当前接受原始字符串，因此这里仍传入 normalize 后的原始 JSON 文本；
-    // parse_tool_arguments 在 builtin 情况下不需要提前结构化（保持行为一致）。
-    let raw = tokio::time::timeout(
-        std::time::Duration::from_millis(timeout_ms),
+    // 定义实际的执行逻辑
+    let execution = async {
         execute_aipp_builtin_tool(
             app_handle.clone(),
             command.clone(),
             tool_name.to_string(),
             normalize_parameters_json(parameters),
             conversation_id,
-        ),
-    )
-    .await
-    .map_err(|_| anyhow!("工具执行超时（{}ms）", timeout_ms))?
-    .map_err(|e| anyhow!(e))?; // map String error to anyhow
+        )
+        .await
+    };
+
+    // 使用 select! 同时监听取消信号和超时
+    let raw: String = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            return Err(anyhow!("Cancelled by user"));
+        }
+        result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), execution) => {
+            match result {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => return Err(anyhow!("工具执行失败: {}", e)),
+                Err(_) => return Err(anyhow!("工具执行超时（{}ms）", timeout_ms)),
+            }
+        }
+    };
 
     // raw 是序列化后的 ToolResult，提取其中的 content 字段以与其他传输保持一致
     let v: serde_json::Value = serde_json::from_str(&raw).context("解析内置工具结果失败")?;
@@ -1124,14 +1597,17 @@ async fn execute_builtin_tool(
 }
 
 /// 通过 HTTP (streamable) 传输执行工具。
-#[instrument(skip(feature_config_state,server,parameters), fields(server_id=server.id, tool_name=%tool_name))]
+/// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
+#[instrument(skip(feature_config_state,server,parameters,cancel_token), fields(server_id=server.id, tool_name=%tool_name))]
 async fn execute_http_tool(
     _app_handle: &tauri::AppHandle,
     feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
     server: &MCPServer,
     tool_name: &str,
     parameters: &str,
+    cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
+    let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
     let url = server.url.as_ref().ok_or_else(|| anyhow!("No URL specified for HTTP transport"))?;
 
     // 获取代理配置
@@ -1195,39 +1671,46 @@ async fn execute_http_tool(
     };
 
     let start = std::time::Instant::now();
-    let client_result = tokio::time::timeout(
-        std::time::Duration::from_millis(
-            server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS),
-        ),
-        async move {
-            let client =
-                client_info.serve(transport).await.context("Failed to initialize HTTP client")?;
-            let args = parse_tool_arguments(parameters).context("解析工具参数失败")?;
-            let request_param = build_call_tool_request(tool_name, args);
+    let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
 
-            let response = client.call_tool(request_param).await.context("Tool call failed")?;
-            debug!(is_error=?response.is_error, parts=?response.content.len(), "received http tool response");
+    // 定义实际的执行逻辑
+    let execution = async move {
+        let client =
+            client_info.serve(transport).await.context("Failed to initialize HTTP client")?;
+        let args = parse_tool_arguments(parameters).context("解析工具参数失败")?;
+        let request_param = build_call_tool_request(tool_name, args);
 
-            // Cancel the client connection
-            client.cancel().await.context("Failed to cancel client")?;
+        let response = client.call_tool(request_param).await.context("Tool call failed")?;
+        debug!(is_error=?response.is_error, parts=?response.content.len(), "received http tool response");
 
-            serialize_tool_response(&response)
-        },
-    )
-    .await;
+        // Cancel the client connection
+        client.cancel().await.context("Failed to cancel client")?;
 
-    match client_result {
-        Ok(Ok(result)) => {
+        serialize_tool_response(&response)
+    };
+
+    // 使用 select! 同时监听取消信号和超时
+    let result: Result<String, anyhow::Error> = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            Err(anyhow!("Cancelled by user"))
+        }
+        result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), execution) => {
+            match result {
+                Ok(Ok(r)) => Ok(r),
+                Ok(Err(e)) => Err(anyhow!("Tool execution failed: {}", e)),
+                Err(_) => Err(anyhow!("Timeout while executing tool")),
+            }
+        }
+    };
+
+    match result {
+        Ok(result) => {
             info!(elapsed_ms=?start.elapsed().as_millis(), "http tool executed successfully");
             Ok(result)
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             error!(elapsed_ms=?start.elapsed().as_millis(), error=%e, "http tool execution failed");
-            Err(anyhow!("Tool execution failed: {}", e))
-        }
-        Err(_) => {
-            error!(elapsed_ms=?start.elapsed().as_millis(), timeout_ms=server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS), "http tool execution timeout");
-            Err(anyhow!("Timeout while executing tool"))
+            Err(e)
         }
     }
 }

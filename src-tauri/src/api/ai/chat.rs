@@ -1,11 +1,12 @@
 use crate::api::ai::config::{calculate_retry_delay, get_retry_attempts_from_config};
-use crate::api::ai::events::{ConversationEvent, MessageAddEvent, MessageUpdateEvent};
+use crate::api::ai::events::{ActivityFocus, ConversationEvent, MessageAddEvent, MessageUpdateEvent};
 use crate::api::ai::types::McpOverrideConfig;
 use crate::api::ai_api::{resolve_tool_name, sanitize_tool_name, ToolNameMapping};
 use crate::db::assistant_db::Assistant;
 use crate::db::conversation_db::{ConversationDatabase, Message, Repository};
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
+use crate::state::activity_state::ConversationActivityManager;
 use crate::utils::window_utils::send_error_to_appropriate_window;
 use anyhow::Context as _;
 use futures::StreamExt;
@@ -305,6 +306,7 @@ fn split_tool_name(fn_name: &str) -> (String, String) {
 }
 
 /// 创建并发出 message_add 事件，返回消息ID
+/// 同时设置活动状态以显示闪亮边框
 async fn ensure_stream_message(
     conversation_db: &ConversationDatabase,
     window: &tauri::Window,
@@ -361,6 +363,16 @@ async fn ensure_stream_message(
         .unwrap(),
     };
     let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
+
+    // 设置 Assistant 消息的活动状态（闪亮边框）
+    if message_type == "response" || message_type == "reasoning" {
+        let app_handle = window.app_handle();
+        if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+            activity_manager
+                .set_assistant_streaming(&app_handle, conversation_id, new_message.id)
+                .await;
+        }
+    }
 
     Ok(new_message.id)
 }
@@ -557,6 +569,7 @@ async fn handle_captured_tool_calls_common(
                                     feature_config_state,
                                     window.clone(),
                                     tool_call_record.id,
+                                    true, // trigger_continuation
                                 )
                                 .await
                                 {
@@ -594,6 +607,193 @@ async fn handle_captured_tool_calls_common(
     }
 
     Ok(())
+}
+
+/// 并发处理捕获到的工具调用
+/// 返回: (所有工具调用ID, 需要执行的工具调用ID)
+async fn handle_captured_tool_calls_concurrent(
+    app_handle: &tauri::AppHandle,
+    conversation_db: &ConversationDatabase,
+    window: &tauri::Window,
+    conversation_id: i64,
+    response_message_id: i64,
+    captured_tool_calls: &[genai::chat::ToolCall],
+    response_content: &mut String,
+    mcp_override_config: Option<&crate::api::ai::types::McpOverrideConfig>,
+    tool_name_mapping: &ToolNameMapping,
+) -> anyhow::Result<(Vec<i64>, Vec<i64>)> {
+    use futures::future::join_all;
+
+    // 第一步：为所有工具调用创建 DB 记录和 UI hints（保持原有顺序）
+    let mut all_tool_call_ids = Vec::new();
+    let mut tool_call_records: Vec<(i64, String, String)> = Vec::new(); // (id, server_name, tool_name)
+
+    for tool_call in captured_tool_calls {
+        // 使用映射表还原原始名称，用于 UI 显示和数据库记录
+        let (server_name, tool_name) =
+            crate::api::ai_api::resolve_tool_name(&tool_call.fn_name, tool_name_mapping);
+        let params_str = tool_call.fn_arguments.to_string();
+
+        // 创建工具调用记录（使用原始名称）
+        match crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
+            app_handle.clone(),
+            conversation_id,
+            Some(response_message_id),
+            server_name.clone(),
+            tool_name.clone(),
+            params_str.clone(),
+            Some(&tool_call.call_id),
+            Some(response_message_id),
+        )
+        .await
+        {
+            Ok(tool_call_record) => {
+                tool_call_records.push((tool_call_record.id, server_name.clone(), tool_name.clone()));
+                all_tool_call_ids.push(tool_call_record.id);
+
+                // 追加 UI hint（使用原始名称）
+                let ui_hint = format!(
+                    "\n\n<!-- MCP_TOOL_CALL:{} -->\n",
+                    serde_json::json!({
+                        "server_name": server_name,
+                        "tool_name": tool_name,
+                        "parameters": params_str,
+                        "call_id": tool_call_record.id,
+                        "llm_call_id": tool_call.call_id.clone(),
+                    })
+                );
+                response_content.push_str(&ui_hint);
+
+                // 持久化内容并发出更新
+                if let Ok(Some(mut msg)) = conversation_db
+                    .message_repo()
+                    .context("failed to get message_repo for read")?
+                    .read(response_message_id)
+                {
+                    msg.content = response_content.clone();
+                    // 覆盖保存 tool_calls JSON（再次确保一致）
+                    msg.tool_calls_json = serde_json::to_string(&captured_tool_calls).ok();
+                    let _ = conversation_db
+                        .message_repo()
+                        .context("failed to get message_repo for update")?
+                        .update(&msg);
+
+                    let update_event = crate::api::ai::events::ConversationEvent {
+                        r#type: "message_update".to_string(),
+                        data: serde_json::to_value(crate::api::ai::events::MessageUpdateEvent {
+                            message_id: response_message_id,
+                            message_type: "response".to_string(),
+                            content: response_content.clone(),
+                            is_done: false,
+                            token_count: None,
+                            input_token_count: None,
+                            output_token_count: None,
+                            ttft_ms: None,
+                            tps: None,
+                        })
+                        .unwrap(),
+                    };
+                    let _ = window.emit(
+                        format!("conversation_event_{}", conversation_id).as_str(),
+                        update_event,
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to create MCP tool call record");
+            }
+        }
+    }
+
+    // 第二步：筛选出需要 auto_run 的工具调用 ID
+    let mut auto_run_ids = Vec::new();
+    if let Ok(conv) = conversation_db
+        .conversation_repo()
+        .context("failed to get conversation_repo")?
+        .read(conversation_id)
+    {
+        if let Some(assistant_id) = conv.and_then(|c| c.assistant_id) {
+            if let Ok(servers) =
+                crate::api::assistant_api::get_assistant_mcp_servers_with_tools(
+                    app_handle.clone(),
+                    assistant_id,
+                )
+                .await
+            {
+                for (call_id, server_name, tool_name) in &tool_call_records {
+                    let mut should_auto_run = false;
+                    for s in servers.iter() {
+                        let name_matches = s.name == *server_name
+                            || crate::api::ai_api::sanitize_tool_name(&s.name) == *server_name;
+                        if name_matches && s.is_enabled {
+                            if let Some(t) =
+                                s.tools.iter().find(|t| t.name == *tool_name && t.is_enabled)
+                            {
+                                let tool_key = format!("{}/{}", server_name, tool_name);
+                                let auto_run = if let Some(all_auto_run) =
+                                    mcp_override_config
+                                        .and_then(|config| config.all_tool_auto_run)
+                                {
+                                    all_auto_run
+                                } else {
+                                    *mcp_override_config
+                                        .and_then(|config| config.tool_auto_run.as_ref())
+                                        .and_then(|auto_run_map| {
+                                            auto_run_map.get(&tool_key)
+                                        })
+                                        .unwrap_or(&t.is_auto_run)
+                                };
+
+                                if auto_run {
+                                    should_auto_run = true;
+                                }
+                            }
+                        }
+                    }
+
+                    if should_auto_run {
+                        auto_run_ids.push(*call_id);
+                    }
+                }
+            }
+        }
+    }
+
+    // 第三步：并发执行所有 auto_run 的工具调用
+    if !auto_run_ids.is_empty() {
+        let state = app_handle.state::<crate::AppState>();
+        let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+
+        let mut execute_futures = Vec::new();
+        for call_id in &auto_run_ids {
+            let future = crate::mcp::execution_api::execute_mcp_tool_call(
+                app_handle.clone(),
+                state.clone(),
+                feature_config_state.clone(),
+                window.clone(),
+                *call_id,
+                false, // 不触发续写
+            );
+            execute_futures.push(future);
+        }
+
+        // 第四步：等待所有执行完成
+        let results = join_all(execute_futures).await;
+
+        // 记录执行结果
+        for (idx, result) in results.iter().enumerate() {
+            if let Err(e) = result {
+                warn!(
+                    call_id = auto_run_ids[idx],
+                    error = %e,
+                    "Concurrent tool execution failed"
+                );
+            }
+        }
+    }
+
+    // 第五步：返回 (所有工具ID, 需要执行的工具ID)
+    Ok((all_tool_call_ids, auto_run_ids))
 }
 
 /// 助手提及信息
@@ -1368,6 +1568,13 @@ pub async fn handle_stream_chat(
                         Some(conversation_id),
                     );
 
+                    // 清除活动焦点（闪亮边框）
+                    if let Some(activity_manager) =
+                        app_handle.try_state::<ConversationActivityManager>()
+                    {
+                        activity_manager.clear_focus(app_handle, conversation_id).await;
+                    }
+
                     // 创建错误消息
                     create_error_message(
                         conversation_db,
@@ -1863,7 +2070,8 @@ async fn attempt_stream_chat(
                                 }
                             }
                             if let Some(msg_id) = response_message_id {
-                                let _ = handle_captured_tool_calls_common(
+                                // 使用并发处理函数，返回 (所有工具ID, 需要执行的工具ID)
+                                if let Ok((_all_ids, exec_ids)) = handle_captured_tool_calls_concurrent(
                                     &app_handle,
                                     &conversation_db,
                                     &window,
@@ -1871,11 +2079,33 @@ async fn attempt_stream_chat(
                                     msg_id,
                                     &captured_tool_calls,
                                     &mut response_content,
-                                    true,
                                     mcp_override_config.as_ref(),
                                     &tool_name_mapping,
                                 )
-                                .await;
+                                .await
+                                {
+                                    // 批量续写：所有工具执行完成后统一触发
+                                    if !exec_ids.is_empty() {
+                                        debug!(
+                                            exec_ids = ?exec_ids,
+                                            "triggering batch continuation after concurrent tool execution"
+                                        );
+                                        let state = app_handle.state::<crate::AppState>();
+                                        let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+                                        if let Err(e) = crate::mcp::execution_api::trigger_conversation_continuation_batch(
+                                            &app_handle,
+                                            state,
+                                            feature_config_state,
+                                            window.clone(),
+                                            conversation_id,
+                                            exec_ids,
+                                        ).await {
+                                            warn!(error = %e, "batch continuation failed after concurrent tool execution");
+                                        }
+                                    } else {
+                                        debug!("no exec_ids, skipping batch continuation");
+                                    }
+                                }
                             }
                         }
 
@@ -2028,6 +2258,24 @@ async fn attempt_stream_chat(
                             format!("conversation_event_{}", conversation_id).as_str(),
                             stream_complete_event,
                         );
+
+                        // 清除活动状态（闪亮边框）
+                        let app_handle = window.app_handle();
+                        if let Some(activity_manager) =
+                            app_handle.try_state::<ConversationActivityManager>()
+                        {
+                            let current_focus = activity_manager.get_focus(conversation_id).await;
+                            if !matches!(current_focus, ActivityFocus::McpExecuting { .. }) {
+                                activity_manager
+                                    .clear_focus(&app_handle, conversation_id)
+                                    .await;
+                            } else {
+                                debug!(
+                                    conversation_id = conversation_id,
+                                    "Skip clearing activity focus during MCP execution"
+                                );
+                            }
+                        }
 
                         return Ok(());
                     }
@@ -2214,6 +2462,13 @@ pub async fn handle_non_stream_chat(
                             Some(conversation_id),
                         );
 
+                        // 清除活动焦点（闪亮边框）
+                        if let Some(activity_manager) =
+                            app_handle.try_state::<ConversationActivityManager>()
+                        {
+                            activity_manager.clear_focus(app_handle, conversation_id).await;
+                        }
+
                         break Err(anyhow::anyhow!("{}", final_error));
                     }
 
@@ -2331,8 +2586,8 @@ pub async fn handle_non_stream_chat(
             if !tool_calls.is_empty() {
                 debug!(tool_calls_count = tool_calls.len(), "non stream captured tool calls count");
 
-                // 统一处理（会覆盖 tool_calls_json，插入 UI 注释，并 emit 事件）
-                let _ = handle_captured_tool_calls_common(
+                // 使用并发处理函数，返回 (所有工具ID, 需要执行的工具ID)
+                if let Ok((_all_ids, exec_ids)) = handle_captured_tool_calls_concurrent(
                     app_handle,
                     conversation_db,
                     window,
@@ -2340,11 +2595,33 @@ pub async fn handle_non_stream_chat(
                     response_message_id,
                     &tool_calls,
                     &mut content,
-                    true,
                     mcp_override_config.as_ref(),
                     &tool_name_mapping,
                 )
-                .await;
+                .await
+                {
+                    // 批量续写：所有工具执行完成后统一触发
+                    if !exec_ids.is_empty() {
+                        debug!(
+                            exec_ids = ?exec_ids,
+                            "triggering batch continuation after non-stream concurrent tool execution"
+                        );
+                        let state = app_handle.state::<crate::AppState>();
+                        let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+                        if let Err(e) = crate::mcp::execution_api::trigger_conversation_continuation_batch(
+                            app_handle,
+                            state,
+                            feature_config_state,
+                            window.clone(),
+                            conversation_id,
+                            exec_ids,
+                        ).await {
+                            warn!(error = %e, "batch continuation failed after non-stream concurrent tool execution");
+                        }
+                    } else {
+                        debug!("no exec_ids in non-stream, skipping batch continuation");
+                    }
+                }
             }
 
             // 非流式场景下补充基于提示词的 MCP 检测，确保 prompt 模式生效
@@ -2455,6 +2732,11 @@ pub async fn handle_non_stream_chat(
             );
             let now = chrono::Utc::now();
             send_error_to_appropriate_window(&window, &user_friendly_error, Some(conversation_id));
+
+            // 清除活动焦点（闪亮边框）
+            if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+                activity_manager.clear_focus(app_handle, conversation_id).await;
+            }
 
             let generation_group_id = generation_group_id_override
                 .clone()

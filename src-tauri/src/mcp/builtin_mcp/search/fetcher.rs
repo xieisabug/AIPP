@@ -1,4 +1,5 @@
 use super::browser::BrowserManager;
+use super::browser_pool::BrowserPool;
 use super::engine_manager::SearchEngine;
 use super::fingerprint::{FingerprintConfig, FingerprintManager, TimingConfig};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -104,12 +105,16 @@ impl ContentFetcher {
         &mut self,
         url: &str,
         browser_manager: &BrowserManager,
+        browser_pool: Option<&BrowserPool>,
     ) -> Result<String, String> {
         info!(%url, "Starting content fetch");
 
         // 策略1: Playwright（最优，支持复杂动态内容）
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        match self.fetch_with_playwright(url, browser_manager).await {
+        match self
+            .fetch_with_playwright(url, browser_manager, browser_pool)
+            .await
+        {
             Ok(html) => {
                 info!(strategy = "playwright", bytes = html.len(), "Fetched content");
                 return Ok(html);
@@ -151,6 +156,7 @@ impl ContentFetcher {
         query: &str,
         search_engine: &SearchEngine,
         browser_manager: &BrowserManager,
+        browser_pool: Option<&BrowserPool>,
     ) -> Result<String, String> {
         info!(%query, engine = ?search_engine, "Starting search content fetch");
 
@@ -159,14 +165,17 @@ impl ContentFetcher {
             if let Some(session_url) = self.config.kagi_session_url.clone() {
                 info!("Using Kagi session URL for direct search");
                 return self
-                    .fetch_kagi_with_session_url(query, &session_url, browser_manager)
+                    .fetch_kagi_with_session_url(query, &session_url, browser_manager, browser_pool)
                     .await;
             }
         }
 
         // 使用Playwright执行搜索流程
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        match self.fetch_search_with_playwright(query, search_engine, browser_manager).await {
+        match self
+            .fetch_search_with_playwright(query, search_engine, browser_manager, browser_pool)
+            .await
+        {
             Ok(html) => {
                 info!(strategy = "playwright_search", bytes = html.len(), "Fetched search content");
                 return Ok(html);
@@ -193,6 +202,7 @@ impl ContentFetcher {
         query: &str,
         session_url: &str,
         browser_manager: &BrowserManager,
+        browser_pool: Option<&BrowserPool>,
     ) -> Result<String, String> {
         // 构造搜索 URL：在会话链接后面拼接 &q=搜索词
         let encoded_query = urlencoding::encode(query);
@@ -203,6 +213,11 @@ impl ContentFetcher {
         };
 
         info!(%search_url, "Fetching Kagi search results with session URL");
+
+        // 如果有浏览器池，使用池化页面
+        if let Some(pool) = browser_pool {
+            return self.fetch_kagi_with_session_url_pooled(&search_url, pool).await;
+        }
 
         // 使用 Playwright 直接访问搜索结果页面
         let (_browser_type, browser_path) = browser_manager.get_available_browser()?;
@@ -299,6 +314,52 @@ impl ContentFetcher {
         Ok(html)
     }
 
+    /// 使用浏览器池的 Kagi 会话搜索方法
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    async fn fetch_kagi_with_session_url_pooled(
+        &mut self,
+        search_url: &str,
+        pool: &BrowserPool,
+    ) -> Result<String, String> {
+        let mut pooled_page = pool.acquire_page().await?;
+        let page = pooled_page.page();
+
+        // 注入反检测脚本
+        self.inject_anti_detection_scripts(page).await?;
+
+        // 设置 HTTP 头
+        let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
+        self.set_page_http_headers(page, &fingerprint).await?;
+
+        // 直接导航到搜索结果页面
+        page.goto_builder(search_url)
+            .goto()
+            .await
+            .map_err(|e| format!("Playwright goto error: {}", e))?;
+
+        // 等待 Kagi 搜索结果加载
+        let kagi_selectors = super::engines::kagi::KagiEngine::default_wait_selectors();
+        self.wait_for_results_with_selectors(page, &kagi_selectors).await?;
+
+        // 提取 HTML
+        let html: String = page
+            .eval("() => document.documentElement.outerHTML")
+            .await
+            .map_err(|e| format!("Playwright eval error: {}", e))?;
+
+        if html.trim().is_empty() {
+            return Err("Empty HTML from Kagi session URL search".to_string());
+        }
+
+        info!(bytes = html.len(), "Successfully fetched Kagi search results (pooled)");
+
+        // 保存调试HTML
+        Self::save_debug_html(&html, "kagi_session_search_pooled");
+
+        // pooled_page 离开作用域时自动归还到池中
+        Ok(html)
+    }
+
     /// 等待搜索结果，使用指定的选择器列表
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     async fn wait_for_results_with_selectors(
@@ -354,7 +415,13 @@ impl ContentFetcher {
         query: &str,
         search_engine: &SearchEngine,
         browser_manager: &BrowserManager,
+        browser_pool: Option<&BrowserPool>,
     ) -> Result<String, String> {
+        // 如果有浏览器池，使用池化页面
+        if let Some(pool) = browser_pool {
+            return self.fetch_search_with_pooled_page(query, search_engine, pool).await;
+        }
+
         let (_browser_type, browser_path) = browser_manager.get_available_browser()?;
 
         let user_data_dir = self.get_user_data_dir()?;
@@ -438,13 +505,50 @@ impl ContentFetcher {
         Ok(html)
     }
 
+    /// 使用浏览器池执行搜索流程
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    async fn fetch_search_with_pooled_page(
+        &mut self,
+        query: &str,
+        search_engine: &SearchEngine,
+        pool: &BrowserPool,
+    ) -> Result<String, String> {
+        let mut pooled_page = pool.acquire_page().await?;
+        let page = pooled_page.page();
+
+        // 注入反检测脚本
+        self.inject_anti_detection_scripts(page).await?;
+
+        // 设置 HTTP 头
+        let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
+        self.set_page_http_headers(page, &fingerprint).await?;
+
+        // 执行搜索流程（使用人性化的延时）
+        let html = self.perform_humanized_search(page, query, search_engine).await?;
+
+        if html.trim().is_empty() {
+            return Err("Empty HTML from search flow (pooled)".to_string());
+        }
+
+        info!(bytes = html.len(), "Successfully fetched search content (pooled)");
+
+        // pooled_page 离开作用域时自动归还到池中
+        Ok(html)
+    }
+
     /// 使用Playwright抓取内容
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     async fn fetch_with_playwright(
         &mut self,
         url: &str,
         browser_manager: &BrowserManager,
+        browser_pool: Option<&BrowserPool>,
     ) -> Result<String, String> {
+        // 如果有浏览器池，使用池化页面
+        if let Some(pool) = browser_pool {
+            return self.fetch_with_pooled_page(url, pool).await;
+        }
+
         let (_browser_type, browser_path) = browser_manager.get_available_browser()?;
 
         let user_data_dir = self.get_user_data_dir()?;
@@ -528,6 +632,48 @@ impl ContentFetcher {
         Ok(html)
     }
 
+    /// 使用浏览器池抓取URL内容
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    async fn fetch_with_pooled_page(
+        &mut self,
+        url: &str,
+        pool: &BrowserPool,
+    ) -> Result<String, String> {
+        let mut pooled_page = pool.acquire_page().await?;
+        let page = pooled_page.page();
+
+        // 注入反检测脚本
+        self.inject_anti_detection_scripts(page).await?;
+
+        // 设置 HTTP 头
+        let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
+        self.set_page_http_headers(page, &fingerprint).await?;
+
+        // 导航到 URL
+        page.goto_builder(url)
+            .goto()
+            .await
+            .map_err(|e| format!("Playwright goto error: {}", e))?;
+
+        // 等待页面加载完成
+        self.wait_for_content(page).await?;
+
+        // 获取 HTML
+        let html: String = page
+            .eval("() => document.documentElement.outerHTML")
+            .await
+            .map_err(|e| format!("Playwright eval error: {}", e))?;
+
+        if html.trim().is_empty() {
+            return Err("Empty HTML from Playwright (pooled)".to_string());
+        }
+
+        info!(bytes = html.len(), "Successfully fetched content (pooled)");
+
+        // pooled_page 离开作用域时自动归还到池中
+        Ok(html)
+    }
+
     /// 等待页面内容加载
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     async fn wait_for_content(&self, page: &playwright::api::Page) -> Result<(), String> {
@@ -596,7 +742,7 @@ impl ContentFetcher {
             .arg("--disable-extensions")
             .arg("--disable-blink-features=AutomationControlled")
             .arg("--virtual-time-budget=15000")
-            .arg("--timeout=45000")
+            .arg(format!("--timeout={}", self.config.wait_timeout_ms * 3))
             .arg("--hide-scrollbars")
             .arg("--window-size=1280,800")
             .arg("--dump-dom")
@@ -662,7 +808,7 @@ impl ContentFetcher {
         let mut client_builder = reqwest::Client::builder()
             .user_agent(user_agent)
             .redirect(reqwest::redirect::Policy::limited(10))
-            .timeout(Duration::from_secs(15));
+            .timeout(Duration::from_millis(self.config.wait_timeout_ms));
 
         if let Some(ref proxy) = self.config.proxy_server {
             let proxy = reqwest::Proxy::all(proxy)
@@ -993,8 +1139,8 @@ impl ContentFetcher {
         // 人性化的搜索触发
         self.humanized_search_submit(page, search_engine).await?;
 
-        // 等待结果加载，带随机延时
-        let wait_time = self.timing_config.page_load_timeout + fastrand::u64(0..2000);
+        // 等待结果加载，使用配置的等待时间加随机延时
+        let wait_time = self.config.wait_timeout_ms + fastrand::u64(0..2000);
         self.wait_for_results_with_timeout(page, wait_time, search_engine).await?;
 
         // 增强的HTML提取，带重试机制
