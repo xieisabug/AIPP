@@ -147,6 +147,11 @@ jobs:
                   node-version: 22
                   cache: 'pnpm'
 
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
             - name: Install dependencies
               run: pnpm install
 
@@ -171,6 +176,7 @@ jobs:
                   releaseId: ${{ needs.create-release.outputs.release_id }}
                   releaseBody: ${{ needs.create-release.outputs.release_body }}
                   tauriScript: pnpm run tauri
+                  args: --target ${{ matrix.target }}
 
     # 生成并上传 latest.json 文件（带签名）
     generate-latest-json:
