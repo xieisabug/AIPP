@@ -213,6 +213,9 @@ jobs:
                     release_id: process.env.release_id,
                   });
 
+                  const tagName = release.data.tag_name;
+                  const downloadBase = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/download/${tagName}`;
+
                   // 收集签名文件
                   const signatures = {};
                   const bundleUrls = {};
@@ -284,7 +287,8 @@ jobs:
                     // 记录 bundle URL
                     const preferred = isPreferredBundle(baseName, platform);
                     if (!bundleUrls[platform] || (preferred && !urlPreference[platform])) {
-                      bundleUrls[platform] = asset.browser_download_url;
+                      const downloadUrl = encodeURI(`${downloadBase}/${name}`);
+                      bundleUrls[platform] = downloadUrl;
                       urlPreference[platform] = preferred;
                     }
                   }
