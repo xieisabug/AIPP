@@ -17,9 +17,11 @@ export const AboutConfigForm: React.FC<AboutConfigFormProps> = ({ form: _form })
         isChecking,
         isCheckingWithProxy,
         isDownloading,
+        isDownloadingWithProxy,
         checkUpdate,
         checkUpdateWithProxy,
         downloadAndInstall,
+        downloadAndInstallWithProxy,
     } = useAppUpdater();
 
     const getUpdateStatusBadge = () => {
@@ -44,12 +46,14 @@ export const AboutConfigForm: React.FC<AboutConfigFormProps> = ({ form: _form })
     };
 
     const getUpdateButtonText = () => {
-        if (isDownloading) return "下载中...";
+        if (isDownloading || isDownloadingWithProxy) return "下载中...";
         if (updateInfo?.available) return "开始更新";
         return "检查更新";
     };
 
     const isAnyChecking = isChecking || isCheckingWithProxy;
+    const isAnyDownloading = isDownloading || isDownloadingWithProxy;
+    const isAnyBusy = isAnyChecking || isAnyDownloading;
 
     return (
         <Card className="shadow-sm border-l-4 border-l-primary">
@@ -88,18 +92,32 @@ export const AboutConfigForm: React.FC<AboutConfigFormProps> = ({ form: _form })
                 <div className="flex gap-3">
                     <Button
                         onClick={handleUpdateButtonClick}
-                        disabled={isAnyChecking || isDownloading}
+                        disabled={isAnyBusy}
                         className="flex-1"
                         variant={updateInfo?.available ? "default" : "outline"}
                     >
-                        {(isAnyChecking || isDownloading) && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                        {!isAnyChecking && !isDownloading && <Download className="h-4 w-4 mr-2" />}
+                        {isAnyBusy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                        {!isAnyBusy && <Download className="h-4 w-4 mr-2" />}
                         {getUpdateButtonText()}
                     </Button>
-                    {!updateInfo?.available && (
+                    {updateInfo?.available ? (
+                        <Button
+                            onClick={downloadAndInstallWithProxy}
+                            disabled={isAnyBusy}
+                            variant="outline"
+                            className="shrink-0"
+                            title="使用网络配置中的代理下载更新"
+                        >
+                            {isDownloadingWithProxy ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                                <Globe className="h-4 w-4" />
+                            )}
+                        </Button>
+                    ) : (
                         <Button
                             onClick={checkUpdateWithProxy}
-                            disabled={isAnyChecking || isDownloading}
+                            disabled={isAnyBusy}
                             variant="outline"
                             className="shrink-0"
                             title="使用网络配置中的代理检查更新"

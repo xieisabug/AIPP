@@ -66,7 +66,8 @@ use crate::api::system_api::{
 };
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
 use crate::api::updater_api::{
-    check_update, check_update_with_proxy, download_and_install_update, get_app_version,
+    check_update, check_update_with_proxy, download_and_install_update,
+    download_and_install_update_with_proxy, get_app_version,
 };
 use crate::artifacts::artifacts_db::ArtifactsDatabase;
 use crate::artifacts::collection_api::{
@@ -700,6 +701,7 @@ pub fn run() {
             check_update,
             check_update_with_proxy,
             download_and_install_update,
+            download_and_install_update_with_proxy,
             get_app_version,
         ])
         .build(tauri::generate_context!())

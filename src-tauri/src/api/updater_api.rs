@@ -25,6 +25,11 @@ pub async fn check_update_with_proxy(
     app_handle: AppHandle,
     state: State<'_, FeatureConfigState>,
 ) -> Result<UpdateInfo, String> {
+    let proxy = get_network_proxy(&state).await?;
+    check_update_impl(app_handle, Some(proxy)).await
+}
+
+async fn get_network_proxy(state: &State<'_, FeatureConfigState>) -> Result<String, String> {
     // 从配置中获取代理
     let config_feature_map = state.config_feature_map.lock().await;
     let proxy = if let Some(network_config) = config_feature_map.get("network_config") {
@@ -43,11 +48,7 @@ pub async fn check_update_with_proxy(
     };
     drop(config_feature_map);
 
-    if proxy.is_none() {
-        return Err("未配置代理，请在网络配置中设置代理".to_string());
-    }
-
-    check_update_impl(app_handle, proxy).await
+    proxy.ok_or_else(|| "未配置代理，请在网络配置中设置代理".to_string())
 }
 
 /// 检查更新的内部实现
@@ -141,6 +142,64 @@ pub async fn download_and_install_update(app_handle: AppHandle) -> Result<String
             .map_err(|e| format!("下载更新失败: {}", e))?;
 
         Ok("更新下载完成，即将安装...".to_string())
+    }
+    #[cfg(mobile)]
+    {
+        Err("自动更新不支持移动平台".to_string())
+    }
+}
+
+/// 使用代理下载并安装更新
+#[tauri::command]
+pub async fn download_and_install_update_with_proxy(
+    app_handle: AppHandle,
+    state: State<'_, FeatureConfigState>,
+) -> Result<String, String> {
+    let proxy = get_network_proxy(&state).await?;
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_updater::UpdaterExt;
+
+        let updater = app_handle
+            .updater()
+            .map_err(|e| format!("获取 updater 失败: {}", e))?;
+
+        // 设置代理环境变量
+        std::env::set_var("HTTP_PROXY", &proxy);
+        std::env::set_var("HTTPS_PROXY", &proxy);
+
+        let result = (async {
+            let update = updater
+                .check()
+                .await
+                .map_err(|e| format!("检查更新失败: {}", e))?
+                .ok_or("没有可用的更新")?;
+
+            update
+                .download(
+                    |chunk_length, content_length| {
+                        tracing::info!(
+                            "下载进度: {} / {}",
+                            chunk_length,
+                            content_length.unwrap_or(0)
+                        );
+                    },
+                    || {
+                        tracing::info!("下载完成");
+                    },
+                )
+                .await
+                .map_err(|e| format!("下载更新失败: {}", e))?;
+
+            Ok::<_, String>("更新下载完成，即将安装...".to_string())
+        })
+        .await;
+
+        // 清除代理环境变量
+        std::env::remove_var("HTTP_PROXY");
+        std::env::remove_var("HTTPS_PROXY");
+
+        result
     }
     #[cfg(mobile)]
     {

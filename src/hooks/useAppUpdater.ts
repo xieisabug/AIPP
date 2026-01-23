@@ -9,6 +9,7 @@ export const useAppUpdater = () => {
     const [isChecking, setIsChecking] = useState(false);
     const [isCheckingWithProxy, setIsCheckingWithProxy] = useState(false);
     const [isDownloading, setIsDownloading] = useState(false);
+    const [isDownloadingWithProxy, setIsDownloadingWithProxy] = useState(false);
 
     // 获取当前版本
     useEffect(() => {
@@ -63,14 +64,28 @@ export const useAppUpdater = () => {
         }
     }, []);
 
+    // 使用代理下载并安装更新
+    const downloadAndInstallWithProxy = useCallback(async () => {
+        setIsDownloadingWithProxy(true);
+        try {
+            const msg = await invoke<string>("download_and_install_update_with_proxy");
+            toast.success(msg);
+        } catch (e) {
+            toast.error("代理更新失败: " + e);
+            setIsDownloadingWithProxy(false);
+        }
+    }, []);
+
     return {
         currentVersion,
         updateInfo,
         isChecking,
         isCheckingWithProxy,
         isDownloading,
+        isDownloadingWithProxy,
         checkUpdate,
         checkUpdateWithProxy,
         downloadAndInstall,
+        downloadAndInstallWithProxy,
     };
 };
