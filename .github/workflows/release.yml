@@ -368,6 +368,21 @@ jobs:
                   release_id: ${{ needs.create-release.outputs.release_id }}
               with:
                 script: |
+                  const existingAssets = await github.rest.repos.listReleaseAssets({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    release_id: process.env.release_id,
+                    per_page: 100,
+                  });
+                  const existing = existingAssets.data.find(asset => asset.name === 'latest.json');
+                  if (existing) {
+                    await github.rest.repos.deleteReleaseAsset({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      release_id: process.env.release_id,
+                      asset_id: existing.id,
+                    });
+                  }
                   const fs = require('fs');
                   const latestJson = fs.readFileSync('latest.json', 'utf8');
 
