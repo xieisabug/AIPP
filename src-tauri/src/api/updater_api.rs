@@ -127,21 +127,25 @@ pub async fn download_and_install_update(app_handle: AppHandle) -> Result<String
             .map_err(|e| format!("检查更新失败: {}", e))?
             .ok_or("没有可用的更新")?;
 
-        // 下载更新
-        // download 方法需要两个回调：on_chunk 和 on_download_finish
-        update.download(
-            |chunk_length, content_length| {
-                // on_chunk 回调 - 可以在这里更新下载进度
-                tracing::info!("下载进度: {} / {}", chunk_length, content_length.unwrap_or(0));
-            },
-            || {
-                // on_download_finish 回调
-                tracing::info!("下载完成");
-            }
-        ).await
+        let mut downloaded: u64 = 0;
+        update
+            .download_and_install(
+                |chunk_length, content_length| {
+                    downloaded = downloaded.saturating_add(chunk_length as u64);
+                    tracing::info!(
+                        "下载进度: {} / {}",
+                        downloaded,
+                        content_length.unwrap_or(0)
+                    );
+                },
+                || {
+                    tracing::info!("下载完成，开始安装");
+                },
+            )
+            .await
             .map_err(|e| format!("下载更新失败: {}", e))?;
 
-        Ok("更新下载完成，即将安装...".to_string())
+        Ok("更新已开始安装".to_string())
     }
     #[cfg(mobile)]
     {
@@ -175,23 +179,25 @@ pub async fn download_and_install_update_with_proxy(
                 .map_err(|e| format!("检查更新失败: {}", e))?
                 .ok_or("没有可用的更新")?;
 
+            let mut downloaded: u64 = 0;
             update
-                .download(
+                .download_and_install(
                     |chunk_length, content_length| {
+                        downloaded = downloaded.saturating_add(chunk_length as u64);
                         tracing::info!(
                             "下载进度: {} / {}",
-                            chunk_length,
+                            downloaded,
                             content_length.unwrap_or(0)
                         );
                     },
                     || {
-                        tracing::info!("下载完成");
+                        tracing::info!("下载完成，开始安装");
                     },
                 )
                 .await
                 .map_err(|e| format!("下载更新失败: {}", e))?;
 
-            Ok::<_, String>("更新下载完成，即将安装...".to_string())
+            Ok::<_, String>("更新已开始安装".to_string())
         })
         .await;
 
