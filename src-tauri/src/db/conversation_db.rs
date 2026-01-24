@@ -616,6 +616,10 @@ impl ConversationDatabase {
             [],
         )?;
         conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversation_name ON conversation(name)",
+            [],
+        )?;
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS message (
                 id              INTEGER
                 primary key autoincrement,
@@ -703,6 +707,10 @@ impl ConversationDatabase {
             "CREATE INDEX IF NOT EXISTS idx_message_conversation_created ON message(conversation_id, created_time)",
             [],
         )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_message_content ON message(content)",
+            [],
+        )?;
         conn.execute("CREATE INDEX IF NOT EXISTS idx_message_parent_id ON message(parent_id)", [])?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_message_attachment_message_id ON message_attachment(message_id)",
@@ -724,6 +732,10 @@ impl ConversationDatabase {
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_conversation_summary_conversation_id ON conversation_summary(conversation_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversation_summary_summary ON conversation_summary(summary)",
             [],
         )?;
 

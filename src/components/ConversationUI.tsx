@@ -48,6 +48,7 @@ import ConversationContent from "./conversation/ConversationContent";
 // 暴露给外部的方法接口
 export interface ConversationUIRef {
     focus: () => void;
+    scrollToMessage: (messageId: number) => void;
 }
 
 interface ConversationUIProps {
@@ -245,6 +246,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 滚动管理 - 移除依赖项，改为手动调用
         const { messagesEndRef, scrollContainerRef, handleScroll, smartScroll, scrollToUserMessage } = useScrollManagement();
+        const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
 
         // 使用 useMemo 稳定 options 对象，避免频繁触发 useConversationEvents 内部的 useEffect
         const conversationEventsOptions = useMemo(() => {
@@ -395,6 +397,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             () => ({
                 focus: () => {
                     inputAreaRef.current?.focus();
+                },
+                scrollToMessage: (messageId: number) => {
+                    setPendingScrollMessageId(messageId);
                 },
             }),
             []
@@ -573,7 +578,31 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             );
         }, [conversationId, isLoadingShow, allDisplayMessages.length, smartScroll]);
 
-        // 监听消息变化，当用户发送消息时滚动到用户消息位置
+        // 按消息 ID 定位滚动（用于搜索结果）
+        useEffect(() => {
+            if (pendingScrollMessageId === null) {
+                return;
+            }
+            const container = scrollContainerRef.current;
+            if (!container) {
+                return;
+            }
+            const target = container.querySelector(
+                `[data-message-id='${pendingScrollMessageId}']`
+            ) as HTMLElement | null;
+            if (!target) {
+                return;
+            }
+            requestAnimationFrame(() => {
+                target.scrollIntoView({ behavior: "smooth", block: "center" });
+                setShiningMessageIds(() => new Set([pendingScrollMessageId]));
+                setTimeout(() => {
+                    setShiningMessageIds(new Set());
+                }, 2000);
+                setPendingScrollMessageId(null);
+            });
+        }, [pendingScrollMessageId, allDisplayMessages.length, scrollContainerRef, setShiningMessageIds]);
+
         useEffect(() => {
             const lastMessage = allDisplayMessages[allDisplayMessages.length - 1];
             if (lastMessage && lastMessage.message_type === 'user') {

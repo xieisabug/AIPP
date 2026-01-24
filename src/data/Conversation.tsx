@@ -234,3 +234,14 @@ export interface MCPToolCall {
     started_time?: string;
     finished_time?: string;
 }
+
+export interface ConversationSearchHit {
+    conversation_id: number;
+    conversation_name: string;
+    assistant_name: string;
+    message_id: number | null;
+    message_type: string | null;
+    created_time: Date;
+    snippet: string;
+    hit_type: "title" | "summary" | "message";
+}

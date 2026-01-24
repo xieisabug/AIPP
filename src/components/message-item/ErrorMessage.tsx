@@ -7,6 +7,7 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 
 interface ErrorMessageProps {
     content: string;
+    messageId?: number;
 }
 
 interface ParsedErrorContent {
@@ -42,7 +43,7 @@ const getStatusBadgeStyle = (status: number): string => {
     return "bg-gray-200 text-gray-800 border-gray-300";
 };
 
-const ErrorMessage: React.FC<ErrorMessageProps> = ({ content }) => {
+const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
     const [isExpanded, setIsExpanded] = useState(false);
     const { copyIconState, handleCopy } = useCopyHandler(content);
 
@@ -142,7 +143,12 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content }) => {
     };
 
     return (
-        <div data-message-item data-message-type="error" className="group relative py-4 px-5 rounded-2xl inline-block max-w-[65%] transition-all duration-200 self-start bg-red-50 text-red-800 border border-red-200">
+        <div
+            data-message-item
+            data-message-id={messageId}
+            data-message-type="error"
+            className="group relative py-4 px-5 rounded-2xl inline-block max-w-[65%] transition-all duration-200 self-start bg-red-50 text-red-800 border border-red-200"
+        >
             <div className="flex items-start space-x-3">
                 <div className="flex-shrink-0 w-5 h-5 mt-0.5">
                     <svg

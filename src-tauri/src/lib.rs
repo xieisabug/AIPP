@@ -28,7 +28,7 @@ use crate::api::attachment_api::{add_attachment, open_attachment_with_default_ap
 use crate::api::conversation_api::{
     create_conversation_with_messages, create_message, delete_conversation, fork_conversation,
     get_conversation_with_messages, list_conversations, update_assistant_message,
-    update_conversation, update_message_content,
+    search_conversations, update_conversation, update_message_content,
 };
 use crate::api::copilot_api::{poll_github_copilot_token, start_github_copilot_device_flow};
 #[cfg(desktop)]
@@ -543,6 +543,7 @@ pub fn run() {
             export_assistant,
             import_assistant,
             list_conversations,
+            search_conversations,
             get_conversation_with_messages,
             create_conversation_with_messages,
             delete_conversation,

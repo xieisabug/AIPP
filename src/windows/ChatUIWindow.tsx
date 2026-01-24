@@ -4,9 +4,10 @@ import { emit, listen } from "@tauri-apps/api/event";
 import ChatUIToolbar from "../components/ChatUIToolbar";
 import ConversationList from "../components/ConversationList";
 import ChatUIInfomation from "../components/ChatUIInfomation";
+import ConversationSearchDialog from "../components/ConversationSearchDialog";
 import ConversationUI, { ConversationUIRef } from "../components/ConversationUI";
 import { AcpPermissionDialog, OperationPermissionDialog } from "../components/OperationPermissionDialog";
-import { Conversation } from "../data/Conversation";
+import { Conversation, ConversationSearchHit } from "../data/Conversation";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
 import { useAcpPermission, useOperationPermission } from "../hooks/useOperationPermission";
@@ -32,6 +33,8 @@ function ChatUIWindow() {
     const isMobile = useIsMobile();
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [conversationTitle, setConversationTitle] = useState("");
+    const [searchOpen, setSearchOpen] = useState(false);
+    const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
 
     const [pluginList, setPluginList] = useState<any[]>([]);
 
@@ -73,6 +76,35 @@ function ChatUIWindow() {
         setConversationTitle(conv?.name || "");
     }, []);
 
+    const handleSearchSelect = useCallback((hit: ConversationSearchHit) => {
+        setSelectedConversation(hit.conversation_id.toString());
+        if (hit.message_id) {
+            setPendingScrollMessageId(hit.message_id);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (!pendingScrollMessageId) {
+            return;
+        }
+        if (!selectedConversation) {
+            return;
+        }
+        let attempts = 0;
+        const handle = window.setInterval(() => {
+            attempts += 1;
+            if (conversationUIRef.current) {
+                conversationUIRef.current.scrollToMessage(pendingScrollMessageId);
+                setPendingScrollMessageId(null);
+                window.clearInterval(handle);
+            } else if (attempts >= 10) {
+                setPendingScrollMessageId(null);
+                window.clearInterval(handle);
+            }
+        }, 200);
+        return () => window.clearInterval(handle);
+    }, [pendingScrollMessageId, selectedConversation]);
+
     // 组件挂载完成后，发送窗口加载事件，通知 AskWindow
     useEffect(() => {
         emit("chat-ui-window-load");
@@ -104,10 +136,19 @@ function ChatUIWindow() {
             setSidebarOpen(false);
         });
 
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
+                event.preventDefault();
+                setSearchOpen(true);
+            }
+        };
+        window.addEventListener("keydown", handleKeyDown);
+
         return () => {
             unlisten.then((unlisten) => unlisten());
             windowFocusUnlisten.then((unlistenFn) => unlistenFn());
             unlistenHidden.then((unlistenFn) => unlistenFn());
+            window.removeEventListener("keydown", handleKeyDown);
         };
     }, []);
 
@@ -216,7 +257,10 @@ function ChatUIWindow() {
                             >
                                 <SheetTitle className="sr-only">导航菜单</SheetTitle>
                                 <ChatUIInfomation showArtifacts={false} showPluginStore={false} isMobile={true} />
-                                <ChatUIToolbar onNewConversation={handleNewConversation} />
+                                <ChatUIToolbar
+                                    onNewConversation={handleNewConversation}
+                                    onSearch={() => setSearchOpen(true)}
+                                />
                                 <ConversationList
                                     conversationId={selectedConversation}
                                     onSelectConversation={handleSelectConversation}
@@ -242,6 +286,11 @@ function ChatUIWindow() {
                     </div>
 
                     {/* 操作权限对话框 */}
+                    <ConversationSearchDialog
+                        open={searchOpen}
+                        onOpenChange={setSearchOpen}
+                        onSelectResult={handleSearchSelect}
+                    />
                     <OperationPermissionDialog
                         request={pendingRequest}
                         isOpen={isDialogOpen}
@@ -263,7 +312,10 @@ function ChatUIWindow() {
             <div className="flex h-screen bg-background">
                 <div className="flex-none w-[280px] flex flex-col shadow-lg box-border rounded-r-xl mb-2 mr-2">
                     <ChatUIInfomation />
-                    <ChatUIToolbar onNewConversation={handleNewConversation} />
+                    <ChatUIToolbar
+                        onNewConversation={handleNewConversation}
+                        onSearch={() => setSearchOpen(true)}
+                    />
                     <ConversationList
                         conversationId={selectedConversation}
                         onSelectConversation={handleSelectConversation}
@@ -278,6 +330,12 @@ function ChatUIWindow() {
                         onChangeConversationId={setSelectedConversation}
                     />
                 </div>
+
+                <ConversationSearchDialog
+                    open={searchOpen}
+                    onOpenChange={setSearchOpen}
+                    onSelectResult={handleSearchSelect}
+                />
 
                 {/* 操作权限对话框 */}
                 <OperationPermissionDialog

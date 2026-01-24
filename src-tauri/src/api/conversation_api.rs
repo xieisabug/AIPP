@@ -13,6 +13,18 @@ use crate::{
     NameCacheState,
 };
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ConversationSearchHit {
+    pub conversation_id: i64,
+    pub conversation_name: String,
+    pub assistant_name: String,
+    pub message_id: Option<i64>,
+    pub message_type: Option<String>,
+    pub created_time: DateTime<Utc>,
+    pub snippet: String,
+    pub hit_type: String, // title | summary | message
+}
+
 /// 处理消息版本管理的纯函数 - 这是核心业务逻辑
 /// 输入原始消息列表，返回经过版本管理处理的最终消息列表
 pub fn process_message_versions(mut message_details: Vec<MessageDetail>) -> Vec<MessageDetail> {
@@ -576,4 +588,138 @@ pub async fn update_assistant_message(
         }
         None => Err(format!("Message with ID {} not found", message_id)),
     }
+}
+
+#[tauri::command]
+pub async fn search_conversations(
+    app_handle: tauri::AppHandle,
+    name_cache_state: tauri::State<'_, NameCacheState>,
+    query: String,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<Vec<ConversationSearchHit>, String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let assistant_name_cache = name_cache_state.assistant_names.lock().await.clone();
+    let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    let search_value = format!("%{}%", trimmed);
+    let max_rows = limit.unwrap_or(50).min(200);
+    let offset_rows = offset.unwrap_or(0);
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.id, c.name, c.assistant_id, c.created_time, \
+                NULL as message_id, NULL as message_type, c.created_time as hit_time, \
+                c.name as hit_text, 'title' as hit_type \
+             FROM conversation c \
+             WHERE c.name LIKE ?1 COLLATE NOCASE \
+             UNION ALL \
+             SELECT c.id, c.name, c.assistant_id, c.created_time, \
+                NULL as message_id, NULL as message_type, cs.created_time as hit_time, \
+                cs.summary as hit_text, 'summary' as hit_type \
+             FROM conversation_summary cs \
+             JOIN conversation c ON cs.conversation_id = c.id \
+             WHERE cs.summary LIKE ?1 COLLATE NOCASE \
+             UNION ALL \
+             SELECT c.id, c.name, c.assistant_id, c.created_time, \
+                m.id as message_id, m.message_type, m.created_time as hit_time, \
+                m.content as hit_text, 'message' as hit_type \
+             FROM message m \
+             JOIN conversation c ON m.conversation_id = c.id \
+             WHERE m.content LIKE ?1 COLLATE NOCASE \
+             ORDER BY hit_time DESC \
+             LIMIT ?2 OFFSET ?3",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map((&search_value, max_rows, offset_rows), |row| {
+            let assistant_id: Option<i64> = row.get(2)?;
+            let assistant_name = assistant_id
+                .and_then(|id| assistant_name_cache.get(&id).cloned())
+                .unwrap_or_else(|| "未知".to_string());
+
+            let message_id: Option<i64> = row.get(4)?;
+            let message_type: Option<String> = row.get(5)?;
+            let hit_time: DateTime<Utc> = row.get(6)?;
+            let hit_text: String = row.get(7)?;
+            let hit_type: String = row.get(8)?;
+
+            let conversation_id: i64 = row.get(0)?;
+            let conversation_name: String = row.get(1)?;
+            let _conversation_created_time: DateTime<Utc> = row.get(3)?;
+            let snippet = build_snippet(&hit_text, trimmed, 120);
+
+            Ok(ConversationSearchHit {
+                conversation_id,
+                conversation_name,
+                assistant_name,
+                message_id,
+                message_type,
+                created_time: hit_time,
+                snippet,
+                hit_type,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut hits: Vec<ConversationSearchHit> = Vec::new();
+    for hit in rows {
+        if let Ok(hit) = hit {
+            hits.push(hit);
+        }
+    }
+
+    Ok(hits)
+}
+
+fn build_snippet(text: &str, query: &str, max_len: usize) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+
+    let escaped_query = regex::escape(query);
+    if let Ok(re) = regex::RegexBuilder::new(&escaped_query).case_insensitive(true).build() {
+        if let Some(mat) = re.find(text) {
+            let start_chars = text[..mat.start()].chars().count();
+            let end_chars = text[..mat.end()].chars().count();
+            let total_chars = text.chars().count();
+            let snippet_start = start_chars.saturating_sub(40);
+            let snippet_end = (end_chars + 40).min(total_chars);
+            let mut snippet = slice_by_chars(text, snippet_start, snippet_end);
+            if snippet_start > 0 {
+                snippet = format!("...{}", snippet);
+            }
+            if snippet_end < total_chars {
+                snippet.push_str("...");
+            }
+            return truncate_chars(&snippet, max_len);
+        }
+    }
+
+    truncate_chars(text, max_len)
+}
+
+fn slice_by_chars(text: &str, start: usize, end: usize) -> String {
+    if start >= end {
+        return String::new();
+    }
+    text.chars().skip(start).take(end - start).collect()
+}
+
+fn truncate_chars(text: &str, max_len: usize) -> String {
+    if max_len == 0 {
+        return String::new();
+    }
+    let total_chars = text.chars().count();
+    if total_chars <= max_len {
+        return text.to_string();
+    }
+    let mut snippet = text.chars().take(max_len).collect::<String>();
+    snippet.push_str("...");
+    snippet
 }
