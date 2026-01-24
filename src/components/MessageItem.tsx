@@ -262,12 +262,12 @@ const MessageItem = React.memo<MessageItemProps>(
 
         // 早期返回：错误类型消息
         if (message.message_type === "error") {
-            return <ErrorMessage content={message.content} />;
+            return <ErrorMessage content={message.content} messageId={message.id} />;
         }
 
         // 常规消息渲染
         return (
-            <div className="flex flex-col" data-message-item data-message-type={message.message_type}>
+            <div className="flex flex-col" data-message-item data-message-id={message.id} data-message-type={message.message_type}>
                 {/* Message-level sub-tasks - shown at the top of each message */}
                 {conversationId && (
                     <SubTaskList
@@ -291,11 +291,7 @@ const MessageItem = React.memo<MessageItemProps>(
                         />
                     )}
 
-                    <div
-                        className="prose prose-sm max-w-none text-foreground"
-                        data-conversation-id={conversationId}
-                        data-message-id={message.id}
-                    >
+                    <div className="prose prose-sm max-w-none text-foreground">
                         {/* RawTextRenderer 已包含 prose 样式，条件渲染避免重复包装 */}
                         {isUserMessage && !isUserMessageMarkdownEnabled ? contentElement : <div>{contentElement}</div>}
                     </div>
