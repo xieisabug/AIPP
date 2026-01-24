@@ -10,7 +10,7 @@ const windowLoaders: Record<string, () => Promise<{ default: React.ComponentType
     chat_ui: () => import("./windows/ChatUIWindow"),
     artifact_preview: () => import("./windows/ArtifactPreviewWindow"),
     plugin: () => import("./windows/PluginWindow"),
-    plugin_store: () => import("./windows/PluginStoreWindow"),
+    schedule: () => import("./windows/ScheduleWindow"),
     artifact_collections: () => import("./windows/ArtifactCollectionsWindow"),
     artifact: () => import("./windows/ArtifactWindow"),
 };

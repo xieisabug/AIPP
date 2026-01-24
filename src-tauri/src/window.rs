@@ -765,19 +765,15 @@ pub async fn open_artifact_window(
     Ok(())
 }
 
-// Create plugin store window
-fn create_plugin_store_window(app_handle: &AppHandle) {
+// Create schedule window
+fn create_schedule_window(app_handle: &AppHandle) {
     #[cfg(desktop)]
     {
         let (window_size, window_position) =
             get_window_size_and_position(app_handle, 1200.0, 800.0, &["chat_ui", "ask", "config"]);
 
-        let builder = WebviewWindowBuilder::new(
-            app_handle,
-            "plugin_store",
-            WebviewUrl::App("index.html".into()),
-        )
-        .title("插件商店")
+        let builder = WebviewWindowBuilder::new(app_handle, "schedule", WebviewUrl::App("index.html".into()))
+        .title("定时任务")
         .inner_size(window_size.width, window_size.height)
         .resizable(true)
         .minimizable(true)
@@ -792,34 +788,30 @@ fn create_plugin_store_window(app_handle: &AppHandle) {
 
         match builder.build() {
             Ok(_window) => {
-                info!("Plugin store window created successfully");
+                info!("Schedule window created successfully");
             }
             Err(e) => {
-                error!(error=%e, "Failed to create plugin store window");
+                error!(error=%e, "Failed to create schedule window");
             }
         }
     }
     #[cfg(mobile)]
     {
-        let builder = WebviewWindowBuilder::new(
-            app_handle,
-            "plugin_store",
-            WebviewUrl::App("index.html".into()),
-        );
+        let builder = WebviewWindowBuilder::new(app_handle, "schedule", WebviewUrl::App("index.html".into()));
         if let Err(e) = builder.build() {
-            error!(error=%e, "Failed to create plugin store window");
+            error!(error=%e, "Failed to create schedule window");
         }
     }
 }
 
-/// Open plugin store window
+/// Open schedule window
 #[tauri::command]
-pub async fn open_plugin_store_window(app_handle: AppHandle) -> Result<(), String> {
-    if app_handle.get_webview_window("plugin_store").is_none() {
-        debug!("Creating plugin store window");
-        create_plugin_store_window(&app_handle);
-    } else if let Some(window) = app_handle.get_webview_window("plugin_store") {
-        debug!("Showing plugin store window");
+pub async fn open_schedule_window(app_handle: AppHandle) -> Result<(), String> {
+    if app_handle.get_webview_window("schedule").is_none() {
+        debug!("Creating schedule window");
+        create_schedule_window(&app_handle);
+    } else if let Some(window) = app_handle.get_webview_window("schedule") {
+        debug!("Showing schedule window");
         #[cfg(desktop)]
         {
             if window.is_minimized().unwrap_or(false) {

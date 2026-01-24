@@ -5,6 +5,7 @@ use conversation_db::ConversationDatabase;
 use llm_db::LLMDatabase;
 use rusqlite::params;
 use semver::Version;
+use scheduled_task_db::ScheduledTaskDatabase;
 use sub_task_db::SubTaskDatabase;
 use system_db::SystemDatabase;
 use tauri::Manager;
@@ -15,6 +16,7 @@ pub mod conversation_db;
 pub mod llm_db;
 pub mod mcp_db;
 pub mod plugin_db;
+pub mod scheduled_task_db;
 pub mod skill_db;
 pub mod sub_task_db;
 pub mod system_db;
@@ -22,7 +24,7 @@ pub mod system_db;
 #[cfg(test)]
 mod tests;
 
-const CURRENT_VERSION: &str = "0.0.5";
+const CURRENT_VERSION: &str = "0.0.7";
 
 pub(crate) fn get_db_path(app_handle: &tauri::AppHandle, db_name: &str) -> Result<PathBuf, String> {
     let app_dir = app_handle.path().app_data_dir().unwrap();
@@ -80,6 +82,8 @@ pub fn database_upgrade(
                     ("0.0.3", special_logic_0_0_3),
                     ("0.0.4", special_logic_0_0_4),
                     ("0.0.5", special_logic_0_0_5),
+                    ("0.0.6", special_logic_0_0_6),
+                    ("0.0.7", special_logic_0_0_7),
                 ];
 
                 for (version_str, logic) in special_versions.iter() {
@@ -468,5 +472,43 @@ fn special_logic_0_0_5(
     sub_task_db.create_tables().map_err(|e| format!("创建 sub task 表失败: {}", e.to_string()))?;
 
     info!("special_logic_0_0_5 done: sub task 表创建完成");
+    Ok(())
+}
+
+fn special_logic_0_0_6(
+    _system_db: &SystemDatabase,
+    _llm_db: &LLMDatabase,
+    _assistant_db: &AssistantDatabase,
+    _conversation_db: &ConversationDatabase,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    info!("special_logic_0_0_6: 创建 scheduled_task 表");
+
+    let scheduled_task_db = ScheduledTaskDatabase::new(app_handle)
+        .map_err(|e| format!("创建 ScheduledTaskDatabase 失败: {}", e.to_string()))?;
+    scheduled_task_db
+        .create_tables()
+        .map_err(|e| format!("创建 scheduled_task 表失败: {}", e.to_string()))?;
+
+    info!("special_logic_0_0_6 done: scheduled_task 表创建完成");
+    Ok(())
+}
+
+fn special_logic_0_0_7(
+    _system_db: &SystemDatabase,
+    _llm_db: &LLMDatabase,
+    _assistant_db: &AssistantDatabase,
+    _conversation_db: &ConversationDatabase,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    info!("special_logic_0_0_7: 创建 scheduled_task_log 表");
+
+    let scheduled_task_db = ScheduledTaskDatabase::new(app_handle)
+        .map_err(|e| format!("创建 ScheduledTaskDatabase 失败: {}", e.to_string()))?;
+    scheduled_task_db
+        .create_tables()
+        .map_err(|e| format!("创建 scheduled_task_log 表失败: {}", e.to_string()))?;
+
+    info!("special_logic_0_0_7 done: scheduled_task_log 表创建完成");
     Ok(())
 }

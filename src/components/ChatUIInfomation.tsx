@@ -1,4 +1,4 @@
-import { PackageOpen, Settings, Store, Eye, EyeOff } from "lucide-react";
+import { PackageOpen, Settings, CalendarClock, Eye, EyeOff } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import AnimatedLogo from "./AnimatedLogo";
 import { useLogoState } from "../hooks/useLogoState";
@@ -8,14 +8,14 @@ import { memo } from "react";
 
 interface ChatUIInfomationProps {
     showArtifacts?: boolean;
-    showPluginStore?: boolean;
+    showSchedule?: boolean;
     /** 移动端模式，使用内部视图切换而非多窗口 */
     isMobile?: boolean;
 }
 
 const ChatUIInfomation = memo(function ChatUIInfomation({
     showArtifacts = true,
-    showPluginStore = true,
+    showSchedule = true,
     isMobile = false,
 }: ChatUIInfomationProps) {
     const { enabled: antiLeakageEnabled, isRevealed, toggleReveal } = useAntiLeakage();
@@ -60,9 +60,9 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
         }
     };
 
-    const openPluginStore = async () => {
+    const openScheduleWindow = async () => {
         try {
-            await invoke("open_plugin_store_window");
+            await invoke("open_schedule_window");
             showHappy();
         } catch (error) {
             showError();
@@ -93,9 +93,9 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
                         <PackageOpen />
                     </Button>
                 )}
-                {showPluginStore && (
-                    <Button onClick={openPluginStore} variant={"ghost"}>
-                        <Store />
+                {showSchedule && (
+                    <Button onClick={openScheduleWindow} variant={"ghost"}>
+                        <CalendarClock />
                     </Button>
                 )}
             </div>

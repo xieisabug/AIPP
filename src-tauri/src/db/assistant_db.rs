@@ -209,6 +209,25 @@ impl AssistantDatabase {
         Ok(id)
     }
 
+    #[instrument(level = "debug", skip(self), fields(assistant_type = assistant_type))]
+    pub fn get_assistants_by_type(&self, assistant_type: i64) -> Result<Vec<Assistant>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, description, assistant_type, is_addition, created_time FROM assistant WHERE assistant_type = ? ORDER BY created_time DESC",
+        )?;
+        let rows = stmt.query_map([assistant_type], |row| {
+            Ok(Assistant {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                assistant_type: row.get(3)?,
+                is_addition: row.get(4)?,
+                created_time: row.get(5)?,
+            })
+        })?;
+        let assistants: Vec<Assistant> = rows.collect::<Result<Vec<_>>>()?;
+        Ok(assistants)
+    }
+
     #[instrument(level = "debug", skip(self), fields(id = id, name = name))]
     pub fn update_assistant(&self, id: i64, name: &str, description: &str) -> Result<()> {
         self.conn.execute(

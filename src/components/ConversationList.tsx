@@ -277,6 +277,32 @@ const ConversationList = memo(function ConversationList({
         };
     }, []);
 
+    // 监听对话创建事件，刷新列表
+    useEffect(() => {
+        let unlisten: (() => void) | undefined;
+
+        const setupListener = async () => {
+            unlisten = await listen("conversation_created", async () => {
+                try {
+                    const conversations = await listConversations(1, 100);
+                    setConversations(conversations);
+                    setCurrentPage(1);
+                    setHasMoreData(conversations.length === 100);
+                } catch (error) {
+                    console.error("ConversationList: reload after create failed", error);
+                }
+            });
+        };
+
+        setupListener();
+
+        return () => {
+            if (unlisten) {
+                unlisten();
+            }
+        };
+    }, [listConversations]);
+
     // 监听对话删除事件
     useEffect(() => {
         const unsubscribe = listen("conversation_deleted", (event) => {

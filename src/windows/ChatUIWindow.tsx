@@ -256,7 +256,7 @@ function ChatUIWindow() {
                                 hideCloseButton
                             >
                                 <SheetTitle className="sr-only">导航菜单</SheetTitle>
-                                <ChatUIInfomation showArtifacts={false} showPluginStore={false} isMobile={true} />
+                                <ChatUIInfomation showArtifacts={false} showSchedule={false} isMobile={true} />
                                 <ChatUIToolbar
                                     onNewConversation={handleNewConversation}
                                     onSearch={() => setSearchOpen(true)}
