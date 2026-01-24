@@ -65,4 +65,40 @@ impl UvUtils {
 
         Ok("Not Installed".to_string())
     }
+
+    /// 获取 uv 可执行文件路径（按常见安装位置优先）
+    pub fn find_uv_executable() -> Option<std::path::PathBuf> {
+        let uv_executable_name = Self::get_uv_executable_name();
+
+        if cfg!(target_os = "windows") {
+            if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+                let path = std::path::Path::new(&local_app_data)
+                    .join("Programs")
+                    .join("uv")
+                    .join(uv_executable_name);
+                if path.exists() {
+                    return Some(path);
+                }
+            }
+        }
+
+        if let Some(home_dir) = dirs::home_dir() {
+            let local_bin_path = home_dir.join(".local").join("bin").join(uv_executable_name);
+            if local_bin_path.exists() {
+                return Some(local_bin_path);
+            }
+
+            let cargo_bin_path = home_dir.join(".cargo").join("bin").join(uv_executable_name);
+            if cargo_bin_path.exists() {
+                return Some(cargo_bin_path);
+            }
+        }
+
+        let path = std::path::Path::new(uv_executable_name);
+        if path.exists() {
+            return Some(path.to_path_buf());
+        }
+
+        None
+    }
 }

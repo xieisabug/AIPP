@@ -1,5 +1,6 @@
 use std::process::Command;
 use tauri::AppHandle;
+use crate::utils::uv_utils::UvUtils;
 
 /// Python 版本信息
 #[derive(Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -120,9 +121,9 @@ impl PythonUtils {
 
     /// 获取 uv 管理的 Python 版本列表
     fn get_uv_python_list() -> Option<Vec<String>> {
-        let uv_exe = if cfg!(target_os = "windows") { "uv.exe" } else { "uv" };
+        let uv_exe = UvUtils::find_uv_executable()?;
 
-        match Command::new(uv_exe).arg("python").arg("list").output() {
+        match Command::new(&uv_exe).arg("python").arg("list").output() {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let mut versions = Vec::new();
@@ -133,23 +134,29 @@ impl PythonUtils {
                 // ✓ 3.11
                 for line in stdout.lines() {
                     let line = line.trim();
-                    // 匹配 "cpython-X.Y.Z" 或 "3.X.Y" 格式
-                    if line.contains("cpython-") || (line.starts_with("3.") && !line.contains(" "))
-                    {
-                        // 提取版本号
-                        if let Some(start) = line.find("cpython-") {
-                            let rest = &line[start + 8..];
-                            if let Some(end) = rest.find('-') {
-                                let version = rest[..end].to_string();
-                                versions.push(version);
-                            }
-                        } else if line.starts_with("3.") {
-                            // 简单的 "3.X" 格式
-                            if let Some(end) = line.find(char::is_whitespace) {
-                                versions.push(line[..end].to_string());
-                            } else {
-                                versions.push(line.to_string());
-                            }
+                    if !line.contains("cpython-") {
+                        continue;
+                    }
+
+                    if line.contains("<download available>") {
+                        continue;
+                    }
+
+                    let mut parts = line.split_whitespace();
+                    let spec = match parts.next() {
+                        Some(value) => value,
+                        None => continue,
+                    };
+                    if parts.next().is_none() {
+                        // 没有安装路径，说明未安装
+                        continue;
+                    }
+
+                    if let Some(start) = spec.find("cpython-") {
+                        let rest = &spec[start + 8..];
+                        if let Some(end) = rest.find('-') {
+                            let version = rest[..end].to_string();
+                            versions.push(version);
                         }
                     }
                 }
