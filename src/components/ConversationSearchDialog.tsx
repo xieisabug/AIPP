@@ -19,6 +19,8 @@ interface ConversationGroup {
     hits: ConversationSearchHit[];
 }
 
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 const ConversationSearchDialog = memo(function ConversationSearchDialog({
     open,
     onOpenChange,
@@ -37,6 +39,7 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
     const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
 
     const shouldMask = antiLeakageEnabled && !isRevealed;
+    const highlightTerm = query.trim();
 
     const maskedText = useCallback(
         (text: string) => (shouldMask ? maskContent(text) : text),
@@ -46,6 +49,50 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
     const maskedTitle = useCallback(
         (text: string) => (shouldMask ? maskTitle(text) : text),
         [shouldMask],
+    );
+
+    const renderHighlighted = useCallback(
+        (text: string) => {
+            if (!highlightTerm) {
+                return text;
+            }
+            const escaped = escapeRegExp(highlightTerm);
+            const regex = new RegExp(escaped, "gi");
+            const nodes: Array<string | JSX.Element> = [];
+            let lastIndex = 0;
+            let match: RegExpExecArray | null;
+            let index = 0;
+            let hasMatch = false;
+            while ((match = regex.exec(text)) !== null) {
+                hasMatch = true;
+                const start = match.index;
+                const end = start + match[0].length;
+                if (start > lastIndex) {
+                    nodes.push(text.slice(lastIndex, start));
+                }
+                nodes.push(
+                    <span
+                        key={`highlight-${index}`}
+                        className="rounded bg-primary/20 text-primary px-0.5"
+                    >
+                        {match[0]}
+                    </span>,
+                );
+                lastIndex = end;
+                index += 1;
+                if (match.index === regex.lastIndex) {
+                    regex.lastIndex += 1;
+                }
+            }
+            if (!hasMatch) {
+                return text;
+            }
+            if (lastIndex < text.length) {
+                nodes.push(text.slice(lastIndex));
+            }
+            return nodes;
+        },
+        [highlightTerm],
     );
 
     const groupedResults = useMemo(() => {
@@ -204,7 +251,9 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
                 {groupedResults.map((group) => (
                     <div key={group.conversationId} className="px-2">
                         <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
-                            {`${maskedTitle(group.conversationName)} · ${maskedTitle(group.assistantName)}`}
+                            {renderHighlighted(maskedTitle(group.conversationName))}
+                            <span className="mx-1">·</span>
+                            {renderHighlighted(maskedTitle(group.assistantName))}
                         </div>
                         {group.hits.map((hit, index) => (
                             <button
@@ -228,7 +277,7 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
                                     )}
                                 </div>
                                 <div className="text-sm text-foreground line-clamp-2 mt-1">
-                                    {maskedText(hit.snippet)}
+                                    {renderHighlighted(maskedText(hit.snippet))}
                                 </div>
                             </button>
                         ))}
