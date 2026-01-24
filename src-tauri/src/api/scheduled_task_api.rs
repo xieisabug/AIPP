@@ -35,6 +35,9 @@ pub struct ScheduledTaskDTO {
     pub schedule_type: String,
     pub interval_value: Option<i64>,
     pub interval_unit: Option<String>,
+    pub start_time: Option<String>,
+    pub week_days: Option<Vec<i32>>,
+    pub month_days: Option<Vec<i32>>,
     pub run_at: Option<String>,
     pub next_run_at: Option<String>,
     pub last_run_at: Option<String>,
@@ -53,6 +56,9 @@ pub struct CreateScheduledTaskRequest {
     pub schedule_type: String, // 'once' | 'interval'
     pub interval_value: Option<i64>,
     pub interval_unit: Option<String>, // minute/hour/day/week/month
+    pub start_time: Option<String>,    // HH:mm for day/week/month
+    pub week_days: Option<Vec<i32>>,   // [0-6] for week
+    pub month_days: Option<Vec<i32>>,  // [1-31] for month
     pub run_at: Option<String>,
     pub assistant_id: i64,
     pub task_prompt: String,
@@ -68,6 +74,9 @@ pub struct UpdateScheduledTaskRequest {
     pub schedule_type: String,
     pub interval_value: Option<i64>,
     pub interval_unit: Option<String>,
+    pub start_time: Option<String>,
+    pub week_days: Option<Vec<i32>>,
+    pub month_days: Option<Vec<i32>>,
     pub run_at: Option<String>,
     pub assistant_id: i64,
     pub task_prompt: String,
@@ -277,6 +286,30 @@ fn cleanup_conversation(app_handle: &tauri::AppHandle, conversation_id: i64) -> 
     Ok(())
 }
 
+/// Configuration for schedule calculation
+pub struct ScheduleConfig<'a> {
+    pub schedule_type: &'a str,
+    pub interval_value: Option<i64>,
+    pub interval_unit: Option<&'a str>,
+    pub start_time: Option<&'a str>,      // HH:mm
+    pub week_days: Option<Vec<i32>>,       // 0=Sun, 1=Mon, ..., 6=Sat
+    pub month_days: Option<Vec<i32>>,      // 1-31
+    pub run_at: Option<DateTime<Utc>>,
+}
+
+fn parse_start_time(start_time: Option<&str>) -> Option<(u32, u32)> {
+    start_time.and_then(|s| {
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() == 2 {
+            let hour = parts[0].parse::<u32>().ok()?;
+            let minute = parts[1].parse::<u32>().ok()?;
+            Some((hour, minute))
+        } else {
+            None
+        }
+    })
+}
+
 pub fn compute_next_run_at(
     schedule_type: &str,
     interval_value: Option<i64>,
@@ -284,67 +317,165 @@ pub fn compute_next_run_at(
     run_at: Option<DateTime<Utc>>,
     base_time: DateTime<Utc>,
 ) -> Result<Option<DateTime<Utc>>, String> {
-    if schedule_type == "once" {
-        return Ok(run_at);
+    compute_next_run_at_with_config(
+        ScheduleConfig {
+            schedule_type,
+            interval_value,
+            interval_unit,
+            start_time: None,
+            week_days: None,
+            month_days: None,
+            run_at,
+        },
+        base_time,
+    )
+}
+
+pub fn compute_next_run_at_with_config(
+    config: ScheduleConfig,
+    base_time: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, String> {
+    use chrono::{Datelike, Timelike, Weekday};
+
+    if config.schedule_type == "once" {
+        return Ok(config.run_at);
     }
-    if schedule_type != "interval" {
+    if config.schedule_type != "interval" {
         return Err("不支持的 schedule_type".to_string());
     }
-    let value = interval_value.ok_or_else(|| "缺少 interval_value".to_string())?;
-    let unit = interval_unit.ok_or_else(|| "缺少 interval_unit".to_string())?;
+
+    let value = config.interval_value.ok_or_else(|| "缺少 interval_value".to_string())?;
+    let unit = config.interval_unit.ok_or_else(|| "缺少 interval_unit".to_string())?;
     if value <= 0 {
         return Err("interval_value 需要大于 0".to_string());
     }
-    let add_interval = |current: DateTime<Utc>| -> Result<DateTime<Utc>, String> {
-        match unit {
-            "minute" => Ok(current + chrono::Duration::minutes(value)),
-            "hour" => Ok(current + chrono::Duration::hours(value)),
-            "day" => Ok(current + chrono::Duration::days(value)),
-            "week" => Ok(current + chrono::Duration::days(value * 7)),
-            "month" => {
-                let months = chrono::Months::new(value as u32);
-                current
-                    .checked_add_months(months)
-                    .ok_or_else(|| "无法计算下次执行时间".to_string())
-            }
-            _ => Err("不支持的 interval_unit".to_string()),
+
+    let local_base = base_time.with_timezone(&Local);
+    let (target_hour, target_minute) = parse_start_time(config.start_time).unwrap_or((local_base.hour(), local_base.minute()));
+
+    match unit {
+        "minute" => {
+            let next = base_time + chrono::Duration::minutes(value);
+            Ok(Some(next))
         }
-    };
+        "hour" => {
+            let next = base_time + chrono::Duration::hours(value);
+            Ok(Some(next))
+        }
+        "day" => {
+            // Every N days at start_time
+            let mut candidate = Local
+                .with_ymd_and_hms(local_base.year(), local_base.month(), local_base.day(), target_hour, target_minute, 0)
+                .single()
+                .ok_or_else(|| "无法构造日期".to_string())?;
 
-    let start = match run_at {
-        Some(value) => value,
-        None => add_interval(base_time)?,
-    };
+            if candidate <= local_base {
+                candidate = candidate + chrono::Duration::days(value);
+            }
+            Ok(Some(candidate.with_timezone(&Utc)))
+        }
+        "week" => {
+            // Every N weeks on specified week_days at start_time
+            let week_days = config.week_days.clone().unwrap_or_else(|| vec![local_base.weekday().num_days_from_sunday() as i32]);
+            if week_days.is_empty() {
+                return Err("请至少选择一个星期几".to_string());
+            }
 
-    if base_time <= start {
-        return Ok(Some(start));
-    }
+            let mut week_days_sorted: Vec<u32> = week_days.iter().filter_map(|&d| if d >= 0 && d <= 6 { Some(d as u32) } else { None }).collect();
+            week_days_sorted.sort();
+            week_days_sorted.dedup();
 
-    if unit == "month" {
-        let mut next = start;
-        for _ in 0..240 {
-            next = add_interval(next)?;
-            if next > base_time {
-                return Ok(Some(next));
+            if week_days_sorted.is_empty() {
+                return Err("无效的星期几配置".to_string());
+            }
+
+            let current_weekday = local_base.weekday().num_days_from_sunday();
+
+            // Find next valid day in this week or next weeks
+            let mut candidate: Option<DateTime<Local>> = None;
+            for week_offset in 0..=(value as i64 * 2) {
+                let week_start = local_base + chrono::Duration::weeks(week_offset);
+                for &wd in &week_days_sorted {
+                    let days_from_week_start = (wd as i64 + 7 - week_start.weekday().num_days_from_sunday() as i64) % 7;
+                    let target_date = week_start.date_naive() + chrono::Duration::days(days_from_week_start);
+                    let target_dt = Local
+                        .with_ymd_and_hms(target_date.year(), target_date.month(), target_date.day(), target_hour, target_minute, 0)
+                        .single();
+
+                    if let Some(dt) = target_dt {
+                        if dt > local_base {
+                            if candidate.is_none() || dt < candidate.unwrap() {
+                                candidate = Some(dt);
+                            }
+                        }
+                    }
+                }
+                if candidate.is_some() {
+                    break;
+                }
+            }
+
+            match candidate {
+                Some(dt) => Ok(Some(dt.with_timezone(&Utc))),
+                None => Err("无法计算下次执行时间".to_string()),
             }
         }
-        return Err("无法计算下次执行时间".to_string());
-    }
+        "month" => {
+            // Every N months on specified month_days at start_time
+            let month_days = config.month_days.clone().unwrap_or_else(|| vec![local_base.day() as i32]);
+            if month_days.is_empty() {
+                return Err("请至少选择一天".to_string());
+            }
 
-    let interval_seconds = match unit {
-        "minute" => value * 60,
-        "hour" => value * 60 * 60,
-        "day" => value * 60 * 60 * 24,
-        "week" => value * 60 * 60 * 24 * 7,
-        _ => return Err("不支持的 interval_unit".to_string()),
-    };
-    if interval_seconds <= 0 {
-        return Err("interval_value 需要大于 0".to_string());
+            let mut month_days_sorted: Vec<u32> = month_days.iter().filter_map(|&d| if d >= 1 && d <= 31 { Some(d as u32) } else { None }).collect();
+            month_days_sorted.sort();
+            month_days_sorted.dedup();
+
+            if month_days_sorted.is_empty() {
+                return Err("无效的日期配置".to_string());
+            }
+
+            // Find next valid day in current month or future months
+            let mut candidate: Option<DateTime<Local>> = None;
+            let mut check_year = local_base.year();
+            let mut check_month = local_base.month();
+
+            for _ in 0..24 {
+                for &day in &month_days_sorted {
+                    let target_dt = Local
+                        .with_ymd_and_hms(check_year, check_month, day, target_hour, target_minute, 0)
+                        .single();
+
+                    if let Some(dt) = target_dt {
+                        if dt > local_base {
+                            if candidate.is_none() || dt < candidate.unwrap() {
+                                candidate = Some(dt);
+                            }
+                        }
+                    }
+                }
+                if candidate.is_some() {
+                    break;
+                }
+                // Move to next month
+                check_month += 1;
+                if check_month > 12 {
+                    check_month = 1;
+                    check_year += 1;
+                }
+            }
+
+            match candidate {
+                Some(dt) => Ok(Some(dt.with_timezone(&Utc))),
+                None => Err("无法计算下次执行时间".to_string()),
+            }
+        }
+        _ => Err("不支持的 interval_unit".to_string()),
     }
-    let elapsed = (base_time - start).num_seconds();
-    let intervals = elapsed / interval_seconds + 1;
-    let next = start + chrono::Duration::seconds(interval_seconds * intervals);
-    Ok(Some(next))
+}
+
+fn parse_json_array(s: &Option<String>) -> Option<Vec<i32>> {
+    s.as_ref().and_then(|v| serde_json::from_str(v).ok())
 }
 
 fn to_dto(task: ScheduledTask) -> ScheduledTaskDTO {
@@ -355,6 +486,9 @@ fn to_dto(task: ScheduledTask) -> ScheduledTaskDTO {
         schedule_type: task.schedule_type,
         interval_value: task.interval_value,
         interval_unit: task.interval_unit,
+        start_time: task.start_time,
+        week_days: parse_json_array(&task.week_days),
+        month_days: parse_json_array(&task.month_days),
         run_at: format_dt(task.run_at),
         next_run_at: format_dt(task.next_run_at),
         last_run_at: format_dt(task.last_run_at),
@@ -436,6 +570,10 @@ pub async fn list_scheduled_task_runs(
     })
 }
 
+fn serialize_json_array(arr: &Option<Vec<i32>>) -> Option<String> {
+    arr.as_ref().map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()))
+}
+
 #[tauri::command]
 pub async fn create_scheduled_task(
     app_handle: tauri::AppHandle,
@@ -451,11 +589,16 @@ pub async fn create_scheduled_task(
     if request.schedule_type == "once" && run_at.is_none() {
         return Err("一次性任务需要设置执行时间".to_string());
     }
-    let next_run_at = compute_next_run_at(
-        &request.schedule_type,
-        request.interval_value,
-        request.interval_unit.as_deref(),
-        run_at,
+    let next_run_at = compute_next_run_at_with_config(
+        ScheduleConfig {
+            schedule_type: &request.schedule_type,
+            interval_value: request.interval_value,
+            interval_unit: request.interval_unit.as_deref(),
+            start_time: request.start_time.as_deref(),
+            week_days: request.week_days.clone(),
+            month_days: request.month_days.clone(),
+            run_at,
+        },
         now,
     )?;
 
@@ -466,6 +609,9 @@ pub async fn create_scheduled_task(
         schedule_type: request.schedule_type,
         interval_value: request.interval_value,
         interval_unit: request.interval_unit,
+        start_time: request.start_time,
+        week_days: serialize_json_array(&request.week_days),
+        month_days: serialize_json_array(&request.month_days),
         run_at,
         next_run_at,
         last_run_at: None,
@@ -498,11 +644,16 @@ pub async fn update_scheduled_task(
     if request.schedule_type == "once" && run_at.is_none() {
         return Err("一次性任务需要设置执行时间".to_string());
     }
-    let next_run_at = compute_next_run_at(
-        &request.schedule_type,
-        request.interval_value,
-        request.interval_unit.as_deref(),
-        run_at,
+    let next_run_at = compute_next_run_at_with_config(
+        ScheduleConfig {
+            schedule_type: &request.schedule_type,
+            interval_value: request.interval_value,
+            interval_unit: request.interval_unit.as_deref(),
+            start_time: request.start_time.as_deref(),
+            week_days: request.week_days.clone(),
+            month_days: request.month_days.clone(),
+            run_at,
+        },
         now,
     )?;
     let updated = ScheduledTask {
@@ -512,6 +663,9 @@ pub async fn update_scheduled_task(
         schedule_type: request.schedule_type,
         interval_value: request.interval_value,
         interval_unit: request.interval_unit,
+        start_time: request.start_time,
+        week_days: serialize_json_array(&request.week_days),
+        month_days: serialize_json_array(&request.month_days),
         run_at,
         next_run_at,
         last_run_at: existing.last_run_at,
@@ -824,10 +978,20 @@ pub async fn execute_scheduled_task(
             log_task_message(app_handle, task.id, &run_id, "response", task_result.clone());
         }
 
+        // Build the full notify prompt by combining default template with user's custom logic
+        let notify_prompt_full = format!(
+            "请判断以下任务结果是否需要通知用户，根据以下判定规则:\n{}\n\n请返回 JSON 格式：\n{{\"notify\": true|false, \"summary\": \"需要通知时的摘要\"}}\n如果 notify 为 true，请在 summary 中给出简要结论。",
+            if task.notify_prompt.trim().is_empty() {
+                "如果任务结果包含重要信息或需要用户关注的内容则通知".to_string()
+            } else {
+                task.notify_prompt.clone()
+            }
+        );
+
         let notify_request = build_chat_request_from_messages(
             &[
                 ("system".to_string(), system_prompt_rendered.clone(), Vec::new()),
-                ("user".to_string(), task.notify_prompt.clone(), Vec::new()),
+                ("user".to_string(), notify_prompt_full, Vec::new()),
                 ("assistant".to_string(), task_result.clone(), Vec::new()),
             ],
             ToolCallStrategy::NonNative,

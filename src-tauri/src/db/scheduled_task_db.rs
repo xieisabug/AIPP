@@ -17,6 +17,9 @@ pub struct ScheduledTask {
     pub schedule_type: String, // 'once' | 'interval'
     pub interval_value: Option<i64>,
     pub interval_unit: Option<String>, // 'minute' | 'hour' | 'day' | 'week' | 'month'
+    pub start_time: Option<String>,    // HH:mm format for day/week/month schedules
+    pub week_days: Option<String>,     // JSON array e.g. "[1,3,5]" for Mon/Wed/Fri
+    pub month_days: Option<String>,    // JSON array e.g. "[1,15]" for 1st and 15th
     pub run_at: Option<DateTime<Utc>>,
     pub next_run_at: Option<DateTime<Utc>>,
     pub last_run_at: Option<DateTime<Utc>>,
@@ -79,6 +82,9 @@ impl ScheduledTaskDatabase {
                 schedule_type TEXT NOT NULL CHECK(schedule_type IN ('once', 'interval')),
                 interval_value INTEGER,
                 interval_unit TEXT,
+                start_time TEXT,
+                week_days TEXT,
+                month_days TEXT,
                 run_at DATETIME,
                 next_run_at DATETIME,
                 last_run_at DATETIME,
@@ -90,6 +96,21 @@ impl ScheduledTaskDatabase {
             )",
             [],
         )?;
+
+        // Migration: add new columns if they don't exist
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(scheduled_task)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>>>()?;
+        if !columns.contains(&"start_time".to_string()) {
+            conn.execute("ALTER TABLE scheduled_task ADD COLUMN start_time TEXT", [])?;
+        }
+        if !columns.contains(&"week_days".to_string()) {
+            conn.execute("ALTER TABLE scheduled_task ADD COLUMN week_days TEXT", [])?;
+        }
+        if !columns.contains(&"month_days".to_string()) {
+            conn.execute("ALTER TABLE scheduled_task ADD COLUMN month_days TEXT", [])?;
+        }
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_scheduled_task_enabled_next_run ON scheduled_task(is_enabled, next_run_at)",
@@ -145,7 +166,7 @@ impl ScheduledTaskDatabase {
     #[instrument(level = "debug", skip(self))]
     pub fn list_tasks(&self) -> Result<Vec<ScheduledTask>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, is_enabled, schedule_type, interval_value, interval_unit, run_at, next_run_at, last_run_at, assistant_id, task_prompt, notify_prompt, created_time, updated_time
+            "SELECT id, name, is_enabled, schedule_type, interval_value, interval_unit, start_time, week_days, month_days, run_at, next_run_at, last_run_at, assistant_id, task_prompt, notify_prompt, created_time, updated_time
              FROM scheduled_task
              ORDER BY created_time DESC",
         )?;
@@ -157,14 +178,17 @@ impl ScheduledTaskDatabase {
                 schedule_type: row.get(3)?,
                 interval_value: row.get(4)?,
                 interval_unit: row.get(5)?,
-                run_at: get_datetime_from_row(row, 6)?,
-                next_run_at: get_datetime_from_row(row, 7)?,
-                last_run_at: get_datetime_from_row(row, 8)?,
-                assistant_id: row.get(9)?,
-                task_prompt: row.get(10)?,
-                notify_prompt: row.get(11)?,
-                created_time: get_required_datetime_from_row(row, 12, "created_time")?,
-                updated_time: get_required_datetime_from_row(row, 13, "updated_time")?,
+                start_time: row.get(6)?,
+                week_days: row.get(7)?,
+                month_days: row.get(8)?,
+                run_at: get_datetime_from_row(row, 9)?,
+                next_run_at: get_datetime_from_row(row, 10)?,
+                last_run_at: get_datetime_from_row(row, 11)?,
+                assistant_id: row.get(12)?,
+                task_prompt: row.get(13)?,
+                notify_prompt: row.get(14)?,
+                created_time: get_required_datetime_from_row(row, 15, "created_time")?,
+                updated_time: get_required_datetime_from_row(row, 16, "updated_time")?,
             })
         })?;
         let tasks: Vec<ScheduledTask> = rows.collect::<Result<Vec<_>>>()?;
@@ -176,7 +200,7 @@ impl ScheduledTaskDatabase {
         let task = self
             .conn
             .query_row(
-                "SELECT id, name, is_enabled, schedule_type, interval_value, interval_unit, run_at, next_run_at, last_run_at, assistant_id, task_prompt, notify_prompt, created_time, updated_time
+                "SELECT id, name, is_enabled, schedule_type, interval_value, interval_unit, start_time, week_days, month_days, run_at, next_run_at, last_run_at, assistant_id, task_prompt, notify_prompt, created_time, updated_time
                  FROM scheduled_task WHERE id = ?",
                 [id],
                 |row| {
@@ -187,14 +211,17 @@ impl ScheduledTaskDatabase {
                         schedule_type: row.get(3)?,
                         interval_value: row.get(4)?,
                         interval_unit: row.get(5)?,
-                        run_at: get_datetime_from_row(row, 6)?,
-                        next_run_at: get_datetime_from_row(row, 7)?,
-                        last_run_at: get_datetime_from_row(row, 8)?,
-                        assistant_id: row.get(9)?,
-                        task_prompt: row.get(10)?,
-                        notify_prompt: row.get(11)?,
-                        created_time: get_required_datetime_from_row(row, 12, "created_time")?,
-                        updated_time: get_required_datetime_from_row(row, 13, "updated_time")?,
+                        start_time: row.get(6)?,
+                        week_days: row.get(7)?,
+                        month_days: row.get(8)?,
+                        run_at: get_datetime_from_row(row, 9)?,
+                        next_run_at: get_datetime_from_row(row, 10)?,
+                        last_run_at: get_datetime_from_row(row, 11)?,
+                        assistant_id: row.get(12)?,
+                        task_prompt: row.get(13)?,
+                        notify_prompt: row.get(14)?,
+                        created_time: get_required_datetime_from_row(row, 15, "created_time")?,
+                        updated_time: get_required_datetime_from_row(row, 16, "updated_time")?,
                     })
                 },
             )
@@ -205,14 +232,17 @@ impl ScheduledTaskDatabase {
     #[instrument(level = "debug", skip(self, task), fields(name = %task.name))]
     pub fn create_task(&self, task: &ScheduledTask) -> Result<ScheduledTask> {
         self.conn.execute(
-            "INSERT INTO scheduled_task (name, is_enabled, schedule_type, interval_value, interval_unit, run_at, next_run_at, last_run_at, assistant_id, task_prompt, notify_prompt, created_time, updated_time)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO scheduled_task (name, is_enabled, schedule_type, interval_value, interval_unit, start_time, week_days, month_days, run_at, next_run_at, last_run_at, assistant_id, task_prompt, notify_prompt, created_time, updated_time)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 task.name,
                 task.is_enabled,
                 task.schedule_type,
                 task.interval_value,
                 task.interval_unit,
+                task.start_time,
+                task.week_days,
+                task.month_days,
                 task.run_at,
                 task.next_run_at,
                 task.last_run_at,
@@ -230,13 +260,16 @@ impl ScheduledTaskDatabase {
     #[instrument(level = "debug", skip(self, task), fields(id = task.id))]
     pub fn update_task(&self, task: &ScheduledTask) -> Result<()> {
         self.conn.execute(
-            "UPDATE scheduled_task SET name = ?1, is_enabled = ?2, schedule_type = ?3, interval_value = ?4, interval_unit = ?5, run_at = ?6, next_run_at = ?7, last_run_at = ?8, assistant_id = ?9, task_prompt = ?10, notify_prompt = ?11, updated_time = ?12 WHERE id = ?13",
+            "UPDATE scheduled_task SET name = ?1, is_enabled = ?2, schedule_type = ?3, interval_value = ?4, interval_unit = ?5, start_time = ?6, week_days = ?7, month_days = ?8, run_at = ?9, next_run_at = ?10, last_run_at = ?11, assistant_id = ?12, task_prompt = ?13, notify_prompt = ?14, updated_time = ?15 WHERE id = ?16",
             params![
                 task.name,
                 task.is_enabled,
                 task.schedule_type,
                 task.interval_value,
                 task.interval_unit,
+                task.start_time,
+                task.week_days,
+                task.month_days,
                 task.run_at,
                 task.next_run_at,
                 task.last_run_at,
@@ -265,7 +298,7 @@ impl ScheduledTaskDatabase {
     #[instrument(level = "debug", skip(self, now), fields(now = %now))]
     pub fn list_due_tasks(&self, now: DateTime<Utc>) -> Result<Vec<ScheduledTask>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, is_enabled, schedule_type, interval_value, interval_unit, run_at, next_run_at, last_run_at, assistant_id, task_prompt, notify_prompt, created_time, updated_time
+            "SELECT id, name, is_enabled, schedule_type, interval_value, interval_unit, start_time, week_days, month_days, run_at, next_run_at, last_run_at, assistant_id, task_prompt, notify_prompt, created_time, updated_time
              FROM scheduled_task
              WHERE is_enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
              ORDER BY next_run_at ASC",
@@ -278,14 +311,17 @@ impl ScheduledTaskDatabase {
                 schedule_type: row.get(3)?,
                 interval_value: row.get(4)?,
                 interval_unit: row.get(5)?,
-                run_at: get_datetime_from_row(row, 6)?,
-                next_run_at: get_datetime_from_row(row, 7)?,
-                last_run_at: get_datetime_from_row(row, 8)?,
-                assistant_id: row.get(9)?,
-                task_prompt: row.get(10)?,
-                notify_prompt: row.get(11)?,
-                created_time: get_required_datetime_from_row(row, 12, "created_time")?,
-                updated_time: get_required_datetime_from_row(row, 13, "updated_time")?,
+                start_time: row.get(6)?,
+                week_days: row.get(7)?,
+                month_days: row.get(8)?,
+                run_at: get_datetime_from_row(row, 9)?,
+                next_run_at: get_datetime_from_row(row, 10)?,
+                last_run_at: get_datetime_from_row(row, 11)?,
+                assistant_id: row.get(12)?,
+                task_prompt: row.get(13)?,
+                notify_prompt: row.get(14)?,
+                created_time: get_required_datetime_from_row(row, 15, "created_time")?,
+                updated_time: get_required_datetime_from_row(row, 16, "updated_time")?,
             })
         })?;
         let tasks: Vec<ScheduledTask> = rows.collect::<Result<Vec<_>>>()?;

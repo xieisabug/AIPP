@@ -10,13 +10,13 @@ import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { AssistantListItem } from "@/data/Assistant";
 import { useAssistantListListener } from "@/hooks/useAssistantListListener";
-import { Calendar, Clock, Plus, RefreshCw, Trash2, Pencil, Play, Bell } from "lucide-react";
+import { Calendar, Clock, Plus, RefreshCw, Trash2, Pencil, Play, Bell, HelpCircle } from "lucide-react";
 
 interface ScheduledTask {
     id: number;
@@ -25,6 +25,9 @@ interface ScheduledTask {
     scheduleType: "once" | "interval";
     intervalValue?: number | null;
     intervalUnit?: string | null;
+    startTime?: string | null;
+    weekDays?: number[] | null;
+    monthDays?: number[] | null;
     runAt?: string | null;
     nextRunAt?: string | null;
     lastRunAt?: string | null;
@@ -63,12 +66,13 @@ interface ScheduledTaskFormValues {
     run_at: string;
     interval_value: string;
     interval_unit: string;
+    start_time: string;
+    week_days: number[];
+    month_days: number[];
     assistant_id: string;
     task_prompt: string;
     notify_prompt: string;
 }
-
-const DEFAULT_NOTIFY_PROMPT = `请判断以下任务结果是否需要通知用户，并返回 JSON：\n{"notify": true|false, "summary": "需要通知时的摘要"}\n如果 notify 为 true，请在 summary 中给出简要结论。`;
 
 const intervalUnitLabels: Record<string, string> = {
     minute: "分钟",
@@ -76,6 +80,16 @@ const intervalUnitLabels: Record<string, string> = {
     day: "天",
     week: "周",
     month: "月",
+};
+
+const weekDayLabels: Record<number, string> = {
+    0: "周日",
+    1: "周一",
+    2: "周二",
+    3: "周三",
+    4: "周四",
+    5: "周五",
+    6: "周六",
 };
 
 const logTypeLabels: Record<string, string> = {
@@ -110,6 +124,7 @@ export default function ScheduleWindow() {
     const [isLoading, setIsLoading] = useState(true);
     const [activeTaskId, setActiveTaskId] = useState<number | null>(null);
     const [isDialogOpen, setIsDialogOpen] = useState(false);
+    const [isHelpDialogOpen, setIsHelpDialogOpen] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
     const [isRunning, setIsRunning] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
@@ -125,9 +140,12 @@ export default function ScheduleWindow() {
         run_at: "",
         interval_value: "1",
         interval_unit: "hour",
+        start_time: "09:00",
+        week_days: [1],
+        month_days: [1],
         assistant_id: "",
         task_prompt: "",
-        notify_prompt: DEFAULT_NOTIFY_PROMPT,
+        notify_prompt: "",
     });
 
     const selectedTask = useMemo(
@@ -257,9 +275,12 @@ export default function ScheduleWindow() {
             run_at: "",
             interval_value: "1",
             interval_unit: "hour",
+            start_time: "09:00",
+            week_days: [1],
+            month_days: [1],
             assistant_id: assistantOptions[0]?.id.toString() ?? "",
             task_prompt: "",
-            notify_prompt: DEFAULT_NOTIFY_PROMPT,
+            notify_prompt: "",
         });
         setIsDialogOpen(true);
     }, [assistantOptions]);
@@ -273,9 +294,12 @@ export default function ScheduleWindow() {
                 run_at: toLocalDatetimeInput(task.runAt),
                 interval_value: task.intervalValue ? task.intervalValue.toString() : "1",
                 interval_unit: task.intervalUnit ?? "hour",
+                start_time: task.startTime ?? "09:00",
+                week_days: task.weekDays ?? [1],
+                month_days: task.monthDays ?? [1],
                 assistant_id: task.assistantId.toString(),
                 task_prompt: task.taskPrompt,
-                notify_prompt: task.notifyPrompt || DEFAULT_NOTIFY_PROMPT,
+                notify_prompt: task.notifyPrompt || "",
             });
             setActiveTaskId(task.id);
             setIsDialogOpen(true);
@@ -286,12 +310,16 @@ export default function ScheduleWindow() {
     const handleSave = useCallback(async () => {
         setIsSaving(true);
         try {
+            const needsStartTime = ["day", "week", "month"].includes(formValues.interval_unit);
             const payload = {
                 name: formValues.name.trim(),
                 isEnabled: formValues.is_enabled,
                 scheduleType: formValues.schedule_type,
                 intervalValue: formValues.schedule_type === "interval" ? Number(formValues.interval_value) : null,
                 intervalUnit: formValues.schedule_type === "interval" ? formValues.interval_unit : null,
+                startTime: formValues.schedule_type === "interval" && needsStartTime ? formValues.start_time : null,
+                weekDays: formValues.schedule_type === "interval" && formValues.interval_unit === "week" ? formValues.week_days : null,
+                monthDays: formValues.schedule_type === "interval" && formValues.interval_unit === "month" ? formValues.month_days : null,
                 runAt: formValues.schedule_type === "once" ? toServerDatetime(formValues.run_at) : null,
                 assistantId: Number(formValues.assistant_id),
                 taskPrompt: formValues.task_prompt.trim(),
@@ -311,6 +339,12 @@ export default function ScheduleWindow() {
             }
             if (payload.scheduleType === "interval" && (!payload.intervalValue || payload.intervalValue <= 0)) {
                 throw new Error("请设置有效的执行周期");
+            }
+            if (payload.intervalUnit === "week" && (!payload.weekDays || payload.weekDays.length === 0)) {
+                throw new Error("请至少选择一个星期几");
+            }
+            if (payload.intervalUnit === "month" && (!payload.monthDays || payload.monthDays.length === 0)) {
+                throw new Error("请至少选择一天");
             }
 
             if (selectedTask && selectedTask.id === activeTaskId) {
@@ -351,6 +385,9 @@ export default function ScheduleWindow() {
                         scheduleType: task.scheduleType,
                         intervalValue: task.intervalValue ?? null,
                         intervalUnit: task.intervalUnit ?? null,
+                        startTime: task.startTime ?? null,
+                        weekDays: task.weekDays ?? null,
+                        monthDays: task.monthDays ?? null,
                         runAt: task.runAt ? toServerDatetime(toLocalDatetimeInput(task.runAt)) : null,
                         assistantId: task.assistantId,
                         taskPrompt: task.taskPrompt,
@@ -358,7 +395,7 @@ export default function ScheduleWindow() {
                     },
                 });
                 setTasks((prev) =>
-                    prev.map((item) => (item.id === task.id ? { ...item, isEnabled: value, ...updated } : item))
+                    prev.map((item) => (item.id === task.id ? { ...item, ...updated, isEnabled: value } : item))
                 );
             } catch (error) {
                 toast({
@@ -408,7 +445,21 @@ export default function ScheduleWindow() {
         }
         const value = selectedTask.intervalValue ?? 1;
         const unit = intervalUnitLabels[selectedTask.intervalUnit ?? "hour"] ?? selectedTask.intervalUnit ?? "";
-        return `每 ${value} ${unit} 执行一次`;
+        let desc = `每 ${value} ${unit}`;
+        
+        if (selectedTask.intervalUnit === "week" && selectedTask.weekDays?.length) {
+            const days = selectedTask.weekDays.map(d => weekDayLabels[d] ?? d).join("、");
+            desc += ` (${days})`;
+        } else if (selectedTask.intervalUnit === "month" && selectedTask.monthDays?.length) {
+            const days = selectedTask.monthDays.join("、");
+            desc += ` (${days}日)`;
+        }
+        
+        if (["day", "week", "month"].includes(selectedTask.intervalUnit ?? "") && selectedTask.startTime) {
+            desc += ` ${selectedTask.startTime}`;
+        }
+        
+        return desc + " 执行";
     }, [selectedTask]);
 
     const hasDetailPrompts = useMemo(() => {
@@ -447,60 +498,54 @@ export default function ScheduleWindow() {
     }, []);
 
     return (
-        <div className="flex flex-col h-screen bg-background p-6">
-            <div className="flex items-center justify-between gap-4 mb-6">
+        <div className="flex flex-col h-screen bg-background p-4">
+            <div className="flex items-center justify-between gap-4 mb-4">
                 <div>
-                    <h1 className="text-2xl font-bold">定时任务</h1>
-                    <p className="text-muted-foreground">任务仅在程序运行时执行，错过的任务会在下次启动时立即执行一次。</p>
+                    <h1 className="text-xl font-bold">定时任务</h1>
+                    <p className="text-sm text-muted-foreground">管理自动执行的任务调度</p>
                 </div>
                 <div className="flex items-center gap-2">
-                    <Button variant="outline" onClick={handleRefresh} disabled={isRefreshing}>
-                        <RefreshCw className={isRefreshing ? "mr-2 h-4 w-4 animate-spin" : "mr-2 h-4 w-4"} />
+                    <Button variant="ghost" size="icon" onClick={() => setIsHelpDialogOpen(true)} title="使用说明">
+                        <HelpCircle className="h-4 w-4" />
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={handleRefresh} disabled={isRefreshing}>
+                        <RefreshCw className={isRefreshing ? "mr-1.5 h-3.5 w-3.5 animate-spin" : "mr-1.5 h-3.5 w-3.5"} />
                         刷新
                     </Button>
-                    <Button onClick={openCreateDialog}>
-                        <Plus className="mr-2 h-4 w-4" />
+                    <Button size="sm" onClick={openCreateDialog}>
+                        <Plus className="mr-1.5 h-3.5 w-3.5" />
                         新建任务
                     </Button>
                 </div>
             </div>
 
-            <Alert>
-                <Bell />
-                <AlertTitle>提示</AlertTitle>
-                <AlertDescription>
-                    配置任务时可填写任务指令与通知判定指令，通知判定指令需返回 JSON，例如{" "}
-                    <span className="font-mono">{'{{"notify": true, "summary": "..."}}'}</span>
-                </AlertDescription>
-            </Alert>
-
-            <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-6 mt-6 flex-1 overflow-hidden">
-                <div className="border rounded-lg p-4 overflow-y-auto">
-                    <div className="flex items-center justify-between mb-4">
-                        <h2 className="text-base font-semibold">任务列表</h2>
+            <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-4 flex-1 overflow-hidden">
+                <div className="border rounded-lg p-3 overflow-y-auto">
+                    <div className="flex items-center justify-between mb-3">
+                        <h2 className="text-sm font-semibold">任务列表</h2>
                         <span className="text-xs text-muted-foreground">共 {tasks.length} 个</span>
                     </div>
                     {isLoading ? (
-                        <div className="flex items-center justify-center py-10 text-muted-foreground">
-                            <RefreshCw className="h-4 w-4 animate-spin mr-2" />
+                        <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
+                            <RefreshCw className="h-3.5 w-3.5 animate-spin mr-2" />
                             加载中...
                         </div>
                     ) : tasks.length === 0 ? (
-                        <div className="text-sm text-muted-foreground py-8 text-center">暂无定时任务</div>
+                        <div className="text-sm text-muted-foreground py-6 text-center">暂无定时任务</div>
                     ) : (
-                        <div className="space-y-2">
+                        <div className="space-y-1.5">
                             {tasks.map((task) => (
                                 <div
                                     key={task.id}
-                                    className={`rounded-lg border px-3 py-3 cursor-pointer transition-colors ${
+                                    className={`rounded-lg border px-2.5 py-2 cursor-pointer transition-colors ${
                                         activeTaskId === task.id ? "border-primary bg-muted/40" : "hover:bg-muted/30"
                                     }`}
                                     onClick={() => setActiveTaskId(task.id)}
                                 >
                                     <div className="flex items-center justify-between gap-2">
                                         <div className="min-w-0">
-                                            <div className="font-medium truncate">{task.name}</div>
-                                            <div className="text-xs text-muted-foreground mt-1">
+                                            <div className="text-sm font-medium truncate">{task.name}</div>
+                                            <div className="text-xs text-muted-foreground mt-0.5">
                                                 {task.scheduleType === "once" ? "单次" : "周期"} ·{" "}
                                                 {task.isEnabled ? "已启用" : "已停用"}
                                             </div>
@@ -512,7 +557,7 @@ export default function ScheduleWindow() {
                                         />
                                     </div>
                                     {task.nextRunAt && (
-                                        <div className="text-xs text-muted-foreground mt-2 flex items-center gap-1">
+                                        <div className="text-xs text-muted-foreground mt-1.5 flex items-center gap-1">
                                             <Clock className="h-3 w-3" />
                                             下次: {new Date(task.nextRunAt).toLocaleString()}
                                         </div>
@@ -526,15 +571,15 @@ export default function ScheduleWindow() {
                 <div className="overflow-y-auto">
                     {selectedTask ? (
                         <Card>
-                            <CardHeader>
+                            <CardHeader className="pb-3">
                                 <div className="flex items-start justify-between gap-4">
                                     <div>
-                                        <CardTitle className="text-lg">{selectedTask.name}</CardTitle>
-                                        <p className="text-sm text-muted-foreground mt-1">{scheduleDescription}</p>
+                                        <CardTitle className="text-base">{selectedTask.name}</CardTitle>
+                                        <p className="text-xs text-muted-foreground mt-1">{scheduleDescription}</p>
                                     </div>
-                                    <div className="flex items-center gap-2">
+                                    <div className="flex items-center gap-1.5">
                                         <Button variant="outline" size="sm" onClick={() => openEditDialog(selectedTask)}>
-                                            <Pencil className="mr-2 h-4 w-4" />
+                                            <Pencil className="mr-1.5 h-3.5 w-3.5" />
                                             编辑
                                         </Button>
                                         <Button
@@ -543,24 +588,23 @@ export default function ScheduleWindow() {
                                             onClick={() => handleRunNow(selectedTask)}
                                             disabled={isRunning}
                                         >
-                                            <Play className="mr-2 h-4 w-4" />
-                                            立即执行
+                                            <Play className="mr-1.5 h-3.5 w-3.5" />
+                                            执行
                                         </Button>
                                         <Button
                                             variant="destructive"
                                             size="sm"
                                             onClick={() => setDeleteTarget(selectedTask)}
                                         >
-                                            <Trash2 className="mr-2 h-4 w-4" />
-                                            删除
+                                            <Trash2 className="h-3.5 w-3.5" />
                                         </Button>
                                     </div>
                                 </div>
                             </CardHeader>
-                            <CardContent className="space-y-4">
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                            <CardContent className="space-y-3 pt-0">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
                                     <div className="flex items-center gap-2">
-                                        <Calendar className="h-4 w-4 text-muted-foreground" />
+                                        <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
                                         <span className="text-muted-foreground">下次执行:</span>
                                         <span>
                                             {selectedTask.nextRunAt
@@ -569,7 +613,7 @@ export default function ScheduleWindow() {
                                         </span>
                                     </div>
                                     <div className="flex items-center gap-2">
-                                        <Clock className="h-4 w-4 text-muted-foreground" />
+                                        <Clock className="h-3.5 w-3.5 text-muted-foreground" />
                                         <span className="text-muted-foreground">上次执行:</span>
                                         <span>
                                             {selectedTask.lastRunAt
@@ -578,40 +622,40 @@ export default function ScheduleWindow() {
                                         </span>
                                     </div>
                                     <div className="flex items-center gap-2">
-                                        <Bell className="h-4 w-4 text-muted-foreground" />
+                                        <Bell className="h-3.5 w-3.5 text-muted-foreground" />
                                         <span className="text-muted-foreground">执行助手:</span>
                                         <span>{assistantName || "未选择"}</span>
                                     </div>
                                 </div>
 
-                                <div className="space-y-2">
-                                    <div className="text-sm font-semibold">任务指令</div>
-                                    <div className="rounded bg-muted/30 border p-3 text-sm whitespace-pre-wrap">
+                                <div className="space-y-1.5">
+                                    <div className="text-xs font-semibold">任务指令</div>
+                                    <div className="rounded bg-muted/30 border p-2 text-xs whitespace-pre-wrap max-h-24 overflow-y-auto">
                                         {selectedTask.taskPrompt || (hasDetailPrompts ? "未设置" : "暂无数据")}
                                     </div>
                                 </div>
 
-                                <div className="space-y-2">
-                                    <div className="text-sm font-semibold">通知判定指令</div>
-                                    <div className="rounded bg-muted/30 border p-3 text-sm whitespace-pre-wrap">
-                                        {selectedTask.notifyPrompt || (hasDetailPrompts ? "未设置" : "暂无数据")}
+                                <div className="space-y-1.5">
+                                    <div className="text-xs font-semibold">通知判定规则</div>
+                                    <div className="rounded bg-muted/30 border p-2 text-xs whitespace-pre-wrap max-h-20 overflow-y-auto">
+                                        {selectedTask.notifyPrompt || "默认规则：有重要信息时通知"}
                                     </div>
                                 </div>
 
-                                <div className="space-y-2">
+                                <div className="space-y-1.5">
                                     <div className="flex items-center justify-between">
-                                        <div className="text-sm font-semibold">运行记录</div>
+                                        <div className="text-xs font-semibold">运行记录</div>
                                         <Button
                                             variant="outline"
                                             size="sm"
                                             onClick={() => loadRuns(selectedTask.id)}
                                             disabled={isLogLoading}
                                         >
-                                            <RefreshCw className={isLogLoading ? "mr-2 h-4 w-4 animate-spin" : "mr-2 h-4 w-4"} />
-                                            刷新记录
+                                            <RefreshCw className={isLogLoading ? "mr-1.5 h-3 w-3 animate-spin" : "mr-1.5 h-3 w-3"} />
+                                            刷新
                                         </Button>
                                     </div>
-                                    <div className="rounded border bg-muted/10 p-3 space-y-3 max-h-[260px] overflow-y-auto">
+                                    <div className="rounded border bg-muted/10 p-2 space-y-2 max-h-[200px] overflow-y-auto">
                                         {isLogLoading ? (
                                             <div className="text-xs text-muted-foreground flex items-center">
                                                 <RefreshCw className="h-3 w-3 animate-spin mr-2" />
@@ -653,11 +697,11 @@ export default function ScheduleWindow() {
                                                                 </span>
                                                             )}
                                                         </div>
-                                                        <span className="text-[11px] text-muted-foreground font-mono truncate">
+                                                        <span className="text-[10px] text-muted-foreground font-mono truncate">
                                                             {run.runId.slice(0, 8)}
                                                         </span>
                                                     </div>
-                                                    <div className="text-xs whitespace-pre-wrap break-words text-muted-foreground">
+                                                    <div className="text-[11px] whitespace-pre-wrap break-words text-muted-foreground line-clamp-2">
                                                         {run.errorMessage || run.summary || "无摘要"}
                                                     </div>
                                                 </button>
@@ -666,9 +710,9 @@ export default function ScheduleWindow() {
                                     </div>
                                 </div>
 
-                                <div className="space-y-2">
-                                    <div className="text-sm font-semibold">运行日志详情</div>
-                                    <div className="rounded border bg-muted/10 p-3 space-y-3 max-h-[320px] overflow-y-auto">
+                                <div className="space-y-1.5">
+                                    <div className="text-xs font-semibold">运行日志详情</div>
+                                    <div className="rounded border bg-muted/10 p-2 space-y-2 max-h-[240px] overflow-y-auto">
                                         {selectedRunId ? (
                                             isLogLoading ? (
                                                 <div className="text-xs text-muted-foreground flex items-center">
@@ -679,19 +723,19 @@ export default function ScheduleWindow() {
                                                 <div className="text-xs text-muted-foreground">暂无日志详情</div>
                                             ) : (
                                                 logEntries.map((log) => (
-                                                    <div key={log.id} className="border border-muted-foreground/20 rounded-md p-2 space-y-1">
+                                                    <div key={log.id} className="border border-muted-foreground/20 rounded-md p-1.5 space-y-0.5">
                                                         <div className="flex items-center justify-between gap-2">
-                                                            <div className="flex items-center gap-2">
+                                                            <div className="flex items-center gap-1.5">
                                                                 {renderLogTag(log.messageType)}
-                                                                <span className="text-xs text-muted-foreground">
+                                                                <span className="text-[10px] text-muted-foreground">
                                                                     {new Date(log.createdTime).toLocaleString()}
                                                                 </span>
                                                             </div>
-                                                            <span className="text-[11px] text-muted-foreground font-mono truncate">
+                                                            <span className="text-[10px] text-muted-foreground font-mono truncate">
                                                                 {log.runId.slice(0, 8)}
                                                             </span>
                                                         </div>
-                                                        <div className="text-xs whitespace-pre-wrap break-words">
+                                                        <div className="text-[11px] whitespace-pre-wrap break-words">
                                                             {log.content}
                                                         </div>
                                                     </div>
@@ -705,7 +749,7 @@ export default function ScheduleWindow() {
                             </CardContent>
                         </Card>
                     ) : (
-                        <div className="h-full flex items-center justify-center text-muted-foreground">
+                        <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
                             请选择一个任务查看详情
                         </div>
                     )}
@@ -713,27 +757,28 @@ export default function ScheduleWindow() {
             </div>
 
             <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-                <DialogContent className="sm:max-w-[720px] max-h-[85vh] overflow-y-auto">
+                <DialogContent className="sm:max-w-[640px] max-h-[85vh] overflow-y-auto">
                     <DialogHeader>
-                        <DialogTitle>{selectedTask && selectedTask.id === activeTaskId ? "编辑任务" : "新建任务"}</DialogTitle>
+                        <DialogTitle className="text-base">{selectedTask && selectedTask.id === activeTaskId ? "编辑任务" : "新建任务"}</DialogTitle>
                     </DialogHeader>
                     <div className="space-y-4 py-2">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div className="space-y-2">
-                                <Label>任务名称</Label>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div className="space-y-1.5">
+                                <Label className="text-xs">任务名称</Label>
                                 <Input
                                     value={formValues.name}
                                     onChange={(e) => setFormValues((prev) => ({ ...prev, name: e.target.value }))}
                                     placeholder="例如：每日汇总报告"
+                                    className="h-8 text-sm"
                                 />
                             </div>
-                            <div className="space-y-2">
-                                <Label>选择助手</Label>
+                            <div className="space-y-1.5">
+                                <Label className="text-xs">选择助手</Label>
                                 <Select
                                     value={formValues.assistant_id}
                                     onValueChange={(value) => setFormValues((prev) => ({ ...prev, assistant_id: value }))}
                                 >
-                                    <SelectTrigger>
+                                    <SelectTrigger className="h-8 text-sm">
                                         <SelectValue placeholder="选择普通助手" />
                                     </SelectTrigger>
                                     <SelectContent>
@@ -747,16 +792,16 @@ export default function ScheduleWindow() {
                             </div>
                         </div>
 
-                        <div className="space-y-2">
-                            <Label>启用任务</Label>
+                        <div className="flex items-center gap-2">
                             <Switch
                                 checked={formValues.is_enabled}
                                 onCheckedChange={(value) => setFormValues((prev) => ({ ...prev, is_enabled: value }))}
                             />
+                            <Label className="text-xs">启用任务</Label>
                         </div>
 
-                        <div className="space-y-3">
-                            <Label>执行时间</Label>
+                        <div className="space-y-2">
+                            <Label className="text-xs">执行时间</Label>
                             <RadioGroup
                                 value={formValues.schedule_type}
                                 onValueChange={(value) =>
@@ -764,23 +809,24 @@ export default function ScheduleWindow() {
                                 }
                                 className="flex flex-col gap-3"
                             >
-                                <div className="flex items-start gap-3">
-                                    <RadioGroupItem value="once" id="schedule-once" />
-                                    <div className="flex-1 space-y-2">
-                                        <Label htmlFor="schedule-once">指定时间执行一次</Label>
+                                <div className="flex items-start gap-2">
+                                    <RadioGroupItem value="once" id="schedule-once" className="mt-0.5" />
+                                    <div className="flex-1 space-y-1.5">
+                                        <Label htmlFor="schedule-once" className="text-xs">指定时间执行一次</Label>
                                         <Input
                                             type="datetime-local"
                                             value={formValues.run_at}
                                             onChange={(e) => setFormValues((prev) => ({ ...prev, run_at: e.target.value }))}
                                             disabled={formValues.schedule_type !== "once"}
+                                            className="h-8 text-sm"
                                         />
                                     </div>
                                 </div>
-                                <div className="flex items-start gap-3">
-                                    <RadioGroupItem value="interval" id="schedule-interval" />
+                                <div className="flex items-start gap-2">
+                                    <RadioGroupItem value="interval" id="schedule-interval" className="mt-0.5" />
                                     <div className="flex-1 space-y-2">
-                                        <Label htmlFor="schedule-interval">按周期重复执行</Label>
-                                        <div className="flex gap-3">
+                                        <Label htmlFor="schedule-interval" className="text-xs">按周期重复执行</Label>
+                                        <div className="flex gap-2">
                                             <Input
                                                 type="number"
                                                 min={1}
@@ -789,6 +835,7 @@ export default function ScheduleWindow() {
                                                     setFormValues((prev) => ({ ...prev, interval_value: e.target.value }))
                                                 }
                                                 disabled={formValues.schedule_type !== "interval"}
+                                                className="h-8 text-sm w-20"
                                             />
                                             <Select
                                                 value={formValues.interval_unit}
@@ -797,7 +844,7 @@ export default function ScheduleWindow() {
                                                 }
                                                 disabled={formValues.schedule_type !== "interval"}
                                             >
-                                                <SelectTrigger className="w-32">
+                                                <SelectTrigger className="w-24 h-8 text-sm">
                                                     <SelectValue />
                                                 </SelectTrigger>
                                                 <SelectContent>
@@ -809,36 +856,177 @@ export default function ScheduleWindow() {
                                                 </SelectContent>
                                             </Select>
                                         </div>
+
+                                        {/* Day: start time */}
+                                        {formValues.schedule_type === "interval" && formValues.interval_unit === "day" && (
+                                            <div className="flex items-center gap-2 mt-2">
+                                                <Label className="text-xs text-muted-foreground">开始时间:</Label>
+                                                <Input
+                                                    type="time"
+                                                    value={formValues.start_time}
+                                                    onChange={(e) => setFormValues((prev) => ({ ...prev, start_time: e.target.value }))}
+                                                    className="h-8 text-sm w-28"
+                                                />
+                                            </div>
+                                        )}
+
+                                        {/* Week: weekday checkboxes + start time */}
+                                        {formValues.schedule_type === "interval" && formValues.interval_unit === "week" && (
+                                            <div className="space-y-2 mt-2">
+                                                <Label className="text-xs text-muted-foreground">选择星期几:</Label>
+                                                <div className="flex flex-wrap gap-3">
+                                                    {Object.entries(weekDayLabels).map(([value, label]) => {
+                                                        const dayNum = Number(value);
+                                                        const isChecked = formValues.week_days.includes(dayNum);
+                                                        return (
+                                                            <label key={value} className="flex items-center gap-1.5 cursor-pointer">
+                                                                <Checkbox
+                                                                    checked={isChecked}
+                                                                    onCheckedChange={(checked) => {
+                                                                        setFormValues((prev) => ({
+                                                                            ...prev,
+                                                                            week_days: checked
+                                                                                ? [...prev.week_days, dayNum].sort()
+                                                                                : prev.week_days.filter((d) => d !== dayNum),
+                                                                        }));
+                                                                    }}
+                                                                />
+                                                                <span className="text-xs">{label}</span>
+                                                            </label>
+                                                        );
+                                                    })}
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    <Label className="text-xs text-muted-foreground">开始时间:</Label>
+                                                    <Input
+                                                        type="time"
+                                                        value={formValues.start_time}
+                                                        onChange={(e) => setFormValues((prev) => ({ ...prev, start_time: e.target.value }))}
+                                                        className="h-8 text-sm w-28"
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Month: day checkboxes + start time */}
+                                        {formValues.schedule_type === "interval" && formValues.interval_unit === "month" && (
+                                            <div className="space-y-2 mt-2">
+                                                <Label className="text-xs text-muted-foreground">选择日期 (1-31):</Label>
+                                                <div className="flex flex-wrap gap-1.5">
+                                                    {Array.from({ length: 31 }, (_, i) => i + 1).map((day) => {
+                                                        const isChecked = formValues.month_days.includes(day);
+                                                        return (
+                                                            <button
+                                                                key={day}
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    setFormValues((prev) => ({
+                                                                        ...prev,
+                                                                        month_days: isChecked
+                                                                            ? prev.month_days.filter((d) => d !== day)
+                                                                            : [...prev.month_days, day].sort((a, b) => a - b),
+                                                                    }));
+                                                                }}
+                                                                className={`w-7 h-7 text-xs rounded border transition-colors ${
+                                                                    isChecked
+                                                                        ? "bg-primary text-primary-foreground border-primary"
+                                                                        : "border-input hover:bg-muted"
+                                                                }`}
+                                                            >
+                                                                {day}
+                                                            </button>
+                                                        );
+                                                    })}
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    <Label className="text-xs text-muted-foreground">开始时间:</Label>
+                                                    <Input
+                                                        type="time"
+                                                        value={formValues.start_time}
+                                                        onChange={(e) => setFormValues((prev) => ({ ...prev, start_time: e.target.value }))}
+                                                        className="h-8 text-sm w-28"
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             </RadioGroup>
                         </div>
 
-                        <div className="space-y-2">
-                            <Label>任务指令</Label>
+                        <div className="space-y-1.5">
+                            <Label className="text-xs">任务指令</Label>
                             <Textarea
-                                rows={4}
+                                rows={3}
                                 value={formValues.task_prompt}
                                 onChange={(e) => setFormValues((prev) => ({ ...prev, task_prompt: e.target.value }))}
                                 placeholder="描述要执行的任务和结果提取要求"
+                                className="text-sm"
                             />
                         </div>
-                        <div className="space-y-2">
-                            <Label>通知判定指令</Label>
+                        <div className="space-y-1.5">
+                            <Label className="text-xs">通知判定规则 <span className="text-muted-foreground">(留空使用默认规则)</span></Label>
                             <Textarea
-                                rows={4}
+                                rows={2}
                                 value={formValues.notify_prompt}
                                 onChange={(e) => setFormValues((prev) => ({ ...prev, notify_prompt: e.target.value }))}
-                                placeholder={DEFAULT_NOTIFY_PROMPT}
+                                placeholder="例如：如果结果包含错误或异常则通知"
+                                className="text-sm"
                             />
                         </div>
                     </div>
                     <DialogFooter className="gap-2">
-                        <Button variant="outline" onClick={() => setIsDialogOpen(false)}>
+                        <Button variant="outline" size="sm" onClick={() => setIsDialogOpen(false)}>
                             取消
                         </Button>
-                        <Button onClick={handleSave} disabled={isSaving}>
+                        <Button size="sm" onClick={handleSave} disabled={isSaving}>
                             {isSaving ? "保存中..." : "保存任务"}
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* Help Dialog */}
+            <Dialog open={isHelpDialogOpen} onOpenChange={setIsHelpDialogOpen}>
+                <DialogContent className="sm:max-w-[500px]">
+                    <DialogHeader>
+                        <DialogTitle className="text-base">定时任务使用说明</DialogTitle>
+                    </DialogHeader>
+                    <div className="space-y-4 text-sm">
+                        <div>
+                            <h4 className="font-medium mb-1">基本说明</h4>
+                            <p className="text-muted-foreground text-xs leading-relaxed">
+                                定时任务会在指定时间自动执行 AI 助手对话。任务仅在程序运行时执行，错过的任务会在下次启动时立即执行一次。
+                            </p>
+                        </div>
+                        <div>
+                            <h4 className="font-medium mb-1">执行周期</h4>
+                            <ul className="text-xs text-muted-foreground space-y-1 list-disc list-inside">
+                                <li><strong>分钟/小时</strong>：按固定间隔重复执行</li>
+                                <li><strong>天</strong>：每 N 天在指定时间执行</li>
+                                <li><strong>周</strong>：选择星期几，在指定时间执行</li>
+                                <li><strong>月</strong>：选择每月几号，在指定时间执行</li>
+                            </ul>
+                        </div>
+                        <div>
+                            <h4 className="font-medium mb-1">通知判定</h4>
+                            <p className="text-muted-foreground text-xs leading-relaxed">
+                                任务执行完成后，系统会根据通知判定规则决定是否弹出通知。留空则使用默认规则（有重要信息时通知）。
+                                你只需要描述判定逻辑，例如："如果结果包含错误则通知"。
+                            </p>
+                        </div>
+                        <div>
+                            <h4 className="font-medium mb-1">使用示例</h4>
+                            <ul className="text-xs text-muted-foreground space-y-1 list-disc list-inside">
+                                <li>每天 9:00 执行"查询今日天气"</li>
+                                <li>每周一、三、五 18:00 执行"汇总本周工作"</li>
+                                <li>每月 1 号和 15 号执行"生成半月报告"</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <DialogFooter>
+                        <Button size="sm" onClick={() => setIsHelpDialogOpen(false)}>
+                            知道了
                         </Button>
                     </DialogFooter>
                 </DialogContent>

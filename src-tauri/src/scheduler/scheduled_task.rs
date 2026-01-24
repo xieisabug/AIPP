@@ -1,12 +1,16 @@
 use chrono::Utc;
 use tracing::{error, info, warn};
 
-use crate::api::scheduled_task_api::{compute_next_run_at, execute_scheduled_task};
+use crate::api::scheduled_task_api::{compute_next_run_at_with_config, execute_scheduled_task, ScheduleConfig};
 use crate::db::scheduled_task_db::{ScheduledTask, ScheduledTaskDatabase};
 use crate::FeatureConfigState;
 use tauri::Manager;
 
 use super::SchedulerState;
+
+fn parse_json_array(s: &Option<String>) -> Option<Vec<i32>> {
+    s.as_ref().and_then(|v| serde_json::from_str(v).ok())
+}
 
 pub async fn run_scheduled_tasks(
     app_handle: tauri::AppHandle,
@@ -58,11 +62,16 @@ async fn process_scheduled_task(
     let next_run_at = if task.schedule_type == "once" {
         None
     } else {
-        compute_next_run_at(
-            &task.schedule_type,
-            task.interval_value,
-            task.interval_unit.as_deref(),
-            task.run_at,
+        compute_next_run_at_with_config(
+            ScheduleConfig {
+                schedule_type: &task.schedule_type,
+                interval_value: task.interval_value,
+                interval_unit: task.interval_unit.as_deref(),
+                start_time: task.start_time.as_deref(),
+                week_days: parse_json_array(&task.week_days),
+                month_days: parse_json_array(&task.month_days),
+                run_at: task.run_at,
+            },
             now,
         )?
     };
