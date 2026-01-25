@@ -12,7 +12,6 @@ use std::sync::Arc;
 use tauri::Emitter;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
-use uuid::Uuid;
 
 fn build_user_message_with_attachments(
     content: &str,
@@ -126,10 +125,11 @@ fn extract_tool_call_ids_from_mcp_comments(content: &str) -> HashSet<String> {
 }
 
 fn collect_sticky_response_ids(
+    selected_messages: &[Message],
     all_messages: &[(Message, Option<MessageAttachment>)],
 ) -> HashSet<i64> {
     let mut tool_result_ids = HashSet::new();
-    for (message, _) in all_messages.iter() {
+    for message in selected_messages.iter() {
         if message.message_type != "tool_result" {
             continue;
         }
@@ -415,10 +415,10 @@ pub fn build_message_list_from_db(
     all_messages: &[(Message, Option<MessageAttachment>)],
     branch_selection: BranchSelection,
 ) -> Vec<(String, String, Vec<MessageAttachment>)> {
-    let sticky_response_ids = collect_sticky_response_ids(all_messages);
     match branch_selection {
         BranchSelection::LatestBranch => {
             let mut latest_branch = get_latest_branch_messages(all_messages);
+            let sticky_response_ids = collect_sticky_response_ids(&latest_branch, all_messages);
             if !sticky_response_ids.is_empty() {
                 for (message, _) in all_messages.iter() {
                     if sticky_response_ids.contains(&message.id)
@@ -434,6 +434,7 @@ pub fn build_message_list_from_db(
             let (latest_children, child_ids) = get_latest_child_messages(all_messages);
             let mut message_list: Vec<(String, String, Vec<MessageAttachment>)> = Vec::new();
             let mut included_ids: HashSet<i64> = HashSet::new();
+            let mut selected_messages: Vec<Message> = Vec::new();
             for (message, attachment) in all_messages.iter() {
                 if child_ids.contains(&message.id) {
                     continue;
@@ -444,12 +445,14 @@ pub fn build_message_list_from_db(
                     .unwrap_or((message.clone(), attachment.clone()));
 
                 included_ids.insert(final_message.id);
+                selected_messages.push(final_message.clone());
                 message_list.push((
                     final_message.message_type,
                     final_message.content,
                     final_attachment.map(|a| vec![a]).unwrap_or_else(Vec::new),
                 ));
             }
+            let sticky_response_ids = collect_sticky_response_ids(&selected_messages, all_messages);
             if !sticky_response_ids.is_empty() {
                 for (message, attachment) in all_messages.iter() {
                     if sticky_response_ids.contains(&message.id) && !included_ids.contains(&message.id)
