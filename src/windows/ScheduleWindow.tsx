@@ -13,6 +13,7 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ConfigPageLayout, SidebarList, ListItemButton, EmptyState } from "@/components/common";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { AssistantListItem } from "@/data/Assistant";
 import { useAssistantListListener } from "@/hooks/useAssistantListListener";
@@ -446,7 +447,7 @@ export default function ScheduleWindow() {
         const value = selectedTask.intervalValue ?? 1;
         const unit = intervalUnitLabels[selectedTask.intervalUnit ?? "hour"] ?? selectedTask.intervalUnit ?? "";
         let desc = `每 ${value} ${unit}`;
-        
+
         if (selectedTask.intervalUnit === "week" && selectedTask.weekDays?.length) {
             const days = selectedTask.weekDays.map(d => weekDayLabels[d] ?? d).join("、");
             desc += ` (${days})`;
@@ -454,11 +455,11 @@ export default function ScheduleWindow() {
             const days = selectedTask.monthDays.join("、");
             desc += ` (${days}日)`;
         }
-        
+
         if (["day", "week", "month"].includes(selectedTask.intervalUnit ?? "") && selectedTask.startTime) {
             desc += ` ${selectedTask.startTime}`;
         }
-        
+
         return desc + " 执行";
     }, [selectedTask]);
 
@@ -471,16 +472,114 @@ export default function ScheduleWindow() {
         return assistants.find((assistant) => assistant.id === selectedTask.assistantId)?.name ?? "";
     }, [assistants, selectedTask]);
 
+    const selectOptions = useMemo(
+        () =>
+            tasks.map((task) => ({
+                id: task.id.toString(),
+                label: task.name,
+                icon: <Clock className="h-4 w-4" />,
+            })),
+        [tasks]
+    );
+
+    const handleSelectFromDropdown = useCallback(
+        (taskId: string) => {
+            const task = tasks.find((item) => item.id.toString() === taskId);
+            if (task) {
+                setActiveTaskId(task.id);
+            }
+        },
+        [tasks]
+    );
+
+    const addButton = useMemo(
+        () => (
+            <div className="flex items-center gap-2">
+                <Button variant="ghost" size="icon" onClick={() => setIsHelpDialogOpen(true)} title="使用说明">
+                    <HelpCircle className="h-4 w-4" />
+                </Button>
+                <Button variant="outline" size="icon" onClick={handleRefresh} disabled={isRefreshing} title="刷新">
+                    <RefreshCw className={isRefreshing ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                </Button>
+                <Button size="icon" onClick={openCreateDialog} title="新建任务">
+                    <Plus className="h-4 w-4" />
+                </Button>
+            </div>
+        ),
+        [handleRefresh, isRefreshing, openCreateDialog]
+    );
+
+    const sidebar = useMemo(
+        () => (
+            <SidebarList
+                title="定时任务"
+                description="管理自动执行的任务调度"
+                icon={<Clock className="h-5 w-5" />}
+                addButton={addButton}
+            >
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>共 {tasks.length} 个</span>
+                    {isLoading && (
+                        <span className="flex items-center gap-1">
+                            <RefreshCw className="h-3 w-3 animate-spin" />
+                            加载中
+                        </span>
+                    )}
+                </div>
+                {isLoading ? (
+                    <div className="flex items-center justify-center py-6 text-muted-foreground text-sm">
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin mr-2" />
+                        加载中...
+                    </div>
+                ) : tasks.length === 0 ? (
+                    <div className="text-sm text-muted-foreground py-6 text-center">暂无定时任务</div>
+                ) : (
+                    <div className="space-y-2">
+                        {tasks.map((task) => {
+                            const isSelected = activeTaskId === task.id;
+                            const subTextClass = isSelected ? "text-primary-foreground/80" : "text-muted-foreground";
+                            return (
+                                <ListItemButton
+                                    key={task.id}
+                                    isSelected={isSelected}
+                                    onClick={() => setActiveTaskId(task.id)}
+                                    className="h-auto items-start py-2"
+                                >
+                                    <div className="flex items-start w-full gap-2">
+                                        <div className="min-w-0 flex-1">
+                                            <div className={`text-sm font-medium truncate ${isSelected ? "text-primary-foreground" : "text-foreground"}`}>
+                                                {task.name}
+                                            </div>
+                                            <div className={`text-xs mt-0.5 ${subTextClass}`}>
+                                                {task.scheduleType === "once" ? "单次" : "周期"} · {task.isEnabled ? "已启用" : "已停用"}
+                                            </div>
+                                            {task.nextRunAt && (
+                                                <div className={`text-xs mt-1 flex items-center gap-1 ${subTextClass}`}>
+                                                    <Clock className="h-3 w-3" />
+                                                    下次: {new Date(task.nextRunAt).toLocaleString()}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                </ListItemButton>
+                            );
+                        })}
+                    </div>
+                )}
+            </SidebarList>
+        ),
+        [addButton, tasks, isLoading, activeTaskId]
+    );
+
     const renderLogTag = useCallback((messageType: string) => {
         const label = logTypeLabels[messageType] ?? messageType;
         const isError = messageType === "error";
         return (
             <span
-                className={`text-xs px-2 py-0.5 rounded-full border ${
-                    isError
-                        ? "border-destructive/40 text-destructive"
-                        : "border-muted-foreground/30 text-muted-foreground"
-                }`}
+                className={`text-xs px-2 py-0.5 rounded-full border ${isError
+                    ? "border-destructive/40 text-destructive"
+                    : "border-muted-foreground/30 text-muted-foreground"
+                    }`}
             >
                 {label}
             </span>
@@ -497,263 +596,255 @@ export default function ScheduleWindow() {
         return "text-emerald-600 border-emerald-300/60";
     }, []);
 
-    return (
-        <div className="flex flex-col h-screen bg-background p-4">
-            <div className="flex items-center justify-between gap-4 mb-4">
-                <div>
-                    <h1 className="text-xl font-bold">定时任务</h1>
-                    <p className="text-sm text-muted-foreground">管理自动执行的任务调度</p>
-                </div>
-                <div className="flex items-center gap-2">
-                    <Button variant="ghost" size="icon" onClick={() => setIsHelpDialogOpen(true)} title="使用说明">
-                        <HelpCircle className="h-4 w-4" />
+    const emptyState = useMemo(
+        () => (
+            <EmptyState
+                icon={<Clock className="h-8 w-8 text-muted-foreground" />}
+                title="还没有定时任务"
+                description="创建你的第一个定时任务，自动执行助手对话"
+                action={
+                    <Button size="icon" onClick={openCreateDialog} title="新建任务">
+                        <Plus className="h-4 w-4" />
                     </Button>
-                    <Button variant="outline" size="sm" onClick={handleRefresh} disabled={isRefreshing}>
-                        <RefreshCw className={isRefreshing ? "mr-1.5 h-3.5 w-3.5 animate-spin" : "mr-1.5 h-3.5 w-3.5"} />
-                        刷新
-                    </Button>
-                    <Button size="sm" onClick={openCreateDialog}>
-                        <Plus className="mr-1.5 h-3.5 w-3.5" />
-                        新建任务
-                    </Button>
-                </div>
-            </div>
+                }
+            />
+        ),
+        [openCreateDialog]
+    );
 
-            <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-4 flex-1 overflow-hidden">
-                <div className="border rounded-lg p-3 overflow-y-auto">
-                    <div className="flex items-center justify-between mb-3">
-                        <h2 className="text-sm font-semibold">任务列表</h2>
-                        <span className="text-xs text-muted-foreground">共 {tasks.length} 个</span>
-                    </div>
-                    {isLoading ? (
-                        <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
-                            <RefreshCw className="h-3.5 w-3.5 animate-spin mr-2" />
-                            加载中...
-                        </div>
-                    ) : tasks.length === 0 ? (
-                        <div className="text-sm text-muted-foreground py-6 text-center">暂无定时任务</div>
-                    ) : (
-                        <div className="space-y-1.5">
-                            {tasks.map((task) => (
-                                <div
-                                    key={task.id}
-                                    className={`rounded-lg border px-2.5 py-2 cursor-pointer transition-colors ${
-                                        activeTaskId === task.id ? "border-primary bg-muted/40" : "hover:bg-muted/30"
-                                    }`}
-                                    onClick={() => setActiveTaskId(task.id)}
+    const content = useMemo(
+        () =>
+            selectedTask ? (
+                <Card className="shadow-none">
+                    <CardHeader className="pb-3">
+                        <div className="flex items-start justify-between gap-4">
+                            <div>
+                                <CardTitle className="text-base">{selectedTask.name}</CardTitle>
+                                <p className="text-xs text-muted-foreground mt-1">{scheduleDescription}</p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                    <span>启用</span>
+                                    <Switch
+                                        checked={selectedTask.isEnabled}
+                                        onCheckedChange={(value) => handleToggleEnabled(selectedTask, value)}
+                                    />
+                                </div>
+                                <Button variant="outline" size="icon" onClick={() => openEditDialog(selectedTask)} title="编辑">
+                                    <Pencil className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                    variant="outline"
+                                    size="icon"
+                                    onClick={() => handleRunNow(selectedTask)}
+                                    disabled={isRunning}
+                                    title="执行"
                                 >
-                                    <div className="flex items-center justify-between gap-2">
-                                        <div className="min-w-0">
-                                            <div className="text-sm font-medium truncate">{task.name}</div>
-                                            <div className="text-xs text-muted-foreground mt-0.5">
-                                                {task.scheduleType === "once" ? "单次" : "周期"} ·{" "}
-                                                {task.isEnabled ? "已启用" : "已停用"}
-                                            </div>
-                                        </div>
-                                        <Switch
-                                            checked={task.isEnabled}
-                                            onCheckedChange={(value) => handleToggleEnabled(task, value)}
-                                            onClick={(event) => event.stopPropagation()}
-                                        />
-                                    </div>
-                                    {task.nextRunAt && (
-                                        <div className="text-xs text-muted-foreground mt-1.5 flex items-center gap-1">
-                                            <Clock className="h-3 w-3" />
-                                            下次: {new Date(task.nextRunAt).toLocaleString()}
-                                        </div>
-                                    )}
-                                </div>
-                            ))}
+                                    <Play className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                    variant="destructive"
+                                    size="icon"
+                                    onClick={() => setDeleteTarget(selectedTask)}
+                                    title="删除"
+                                >
+                                    <Trash2 className="h-4 w-4" />
+                                </Button>
+                            </div>
                         </div>
-                    )}
-                </div>
+                    </CardHeader>
+                    <CardContent className="space-y-3 pt-0">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                            <div className="flex items-center gap-2">
+                                <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
+                                <span className="text-muted-foreground">下次执行:</span>
+                                <span>
+                                    {selectedTask.nextRunAt
+                                        ? new Date(selectedTask.nextRunAt).toLocaleString()
+                                        : "未设置"}
+                                </span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                                <span className="text-muted-foreground">上次执行:</span>
+                                <span>
+                                    {selectedTask.lastRunAt
+                                        ? new Date(selectedTask.lastRunAt).toLocaleString()
+                                        : "未执行"}
+                                </span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <Bell className="h-3.5 w-3.5 text-muted-foreground" />
+                                <span className="text-muted-foreground">执行助手:</span>
+                                <span>{assistantName || "未选择"}</span>
+                            </div>
+                        </div>
 
-                <div className="overflow-y-auto">
-                    {selectedTask ? (
-                        <Card>
-                            <CardHeader className="pb-3">
-                                <div className="flex items-start justify-between gap-4">
-                                    <div>
-                                        <CardTitle className="text-base">{selectedTask.name}</CardTitle>
-                                        <p className="text-xs text-muted-foreground mt-1">{scheduleDescription}</p>
+                        <div className="space-y-1.5">
+                            <div className="text-xs font-semibold">任务指令</div>
+                            <div className="rounded bg-muted/30 border p-2 text-xs whitespace-pre-wrap max-h-24 overflow-y-auto">
+                                {selectedTask.taskPrompt || (hasDetailPrompts ? "未设置" : "暂无数据")}
+                            </div>
+                        </div>
+
+                        <div className="space-y-1.5">
+                            <div className="text-xs font-semibold">通知判定规则</div>
+                            <div className="rounded bg-muted/30 border p-2 text-xs whitespace-pre-wrap max-h-20 overflow-y-auto">
+                                {selectedTask.notifyPrompt || "默认规则：有重要信息时通知"}
+                            </div>
+                        </div>
+
+                        <div className="space-y-1.5">
+                            <div className="flex items-center justify-between">
+                                <div className="text-xs font-semibold">运行记录</div>
+                                <Button
+                                    variant="outline"
+                                    size="icon"
+                                    onClick={() => loadRuns(selectedTask.id)}
+                                    disabled={isLogLoading}
+                                    title="刷新"
+                                >
+                                    <RefreshCw className={isLogLoading ? "h-3.5 w-3.5 animate-spin" : "h-3.5 w-3.5"} />
+                                </Button>
+                            </div>
+                            <div className="rounded border bg-muted/10 p-2 space-y-2 max-h-[200px] overflow-y-auto">
+                                {isLogLoading ? (
+                                    <div className="text-xs text-muted-foreground flex items-center">
+                                        <RefreshCw className="h-3 w-3 animate-spin mr-2" />
+                                        加载记录...
                                     </div>
-                                    <div className="flex items-center gap-1.5">
-                                        <Button variant="outline" size="sm" onClick={() => openEditDialog(selectedTask)}>
-                                            <Pencil className="mr-1.5 h-3.5 w-3.5" />
-                                            编辑
-                                        </Button>
+                                ) : runEntries.length === 0 ? (
+                                    <div className="text-xs text-muted-foreground">暂无运行记录</div>
+                                ) : (
+                                    runEntries.map((run) => (
                                         <Button
+                                            key={run.id}
+                                            type="button"
                                             variant="outline"
-                                            size="sm"
-                                            onClick={() => handleRunNow(selectedTask)}
-                                            disabled={isRunning}
+                                            onClick={() => setSelectedRunId(run.runId)}
+                                            className={`w-full text-left justify-start h-auto p-2 space-y-1 transition-colors ${selectedRunId === run.runId
+                                                ? "border-primary bg-muted/40"
+                                                : "border-muted-foreground/20 hover:bg-muted/30"
+                                                }`}
                                         >
-                                            <Play className="mr-1.5 h-3.5 w-3.5" />
-                                            执行
-                                        </Button>
-                                        <Button
-                                            variant="destructive"
-                                            size="sm"
-                                            onClick={() => setDeleteTarget(selectedTask)}
-                                        >
-                                            <Trash2 className="h-3.5 w-3.5" />
-                                        </Button>
-                                    </div>
-                                </div>
-                            </CardHeader>
-                            <CardContent className="space-y-3 pt-0">
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                                    <div className="flex items-center gap-2">
-                                        <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
-                                        <span className="text-muted-foreground">下次执行:</span>
-                                        <span>
-                                            {selectedTask.nextRunAt
-                                                ? new Date(selectedTask.nextRunAt).toLocaleString()
-                                                : "未设置"}
-                                        </span>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                                        <span className="text-muted-foreground">上次执行:</span>
-                                        <span>
-                                            {selectedTask.lastRunAt
-                                                ? new Date(selectedTask.lastRunAt).toLocaleString()
-                                                : "未执行"}
-                                        </span>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        <Bell className="h-3.5 w-3.5 text-muted-foreground" />
-                                        <span className="text-muted-foreground">执行助手:</span>
-                                        <span>{assistantName || "未选择"}</span>
-                                    </div>
-                                </div>
-
-                                <div className="space-y-1.5">
-                                    <div className="text-xs font-semibold">任务指令</div>
-                                    <div className="rounded bg-muted/30 border p-2 text-xs whitespace-pre-wrap max-h-24 overflow-y-auto">
-                                        {selectedTask.taskPrompt || (hasDetailPrompts ? "未设置" : "暂无数据")}
-                                    </div>
-                                </div>
-
-                                <div className="space-y-1.5">
-                                    <div className="text-xs font-semibold">通知判定规则</div>
-                                    <div className="rounded bg-muted/30 border p-2 text-xs whitespace-pre-wrap max-h-20 overflow-y-auto">
-                                        {selectedTask.notifyPrompt || "默认规则：有重要信息时通知"}
-                                    </div>
-                                </div>
-
-                                <div className="space-y-1.5">
-                                    <div className="flex items-center justify-between">
-                                        <div className="text-xs font-semibold">运行记录</div>
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={() => loadRuns(selectedTask.id)}
-                                            disabled={isLogLoading}
-                                        >
-                                            <RefreshCw className={isLogLoading ? "mr-1.5 h-3 w-3 animate-spin" : "mr-1.5 h-3 w-3"} />
-                                            刷新
-                                        </Button>
-                                    </div>
-                                    <div className="rounded border bg-muted/10 p-2 space-y-2 max-h-[200px] overflow-y-auto">
-                                        {isLogLoading ? (
-                                            <div className="text-xs text-muted-foreground flex items-center">
-                                                <RefreshCw className="h-3 w-3 animate-spin mr-2" />
-                                                加载记录...
+                                            <div className="flex items-center justify-between gap-2 w-full">
+                                                <div className="flex items-center gap-2">
+                                                    <span
+                                                        className={`text-[11px] px-2 py-0.5 rounded-full border ${renderRunStatus(
+                                                            run.status
+                                                        )}`}
+                                                    >
+                                                        {run.status === "running"
+                                                            ? "运行中"
+                                                            : run.status === "failed"
+                                                                ? "失败"
+                                                                : "完成"}
+                                                    </span>
+                                                    <span className="text-xs text-muted-foreground">
+                                                        {new Date(run.startedTime).toLocaleString()}
+                                                    </span>
+                                                    {run.notify && (
+                                                        <span className="text-[11px] px-2 py-0.5 rounded-full border border-emerald-300/60 text-emerald-600">
+                                                            已通知
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <span className="text-[10px] text-muted-foreground font-mono truncate">
+                                                    {run.runId.slice(0, 8)}
+                                                </span>
                                             </div>
-                                        ) : runEntries.length === 0 ? (
-                                            <div className="text-xs text-muted-foreground">暂无运行记录</div>
-                                        ) : (
-                                            runEntries.map((run) => (
-                                                <button
-                                                    key={run.id}
-                                                    type="button"
-                                                    onClick={() => setSelectedRunId(run.runId)}
-                                                    className={`w-full text-left border rounded-md p-2 space-y-1 transition-colors ${
-                                                        selectedRunId === run.runId
-                                                            ? "border-primary bg-muted/40"
-                                                            : "border-muted-foreground/20 hover:bg-muted/30"
-                                                    }`}
-                                                >
-                                                    <div className="flex items-center justify-between gap-2">
-                                                        <div className="flex items-center gap-2">
-                                                            <span
-                                                                className={`text-[11px] px-2 py-0.5 rounded-full border ${renderRunStatus(
-                                                                    run.status
-                                                                )}`}
-                                                            >
-                                                                {run.status === "running"
-                                                                    ? "运行中"
-                                                                    : run.status === "failed"
-                                                                        ? "失败"
-                                                                        : "完成"}
-                                                            </span>
-                                                            <span className="text-xs text-muted-foreground">
-                                                                {new Date(run.startedTime).toLocaleString()}
-                                                            </span>
-                                                            {run.notify && (
-                                                                <span className="text-[11px] px-2 py-0.5 rounded-full border border-emerald-300/60 text-emerald-600">
-                                                                    已通知
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                        <span className="text-[10px] text-muted-foreground font-mono truncate">
-                                                            {run.runId.slice(0, 8)}
+                                            <div className="text-[11px] whitespace-pre-wrap break-words text-muted-foreground line-clamp-2">
+                                                {run.errorMessage || run.summary || "无摘要"}
+                                            </div>
+                                        </Button>
+                                    ))
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="space-y-1.5">
+                            <div className="text-xs font-semibold">运行日志详情</div>
+                            <div className="rounded border bg-muted/10 p-2 space-y-2 max-h-[240px] overflow-y-auto">
+                                {selectedRunId ? (
+                                    isLogLoading ? (
+                                        <div className="text-xs text-muted-foreground flex items-center">
+                                            <RefreshCw className="h-3 w-3 animate-spin mr-2" />
+                                            加载日志...
+                                        </div>
+                                    ) : logEntries.length === 0 ? (
+                                        <div className="text-xs text-muted-foreground">暂无日志详情</div>
+                                    ) : (
+                                        logEntries.map((log) => (
+                                            <div key={log.id} className="border border-muted-foreground/20 rounded-md p-1.5 space-y-0.5">
+                                                <div className="flex items-center justify-between gap-2">
+                                                    <div className="flex items-center gap-1.5">
+                                                        {renderLogTag(log.messageType)}
+                                                        <span className="text-[10px] text-muted-foreground">
+                                                            {new Date(log.createdTime).toLocaleString()}
                                                         </span>
                                                     </div>
-                                                    <div className="text-[11px] whitespace-pre-wrap break-words text-muted-foreground line-clamp-2">
-                                                        {run.errorMessage || run.summary || "无摘要"}
-                                                    </div>
-                                                </button>
-                                            ))
-                                        )}
-                                    </div>
-                                </div>
-
-                                <div className="space-y-1.5">
-                                    <div className="text-xs font-semibold">运行日志详情</div>
-                                    <div className="rounded border bg-muted/10 p-2 space-y-2 max-h-[240px] overflow-y-auto">
-                                        {selectedRunId ? (
-                                            isLogLoading ? (
-                                                <div className="text-xs text-muted-foreground flex items-center">
-                                                    <RefreshCw className="h-3 w-3 animate-spin mr-2" />
-                                                    加载日志...
+                                                    <span className="text-[10px] text-muted-foreground font-mono truncate">
+                                                        {log.runId.slice(0, 8)}
+                                                    </span>
                                                 </div>
-                                            ) : logEntries.length === 0 ? (
-                                                <div className="text-xs text-muted-foreground">暂无日志详情</div>
-                                            ) : (
-                                                logEntries.map((log) => (
-                                                    <div key={log.id} className="border border-muted-foreground/20 rounded-md p-1.5 space-y-0.5">
-                                                        <div className="flex items-center justify-between gap-2">
-                                                            <div className="flex items-center gap-1.5">
-                                                                {renderLogTag(log.messageType)}
-                                                                <span className="text-[10px] text-muted-foreground">
-                                                                    {new Date(log.createdTime).toLocaleString()}
-                                                                </span>
-                                                            </div>
-                                                            <span className="text-[10px] text-muted-foreground font-mono truncate">
-                                                                {log.runId.slice(0, 8)}
-                                                            </span>
-                                                        </div>
-                                                        <div className="text-[11px] whitespace-pre-wrap break-words">
-                                                            {log.content}
-                                                        </div>
-                                                    </div>
-                                                ))
-                                            )
-                                        ) : (
-                                            <div className="text-xs text-muted-foreground">请选择一条运行记录查看详情</div>
-                                        )}
-                                    </div>
-                                </div>
-                            </CardContent>
-                        </Card>
-                    ) : (
-                        <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
-                            请选择一个任务查看详情
+                                                <div className="text-[11px] whitespace-pre-wrap break-words">
+                                                    {log.content}
+                                                </div>
+                                            </div>
+                                        ))
+                                    )
+                                ) : (
+                                    <div className="text-xs text-muted-foreground">请选择一条运行记录查看详情</div>
+                                )}
+                            </div>
                         </div>
-                    )}
-                </div>
+                    </CardContent>
+                </Card>
+            ) : (
+                <EmptyState
+                    icon={<Calendar className="h-8 w-8 text-muted-foreground" />}
+                    title="选择一个任务"
+                    description="从左侧列表中选择一个定时任务查看详情"
+                    action={
+                        <Button size="icon" onClick={openCreateDialog} title="新建任务">
+                            <Plus className="h-4 w-4" />
+                        </Button>
+                    }
+                />
+            ),
+        [
+            assistantName,
+            handleRunNow,
+            hasDetailPrompts,
+            isLogLoading,
+            isRunning,
+            loadRuns,
+            logEntries,
+            openCreateDialog,
+            openEditDialog,
+            renderLogTag,
+            renderRunStatus,
+            runEntries,
+            scheduleDescription,
+            selectedRunId,
+            selectedTask,
+        ]
+    );
+
+    return (
+        <div className="flex justify-center items-center h-screen bg-background">
+            <div className="bg-card shadow-none w-full h-screen overflow-y-auto">
+                <ConfigPageLayout
+                    sidebar={sidebar}
+                    content={content}
+                    selectOptions={selectOptions}
+                    selectedOptionId={activeTaskId ? activeTaskId.toString() : undefined}
+                    onSelectOption={handleSelectFromDropdown}
+                    selectPlaceholder="选择任务"
+                    addButton={addButton}
+                    emptyState={emptyState}
+                    showEmptyState={!isLoading && tasks.length === 0}
+                />
             </div>
 
             <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
@@ -916,9 +1007,11 @@ export default function ScheduleWindow() {
                                                     {Array.from({ length: 31 }, (_, i) => i + 1).map((day) => {
                                                         const isChecked = formValues.month_days.includes(day);
                                                         return (
-                                                            <button
+                                                            <Button
                                                                 key={day}
                                                                 type="button"
+                                                                variant="outline"
+                                                                size="sm"
                                                                 onClick={() => {
                                                                     setFormValues((prev) => ({
                                                                         ...prev,
@@ -927,14 +1020,13 @@ export default function ScheduleWindow() {
                                                                             : [...prev.month_days, day].sort((a, b) => a - b),
                                                                     }));
                                                                 }}
-                                                                className={`w-7 h-7 text-xs rounded border transition-colors ${
-                                                                    isChecked
-                                                                        ? "bg-primary text-primary-foreground border-primary"
-                                                                        : "border-input hover:bg-muted"
-                                                                }`}
+                                                                className={`w-7 h-7 p-0 text-xs transition-colors ${isChecked
+                                                                    ? "bg-primary text-primary-foreground border-primary hover:bg-primary/90"
+                                                                    : "border-input hover:bg-muted"
+                                                                    }`}
                                                             >
                                                                 {day}
-                                                            </button>
+                                                            </Button>
                                                         );
                                                     })}
                                                 </div>
@@ -996,7 +1088,7 @@ export default function ScheduleWindow() {
                         <div>
                             <h4 className="font-medium mb-1">基本说明</h4>
                             <p className="text-muted-foreground text-xs leading-relaxed">
-                                定时任务会在指定时间自动执行 AI 助手对话。任务仅在程序运行时执行，错过的任务会在下次启动时立即执行一次。
+                                定时任务会在指定时间自动执行 AI 助手对话。任务仅在程序运行时执行，错过的任务会在下次启动时立即执行一次。因为执行任务的是AI，所以<strong>配置更好的助手Prompt、工具、模型等就能够大大提高任务的准确性和效率。</strong>
                             </p>
                         </div>
                         <div>
@@ -1012,14 +1104,14 @@ export default function ScheduleWindow() {
                             <h4 className="font-medium mb-1">通知判定</h4>
                             <p className="text-muted-foreground text-xs leading-relaxed">
                                 任务执行完成后，系统会根据通知判定规则决定是否弹出通知。留空则使用默认规则（有重要信息时通知）。
-                                你只需要描述判定逻辑，例如："如果结果包含错误则通知"。
+                                你只需要描述判定逻辑，例如："如果结果能够确定是xxx则进行通知"。
                             </p>
                         </div>
                         <div>
                             <h4 className="font-medium mb-1">使用示例</h4>
                             <ul className="text-xs text-muted-foreground space-y-1 list-disc list-inside">
-                                <li>每天 9:00 执行"查询今日天气"</li>
-                                <li>每周一、三、五 18:00 执行"汇总本周工作"</li>
+                                <li>每天 9:00 执行"获取工作任务"</li>
+                                <li>每周五 17:00 执行"读取git仓库提交情况生成周报"</li>
                                 <li>每月 1 号和 15 号执行"生成半月报告"</li>
                             </ul>
                         </div>
