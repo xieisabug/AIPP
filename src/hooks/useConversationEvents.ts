@@ -38,6 +38,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         new Set(),
     );
 
+    // 临时强制闪亮的消息 ID（用于重新生成/用户点击等），会被后端焦点或流式状态覆盖
+    const [manualShineMessageId, setManualShineMessageId] = useState<number | null>(null);
+
     // MCP工具调用状态管理
     const [mcpToolCallStates, setMCPToolCallStates] = useState<
         Map<number, MCPToolCallUpdateEvent>
@@ -53,9 +56,8 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         new Set(),
     );
 
-    // 等待回复的用户消息 ID（只有一个）- 保留 setter 用于事件处理中清理状态
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const [_pendingUserMessageId, setPendingUserMessageId] = useState<number | null>(null);
+    // 等待回复的用户消息 ID（只有一个）
+    const [pendingUserMessageId, setPendingUserMessageId] = useState<number | null>(null);
 
     // 活动焦点状态 - 由后端统一管理，优先使用这个状态来控制闪亮边框
     const [activityFocus, setActivityFocus] = useState<ActivityFocus>({ focus_type: 'none' });
@@ -78,18 +80,18 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     }, [options]);
 
     // 基于 activityFocus 计算闪亮边框状态
-    // 这是新的逻辑：优先使用后端发送的活动焦点状态
+    // 这是新的逻辑：优先使用后端发送的活动焦点状态，必要时回退本地/手动状态
     const updateShiningMessagesFromFocus = useCallback(() => {
+        const activeToolCount = activeMcpCallIds.size;
+        const hasActiveTools =
+            activeToolCount > 0 || activityFocus.focus_type === 'mcp_executing';
+
         setShiningMessageIds(() => {
             const newShining = new Set<number>();
 
             switch (activityFocus.focus_type) {
-                case 'none':
-                    // 没有活动焦点，清空所有边框
-                    return newShining;
                 case 'user_pending':
                 case 'assistant_streaming':
-                    // 显示消息边框
                     newShining.add(activityFocus.message_id);
                     console.log("✨ [ActivityFocus] Shining message:", activityFocus.message_id, "-", activityFocus.focus_type);
                     return newShining;
@@ -97,9 +99,33 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     // MCP 执行时不显示消息边框（MCP 组件自己控制）
                     console.log("🔧 [ActivityFocus] MCP executing:", activityFocus.call_id);
                     return newShining;
+                case 'none':
                 default:
-                    return newShining;
+                    break;
             }
+
+            if (hasActiveTools) {
+                // 有工具执行时，消息边框暂停闪亮
+                return newShining;
+            }
+
+            // 回退：activity_focus 丢失时，使用本地流式/等待状态
+            if (streamingAssistantMessageIds.size > 0) {
+                streamingAssistantMessageIds.forEach((id) => newShining.add(id));
+                return newShining;
+            }
+
+            if (pendingUserMessageId !== null) {
+                newShining.add(pendingUserMessageId);
+                return newShining;
+            }
+
+            // 最后回退到手动闪亮（例如重新生成点击）
+            if (manualShineMessageId !== null) {
+                newShining.add(manualShineMessageId);
+            }
+
+            return newShining;
         });
 
         // 同步更新活跃的 MCP 调用 ID
@@ -110,18 +136,30 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             }
             return newActiveSet;
         });
-    }, [activityFocus]);
+    }, [
+        activeMcpCallIds,
+        activityFocus,
+        manualShineMessageId,
+        pendingUserMessageId,
+        streamingAssistantMessageIds,
+    ]);
 
     // 当 activityFocus 变化时，更新边框显示
     useEffect(() => {
         updateShiningMessagesFromFocus();
     }, [updateShiningMessagesFromFocus]);
 
+    // 工具执行全部结束时，清理手动闪亮，交还给后端/流式状态
+    useEffect(() => {
+        if (activeMcpCallIds.size === 0 && manualShineMessageId !== null) {
+            setManualShineMessageId(null);
+        }
+    }, [activeMcpCallIds.size, manualShineMessageId]);
+
     // 智能边框控制辅助函数 - 用于外部组件手动触发边框更新
     // 注意：现在 shiningMessageIds 主要由 updateShiningMessagesFromFocus 根据 activityFocus 管理
     // 这个函数保留用于兼容性，但不再自动触发
     const updateShiningMessages = useCallback(() => {
-        // 不再自动更新 shiningMessageIds，而是触发 updateShiningMessagesFromFocus
         updateShiningMessagesFromFocus();
     }, [updateShiningMessagesFromFocus]);
 
@@ -417,21 +455,22 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     return newMap;
                 });
 
-                // 更新活跃的 MCP 调用状态
+                // 更新活跃的 MCP 调用状态，并在全部完成后同步焦点
                 setActiveMcpCallIds((prev) => {
                     const newSet = new Set(prev);
                     const mergedStatus = mcpUpdateData.status;
 
                     if (mergedStatus === "executing" || mergedStatus === "pending") {
-                        // MCP 开始执行，添加到活跃集合
                         newSet.add(mcpUpdateData.call_id);
                     } else if (mergedStatus === "success" || mergedStatus === "failed") {
-                        // MCP 执行完成，从活跃集合中移除
                         newSet.delete(mcpUpdateData.call_id);
                     } else {
-                        // 兜底：任何其他终态都认为不再活跃
                         console.log(`[MCP] Treating status '${mergedStatus}' as inactive for call ${mcpUpdateData.call_id}`);
                         newSet.delete(mcpUpdateData.call_id);
+                    }
+
+                    if (newSet.size === 0) {
+                        syncActivityFocus(mcpUpdateData.conversation_id);
                     }
 
                     return newSet;
@@ -462,12 +501,10 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
                 // 清理流式与闪烁状态，避免 UI 长时间处于接收中
                 setStreamingMessages(new Map());
-                setShiningMessageIds(new Set());
                 setStreamingAssistantMessageIds(new Set());
-                setActiveMcpCallIds(new Set());
                 setPendingUserMessageId(null);
-                setMCPToolCallStates(new Map());
-                setActivityFocus({ focus_type: 'none' });
+                // 保持 MCP 工具调用状态，避免执行中的边框被清空
+                syncActivityFocus(completionData.conversation_id);
 
                 // 通知外部响应已完成（即便没有 response chunk）
                 callbacksRef.current.onAiResponseComplete?.();
@@ -573,10 +610,15 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         setActiveMcpCallIds(new Set());
         setMCPToolCallStates(new Map());
         setActivityFocus({ focus_type: 'none' });
+        setManualShineMessageId(null);
     }, []);
 
     const setPendingUserMessage = useCallback((messageId: number | null) => {
         setPendingUserMessageId(messageId);
+    }, []);
+
+    const setManualShineMessage = useCallback((messageId: number | null) => {
+        setManualShineMessageId(messageId);
     }, []);
 
     const handleError = useCallback((errorMessage: string) => {
@@ -605,6 +647,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         streamingMessages,
         shiningMessageIds,
         setShiningMessageIds,
+        setManualShineMessage,
         mcpToolCallStates,
         activeMcpCallIds, // 导出活跃的 MCP 调用状态
         streamingAssistantMessageIds, // 导出正在流式输出的 assistant 消息状态
