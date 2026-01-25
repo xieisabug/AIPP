@@ -11,6 +11,10 @@ import {
     formatAsMarkdown,
     sanitizeFilename,
     type ExportData,
+    stripMcpToolCallMarkers,
+    extractMcpToolCallHints,
+    formatJsonContent,
+    getLatestBranchMessages,
 } from "@/utils/exportFormatters";
 import { renderExportContent } from "@/components/conversation/ConversationExportRenderer";
 
@@ -31,7 +35,30 @@ export const conversationExportService = {
                     conversationId: parseInt(conversationId),
                 }).catch(() => []), // 如果没有工具调用，返回空数组
             ]);
-            return { conversation, toolCalls };
+            const filteredMessages = getLatestBranchMessages(conversation.messages);
+            const messageIdSet = new Set(filteredMessages.map((msg) => msg.id));
+            const hintCallIdSet = new Set<number>();
+            for (const message of filteredMessages) {
+                const hints = extractMcpToolCallHints(message.content || "");
+                for (const hint of hints) {
+                    if (typeof hint.call_id === "number") {
+                        hintCallIdSet.add(hint.call_id);
+                    }
+                }
+            }
+            const filteredToolCalls = toolCalls.filter((call) => {
+                if (typeof call.message_id === "number" && messageIdSet.has(call.message_id)) {
+                    return true;
+                }
+                return hintCallIdSet.has(call.id);
+            });
+            return {
+                conversation: {
+                    ...conversation,
+                    messages: filteredMessages,
+                },
+                toolCalls: filteredToolCalls,
+            };
         } catch (error) {
             console.error("Failed to get export data:", error);
             throw error;
@@ -206,6 +233,8 @@ export const conversationExportService = {
 
         // 过滤消息
         const messages = data.conversation.messages.filter((msg) => {
+            if (msg.message_type === "tool_result") return false;
+            if (msg.message_type === "user" && msg.content?.startsWith("Tool execution results:\n")) return false;
             if (msg.message_type === "system") return options.includeSystemPrompt;
             if (msg.message_type === "reasoning") return options.includeReasoning;
             return true;
@@ -220,6 +249,10 @@ export const conversationExportService = {
                 }
                 toolCallMap.get(tc.message_id)!.push(tc);
             }
+        }
+        const toolCallById = new Map<number, (typeof data.toolCalls)[number]>();
+        for (const tc of data.toolCalls) {
+            toolCallById.set(tc.id, tc);
         }
 
         // 逐条消息渲染
@@ -237,11 +270,50 @@ export const conversationExportService = {
             const label = this.getMessageLabel(message.message_type);
             const labelStyle = this.getMessageLabelStyle(message.message_type);
             let toolCallsHtml = this.generateToolCallsHtml(message, options, toolCallMap);
+            const mcpHints = extractMcpToolCallHints(message.content || "");
+            const hintCallIds = mcpHints
+                .map((hint) => hint.call_id)
+                .filter((callId): callId is number => typeof callId === "number");
+
+            if (options.includeToolParams && (!message.tool_calls_json || message.tool_calls_json.trim() === "") && toolCallMap.has(message.id)) {
+                const mappedCalls = toolCallMap.get(message.id) || [];
+                const paramBlocks = mappedCalls.map((tc) => {
+                    return `
+                            <div style="margin-top: 8px; padding: 8px; background: #f9f9f9; border-left: 3px solid #2563eb; font-size: 11px;">
+                                <div style="font-weight: 500; margin-bottom: 4px; color: #333;">🔧 ${this.escapeHtml(tc.server_name)} / ${this.escapeHtml(tc.tool_name)}</div>
+                                <pre style="background: #f0f0f0; padding: 6px; border-radius: 3px; margin: 0; overflow-x: auto;"><code style="font-family: Consolas, Monaco, monospace; font-size: 10px; color: #333; white-space: pre-wrap; word-break: break-word;">${this.escapeHtml(formatJsonContent(tc.parameters))}</code></pre>
+                            </div>
+                    `;
+                }).join("");
+                toolCallsHtml += paramBlocks;
+            }
+
+            if (options.includeToolResults && toolCallMap.has(message.id)) {
+                const relatedCalls = (toolCallMap.get(message.id) || []).filter(
+                    (call) => call.status === "success" && call.result,
+                );
+                if (relatedCalls.length > 0) {
+                    const resultBlocks = relatedCalls.map((tc) => {
+                        const statusText = tc.status === "success" ? "✓" : tc.status === "failed" ? "✗" : "...";
+                        let resultHtml = "";
+                        if (tc.result) {
+                            resultHtml = `<pre style="background: #f0f0f0; padding: 6px; border-radius: 3px; margin: 4px 0 0; overflow-x: auto;"><code style="font-family: Consolas, Monaco, monospace; font-size: 10px; color: #333; white-space: pre-wrap; word-break: break-word;">${this.escapeHtml(formatJsonContent(tc.result))}</code></pre>`;
+                        }
+                        return `
+                            <div style="margin-top: 8px; padding: 8px; background: #f9f9f9; border-left: 3px solid ${tc.status === "success" ? "#22c55e" : tc.status === "failed" ? "#dc2626" : "#666"}; font-size: 11px;">
+                                <div style="font-weight: 500; margin-bottom: 4px; color: #333;">${statusText} ${this.escapeHtml(tc.server_name)} / ${this.escapeHtml(tc.tool_name)}</div>
+                                ${resultHtml}
+                            </div>
+                        `;
+                    }).join("");
+                    toolCallsHtml += resultBlocks;
+                }
+            }
 
             msgContainer.innerHTML = `
                 <div style="padding: 16px 0; border-bottom: 2px solid #e0e0e0;">
                     <div style="${labelStyle}">${this.escapeHtml(label)}</div>
-                    <div style="color: #111; font-size: 12px; line-height: 1.6; margin-top: 8px;">${this.markdownToHtml(message.content || "")}</div>
+                    <div style="color: #111; font-size: 12px; line-height: 1.6; margin-top: 8px;">${this.markdownToHtml(stripMcpToolCallMarkers(message.content || ""))}</div>
                     ${toolCallsHtml}
                 </div>
             `;
@@ -364,7 +436,7 @@ export const conversationExportService = {
                     const statusText = tc.status === "success" ? "✓" : tc.status === "failed" ? "✗" : "...";
                     let resultHtml = "";
                     if (tc.status === "success" && tc.result) {
-                        resultHtml = `<pre style="background: #f0f0f0; padding: 6px; border-radius: 3px; margin: 4px 0 0; overflow-x: auto;"><code style="font-family: Consolas, Monaco, monospace; font-size: 10px; color: #333; white-space: pre-wrap; word-break: break-word;">${this.escapeHtml(tc.result)}</code></pre>`;
+                        resultHtml = `<pre style="background: #f0f0f0; padding: 6px; border-radius: 3px; margin: 4px 0 0; overflow-x: auto;"><code style="font-family: Consolas, Monaco, monospace; font-size: 10px; color: #333; white-space: pre-wrap; word-break: break-word;">${this.escapeHtml(formatJsonContent(tc.result))}</code></pre>`;
                     } else if (tc.status === "failed" && tc.error) {
                         resultHtml = `<div style="color: #dc2626; font-size: 10px; margin-top: 4px;">错误: ${this.escapeHtml(tc.error)}</div>`;
                     }
