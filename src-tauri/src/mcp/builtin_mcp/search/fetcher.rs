@@ -135,6 +135,18 @@ impl ContentFetcher {
         }
     }
 
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    async fn capture_page_state(
+        &self,
+        page: &playwright::api::Page,
+    ) -> serde_json::Value {
+        page.eval(
+            "() => ({ url: window.location.href, title: document.title, readyState: document.readyState, bodyChildren: document.body ? document.body.children.length : 0, bodyLength: document.body ? document.body.innerHTML.length : 0 })",
+        )
+        .await
+        .unwrap_or_default()
+    }
+
     /// 主要的内容抓取方法，按优先级尝试不同策略
     pub async fn fetch_content(
         &mut self,
@@ -335,6 +347,14 @@ impl ContentFetcher {
             .map_err(|e| format!("Playwright eval error: {}", e))?;
 
         if html.trim().is_empty() {
+            let page_state = self.capture_page_state(&page).await;
+            warn!(
+                stage = "kagi_session_search",
+                %search_url,
+                bytes = html.len(),
+                ?page_state,
+                "Empty HTML from Kagi session URL search"
+            );
             return Err("Empty HTML from Kagi session URL search".to_string());
         }
 
@@ -377,6 +397,14 @@ impl ContentFetcher {
             .map_err(|e| format!("Playwright eval error: {}", e))?;
 
         if html.trim().is_empty() {
+            let page_state = self.capture_page_state(page).await;
+            warn!(
+                stage = "kagi_session_search_pooled",
+                %search_url,
+                bytes = html.len(),
+                ?page_state,
+                "Empty HTML from Kagi session URL search"
+            );
             return Err("Empty HTML from Kagi session URL search".to_string());
         }
 
@@ -533,6 +561,15 @@ impl ContentFetcher {
         let html = self.perform_humanized_search(&page, query, search_engine).await?;
 
         if html.trim().is_empty() {
+            let page_state = self.capture_page_state(&page).await;
+            warn!(
+                stage = "search_flow",
+                engine = search_engine.as_str(),
+                %query,
+                bytes = html.len(),
+                ?page_state,
+                "Empty HTML from search flow"
+            );
             return Err("Empty HTML from search flow".to_string());
         }
 
@@ -561,6 +598,15 @@ impl ContentFetcher {
         let html = self.perform_humanized_search(page, query, search_engine).await?;
 
         if html.trim().is_empty() {
+            let page_state = self.capture_page_state(page).await;
+            warn!(
+                stage = "search_flow_pooled",
+                engine = search_engine.as_str(),
+                %query,
+                bytes = html.len(),
+                ?page_state,
+                "Empty HTML from search flow (pooled)"
+            );
             return Err("Empty HTML from search flow (pooled)".to_string());
         }
 
@@ -660,6 +706,14 @@ impl ContentFetcher {
             .map_err(|e| format!("Playwright eval error: {}", e))?;
 
         if html.trim().is_empty() {
+            let page_state = self.capture_page_state(&page).await;
+            warn!(
+                stage = "fetch_content",
+                %url,
+                bytes = html.len(),
+                ?page_state,
+                "Empty HTML from Playwright"
+            );
             return Err("Empty HTML from Playwright".to_string());
         }
 
@@ -696,6 +750,14 @@ impl ContentFetcher {
             .map_err(|e| format!("Playwright eval error: {}", e))?;
 
         if html.trim().is_empty() {
+            let page_state = self.capture_page_state(page).await;
+            warn!(
+                stage = "fetch_content_pooled",
+                %url,
+                bytes = html.len(),
+                ?page_state,
+                "Empty HTML from Playwright (pooled)"
+            );
             return Err("Empty HTML from Playwright (pooled)".to_string());
         }
 
@@ -797,6 +859,7 @@ impl ContentFetcher {
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         if stdout.trim().is_empty() {
+            warn!(%url, "Empty DOM output from headless browser");
             return Err("Empty DOM output from headless browser".to_string());
         }
 
@@ -873,6 +936,7 @@ impl ContentFetcher {
         let text = resp.text().await.map_err(|e| format!("Failed to read response body: {}", e))?;
 
         if text.trim().is_empty() {
+            warn!(%url, status = status.as_u16(), "Empty response body");
             return Err("Empty response body".to_string());
         }
 
