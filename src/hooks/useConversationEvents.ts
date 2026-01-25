@@ -128,16 +128,8 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             return newShining;
         });
 
-        // 同步更新活跃的 MCP 调用 ID
-        setActiveMcpCallIds(() => {
-            const newActiveSet = new Set<number>();
-            if (activityFocus.focus_type === 'mcp_executing') {
-                newActiveSet.add(activityFocus.call_id);
-            }
-            return newActiveSet;
-        });
     }, [
-        activeMcpCallIds,
+        activeMcpCallIds.size,
         activityFocus,
         manualShineMessageId,
         pendingUserMessageId,
@@ -155,6 +147,20 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             setManualShineMessageId(null);
         }
     }, [activeMcpCallIds.size, manualShineMessageId]);
+
+    // activityFocus 变化时同步活跃 MCP 集合（避免循环）
+    useEffect(() => {
+        if (activityFocus.focus_type !== 'mcp_executing') {
+            return;
+        }
+
+        setActiveMcpCallIds((prev) => {
+            if (prev.size === 1 && prev.has(activityFocus.call_id)) {
+                return prev;
+            }
+            return new Set([activityFocus.call_id]);
+        });
+    }, [activityFocus]);
 
     // 智能边框控制辅助函数 - 用于外部组件手动触发边框更新
     // 注意：现在 shiningMessageIds 主要由 updateShiningMessagesFromFocus 根据 activityFocus 管理
