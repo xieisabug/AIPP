@@ -3,7 +3,7 @@ use super::browser_pool::BrowserPool;
 use super::engine_manager::SearchEngine;
 use super::fingerprint::{FingerprintConfig, FingerprintManager, TimingConfig};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-use playwright::Playwright;
+use playwright::{api::DocumentLoadState, Playwright};
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -96,6 +96,41 @@ impl ContentFetcher {
             }
             Err(e) => {
                 warn!(error = %e, path = %filepath.display(), "Failed to save debug HTML");
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn navigation_timeout_ms(&self) -> u64 {
+        self.config.wait_timeout_ms.max(30_000)
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    async fn goto_with_timeout(
+        &self,
+        page: &playwright::api::Page,
+        url: &str,
+        stage: &str,
+    ) -> Result<(), String> {
+        let timeout_ms = self.navigation_timeout_ms();
+        info!(%url, stage, timeout_ms, "Navigating with Playwright");
+        match page
+            .goto_builder(url)
+            .timeout(timeout_ms as f64)
+            .wait_until(DocumentLoadState::DomContentLoaded)
+            .goto()
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let err = e.to_string();
+                let lower = err.to_lowercase();
+                if lower.contains("timeout") {
+                    warn!(%url, stage, timeout_ms, error = %err, "Playwright navigation timeout");
+                } else {
+                    warn!(%url, stage, timeout_ms, error = %err, "Playwright navigation failed");
+                }
+                Err(format!("Playwright goto error ({}): {}", stage, err))
             }
         }
     }
@@ -287,10 +322,7 @@ impl ContentFetcher {
         self.set_page_http_headers(&page, &fingerprint).await?;
 
         // 直接导航到搜索结果页面
-        page.goto_builder(&search_url)
-            .goto()
-            .await
-            .map_err(|e| format!("Playwright goto error: {}", e))?;
+        self.goto_with_timeout(&page, &search_url, "kagi_session_search").await?;
 
         // 等待 Kagi 搜索结果加载
         let kagi_selectors = super::engines::kagi::KagiEngine::default_wait_selectors();
@@ -332,10 +364,7 @@ impl ContentFetcher {
         self.set_page_http_headers(page, &fingerprint).await?;
 
         // 直接导航到搜索结果页面
-        page.goto_builder(search_url)
-            .goto()
-            .await
-            .map_err(|e| format!("Playwright goto error: {}", e))?;
+        self.goto_with_timeout(page, search_url, "kagi_session_search_pooled").await?;
 
         // 等待 Kagi 搜索结果加载
         let kagi_selectors = super::engines::kagi::KagiEngine::default_wait_selectors();
@@ -395,9 +424,14 @@ impl ContentFetcher {
             }
 
             if start.elapsed() >= timeout {
+                let current_url = page.url().unwrap_or_else(|_| "unknown".to_string());
                 warn!(
+                    stage = "wait_for_results_selectors",
                     timeout_ms = self.config.wait_timeout_ms,
-                    check_count, "⚠️ Results wait timeout, continuing anyway"
+                    check_count,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    %current_url,
+                    "⚠️ Results wait timeout, continuing anyway"
                 );
                 break;
             }
@@ -615,7 +649,7 @@ impl ContentFetcher {
         // 在页面级别设置额外的HTTP头（替代浏览器上下文级别的设置）
         self.set_page_http_headers(&page, &fingerprint).await?;
 
-        page.goto_builder(url).goto().await.map_err(|e| format!("Playwright goto error: {}", e))?;
+        self.goto_with_timeout(&page, url, "fetch_content").await?;
 
         // 等待页面加载完成
         self.wait_for_content(&page).await?;
@@ -650,10 +684,7 @@ impl ContentFetcher {
         self.set_page_http_headers(page, &fingerprint).await?;
 
         // 导航到 URL
-        page.goto_builder(url)
-            .goto()
-            .await
-            .map_err(|e| format!("Playwright goto error: {}", e))?;
+        self.goto_with_timeout(page, url, "fetch_content_pooled").await?;
 
         // 等待页面加载完成
         self.wait_for_content(page).await?;
@@ -704,6 +735,15 @@ impl ContentFetcher {
             }
 
             if start.elapsed() >= Duration::from_millis(self.config.wait_timeout_ms) {
+                let current_url = page.url().unwrap_or_else(|_| "unknown".to_string());
+                warn!(
+                    stage = "wait_for_content",
+                    timeout_ms = self.config.wait_timeout_ms,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    %current_url,
+                    selectors = ?self.config.wait_selectors,
+                    "⚠️ Content wait timeout"
+                );
                 break;
             }
 
@@ -712,8 +752,6 @@ impl ContentFetcher {
 
         if let Some(sel) = matched {
             debug!(selector = %sel, "Waited selector matched");
-        } else {
-            debug!(timeout_ms = self.config.wait_timeout_ms, "Wait timeout");
         }
 
         Ok(())
@@ -1299,7 +1337,8 @@ impl ContentFetcher {
         for attempt in 1..=max_retries {
             debug!(attempt, max_retries, %url, "Attempting navigation");
 
-            match page.goto_builder(url).goto().await {
+            let stage = format!("navigate_with_retry_attempt_{}", attempt);
+            match self.goto_with_timeout(page, url, &stage).await {
                 Ok(_) => {
                     info!(attempt, "Navigation successful");
 
@@ -1320,11 +1359,11 @@ impl ContentFetcher {
                 }
                 Err(e) => {
                     last_error = format!("Navigation error: {}", e);
-                    debug!(error = %e, "Navigation failed");
+                    debug!(error = %last_error, attempt, "Navigation failed");
 
                     // 对于特定的错误，我们可以尝试不同的策略
-                    if e.to_string().contains("ERR_CONNECTION_CLOSED")
-                        || e.to_string().contains("ERR_NETWORK_CHANGED")
+                    if last_error.contains("ERR_CONNECTION_CLOSED")
+                        || last_error.contains("ERR_NETWORK_CHANGED")
                     {
                         warn!("Network connection issue detected, waiting longer before retry");
                         sleep(Duration::from_millis(5000)).await;
@@ -1778,6 +1817,7 @@ impl ContentFetcher {
                     .unwrap_or_default();
 
                 warn!(
+                    stage = "wait_for_results_timeout",
                     timeout_ms,
                     check_count,
                     ?page_state,
