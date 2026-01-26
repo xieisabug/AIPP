@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ExportData, ConversationExportOptions } from "@/utils/exportFormatters";
-import { parseToolCalls, mapToolCallsToMessages } from "@/utils/exportFormatters";
+import { parseToolCalls, mapToolCallsToMessages, stripMcpToolCallMarkers, extractMcpToolCallHints, formatJsonContent } from "@/utils/exportFormatters";
 
 // 导出专用的颜色方案 - 使用纯 RGB 值避免 oklch 兼容性问题
 const exportColors = {
@@ -199,9 +199,15 @@ const ConversationExportRenderer: React.FC<ConversationExportRendererProps> = ({
 
     // 构建工具调用映射
     const toolCallMap = mapToolCallsToMessages(toolCalls);
+    const toolCallById = new Map<number, (typeof toolCalls)[number]>();
+    for (const tc of toolCalls) {
+        toolCallById.set(tc.id, tc);
+    }
 
     // 过滤消息
     const filteredMessages = messages.filter((msg) => {
+        if (msg.message_type === "tool_result") return false;
+        if (msg.message_type === "user" && msg.content?.startsWith("Tool execution results:\n")) return false;
         if (msg.message_type === "system") return options.includeSystemPrompt;
         if (msg.message_type === "reasoning") return options.includeReasoning;
         return true;
@@ -415,7 +421,7 @@ const ConversationExportRenderer: React.FC<ConversationExportRendererProps> = ({
                         <div style={getBubbleStyle(message.message_type)}>
                             {/* 消息内容 */}
                             <div style={styles.prose}>
-                                <ExportMarkdown colors={colors}>{message.content || ""}</ExportMarkdown>
+                                <ExportMarkdown colors={colors}>{stripMcpToolCallMarkers(message.content || "")}</ExportMarkdown>
                             </div>
 
                             {/* 图片附件 */}
@@ -440,19 +446,22 @@ const ConversationExportRenderer: React.FC<ConversationExportRendererProps> = ({
                             })()}
 
                             {/* 工具调用参数 */}
-                            {options.includeToolParams && message.tool_calls_json && (() => {
-                                const parsedToolCalls = parseToolCalls(message.tool_calls_json);
-                                if (parsedToolCalls.length === 0) return null;
+                            {options.includeToolParams && (() => {
+                                const nativeToolCalls = message.tool_calls_json
+                                    ? parseToolCalls(message.tool_calls_json)
+                                    : [];
+                                const hintCalls = extractMcpToolCallHints(message.content || "");
+                                if (nativeToolCalls.length === 0 && hintCalls.length === 0) return null;
 
                                 return (
                                     <div style={{ marginTop: "12px" }}>
-                                        {parsedToolCalls.map((tc, tcIndex) => {
+                                        {nativeToolCalls.map((tc, tcIndex) => {
                                             const parts = tc.fn_name.split("__");
                                             const toolName = parts.length > 1 ? parts.slice(1).join("__") : tc.fn_name;
                                             const serverName = parts[0] || "unknown";
 
                                             return (
-                                                <div key={tcIndex} style={styles.toolCallBox}>
+                                                <div key={`native-${tcIndex}`} style={styles.toolCallBox}>
                                                     <div style={styles.toolCallHeader}>
                                                         <span>🔧</span>
                                                         <span>{serverName}</span>
@@ -466,14 +475,47 @@ const ConversationExportRenderer: React.FC<ConversationExportRendererProps> = ({
                                                 </div>
                                             );
                                         })}
+                                        {hintCalls.map((hint, hintIndex) => {
+                                            const fromDb = hint.call_id ? toolCallById.get(hint.call_id) : undefined;
+                                            const serverName = fromDb?.server_name ?? hint.server_name ?? "unknown";
+                                            const toolName = fromDb?.tool_name ?? hint.tool_name ?? "unknown";
+                                            const paramsText = fromDb?.parameters ?? hint.parameters ?? "{}";
+                                            return (
+                                                <div key={`hint-${hintIndex}`} style={styles.toolCallBox}>
+                                                    <div style={styles.toolCallHeader}>
+                                                        <span>🔧</span>
+                                                        <span>{serverName}</span>
+                                                        <span style={{ color: colors.mutedForeground }}>-</span>
+                                                        <span>{toolName}</span>
+                                                        <span style={styles.toolCallBadge}>参数</span>
+                                                    </div>
+                                                    <pre style={styles.codeBlock}>
+                                                        {formatJsonContent(paramsText)}
+                                                    </pre>
+                                                </div>
+                                            );
+                                        })}
                                     </div>
                                 );
                             })()}
 
                             {/* 工具执行结果 */}
-                            {options.includeToolResults && toolCallMap.has(message.id) && (() => {
-                                const relatedCalls = toolCallMap.get(message.id);
-                                if (!relatedCalls || relatedCalls.length === 0) return null;
+                            {options.includeToolResults && (() => {
+                                const relatedById = new Map<number, (typeof toolCalls)[number]>();
+                                const mappedCalls = toolCallMap.get(message.id) || [];
+                                for (const tc of mappedCalls) {
+                                    relatedById.set(tc.id, tc);
+                                }
+                                const hintCalls = extractMcpToolCallHints(message.content || "");
+                                for (const hint of hintCalls) {
+                                    if (!hint.call_id) continue;
+                                    const call = toolCallById.get(hint.call_id);
+                                    if (call) {
+                                        relatedById.set(call.id, call);
+                                    }
+                                }
+                                const relatedCalls = Array.from(relatedById.values());
+                                if (relatedCalls.length === 0) return null;
 
                                 return (
                                     <div style={{ marginTop: "12px" }}>
@@ -494,7 +536,7 @@ const ConversationExportRenderer: React.FC<ConversationExportRendererProps> = ({
                                                 </div>
                                                 {tc.status === "success" && tc.result && (
                                                     <pre style={styles.codeBlock}>
-                                                        {tc.result}
+                                                        {formatJsonContent(tc.result)}
                                                     </pre>
                                                 )}
                                                 {tc.status === "failed" && tc.error && (
@@ -557,6 +599,8 @@ export function renderPdfExportContent(
 
     // 过滤消息
     const filteredMessages = messages.filter((msg) => {
+        if (msg.message_type === "tool_result") return false;
+        if (msg.message_type === "user" && msg.content?.startsWith("Tool execution results:\n")) return false;
         if (msg.message_type === "system") return options.includeSystemPrompt;
         if (msg.message_type === "reasoning") return options.includeReasoning;
         return true;
@@ -638,10 +682,14 @@ export function renderPdfExportContent(
             const label = getMessageLabel(message.message_type);
 
             let toolCallsHtml = "";
+            const mcpHints = extractMcpToolCallHints(message.content || "");
+            const hintCallIds = mcpHints
+                .map((hint) => hint.call_id)
+                .filter((callId): callId is number => typeof callId === "number");
             
             // 工具调用参数
-            if (options.includeToolParams && message.tool_calls_json) {
-                const parsedCalls = parseToolCalls(message.tool_calls_json);
+            if (options.includeToolParams) {
+                const parsedCalls = message.tool_calls_json ? parseToolCalls(message.tool_calls_json) : [];
                 if (parsedCalls.length > 0) {
                     toolCallsHtml += parsedCalls.map((tc) => {
                         const parts = tc.fn_name.split("__");
@@ -654,20 +702,30 @@ export function renderPdfExportContent(
                             </div>
                         `;
                     }).join("");
+                } else if (toolCallMap.has(message.id)) {
+                    const mappedCalls = toolCallMap.get(message.id) || [];
+                    toolCallsHtml += mappedCalls.map((tc) => {
+                        return `
+                            <div style="margin-top: 8px; padding: 8px; background: #f9f9f9; border-left: 3px solid #2563eb; font-size: 11px;">
+                                <div style="font-weight: 500; margin-bottom: 4px; color: #333;">🔧 ${escapeHtml(tc.server_name)} / ${escapeHtml(tc.tool_name)}</div>
+                                <pre style="background: #f0f0f0; padding: 6px; border-radius: 3px; margin: 0; overflow-x: auto;"><code style="font-family: Consolas, Monaco, monospace; font-size: 10px; color: #333; white-space: pre-wrap; word-break: break-word;">${escapeHtml(formatJsonContent(tc.parameters))}</code></pre>
+                            </div>
+                        `;
+                    }).join("");
                 }
             }
 
             // 工具执行结果
             if (options.includeToolResults && toolCallMap.has(message.id)) {
-                const relatedCalls = toolCallMap.get(message.id);
-                if (relatedCalls && relatedCalls.length > 0) {
+                const relatedCalls = (toolCallMap.get(message.id) || []).filter(
+                    (call) => call.status === "success" && call.result,
+                );
+                if (relatedCalls.length > 0) {
                     toolCallsHtml += relatedCalls.map((tc) => {
                         const statusText = tc.status === "success" ? "✓" : tc.status === "failed" ? "✗" : "...";
                         let resultHtml = "";
-                        if (tc.status === "success" && tc.result) {
-                            resultHtml = `<pre style="background: #f0f0f0; padding: 6px; border-radius: 3px; margin: 4px 0 0; overflow-x: auto;"><code style="font-family: Consolas, Monaco, monospace; font-size: 10px; color: #333; white-space: pre-wrap; word-break: break-word;">${escapeHtml(tc.result)}</code></pre>`;
-                        } else if (tc.status === "failed" && tc.error) {
-                            resultHtml = `<div style="color: #dc2626; font-size: 10px; margin-top: 4px;">错误: ${escapeHtml(tc.error)}</div>`;
+                        if (tc.result) {
+                            resultHtml = `<pre style="background: #f0f0f0; padding: 6px; border-radius: 3px; margin: 4px 0 0; overflow-x: auto;"><code style="font-family: Consolas, Monaco, monospace; font-size: 10px; color: #333; white-space: pre-wrap; word-break: break-word;">${escapeHtml(formatJsonContent(tc.result))}</code></pre>`;
                         }
                         return `
                             <div style="margin-top: 8px; padding: 8px; background: #f9f9f9; border-left: 3px solid ${tc.status === "success" ? "#22c55e" : tc.status === "failed" ? "#dc2626" : "#666"}; font-size: 11px;">
@@ -682,7 +740,7 @@ export function renderPdfExportContent(
             return `
                 <div style="margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #e5e5e5;">
                     <div style="font-size: 11px; font-weight: 600; color: #666; margin-bottom: 6px;">${escapeHtml(label)}</div>
-                    <div style="color: #111; font-size: 12px; line-height: 1.6;">${markdownToHtml(message.content || "")}</div>
+                    <div style="color: #111; font-size: 12px; line-height: 1.6;">${markdownToHtml(stripMcpToolCallMarkers(message.content || ""))}</div>
                     ${toolCallsHtml}
                 </div>
             `;

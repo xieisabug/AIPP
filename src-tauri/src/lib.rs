@@ -44,6 +44,10 @@ use crate::api::llm_api::{
     preview_model_list, update_llm_provider, update_llm_provider_config, update_selected_models,
 };
 use crate::api::operation_api::{confirm_acp_permission, confirm_operation_permission};
+use crate::api::scheduled_task_api::{
+    create_scheduled_task, delete_scheduled_task, list_scheduled_task_logs, list_scheduled_tasks,
+    list_scheduled_task_runs, run_scheduled_task_now, update_scheduled_task,
+};
 use crate::api::ai::acp::AcpPermissionState;
 use crate::api::skill_api::{
     bulk_update_assistant_skills, cleanup_orphaned_skill_configs, delete_skill, fetch_official_skills,
@@ -99,6 +103,7 @@ use crate::artifacts::{
 use crate::db::assistant_db::AssistantDatabase;
 use crate::db::llm_db::LLMDatabase;
 use crate::db::mcp_db::MCPDatabase;
+use crate::db::scheduled_task_db::ScheduledTaskDatabase;
 use crate::db::sub_task_db::SubTaskDatabase;
 use crate::db::system_db::SystemDatabase;
 use crate::mcp::builtin_mcp::{
@@ -140,9 +145,10 @@ use crate::mcp::registry_api::{
 };
 use crate::window::{
     awaken_aipp, create_ask_window, create_chat_ui_window_hidden, create_config_window_hidden,
-    ensure_hidden_search_window, handle_open_ask_window, open_artifact_collections_window,
-    open_artifact_preview_window, open_chat_ui_window, open_chat_ui_window_inner,
-    open_config_window, open_config_window_inner, open_plugin_store_window, open_plugin_window,
+    create_schedule_window_hidden, ensure_hidden_search_window, handle_open_ask_window,
+    open_artifact_collections_window, open_artifact_preview_window, open_chat_ui_window,
+    open_chat_ui_window_inner, open_config_window, open_config_window_inner, open_plugin_window,
+    open_schedule_window,
 };
 use db::conversation_db::ConversationDatabase;
 use db::database_upgrade;
@@ -428,6 +434,7 @@ pub fn run() {
             let plugin_db = PluginDatabase::new(&app_handle)?;
             let mcp_db = MCPDatabase::new(&app_handle)?;
             let sub_task_db = SubTaskDatabase::new(&app_handle)?;
+            let scheduled_task_db = ScheduledTaskDatabase::new(&app_handle)?;
             let artifacts_db = ArtifactsDatabase::new(&app_handle)?;
             let skill_db = db::skill_db::SkillDatabase::new(&app_handle)?;
 
@@ -438,6 +445,7 @@ pub fn run() {
             plugin_db.create_tables()?;
             mcp_db.create_tables()?;
             sub_task_db.create_tables()?;
+            scheduled_task_db.create_tables()?;
             artifacts_db.create_tables()?;
             skill_db.create_tables()?;
 
@@ -477,6 +485,7 @@ pub fn run() {
                 {
                     create_chat_ui_window_hidden(&app_handle);
                     create_config_window_hidden(&app_handle);
+                    create_schedule_window_hidden(&app_handle);
                     create_ask_window(&app_handle);
                 }
             }
@@ -507,7 +516,7 @@ pub fn run() {
             open_config_window,
             open_chat_ui_window,
             open_plugin_window,
-            open_plugin_store_window,
+            open_schedule_window,
             open_artifact_preview_window,
             save_config,
             get_config,
@@ -704,6 +713,13 @@ pub fn run() {
             download_and_install_update,
             download_and_install_update_with_proxy,
             get_app_version,
+            list_scheduled_tasks,
+            create_scheduled_task,
+            update_scheduled_task,
+            delete_scheduled_task,
+            run_scheduled_task_now,
+            list_scheduled_task_logs,
+            list_scheduled_task_runs,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");

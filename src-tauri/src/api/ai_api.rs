@@ -1142,12 +1142,13 @@ pub async fn cancel_ai(
 
 #[tauri::command]
 #[instrument(
-    skip(app_handle, feature_config_state, message_token_manager, window),
+    skip(app_handle, feature_config_state, activity_manager, message_token_manager, window),
     fields(message_id)
 )]
 pub async fn regenerate_ai(
     app_handle: tauri::AppHandle,
     feature_config_state: State<'_, FeatureConfigState>,
+    activity_manager: State<'_, ConversationActivityManager>,
     message_token_manager: State<'_, MessageTokenManager>,
     window: tauri::Window,
     message_id: i64,
@@ -1167,6 +1168,17 @@ pub async fn regenerate_ai(
         .read(conversation_id)?
         .ok_or(AppError::DatabaseError("未找到对话".to_string()))?;
     let messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id)?;
+
+    // 重新生成开始时，优先让被点击的消息闪亮（可被后续 streaming 覆盖）
+    if message.message_type == "user" {
+        activity_manager
+            .set_user_pending(&app_handle, conversation_id, message_id)
+            .await;
+    } else {
+        activity_manager
+            .set_assistant_streaming(&app_handle, conversation_id, message_id)
+            .await;
+    }
 
     // 根据消息类型决定处理逻辑
     let (filtered_messages, _parent_message_id) = if message.message_type == "user" {

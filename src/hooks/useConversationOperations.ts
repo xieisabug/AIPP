@@ -26,6 +26,7 @@ export interface UseConversationOperationsProps {
     setAiIsResponsing: (isResponsing: boolean) => void;
     onChangeConversationId: (conversationId: string) => void;
     setShiningMessageIds: React.Dispatch<React.SetStateAction<Set<number>>>;
+    setManualShineMessage: (messageId: number | null) => void;
     updateShiningMessages: () => void;
     clearShiningMessages: () => void;
     assistantTypePluginMap: Map<number, any>;
@@ -69,6 +70,7 @@ export function useConversationOperations({
     setAiIsResponsing,
     onChangeConversationId,
     setShiningMessageIds,
+    setManualShineMessage,
     updateShiningMessages,
     clearShiningMessages,
     assistantTypePluginMap,
@@ -94,8 +96,8 @@ export function useConversationOperations({
             // 设置AI响应状态
             setAiIsResponsing(true);
 
-            // 使用函数式更新设置被点击的消息显示shine-border
-            setShiningMessageIds(() => new Set([regenerateMessageId]));
+            // 点击的消息先闪亮，等待后端 activity_focus 接管
+            setManualShineMessage(regenerateMessageId);
 
             invoke<AiResponse>("regenerate_ai", {
                 messageId: regenerateMessageId,
