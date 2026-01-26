@@ -219,12 +219,8 @@ async fn handle_tool_execution_result(
             // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
             broadcast_mcp_tool_call_update(app_handle, &tool_call);
 
-            // Restore focus before continuation so the UI keeps shining while waiting.
-            if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
-                activity_manager
-                    .restore_after_mcp(app_handle, tool_call.conversation_id)
-                    .await;
-            }
+            // Defer focus restoration until after continuation is triggered to avoid clearing MCP focus
+            // before the assistant streaming state is set.
 
             // 处理对话继续逻辑（仅当 trigger_continuation 为 true 时）
             if trigger_continuation {
@@ -242,8 +238,20 @@ async fn handle_tool_execution_result(
                 {
                     warn!(error=%e, "tool execution succeeded but continuation failed");
                 }
+                // Restore focus after continuation so the assistant streaming state can take over.
+                if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+                    activity_manager
+                        .restore_after_mcp(&app_handle, tool_call.conversation_id)
+                        .await;
+                }
             } else {
                 debug!("trigger_continuation=false, skipping tool continuation, call_id={}", call_id);
+                // No continuation path: restore immediately.
+                if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+                    activity_manager
+                        .restore_after_mcp(&app_handle, tool_call.conversation_id)
+                        .await;
+                }
             }
         }
         Err(error) => {
@@ -262,7 +270,7 @@ async fn handle_tool_execution_result(
             // 工具执行失败后，恢复 MCP 执行前的活动状态
             if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
                 activity_manager
-                    .restore_after_mcp(app_handle, tool_call.conversation_id)
+                    .restore_after_mcp(&app_handle, tool_call.conversation_id)
                     .await;
             }
         }
@@ -754,7 +762,7 @@ pub async fn send_mcp_tool_results(
     let _lock_guard = continuation_lock.lock().await;
 
     // 触发续写 - 使用专门的批量续写实现
-    match batch_tool_result_continue_ask_ai_impl(
+    let continuation_result = match batch_tool_result_continue_ask_ai_impl(
         app_handle.clone(),
         window,
         conversation_id,
@@ -778,7 +786,16 @@ pub async fn send_mcp_tool_results(
             );
             Err(format!("Anyhow错误: {}", e))
         }
+    };
+
+    // Restore focus after batch continuation to keep MCP executing state until streaming starts.
+    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+        activity_manager
+            .restore_after_mcp(&app_handle, conversation_id)
+            .await;
     }
+
+    continuation_result
 }
 
 /// 工具成功后的续写逻辑调度：区分首次与重试。

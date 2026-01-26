@@ -83,6 +83,7 @@ interface InputAreaProps {
     aiIsResponsing: boolean;
     placement?: "top" | "bottom";
     isMobile?: boolean;
+    sidebarExpanded?: boolean;
 }
 const IMAGE_AREA_HEIGHT = 80;
 
@@ -100,6 +101,7 @@ const InputArea = React.memo(
                 aiIsResponsing,
                 placement = "bottom",
                 isMobile = false,
+                sidebarExpanded = false,
             },
             ref
         ) => {
@@ -805,9 +807,14 @@ const InputArea = React.memo(
                 textareaRef.current?.focus();
             }, [textareaRef]);
 
+            // Calculate container right offset when sidebar is expanded
+            const containerStyle = placement === "bottom" && sidebarExpanded && !isMobile 
+                ? { right: 170 + 256 } 
+                : undefined;
+
             return (
                 <div className={`input-area ${placement} ${isMobile ? 'mobile' : ''}`}>
-                    <div className="input-area-textarea-container">
+                    <div className="input-area-textarea-container" style={containerStyle}>
                         <div className="input-area-img-container" onClick={handleImageContainerClick}>
                             {renderFiles()}
                         </div>
@@ -846,6 +853,7 @@ const InputArea = React.memo(
                         onClick={handleChooseFile}
                         icon={<Add className="fill-foreground" />}
                         className={`input-area-add-button ${placement}`}
+                        style={placement === "bottom" && sidebarExpanded && !isMobile ? { right: 190 + 256 } : undefined}
                     />
                     <CircleButton
                         size={placement === "bottom" ? "large" : "medium"}
@@ -859,6 +867,7 @@ const InputArea = React.memo(
                         }
                         primary
                         className={`input-area-send-button ${placement}`}
+                        style={placement === "bottom" && sidebarExpanded && !isMobile ? { right: 107 + 256 } : undefined}
                     />
 
                     <BangCompletionList

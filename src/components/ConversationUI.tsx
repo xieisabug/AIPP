@@ -45,6 +45,12 @@ import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 import ConversationHeader from "./conversation/ConversationHeader";
 import ConversationContent from "./conversation/ConversationContent";
 
+// 导入 Chat Sidebar 相关
+import { ChatSidebar } from "./chat-sidebar";
+import { useTodoList } from "@/hooks/useTodoList";
+import { useArtifactExtractor } from "@/hooks/useArtifactExtractor";
+import { useContextList } from "@/hooks/useContextList";
+
 // 暴露给外部的方法接口
 export interface ConversationUIRef {
     focus: () => void;
@@ -103,6 +109,16 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 防泄露模式：获取重置函数
         const { resetReveal } = useAntiLeakage();
+
+        // ============= Chat Sidebar Hooks =============
+        
+        // Todo list from built-in agent tool
+        const { todos } = useTodoList({
+            conversationId: conversationId ? parseInt(conversationId) : null,
+        });
+
+        // Sidebar expansion state
+        const [sidebarExpanded, setSidebarExpanded] = useState(false);
 
         // ============= 事件处理逻辑 =============
 
@@ -340,6 +356,19 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             generationGroups: messageGroupsData.generationGroups,
             groupRootMessageIds: messageGroupsData.groupRootMessageIds,
             getMessageVersionInfo: messageGroupsData.getMessageVersionInfo,
+        });
+
+        // ============= Chat Sidebar 数据提取 =============
+        
+        // Artifacts from messages (code blocks)
+        const { artifacts } = useArtifactExtractor({
+            messages: allDisplayMessages,
+        });
+
+        // Context items (user files + MCP tool calls)
+        const { contextItems } = useContextList({
+            userFiles: fileInfoList,
+            mcpToolCallStates,
         });
 
         // 助手运行时API
@@ -620,63 +649,79 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // ============= 组件渲染 =============
 
         return (
-            <div ref={dropRef} className={`h-full relative flex flex-col bg-background ${isMobile ? '' : 'rounded-xl'}`}>
-                {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}
-                {!isMobile && (
-                    <ConversationHeader
-                        conversationId={conversationId}
-                        conversation={conversation}
-                        onEdit={openTitleEditDialog}
-                        onDelete={handleDeleteConversationSuccess}
-                    />
-                )}
+            <div ref={dropRef} className={`h-full relative flex bg-background ${isMobile ? '' : 'rounded-xl'}`}>
+                {/* Main content area */}
+                <div className="flex-1 flex flex-col min-w-0">
+                    {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}
+                    {!isMobile && (
+                        <ConversationHeader
+                            conversationId={conversationId}
+                            conversation={conversation}
+                            onEdit={openTitleEditDialog}
+                            onDelete={handleDeleteConversationSuccess}
+                        />
+                    )}
 
-                <div
-                    ref={scrollContainerRef}
-                    onScroll={handleScroll}
-                    className={`h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
-                >
-                    <ConversationContent
-                        conversationId={conversationId}
-                        // MessageList props
-                        allDisplayMessages={allDisplayMessages}
-                        streamingMessages={streamingMessages}
-                        shiningMessageIds={shiningMessageIds}
-                        reasoningExpandStates={reasoningExpandStates}
-                        mcpToolCallStates={mcpToolCallStates}
-                        generationGroups={messageGroupsData.generationGroups}
-                        selectedVersions={messageGroupsData.selectedVersions}
-                        getGenerationGroupControl={messageGroupsData.getGenerationGroupControl}
-                        handleGenerationVersionChange={messageGroupsData.handleGenerationVersionChange}
-                        onCodeRun={handleArtifact}
-                        onMessageRegenerate={handleMessageRegenerate}
-                        onMessageEdit={handleMessageEdit}
-                        onMessageFork={handleMessageFork}
-                        onToggleReasoningExpand={toggleReasoningExpand}
-                        // NewChatComponent props
-                        selectedText={selectedText}
-                        selectedAssistant={selectedAssistant}
-                        assistants={assistants}
-                        setSelectedAssistant={setSelectedAssistant}
+                    <div
+                        ref={scrollContainerRef}
+                        onScroll={handleScroll}
+                        className={`h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
+                    >
+                        <ConversationContent
+                            conversationId={conversationId}
+                            // MessageList props
+                            allDisplayMessages={allDisplayMessages}
+                            streamingMessages={streamingMessages}
+                            shiningMessageIds={shiningMessageIds}
+                            reasoningExpandStates={reasoningExpandStates}
+                            mcpToolCallStates={mcpToolCallStates}
+                            generationGroups={messageGroupsData.generationGroups}
+                            selectedVersions={messageGroupsData.selectedVersions}
+                            getGenerationGroupControl={messageGroupsData.getGenerationGroupControl}
+                            handleGenerationVersionChange={messageGroupsData.handleGenerationVersionChange}
+                            onCodeRun={handleArtifact}
+                            onMessageRegenerate={handleMessageRegenerate}
+                            onMessageEdit={handleMessageEdit}
+                            onMessageFork={handleMessageFork}
+                            onToggleReasoningExpand={toggleReasoningExpand}
+                            // NewChatComponent props
+                            selectedText={selectedText}
+                            selectedAssistant={selectedAssistant}
+                            assistants={assistants}
+                            setSelectedAssistant={setSelectedAssistant}
+                        />
+                        <div ref={messagesEndRef} />
+                    </div>
+
+                    {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleDropFiles} /> : null}
+
+                    <InputArea
+                        ref={inputAreaRef}
+                        inputText={inputText}
+                        setInputText={setInputText}
+                        fileInfoList={fileInfoList}
+                        handleChooseFile={handleChooseFile}
+                        handleDeleteFile={handleDeleteFile}
+                        handlePaste={handlePaste}
+                        handleSend={handleSend}
+                        aiIsResponsing={aiIsResponsing}
+                        placement="bottom"
+                        isMobile={isMobile}
+                        sidebarExpanded={sidebarExpanded}
                     />
-                    <div ref={messagesEndRef} />
                 </div>
 
-                {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleDropFiles} /> : null}
-
-                <InputArea
-                    ref={inputAreaRef}
-                    inputText={inputText}
-                    setInputText={setInputText}
-                    fileInfoList={fileInfoList}
-                    handleChooseFile={handleChooseFile}
-                    handleDeleteFile={handleDeleteFile}
-                    handlePaste={handlePaste}
-                    handleSend={handleSend}
-                    aiIsResponsing={aiIsResponsing}
-                    placement="bottom"
-                    isMobile={isMobile}
-                />
+                {/* Right sidebar - only show on desktop */}
+                {!isMobile && conversationId && (
+                    <ChatSidebar
+                        todos={todos}
+                        artifacts={artifacts}
+                        contextItems={contextItems}
+                        conversationId={conversationId}
+                        onExpandChange={setSidebarExpanded}
+                        onArtifactClick={(artifact) => handleArtifact(artifact.language, artifact.code)}
+                    />
+                )}
 
                 <ConversationTitleEditDialog
                     isOpen={titleEditDialogIsOpen}

@@ -739,6 +739,26 @@ impl ConversationDatabase {
             [],
         )?;
 
+        // 创建对话Todo表
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS conversation_todo (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                active_form TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (conversation_id) REFERENCES conversation(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversation_todo_conversation_id ON conversation_todo(conversation_id)",
+            [],
+        )?;
+
         Ok(())
     }
 
@@ -1144,6 +1164,129 @@ impl ConversationDatabase {
             },
         )
     }
+
+    // ============= Todo CRUD Methods =============
+
+    /// Get all todos for a conversation
+    #[instrument(level = "debug", skip(self), err)]
+    pub fn get_todos(&self, conversation_id: i64) -> Result<Vec<ConversationTodo>, AppError> {
+        let conn = self.get_connection().map_err(AppError::from)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, conversation_id, content, status, active_form, sort_order, created_time, updated_time
+                 FROM conversation_todo
+                 WHERE conversation_id = ?1
+                 ORDER BY sort_order ASC, id ASC",
+            )
+            .map_err(AppError::from)?;
+
+        let todos = stmt
+            .query_map(params![conversation_id], |row| {
+                Ok(ConversationTodo {
+                    id: row.get(0)?,
+                    conversation_id: row.get(1)?,
+                    content: row.get(2)?,
+                    status: row.get(3)?,
+                    active_form: row.get(4)?,
+                    sort_order: row.get(5)?,
+                    created_time: get_required_datetime_from_row(row, 6, "created_time")?,
+                    updated_time: get_required_datetime_from_row(row, 7, "updated_time")?,
+                })
+            })
+            .map_err(AppError::from)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(AppError::from)?;
+
+        Ok(todos)
+    }
+
+    /// Replace all todos for a conversation (delete existing and insert new)
+    #[instrument(level = "debug", skip(self, todos), err)]
+    pub fn replace_todos(
+        &self,
+        conversation_id: i64,
+        todos: Vec<ConversationTodoInput>,
+    ) -> Result<(), AppError> {
+        let conn = self.get_connection().map_err(AppError::from)?;
+
+        // Start transaction
+        conn.execute("BEGIN TRANSACTION", []).map_err(AppError::from)?;
+
+        // Delete existing todos
+        conn.execute(
+            "DELETE FROM conversation_todo WHERE conversation_id = ?1",
+            params![conversation_id],
+        )
+        .map_err(|e| {
+            let _ = conn.execute("ROLLBACK", []);
+            AppError::from(e)
+        })?;
+
+        // Insert new todos
+        for (index, todo) in todos.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO conversation_todo (conversation_id, content, status, active_form, sort_order)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    conversation_id,
+                    &todo.content,
+                    &todo.status,
+                    &todo.active_form,
+                    index as i32
+                ],
+            )
+            .map_err(|e| {
+                let _ = conn.execute("ROLLBACK", []);
+                AppError::from(e)
+            })?;
+        }
+
+        // Commit transaction
+        conn.execute("COMMIT", []).map_err(AppError::from)?;
+
+        debug!(
+            conversation_id = conversation_id,
+            todo_count = todos.len(),
+            "Replaced todos for conversation"
+        );
+
+        Ok(())
+    }
+
+    /// Delete all todos for a conversation
+    #[instrument(level = "debug", skip(self), err)]
+    pub fn delete_todos(&self, conversation_id: i64) -> Result<(), AppError> {
+        let conn = self.get_connection().map_err(AppError::from)?;
+        conn.execute(
+            "DELETE FROM conversation_todo WHERE conversation_id = ?1",
+            params![conversation_id],
+        )
+        .map_err(AppError::from)?;
+        Ok(())
+    }
+}
+
+/// Todo item stored in database
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ConversationTodo {
+    pub id: i64,
+    pub conversation_id: i64,
+    pub content: String,
+    pub status: String,
+    pub active_form: String,
+    pub sort_order: i32,
+    #[serde(serialize_with = "serialize_datetime_millis")]
+    pub created_time: DateTime<Utc>,
+    #[serde(serialize_with = "serialize_datetime_millis")]
+    pub updated_time: DateTime<Utc>,
+}
+
+/// Input for creating/updating a todo item
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ConversationTodoInput {
+    pub content: String,
+    pub status: String,
+    pub active_form: String,
 }
 
 /// 对话token统计信息

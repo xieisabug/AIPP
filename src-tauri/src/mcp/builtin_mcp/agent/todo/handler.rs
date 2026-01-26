@@ -4,36 +4,125 @@
 //! allowing tracking of progress on complex multi-step tasks.
 
 use super::types::*;
+use crate::db::conversation_db::{ConversationDatabase, ConversationTodoInput};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use tracing::{debug, info, instrument, warn};
+use tauri::AppHandle;
+use tracing::{debug, error, info, instrument, warn};
 
 /// State for todo lists, keyed by conversation_id
-#[derive(Debug, Clone, Default)]
+/// Uses both in-memory cache and database for persistence
+#[derive(Debug, Clone)]
 pub struct TodoState {
-    /// Todo lists per conversation
+    /// In-memory cache of todo lists per conversation
     todos: Arc<RwLock<HashMap<i64, Vec<TodoItem>>>>,
+    /// App handle for database access (set after app initialization)
+    app_handle: Arc<RwLock<Option<AppHandle>>>,
+}
+
+impl Default for TodoState {
+    fn default() -> Self {
+        Self {
+            todos: Arc::new(RwLock::new(HashMap::new())),
+            app_handle: Arc::new(RwLock::new(None)),
+        }
+    }
 }
 
 impl TodoState {
     pub fn new() -> Self {
-        Self { todos: Arc::new(RwLock::new(HashMap::new())) }
+        Self::default()
     }
 
-    /// Get todos for a conversation
+    /// Set the app handle for database access (called during app setup)
+    pub fn set_app_handle(&self, app_handle: AppHandle) {
+        *self.app_handle.write().unwrap() = Some(app_handle);
+    }
+
+    /// Get todos for a conversation (from cache or database)
     pub fn get_todos(&self, conversation_id: i64) -> Vec<TodoItem> {
-        self.todos.read().unwrap().get(&conversation_id).cloned().unwrap_or_default()
+        // First check in-memory cache
+        if let Some(todos) = self.todos.read().unwrap().get(&conversation_id) {
+            return todos.clone();
+        }
+
+        // If not in cache, try to load from database
+        if let Some(app_handle) = self.app_handle.read().unwrap().as_ref() {
+            if let Ok(db) = ConversationDatabase::new(app_handle) {
+                if let Ok(db_todos) = db.get_todos(conversation_id) {
+                    let todos: Vec<TodoItem> = db_todos
+                        .into_iter()
+                        .map(|t| TodoItem {
+                            content: t.content,
+                            status: match t.status.as_str() {
+                                "in_progress" => TodoStatus::InProgress,
+                                "completed" => TodoStatus::Completed,
+                                _ => TodoStatus::Pending,
+                            },
+                            active_form: t.active_form,
+                        })
+                        .collect();
+
+                    // Cache the loaded todos
+                    self.todos.write().unwrap().insert(conversation_id, todos.clone());
+                    return todos;
+                }
+            }
+        }
+
+        Vec::new()
     }
 
-    /// Set todos for a conversation
+    /// Set todos for a conversation (updates cache and database)
     pub fn set_todos(&self, conversation_id: i64, todos: Vec<TodoItem>) {
-        self.todos.write().unwrap().insert(conversation_id, todos);
+        // Update in-memory cache
+        self.todos.write().unwrap().insert(conversation_id, todos.clone());
+
+        // Persist to database
+        if let Some(app_handle) = self.app_handle.read().unwrap().as_ref() {
+            if let Ok(db) = ConversationDatabase::new(app_handle) {
+                let db_todos: Vec<ConversationTodoInput> = todos
+                    .into_iter()
+                    .map(|t| ConversationTodoInput {
+                        content: t.content,
+                        status: t.status.to_string(),
+                        active_form: t.active_form,
+                    })
+                    .collect();
+
+                if let Err(e) = db.replace_todos(conversation_id, db_todos) {
+                    error!(
+                        conversation_id = conversation_id,
+                        error = ?e,
+                        "Failed to persist todos to database"
+                    );
+                } else {
+                    debug!(
+                        conversation_id = conversation_id,
+                        "Todos persisted to database"
+                    );
+                }
+            }
+        }
     }
 
     /// Clear todos for a conversation
     #[allow(dead_code)]
     pub fn clear_todos(&self, conversation_id: i64) {
         self.todos.write().unwrap().remove(&conversation_id);
+
+        // Also clear from database
+        if let Some(app_handle) = self.app_handle.read().unwrap().as_ref() {
+            if let Ok(db) = ConversationDatabase::new(app_handle) {
+                if let Err(e) = db.delete_todos(conversation_id) {
+                    error!(
+                        conversation_id = conversation_id,
+                        error = ?e,
+                        "Failed to delete todos from database"
+                    );
+                }
+            }
+        }
     }
 }
 

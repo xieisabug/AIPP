@@ -108,8 +108,9 @@ use crate::db::sub_task_db::SubTaskDatabase;
 use crate::db::system_db::SystemDatabase;
 use crate::mcp::builtin_mcp::{
     add_or_update_aipp_builtin_server, execute_aipp_builtin_tool, init_builtin_mcp_servers,
-    list_aipp_builtin_templates, OperationState,
+    list_aipp_builtin_templates, OperationState, TodoState,
 };
+use crate::api::todo_api::get_todos;
 use crate::mcp::execution_api::{
     continue_with_error, create_mcp_tool_call, execute_mcp_tool_call, get_mcp_tool_call,
     get_mcp_tool_calls_by_conversation, send_mcp_tool_results, stop_mcp_tool_call,
@@ -461,6 +462,10 @@ pub fn run() {
                 warn!(error = %e, "Failed to initialize builtin MCP servers");
             }
 
+            // Initialize TodoState with app handle for database persistence
+            let todo_state = app.state::<TodoState>();
+            todo_state.set_app_handle(app_handle.clone());
+
             app.manage(initialize_state(&app_handle));
             app.manage(initialize_name_cache_state(&app_handle));
 
@@ -500,7 +505,8 @@ pub fn run() {
         .manage(MessageTokenManager::new())
         .manage(ConversationActivityManager::new())
         .manage(OperationState::new())
-        .manage(AcpPermissionState::new());
+        .manage(AcpPermissionState::new())
+        .manage(TodoState::new());
     #[cfg(desktop)]
     let app = app.manage(CopilotLspState::default());
     let app = app
@@ -720,6 +726,8 @@ pub fn run() {
             run_scheduled_task_now,
             list_scheduled_task_logs,
             list_scheduled_task_runs,
+            // Todo commands
+            get_todos,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -454,14 +454,15 @@ pub async fn execute_aipp_builtin_tool(
                 }
                 "todo_write" => {
                     use agent::todo::{TodoHandler, TodoItem, TodoState, TodoWriteRequest};
+                    use crate::api::todo_api::{emit_todo_update, TodoItemResponse};
 
-                    // Get or create TodoState from app state
+                    // Get TodoState from app state (must use the managed state)
                     let state = app_handle
                         .try_state::<TodoState>()
                         .map(|s| s.inner().clone())
                         .unwrap_or_else(TodoState::new);
 
-                    let todo_handler = TodoHandler::new(state);
+                    let todo_handler = TodoHandler::new(state.clone());
 
                     // Parse todos array
                     let todos_value = match args.get("todos") {
@@ -482,6 +483,20 @@ pub async fn execute_aipp_builtin_tool(
 
                     match todo_handler.todo_write(request, conversation_id) {
                         Ok(response) => {
+                            // Emit todo_update event to frontend
+                            if let Some(conv_id) = conversation_id {
+                                let stored_todos = state.get_todos(conv_id);
+                                let todo_responses: Vec<TodoItemResponse> = stored_todos
+                                    .into_iter()
+                                    .map(|t| TodoItemResponse {
+                                        content: t.content,
+                                        status: t.status.to_string(),
+                                        active_form: t.active_form,
+                                    })
+                                    .collect();
+                                emit_todo_update(&app_handle, conv_id, &todo_responses);
+                            }
+
                             let text = format!(
                                 "{}\n\nCurrent task: {}",
                                 response.message,
