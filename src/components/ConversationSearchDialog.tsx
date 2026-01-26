@@ -1,5 +1,5 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "./ui/command";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { CommandDialog, CommandInput } from "./ui/command";
 import { searchConversations } from "../services/conversationSearchService";
 import { ConversationSearchHit } from "../data/Conversation";
 import { useAntiLeakage } from "../contexts/AntiLeakageContext";
@@ -58,7 +58,7 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
             }
             const escaped = escapeRegExp(highlightTerm);
             const regex = new RegExp(escaped, "gi");
-            const nodes: Array<string | JSX.Element> = [];
+            const nodes: Array<string | ReactNode> = [];
             let lastIndex = 0;
             let match: RegExpExecArray | null;
             let index = 0;

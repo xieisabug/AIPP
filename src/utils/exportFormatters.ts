@@ -524,9 +524,9 @@ export function generateExportHtml(
         }
 
         // 工具执行结果
-        if (options.includeToolResults && toolCallMap.has(message.id)) {
-            const relatedCalls = (toolCallMap.get(message.id) || []).filter(
-                (tc) => tc.status === 'success' && tc.result,
+        if (options.includeToolResults) {
+            const relatedCalls = data.toolCalls.filter(
+                (tc: MCPToolCall) => tc.message_id === message.id && tc.status === 'success' && tc.result,
             );
             for (const tc of relatedCalls) {
                 html += `

@@ -69,7 +69,7 @@ export function useConversationOperations({
     aiIsResponsing,
     setAiIsResponsing,
     onChangeConversationId,
-    setShiningMessageIds,
+    setShiningMessageIds: _setShiningMessageIds,
     setManualShineMessage,
     updateShiningMessages,
     clearShiningMessages,

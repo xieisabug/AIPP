@@ -682,10 +682,6 @@ export function renderPdfExportContent(
             const label = getMessageLabel(message.message_type);
 
             let toolCallsHtml = "";
-            const mcpHints = extractMcpToolCallHints(message.content || "");
-            const hintCallIds = mcpHints
-                .map((hint) => hint.call_id)
-                .filter((callId): callId is number => typeof callId === "number");
             
             // 工具调用参数
             if (options.includeToolParams) {

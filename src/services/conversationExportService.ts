@@ -270,10 +270,6 @@ export const conversationExportService = {
             const label = this.getMessageLabel(message.message_type);
             const labelStyle = this.getMessageLabelStyle(message.message_type);
             let toolCallsHtml = this.generateToolCallsHtml(message, options, toolCallMap);
-            const mcpHints = extractMcpToolCallHints(message.content || "");
-            const hintCallIds = mcpHints
-                .map((hint) => hint.call_id)
-                .filter((callId): callId is number => typeof callId === "number");
 
             if (options.includeToolParams && (!message.tool_calls_json || message.tool_calls_json.trim() === "") && toolCallMap.has(message.id)) {
                 const mappedCalls = toolCallMap.get(message.id) || [];
