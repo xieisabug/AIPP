@@ -765,30 +765,45 @@ pub async fn open_artifact_window(
     Ok(())
 }
 
-// Create schedule window
-fn create_schedule_window(app_handle: &AppHandle) {
+// Create schedule window with visibility control
+pub fn create_schedule_window_hidden(app_handle: &AppHandle) {
+    create_schedule_window_with_visibility(app_handle, false);
+}
+
+fn create_schedule_window_with_visibility(app_handle: &AppHandle, visible: bool) {
     #[cfg(desktop)]
     {
         let (window_size, window_position) =
             get_window_size_and_position(app_handle, 1200.0, 800.0, &["chat_ui", "ask", "config"]);
 
-        let builder = WebviewWindowBuilder::new(app_handle, "schedule", WebviewUrl::App("index.html".into()))
-        .title("定时任务")
-        .inner_size(window_size.width, window_size.height)
-        .resizable(true)
-        .minimizable(true)
-        .maximizable(true)
-        .center();
+        let mut builder = WebviewWindowBuilder::new(app_handle, "schedule", WebviewUrl::App("index.html".into()))
+            .title("定时任务")
+            .inner_size(window_size.width, window_size.height)
+            .resizable(true)
+            .minimizable(true)
+            .maximizable(true)
+            .visible(visible)
+            .decorations(true);
 
-        let builder = if let Some(position) = window_position {
-            builder.position(position.x, position.y)
+        if let Some(position) = window_position {
+            builder = builder.position(position.x, position.y);
         } else {
-            builder.center()
-        };
+            builder = builder.center();
+        }
 
         match builder.build() {
-            Ok(_window) => {
-                info!("Schedule window created successfully");
+            Ok(window) => {
+                info!(visible=%visible, "Schedule window created successfully");
+                let window_clone = window.clone();
+                let app_handle_clone = app_handle.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        window_clone.hide().unwrap();
+                        // 发送窗口隐藏事件，让前端重置状态
+                        let _ = app_handle_clone.emit_to("schedule", "schedule-window-hidden", ());
+                    }
+                });
             }
             Err(e) => {
                 error!(error=%e, "Failed to create schedule window");
@@ -807,10 +822,7 @@ fn create_schedule_window(app_handle: &AppHandle) {
 /// Open schedule window
 #[tauri::command]
 pub async fn open_schedule_window(app_handle: AppHandle) -> Result<(), String> {
-    if app_handle.get_webview_window("schedule").is_none() {
-        debug!("Creating schedule window");
-        create_schedule_window(&app_handle);
-    } else if let Some(window) = app_handle.get_webview_window("schedule") {
+    if let Some(window) = app_handle.get_webview_window("schedule") {
         debug!("Showing schedule window");
         #[cfg(desktop)]
         {
@@ -820,6 +832,9 @@ pub async fn open_schedule_window(app_handle: AppHandle) -> Result<(), String> {
             window.show().unwrap();
             window.set_focus().unwrap();
         }
+    } else {
+        debug!("Creating schedule window");
+        create_schedule_window_with_visibility(&app_handle, true);
     }
     Ok(())
 }

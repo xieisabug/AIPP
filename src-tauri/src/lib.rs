@@ -145,9 +145,10 @@ use crate::mcp::registry_api::{
 };
 use crate::window::{
     awaken_aipp, create_ask_window, create_chat_ui_window_hidden, create_config_window_hidden,
-    ensure_hidden_search_window, handle_open_ask_window, open_artifact_collections_window,
-    open_artifact_preview_window, open_chat_ui_window, open_chat_ui_window_inner,
-    open_config_window, open_config_window_inner, open_plugin_window, open_schedule_window,
+    create_schedule_window_hidden, ensure_hidden_search_window, handle_open_ask_window,
+    open_artifact_collections_window, open_artifact_preview_window, open_chat_ui_window,
+    open_chat_ui_window_inner, open_config_window, open_config_window_inner, open_plugin_window,
+    open_schedule_window,
 };
 use db::conversation_db::ConversationDatabase;
 use db::database_upgrade;
@@ -484,6 +485,7 @@ pub fn run() {
                 {
                     create_chat_ui_window_hidden(&app_handle);
                     create_config_window_hidden(&app_handle);
+                    create_schedule_window_hidden(&app_handle);
                     create_ask_window(&app_handle);
                 }
             }
