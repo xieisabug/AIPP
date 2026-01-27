@@ -83,7 +83,7 @@ interface InputAreaProps {
     aiIsResponsing: boolean;
     placement?: "top" | "bottom";
     isMobile?: boolean;
-    sidebarExpanded?: boolean;
+    sidebarWidth?: number;
     sidebarVisible?: boolean;
 }
 const IMAGE_AREA_HEIGHT = 80;
@@ -102,7 +102,7 @@ const InputArea = React.memo(
                 aiIsResponsing,
                 placement = "bottom",
                 isMobile = false,
-                sidebarExpanded = false,
+                sidebarWidth = 0,
                 sidebarVisible = false,
             },
             ref
@@ -854,7 +854,7 @@ const InputArea = React.memo(
                         className={`input-area-add-button ${placement}`}
                         style={
                             placement === "bottom" && !isMobile
-                                ? { right: (sidebarVisible ? 170 : 190) + (sidebarExpanded ? 256 : 0) }
+                                ? { right: (sidebarVisible ? 150 : 190) + sidebarWidth }
                                 : undefined
                         }
                     />
@@ -872,7 +872,7 @@ const InputArea = React.memo(
                         className={`input-area-send-button ${placement}`}
                         style={
                             placement === "bottom" && !isMobile
-                                ? { right: (sidebarVisible ? 87 : 107) + (sidebarExpanded ? 256 : 0) }
+                                ? { right: (sidebarVisible ? 70 : 107) + sidebarWidth }
                                 : undefined
                         }
                     />
