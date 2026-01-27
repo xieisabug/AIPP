@@ -65,6 +65,44 @@ fn pick_theme(is_dark: bool) -> &'static syntect::highlighting::Theme {
     ts.themes.values().next().expect("No themes available")
 }
 
+fn normalize_lang_token(raw: &str) -> &str {
+    let token = raw.trim();
+    if token.is_empty() {
+        return token;
+    }
+    let token = token.split_whitespace().next().unwrap_or(token);
+    token.split(|c| c == '{' || c == ';' || c == ',').next().unwrap_or(token)
+}
+
+fn map_lang_alias(token: &str) -> String {
+    let lower = token.to_lowercase();
+    match lower.as_str() {
+        "ts" => "typescript".to_string(),
+        "tsx" => "javascript".to_string(),
+        "js" => "javascript".to_string(),
+        "jsx" => "jsx".to_string(),
+        "py" => "python".to_string(),
+        "rb" => "ruby".to_string(),
+        "rs" => "rust".to_string(),
+        "md" => "markdown".to_string(),
+        "yml" => "yaml".to_string(),
+        "sh" => "bash".to_string(),
+        "shell" => "bash".to_string(),
+        "zsh" => "bash".to_string(),
+        "ps" => "powershell".to_string(),
+        "ps1" => "powershell".to_string(),
+        "cs" => "c#".to_string(),
+        "csharp" => "c#".to_string(),
+        "cpp" => "c++".to_string(),
+        "cxx" => "c++".to_string(),
+        "hpp" => "c++".to_string(),
+        "kt" => "kotlin".to_string(),
+        "golang" => "go".to_string(),
+        "dockerfile" => "docker".to_string(),
+        other => other.to_string(),
+    }
+}
+
 #[tauri::command]
 pub fn highlight_code(
     lang: String,
@@ -109,12 +147,16 @@ pub fn highlight_code(
     let ts = theme_set();
 
     // Try by token, then by extension, else plain text
-    let token = lang.trim();
-    let token_lower = token.to_lowercase();
+    let raw_token = normalize_lang_token(&lang);
+    let mapped = map_lang_alias(raw_token);
+    let token_lower = mapped.to_lowercase();
     let syntax = ss
-        .find_syntax_by_token(token)
+        .find_syntax_by_token(&mapped)
         .or_else(|| ss.find_syntax_by_token(&token_lower))
-        .or_else(|| ss.find_syntax_by_extension(token))
+        .or_else(|| ss.find_syntax_by_extension(&mapped))
+        .or_else(|| ss.find_syntax_by_extension(&token_lower))
+        .or_else(|| ss.find_syntax_by_name(&mapped))
+        .or_else(|| ss.find_syntax_by_name(&token_lower))
         .unwrap_or_else(|| ss.find_syntax_plain_text());
 
     // Use helper to generate inline-styled HTML within <pre><code> ... </code></pre>
