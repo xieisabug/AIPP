@@ -48,6 +48,18 @@ export function useMessageGroups({
         Map<string, number>
     >(new Map());
     const userSwitchRef = useRef(false);
+
+    const compareReasoningBeforeResponse = useCallback((a: Message, b: Message): number => {
+        const aIsReasoning = a.message_type === "reasoning";
+        const bIsReasoning = b.message_type === "reasoning";
+        const aIsResponse = a.message_type === "response";
+        const bIsResponse = b.message_type === "response";
+
+        if ((aIsReasoning && bIsResponse) || (aIsResponse && bIsReasoning)) {
+            return aIsReasoning ? -1 : 1;
+        }
+        return 0;
+    }, []);
     const getOrderValue = useCallback((msg: Message): number => {
         const tryParse = (value: any) => {
             const ts = value ? new Date(value as any).getTime() : NaN;
@@ -196,13 +208,19 @@ export function useMessageGroups({
             
             group.versions.forEach(version => {
                 version.messages.sort(
-                    (a, b) => getOrderValue(a) - getOrderValue(b),
+                    (a, b) => {
+                        const orderDelta = getOrderValue(a) - getOrderValue(b);
+                        if (orderDelta !== 0) return orderDelta;
+                        const reasoningOrder = compareReasoningBeforeResponse(a, b);
+                        if (reasoningOrder !== 0) return reasoningOrder;
+                        return a.id - b.id;
+                    },
                 );
             });
         });
 
         return { groups, groupRootMessageIds };
-    }, [allDisplayMessages, groupMergeMap, getOrderValue]);
+    }, [allDisplayMessages, groupMergeMap, getOrderValue, compareReasoningBeforeResponse]);
 
     const pureGenerationGroups = pureGenerationGroupsAndTimestamps.groups;
     const groupRootMessageIds = pureGenerationGroupsAndTimestamps.groupRootMessageIds;
