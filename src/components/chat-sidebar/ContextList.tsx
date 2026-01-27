@@ -1,6 +1,7 @@
 import React, { useCallback, useState } from 'react';
-import { File, Search, FolderOpen, FileInput, FileQuestion, ExternalLink, ChevronDown } from 'lucide-react';
+import { File, Search, FolderOpen, FileInput, FileQuestion, ExternalLink, ChevronDown, Image } from 'lucide-react';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { invoke } from '@tauri-apps/api/core';
 import { ContextItem } from './types';
 import { cn } from '@/utils/utils';
 
@@ -10,7 +11,10 @@ interface ContextListProps {
     onItemClick?: (item: ContextItem) => void;
 }
 
-const getContextIcon = (type: ContextItem['type']) => {
+const getContextIcon = (type: ContextItem['type'], attachmentType?: string) => {
+    if (type === 'user_file' && attachmentType === 'Image') {
+        return <Image className="h-4 w-4 text-blue-500 flex-shrink-0" />;
+    }
     switch (type) {
         case 'user_file':
             return <FileInput className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
@@ -48,6 +52,28 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
         openUrl(url).catch(console.error);
     }, []);
 
+    const handleOpenAttachment = useCallback(async (item: ContextItem) => {
+        if (!item.attachmentData) return;
+        
+        const { type, content, url } = item.attachmentData;
+        
+        if (type === 'Image' && content) {
+            // Open image using Tauri backend
+            try {
+                await invoke('open_image', { imageData: content });
+            } catch (e) {
+                console.error('Open image failed', e);
+            }
+        } else if (url) {
+            // Open file using system default application
+            try {
+                await openUrl(url);
+            } catch (e) {
+                console.error('Open file failed', e);
+            }
+        }
+    }, []);
+
     const toggleSearchCollapse = useCallback((id: string) => {
         setCollapsedSearchIds((prev) => {
             const next = new Set(prev);
@@ -59,6 +85,14 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
             return next;
         });
     }, []);
+
+    const handleItemClick = useCallback((item: ContextItem) => {
+        if (item.attachmentData) {
+            handleOpenAttachment(item);
+        } else if (onItemClick) {
+            onItemClick(item);
+        }
+    }, [handleOpenAttachment, onItemClick]);
 
     if (items.length === 0) {
         return (
@@ -97,11 +131,11 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
                                 <div
                                     className={cn(
                                         "flex items-center gap-2 px-2.5 py-2 rounded-lg border border-border bg-background transition-colors",
-                                        "hover:bg-muted/40",
-                                        onItemClick && "cursor-pointer"
+                                        "hover:bg-muted/40 cursor-pointer"
                                     )}
-                                    onClick={() => onItemClick?.(item)}
+                                    onClick={() => handleItemClick(item)}
                                 >
+                                    {getContextIcon(item.type, item.attachmentData?.type)}
                                     <div className="flex-1 min-w-0">
                                         <p className="text-sm font-medium truncate">{item.name}</p>
                                         {item.details && item.details !== item.name && (

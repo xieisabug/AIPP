@@ -365,10 +365,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             messages: allDisplayMessages,
         });
 
-        // Context items (user files + MCP tool calls)
+        // Context items (user files + MCP tool calls + message attachments)
         const { contextItems } = useContextList({
             userFiles: fileInfoList,
             mcpToolCallStates,
+            messages,
         });
 
         // 助手运行时API
@@ -695,20 +696,21 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
                     {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleDropFiles} /> : null}
 
-                    <InputArea
-                        ref={inputAreaRef}
-                        inputText={inputText}
-                        setInputText={setInputText}
-                        fileInfoList={fileInfoList}
-                        handleChooseFile={handleChooseFile}
-                        handleDeleteFile={handleDeleteFile}
-                        handlePaste={handlePaste}
-                        handleSend={handleSend}
-                        aiIsResponsing={aiIsResponsing}
-                        placement="bottom"
-                        isMobile={isMobile}
-                        sidebarExpanded={sidebarExpanded}
-                    />
+                        <InputArea
+                            ref={inputAreaRef}
+                            inputText={inputText}
+                            setInputText={setInputText}
+                            fileInfoList={fileInfoList}
+                            handleChooseFile={handleChooseFile}
+                            handleDeleteFile={handleDeleteFile}
+                            handlePaste={handlePaste}
+                            handleSend={handleSend}
+                            aiIsResponsing={aiIsResponsing}
+                            placement="bottom"
+                            isMobile={isMobile}
+                            sidebarExpanded={sidebarExpanded}
+                            sidebarVisible={!isMobile && Boolean(conversationId)}
+                        />
                 </div>
 
                 {/* Right sidebar - only show on desktop */}

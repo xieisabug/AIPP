@@ -1,12 +1,20 @@
 import { useMemo } from 'react';
-import { FileInfo, MCPToolCallUpdateEvent } from '../data/Conversation';
+import { FileInfo, MCPToolCallUpdateEvent, Message } from '../data/Conversation';
 import { ContextItem, CONTEXT_TOOL_NAMES, SearchResultItem, getContextTypeFromToolName } from '../components/chat-sidebar/types';
 
+interface Attachment {
+    attachment_url: string;
+    attachment_content: string;
+    attachment_type: string;
+}
+
 interface UseContextListOptions {
-    // User provided files from input area
+    // User provided files from input area (pending to be sent)
     userFiles: FileInfo[] | null;
     // MCP tool call states
     mcpToolCallStates: Map<number, MCPToolCallUpdateEvent>;
+    // Messages in conversation (to extract sent attachments)
+    messages?: Message[];
 }
 
 interface UseContextListReturn {
@@ -37,11 +45,60 @@ const parseSearchResultItems = (rawResult: string): SearchResultItem[] | undefin
     }
 };
 
-export function useContextList({ userFiles, mcpToolCallStates }: UseContextListOptions): UseContextListReturn {
+const getAttachmentTypeName = (type: string): string => {
+    switch (type) {
+        case 'Image':
+            return '图片';
+        case 'Text':
+            return '文本';
+        case 'PDF':
+            return 'PDF';
+        case 'Word':
+            return 'Word';
+        case 'PowerPoint':
+            return 'PPT';
+        case 'Excel':
+            return 'Excel';
+        default:
+            return '文件';
+    }
+};
+
+export function useContextList({ userFiles, mcpToolCallStates, messages }: UseContextListOptions): UseContextListReturn {
     const contextItems = useMemo(() => {
         const items: ContextItem[] = [];
 
-        // Add user provided files
+        // Track attachment counts by type for naming
+        const attachmentCounts: Record<string, number> = {};
+
+        // Add attachments from messages (sent files)
+        if (messages && messages.length > 0) {
+            for (const message of messages) {
+                if (message.message_type !== 'user') continue;
+                if (!message.attachment_list || message.attachment_list.length === 0) continue;
+
+                for (const attachment of message.attachment_list as Attachment[]) {
+                    const attType = attachment.attachment_type || 'File';
+                    attachmentCounts[attType] = (attachmentCounts[attType] || 0) + 1;
+                    const displayName = `${getAttachmentTypeName(attType)} ${attachmentCounts[attType]}`;
+                    
+                    items.push({
+                        id: `msg-attachment-${message.id}-${attachmentCounts[attType]}`,
+                        type: 'user_file',
+                        name: displayName,
+                        details: getAttachmentTypeName(attType),
+                        source: 'user',
+                        attachmentData: {
+                            type: attType,
+                            content: attachment.attachment_content,
+                            url: attachment.attachment_url,
+                        },
+                    });
+                }
+            }
+        }
+
+        // Add user provided files (pending to be sent)
         if (userFiles && userFiles.length > 0) {
             for (const file of userFiles) {
                 items.push({
@@ -98,7 +155,7 @@ export function useContextList({ userFiles, mcpToolCallStates }: UseContextListO
         });
 
         return items;
-    }, [userFiles, mcpToolCallStates]);
+    }, [userFiles, mcpToolCallStates, messages]);
 
     return { contextItems };
 }

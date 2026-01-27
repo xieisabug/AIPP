@@ -47,6 +47,12 @@ export interface ContextItem {
     source: 'user' | 'mcp';
     // Optional timestamp
     timestamp?: Date;
+    // Attachment data for user files
+    attachmentData?: {
+        type: 'Image' | 'Text' | 'PDF' | 'Word' | 'PowerPoint' | 'Excel' | string;
+        content?: string; // base64 for images
+        url?: string; // file path
+    };
 }
 
 // Tool names that represent context operations
