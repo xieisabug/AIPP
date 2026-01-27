@@ -460,14 +460,31 @@ pub async fn fork_conversation(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Conversation not found".to_string())?;
 
-    // 获取原对话的所有消息
+    // 获取原对话的所有消息（包含附件）
     let message_repo = db.message_repo().unwrap();
     let all_messages_with_attachments =
         message_repo.list_by_conversation_id(conversation_id).map_err(|e| e.to_string())?;
 
-    // 提取消息部分
-    let all_messages: Vec<Message> =
-        all_messages_with_attachments.iter().map(|(message, _)| message.clone()).collect();
+    // 构建消息ID到附件列表的映射
+    let mut attachment_map: HashMap<i64, Vec<MessageAttachment>> = HashMap::new();
+    for (message, attachment) in &all_messages_with_attachments {
+        if let Some(att) = attachment {
+            attachment_map.entry(message.id).or_default().push(att.clone());
+        }
+    }
+
+    // 提取消息部分（去重，因为一条消息可能有多个附件导致多行）
+    let mut seen_ids = std::collections::HashSet::new();
+    let all_messages: Vec<Message> = all_messages_with_attachments
+        .iter()
+        .filter_map(|(message, _)| {
+            if seen_ids.insert(message.id) {
+                Some(message.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
 
     // 找到目标消息的位置
     let target_message_index = all_messages
@@ -501,14 +518,29 @@ pub async fn fork_conversation(
     let created_conversation =
         conversation_repo.create(&new_conversation).map_err(|e| e.to_string())?;
 
-    // 复制消息到新对话
+    // 获取附件仓库
+    let attachment_repo = db.attachment_repo().map_err(|e| e.to_string())?;
+
+    // 复制消息到新对话，并复制对应的附件
     for message in messages_to_copy {
+        let old_message_id = message.id;
+
         let mut new_message = message.clone();
         new_message.id = 0;
         new_message.conversation_id = created_conversation.id;
         new_message.created_time = chrono::Utc::now();
 
-        message_repo.create(&new_message).map_err(|e| e.to_string())?;
+        let created_message = message_repo.create(&new_message).map_err(|e| e.to_string())?;
+
+        // 复制该消息的所有附件
+        if let Some(attachments) = attachment_map.get(&old_message_id) {
+            for attachment in attachments {
+                let mut new_attachment = attachment.clone();
+                new_attachment.id = 0;
+                new_attachment.message_id = created_message.id;
+                attachment_repo.create(&new_attachment).map_err(|e| e.to_string())?;
+            }
+        }
     }
 
     Ok(created_conversation.id)
