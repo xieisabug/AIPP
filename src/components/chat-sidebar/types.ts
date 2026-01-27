@@ -27,12 +27,22 @@ export interface CodeArtifact {
     title: string;
 }
 
+export interface SearchResultItem {
+    title: string;
+    url: string;
+    snippet?: string;
+    displayUrl?: string;
+    rank?: number;
+}
+
 export interface ContextItem {
     id: string;
     type: 'user_file' | 'read_file' | 'search' | 'list_directory' | 'other';
     name: string;
     // Optional details like file path, search query
     details?: string;
+    // Optional search results for search context items
+    searchResults?: SearchResultItem[];
     // Source: user input, MCP tool call
     source: 'user' | 'mcp';
     // Optional timestamp

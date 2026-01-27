@@ -74,7 +74,7 @@ const ArtifactList: React.FC<ArtifactListProps> = ({ artifacts, className, onArt
     }
 
     return (
-        <div className={cn("flex flex-col gap-1 p-2 max-h-56 overflow-y-auto", className)}>
+        <div className={cn("flex flex-col gap-1 p-2", className)}>
             {artifacts.map((artifact) => (
                 <div
                     key={artifact.id}

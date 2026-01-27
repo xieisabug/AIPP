@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { createContext, useContext, useMemo } from 'react';
 import { cn } from '@/utils/utils';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { ChevronDown } from 'lucide-react';
@@ -16,24 +16,46 @@ interface ChatSidebarContentProps {
     onContextClick?: (item: ContextItem) => void;
 }
 
+interface SectionState {
+    id: string;
+    isOpen: boolean;
+    setIsOpen: (open: boolean) => void;
+}
+
+interface SectionsContextValue {
+    sections: SectionState[];
+    openCount: number;
+}
+
+const SectionsContext = createContext<SectionsContextValue>({ sections: [], openCount: 0 });
+
 interface CollapsibleSectionProps {
     title: string;
     count: number;
-    defaultOpen?: boolean;
+    isOpen: boolean;
+    onOpenChange: (open: boolean) => void;
     children: React.ReactNode;
 }
 
 const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
     title,
     count,
-    defaultOpen = true,
+    isOpen,
+    onOpenChange,
     children,
 }) => {
-    const [isOpen, setIsOpen] = React.useState(defaultOpen);
+    const { openCount } = useContext(SectionsContext);
 
     return (
-        <Collapsible open={isOpen} onOpenChange={setIsOpen}>
-            <CollapsibleTrigger className="flex items-center justify-between w-full p-2 hover:bg-muted/50 rounded-md transition-colors">
+        <Collapsible 
+            open={isOpen} 
+            onOpenChange={onOpenChange}
+            className={cn(
+                "flex flex-col min-h-0",
+                isOpen && openCount > 0 && "flex-1"
+            )}
+        >
+            <CollapsibleTrigger className="flex items-center justify-between w-full p-2 hover:bg-muted/50 rounded-md transition-colors flex-shrink-0">
                 <div className="flex items-center gap-2">
                     <span className="text-sm font-medium">{title}</span>
                     {count > 0 && (
@@ -49,8 +71,10 @@ const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
                     )}
                 />
             </CollapsibleTrigger>
-            <CollapsibleContent className="overflow-hidden data-[state=open]:animate-collapsible-down data-[state=closed]:animate-collapsible-up">
-                {children}
+            <CollapsibleContent className="flex-1 min-h-0 overflow-hidden data-[state=open]:animate-collapsible-down data-[state=closed]:animate-collapsible-up">
+                <div className="h-full overflow-y-auto">
+                    {children}
+                </div>
             </CollapsibleContent>
         </Collapsible>
     );
@@ -64,23 +88,66 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
     onArtifactClick,
     onContextClick,
 }) => {
+    const [todoOpen, setTodoOpen] = React.useState(todos.length > 0);
+    const [artifactOpen, setArtifactOpen] = React.useState(artifacts.length > 0);
+    const [contextOpen, setContextOpen] = React.useState(contextItems.length > 0);
+
+    // Update open state when data changes
+    React.useEffect(() => {
+        if (todos.length > 0 && !todoOpen) setTodoOpen(true);
+    }, [todos.length]);
+
+    React.useEffect(() => {
+        if (artifacts.length > 0 && !artifactOpen) setArtifactOpen(true);
+    }, [artifacts.length]);
+
+    React.useEffect(() => {
+        if (contextItems.length > 0 && !contextOpen) setContextOpen(true);
+    }, [contextItems.length]);
+
+    const openCount = useMemo(() => {
+        return [todoOpen, artifactOpen, contextOpen].filter(Boolean).length;
+    }, [todoOpen, artifactOpen, contextOpen]);
+
+    const contextValue = useMemo(() => ({
+        sections: [],
+        openCount,
+    }), [openCount]);
+
     return (
-        <div className={cn("flex flex-col gap-1", className)}>
-            {/* Todo/Plan Section */}
-            <CollapsibleSection title="计划" count={todos.length} defaultOpen={todos.length > 0}>
-                <TodoList todos={todos} />
-            </CollapsibleSection>
+        <SectionsContext.Provider value={contextValue}>
+            <div className={cn("flex flex-col gap-1 h-full", className)}>
+                {/* Todo/Plan Section */}
+                <CollapsibleSection 
+                    title="计划" 
+                    count={todos.length} 
+                    isOpen={todoOpen}
+                    onOpenChange={setTodoOpen}
+                >
+                    <TodoList todos={todos} />
+                </CollapsibleSection>
 
-            {/* Artifacts Section */}
-            <CollapsibleSection title="Artifact" count={artifacts.length} defaultOpen={artifacts.length > 0}>
-                <ArtifactList artifacts={artifacts} onArtifactClick={onArtifactClick} />
-            </CollapsibleSection>
+                {/* Artifacts Section */}
+                <CollapsibleSection 
+                    title="Artifact" 
+                    count={artifacts.length} 
+                    isOpen={artifactOpen}
+                    onOpenChange={setArtifactOpen}
+                >
+                    <ArtifactList artifacts={artifacts} onArtifactClick={onArtifactClick} />
+                </CollapsibleSection>
 
-            {/* Context Section */}
-            <CollapsibleSection title="上下文" count={contextItems.length} defaultOpen={contextItems.length > 0}>
-                <ContextList items={contextItems} onItemClick={onContextClick} />
-            </CollapsibleSection>
-        </div>
+                {/* Context Section */}
+                <CollapsibleSection 
+                    title="上下文" 
+                    count={contextItems.length} 
+                    isOpen={contextOpen}
+                    onOpenChange={setContextOpen}
+                >
+                    <ContextList items={contextItems} onItemClick={onContextClick} />
+                </CollapsibleSection>
+            </div>
+        </SectionsContext.Provider>
     );
 };
 

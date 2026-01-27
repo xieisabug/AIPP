@@ -50,7 +50,7 @@ const TodoList: React.FC<TodoListProps> = ({ todos, className }) => {
             </div>
 
             {/* Todo items */}
-            <div className="flex flex-col gap-1 px-2 pb-2 max-h-48 overflow-y-auto">
+            <div className="flex flex-col gap-1 px-2 pb-2">
                 {todos.map((todo, index) => (
                     <div 
                         key={index}
