@@ -1,5 +1,5 @@
 import React, { useCallback } from "react";
-import { open } from "@tauri-apps/plugin-shell";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 interface MessageWebContentProps {
     url: string;
@@ -11,7 +11,7 @@ const MessageWebContent: React.FC<MessageWebContentProps> = (props) => {
     const handleClick = useCallback((e: React.MouseEvent) => {
         e.preventDefault();
         if (url) {
-            open(url).catch(console.error);
+            openUrl(url).catch(console.error);
         }
     }, [url]);
 

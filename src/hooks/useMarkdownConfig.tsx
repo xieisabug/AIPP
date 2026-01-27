@@ -1,7 +1,7 @@
 import { useMemo, useCallback } from 'react';
 import React from 'react';
 import { Components } from 'react-markdown';
-import { open } from '@tauri-apps/plugin-shell';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import {
     REMARK_PLUGINS,
     REHYPE_PLUGINS,
@@ -99,7 +99,7 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false, is
                     (e: React.MouseEvent) => {
                         e.preventDefault();
                         if (href) {
-                            open(href).catch(console.error);
+                            openUrl(href).catch(console.error);
                         }
                     },
                     [href],

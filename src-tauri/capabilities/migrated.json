@@ -46,6 +46,7 @@
     "core:window:allow-destroy",
     "core:window:allow-start-dragging",
     "opener:allow-open-url",
+    "opener:allow-default-urls",
     "dialog:allow-open",
     "dialog:allow-save",
     "dialog:allow-message",

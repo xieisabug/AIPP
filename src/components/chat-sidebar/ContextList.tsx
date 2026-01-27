@@ -1,6 +1,6 @@
-import React, { useCallback } from 'react';
-import { File, Search, FolderOpen, FileInput, FileQuestion, ExternalLink } from 'lucide-react';
-import { open } from '@tauri-apps/plugin-shell';
+import React, { useCallback, useState } from 'react';
+import { File, Search, FolderOpen, FileInput, FileQuestion, ExternalLink, ChevronDown } from 'lucide-react';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { ContextItem } from './types';
 import { cn } from '@/utils/utils';
 
@@ -13,13 +13,13 @@ interface ContextListProps {
 const getContextIcon = (type: ContextItem['type']) => {
     switch (type) {
         case 'user_file':
-            return <FileInput className="h-4 w-4 text-blue-500 flex-shrink-0" />;
+            return <FileInput className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
         case 'read_file':
-            return <File className="h-4 w-4 text-emerald-500 flex-shrink-0" />;
+            return <File className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
         case 'search':
-            return <Search className="h-4 w-4 text-violet-500 flex-shrink-0" />;
+            return <Search className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
         case 'list_directory':
-            return <FolderOpen className="h-4 w-4 text-amber-500 flex-shrink-0" />;
+            return <FolderOpen className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
         default:
             return <FileQuestion className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
     }
@@ -40,25 +40,24 @@ const getContextLabel = (type: ContextItem['type']): string => {
     }
 };
 
-const getContextBgColor = (type: ContextItem['type']): string => {
-    switch (type) {
-        case 'user_file':
-            return 'bg-blue-500/10 border-blue-500/20';
-        case 'read_file':
-            return 'bg-emerald-500/10 border-emerald-500/20';
-        case 'search':
-            return 'bg-violet-500/10 border-violet-500/20';
-        case 'list_directory':
-            return 'bg-amber-500/10 border-amber-500/20';
-        default:
-            return 'bg-muted/50 border-border';
-    }
-};
-
 const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick }) => {
+    const [collapsedSearchIds, setCollapsedSearchIds] = useState<Set<string>>(new Set());
+
     const handleOpenUrl = useCallback((url?: string) => {
         if (!url) return;
-        open(url).catch(console.error);
+        openUrl(url).catch(console.error);
+    }, []);
+
+    const toggleSearchCollapse = useCallback((id: string) => {
+        setCollapsedSearchIds((prev) => {
+            const next = new Set(prev);
+            if (next.has(id)) {
+                next.delete(id);
+            } else {
+                next.add(id);
+            }
+            return next;
+        });
     }, []);
 
     if (items.length === 0) {
@@ -97,9 +96,9 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
                             <div key={item.id} className="flex flex-col">
                                 <div
                                     className={cn(
-                                        "flex items-center gap-2 px-2.5 py-2 rounded-lg border transition-all",
-                                        getContextBgColor(item.type),
-                                        onItemClick && "cursor-pointer hover:shadow-sm hover:scale-[1.01]"
+                                        "flex items-center gap-2 px-2.5 py-2 rounded-lg border border-border bg-background transition-colors",
+                                        "hover:bg-muted/40",
+                                        onItemClick && "cursor-pointer"
                                     )}
                                     onClick={() => onItemClick?.(item)}
                                 >
@@ -111,17 +110,31 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
                                             </p>
                                         )}
                                     </div>
+                                    {item.type === 'search' && item.searchResults && item.searchResults.length > 0 && (
+                                        <button
+                                            type="button"
+                                            className="h-6 w-6 flex items-center justify-center text-muted-foreground hover:text-foreground"
+                                            onClick={(event) => {
+                                                event.stopPropagation();
+                                                toggleSearchCollapse(item.id);
+                                            }}
+                                        >
+                                            <ChevronDown
+                                                className={cn(
+                                                    "h-4 w-4 transition-transform",
+                                                    !collapsedSearchIds.has(item.id) && "rotate-180"
+                                                )}
+                                            />
+                                        </button>
+                                    )}
                                 </div>
-                                {item.type === 'search' && item.searchResults && item.searchResults.length > 0 && (
-                                    <div className="ml-3 mt-1 flex flex-col gap-1 border-l-2 border-violet-500/30 pl-2">
+                                {item.type === 'search' && item.searchResults && item.searchResults.length > 0 && !collapsedSearchIds.has(item.id) && (
+                                    <div className="ml-3 mt-1 flex flex-col gap-1 border-l border-border pl-2">
                                         {item.searchResults.map((result, index) => (
                                             <button
                                                 key={`${item.id}-${result.url}-${index}`}
                                                 type="button"
-                                                className={cn(
-                                                    "text-left px-2 py-1.5 rounded-md transition-all group",
-                                                    "hover:bg-violet-500/10 hover:shadow-sm"
-                                                )}
+                                                className="text-left px-2 py-1.5 rounded-md transition-colors hover:bg-muted/40"
                                                 onClick={(event) => {
                                                     event.stopPropagation();
                                                     handleOpenUrl(result.url);
@@ -131,7 +144,7 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
                                                     <span className="text-sm text-foreground flex-1 truncate">
                                                         {result.title}
                                                     </span>
-                                                    <ExternalLink className="h-3 w-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+                                                    <ExternalLink className="h-3 w-3 text-muted-foreground flex-shrink-0" />
                                                 </div>
                                                 {result.snippet && (
                                                     <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">

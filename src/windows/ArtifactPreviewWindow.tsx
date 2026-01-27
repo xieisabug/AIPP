@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { open } from '@tauri-apps/plugin-shell';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import mermaid from 'mermaid';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -574,7 +574,7 @@ export default function ArtifactPreviewWindow() {
     const handleOpenInBrowser = async () => {
         if (previewUrl) {
             try {
-                await open(previewUrl);
+                await openUrl(previewUrl);
             } catch (error) {
             }
         }
