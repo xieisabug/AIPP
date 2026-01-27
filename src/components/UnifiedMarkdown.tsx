@@ -4,6 +4,7 @@ import CodeBlock from './RustCodeBlock';
 import { useMarkdownConfig } from '../hooks/useMarkdownConfig';
 import { customUrlTransform } from '@/constants/markdown';
 import { transformInlineImages, releaseInlineImages } from '@/lib/inlineImageStore';
+import { resolveCodeBlockMeta } from '@/react-markdown/remarkCodeBlockMeta';
 
 interface UnifiedMarkdownProps {
     children: string;
@@ -43,22 +44,29 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
     const customComponents = useMemo((): CustomComponents => ({
         ...markdownConfig.markdownComponents,
         // 重写code组件以支持CodeBlock
-        code({ className, children, ...props }) {
+        code({ className, children, node, ...props }) {
             const match = /language-(\w+)/.exec(className || '');
+            const meta = resolveCodeBlockMeta(props as Record<string, unknown>, node);
+            const dataLanguage = typeof (props as Record<string, unknown>)["data-language"] === "string"
+                ? (props as Record<string, unknown>)["data-language"] as string
+                : undefined;
+            const language = match?.[1] ?? dataLanguage ?? "text";
+            const isBlock = Boolean(match || meta || dataLanguage);
 
             // 如果禁用markdown语法，使用原始文本
             if (disableMarkdownSyntax) {
-                return match ? (
-                    <span>```{match[1]}{'\n'}{children}{'\n'}```</span>
+                return isBlock ? (
+                    <span>```{language}{'\n'}{children}{'\n'}```</span>
                 ) : (
                     <span>`{children}`</span>
                 );
             }
 
             // 正常模式下使用CodeBlock
-            return match ? (
+            return isBlock ? (
                 <CodeBlock
-                    language={match[1]}
+                    language={language}
+                    meta={meta}
                     onCodeRun={onCodeRun || (() => { })}
                     isStreaming={isStreaming}
                 >

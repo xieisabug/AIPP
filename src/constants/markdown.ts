@@ -6,6 +6,7 @@ import rehypeKatex from "rehype-katex";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import { defaultUrlTransform } from "react-markdown";
 import remarkCustomCompenent from "@/react-markdown/remarkCustomComponent";
+import remarkCodeBlockMeta from "@/react-markdown/remarkCodeBlockMeta";
 import TipsComponent from "@/react-markdown/components/TipsComponent";
 import MessageFileAttachment from "@/components/MessageFileAttachment";
 import MessageWebContent from "@/components/conversation/MessageWebContent";
@@ -17,6 +18,7 @@ export const REMARK_PLUGINS = [
     remarkMath,
     remarkBreaks,
     remarkGfm,
+    remarkCodeBlockMeta,
     remarkCustomCompenent,
 ] as const;
 
@@ -70,6 +72,24 @@ export const SANITIZE_SCHEMA = {
             "dataalt",
             "dataAlt",
             "className",
+        ],
+        pre: [
+            ...(defaultSchema.attributes?.pre || []),
+            "data-language",
+            "data-title",
+            "data-filename",
+            "data-line",
+            "data-highlight",
+            "data-meta",
+        ],
+        code: [
+            ...(defaultSchema.attributes?.code || []),
+            "data-language",
+            "data-title",
+            "data-filename",
+            "data-line",
+            "data-highlight",
+            "data-meta",
         ],
     },
     // 允许 data: URI 协议用于内联图片 (base64 图片)

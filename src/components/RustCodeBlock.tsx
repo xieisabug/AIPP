@@ -7,6 +7,7 @@ import Copy from "../assets/copy.svg?react";
 import Run from "../assets/run.svg?react";
 import { useRustHighlight } from "@/hooks/highlight/useRustHighlight";
 import { useCodeTheme } from "@/hooks/useCodeTheme";
+import type { CodeBlockMetaInfo } from "@/react-markdown/remarkCodeBlockMeta";
 
 interface RustCodeBlockProps {
     language: string;
@@ -15,9 +16,17 @@ interface RustCodeBlockProps {
     className?: string;
     // 是否处于大模型流式输出中（用于首次阈值超限时自动折叠）
     isStreaming?: boolean;
+    meta?: CodeBlockMetaInfo | null;
 }
 
-const RustCodeBlock: React.FC<RustCodeBlockProps> = ({ language, children, onCodeRun, className = "", isStreaming = false }) => {
+const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
+    language,
+    children,
+    onCodeRun,
+    className = "",
+    isStreaming = false,
+    meta = null,
+}) => {
     const code = useMemo(() => (typeof children === "string" ? children : String(children)), [children]);
     const { resolvedTheme } = useTheme();
     const [html, setHtml] = useState<string>("");
@@ -38,6 +47,15 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({ language, children, onCod
     const userToggledRef = useRef(false);
     const streamingAutoCollapsedOnceRef = useRef(false);
     const hasInitialDecisionRef = useRef(false); // 非流式时仅在首次渲染做一次自动判断
+    const metaLabel = useMemo(() => {
+        if (!meta) return null;
+        const title = meta.title || meta.filename;
+        const parts = [];
+        if (title) parts.push(title);
+        if (meta.line) parts.push(`line ${meta.line}`);
+        if (meta.highlight) parts.push(`highlight ${meta.highlight}`);
+        return parts.length ? parts.join(" · ") : null;
+    }, [meta]);
 
     useEffect(() => {
         let cancelled = false;
@@ -170,6 +188,11 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({ language, children, onCod
         <div 
             ref={containerRef}
             className={`relative overflow-hidden bg-transparent ${className}`}
+            data-meta={meta?.meta}
+            data-title={meta?.title}
+            data-filename={meta?.filename}
+            data-line={meta?.line}
+            data-highlight={meta?.highlight}
             onMouseEnter={() => setIsHovered(true)}
             onMouseLeave={() => setIsHovered(false)}
         >
@@ -192,6 +215,15 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({ language, children, onCod
                 />
                 <IconButton icon={<Run fill="black" />} onClick={() => onCodeRun?.(language, code)} />
             </div>
+
+            {metaLabel && (
+                <div
+                    className="px-3 pt-2 text-xs text-muted-foreground font-mono truncate pr-12"
+                    title={metaLabel}
+                >
+                    {metaLabel}
+                </div>
+            )}
 
             {/* Code content with collapsible container */}
             <div

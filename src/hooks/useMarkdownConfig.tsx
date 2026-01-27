@@ -9,6 +9,7 @@ import {
 } from '@/constants/markdown';
 import CodeBlock from '@/components/RustCodeBlock';
 import LazyImage from '@/components/common/LazyImage';
+import { resolveCodeBlockMeta } from '@/react-markdown/remarkCodeBlockMeta';
 
 interface UseMarkdownConfigOptions {
     onCodeRun?: (lang: string, code: string) => void;
@@ -64,22 +65,29 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false, is
                     </div>
                 </div>
             ),
-            code: ({ className, children }) => {
+            code: ({ className, children, node, ...props }) => {
                 const match = /language-(\w+)/.exec(className || '');
+                const meta = resolveCodeBlockMeta(props as Record<string, unknown>, node);
+                const dataLanguage = typeof (props as Record<string, unknown>)["data-language"] === "string"
+                    ? (props as Record<string, unknown>)["data-language"] as string
+                    : undefined;
+                const language = match?.[1] ?? dataLanguage ?? "text";
+                const isBlock = Boolean(match || meta || dataLanguage);
                 
                 // 纯文本模式：代码块显示为原始文本
                 if (disableMarkdownSyntax) {
-                    return match ? (
-                        <span>```{match[1]}{'\n'}{children}{'\n'}```</span>
+                    return isBlock ? (
+                        <span>```{language}{'\n'}{children}{'\n'}```</span>
                     ) : (
                         <span>`{children}`</span>
                     );
                 }
                 
                 // Markdown 模式：正常的代码块渲染
-                return match ? (
+                return isBlock ? (
                     <CodeBlock
-                        language={match[1]}
+                        language={language}
+                        meta={meta}
                         onCodeRun={onCodeRun || (() => {})}
                         isStreaming={isStreaming}
                     >
