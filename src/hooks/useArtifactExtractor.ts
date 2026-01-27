@@ -10,6 +10,18 @@ const CODE_BLOCK_REGEX = /```(\w*)([^\n]*)\n([\s\S]*?)```/g;
 // Extract title from meta info like: title="App.tsx" or title='App.tsx'
 const META_TITLE_REGEX = /title\s*=\s*["']([^"']+)["']/i;
 
+const ARTIFACT_LIST_LANGUAGES = new Set([
+    'vue',
+    'react',
+    'jsx',
+    'tsx',
+    'html',
+    'markdown',
+    'md',
+    'mermaid',
+    'drawio',
+]);
+
 interface UseArtifactExtractorOptions {
     messages: Message[];
 }
@@ -43,6 +55,9 @@ export function useArtifactExtractor({ messages }: UseArtifactExtractorOptions):
                 const language = match[1] || 'text';
                 const meta = match[2] || '';
                 const code = match[3].trim();
+
+                const normalizedLanguage = language.toLowerCase();
+                if (!ARTIFACT_LIST_LANGUAGES.has(normalizedLanguage)) continue;
 
                 // Skip very short code blocks (likely not meaningful artifacts)
                 if (code.length < 20) continue;

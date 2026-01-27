@@ -43,6 +43,8 @@ export interface ContextItem {
     details?: string;
     // Optional search results for search context items
     searchResults?: SearchResultItem[];
+    // Optional markdown search result content
+    searchMarkdown?: string;
     // Source: user input, MCP tool call
     source: 'user' | 'mcp';
     // Optional timestamp

@@ -489,7 +489,8 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 const cancelData = conversationEvent.data as ConversationCancelEvent;
                 console.log("Received conversation_cancel event:", cancelData);
 
-                // 立即清理所有流式状态，停止显示闪亮边框
+                // 立即清理所有流式状态，停止显示闪亮边框和思考计时器
+                setStreamingMessages(new Map());
                 setPendingUserMessageId(null);
                 setStreamingAssistantMessageIds(new Set());
                 setActiveMcpCallIds(new Set());

@@ -45,6 +45,22 @@ const parseSearchResultItems = (rawResult: string): SearchResultItem[] | undefin
     }
 };
 
+const parseSearchResultText = (rawResult: string): string | undefined => {
+    if (!rawResult) return undefined;
+    try {
+        const parsed = JSON.parse(rawResult);
+        const parts = Array.isArray(parsed) ? parsed : parsed?.content;
+        if (!Array.isArray(parts)) return undefined;
+        const textParts = parts
+            .map((part: any) => (part?.type === 'text' && typeof part?.text === 'string' ? part.text : ''))
+            .filter((text: string) => text);
+        if (textParts.length === 0) return undefined;
+        return textParts.join('\n');
+    } catch {
+        return undefined;
+    }
+};
+
 const getAttachmentTypeName = (type: string): string => {
     switch (type) {
         case 'Image':
@@ -127,12 +143,14 @@ export function useContextList({ userFiles, mcpToolCallStates, messages }: UseCo
 
             // Parse parameters to get meaningful details
             let details = '';
+            let resultType: string | undefined;
             try {
                 if (toolCall.parameters) {
                     const params = JSON.parse(toolCall.parameters);
                     // Common parameter names for file paths and search queries
                     details = params.path || params.file_path || params.query || 
                               params.pattern || params.directory || params.uri || '';
+                    resultType = typeof params.result_type === 'string' ? params.result_type : undefined;
                 }
             } catch {
                 // Ignore parse errors
@@ -142,6 +160,13 @@ export function useContextList({ userFiles, mcpToolCallStates, messages }: UseCo
             const displayName = details || toolCall.tool_name || 'Unknown';
             const searchResults =
                 contextType === 'search' && toolCall.result ? parseSearchResultItems(toolCall.result) : undefined;
+            const searchMarkdown =
+                contextType === 'search' &&
+                toolCall.result &&
+                (!resultType || resultType === 'markdown') &&
+                !searchResults
+                    ? parseSearchResultText(toolCall.result)
+                    : undefined;
 
             items.push({
                 id: `mcp-${callId}`,
@@ -149,6 +174,7 @@ export function useContextList({ userFiles, mcpToolCallStates, messages }: UseCo
                 name: displayName.length > 50 ? displayName.slice(0, 47) + '...' : displayName,
                 details: toolCall.tool_name,
                 searchResults,
+                searchMarkdown,
                 source: 'mcp',
                 timestamp: new Date(),
             });

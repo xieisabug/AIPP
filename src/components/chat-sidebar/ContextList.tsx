@@ -2,6 +2,7 @@ import React, { useCallback, useState } from 'react';
 import { File, Search, FolderOpen, FileInput, FileQuestion, ExternalLink, ChevronDown, Image } from 'lucide-react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { invoke } from '@tauri-apps/api/core';
+import { emitTo, once } from '@tauri-apps/api/event';
 import { ContextItem } from './types';
 import { cn } from '@/utils/utils';
 
@@ -52,6 +53,24 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
         openUrl(url).catch(console.error);
     }, []);
 
+    const handleOpenMarkdownPreview = useCallback(async (markdown: string) => {
+        if (!markdown) return;
+        try {
+            await invoke('open_artifact_preview_window');
+            const payload = { type: 'markdown', original_code: markdown };
+            try {
+                await emitTo('artifact_preview', 'artifact-preview-data', payload);
+            } catch (_) {
+                // Ignore direct send failure, fallback to ready event.
+            }
+            await once('artifact-preview-ready', () => {
+                emitTo('artifact_preview', 'artifact-preview-data', payload);
+            });
+        } catch (error) {
+            console.error('Open markdown preview failed', error);
+        }
+    }, []);
+
     const handleOpenAttachment = useCallback(async (item: ContextItem) => {
         if (!item.attachmentData) return;
         
@@ -87,12 +106,14 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
     }, []);
 
     const handleItemClick = useCallback((item: ContextItem) => {
-        if (item.attachmentData) {
+        if (item.type === 'search' && item.searchMarkdown) {
+            handleOpenMarkdownPreview(item.searchMarkdown);
+        } else if (item.attachmentData) {
             handleOpenAttachment(item);
         } else if (onItemClick) {
             onItemClick(item);
         }
-    }, [handleOpenAttachment, onItemClick]);
+    }, [handleOpenAttachment, handleOpenMarkdownPreview, onItemClick]);
 
     if (items.length === 0) {
         return (

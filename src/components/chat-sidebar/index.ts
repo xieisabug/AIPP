@@ -1,5 +1,5 @@
 // Chat Sidebar Components
-export { default as ChatSidebar, SIDEBAR_WIDTH, COLLAPSED_WIDTH } from './ChatSidebar';
+export { default as ChatSidebar, DEFAULT_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, COLLAPSED_WIDTH } from './ChatSidebar';
 export { default as ChatSidebarContent } from './ChatSidebarContent';
 export { default as TodoList } from './TodoList';
 export { default as ArtifactList } from './ArtifactList';

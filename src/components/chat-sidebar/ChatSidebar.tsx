@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { cn } from '@/utils/utils';
 import { Button } from '@/components/ui/button';
-import { PanelRightClose, ExternalLink, ChevronRight } from 'lucide-react';
+import { PanelRightClose, ExternalLink, ChevronLeft } from 'lucide-react';
 import ChatSidebarContent from './ChatSidebarContent';
 import { TodoItem, CodeArtifact, ContextItem } from './types';
 
@@ -14,10 +14,12 @@ interface ChatSidebarProps {
     onOpenWindow?: () => void;
     onArtifactClick?: (artifact: CodeArtifact) => void;
     onContextClick?: (item: ContextItem) => void;
-    onExpandChange?: (isExpanded: boolean) => void;
+    onExpandChange?: (isExpanded: boolean, width: number) => void;
 }
 
-export const SIDEBAR_WIDTH = 280;
+export const DEFAULT_SIDEBAR_WIDTH = 280;
+export const MIN_SIDEBAR_WIDTH = 200;
+export const MAX_SIDEBAR_WIDTH = 500;
 export const COLLAPSED_WIDTH = 24;
 
 const ChatSidebar: React.FC<ChatSidebarProps> = ({
@@ -33,16 +35,19 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
 }) => {
     const [isExpanded, setIsExpanded] = useState(false);
     const [hasAutoExpanded, setHasAutoExpanded] = useState(false);
+    const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+    const [isResizing, setIsResizing] = useState(false);
     const prevConversationId = useRef(conversationId);
+    const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
     // Check if there's any data to display
     const hasData = todos.length > 0 || artifacts.length > 0 || contextItems.length > 0;
     const dataCount = todos.length + artifacts.length + contextItems.length;
 
-    // Notify parent when expansion state changes
+    // Notify parent when expansion state or width changes
     useEffect(() => {
-        onExpandChange?.(isExpanded);
-    }, [isExpanded, onExpandChange]);
+        onExpandChange?.(isExpanded, isExpanded ? sidebarWidth : COLLAPSED_WIDTH);
+    }, [isExpanded, sidebarWidth, onExpandChange]);
 
     // Reset auto-expand state when conversation changes
     useEffect(() => {
@@ -61,6 +66,38 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
         }
     }, [hasData, hasAutoExpanded, conversationId]);
 
+    // Handle resize drag
+    const handleResizeStart = useCallback((e: React.MouseEvent) => {
+        e.preventDefault();
+        setIsResizing(true);
+        resizeRef.current = { startX: e.clientX, startWidth: sidebarWidth };
+    }, [sidebarWidth]);
+
+    useEffect(() => {
+        if (!isResizing) return;
+
+        const handleMouseMove = (e: MouseEvent) => {
+            if (!resizeRef.current) return;
+            // Dragging left increases width (since sidebar is on the right)
+            const delta = resizeRef.current.startX - e.clientX;
+            const newWidth = Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, resizeRef.current.startWidth + delta));
+            setSidebarWidth(newWidth);
+        };
+
+        const handleMouseUp = () => {
+            setIsResizing(false);
+            resizeRef.current = null;
+        };
+
+        document.addEventListener('mousemove', handleMouseMove);
+        document.addEventListener('mouseup', handleMouseUp);
+
+        return () => {
+            document.removeEventListener('mousemove', handleMouseMove);
+            document.removeEventListener('mouseup', handleMouseUp);
+        };
+    }, [isResizing]);
+
     const handleToggle = useCallback(() => {
         setIsExpanded(prev => !prev);
     }, []);
@@ -77,10 +114,11 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
     return (
         <div 
             className={cn(
-                "relative flex-shrink-0 h-full transition-all duration-300 ease-in-out",
+                "relative flex-shrink-0 h-full",
+                !isResizing && "transition-all duration-300 ease-in-out",
                 className
             )}
-            style={{ width: isExpanded ? SIDEBAR_WIDTH : COLLAPSED_WIDTH }}
+            style={{ width: isExpanded ? sidebarWidth : COLLAPSED_WIDTH }}
         >
             {/* Collapsed state - show toggle tab */}
             {!isExpanded && (
@@ -89,7 +127,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
                     onClick={handleToggle}
                 >
                     <div className="flex flex-col items-center gap-2">
-                        <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                        <ChevronLeft className="h-4 w-4 text-muted-foreground" />
                         {hasData && (
                             <span className="text-xs text-muted-foreground writing-mode-vertical">
                                 {dataCount}
@@ -102,6 +140,16 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
             {/* Expanded state */}
             {isExpanded && (
                 <div className="h-full flex flex-col bg-background border-l border-border rounded-l-lg overflow-hidden">
+                    {/* Resize handle */}
+                    <div
+                        className={cn(
+                            "absolute left-0 top-0 bottom-0 w-1 cursor-ew-resize z-10 transition-colors",
+                            "hover:bg-primary/50",
+                            isResizing && "bg-primary/50"
+                        )}
+                        onMouseDown={handleResizeStart}
+                    />
+
                     {/* Header */}
                     <div className="flex items-center justify-between p-2 border-b border-border">
                         <span className="text-sm font-medium">详情</span>

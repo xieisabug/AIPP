@@ -331,6 +331,18 @@ impl MessageRepository {
         self.conn.execute("UPDATE message SET content = ?1 WHERE id = ?2", (content, id))?;
         Ok(())
     }
+
+    /// 更新对话中所有正在进行的消息的 finish_time（用于取消操作）
+    /// 只更新 start_time IS NOT NULL 且 finish_time IS NULL 的消息
+    #[instrument(level = "debug", skip(self), fields(conversation_id = conversation_id))]
+    pub fn finish_pending_messages(&self, conversation_id: i64) -> Result<usize> {
+        let now = chrono::Utc::now();
+        let updated = self.conn.execute(
+            "UPDATE message SET finish_time = ?1 WHERE conversation_id = ?2 AND start_time IS NOT NULL AND finish_time IS NULL",
+            rusqlite::params![now, conversation_id],
+        )?;
+        Ok(updated)
+    }
 }
 
 impl Repository<Message> for MessageRepository {

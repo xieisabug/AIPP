@@ -1126,6 +1126,22 @@ pub async fn cancel_ai(
         warn!(conversation_id, error = %e, "failed to cancel MCP tool calls for conversation");
     }
 
+    // 更新所有正在进行中的消息的 finish_time
+    if let Ok(db) = ConversationDatabase::new(&app_handle) {
+        if let Ok(message_repo) = db.message_repo() {
+            match message_repo.finish_pending_messages(conversation_id) {
+                Ok(count) => {
+                    if count > 0 {
+                        debug!(conversation_id, count, "finished pending messages on cancel");
+                    }
+                }
+                Err(e) => {
+                    warn!(conversation_id, error = %e, "failed to finish pending messages on cancel");
+                }
+            }
+        }
+    }
+
     // Send cancellation event to both ask and chat_ui windows
     let cancel_event = crate::api::ai::events::ConversationEvent {
         r#type: "conversation_cancel".to_string(),

@@ -117,8 +117,21 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             conversationId: conversationId ? parseInt(conversationId) : null,
         });
 
-        // Sidebar expansion state
-        const [sidebarExpanded, setSidebarExpanded] = useState(false);
+        // Sidebar expansion state and width
+        const [, setSidebarExpanded] = useState(false);
+        const [sidebarWidth, setSidebarWidth] = useState(0);
+        
+        const handleSidebarExpandChange = useCallback((isExpanded: boolean, width: number) => {
+            setSidebarExpanded(isExpanded);
+            setSidebarWidth(width);
+        }, []);
+
+        // Reset sidebar width when conversation changes or sidebar becomes invisible
+        useEffect(() => {
+            if (!conversationId || isMobile) {
+                setSidebarWidth(0);
+            }
+        }, [conversationId, isMobile]);
 
         // ============= 事件处理逻辑 =============
 
@@ -197,6 +210,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 // 检查messages中是否已存在该消息
                 setMessages((prevMessages) => {
                     const existingIndex = prevMessages.findIndex((msg) => msg.id === streamEvent.message_id);
+                    const lastUserMessage = [...prevMessages].reverse().find((msg) => msg.message_type === "user");
+                    const baseTime = lastUserMessage ? new Date(lastUserMessage.created_time) : new Date();
 
                     if (existingIndex !== -1) {
                         // 消息已存在，更新其内容和完成状态
@@ -234,15 +249,14 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         return updatedMessages;
                     } else {
                         // 消息不存在，添加新消息
-                        const lastMessage = prevMessages[prevMessages.length - 1];
-                        const baseTime = lastMessage ? new Date(lastMessage.created_time) : new Date();
+                        const offsetMs = streamEvent.message_type === "reasoning" ? 500 : 1000;
                         const newMessage: Message = {
                             id: streamEvent.message_id,
                             conversation_id: conversation?.id || 0,
                             message_type: streamEvent.message_type,
                             content: streamEvent.content,
                             llm_model_id: null,
-                            created_time: new Date(baseTime.getTime() + 1000),
+                            created_time: new Date(baseTime.getTime() + offsetMs),
                             start_time: streamEvent.message_type === "reasoning" ? baseTime : null,
                             finish_time: new Date(), // 标记为完成
                             // 如果事件中包含 Token 计数，则使用，否则默认为 0
@@ -708,7 +722,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             aiIsResponsing={aiIsResponsing}
                             placement="bottom"
                             isMobile={isMobile}
-                            sidebarExpanded={sidebarExpanded}
+                            sidebarWidth={sidebarWidth}
                             sidebarVisible={!isMobile && Boolean(conversationId)}
                         />
                 </div>
@@ -720,7 +734,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         artifacts={artifacts}
                         contextItems={contextItems}
                         conversationId={conversationId}
-                        onExpandChange={setSidebarExpanded}
+                        onExpandChange={handleSidebarExpandChange}
                         onArtifactClick={(artifact) => handleArtifact(artifact.language, artifact.code)}
                     />
                 )}
