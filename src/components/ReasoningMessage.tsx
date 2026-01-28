@@ -202,12 +202,12 @@ const ReasoningMessage = React.memo(
                     className="my-2 p-2 bg-gray-50 border-l-4 border-gray-400 rounded-r-lg w-80 max-w-[60%] cursor-pointer hover:bg-gray-100 transition-colors"
                     onClick={() => onToggleReasoningExpand?.()}
                 >
-                    <div className="flex items-center gap-2">
-                        <div className="w-2 h-2 bg-gray-500 rounded-full"></div>
-                        <span className="text-sm font-medium text-gray-700">
+                    <div className="flex items-center gap-2 overflow-hidden">
+                        <div className="w-2 h-2 bg-gray-500 rounded-full flex-shrink-0"></div>
+                        <span className="text-sm font-medium text-gray-700 truncate">
                             {formatStatusText("思考完成")}
                         </span>
-                        <span className="text-xs text-gray-400 ml-auto">
+                        <span className="text-xs text-gray-400 ml-auto flex-shrink-0">
                             点击展开
                         </span>
                     </div>
@@ -228,17 +228,17 @@ const ReasoningMessage = React.memo(
                 data-message-type="reasoning"
                 className="my-2 p-3 bg-gray-50 border-l-4 border-gray-400 rounded-r-lg max-w-[80%]"
             >
-                <div className="flex items-center gap-2 mb-2">
+                <div className="flex items-center gap-2 mb-2 overflow-hidden">
                     <div
-                        className={`w-2 h-2 bg-gray-500 rounded-full ${isThinking ? "animate-pulse" : ""}`}
+                        className={`w-2 h-2 bg-gray-500 rounded-full flex-shrink-0 ${isThinking ? "animate-pulse" : ""}`}
                     ></div>
-                    <span className="text-sm font-medium text-gray-700">
+                    <span className="text-sm font-medium text-gray-700 truncate">
                         {formatStatusText(
                             isComplete ? "思考完成" : "思考中...",
                         )}
                     </span>
                 </div>
-                <div className="text-sm text-gray-600 whitespace-pre-wrap font-mono">
+                <div className="text-sm text-gray-600 whitespace-pre-wrap break-words font-mono overflow-hidden">
                     {isThinking &&
                         contentLines.hasMoreThanThreeLines &&
                         !isReasoningExpanded ? (

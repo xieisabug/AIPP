@@ -289,6 +289,104 @@ pub async fn run_artifacts(
                 }
             }
         }
+        // 对于 tsx/ts/js/javascript/typescript 等通用代码格式，自动检测是 React 还是 Vue
+        "tsx" | "ts" | "js" | "javascript" | "typescript" => {
+            // 优先检测 Vue 组件 (因为 Vue SFC 有明确的 <template> 标记)
+            if is_vue_component(input_str) {
+                let bun_version = BunUtils::get_bun_version(&app_handle);
+                if bun_version.is_err()
+                    || bun_version.as_ref().unwrap_or(&String::new()).contains("Not Installed")
+                {
+                    if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+                        let _ = window.emit("environment-check", serde_json::json!({
+                            "tool": "bun",
+                            "message": "Vue 预览需要 bun 环境，但系统中未安装 bun。是否要自动安装？",
+                            "lang": "vue",
+                            "input_str": input_str
+                        }));
+                    }
+                    return Ok("等待用户确认安装环境".to_string());
+                }
+
+                let component_name = extract_vue_component_name(input_str)
+                    .unwrap_or_else(|| "UserComponent".to_string());
+                if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+                    let _ = window.emit(
+                        "artifact-preview-data",
+                        serde_json::json!({ "type": "vue", "original_code": input_str }),
+                    );
+                    let _ = window.emit(
+                        "artifact-preview-log",
+                        format!("检测到 Vue 组件，正在启动预览..."),
+                    );
+                }
+                let preview_id = create_vue_preview_for_artifact(
+                    app_handle.clone(),
+                    input_str.to_string(),
+                    component_name,
+                )
+                .await
+                .map_err(|e| {
+                    let error_msg = format!("Vue 组件预览失败: {}", e);
+                    if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+                        let _ = window.emit("artifact-preview-error", &error_msg);
+                    }
+                    AppError::RunCodeError(error_msg)
+                })?;
+                return Ok(format!("Vue 组件预览已启动，预览 ID: {}", preview_id));
+            }
+            // 其次检测 React 组件
+            else if is_react_component(input_str) {
+                let bun_version = BunUtils::get_bun_version(&app_handle);
+                if bun_version.is_err()
+                    || bun_version.as_ref().unwrap_or(&String::new()).contains("Not Installed")
+                {
+                    if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+                        let _ = window.emit("environment-check", serde_json::json!({
+                            "tool": "bun",
+                            "message": "React 预览需要 bun 环境，但系统中未安装 bun。是否要自动安装？",
+                            "lang": "react",
+                            "input_str": input_str
+                        }));
+                    }
+                    return Ok("等待用户确认安装环境".to_string());
+                }
+
+                let component_name = extract_component_name(input_str)
+                    .unwrap_or_else(|| "UserComponent".to_string());
+                if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+                    let _ = window.emit(
+                        "artifact-preview-data",
+                        serde_json::json!({ "type": "react", "original_code": input_str }),
+                    );
+                    let _ = window.emit(
+                        "artifact-preview-log",
+                        format!("检测到 React 组件，正在启动预览..."),
+                    );
+                }
+                let preview_id = create_react_preview_for_artifact(
+                    app_handle.clone(),
+                    input_str.to_string(),
+                    component_name,
+                )
+                .await
+                .map_err(|e| {
+                    let error_msg = format!("React 组件预览失败: {}", e);
+                    if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+                        let _ = window.emit("artifact-preview-error", &error_msg);
+                    }
+                    AppError::RunCodeError(error_msg)
+                })?;
+                return Ok(format!("React 组件预览已启动，预览 ID: {}", preview_id));
+            } else {
+                let error_msg =
+                    "无法识别为 React 或 Vue 组件，请确保代码是完整的组件格式".to_owned();
+                if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+                    let _ = window.emit("artifact-preview-error", &error_msg);
+                }
+                return Err(AppError::RunCodeError(error_msg));
+            }
+        }
         _ => {
             let error_msg = "暂不支持该语言的代码执行".to_owned();
             if let Some(window) = app_handle.get_webview_window("artifact_preview") {

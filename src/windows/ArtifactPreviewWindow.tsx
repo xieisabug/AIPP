@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { open } from '@tauri-apps/plugin-shell';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import mermaid from 'mermaid';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -9,9 +9,11 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import remarkMath from 'remark-math';
 import remarkBreaks from 'remark-breaks';
 import remarkCustomCompenent from '@/react-markdown/remarkCustomComponent';
+import remarkCodeBlockMeta from '@/react-markdown/remarkCodeBlockMeta';
 import rehypeKatex from 'rehype-katex';
 import rehypeRaw from 'rehype-raw';
 import TipsComponent from '@/react-markdown/components/TipsComponent';
+import { resolveCodeBlockMeta } from '@/react-markdown/remarkCodeBlockMeta';
 import '../styles/ArtifactPreviewWIndow.css';
 import 'katex/dist/katex.min.css';
 import EnvironmentInstallDialog from '../components/EnvironmentInstallDialog';
@@ -574,7 +576,7 @@ export default function ArtifactPreviewWindow() {
     const handleOpenInBrowser = async () => {
         if (previewUrl) {
             try {
-                await open(previewUrl);
+                await openUrl(previewUrl);
             } catch (error) {
             }
         }
@@ -823,18 +825,35 @@ export default function ArtifactPreviewWindow() {
                                         {(() => {
                                             const mdComponents: any = {
                                                 tipscomponent: TipsComponent,
-                                                code({ className, children, ...props }: any) {
+                                                code({ className, children, node, ...props }: any) {
                                                     const match = /language-(\w+)/.exec(className || '');
-                                                    const isInline = !match;
+                                                    const meta = resolveCodeBlockMeta(props as Record<string, unknown>, node);
+                                                    const dataLanguage = typeof (props as Record<string, unknown>)['data-language'] === 'string'
+                                                        ? (props as Record<string, unknown>)['data-language'] as string
+                                                        : undefined;
+                                                    const language = match?.[1] ?? dataLanguage ?? 'text';
+                                                    const isInline = !match && !meta && !dataLanguage;
+                                                    const metaLabel = meta
+                                                        ? [meta.title || meta.filename, meta.line ? `line ${meta.line}` : null, meta.highlight ? `highlight ${meta.highlight}` : null]
+                                                            .filter(Boolean)
+                                                            .join(' · ')
+                                                        : null;
                                                     return !isInline ? (
-                                                        <SyntaxHighlighter
-                                                            style={oneDark as any}
-                                                            language={match[1]}
-                                                            PreTag="div"
-                                                            {...props}
-                                                        >
-                                                            {String(children).replace(/\n$/, '')}
-                                                        </SyntaxHighlighter>
+                                                        <div>
+                                                            {metaLabel && (
+                                                                <div className="mb-2 text-xs text-muted-foreground font-mono truncate" title={metaLabel}>
+                                                                    {metaLabel}
+                                                                </div>
+                                                            )}
+                                                            <SyntaxHighlighter
+                                                                style={oneDark as any}
+                                                                language={language}
+                                                                PreTag="div"
+                                                                {...props}
+                                                            >
+                                                                {String(children).replace(/\n$/, '')}
+                                                            </SyntaxHighlighter>
+                                                        </div>
                                                     ) : (
                                                         <code className={className} {...props}>
                                                             {children}
@@ -844,7 +863,7 @@ export default function ArtifactPreviewWindow() {
                                             };
                                             return (
                                                 <ReactMarkdown
-                                                    remarkPlugins={[remarkMath, remarkBreaks, remarkCustomCompenent]}
+                                                    remarkPlugins={[remarkMath, remarkBreaks, remarkCodeBlockMeta, remarkCustomCompenent]}
                                                     rehypePlugins={[rehypeKatex, rehypeRaw]}
                                                     components={mdComponents}
                                                 >

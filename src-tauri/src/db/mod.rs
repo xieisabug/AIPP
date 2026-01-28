@@ -24,7 +24,7 @@ pub mod system_db;
 #[cfg(test)]
 mod tests;
 
-const CURRENT_VERSION: &str = "0.0.7";
+const CURRENT_VERSION: &str = "0.0.8";
 
 pub(crate) fn get_db_path(app_handle: &tauri::AppHandle, db_name: &str) -> Result<PathBuf, String> {
     let app_dir = app_handle.path().app_data_dir().unwrap();
@@ -84,6 +84,7 @@ pub fn database_upgrade(
                     ("0.0.5", special_logic_0_0_5),
                     ("0.0.6", special_logic_0_0_6),
                     ("0.0.7", special_logic_0_0_7),
+                    ("0.0.8", special_logic_0_0_8),
                 ];
 
                 for (version_str, logic) in special_versions.iter() {
@@ -510,5 +511,23 @@ fn special_logic_0_0_7(
         .map_err(|e| format!("创建 scheduled_task_log 表失败: {}", e.to_string()))?;
 
     info!("special_logic_0_0_7 done: scheduled_task_log 表创建完成");
+    Ok(())
+}
+
+fn special_logic_0_0_8(
+    _system_db: &SystemDatabase,
+    _llm_db: &LLMDatabase,
+    _assistant_db: &AssistantDatabase,
+    conversation_db: &ConversationDatabase,
+    _app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    info!("special_logic_0_0_8: 创建 conversation_todo 表");
+
+    // The create_tables method will create the conversation_todo table if it doesn't exist
+    conversation_db
+        .create_tables()
+        .map_err(|e| format!("创建 conversation_todo 表失败: {}", e.to_string()))?;
+
+    info!("special_logic_0_0_8 done: conversation_todo 表创建完成");
     Ok(())
 }

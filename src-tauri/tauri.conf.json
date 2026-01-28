@@ -24,7 +24,9 @@
             "icons/icon.ico"
         ],
         "resources": [
-            "artifacts/templates/**/*"
+            "artifacts/templates/**/*",
+            "assets/syntaxes.bin",
+            "assets/themes.bin"
         ]
     },
     "productName": "Aipp",

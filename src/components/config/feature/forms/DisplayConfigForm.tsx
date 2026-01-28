@@ -1,10 +1,11 @@
-import React, { useCallback, useRef } from "react";
+import React, { useCallback, useMemo, useRef } from "react";
 import { UseFormReturn } from "react-hook-form";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { emit } from "@tauri-apps/api/event";
 import ConfigForm from "@/components/ConfigForm";
 import { toast } from "sonner";
 import { AVAILABLE_CODE_THEMES } from "@/hooks/useCodeTheme";
+import { useSyntectThemes } from "@/hooks/highlight/useSyntectThemes";
 
 interface DisplayConfigFormProps {
     form: UseFormReturn<any>;
@@ -13,6 +14,7 @@ interface DisplayConfigFormProps {
 
 export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({ form, onSave }) => {
     const previousNotificationValue = useRef<boolean | undefined>(undefined);
+    const { themes, themeInfo } = useSyntectThemes();
     
     const themeOptions = [{ value: "default", label: "默认主题" }];
 
@@ -27,16 +29,42 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({ form, onSa
         { value: "disabled", label: "关闭" },
     ];
 
-    // 代码主题选项
-    const lightCodeThemeOptions = AVAILABLE_CODE_THEMES.filter((theme) => theme.category === "light").map((theme) => ({
-        value: theme.id,
-        label: theme.name,
-    }));
+    const syntectThemeOptions = useMemo(() => {
+        if (!themes || themes.length === 0) return null;
+        return [...themes]
+            .sort((a, b) => a.localeCompare(b))
+            .map((name) => ({ value: name, label: name }));
+    }, [themes]);
 
-    const darkCodeThemeOptions = AVAILABLE_CODE_THEMES.filter((theme) => theme.category === "dark").map((theme) => ({
-        value: theme.id,
-        label: theme.name,
-    }));
+    const syntectThemeOptionsByMode = useMemo(() => {
+        if (!themeInfo || themeInfo.length === 0) return null;
+        const sorted = [...themeInfo].sort((a, b) => a.name.localeCompare(b.name));
+        return {
+            light: sorted.filter((item) => !item.is_dark).map((item) => ({ value: item.name, label: item.name })),
+            dark: sorted.filter((item) => item.is_dark).map((item) => ({ value: item.name, label: item.name })),
+        };
+    }, [themeInfo]);
+
+    const fallbackLightOptions = useMemo(() => {
+        return AVAILABLE_CODE_THEMES.filter((theme) => theme.category === "light").map((theme) => ({
+            value: theme.id,
+            label: theme.name,
+        }));
+    }, []);
+
+    const fallbackDarkOptions = useMemo(() => {
+        return AVAILABLE_CODE_THEMES.filter((theme) => theme.category === "dark").map((theme) => ({
+            value: theme.id,
+            label: theme.name,
+        }));
+    }, []);
+
+    const lightCodeThemeOptions = syntectThemeOptionsByMode?.light?.length
+        ? syntectThemeOptionsByMode.light
+        : syntectThemeOptions ?? fallbackLightOptions;
+    const darkCodeThemeOptions = syntectThemeOptionsByMode?.dark?.length
+        ? syntectThemeOptionsByMode.dark
+        : syntectThemeOptions ?? fallbackDarkOptions;
 
     const handleSaveDisplayConfig = useCallback(async () => {
         const values = form.getValues();

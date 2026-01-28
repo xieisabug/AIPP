@@ -14,6 +14,7 @@ pub mod scheduled_task_api;
 pub mod skill_api;
 pub mod sub_task_api;
 pub mod system_api;
+pub mod todo_api;
 pub mod token_statistics_api;
 pub mod updater_api;
 

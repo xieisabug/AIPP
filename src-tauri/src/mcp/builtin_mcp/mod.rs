@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
-use tracing::{error, instrument};
+use tracing::{debug, error, instrument};
 
 pub mod agent;
 pub mod operation;
 pub mod search;
 pub mod templates;
 
-pub use agent::AgentHandler;
+pub use agent::{AgentHandler, TodoHandler, TodoState};
 pub use operation::{OperationHandler, OperationState};
 pub use search::SearchHandler;
 pub use templates::{
@@ -445,6 +445,77 @@ pub async fn execute_aipp_builtin_tool(
                         }
                         Err(e) => {
                             error!(error = %e, "load_skill tool execution failed");
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": e}],
+                                "isError": true
+                            })
+                        }
+                    }
+                }
+                "todo_write" => {
+                    use agent::todo::{TodoHandler, TodoItem, TodoState, TodoWriteRequest};
+                    use crate::api::todo_api::{emit_todo_update, TodoItemResponse};
+
+                    // Get TodoState from app state (must use the managed state)
+                    let state = app_handle
+                        .try_state::<TodoState>()
+                        .map(|s| s.inner().clone())
+                        .unwrap_or_else(TodoState::new);
+
+                    let todo_handler = TodoHandler::new(state.clone());
+
+                    // Parse todos array
+                    let todos_value = match args.get("todos") {
+                        Some(value) => {
+                            debug!(has_todos = true, "todo_write args parsed");
+                            value
+                        }
+                        None => {
+                            debug!(has_todos = false, args = ?args, "todo_write args missing todos");
+                            return Err("Missing required parameter: todos".to_string());
+                        }
+                    };
+
+                    let todos: Vec<TodoItem> = serde_json::from_value(todos_value.clone())
+                        .map_err(|e| format!("Invalid todos format: {}", e))?;
+
+                    let request = TodoWriteRequest { todos };
+
+                    match todo_handler.todo_write(request, conversation_id) {
+                        Ok(response) => {
+                            // Emit todo_update event to frontend
+                            if let Some(conv_id) = conversation_id {
+                                let stored_todos = state.get_todos(conv_id);
+                                let todo_responses: Vec<TodoItemResponse> = stored_todos
+                                    .into_iter()
+                                    .map(|t| TodoItemResponse {
+                                        content: t.content,
+                                        status: t.status.to_string(),
+                                        active_form: t.active_form,
+                                    })
+                                    .collect();
+                                emit_todo_update(&app_handle, conv_id, &todo_responses);
+                            }
+
+                            let text = format!(
+                                "{}\n\nCurrent task: {}",
+                                response.message,
+                                response.current_task.as_deref().unwrap_or("None")
+                            );
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": text}],
+                                "isError": false,
+                                "metadata": {
+                                    "total": response.total,
+                                    "pending": response.pending,
+                                    "in_progress": response.in_progress,
+                                    "completed": response.completed,
+                                    "current_task": response.current_task
+                                }
+                            })
+                        }
+                        Err(e) => {
+                            error!(error = %e, "todo_write tool execution failed");
                             serde_json::json!({
                                 "content": [{"type": "text", "text": e}],
                                 "isError": true

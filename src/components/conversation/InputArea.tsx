@@ -83,6 +83,8 @@ interface InputAreaProps {
     aiIsResponsing: boolean;
     placement?: "top" | "bottom";
     isMobile?: boolean;
+    sidebarWidth?: number;
+    sidebarVisible?: boolean;
 }
 const IMAGE_AREA_HEIGHT = 80;
 
@@ -100,6 +102,8 @@ const InputArea = React.memo(
                 aiIsResponsing,
                 placement = "bottom",
                 isMobile = false,
+                sidebarWidth = 0,
+                sidebarVisible = false,
             },
             ref
         ) => {
@@ -805,9 +809,11 @@ const InputArea = React.memo(
                 textareaRef.current?.focus();
             }, [textareaRef]);
 
+            const baseRight = sidebarVisible ? 130 : 170;
+
             return (
                 <div className={`input-area ${placement} ${isMobile ? 'mobile' : ''}`}>
-                    <div className="input-area-textarea-container">
+                    <div className="input-area-textarea-container" style={{ right: baseRight}}>
                         <div className="input-area-img-container" onClick={handleImageContainerClick}>
                             {renderFiles()}
                         </div>
@@ -846,6 +852,11 @@ const InputArea = React.memo(
                         onClick={handleChooseFile}
                         icon={<Add className="fill-foreground" />}
                         className={`input-area-add-button ${placement}`}
+                        style={
+                            placement === "bottom" && !isMobile
+                                ? { right: (sidebarVisible ? 150 : 190) + sidebarWidth }
+                                : undefined
+                        }
                     />
                     <CircleButton
                         size={placement === "bottom" ? "large" : "medium"}
@@ -859,6 +870,11 @@ const InputArea = React.memo(
                         }
                         primary
                         className={`input-area-send-button ${placement}`}
+                        style={
+                            placement === "bottom" && !isMobile
+                                ? { right: (sidebarVisible ? 70 : 107) + sidebarWidth }
+                                : undefined
+                        }
                     />
 
                     <BangCompletionList

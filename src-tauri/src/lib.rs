@@ -19,7 +19,7 @@ use crate::api::ai_api::{
 };
 use crate::api::assistant_api::{
     add_assistant, bulk_update_assistant_mcp_tools, copy_assistant, delete_assistant,
-    export_assistant, get_assistant, get_assistant_field_value,
+    export_assistant, get_acp_working_directory, get_assistant, get_assistant_field_value,
     get_assistant_mcp_servers_with_tools, get_assistants, import_assistant, save_assistant,
     update_assistant_mcp_config, update_assistant_mcp_tool_config,
     update_assistant_model_config_value,
@@ -108,8 +108,9 @@ use crate::db::sub_task_db::SubTaskDatabase;
 use crate::db::system_db::SystemDatabase;
 use crate::mcp::builtin_mcp::{
     add_or_update_aipp_builtin_server, execute_aipp_builtin_tool, init_builtin_mcp_servers,
-    list_aipp_builtin_templates, OperationState,
+    list_aipp_builtin_templates, OperationState, TodoState,
 };
+use crate::api::todo_api::get_todos;
 use crate::mcp::execution_api::{
     continue_with_error, create_mcp_tool_call, execute_mcp_tool_call, get_mcp_tool_call,
     get_mcp_tool_calls_by_conversation, send_mcp_tool_results, stop_mcp_tool_call,
@@ -148,7 +149,7 @@ use crate::window::{
     create_schedule_window_hidden, ensure_hidden_search_window, handle_open_ask_window,
     open_artifact_collections_window, open_artifact_preview_window, open_chat_ui_window,
     open_chat_ui_window_inner, open_config_window, open_config_window_inner, open_plugin_window,
-    open_schedule_window,
+    open_schedule_window, open_sidebar_window, close_sidebar_window,
 };
 use db::conversation_db::ConversationDatabase;
 use db::database_upgrade;
@@ -461,6 +462,10 @@ pub fn run() {
                 warn!(error = %e, "Failed to initialize builtin MCP servers");
             }
 
+            // Initialize TodoState with app handle for database persistence
+            let todo_state = app.state::<TodoState>();
+            todo_state.set_app_handle(app_handle.clone());
+
             app.manage(initialize_state(&app_handle));
             app.manage(initialize_name_cache_state(&app_handle));
 
@@ -500,7 +505,8 @@ pub fn run() {
         .manage(MessageTokenManager::new())
         .manage(ConversationActivityManager::new())
         .manage(OperationState::new())
-        .manage(AcpPermissionState::new());
+        .manage(AcpPermissionState::new())
+        .manage(TodoState::new());
     #[cfg(desktop)]
     let app = app.manage(CopilotLspState::default());
     let app = app
@@ -518,6 +524,8 @@ pub fn run() {
             open_plugin_window,
             open_schedule_window,
             open_artifact_preview_window,
+            open_sidebar_window,
+            close_sidebar_window,
             save_config,
             get_config,
             get_all_feature_config,
@@ -545,6 +553,7 @@ pub fn run() {
             get_assistants,
             get_assistant,
             get_assistant_field_value,
+            get_acp_working_directory,
             save_assistant,
             add_assistant,
             delete_assistant,
@@ -720,6 +729,8 @@ pub fn run() {
             run_scheduled_task_now,
             list_scheduled_task_logs,
             list_scheduled_task_runs,
+            // Todo commands
+            get_todos,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");

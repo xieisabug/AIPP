@@ -25,6 +25,18 @@ export function useMessageProcessing({
     groupRootMessageIds,
     getMessageVersionInfo,
 }: UseMessageProcessingProps): UseMessageProcessingReturn {
+    const compareReasoningBeforeResponse = (a: Message, b: Message): number => {
+        const aIsReasoning = a.message_type === "reasoning";
+        const bIsReasoning = b.message_type === "reasoning";
+        const aIsResponse = a.message_type === "response";
+        const bIsResponse = b.message_type === "response";
+
+        if ((aIsReasoning && bIsResponse) || (aIsResponse && bIsReasoning)) {
+            return aIsReasoning ? -1 : 1;
+        }
+        return 0;
+    };
+
     const getOrderValue = (msg: Message): number => {
         const tryParse = (value: any) => {
             const ts = value ? new Date(value as any).getTime() : NaN;
@@ -37,6 +49,21 @@ export function useMessageProcessing({
             tryParse(msg.finish_time) ??
             msg.id
         );
+    };
+
+    const compareMessageOrder = (a: Message, b: Message): number => {
+        if (a.generation_group_id && a.generation_group_id === b.generation_group_id) {
+            const reasoningOrder = compareReasoningBeforeResponse(a, b);
+            if (reasoningOrder !== 0) return reasoningOrder;
+        }
+
+        const orderDelta = getOrderValue(a) - getOrderValue(b);
+        if (orderDelta !== 0) return orderDelta;
+
+        const reasoningOrder = compareReasoningBeforeResponse(a, b);
+        if (reasoningOrder !== 0) return reasoningOrder;
+
+        return a.id - b.id;
     };
 
     // 管理组合并关系：new_group_id -> original_group_id
@@ -121,7 +148,7 @@ export function useMessageProcessing({
         // 如果没有分组信息，直接按时间/ID排序返回
         if (generationGroups.size === 0) {
             return visibleMessages.sort(
-                (a, b) => getOrderValue(a) - getOrderValue(b),
+                (a, b) => compareMessageOrder(a, b),
             );
         }
 
@@ -155,17 +182,7 @@ export function useMessageProcessing({
 
         // 然后对可见消息进行排序
         const sorted = visibleMessages.sort((a, b) => {
-
-            // 获取排序基准值：对所有可见消息直接使用自身时间/ID，避免跨轮分组的旧基准把新轮消息提前
-            const aBaseValue = getOrderValue(a);
-            const bBaseValue = getOrderValue(b);
-
-            if (aBaseValue !== bBaseValue) {
-                return aBaseValue - bBaseValue;
-            }
-            
-            // 基准值相同时，按时间/ID排序（同一分组内的消息或ID相同的情况）
-            return getOrderValue(a) - getOrderValue(b);
+            return compareMessageOrder(a, b);
         });
 
         return sorted;

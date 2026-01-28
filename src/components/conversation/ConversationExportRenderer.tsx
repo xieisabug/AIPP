@@ -2,8 +2,10 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkCodeBlockMeta from "@/react-markdown/remarkCodeBlockMeta";
 import type { ExportData, ConversationExportOptions } from "@/utils/exportFormatters";
 import { parseToolCalls, mapToolCallsToMessages, stripMcpToolCallMarkers, extractMcpToolCallHints, formatJsonContent } from "@/utils/exportFormatters";
+import { resolveCodeBlockMeta } from "@/react-markdown/remarkCodeBlockMeta";
 
 // 导出专用的颜色方案 - 使用纯 RGB 值避免 oklch 兼容性问题
 const exportColors = {
@@ -84,9 +86,21 @@ const createExportMarkdownComponents = (colors: ColorScheme) => ({
             fontStyle: "italic"
         }} {...props}>{children}</blockquote>
     ),
-    code: ({ className, children, ...props }: any) => {
+    code: ({ className, children, node, ...props }: any) => {
         const isBlock = className?.includes("language-");
-        if (isBlock) {
+        const meta = resolveCodeBlockMeta(props as Record<string, unknown>, node);
+        const dataLanguage = typeof (props as Record<string, unknown>)["data-language"] === "string"
+            ? (props as Record<string, unknown>)["data-language"] as string
+            : undefined;
+        const language = className?.includes("language-")
+            ? className?.replace("language-", "")
+            : dataLanguage;
+        const metaLabel = meta
+            ? [meta.title || meta.filename, meta.line ? `line ${meta.line}` : null, meta.highlight ? `highlight ${meta.highlight}` : null]
+                .filter(Boolean)
+                .join(" · ")
+            : null;
+        if (isBlock || meta || dataLanguage) {
             return (
                 <pre style={{
                     backgroundColor: colors.codeBg,
@@ -96,13 +110,18 @@ const createExportMarkdownComponents = (colors: ColorScheme) => ({
                     margin: "0.75em 0",
                     border: `1px solid ${colors.border}`,
                 }}>
+                    {metaLabel && (
+                        <div style={{ fontSize: "11px", color: colors.mutedForeground, marginBottom: "6px", fontFamily: "Consolas, Monaco, \"Courier New\", monospace" }}>
+                            {metaLabel}
+                        </div>
+                    )}
                     <code style={{
                         fontFamily: 'Consolas, Monaco, "Courier New", monospace',
                         fontSize: "13px",
                         color: colors.codeText,
                         whiteSpace: "pre-wrap",
                         wordBreak: "break-word",
-                    }} {...props}>{children}</code>
+                    }} data-language={language} {...props}>{children}</code>
                 </pre>
             );
         }
@@ -163,7 +182,7 @@ const ExportMarkdown: React.FC<{ children: string; colors: ColorScheme }> = ({ c
     const components = createExportMarkdownComponents(colors);
     return (
         <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
+            remarkPlugins={[remarkGfm, remarkCodeBlockMeta]}
             components={components}
         >
             {children}

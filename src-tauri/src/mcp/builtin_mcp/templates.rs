@@ -232,6 +232,82 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                     "required": ["command", "source_type"]
                 }),
             },
+            BuiltinToolInfo {
+                name: "todo_write".into(),
+                description: r#"Create and manage a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user. It also helps the user understand the progress of the task and overall progress of their requests.
+
+**When to Use This Tool:**
+1. **Complex multi-step tasks** - When a task requires 3 or more distinct steps or actions
+2. **Non-trivial and complex tasks** - Tasks that require careful planning or multiple operations
+3. **User explicitly requests todo list** - When the user directly asks you to use the todo list
+4. **User provides multiple tasks** - When users provide a list of things to be done (numbered or comma-separated)
+5. **After receiving new instructions** - Immediately capture user requirements as todos
+6. **When you start working on a task** - Mark it as in_progress BEFORE beginning work. **Ideally you should only have one todo as in_progress at a time**
+7. **After completing a task** - Mark it as completed and add any new follow-up tasks discovered during implementation
+
+**When NOT to Use This Tool:**
+- There is only a single, straightforward task
+- The task is trivial and tracking it provides no organizational benefit
+- The task can be completed in less than 3 trivial steps
+- The task is purely conversational or informational
+- NOTE that you should **not use this tool if there is only one trivial task to do**. In this case you are better off just doing the task directly
+
+**Task Management:**
+- Update task status in real-time as you work
+- Mark tasks complete **IMMEDIATELY** after finishing (**don't batch completions**)
+- **Exactly ONE task must be in_progress at any time (not less, not more)**
+- Complete current tasks before starting new ones
+- Remove tasks that are no longer relevant from the list entirely
+
+**Task Completion Requirements:**
+- **ONLY** mark a task as completed when you have **FULLY** accomplished it
+- If you encounter errors, blockers, or cannot finish, keep the task as in_progress
+- When blocked, create a new task describing what needs to be resolved
+- Never mark a task as completed if: Tests are failing, Implementation is partial, You encountered unresolved errors, You couldn't find necessary files or dependencies
+
+**Task Breakdown:**
+- Create specific, actionable items
+- Break complex tasks into smaller, manageable steps
+- Use clear, descriptive task names
+- Always provide both forms: content: "Fix authentication bug", activeForm: "Fixing authentication bug"
+
+**Critical Rule:**
+- It is critical that you mark todos as completed **as soon as you are done** with a task. **Do not batch up multiple tasks before marking them as completed**"#.into(),
+                input_schema: serde_json::json!({
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "object",
+                    "required": ["todos"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "todos": {
+                            "type": "array",
+                            "description": "The updated todo list",
+                            "items": {
+                                "type": "object",
+                                "required": ["content", "status", "activeForm"],
+                                "additionalProperties": false,
+                                "properties": {
+                                    "content": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "description": "Imperative form: what needs to be done (e.g., 'Fix authentication bug')"
+                                    },
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["pending", "in_progress", "completed"],
+                                        "description": "Task status: pending (not started), in_progress (currently working on), completed (finished)"
+                                    },
+                                    "activeForm": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "description": "Present continuous form: what's being done (e.g., 'Fixing authentication bug')"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }),
+            },
         ],
         Some("search") => vec![
             BuiltinToolInfo {

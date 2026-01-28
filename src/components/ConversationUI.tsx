@@ -19,7 +19,7 @@ import {
     MCPToolCallUpdateEvent,
 } from "../data/Conversation";
 import "katex/dist/katex.min.css";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import FileDropArea from "./FileDropArea";
 import useFileDropHandler from "../hooks/useFileDropHandler";
 import InputArea, { InputAreaRef } from "./conversation/InputArea";
@@ -44,6 +44,12 @@ import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 // 导入新创建的组件
 import ConversationHeader from "./conversation/ConversationHeader";
 import ConversationContent from "./conversation/ConversationContent";
+
+// 导入 Chat Sidebar 相关
+import { ChatSidebar } from "./chat-sidebar";
+import { useTodoList } from "@/hooks/useTodoList";
+import { useArtifactExtractor } from "@/hooks/useArtifactExtractor";
+import { useContextList } from "@/hooks/useContextList";
 
 // 暴露给外部的方法接口
 export interface ConversationUIRef {
@@ -70,6 +76,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 对话加载状态
         const [isLoadingShow, setIsLoadingShow] = useState(false);
+
+        // ACP assistant working directory (resolved by backend)
+        const [acpWorkingDirectory, setAcpWorkingDirectory] = useState<string | null>(null);
 
         // 常规消息列表
         const [messages, setMessages] = useState<Array<Message>>([]);
@@ -103,6 +112,32 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 防泄露模式：获取重置函数
         const { resetReveal } = useAntiLeakage();
+
+        // ============= Chat Sidebar Hooks =============
+        
+        // Todo list from built-in agent tool
+        const { todos } = useTodoList({
+            conversationId: conversationId ? parseInt(conversationId) : null,
+        });
+
+        // Sidebar expansion state and width
+        const [, setSidebarExpanded] = useState(false);
+        const [sidebarWidth, setSidebarWidth] = useState(0);
+        
+        // Sidebar window state - when true, hide the inline sidebar
+        const [sidebarWindowOpen, setSidebarWindowOpen] = useState(false);
+        
+        const handleSidebarExpandChange = useCallback((isExpanded: boolean, width: number) => {
+            setSidebarExpanded(isExpanded);
+            setSidebarWidth(width);
+        }, []);
+
+        // Reset sidebar width when conversation changes or sidebar becomes invisible
+        useEffect(() => {
+            if (!conversationId || isMobile) {
+                setSidebarWidth(0);
+            }
+        }, [conversationId, isMobile]);
 
         // ============= 事件处理逻辑 =============
 
@@ -181,6 +216,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 // 检查messages中是否已存在该消息
                 setMessages((prevMessages) => {
                     const existingIndex = prevMessages.findIndex((msg) => msg.id === streamEvent.message_id);
+                    const lastUserMessage = [...prevMessages].reverse().find((msg) => msg.message_type === "user");
+                    const baseTime = lastUserMessage ? new Date(lastUserMessage.created_time) : new Date();
 
                     if (existingIndex !== -1) {
                         // 消息已存在，更新其内容和完成状态
@@ -218,15 +255,14 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         return updatedMessages;
                     } else {
                         // 消息不存在，添加新消息
-                        const lastMessage = prevMessages[prevMessages.length - 1];
-                        const baseTime = lastMessage ? new Date(lastMessage.created_time) : new Date();
+                        const offsetMs = streamEvent.message_type === "reasoning" ? 500 : 1000;
                         const newMessage: Message = {
                             id: streamEvent.message_id,
                             conversation_id: conversation?.id || 0,
                             message_type: streamEvent.message_type,
                             content: streamEvent.content,
                             llm_model_id: null,
-                            created_time: new Date(baseTime.getTime() + 1000),
+                            created_time: new Date(baseTime.getTime() + offsetMs),
                             start_time: streamEvent.message_type === "reasoning" ? baseTime : null,
                             finish_time: new Date(), // 标记为完成
                             // 如果事件中包含 Token 计数，则使用，否则默认为 0
@@ -341,6 +377,75 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             groupRootMessageIds: messageGroupsData.groupRootMessageIds,
             getMessageVersionInfo: messageGroupsData.getMessageVersionInfo,
         });
+
+        // ============= Chat Sidebar 数据提取 =============
+        
+        // Artifacts from messages (code blocks)
+        const { artifacts } = useArtifactExtractor({
+            messages: allDisplayMessages,
+        });
+
+        // Context items (user files + MCP tool calls + message attachments)
+        const { contextItems } = useContextList({
+            userFiles: fileInfoList,
+            mcpToolCallStates,
+            messages,
+            acpWorkingDirectory,
+        });
+
+        // ============= Sidebar Window 事件处理 =============
+        
+        // Listen for sidebar window open/close events
+        useEffect(() => {
+            const unlistenOpened = listen("sidebar-window-opened", () => {
+                setSidebarWindowOpen(true);
+                setSidebarWidth(0); // Reset sidebar width when window opens
+                // Send data immediately when window opens
+                emit("sidebar-data-sync", {
+                    todos,
+                    artifacts,
+                    contextItems,
+                    conversationId,
+                });
+            });
+
+            const unlistenClosed = listen("sidebar-window-closed", () => {
+                setSidebarWindowOpen(false);
+            });
+
+            // Listen for sidebar window ready event and send data
+            const unlistenReady = listen("sidebar-window-ready", () => {
+                emit("sidebar-data-sync", {
+                    todos,
+                    artifacts,
+                    contextItems,
+                    conversationId,
+                });
+            });
+
+            return () => {
+                unlistenOpened.then((f) => f());
+                unlistenClosed.then((f) => f());
+                unlistenReady.then((f) => f());
+            };
+        }, [todos, artifacts, contextItems, conversationId]);
+
+        // Sync sidebar data to window when data changes (if window is open)
+        useEffect(() => {
+            if (sidebarWindowOpen) {
+                emit("sidebar-data-sync", {
+                    todos,
+                    artifacts,
+                    contextItems,
+                    conversationId,
+                });
+            }
+        }, [sidebarWindowOpen, todos, artifacts, contextItems, conversationId]);
+
+        // Handle opening the sidebar window
+        const handleOpenSidebarWindow = useCallback(() => {
+            invoke("open_sidebar_window");
+        }, []);
 
         // 助手运行时API
         const { assistantRunApi } = useAssistantRuntime({
@@ -539,6 +644,23 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             ),
         });
 
+        // Fetch ACP working directory for current assistant
+        useEffect(() => {
+            const assistantId = conversation?.assistant_id ?? selectedAssistant;
+            if (!assistantId) {
+                setAcpWorkingDirectory(null);
+                return;
+            }
+
+            invoke<string>("get_acp_working_directory", { assistantId })
+                .then((workingDirectory) => {
+                    setAcpWorkingDirectory(workingDirectory);
+                })
+                .catch(() => {
+                    setAcpWorkingDirectory(null);
+                });
+        }, [conversation?.assistant_id, selectedAssistant, assistants]);
+
         // 监听错误通知事件
         useEffect(() => {
             const unsubscribe = listen<{ conversation_id: number | null, error_message: string }>("conversation-window-error-notification", (event) => {
@@ -620,63 +742,81 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // ============= 组件渲染 =============
 
         return (
-            <div ref={dropRef} className={`h-full relative flex flex-col bg-background ${isMobile ? '' : 'rounded-xl'}`}>
-                {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}
-                {!isMobile && (
-                    <ConversationHeader
-                        conversationId={conversationId}
-                        conversation={conversation}
-                        onEdit={openTitleEditDialog}
-                        onDelete={handleDeleteConversationSuccess}
-                    />
-                )}
+            <div ref={dropRef} className={`h-full relative flex bg-background ${isMobile ? '' : 'rounded-xl'}`}>
+                {/* Main content area */}
+                <div className="flex-1 flex flex-col min-w-0">
+                    {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}
+                    {!isMobile && (
+                        <ConversationHeader
+                            conversationId={conversationId}
+                            conversation={conversation}
+                            onEdit={openTitleEditDialog}
+                            onDelete={handleDeleteConversationSuccess}
+                        />
+                    )}
 
-                <div
-                    ref={scrollContainerRef}
-                    onScroll={handleScroll}
-                    className={`h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
-                >
-                    <ConversationContent
-                        conversationId={conversationId}
-                        // MessageList props
-                        allDisplayMessages={allDisplayMessages}
-                        streamingMessages={streamingMessages}
-                        shiningMessageIds={shiningMessageIds}
-                        reasoningExpandStates={reasoningExpandStates}
-                        mcpToolCallStates={mcpToolCallStates}
-                        generationGroups={messageGroupsData.generationGroups}
-                        selectedVersions={messageGroupsData.selectedVersions}
-                        getGenerationGroupControl={messageGroupsData.getGenerationGroupControl}
-                        handleGenerationVersionChange={messageGroupsData.handleGenerationVersionChange}
-                        onCodeRun={handleArtifact}
-                        onMessageRegenerate={handleMessageRegenerate}
-                        onMessageEdit={handleMessageEdit}
-                        onMessageFork={handleMessageFork}
-                        onToggleReasoningExpand={toggleReasoningExpand}
-                        // NewChatComponent props
-                        selectedText={selectedText}
-                        selectedAssistant={selectedAssistant}
-                        assistants={assistants}
-                        setSelectedAssistant={setSelectedAssistant}
-                    />
-                    <div ref={messagesEndRef} />
+                    <div
+                        ref={scrollContainerRef}
+                        onScroll={handleScroll}
+                        className={`h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
+                    >
+                        <ConversationContent
+                            conversationId={conversationId}
+                            // MessageList props
+                            allDisplayMessages={allDisplayMessages}
+                            streamingMessages={streamingMessages}
+                            shiningMessageIds={shiningMessageIds}
+                            reasoningExpandStates={reasoningExpandStates}
+                            mcpToolCallStates={mcpToolCallStates}
+                            generationGroups={messageGroupsData.generationGroups}
+                            selectedVersions={messageGroupsData.selectedVersions}
+                            getGenerationGroupControl={messageGroupsData.getGenerationGroupControl}
+                            handleGenerationVersionChange={messageGroupsData.handleGenerationVersionChange}
+                            onCodeRun={handleArtifact}
+                            onMessageRegenerate={handleMessageRegenerate}
+                            onMessageEdit={handleMessageEdit}
+                            onMessageFork={handleMessageFork}
+                            onToggleReasoningExpand={toggleReasoningExpand}
+                            // NewChatComponent props
+                            selectedText={selectedText}
+                            selectedAssistant={selectedAssistant}
+                            assistants={assistants}
+                            setSelectedAssistant={setSelectedAssistant}
+                        />
+                        <div ref={messagesEndRef} />
+                    </div>
+
+                    {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleDropFiles} /> : null}
+
+                        <InputArea
+                            ref={inputAreaRef}
+                            inputText={inputText}
+                            setInputText={setInputText}
+                            fileInfoList={fileInfoList}
+                            handleChooseFile={handleChooseFile}
+                            handleDeleteFile={handleDeleteFile}
+                            handlePaste={handlePaste}
+                            handleSend={handleSend}
+                            aiIsResponsing={aiIsResponsing}
+                            placement="bottom"
+                            isMobile={isMobile}
+                            sidebarWidth={sidebarWidth}
+                            sidebarVisible={!isMobile && Boolean(conversationId)}
+                        />
                 </div>
 
-                {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleDropFiles} /> : null}
-
-                <InputArea
-                    ref={inputAreaRef}
-                    inputText={inputText}
-                    setInputText={setInputText}
-                    fileInfoList={fileInfoList}
-                    handleChooseFile={handleChooseFile}
-                    handleDeleteFile={handleDeleteFile}
-                    handlePaste={handlePaste}
-                    handleSend={handleSend}
-                    aiIsResponsing={aiIsResponsing}
-                    placement="bottom"
-                    isMobile={isMobile}
-                />
+                {/* Right sidebar - only show on desktop when sidebar window is not open */}
+                {!isMobile && conversationId && !sidebarWindowOpen && (
+                    <ChatSidebar
+                        todos={todos}
+                        artifacts={artifacts}
+                        contextItems={contextItems}
+                        conversationId={conversationId}
+                        onExpandChange={handleSidebarExpandChange}
+                        onOpenWindow={handleOpenSidebarWindow}
+                        onArtifactClick={(artifact) => handleArtifact(artifact.language, artifact.code)}
+                    />
+                )}
 
                 <ConversationTitleEditDialog
                     isOpen={titleEditDialogIsOpen}
