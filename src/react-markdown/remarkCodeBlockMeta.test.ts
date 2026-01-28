@@ -40,7 +40,7 @@ describe("remarkCodeBlockMeta", () => {
     });
 
     it("falls back to node meta when data attributes missing", () => {
-        const node = { data: { meta: "title=Readme.md line=1 highlight=1" } };
+        const node = { type: "code", data: { meta: "title=Readme.md line=1 highlight=1" } };
         expect(resolveCodeBlockMeta({}, node)).toEqual({
             meta: "title=Readme.md line=1 highlight=1",
             title: "Readme.md",

@@ -15,6 +15,8 @@ interface UseContextListOptions {
     mcpToolCallStates: Map<number, MCPToolCallUpdateEvent>;
     // Messages in conversation (to extract sent attachments)
     messages?: Message[];
+    // ACP assistant working directory (resolved by backend)
+    acpWorkingDirectory?: string | null;
 }
 
 interface UseContextListReturn {
@@ -80,9 +82,24 @@ const getAttachmentTypeName = (type: string): string => {
     }
 };
 
-export function useContextList({ userFiles, mcpToolCallStates, messages }: UseContextListOptions): UseContextListReturn {
+export function useContextList({
+    userFiles,
+    mcpToolCallStates,
+    messages,
+    acpWorkingDirectory,
+}: UseContextListOptions): UseContextListReturn {
     const contextItems = useMemo(() => {
         const items: ContextItem[] = [];
+
+        if (acpWorkingDirectory) {
+            items.push({
+                id: `acp-working-directory-${acpWorkingDirectory}`,
+                type: 'list_directory',
+                name: acpWorkingDirectory,
+                details: 'ACP 工作目录',
+                source: 'mcp',
+            });
+        }
 
         // Track attachment counts by type for naming
         const attachmentCounts: Record<string, number> = {};
@@ -181,7 +198,7 @@ export function useContextList({ userFiles, mcpToolCallStates, messages }: UseCo
         });
 
         return items;
-    }, [userFiles, mcpToolCallStates, messages]);
+    }, [userFiles, mcpToolCallStates, messages, acpWorkingDirectory]);
 
     return { contextItems };
 }

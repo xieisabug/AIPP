@@ -19,7 +19,7 @@ use crate::api::ai_api::{
 };
 use crate::api::assistant_api::{
     add_assistant, bulk_update_assistant_mcp_tools, copy_assistant, delete_assistant,
-    export_assistant, get_assistant, get_assistant_field_value,
+    export_assistant, get_acp_working_directory, get_assistant, get_assistant_field_value,
     get_assistant_mcp_servers_with_tools, get_assistants, import_assistant, save_assistant,
     update_assistant_mcp_config, update_assistant_mcp_tool_config,
     update_assistant_model_config_value,
@@ -149,7 +149,7 @@ use crate::window::{
     create_schedule_window_hidden, ensure_hidden_search_window, handle_open_ask_window,
     open_artifact_collections_window, open_artifact_preview_window, open_chat_ui_window,
     open_chat_ui_window_inner, open_config_window, open_config_window_inner, open_plugin_window,
-    open_schedule_window,
+    open_schedule_window, open_sidebar_window, close_sidebar_window,
 };
 use db::conversation_db::ConversationDatabase;
 use db::database_upgrade;
@@ -524,6 +524,8 @@ pub fn run() {
             open_plugin_window,
             open_schedule_window,
             open_artifact_preview_window,
+            open_sidebar_window,
+            close_sidebar_window,
             save_config,
             get_config,
             get_all_feature_config,
@@ -551,6 +553,7 @@ pub fn run() {
             get_assistants,
             get_assistant,
             get_assistant_field_value,
+            get_acp_working_directory,
             save_assistant,
             add_assistant,
             delete_assistant,

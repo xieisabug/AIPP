@@ -19,7 +19,7 @@ import {
     MCPToolCallUpdateEvent,
 } from "../data/Conversation";
 import "katex/dist/katex.min.css";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import FileDropArea from "./FileDropArea";
 import useFileDropHandler from "../hooks/useFileDropHandler";
 import InputArea, { InputAreaRef } from "./conversation/InputArea";
@@ -77,6 +77,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 对话加载状态
         const [isLoadingShow, setIsLoadingShow] = useState(false);
 
+        // ACP assistant working directory (resolved by backend)
+        const [acpWorkingDirectory, setAcpWorkingDirectory] = useState<string | null>(null);
+
         // 常规消息列表
         const [messages, setMessages] = useState<Array<Message>>([]);
 
@@ -120,6 +123,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // Sidebar expansion state and width
         const [, setSidebarExpanded] = useState(false);
         const [sidebarWidth, setSidebarWidth] = useState(0);
+        
+        // Sidebar window state - when true, hide the inline sidebar
+        const [sidebarWindowOpen, setSidebarWindowOpen] = useState(false);
         
         const handleSidebarExpandChange = useCallback((isExpanded: boolean, width: number) => {
             setSidebarExpanded(isExpanded);
@@ -384,7 +390,62 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             userFiles: fileInfoList,
             mcpToolCallStates,
             messages,
+            acpWorkingDirectory,
         });
+
+        // ============= Sidebar Window 事件处理 =============
+        
+        // Listen for sidebar window open/close events
+        useEffect(() => {
+            const unlistenOpened = listen("sidebar-window-opened", () => {
+                setSidebarWindowOpen(true);
+                setSidebarWidth(0); // Reset sidebar width when window opens
+                // Send data immediately when window opens
+                emit("sidebar-data-sync", {
+                    todos,
+                    artifacts,
+                    contextItems,
+                    conversationId,
+                });
+            });
+
+            const unlistenClosed = listen("sidebar-window-closed", () => {
+                setSidebarWindowOpen(false);
+            });
+
+            // Listen for sidebar window ready event and send data
+            const unlistenReady = listen("sidebar-window-ready", () => {
+                emit("sidebar-data-sync", {
+                    todos,
+                    artifacts,
+                    contextItems,
+                    conversationId,
+                });
+            });
+
+            return () => {
+                unlistenOpened.then((f) => f());
+                unlistenClosed.then((f) => f());
+                unlistenReady.then((f) => f());
+            };
+        }, [todos, artifacts, contextItems, conversationId]);
+
+        // Sync sidebar data to window when data changes (if window is open)
+        useEffect(() => {
+            if (sidebarWindowOpen) {
+                emit("sidebar-data-sync", {
+                    todos,
+                    artifacts,
+                    contextItems,
+                    conversationId,
+                });
+            }
+        }, [sidebarWindowOpen, todos, artifacts, contextItems, conversationId]);
+
+        // Handle opening the sidebar window
+        const handleOpenSidebarWindow = useCallback(() => {
+            invoke("open_sidebar_window");
+        }, []);
 
         // 助手运行时API
         const { assistantRunApi } = useAssistantRuntime({
@@ -583,6 +644,23 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             ),
         });
 
+        // Fetch ACP working directory for current assistant
+        useEffect(() => {
+            const assistantId = conversation?.assistant_id ?? selectedAssistant;
+            if (!assistantId) {
+                setAcpWorkingDirectory(null);
+                return;
+            }
+
+            invoke<string>("get_acp_working_directory", { assistantId })
+                .then((workingDirectory) => {
+                    setAcpWorkingDirectory(workingDirectory);
+                })
+                .catch(() => {
+                    setAcpWorkingDirectory(null);
+                });
+        }, [conversation?.assistant_id, selectedAssistant, assistants]);
+
         // 监听错误通知事件
         useEffect(() => {
             const unsubscribe = listen<{ conversation_id: number | null, error_message: string }>("conversation-window-error-notification", (event) => {
@@ -727,14 +805,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         />
                 </div>
 
-                {/* Right sidebar - only show on desktop */}
-                {!isMobile && conversationId && (
+                {/* Right sidebar - only show on desktop when sidebar window is not open */}
+                {!isMobile && conversationId && !sidebarWindowOpen && (
                     <ChatSidebar
                         todos={todos}
                         artifacts={artifacts}
                         contextItems={contextItems}
                         conversationId={conversationId}
                         onExpandChange={handleSidebarExpandChange}
+                        onOpenWindow={handleOpenSidebarWindow}
                         onArtifactClick={(artifact) => handleArtifact(artifact.language, artifact.code)}
                     />
                 )}

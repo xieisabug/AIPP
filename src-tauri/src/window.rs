@@ -905,3 +905,102 @@ pub async fn ensure_hidden_search_window(app_handle: AppHandle) -> Result<(), St
     }
     Ok(())
 }
+
+// Create sidebar window for chat sidebar in a separate window
+fn create_sidebar_window(app_handle: &AppHandle) {
+    #[cfg(desktop)]
+    {
+        let (window_size, window_position) =
+            get_window_size_and_position(app_handle, 900.0, 700.0, &["chat_ui", "ask"]);
+
+        let mut builder = WebviewWindowBuilder::new(
+            app_handle,
+            "sidebar",
+            WebviewUrl::App("index.html".into()),
+        )
+        .title("详情 - Aipp")
+        .inner_size(window_size.width, window_size.height)
+        .resizable(true)
+        .minimizable(true)
+        .maximizable(true)
+        .decorations(true);
+
+        if let Some(position) = window_position {
+            builder = builder.position(position.x, position.y);
+        } else {
+            builder = builder.center();
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        let builder = builder.transparent(false);
+
+        match builder.build() {
+            Ok(window) => {
+                info!("Sidebar window created successfully");
+                let window_clone = window.clone();
+                let app_handle_clone = app_handle.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        window_clone.hide().unwrap();
+                        // 广播窗口关闭事件
+                        let _ = app_handle_clone.emit("sidebar-window-closed", ());
+                    }
+                });
+                // 广播窗口打开事件
+                let _ = app_handle.emit("sidebar-window-opened", ());
+            }
+            Err(e) => {
+                error!(error=%e, "Failed to create sidebar window");
+            }
+        }
+    }
+    #[cfg(mobile)]
+    {
+        let builder = WebviewWindowBuilder::new(
+            app_handle,
+            "sidebar",
+            WebviewUrl::App("index.html".into()),
+        );
+        if let Err(e) = builder.build() {
+            error!(error=%e, "Failed to create sidebar window");
+        }
+    }
+}
+
+/// Open sidebar window
+#[tauri::command]
+pub async fn open_sidebar_window(app_handle: AppHandle) -> Result<(), String> {
+    if let Some(window) = app_handle.get_webview_window("sidebar") {
+        debug!("Showing sidebar window");
+        #[cfg(desktop)]
+        {
+            if window.is_minimized().unwrap_or(false) {
+                window.unminimize().unwrap();
+            }
+            window.show().unwrap();
+            window.set_focus().unwrap();
+            // 广播窗口打开事件
+            let _ = app_handle.emit("sidebar-window-opened", ());
+        }
+    } else {
+        debug!("Creating sidebar window");
+        create_sidebar_window(&app_handle);
+    }
+    Ok(())
+}
+
+/// Close sidebar window
+#[tauri::command]
+pub async fn close_sidebar_window(app_handle: AppHandle) -> Result<(), String> {
+    if let Some(window) = app_handle.get_webview_window("sidebar") {
+        debug!("Hiding sidebar window");
+        #[cfg(desktop)]
+        {
+            window.hide().unwrap();
+            // 广播窗口关闭事件
+            let _ = app_handle.emit("sidebar-window-closed", ());
+        }
+    }
+    Ok(())
+}

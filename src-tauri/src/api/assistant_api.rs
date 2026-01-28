@@ -5,6 +5,7 @@ use crate::{
             AssistantModel, AssistantModelConfig, AssistantPrompt, AssistantPromptParam,
         },
         conversation_db::ConversationDatabase,
+        llm_db::LLMDatabase,
     },
     utils::share_utils::{
         compress_assistant_data, decompress_assistant_data, AssistantShareData, ModelConfigShare,
@@ -536,6 +537,38 @@ pub fn get_assistant_field_value(
         .ok_or_else(|| format!("Field '{}' not found", field_name))
 }
 
+#[tauri::command]
+#[instrument(skip(app_handle), fields(assistant_id))]
+pub fn get_acp_working_directory(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+) -> Result<String, String> {
+    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let assistant = assistant_db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
+
+    if assistant.assistant_type != Some(4) {
+        return Err("Assistant is not ACP type".to_string());
+    }
+
+    let model_configs =
+        assistant_db.get_assistant_model_configs(assistant_id).map_err(|e| e.to_string())?;
+    let provider_configs = if let Some(model) = assistant_db
+        .get_assistant_model(assistant_id)
+        .map_err(|e| e.to_string())?
+        .first()
+    {
+        let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+        llm_db.get_llm_provider_config(model.provider_id).map_err(|e| e.to_string())?
+    } else {
+        Vec::new()
+    };
+
+    let acp_config =
+        crate::api::ai::acp::extract_acp_config(&model_configs, &provider_configs).map_err(|e| e.to_string())?;
+
+    Ok(acp_config.working_directory.display().to_string())
+}
+
 // MCP Configuration Commands
 
 #[tauri::command]
@@ -693,6 +726,7 @@ pub async fn update_assistant_model_config_value(
             .map_err(|e| e.to_string())?;
     }
 
+    let _ = app_handle.emit("assistant_list_changed", ());
     Ok(())
 }
 

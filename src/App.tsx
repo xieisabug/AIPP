@@ -13,6 +13,7 @@ const windowLoaders: Record<string, () => Promise<{ default: React.ComponentType
     schedule: () => import("./windows/ScheduleWindow"),
     artifact_collections: () => import("./windows/ArtifactCollectionsWindow"),
     artifact: () => import("./windows/ArtifactWindow"),
+    sidebar: () => import("./windows/SidebarWindow"),
 };
 
 function App() {

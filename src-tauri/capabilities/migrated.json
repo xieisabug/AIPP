@@ -17,7 +17,8 @@
     "preview_vue",
     "artifact_preview",
     "artifact_collections",
-    "artifact"
+    "artifact",
+    "sidebar"
   ],
   "permissions": [
     "core:default",
