@@ -14,6 +14,8 @@ pub struct ArtifactCollection {
     pub created_time: String,
     pub last_used_time: Option<String>,
     pub use_count: i64,
+    pub db_id: Option<String>,       // 独立数据库标识
+    pub assistant_id: Option<i64>,   // 关联的助手 ID
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -24,6 +26,8 @@ pub struct NewArtifactCollection {
     pub artifact_type: String,
     pub code: String,
     pub tags: Option<String>,
+    pub db_id: Option<String>,
+    pub assistant_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -33,6 +37,8 @@ pub struct UpdateArtifactCollection {
     pub icon: Option<String>,
     pub description: Option<String>,
     pub tags: Option<String>,
+    pub db_id: Option<String>,
+    pub assistant_id: Option<i64>,
 }
 
 pub struct ArtifactsDatabase {
@@ -66,7 +72,9 @@ impl ArtifactsDatabase {
                 tags TEXT, -- JSON string for flexible tag storage
                 created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 last_used_time DATETIME,
-                use_count INTEGER NOT NULL DEFAULT 0
+                use_count INTEGER NOT NULL DEFAULT 0,
+                db_id TEXT,
+                assistant_id INTEGER
             );",
             [],
         )?;
@@ -82,14 +90,18 @@ impl ArtifactsDatabase {
             [],
         )?;
 
+        // Migrate: add db_id and assistant_id columns if they don't exist
+        let _ = self.conn.execute("ALTER TABLE artifacts_collection ADD COLUMN db_id TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE artifacts_collection ADD COLUMN assistant_id INTEGER", []);
+
         Ok(())
     }
 
     /// Save a new artifact to collection
     pub fn save_artifact(&self, artifact: NewArtifactCollection) -> Result<i64> {
         let mut stmt = self.conn.prepare(
-            "INSERT INTO artifacts_collection (name, icon, description, artifact_type, code, tags) 
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO artifacts_collection (name, icon, description, artifact_type, code, tags, db_id, assistant_id) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )?;
 
         stmt.execute(params![
@@ -98,7 +110,9 @@ impl ArtifactsDatabase {
             artifact.description,
             artifact.artifact_type,
             artifact.code,
-            artifact.tags
+            artifact.tags,
+            artifact.db_id,
+            artifact.assistant_id
         ])?;
 
         Ok(self.conn.last_insert_rowid())
@@ -107,12 +121,12 @@ impl ArtifactsDatabase {
     /// Get all artifacts with optional type filter
     pub fn get_artifacts(&self, artifact_type: Option<&str>) -> Result<Vec<ArtifactCollection>> {
         let query = if let Some(_) = artifact_type {
-            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count 
+            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count, db_id, assistant_id 
              FROM artifacts_collection 
              WHERE artifact_type = ? 
              ORDER BY use_count DESC, last_used_time DESC, created_time DESC"
         } else {
-            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count 
+            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count, db_id, assistant_id 
              FROM artifacts_collection 
              ORDER BY use_count DESC, last_used_time DESC, created_time DESC"
         };
@@ -131,6 +145,8 @@ impl ArtifactsDatabase {
                 created_time: row.get(7)?,
                 last_used_time: row.get(8)?,
                 use_count: row.get(9)?,
+                db_id: row.get(10)?,
+                assistant_id: row.get(11)?,
             })
         };
 
@@ -151,7 +167,7 @@ impl ArtifactsDatabase {
     /// Get artifact by ID
     pub fn get_artifact_by_id(&self, id: i64) -> Result<Option<ArtifactCollection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count 
+            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count, db_id, assistant_id 
              FROM artifacts_collection 
              WHERE id = ?"
         )?;
@@ -168,6 +184,8 @@ impl ArtifactsDatabase {
                 created_time: row.get(7)?,
                 last_used_time: row.get(8)?,
                 use_count: row.get(9)?,
+                db_id: row.get(10)?,
+                assistant_id: row.get(11)?,
             })
         })?;
 
@@ -183,7 +201,7 @@ impl ArtifactsDatabase {
         let search_pattern = format!("%{}%", query.to_lowercase());
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count 
+            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count, db_id, assistant_id 
              FROM artifacts_collection 
              WHERE LOWER(name) LIKE ? OR LOWER(description) LIKE ? OR LOWER(tags) LIKE ?
              ORDER BY use_count DESC, last_used_time DESC, created_time DESC"
@@ -201,6 +219,8 @@ impl ArtifactsDatabase {
                 created_time: row.get(7)?,
                 last_used_time: row.get(8)?,
                 use_count: row.get(9)?,
+                db_id: row.get(10)?,
+                assistant_id: row.get(11)?,
             })
         })?;
 
@@ -212,39 +232,66 @@ impl ArtifactsDatabase {
         Ok(artifacts)
     }
 
-    /// Update artifact metadata (name, icon, description, tags)
+    /// Update artifact metadata (name, icon, description, tags, db_id, assistant_id)
     pub fn update_artifact(&self, update: UpdateArtifactCollection) -> Result<()> {
-        let mut query_parts = Vec::new();
-        let mut params = Vec::new();
+        let mut set_clauses = Vec::new();
+        
+        if update.name.is_some() {
+            set_clauses.push("name = ?");
+        }
+        if update.icon.is_some() {
+            set_clauses.push("icon = ?");
+        }
+        if update.description.is_some() {
+            set_clauses.push("description = ?");
+        }
+        if update.tags.is_some() {
+            set_clauses.push("tags = ?");
+        }
+        if update.db_id.is_some() {
+            set_clauses.push("db_id = ?");
+        }
+        if update.assistant_id.is_some() {
+            set_clauses.push("assistant_id = ?");
+        }
 
-        if let Some(name) = &update.name {
-            query_parts.push("name = ?");
-            params.push(name.as_str());
-        }
-        if let Some(icon) = &update.icon {
-            query_parts.push("icon = ?");
-            params.push(icon.as_str());
-        }
-        if let Some(description) = &update.description {
-            query_parts.push("description = ?");
-            params.push(description.as_str());
-        }
-        if let Some(tags) = &update.tags {
-            query_parts.push("tags = ?");
-            params.push(tags.as_str());
-        }
-
-        if query_parts.is_empty() {
+        if set_clauses.is_empty() {
             return Ok(()); // Nothing to update
         }
 
         let query =
-            format!("UPDATE artifacts_collection SET {} WHERE id = ?", query_parts.join(", "));
+            format!("UPDATE artifacts_collection SET {} WHERE id = ?", set_clauses.join(", "));
 
-        let id_string = update.id.to_string();
-        params.push(&id_string);
-
-        self.conn.execute(&query, rusqlite::params_from_iter(params))?;
+        let mut stmt = self.conn.prepare(&query)?;
+        
+        let mut idx = 1;
+        if let Some(ref name) = update.name {
+            stmt.raw_bind_parameter(idx, name)?;
+            idx += 1;
+        }
+        if let Some(ref icon) = update.icon {
+            stmt.raw_bind_parameter(idx, icon)?;
+            idx += 1;
+        }
+        if let Some(ref description) = update.description {
+            stmt.raw_bind_parameter(idx, description)?;
+            idx += 1;
+        }
+        if let Some(ref tags) = update.tags {
+            stmt.raw_bind_parameter(idx, tags)?;
+            idx += 1;
+        }
+        if let Some(ref db_id) = update.db_id {
+            stmt.raw_bind_parameter(idx, db_id)?;
+            idx += 1;
+        }
+        if let Some(assistant_id) = update.assistant_id {
+            stmt.raw_bind_parameter(idx, assistant_id)?;
+            idx += 1;
+        }
+        stmt.raw_bind_parameter(idx, update.id)?;
+        
+        stmt.raw_execute()?;
         Ok(())
     }
 

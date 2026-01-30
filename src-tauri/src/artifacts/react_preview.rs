@@ -49,8 +49,16 @@ impl ReactPreviewManager {
         &self,
         component_code: String,
         component_name: String,
+        target_window: Option<String>,
+        request_id: Option<String>,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        self.create_preview_internal(component_code, component_name, PreviewMode::Artifact)
+        self.create_preview_internal(
+            component_code,
+            component_name,
+            PreviewMode::Artifact,
+            target_window,
+            request_id,
+        )
     }
 
     pub fn create_preview(
@@ -58,7 +66,7 @@ impl ReactPreviewManager {
         component_code: String,
         component_name: String,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        self.create_preview_internal(component_code, component_name, PreviewMode::Window)
+        self.create_preview_internal(component_code, component_name, PreviewMode::Window, None, None)
     }
 
     fn create_preview_internal(
@@ -66,10 +74,13 @@ impl ReactPreviewManager {
         component_code: String,
         component_name: String,
         mode: PreviewMode,
+        target_window: Option<String>,
+        request_id: Option<String>,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let preview_id = "react".to_string();
         println!("🚀 [React Preview] 开始创建预览, ID: {}", preview_id);
-        if let Some(window) = self.app_handle.get_webview_window("artifact_preview") {
+        let target_window_name = target_window.unwrap_or_else(|| "artifact_preview".to_string());
+        if let Some(window) = self.app_handle.get_webview_window(&target_window_name) {
             let _ = window.emit("artifact-preview-log", "开始创建 React 预览...");
         }
 
@@ -79,13 +90,17 @@ impl ReactPreviewManager {
         // 关闭已存在的预览实例
         let _ = self.close_preview(&preview_id);
 
-        let (template_path, need_install_deps) =
-            self.setup_template_project(&preview_id, &component_code, &component_name)?;
+        let (template_path, need_install_deps) = self.setup_template_project(
+            &preview_id,
+            &component_code,
+            &component_name,
+            &target_window_name,
+        )?;
         println!("🚀 [React Preview] 模板项目已设置到: {:?}", template_path);
 
         let process_id = self.start_dev_server(&template_path, port, need_install_deps)?;
         println!("🚀 [React Preview] 开发服务器已启动, PID: {}", process_id);
-        if let Some(window) = self.app_handle.get_webview_window("artifact_preview") {
+        if let Some(window) = self.app_handle.get_webview_window(&target_window_name) {
             let _ = window.emit("artifact-preview-log", "预览服务启动");
         }
 
@@ -105,11 +120,13 @@ impl ReactPreviewManager {
 
         // 等待开发服务器启动并执行相应操作
         let app_handle = self.app_handle.clone();
+        let target_window_name = target_window_name.clone();
         let preview_id_clone = preview_id.clone();
+        let request_id = request_id.clone();
         std::thread::spawn(move || {
             // 等待服务器启动
             println!("🚀 [React Preview] 等待服务器启动...");
-            if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+            if let Some(window) = app_handle.get_webview_window(&target_window_name) {
                 let _ = window.emit("artifact-preview-log", "等待服务器启动完毕...");
             }
 
@@ -130,18 +147,21 @@ impl ReactPreviewManager {
                 PreviewMode::Artifact => {
                     let preview_url = format!("http://localhost:{}", port);
                     println!("🚀 [React Preview] 预览已准备完成: {}", preview_url);
-                    if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+                    if let Some(window) = app_handle.get_webview_window(&target_window_name) {
                         let _ = window.emit("artifact-preview-success", "预览服务器已启动完成");
                     }
 
                     // 发送跳转事件，让前端窗口自动跳转到预览页面
-                    if let Some(window) = app_handle.get_webview_window("artifact_preview") {
-                        let _ = window.emit("artifact-preview-redirect", preview_url);
+                    if let Some(window) = app_handle.get_webview_window(&target_window_name) {
+                        let _ = window.emit(
+                            "artifact-preview-redirect",
+                            serde_json::json!({ "url": preview_url, "request_id": request_id }),
+                        );
                     }
                 }
                 PreviewMode::Window => {
                     println!("🚀 [React Preview] 尝试打开预览窗口");
-                    if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+                    if let Some(window) = app_handle.get_webview_window(&target_window_name) {
                         let _ = window.emit("artifact-preview-log", "打开预览窗口...");
                     }
                     let _ = Self::open_preview_window_static(&app_handle, &preview_id_clone, port);
@@ -225,6 +245,7 @@ impl ReactPreviewManager {
         preview_id: &str,
         component_code: &str,
         _component_name: &str,
+        target_window_name: &str,
     ) -> Result<(PathBuf, bool), Box<dyn std::error::Error>> {
         let preview_dir = self.shared_utils.get_preview_directory("react", preview_id)?;
         println!("🛠️ [Setup] 设置预览目录: {:?}", preview_dir);
@@ -276,7 +297,7 @@ impl ReactPreviewManager {
         // 如果需要安装依赖
         if need_install_deps {
             println!("📦 [Setup] 需要安装/更新依赖");
-            if let Some(window) = self.app_handle.get_webview_window("artifact_preview") {
+            if let Some(window) = self.app_handle.get_webview_window(target_window_name) {
                 let _ = window.emit("artifact-preview-log", "安装/更新依赖");
             }
             // 删除现有的 node_modules（如果存在）
@@ -512,9 +533,13 @@ pub async fn create_react_preview_for_artifact(
     app_handle: AppHandle,
     component_code: String,
     component_name: String,
+    target_window: Option<String>,
+    request_id: Option<String>,
 ) -> Result<String, String> {
     let manager = ReactPreviewManager::new(app_handle);
-    manager.create_preview_for_artifact(component_code, component_name).map_err(|e| e.to_string())
+    manager
+        .create_preview_for_artifact(component_code, component_name, target_window, request_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

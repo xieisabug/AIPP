@@ -1,4 +1,6 @@
 pub mod applescript;
+pub mod artifact_bridge_api;
+pub mod artifact_data_db;
 pub mod artifacts_db;
 pub mod code_utils;
 pub mod collection_api;

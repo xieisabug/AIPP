@@ -27,6 +27,8 @@ pub struct ArtifactCollectionItem {
     pub created_time: String,
     pub last_used_time: Option<String>,
     pub use_count: i64,
+    pub db_id: Option<String>,
+    pub assistant_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -37,6 +39,8 @@ pub struct SaveArtifactRequest {
     pub artifact_type: String,
     pub code: String,
     pub tags: Option<String>,
+    pub db_id: Option<String>,
+    pub assistant_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -46,6 +50,8 @@ pub struct UpdateArtifactRequest {
     pub icon: Option<String>,
     pub description: Option<String>,
     pub tags: Option<String>,
+    pub db_id: Option<String>,
+    pub assistant_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -77,6 +83,8 @@ pub fn save_artifact_to_collection(
         artifact_type: request.artifact_type,
         code: request.code,
         tags: request.tags,
+        db_id: request.db_id,
+        assistant_id: request.assistant_id,
     };
 
     let artifact_id =
@@ -116,6 +124,8 @@ pub fn get_artifacts_collection(
             created_time: artifact.created_time,
             last_used_time: artifact.last_used_time,
             use_count: artifact.use_count,
+            db_id: artifact.db_id,
+            assistant_id: artifact.assistant_id,
         })
         .collect();
 
@@ -159,6 +169,8 @@ pub fn search_artifacts_collection(
             created_time: artifact.created_time,
             last_used_time: artifact.last_used_time,
             use_count: artifact.use_count,
+            db_id: artifact.db_id,
+            assistant_id: artifact.assistant_id,
         })
         .collect();
 
@@ -179,6 +191,8 @@ pub fn update_artifact_collection(
         icon: request.icon,
         description: request.description,
         tags: request.tags,
+        db_id: request.db_id,
+        assistant_id: request.assistant_id,
     };
 
     db.update_artifact(update).map_err(|e| format!("Failed to update artifact: {}", e))?;

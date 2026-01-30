@@ -21,6 +21,7 @@ import EnvironmentInstallDialog from "../components/EnvironmentInstallDialog";
 import { useTheme } from "../hooks/useTheme";
 import { formatIconDisplay } from "@/utils/emojiUtils";
 import { useArtifactEvents, ArtifactData, EnvironmentCheckData } from "../hooks/useArtifactEvents";
+import { useArtifactBridge } from "../hooks/useArtifactBridge";
 
 interface ArtifactInfo {
     id: number;
@@ -65,6 +66,7 @@ export default function ArtifactWindow() {
     const [dragStart, setDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
     const [isSpacePressed, setIsSpacePressed] = useState<boolean>(false);
     const isInstalling = useRef<boolean>(false);
+    const previewIframeRef = useRef<HTMLIFrameElement>(null);
 
     // 环境安装相关状态
     const [showEnvironmentDialog, setShowEnvironmentDialog] = useState<boolean>(false);
@@ -72,6 +74,9 @@ export default function ArtifactWindow() {
     const [environmentMessage, setEnvironmentMessage] = useState<string>("");
     const [currentLang, setCurrentLang] = useState<string>("");
     const [currentInputStr, setCurrentInputStr] = useState<string>("");
+
+    // Artifact Bridge 配置
+    const [bridgeConfig, setBridgeConfig] = useState<{ db_id?: string; assistant_id?: number }>({});
 
     // 使用 refs 来存储最新的值，避免闭包陷阱
     const currentLangRef = useRef<string>("");
@@ -88,12 +93,26 @@ export default function ArtifactWindow() {
         currentInputStrRef.current = currentInputStr;
     }, [currentLang, currentInputStr]);
 
+    // ====== Artifact Bridge ======
+    // 集成 postMessage 桥接，允许 artifact 访问数据库和 AI 助手
+    useArtifactBridge({
+        iframeRef: previewIframeRef,
+        config: bridgeConfig,
+        allowedOrigins: ['http://localhost', 'http://127.0.0.1'],
+    });
+
     // 处理 artifact 数据
     const handleArtifactData = useCallback((data: ArtifactData) => {
         console.log("[ArtifactWindow] 接收到 artifact 数据：", data);
         
         // 存储完整的 artifact 信息
         setArtifactInfo(data as unknown as ArtifactInfo);
+
+        // 更新 bridge 配置（用于数据库和 AI 助手访问）
+        setBridgeConfig({
+            db_id: data.db_id,
+            assistant_id: data.assistant_id,
+        });
 
         if (data.original_code && data.type) {
             switch (data.type) {
@@ -739,6 +758,7 @@ export default function ArtifactWindow() {
                             ) : (
                                 /* iframe 预览 - 用于 React 和 Vue */
                                 <iframe
+                                    ref={previewIframeRef}
                                     src={previewUrl || ""}
                                     className="flex-1 w-full border-0"
                                     sandbox="allow-scripts allow-same-origin allow-forms allow-popups"

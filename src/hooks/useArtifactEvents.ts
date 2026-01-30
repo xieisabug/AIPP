@@ -18,6 +18,8 @@ export interface ArtifactData {
     created_time?: string;
     last_used_time?: string;
     use_count?: number;
+    db_id?: string;
+    assistant_id?: number;
 }
 
 export interface EnvironmentCheckData {
@@ -95,6 +97,7 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
     const isRegisteredRef = useRef(false);
     const readyIntervalRef = useRef<NodeJS.Timeout | null>(null);
     const hasReceivedDataRef = useRef(false);
+    const currentRequestIdRef = useRef<string | null>(null);
 
     // 同步 hasReceivedData 到 ref
     useEffect(() => {
@@ -172,7 +175,25 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
 
             // 处理重定向
             const handleRedirect = (event: { payload: any }) => {
-                const url = event.payload as string;
+                const payload = event.payload as { url?: string; request_id?: string } | string;
+                const url = typeof payload === 'string' ? payload : payload?.url;
+                const requestId = typeof payload === 'string' ? undefined : payload?.request_id;
+                const currentRequestId = currentRequestIdRef.current;
+
+                if (!url) {
+                    console.warn(`🔧 [${windowType}] 收到无效重定向 payload:`, payload);
+                    return;
+                }
+
+                if (requestId && currentRequestId && requestId !== currentRequestId) {
+                    console.log(`🔧 [${windowType}] 忽略过期重定向: ${requestId}`);
+                    return;
+                }
+
+                if (requestId && !currentRequestId) {
+                    currentRequestIdRef.current = requestId;
+                }
+
                 console.log(`🔧 [${windowType}] 收到重定向: ${url}`);
 
                 // 标记已接收数据
@@ -217,7 +238,11 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
             };
 
             // 处理重置事件（切换 artifact 时）
-            const handleReset = () => {
+            const handleReset = (event: { payload: any }) => {
+                const nextRequestId = typeof event.payload?.request_id === 'string'
+                    ? event.payload.request_id
+                    : null;
+                currentRequestIdRef.current = nextRequestId;
                 console.log(`🔧 [${windowType}] 收到 reset 事件，重置状态`);
                 reset();  // 清除内部状态
                 onReset?.();  // 调用外部回调

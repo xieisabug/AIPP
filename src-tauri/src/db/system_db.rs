@@ -135,6 +135,16 @@ impl SystemDatabase {
     }
 
     #[instrument(level = "debug", skip(self), fields(feature_code, key))]
+    pub fn delete_feature_config(&self, feature_code: &str, key: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM feature_config WHERE feature_code = ?1 AND key = ?2",
+            params![feature_code, key],
+        )?;
+        debug!("Deleted feature config");
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip(self), fields(feature_code, key))]
     pub fn get_feature_config(
         &self,
         feature_code: &str,

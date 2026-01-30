@@ -71,8 +71,12 @@ function SidebarWindow() {
             setPreviewMode('artifact');
             setContextPreview(null);
             setHasAutoPreviewedLatest(true);
-            
-            invoke("run_artifacts", { lang: latestArtifact.language, inputStr: latestArtifact.code })
+
+            invoke("run_artifacts", {
+                lang: latestArtifact.language,
+                inputStr: latestArtifact.code,
+                sourceWindow: "sidebar",
+            })
                 .then((res) => {
                     console.log("Auto-preview latest artifact:", res);
                 })
@@ -146,7 +150,7 @@ function SidebarWindow() {
         setContextPreview(null);
         
         // Call run_artifacts to start the preview
-        invoke("run_artifacts", { lang: artifact.language, inputStr: artifact.code })
+        invoke("run_artifacts", { lang: artifact.language, inputStr: artifact.code, sourceWindow: "sidebar" })
             .then((res) => {
                 console.log("Artifact preview started:", res);
             })

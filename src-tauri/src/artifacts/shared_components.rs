@@ -376,6 +376,7 @@ impl SharedPreviewUtils {
         &self,
         component_type: &str,
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        // 首先尝试从 resource_dir 获取（生产模式）
         let resource_dir = self.app_handle.path().resource_dir().unwrap_or_else(|_| {
             println!("⚠️ [SharedTemplate] 无法获取资源目录，使用当前目录");
             PathBuf::from(".")
@@ -386,11 +387,45 @@ impl SharedPreviewUtils {
         println!("📁 [SharedTemplate] 资源目录: {:?}", resource_dir);
         println!("📁 [SharedTemplate] 模板路径: {:?}", template_path);
 
-        if !template_path.exists() {
-            return Err(format!("模板源路径不存在: {:?}", template_path).into());
+        if template_path.exists() {
+            return Ok(template_path);
         }
 
-        Ok(template_path)
+        // 开发模式下，尝试从 src-tauri 目录获取
+        // resource_dir 可能类似: .../target/debug 或 .../target/release
+        // 我们需要回退到 src-tauri/artifacts/templates
+        if let Some(parent) = resource_dir.parent() {
+            // 检查是否在 target 目录下
+            if parent.file_name().map(|s| s == "target").unwrap_or(false)
+                || resource_dir.to_string_lossy().contains("target")
+            {
+                // 尝试找到 src-tauri 目录
+                let mut current = resource_dir.clone();
+                for _ in 0..5 {
+                    // 最多向上查找 5 级
+                    if let Some(p) = current.parent() {
+                        current = p.to_path_buf();
+                        let dev_template_path = current
+                            .join("src-tauri")
+                            .join("artifacts")
+                            .join("templates")
+                            .join(component_type);
+                        println!(
+                            "📁 [SharedTemplate] 尝试开发模式路径: {:?}",
+                            dev_template_path
+                        );
+                        if dev_template_path.exists() {
+                            println!("✅ [SharedTemplate] 找到开发模式模板路径");
+                            return Ok(dev_template_path);
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Err(format!("模板源路径不存在: {:?}", template_path).into())
     }
 
     /// 修改 bunfig.toml 中的缓存目录
@@ -421,6 +456,38 @@ impl SharedPreviewUtils {
             fs::write(&bunfig_path, bunfig_content)?;
         }
 
+        Ok(())
+    }
+
+    /// 清除模板缓存（删除缓存目录和数据库记录）
+    pub fn clear_template_cache(
+        &self,
+        template_name: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        println!("🗑️ [SharedCache] 清除模板缓存: {}", template_name);
+
+        // 删除缓存目录
+        let app_data_dir = self
+            .app_handle
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("无法获取应用数据目录: {}", e))?;
+
+        let cache_dir = app_data_dir.join("preview").join("templates").join(template_name);
+        if cache_dir.exists() {
+            println!("🗑️ [SharedCache] 删除缓存目录: {:?}", cache_dir);
+            fs::remove_dir_all(&cache_dir)?;
+        }
+
+        // 删除数据库中的缓存记录
+        let db = SystemDatabase::new(&self.app_handle)?;
+        let files_hash_key = format!("{}_files_hash", template_name);
+        let deps_hash_key = format!("{}_deps_hash", template_name);
+
+        let _ = db.delete_feature_config("template_cache", &files_hash_key);
+        let _ = db.delete_feature_config("template_cache", &deps_hash_key);
+
+        println!("✅ [SharedCache] 模板缓存已清除: {}", template_name);
         Ok(())
     }
 }
@@ -644,4 +711,28 @@ pub fn kill_processes_by_port(port: u16) -> Result<(), Box<dyn std::error::Error
     }
 
     Ok(())
+}
+
+/// 清除所有模板缓存（React 和 Vue 的预览和 artifact）
+#[tauri::command]
+pub fn clear_all_template_cache(app_handle: AppHandle) -> Result<(), String> {
+    println!("🗑️ [SharedCache] 清除所有模板缓存");
+    let shared_utils = SharedPreviewUtils::new(app_handle);
+
+    let templates = ["react", "vue", "react-artifacts", "vue-artifacts"];
+    let mut errors = Vec::new();
+
+    for template in templates {
+        if let Err(e) = shared_utils.clear_template_cache(template) {
+            println!("⚠️ [SharedCache] 清除 {} 缓存失败: {}", template, e);
+            errors.push(format!("{}: {}", template, e));
+        }
+    }
+
+    if errors.is_empty() {
+        println!("✅ [SharedCache] 所有模板缓存已清除");
+        Ok(())
+    } else {
+        Err(format!("部分缓存清除失败: {}", errors.join(", ")))
+    }
 }

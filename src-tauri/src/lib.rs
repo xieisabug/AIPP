@@ -74,6 +74,11 @@ use crate::api::updater_api::{
     download_and_install_update_with_proxy, get_app_version,
 };
 use crate::artifacts::artifacts_db::ArtifactsDatabase;
+use crate::artifacts::artifact_bridge_api::{
+    artifact_ai_ask, artifact_db_batch_execute, artifact_db_delete, artifact_db_execute,
+    artifact_db_exists, artifact_db_get_columns, artifact_db_get_tables, artifact_db_list,
+    artifact_db_query, artifact_get_assistants, artifact_get_config,
+};
 use crate::artifacts::collection_api::{
     delete_artifact_collection, generate_artifact_metadata, get_artifact_by_id,
     get_artifacts_collection, get_artifacts_for_completion, get_artifacts_statistics,
@@ -97,8 +102,9 @@ use crate::artifacts::vue_preview::{
     close_vue_preview, create_vue_preview, create_vue_preview_for_artifact,
 };
 use crate::artifacts::{
-    react_runner::{close_react_artifact, run_react_artifact},
-    vue_runner::{close_vue_artifact, run_vue_artifact},
+    react_runner::{clear_react_artifact_cache, close_react_artifact, run_react_artifact},
+    shared_components::clear_all_template_cache,
+    vue_runner::{clear_vue_artifact_cache, close_vue_artifact, run_vue_artifact},
 };
 use crate::db::assistant_db::AssistantDatabase;
 use crate::db::llm_db::LLMDatabase;
@@ -580,6 +586,18 @@ pub fn run() {
             open_artifact_collections_window,
             get_artifacts_statistics,
             get_artifacts_for_completion,
+            // Artifact bridge API
+            artifact_db_query,
+            artifact_db_execute,
+            artifact_db_batch_execute,
+            artifact_db_get_tables,
+            artifact_db_get_columns,
+            artifact_db_exists,
+            artifact_db_delete,
+            artifact_db_list,
+            artifact_ai_ask,
+            artifact_get_assistants,
+            artifact_get_config,
             get_bang_list,
             get_selected_text_api,
             set_shortcut_recording,
@@ -612,8 +630,11 @@ pub fn run() {
             close_vue_preview,
             run_react_artifact,
             close_react_artifact,
+            clear_react_artifact_cache,
             run_vue_artifact,
             close_vue_artifact,
+            clear_vue_artifact_cache,
+            clear_all_template_cache,
             confirm_environment_install,
             retry_preview_after_install,
             get_mcp_servers,
