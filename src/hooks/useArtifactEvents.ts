@@ -20,6 +20,7 @@ export interface ArtifactData {
     use_count?: number;
     db_id?: string;
     assistant_id?: number;
+    conversation_id?: number;
 }
 
 export interface EnvironmentCheckData {

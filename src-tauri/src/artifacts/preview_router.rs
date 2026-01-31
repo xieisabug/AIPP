@@ -103,6 +103,7 @@ pub async fn run_artifacts(
     lang: &str,
     input_str: &str,
     source_window: Option<String>,
+    conversation_id: Option<i64>,
 ) -> Result<String, AppError> {
     let target_window = match source_window.as_deref() {
         Some("sidebar") => Some("sidebar"),
@@ -194,7 +195,7 @@ pub async fn run_artifacts(
             {
                 let _ = window.emit(
                     "artifact-preview-data",
-                    serde_json::json!({ "type": "mermaid", "original_code": input_str }),
+                    serde_json::json!({ "type": "mermaid", "original_code": input_str, "conversation_id": conversation_id }),
                 );
                 let _ =
                     window.emit("artifact-preview-log", format!("mermaid content: {}", input_str));
@@ -209,7 +210,7 @@ pub async fn run_artifacts(
                 let _ = window.emit("artifact-preview-log", format!("准备预览 {} 内容...", lang));
                 let _ = window.emit(
                     "artifact-preview-data",
-                    serde_json::json!({ "type": lang, "original_code": input_str }),
+                    serde_json::json!({ "type": lang, "original_code": input_str, "conversation_id": conversation_id }),
                 );
                 let _ =
                     window.emit("artifact-preview-log", format!("{} content: {}", lang, input_str));
@@ -228,7 +229,7 @@ pub async fn run_artifacts(
                 let _ = window.emit("artifact-preview-log", "准备预览 Draw.io 图表...");
                 let _ = window.emit(
                     "artifact-preview-data",
-                    serde_json::json!({ "type": "drawio", "original_code": input_str }),
+                    serde_json::json!({ "type": "drawio", "original_code": input_str, "conversation_id": conversation_id }),
                 );
                 let _ = window.emit("artifact-preview-success", "Draw.io 图表预览已准备完成");
             }
@@ -261,7 +262,7 @@ pub async fn run_artifacts(
                 {
                     let _ = window.emit(
                         "artifact-preview-data",
-                        serde_json::json!({ "type": "react", "original_code": input_str }),
+                        serde_json::json!({ "type": "react", "original_code": input_str, "conversation_id": conversation_id }),
                     );
                 }
                 let preview_id = create_react_preview_for_artifact(
@@ -323,7 +324,7 @@ pub async fn run_artifacts(
                 {
                     let _ = window.emit(
                         "artifact-preview-data",
-                        serde_json::json!({ "type": "vue", "original_code": input_str }),
+                        serde_json::json!({ "type": "vue", "original_code": input_str, "conversation_id": conversation_id }),
                     );
                 }
                 let preview_id = create_vue_preview_for_artifact(
@@ -555,8 +556,9 @@ pub async fn retry_preview_after_install(
     lang: String,
     input_str: String,
     source_window: Option<String>,
+    conversation_id: Option<i64>,
 ) -> Result<String, String> {
-    match run_artifacts(app_handle.clone(), &lang, &input_str, source_window).await {
+    match run_artifacts(app_handle.clone(), &lang, &input_str, source_window, conversation_id).await {
         Ok(result) => Ok(result),
         Err(e) => Err(e.to_string()),
     }
@@ -581,7 +583,7 @@ pub async fn restore_artifact_preview(
         tracing::info!("Restoring artifact preview: lang={}, input_len={}", lang, input_str.len());
 
         // 重新处理 artifact
-        match run_artifacts(app_handle, &lang, &input_str, None).await {
+        match run_artifacts(app_handle, &lang, &input_str, None, None).await {
             Ok(_) => Ok(Some(format!("Restored {} preview", lang))),
             Err(e) => Err(e.to_string()),
         }

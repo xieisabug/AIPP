@@ -82,9 +82,9 @@ export default function ArtifactPreviewWindow() {
 
     // Artifact Bridge 配置
     const [bridgeConfig, setBridgeConfig] = useState<{ db_id?: string; assistant_id?: number }>({});
-    const [runtimeConfig, setRuntimeConfig] = useState<{ db_id?: string; assistant_id?: number }>(
-        () => loadArtifactRuntimeConfig()
-    );
+    // Track current conversation for session-level config
+    const [currentConversationId, setCurrentConversationId] = useState<number | undefined>(undefined);
+    const [runtimeConfig, setRuntimeConfig] = useState<{ db_id?: string; assistant_id?: number }>({});
     const [assistants, setAssistants] = useState<AssistantBasicInfo[]>([]);
 
     // 使用 refs 来存储最新的值，避免闭包陷阱
@@ -116,17 +116,6 @@ export default function ArtifactPreviewWindow() {
             .catch(() => {
                 setAssistants([]);
             });
-    }, []);
-
-    useEffect(() => {
-        setRuntimeConfig(prev => {
-            if (prev.db_id) {
-                return prev;
-            }
-            const next = { ...prev, db_id: generateRandomDbId() };
-            persistArtifactRuntimeConfig(next);
-            return next;
-        });
     }, []);
 
     // ====== 缓存相关函数 ======
@@ -226,18 +215,27 @@ export default function ArtifactPreviewWindow() {
             // 保存到缓存，用于刷新恢复
             saveArtifactToCache(data.type, data.original_code);
 
+            // Update conversation ID and load session-level config
+            const convId = data.conversation_id;
+            setCurrentConversationId(convId);
+            
+            // Load config for this conversation (or global if no conversation)
+            const sessionConfig = loadArtifactRuntimeConfig(convId);
+            
+            // If data has explicit overrides, use them; otherwise use session config
             const hasRuntimeOverride = Boolean(data.db_id) || typeof data.assistant_id === 'number';
+            const nextRuntime = hasRuntimeOverride ? {
+                db_id: data.db_id || sessionConfig.db_id,
+                assistant_id: typeof data.assistant_id === 'number' ? data.assistant_id : sessionConfig.assistant_id,
+            } : sessionConfig;
+            
+            setRuntimeConfig(nextRuntime);
             if (hasRuntimeOverride) {
-                const nextRuntime = {
-                    db_id: data.db_id || runtimeConfig.db_id,
-                    assistant_id: typeof data.assistant_id === 'number' ? data.assistant_id : runtimeConfig.assistant_id,
-                };
-                setRuntimeConfig(nextRuntime);
-                persistArtifactRuntimeConfig(nextRuntime);
+                persistArtifactRuntimeConfig(nextRuntime, convId);
             }
             setBridgeConfig({
-                db_id: data.db_id || runtimeConfig.db_id,
-                assistant_id: data.assistant_id ?? runtimeConfig.assistant_id,
+                db_id: nextRuntime.db_id,
+                assistant_id: nextRuntime.assistant_id,
             });
 
             switch (data.type) {
@@ -281,7 +279,7 @@ export default function ArtifactPreviewWindow() {
             }
             setOriginalCode(data.original_code);
         }
-    }, [saveArtifactToCache, runtimeConfig.db_id, runtimeConfig.assistant_id]);
+    }, [saveArtifactToCache]);
 
     // 处理重定向
     const handleRedirect = useCallback((url: string) => {
@@ -677,7 +675,7 @@ export default function ArtifactPreviewWindow() {
         const normalized = normalizeDbId(value);
         setRuntimeConfig(prev => {
             const next = { ...prev, db_id: normalized || undefined };
-            persistArtifactRuntimeConfig(next);
+            persistArtifactRuntimeConfig(next, currentConversationId);
             return next;
         });
     };
@@ -686,7 +684,7 @@ export default function ArtifactPreviewWindow() {
         const assistantId = value && value !== 'none' ? parseInt(value, 10) : undefined;
         setRuntimeConfig(prev => {
             const next = { ...prev, assistant_id: assistantId };
-            persistArtifactRuntimeConfig(next);
+            persistArtifactRuntimeConfig(next, currentConversationId);
             return next;
         });
     };
@@ -695,7 +693,7 @@ export default function ArtifactPreviewWindow() {
         const dbId = generateRandomDbId();
         setRuntimeConfig(prev => {
             const next = { ...prev, db_id: dbId };
-            persistArtifactRuntimeConfig(next);
+            persistArtifactRuntimeConfig(next, currentConversationId);
             return next;
         });
     };
