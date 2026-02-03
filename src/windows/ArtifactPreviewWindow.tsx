@@ -29,6 +29,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Bot, Database, Settings2 } from 'lucide-react';
 import { AssistantBasicInfo } from '@/data/ArtifactCollection';
+import ArtifactPreviewCodeBlock from '@/components/ArtifactPreviewCodeBlock';
 import {
     generateRandomDbId,
     loadArtifactRuntimeConfig,
@@ -772,6 +773,21 @@ export default function ArtifactPreviewWindow() {
         }
     }, [previewType, drawioXmlContent, artifactEvents]);
 
+    const codeContent = originalCode || htmlContent || mermaidContent || markdownContent || '';
+    const codeLanguage = previewType === 'react'
+        ? 'tsx'
+        : previewType === 'vue'
+            ? 'vue'
+            : previewType === 'mermaid'
+                ? 'mermaid'
+                : previewType === 'html'
+                    ? 'html'
+                    : previewType === 'svg' || previewType === 'xml' || previewType === 'drawio'
+                        ? 'xml'
+                        : previewType === 'markdown' || previewType === 'md'
+                            ? 'markdown'
+                            : 'text';
+
     return (
         <div className="flex h-screen bg-background">
             <div className="flex flex-col flex-1 bg-background rounded-xl m-2 shadow-lg border border-border">
@@ -919,10 +935,14 @@ export default function ArtifactPreviewWindow() {
                             )}
                         </div>
                     ) : currentView === 'code' ? (
-                        <div className="flex-1 flex flex-col p-4 gap-3">
-                            <div className="text-sm text-muted-foreground">Artifact 代码</div>
-                            <div className="flex-1 overflow-auto rounded border border-border bg-muted p-3 text-xs font-mono whitespace-pre-wrap">
-                                {originalCode || htmlContent || mermaidContent || markdownContent}
+                        <div className="flex-1 flex flex-col p-4 gap-3 overflow-hidden">
+                            <div className="text-sm text-muted-foreground flex-shrink-0">Artifact 代码</div>
+                            <div className="flex-1 overflow-auto rounded border border-border bg-muted p-3 min-h-0">
+                                <div className="w-full max-w-[1100px] [&_pre]:!overflow-visible [&_pre]:!m-0 [&_pre]:!p-0 [&_pre]:!bg-transparent">
+                                    <ArtifactPreviewCodeBlock language={codeLanguage} className="bg-transparent">
+                                        {codeContent}
+                                    </ArtifactPreviewCodeBlock>
+                                </div>
                             </div>
                         </div>
                     ) : (
