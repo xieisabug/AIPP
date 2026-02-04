@@ -164,6 +164,7 @@ export default function ArtifactPreviewWindow() {
 
     // 标记是否已尝试从缓存恢复，防止无限循环
     const hasTriedRestoreRef = useRef(false);
+    const restoreAbortRef = useRef(false);
 
     // ====== 重置函数 ======
 
@@ -173,6 +174,7 @@ export default function ArtifactPreviewWindow() {
 
         // 设置恢复标记，防止切换 artifact 时触发缓存恢复
         hasTriedRestoreRef.current = true;
+        restoreAbortRef.current = true;
 
         // 1. 清理旧的预览服务器
         const currentType = previewTypeRef.current;
@@ -213,6 +215,7 @@ export default function ArtifactPreviewWindow() {
     // 处理 artifact 数据
     const handleArtifactData = useCallback((data: ArtifactData) => {
         if (data.original_code && data.type) {
+            restoreAbortRef.current = true;
             // 保存到缓存，用于刷新恢复
             saveArtifactToCache(data.type, data.original_code);
 
@@ -284,12 +287,14 @@ export default function ArtifactPreviewWindow() {
 
     // 处理重定向
     const handleRedirect = useCallback((url: string) => {
+        restoreAbortRef.current = true;
         setPreviewUrl(url);
         setIsPreviewReady(true);
     }, []);
 
     // 处理环境检查
     const handleEnvironmentCheck = useCallback((data: EnvironmentCheckData) => {
+        restoreAbortRef.current = true;
         setEnvironmentTool(data.tool);
         setEnvironmentMessage(data.message);
         setCurrentLang(data.lang);
@@ -395,9 +400,12 @@ export default function ArtifactPreviewWindow() {
             const hasData = previewUrl || previewType || mermaidContent || htmlContent || markdownContent || drawioXmlContent;
             if (!hasData && !artifactEvents.hasReceivedData && !hasTriedRestoreRef.current) {
                 hasTriedRestoreRef.current = true;  // 标记已尝试
-                const restored = await loadArtifactFromCache();
-                if (restored) {
-                    artifactEvents.addLog('log', '正在恢复上次的预览...');
+                await new Promise(resolve => setTimeout(resolve, 300));
+                if (!restoreAbortRef.current) {
+                    const restored = await loadArtifactFromCache();
+                    if (restored) {
+                        artifactEvents.addLog('log', '正在恢复上次的预览...');
+                    }
                 }
             }
         };

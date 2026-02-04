@@ -151,7 +151,10 @@ pub async fn run_artifacts(
                 .as_ref()
                 .and_then(|name| app_handle.get_webview_window(name))
             {
-                let _ = window.emit("artifact-preview-log", "执行 PowerShell 脚本...");
+                let _ = window.emit(
+                    "artifact-preview-log",
+                    serde_json::json!({ "message": "执行 PowerShell 脚本...", "request_id": request_id }),
+                );
             }
             return Ok(run_powershell(input_str).map_err(|e| {
                 let error_msg = "PowerShell 脚本执行失败:".to_owned() + &e.to_string();
@@ -159,7 +162,10 @@ pub async fn run_artifacts(
                     .as_ref()
                     .and_then(|name| app_handle.get_webview_window(name))
                 {
-                    let _ = window.emit("artifact-preview-error", &error_msg);
+                    let _ = window.emit(
+                        "artifact-preview-error",
+                        serde_json::json!({ "message": error_msg, "request_id": request_id }),
+                    );
                 }
                 AppError::RunCodeError(error_msg)
             })?);
@@ -169,7 +175,10 @@ pub async fn run_artifacts(
                 .as_ref()
                 .and_then(|name| app_handle.get_webview_window(name))
             {
-                let _ = window.emit("artifact-preview-log", "执行 AppleScript 脚本...");
+                let _ = window.emit(
+                    "artifact-preview-log",
+                    serde_json::json!({ "message": "执行 AppleScript 脚本...", "request_id": request_id }),
+                );
             }
             return Ok(run_applescript(input_str).map_err(|e| {
                 let error_msg = "AppleScript 脚本执行失败:".to_owned() + &e.to_string();
@@ -177,7 +186,10 @@ pub async fn run_artifacts(
                     .as_ref()
                     .and_then(|name| app_handle.get_webview_window(name))
                 {
-                    let _ = window.emit("artifact-preview-error", &error_msg);
+                    let _ = window.emit(
+                        "artifact-preview-error",
+                        serde_json::json!({ "message": error_msg, "request_id": request_id }),
+                    );
                 }
                 AppError::RunCodeError(error_msg)
             })?);
@@ -187,7 +199,10 @@ pub async fn run_artifacts(
                 .as_ref()
                 .and_then(|name| app_handle.get_webview_window(name))
             {
-                let _ = window.emit("artifact-preview-log", "准备预览 Mermaid 图表...");
+                let _ = window.emit(
+                    "artifact-preview-log",
+                    serde_json::json!({ "message": "准备预览 Mermaid 图表...", "request_id": request_id }),
+                );
             }
             if let Some(window) = target_window
                 .as_ref()
@@ -195,11 +210,24 @@ pub async fn run_artifacts(
             {
                 let _ = window.emit(
                     "artifact-preview-data",
-                    serde_json::json!({ "type": "mermaid", "original_code": input_str, "conversation_id": conversation_id }),
+                    serde_json::json!({
+                        "type": "mermaid",
+                        "original_code": input_str,
+                        "conversation_id": conversation_id,
+                        "request_id": request_id
+                    }),
                 );
-                let _ =
-                    window.emit("artifact-preview-log", format!("mermaid content: {}", input_str));
-                let _ = window.emit("artifact-preview-success", "Mermaid 图表预览已准备完成");
+                let _ = window.emit(
+                    "artifact-preview-log",
+                    serde_json::json!({
+                        "message": format!("mermaid content: {}", input_str),
+                        "request_id": request_id
+                    }),
+                );
+                let _ = window.emit(
+                    "artifact-preview-success",
+                    serde_json::json!({ "message": "Mermaid 图表预览已准备完成", "request_id": request_id }),
+                );
             }
         }
         "xml" | "svg" | "html" | "markdown" | "md" => {
@@ -207,16 +235,35 @@ pub async fn run_artifacts(
                 .as_ref()
                 .and_then(|name| app_handle.get_webview_window(name))
             {
-                let _ = window.emit("artifact-preview-log", format!("准备预览 {} 内容...", lang));
+                let _ = window.emit(
+                    "artifact-preview-log",
+                    serde_json::json!({
+                        "message": format!("准备预览 {} 内容...", lang),
+                        "request_id": request_id
+                    }),
+                );
                 let _ = window.emit(
                     "artifact-preview-data",
-                    serde_json::json!({ "type": lang, "original_code": input_str, "conversation_id": conversation_id }),
+                    serde_json::json!({
+                        "type": lang,
+                        "original_code": input_str,
+                        "conversation_id": conversation_id,
+                        "request_id": request_id
+                    }),
                 );
-                let _ =
-                    window.emit("artifact-preview-log", format!("{} content: {}", lang, input_str));
+                let _ = window.emit(
+                    "artifact-preview-log",
+                    serde_json::json!({
+                        "message": format!("{} content: {}", lang, input_str),
+                        "request_id": request_id
+                    }),
+                );
                 let _ = window.emit(
                     "artifact-preview-success",
-                    format!("{} 预览已准备完成", lang.to_uppercase()),
+                    serde_json::json!({
+                        "message": format!("{} 预览已准备完成", lang.to_uppercase()),
+                        "request_id": request_id
+                    }),
                 );
             }
         }
@@ -226,12 +273,23 @@ pub async fn run_artifacts(
                 .as_ref()
                 .and_then(|name| app_handle.get_webview_window(name))
             {
-                let _ = window.emit("artifact-preview-log", "准备预览 Draw.io 图表...");
+                let _ = window.emit(
+                    "artifact-preview-log",
+                    serde_json::json!({ "message": "准备预览 Draw.io 图表...", "request_id": request_id }),
+                );
                 let _ = window.emit(
                     "artifact-preview-data",
-                    serde_json::json!({ "type": "drawio", "original_code": input_str, "conversation_id": conversation_id }),
+                    serde_json::json!({
+                        "type": "drawio",
+                        "original_code": input_str,
+                        "conversation_id": conversation_id,
+                        "request_id": request_id
+                    }),
                 );
-                let _ = window.emit("artifact-preview-success", "Draw.io 图表预览已准备完成");
+                let _ = window.emit(
+                    "artifact-preview-success",
+                    serde_json::json!({ "message": "Draw.io 图表预览已准备完成", "request_id": request_id }),
+                );
             }
         }
         "react" | "jsx" => {
@@ -247,7 +305,8 @@ pub async fn run_artifacts(
                         "tool": "bun",
                         "message": "React 预览需要 bun 环境，但系统中未安装 bun。是否要自动安装？",
                         "lang": lang,
-                        "input_str": input_str
+                        "input_str": input_str,
+                        "request_id": request_id
                     }));
                 }
                 return Ok("等待用户确认安装环境".to_string());
@@ -262,7 +321,12 @@ pub async fn run_artifacts(
                 {
                     let _ = window.emit(
                         "artifact-preview-data",
-                        serde_json::json!({ "type": "react", "original_code": input_str, "conversation_id": conversation_id }),
+                        serde_json::json!({
+                            "type": "react",
+                            "original_code": input_str,
+                            "conversation_id": conversation_id,
+                            "request_id": request_id
+                        }),
                     );
                 }
                 let preview_id = create_react_preview_for_artifact(
@@ -279,7 +343,10 @@ pub async fn run_artifacts(
                         .as_ref()
                         .and_then(|name| app_handle.get_webview_window(name))
                     {
-                        let _ = window.emit("artifact-preview-error", &error_msg);
+                        let _ = window.emit(
+                            "artifact-preview-error",
+                            serde_json::json!({ "message": error_msg, "request_id": request_id }),
+                        );
                     }
                     AppError::RunCodeError(error_msg)
                 })?;
@@ -291,7 +358,10 @@ pub async fn run_artifacts(
                 {
                     let _ = window.emit(
                         "artifact-preview-error",
-                        "React 代码片段预览暂不支持，请提供完整的 React 组件代码。",
+                        serde_json::json!({
+                            "message": "React 代码片段预览暂不支持，请提供完整的 React 组件代码。",
+                            "request_id": request_id
+                        }),
                     );
                 }
             }
@@ -309,7 +379,8 @@ pub async fn run_artifacts(
                         "tool": "bun",
                         "message": "Vue 预览需要 bun 环境，但系统中未安装 bun。是否要自动安装？",
                         "lang": lang,
-                        "input_str": input_str
+                        "input_str": input_str,
+                        "request_id": request_id
                     }));
                 }
                 return Ok("等待用户确认安装环境".to_string());
@@ -324,7 +395,12 @@ pub async fn run_artifacts(
                 {
                     let _ = window.emit(
                         "artifact-preview-data",
-                        serde_json::json!({ "type": "vue", "original_code": input_str, "conversation_id": conversation_id }),
+                        serde_json::json!({
+                            "type": "vue",
+                            "original_code": input_str,
+                            "conversation_id": conversation_id,
+                            "request_id": request_id
+                        }),
                     );
                 }
                 let preview_id = create_vue_preview_for_artifact(
@@ -341,7 +417,10 @@ pub async fn run_artifacts(
                         .as_ref()
                         .and_then(|name| app_handle.get_webview_window(name))
                     {
-                        let _ = window.emit("artifact-preview-error", &error_msg);
+                        let _ = window.emit(
+                            "artifact-preview-error",
+                            serde_json::json!({ "message": error_msg, "request_id": request_id }),
+                        );
                     }
                     AppError::RunCodeError(error_msg)
                 })?;
@@ -353,7 +432,10 @@ pub async fn run_artifacts(
                 {
                     let _ = window.emit(
                         "artifact-preview-error",
-                        "Vue 代码片段预览暂不支持，请提供完整的 Vue 组件代码。",
+                        serde_json::json!({
+                            "message": "Vue 代码片段预览暂不支持，请提供完整的 Vue 组件代码。",
+                            "request_id": request_id
+                        }),
                     );
                 }
             }
@@ -374,7 +456,8 @@ pub async fn run_artifacts(
                             "tool": "bun",
                             "message": "Vue 预览需要 bun 环境，但系统中未安装 bun。是否要自动安装？",
                             "lang": "vue",
-                            "input_str": input_str
+                            "input_str": input_str,
+                            "request_id": request_id
                         }));
                     }
                     return Ok("等待用户确认安装环境".to_string());
@@ -388,11 +471,18 @@ pub async fn run_artifacts(
                 {
                     let _ = window.emit(
                         "artifact-preview-data",
-                        serde_json::json!({ "type": "vue", "original_code": input_str }),
+                        serde_json::json!({
+                            "type": "vue",
+                            "original_code": input_str,
+                            "request_id": request_id
+                        }),
                     );
                     let _ = window.emit(
                         "artifact-preview-log",
-                        format!("检测到 Vue 组件，正在启动预览..."),
+                        serde_json::json!({
+                            "message": "检测到 Vue 组件，正在启动预览...",
+                            "request_id": request_id
+                        }),
                     );
                 }
                 let preview_id = create_vue_preview_for_artifact(
@@ -409,7 +499,10 @@ pub async fn run_artifacts(
                         .as_ref()
                         .and_then(|name| app_handle.get_webview_window(name))
                     {
-                        let _ = window.emit("artifact-preview-error", &error_msg);
+                        let _ = window.emit(
+                            "artifact-preview-error",
+                            serde_json::json!({ "message": error_msg, "request_id": request_id }),
+                        );
                     }
                     AppError::RunCodeError(error_msg)
                 })?;
@@ -429,7 +522,8 @@ pub async fn run_artifacts(
                             "tool": "bun",
                             "message": "React 预览需要 bun 环境，但系统中未安装 bun。是否要自动安装？",
                             "lang": "react",
-                            "input_str": input_str
+                            "input_str": input_str,
+                            "request_id": request_id
                         }));
                     }
                     return Ok("等待用户确认安装环境".to_string());
@@ -443,11 +537,18 @@ pub async fn run_artifacts(
                 {
                     let _ = window.emit(
                         "artifact-preview-data",
-                        serde_json::json!({ "type": "react", "original_code": input_str }),
+                        serde_json::json!({
+                            "type": "react",
+                            "original_code": input_str,
+                            "request_id": request_id
+                        }),
                     );
                     let _ = window.emit(
                         "artifact-preview-log",
-                        format!("检测到 React 组件，正在启动预览..."),
+                        serde_json::json!({
+                            "message": "检测到 React 组件，正在启动预览...",
+                            "request_id": request_id
+                        }),
                     );
                 }
                 let preview_id = create_react_preview_for_artifact(
@@ -464,7 +565,10 @@ pub async fn run_artifacts(
                         .as_ref()
                         .and_then(|name| app_handle.get_webview_window(name))
                     {
-                        let _ = window.emit("artifact-preview-error", &error_msg);
+                        let _ = window.emit(
+                            "artifact-preview-error",
+                            serde_json::json!({ "message": error_msg, "request_id": request_id }),
+                        );
                     }
                     AppError::RunCodeError(error_msg)
                 })?;
@@ -476,7 +580,10 @@ pub async fn run_artifacts(
                     .as_ref()
                     .and_then(|name| app_handle.get_webview_window(name))
                 {
-                    let _ = window.emit("artifact-preview-error", &error_msg);
+                    let _ = window.emit(
+                        "artifact-preview-error",
+                        serde_json::json!({ "message": error_msg, "request_id": request_id }),
+                    );
                 }
                 return Err(AppError::RunCodeError(error_msg));
             }
@@ -487,7 +594,10 @@ pub async fn run_artifacts(
                 .as_ref()
                 .and_then(|name| app_handle.get_webview_window(name))
             {
-                let _ = window.emit("artifact-preview-error", &error_msg);
+                let _ = window.emit(
+                    "artifact-preview-error",
+                    serde_json::json!({ "message": error_msg, "request_id": request_id }),
+                );
             }
             return Err(AppError::RunCodeError(error_msg));
         }

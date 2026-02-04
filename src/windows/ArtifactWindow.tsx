@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { emitTo, once } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import mermaid from "mermaid";
@@ -485,20 +484,7 @@ export default function ArtifactWindow() {
     const handleOpenMermaidInNewWindow = async () => {
         if (!mermaidContent) return;
         try {
-            await invoke("open_artifact_preview_window");
-
-            // 优先直接发送（若窗口已打开，此时已在监听）
-            const payload = { type: "mermaid", original_code: mermaidContent } as any;
-            try {
-                await emitTo("artifact_preview", "artifact-preview-data", payload);
-            } catch (_) {
-                // 忽略直接发送失败，继续走就绪事件
-            }
-
-            // 监听就绪事件，再次发送，避免窗口尚未挂载时丢失事件
-            await once("artifact-preview-ready", () => {
-                emitTo("artifact_preview", "artifact-preview-data", payload);
-            });
+            await invoke("run_artifacts", { lang: "mermaid", inputStr: mermaidContent });
         } catch (error) {
             artifactEvents.addLog("error", `打开预览窗口失败: ${String(error)}`);
         }

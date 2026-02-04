@@ -81,7 +81,13 @@ impl ReactPreviewManager {
         println!("🚀 [React Preview] 开始创建预览, ID: {}", preview_id);
         let target_window_name = target_window.unwrap_or_else(|| "artifact_preview".to_string());
         if let Some(window) = self.app_handle.get_webview_window(&target_window_name) {
-            let _ = window.emit("artifact-preview-log", "开始创建 React 预览...");
+            let _ = window.emit(
+                "artifact-preview-log",
+                serde_json::json!({
+                    "message": "开始创建 React 预览...",
+                    "request_id": request_id
+                }),
+            );
         }
 
         let port = self.find_available_port()?;
@@ -95,13 +101,17 @@ impl ReactPreviewManager {
             &component_code,
             &component_name,
             &target_window_name,
+            request_id.as_deref(),
         )?;
         println!("🚀 [React Preview] 模板项目已设置到: {:?}", template_path);
 
         let process_id = self.start_dev_server(&template_path, port, need_install_deps)?;
         println!("🚀 [React Preview] 开发服务器已启动, PID: {}", process_id);
         if let Some(window) = self.app_handle.get_webview_window(&target_window_name) {
-            let _ = window.emit("artifact-preview-log", "预览服务启动");
+            let _ = window.emit(
+                "artifact-preview-log",
+                serde_json::json!({ "message": "预览服务启动", "request_id": request_id }),
+            );
         }
 
         let server = PreviewServer {
@@ -127,7 +137,10 @@ impl ReactPreviewManager {
             // 等待服务器启动
             println!("🚀 [React Preview] 等待服务器启动...");
             if let Some(window) = app_handle.get_webview_window(&target_window_name) {
-                let _ = window.emit("artifact-preview-log", "等待服务器启动完毕...");
+                let _ = window.emit(
+                    "artifact-preview-log",
+                    serde_json::json!({ "message": "等待服务器启动完毕...", "request_id": request_id }),
+                );
             }
 
             // 检测本地的端口是否已经启动完毕
@@ -148,7 +161,10 @@ impl ReactPreviewManager {
                     let preview_url = format!("http://localhost:{}", port);
                     println!("🚀 [React Preview] 预览已准备完成: {}", preview_url);
                     if let Some(window) = app_handle.get_webview_window(&target_window_name) {
-                        let _ = window.emit("artifact-preview-success", "预览服务器已启动完成");
+                        let _ = window.emit(
+                            "artifact-preview-success",
+                            serde_json::json!({ "message": "预览服务器已启动完成", "request_id": request_id }),
+                        );
                     }
 
                     // 发送跳转事件，让前端窗口自动跳转到预览页面
@@ -162,7 +178,10 @@ impl ReactPreviewManager {
                 PreviewMode::Window => {
                     println!("🚀 [React Preview] 尝试打开预览窗口");
                     if let Some(window) = app_handle.get_webview_window(&target_window_name) {
-                        let _ = window.emit("artifact-preview-log", "打开预览窗口...");
+                        let _ = window.emit(
+                            "artifact-preview-log",
+                            serde_json::json!({ "message": "打开预览窗口...", "request_id": request_id }),
+                        );
                     }
                     let _ = Self::open_preview_window_static(&app_handle, &preview_id_clone, port);
                 }
@@ -246,6 +265,7 @@ impl ReactPreviewManager {
         component_code: &str,
         _component_name: &str,
         target_window_name: &str,
+        request_id: Option<&str>,
     ) -> Result<(PathBuf, bool), Box<dyn std::error::Error>> {
         let preview_dir = self.shared_utils.get_preview_directory("react", preview_id)?;
         println!("🛠️ [Setup] 设置预览目录: {:?}", preview_dir);
@@ -298,7 +318,13 @@ impl ReactPreviewManager {
         if need_install_deps {
             println!("📦 [Setup] 需要安装/更新依赖");
             if let Some(window) = self.app_handle.get_webview_window(target_window_name) {
-                let _ = window.emit("artifact-preview-log", "安装/更新依赖");
+                let _ = window.emit(
+                    "artifact-preview-log",
+                    serde_json::json!({
+                        "message": "安装/更新依赖",
+                        "request_id": request_id
+                    }),
+                );
             }
             // 删除现有的 node_modules（如果存在）
             let node_modules_dir = preview_dir.join("node_modules");

@@ -43,6 +43,7 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
     const drawioIframeRef = useRef<HTMLIFrameElement>(null);
     const logsEndRef = useRef<HTMLDivElement | null>(null);
     const isInstalling = useRef<boolean>(false);
+    const restoreAbortRef = useRef<boolean>(false);
 
     // 环境安装相关状态
     const [showEnvironmentDialog, setShowEnvironmentDialog] = useState<boolean>(false);
@@ -65,6 +66,7 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
 
     // 重置预览状态
     const resetPreviewState = useCallback(async () => {
+        restoreAbortRef.current = true;
         const currentType = previewTypeRef.current;
         if (currentType === 'vue') {
             try {
@@ -94,6 +96,7 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
     // 处理 artifact 数据
     const handleArtifactData = useCallback((data: ArtifactData) => {
         if (data.original_code && data.type) {
+            restoreAbortRef.current = true;
             setOriginalCode(data.original_code);
             switch (data.type) {
                 case 'vue':
@@ -139,12 +142,14 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
 
     // 处理重定向
     const handleRedirect = useCallback((url: string) => {
+        restoreAbortRef.current = true;
         setPreviewUrl(url);
         setIsPreviewReady(true);
     }, []);
 
     // 处理环境检查
     const handleEnvironmentCheck = useCallback((data: EnvironmentCheckData) => {
+        restoreAbortRef.current = true;
         setEnvironmentTool(data.tool);
         setEnvironmentMessage(data.message);
         setCurrentLang(data.lang);

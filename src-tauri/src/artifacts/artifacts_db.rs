@@ -351,6 +351,8 @@ mod tests {
             artifact_type: artifact_type.to_string(),
             code: format!("<div>{}</div>", name),
             tags: Some(r#"["tag1", "tag2"]"#.to_string()),
+            db_id: None,
+            assistant_id: None,
         }
     }
 
@@ -410,6 +412,8 @@ mod tests {
             artifact_type: "invalid_type".to_string(),
             code: "<div></div>".to_string(),
             tags: None,
+            db_id: None,
+            assistant_id: None,
         };
 
         let result = db.save_artifact(artifact);
@@ -426,6 +430,8 @@ mod tests {
             artifact_type: "html".to_string(),
             code: "<div></div>".to_string(),
             tags: None,
+            db_id: None,
+            assistant_id: None,
         };
 
         let result = db.save_artifact(artifact);
@@ -468,6 +474,8 @@ mod tests {
             artifact_type: "vue".to_string(),
             code: "<template><div/></template>".to_string(),
             tags: Some(r#"["vue", "component"]"#.to_string()),
+            db_id: None,
+            assistant_id: None,
         };
         let id = db.save_artifact(artifact).unwrap();
 
@@ -617,6 +625,8 @@ mod tests {
             icon: None,
             description: None,
             tags: None,
+            db_id: None,
+            assistant_id: None,
         };
 
         let result = db.update_artifact(update);
@@ -637,6 +647,8 @@ mod tests {
             icon: Some("🆕".to_string()),
             description: Some("New description".to_string()),
             tags: Some(r#"["new", "tags"]"#.to_string()),
+            db_id: None,
+            assistant_id: None,
         };
 
         let result = db.update_artifact(update);
@@ -655,7 +667,15 @@ mod tests {
         let id = db.save_artifact(create_sample_artifact("NoChange", "react")).unwrap();
 
         let update =
-            UpdateArtifactCollection { id, name: None, icon: None, description: None, tags: None };
+            UpdateArtifactCollection {
+                id,
+                name: None,
+                icon: None,
+                description: None,
+                tags: None,
+                db_id: None,
+                assistant_id: None,
+            };
 
         let result = db.update_artifact(update);
         assert!(result.is_ok(), "Update with no changes should succeed");
