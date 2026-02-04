@@ -219,17 +219,17 @@ export default function ArtifactPreviewWindow() {
             // Update conversation ID and load session-level config
             const convId = data.conversation_id;
             setCurrentConversationId(convId);
-            
+
             // Load config for this conversation (or global if no conversation)
             const sessionConfig = loadArtifactRuntimeConfig(convId);
-            
+
             // If data has explicit overrides, use them; otherwise use session config
             const hasRuntimeOverride = Boolean(data.db_id) || typeof data.assistant_id === 'number';
             const nextRuntime = hasRuntimeOverride ? {
                 db_id: data.db_id || sessionConfig.db_id,
                 assistant_id: typeof data.assistant_id === 'number' ? data.assistant_id : sessionConfig.assistant_id,
             } : sessionConfig;
-            
+
             setRuntimeConfig(nextRuntime);
             if (hasRuntimeOverride) {
                 persistArtifactRuntimeConfig(nextRuntime, convId);
@@ -403,7 +403,7 @@ export default function ArtifactPreviewWindow() {
         };
 
         initFromCache();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [loadArtifactFromCache]);
 
     // 自动滚动到底部
@@ -789,8 +789,8 @@ export default function ArtifactPreviewWindow() {
                             : 'text';
 
     return (
-        <div className="flex h-screen bg-background">
-            <div className="flex flex-col flex-1 bg-background rounded-xl m-2 shadow-lg border border-border">
+        <div className="flex h-screen bg-background overflow-hidden">
+            <div className="flex flex-col flex-1 bg-background rounded-xl m-2 shadow-lg border border-border min-h-0 overflow-hidden">
                 {/* 顶部工具栏 */}
                 {isPreviewReady && (previewUrl || previewType === 'mermaid' || previewType === 'html' || previewType === 'svg' || previewType === 'xml' || previewType === 'markdown' || previewType === 'md' || previewType === 'drawio') && (
                     <div className="flex-shrink-0 p-4 border-b border-border flex items-center justify-between">
@@ -902,7 +902,7 @@ export default function ArtifactPreviewWindow() {
                 )}
 
                 {/* 主要内容区域 */}
-                <div className="flex-1 flex flex-col">
+                <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
                     {currentView === 'logs' ? (
                         /* 日志视图 - 全屏显示 */
                         <div className="flex-1 flex flex-col p-4">
@@ -935,7 +935,7 @@ export default function ArtifactPreviewWindow() {
                             )}
                         </div>
                     ) : currentView === 'code' ? (
-                        <div className="flex-1 flex flex-col p-4 gap-3 overflow-hidden">
+                        <div className="flex-1 flex flex-col p-4 gap-3 overflow-hidden min-h-0">
                             <div className="text-sm text-muted-foreground flex-shrink-0">Artifact 代码</div>
                             <div className="flex-1 overflow-auto rounded border border-border bg-muted p-3 min-h-0">
                                 <div className="w-full max-w-[1100px] [&_pre]:!overflow-visible [&_pre]:!m-0 [&_pre]:!p-0 [&_pre]:!bg-transparent">
