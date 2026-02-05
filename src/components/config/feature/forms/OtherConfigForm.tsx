@@ -18,6 +18,8 @@ export const OtherConfigForm: React.FC<OtherConfigFormProps> = ({ form }) => {
     const { getConfigValue, saveFeatureConfig, loading: featureConfigLoading } = useFeatureConfig();
     const [antiLeakageEnabled, setAntiLeakageEnabled] = useState<boolean>(false);
     const [isTogglingAntiLeakage, setIsTogglingAntiLeakage] = useState(false);
+    const [continueOnToolErrorEnabled, setContinueOnToolErrorEnabled] = useState(true);
+    const [isTogglingContinueOnToolError, setIsTogglingContinueOnToolError] = useState(false);
 
     // 加载防泄露模式配置
     useEffect(() => {
@@ -25,6 +27,15 @@ export const OtherConfigForm: React.FC<OtherConfigFormProps> = ({ form }) => {
             const enabled = getConfigValue("anti_leakage", "enabled") === "true";
             setAntiLeakageEnabled(enabled);
             form.setValue("anti_leakage_enabled", enabled ? "true" : "false");
+        }
+    }, [featureConfigLoading, getConfigValue, form]);
+
+    useEffect(() => {
+        if (!featureConfigLoading) {
+            const rawValue = getConfigValue("tool_error_continue", "enabled");
+            const enabled = rawValue !== "false" && rawValue !== "0";
+            setContinueOnToolErrorEnabled(enabled);
+            form.setValue("tool_error_continue_enabled", enabled ? "true" : "false");
         }
     }, [featureConfigLoading, getConfigValue, form]);
 
@@ -80,6 +91,23 @@ export const OtherConfigForm: React.FC<OtherConfigFormProps> = ({ form }) => {
         }
     }, [form, antiLeakageEnabled, saveFeatureConfig]);
 
+    const handleContinueOnToolErrorChange = useCallback(async (value: string | boolean) => {
+        const checked = value === true || value === "true";
+        setIsTogglingContinueOnToolError(true);
+        try {
+            await saveFeatureConfig("tool_error_continue", { enabled: checked ? "true" : "false" });
+            setContinueOnToolErrorEnabled(checked);
+            form.setValue("tool_error_continue_enabled", checked ? "true" : "false");
+            toast.success(checked ? "已开启工具错误后继续" : "已关闭工具错误后继续");
+        } catch (e) {
+            console.error("[ToolErrorContinue] save_feature_config failed:", e);
+            toast.error("设置失败: " + e);
+            form.setValue("tool_error_continue_enabled", continueOnToolErrorEnabled ? "true" : "false");
+        } finally {
+            setIsTogglingContinueOnToolError(false);
+        }
+    }, [form, continueOnToolErrorEnabled, saveFeatureConfig]);
+
     const AUTOSTART_FORM_CONFIG = [
         {
             key: "autostart_enabled",
@@ -99,6 +127,16 @@ export const OtherConfigForm: React.FC<OtherConfigFormProps> = ({ form }) => {
                 tooltip: "开启后对话标题和内容将被脱敏处理，保护隐私",
                 onChange: handleAntiLeakageChange,
                 disabled: isTogglingAntiLeakage || featureConfigLoading,
+            },
+        },
+        {
+            key: "tool_error_continue_enabled",
+            config: {
+                type: "switch" as const,
+                label: "工具错误后继续",
+                tooltip: "开启后，自动运行的工具出错时会携带错误信息继续对话",
+                onChange: handleContinueOnToolErrorChange,
+                disabled: isTogglingContinueOnToolError || featureConfigLoading,
             },
         },
     ];

@@ -159,6 +159,7 @@ const FeatureAssistantConfig: React.FC = () => {
     const otherForm = useForm({
         defaultValues: {
             autostart_enabled: "false",
+            tool_error_continue_enabled: "true",
         },
     });
 
@@ -268,12 +269,23 @@ const FeatureAssistantConfig: React.FC = () => {
 
             // 更新 autostart 表单
             const autostartConfig = featureConfig.get("autostart");
+            let autostartEnabled = otherForm.getValues("autostart_enabled") ?? "false";
+            let toolErrorContinueEnabled = otherForm.getValues("tool_error_continue_enabled") ?? "true";
             if (autostartConfig) {
-                const enabled = autostartConfig.get("autostart_enabled") || "false";
-                otherForm.reset({
-                    autostart_enabled: enabled,
-                });
+                autostartEnabled = autostartConfig.get("autostart_enabled") || "false";
             }
+
+            const toolErrorContinueConfig = featureConfig.get("tool_error_continue");
+            if (toolErrorContinueConfig) {
+                const rawValue = toolErrorContinueConfig.get("enabled") || "true";
+                const enabled = rawValue !== "false" && rawValue !== "0";
+                toolErrorContinueEnabled = enabled ? "true" : "false";
+            }
+
+            otherForm.reset({
+                autostart_enabled: autostartEnabled,
+                tool_error_continue_enabled: toolErrorContinueEnabled,
+            });
         }
     }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm, otherForm]);
 
