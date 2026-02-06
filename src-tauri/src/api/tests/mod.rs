@@ -1,5 +1,6 @@
 pub mod ai_api_tests;
 pub mod ai_config_tests;
+pub mod branch_bdd_tests;
 pub mod chat_tests;
 pub mod conversation_api_tests;
 pub mod copilot_api_tests;

@@ -1622,9 +1622,24 @@ async fn attempt_stream_chat(
     // 尝试建立流式连接
     info!(model_name, "establishing stream connection");
 
+    let generation_group_id =
+        generation_group_id_override.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
     debug!("stream chat_request messages");
     for (i, msg) in chat_request.messages.iter().enumerate() {
-        debug!(message_index = i, role = ?msg.role, "stream message");
+        let preview = msg.content.first_text().map(|text| {
+            text.chars().take(60).collect::<String>()
+        });
+        let tool_calls_count = msg.content.tool_calls().len();
+        debug!(
+            message_index = i,
+            role = ?msg.role,
+            generation_group_id = %generation_group_id,
+            parent_group_id = ?parent_group_id_override,
+            tool_calls_count,
+            preview = preview.as_deref().unwrap_or(""),
+            "stream message"
+        );
         match &msg.role {
             genai::chat::ChatRole::Assistant => {
                 if let Some(text) = msg.content.first_text() {
@@ -1687,9 +1702,6 @@ async fn attempt_stream_chat(
     let mut response_char_count: usize = 0;
     let mut reasoning_chunk_count: usize = 0;
     let mut reasoning_char_count: usize = 0;
-
-    let generation_group_id =
-        generation_group_id_override.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let is_regeneration = parent_group_id_override.is_some();
     let mut group_merge_event_emitted = false;
@@ -2391,7 +2403,19 @@ pub async fn handle_non_stream_chat(
 
     debug!("non_stream chat_request messages");
     for (i, msg) in chat_request.messages.iter().enumerate() {
-        debug!(message_index = i, role = ?msg.role, "non stream message");
+        let preview = msg.content.first_text().map(|text| {
+            text.chars().take(60).collect::<String>()
+        });
+        let tool_calls_count = msg.content.tool_calls().len();
+        debug!(
+            message_index = i,
+            role = ?msg.role,
+            generation_group_id = %generation_group_id,
+            parent_group_id = ?parent_group_id_override,
+            tool_calls_count,
+            preview = preview.as_deref().unwrap_or(""),
+            "non stream message"
+        );
         match &msg.role {
             genai::chat::ChatRole::Assistant => {
                 if let Some(text) = msg.content.first_text() {

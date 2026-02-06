@@ -8,7 +8,8 @@ use crate::api::ai::config::{
     get_network_proxy_from_config, get_request_timeout_from_config, ChatConfig, ConfigBuilder,
 };
 use crate::api::ai::conversation::{
-    build_chat_request_from_messages, build_message_list_from_db, init_conversation,
+    build_chat_request_from_messages, build_message_list_from_db, filter_messages_for_parent_group,
+    init_conversation,
     BranchSelection, ChatRequestBuildResult, ToolCallStrategy, ToolConfig,
 };
 use crate::api::ai::events::{ActivityFocus, ConversationEvent, MessageAddEvent, MessageUpdateEvent};
@@ -1211,24 +1212,6 @@ pub async fn regenerate_ai(
         (filtered_messages, Some(message_id)) // 使用被重发消息的ID作为parent_id表示这是它的一个版本
     };
 
-    let init_message_list =
-        build_message_list_from_db(&filtered_messages, BranchSelection::LatestChildren);
-
-    debug!(?init_message_list, "initial message list for regenerate");
-
-    // 获取助手信息（在构建消息列表之后，以确保对话已确定）
-    let assistant_id = conversation.assistant_id.unwrap();
-    let assistant_detail = get_assistant(app_handle.clone(), assistant_id).unwrap();
-
-    if assistant_detail.model.is_empty() {
-        return Err(AppError::NoModelFound);
-    }
-
-    // 兼容 MCP：根据助手配置判断是否使用提供商原生 toolcall
-    let mcp_info =
-        crate::mcp::collect_mcp_info_for_assistant(&app_handle, assistant_id, None, None).await?;
-    let is_native_toolcall = mcp_info.use_native_toolcall;
-
     // 确定要使用的generation_group_id和parent_group_id
     let (regenerate_generation_group_id, regenerate_parent_group_id) = if message.message_type
         == "user"
@@ -1261,6 +1244,27 @@ pub async fn regenerate_ai(
         let original_group_id = message.generation_group_id.clone();
         (Some(uuid::Uuid::new_v4().to_string()), original_group_id)
     };
+
+    let filtered_messages =
+        filter_messages_for_parent_group(filtered_messages, regenerate_parent_group_id.as_deref());
+
+    let init_message_list =
+        build_message_list_from_db(&filtered_messages, BranchSelection::LatestBranch);
+
+    debug!(?init_message_list, "initial message list for regenerate");
+
+    // 获取助手信息（在构建消息列表之后，以确保对话已确定）
+    let assistant_id = conversation.assistant_id.unwrap();
+    let assistant_detail = get_assistant(app_handle.clone(), assistant_id).unwrap();
+
+    if assistant_detail.model.is_empty() {
+        return Err(AppError::NoModelFound);
+    }
+
+    // 兼容 MCP：根据助手配置判断是否使用提供商原生 toolcall
+    let mcp_info =
+        crate::mcp::collect_mcp_info_for_assistant(&app_handle, assistant_id, None, None).await?;
+    let is_native_toolcall = mcp_info.use_native_toolcall;
 
     // 在异步任务外获取模型详情（避免线程安全问题）
     let llm_db = LLMDatabase::new(&app_handle).map_err(AppError::from)?;
@@ -1586,7 +1590,7 @@ async fn initialize_conversation(
             let all_messages =
                 db.message_repo().unwrap().list_by_conversation_id(conversation_id)?;
 
-            let message_list = build_message_list_from_db(&all_messages, BranchSelection::LatestChildren);
+            let message_list = build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
             // 获取到消息的附件列表
             let message_attachment_list = db
