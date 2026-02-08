@@ -194,6 +194,7 @@ pub async fn artifact_ai_ask(
         network_proxy.as_deref(),
         proxy_enabled,
         Some(request_timeout),
+        &config_feature_map,
     )
     .map_err(|e| format!("Failed to create AI client: {}", e))?;
 

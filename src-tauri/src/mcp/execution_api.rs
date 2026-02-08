@@ -645,11 +645,11 @@ pub async fn stop_mcp_tool_call(
 /// - 只在最后一个工具结果处理后触发 AI 续写
 /// - 使用 llm_call_id 作为工具调用标识（用于原生 toolcall 模式匹配）
 #[tauri::command]
-#[instrument(skip(app_handle, _state, _feature_config_state, window), fields(message_id))]
+#[instrument(skip(app_handle, _state, feature_config_state, window), fields(message_id))]
 pub async fn send_mcp_tool_results(
     app_handle: tauri::AppHandle,
     _state: tauri::State<'_, crate::AppState>,
-    _feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
+    feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
     window: tauri::Window,
     message_id: i64,
 ) -> std::result::Result<(), String> {
@@ -793,6 +793,7 @@ pub async fn send_mcp_tool_results(
     // 触发续写 - 使用专门的批量续写实现
     let continuation_result = match batch_tool_result_continue_ask_ai_impl(
         app_handle.clone(),
+        feature_config_state,
         window,
         conversation_id,
         assistant_id,
@@ -927,11 +928,11 @@ async fn handle_retry_success_continuation(
 }
 
 /// 触发会话继续：把工具结果作为 tool_result 语义传递给 AI 继续生成。
-#[instrument(skip(app_handle, _state, _feature_config_state, window, result), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
+#[instrument(skip(app_handle, _state, feature_config_state, window, result), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
 async fn trigger_conversation_continuation(
     app_handle: &tauri::AppHandle,
     _state: &tauri::State<'_, crate::AppState>,
-    _feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
+    feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
     window: &tauri::Window,
     tool_call: &MCPToolCall,
     result: &str,
@@ -973,6 +974,7 @@ async fn trigger_conversation_continuation(
     let _lock_guard = continuation_lock.lock().await;
     match tool_result_continue_ask_ai_impl(
         app_handle_clone.clone(),
+        feature_config_state.clone(),
         window_clone,
         conversation_id_str,
         assistant_id,
@@ -1005,11 +1007,11 @@ async fn trigger_conversation_continuation(
 
 /// 触发会话继续：把工具错误作为 tool_result 语义传递给 AI 继续生成。
 /// 与 trigger_conversation_continuation 的区别在于消息格式表明这是错误继续。
-#[instrument(skip(app_handle, _state, _feature_config_state, window, error_message), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
+#[instrument(skip(app_handle, _state, feature_config_state, window, error_message), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
 async fn trigger_conversation_continuation_with_error(
     app_handle: &tauri::AppHandle,
     _state: &tauri::State<'_, crate::AppState>,
-    _feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
+    feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
     window: &tauri::Window,
     tool_call: &MCPToolCall,
     error_message: &str,
@@ -1068,6 +1070,7 @@ async fn trigger_conversation_continuation_with_error(
     let _lock_guard = continuation_lock.lock().await;
     match tool_result_continue_ask_ai_impl(
         app_handle_clone.clone(),
+        feature_config_state.clone(),
         window_clone,
         conversation_id_str,
         assistant_id,
@@ -1284,6 +1287,7 @@ pub async fn trigger_conversation_continuation_batch(
     // 触发续写
     match batch_tool_result_continue_ask_ai_impl(
         app_handle.clone(),
+        feature_config_state,
         window,
         conversation_id,
         assistant_id,

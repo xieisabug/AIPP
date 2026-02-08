@@ -444,6 +444,7 @@ pub async fn ask_ai(
             network_proxy.as_deref(),
             proxy_enabled,
             Some(request_timeout),
+            &_config_feature_map,
         )?;
 
         // 创建一个临时的 ModelDetail 用于配置合并
@@ -588,9 +589,10 @@ pub async fn ask_ai(
     Ok(AiResponse { conversation_id, request_prompt_result_with_context })
 }
 
-#[instrument(skip(app_handle, window, tool_result), fields(conversation_id = %conversation_id, assistant_id, tool_call_id))]
+#[instrument(skip(app_handle, feature_config_state, window, tool_result), fields(conversation_id = %conversation_id, assistant_id, tool_call_id))]
 pub(crate) async fn tool_result_continue_ask_ai_impl(
     app_handle: tauri::AppHandle,
+    feature_config_state: State<'_, FeatureConfigState>,
     window: tauri::Window,
     conversation_id: String,
     assistant_id: i64,
@@ -718,6 +720,9 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let provider_api_type = model_detail.provider.api_type.clone();
     let assistant_model_configs = assistant_detail.model_configs.clone();
 
+    // 获取配置
+    let config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
+
     let conversation_db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
     // Build chat configuration (same as ask_ai)
     let client = genai_client::create_client_with_config(
@@ -727,6 +732,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         None,
         false,
         None,
+        &config_feature_map,
     )
     .map_err(|e| {
         error!(error = %e, "failed to create client in tool_result_continue_ask_ai");
@@ -878,9 +884,10 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
 
 /// 批量工具结果续写：不创建新的 tool_result 消息，只触发 AI 续写
 /// 用于 send_mcp_tool_results 已经创建了所有 tool_result 消息后的续写
-#[instrument(skip(app_handle, window), fields(conversation_id, assistant_id))]
+#[instrument(skip(app_handle, feature_config_state, window), fields(conversation_id, assistant_id))]
 pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     app_handle: tauri::AppHandle,
+    feature_config_state: State<'_, FeatureConfigState>,
     window: tauri::Window,
     conversation_id: i64,
     assistant_id: i64,
@@ -945,6 +952,9 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let provider_api_type = model_detail.provider.api_type.clone();
     let assistant_model_configs = assistant_detail.model_configs.clone();
 
+    // 获取配置
+    let config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
+
     let conversation_db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
     // Build chat configuration
     let client = genai_client::create_client_with_config(
@@ -954,6 +964,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         None,
         false,
         None,
+        &config_feature_map,
     )
     .map_err(|e| {
         error!(error = %e, "failed to create client in batch_tool_result_continue_ask_ai");
@@ -1093,11 +1104,11 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
 }
 
 #[tauri::command]
-#[instrument(skip(app_handle, _state, _feature_config_state, window, tool_result), fields(conversation_id = %conversation_id, assistant_id, tool_call_id))]
+#[instrument(skip(app_handle, _state, feature_config_state, window, tool_result), fields(conversation_id = %conversation_id, assistant_id, tool_call_id))]
 pub async fn tool_result_continue_ask_ai(
     app_handle: tauri::AppHandle,
     _state: State<'_, AppState>,
-    _feature_config_state: State<'_, FeatureConfigState>,
+    feature_config_state: State<'_, FeatureConfigState>,
     window: tauri::Window,
     conversation_id: String,
     assistant_id: i64,
@@ -1106,6 +1117,7 @@ pub async fn tool_result_continue_ask_ai(
 ) -> Result<AiResponse, AppError> {
     tool_result_continue_ask_ai_impl(
         app_handle,
+        feature_config_state,
         window,
         conversation_id,
         assistant_id,
@@ -1307,6 +1319,7 @@ pub async fn regenerate_ai(
             network_proxy.as_deref(),
             proxy_enabled,
             Some(request_timeout),
+            &_config_feature_map,
         )?;
 
         // 创建一个临时的 ModelDetail 用于配置合并

@@ -204,6 +204,7 @@ pub async fn generate_title(
         network_proxy.as_deref(),
         proxy_enabled,
         Some(request_timeout),
+        &config_feature_map,
     )?;
 
     let chat_request = crate::api::ai::conversation::build_chat_request_from_messages(

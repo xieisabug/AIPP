@@ -248,6 +248,7 @@ pub async fn generate_conversation_summary(
         network_proxy.as_deref(),
         proxy_enabled,
         Some(request_timeout),
+        &config_feature_map,
     )?;
 
     // 构建消息列表：system + 原始对话 + 总结请求

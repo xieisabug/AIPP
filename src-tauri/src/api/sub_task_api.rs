@@ -352,6 +352,7 @@ pub async fn run_sub_task_sync(
             network_proxy.as_deref(),
             proxy_enabled,
             Some(request_timeout),
+            &config_map,
         )
         .map_err(|e| {
             let msg = format!("Failed to create AI client: {}", e);
@@ -1339,6 +1340,7 @@ async fn execute_mcp_loop(
         network_proxy.as_deref(),
         proxy_enabled,
         Some(request_timeout),
+        config_map,
     )
     .map_err(|e| format!("Failed to create AI client: {}", e))?;
 
