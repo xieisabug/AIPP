@@ -8,7 +8,7 @@ use crate::db::llm_db::LLMDatabase;
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
 
@@ -16,9 +16,14 @@ use tracing::{debug, error, info, warn};
 ///
 /// Algorithm:
 /// 1. Sort messages by created_time then id.
-/// 2. When a parent_group_id appears, truncate before the parent group (replace it).
+/// 2. When a parent_group_id appears, resolve it through the replacement chain,
+///    then truncate before the resolved group (replace it).
 /// 3. For messages with the same generation_group_id, only keep the latest one.
 /// 4. Append current message to form the latest branch.
+///
+/// The replacement chain tracks "who replaced whom": when group G1 is truncated
+/// and replaced by G2, future lookups for G1 will resolve to G2. This handles
+/// multiple regenerations at the same position correctly.
 pub(crate) fn get_latest_branch_messages(
     messages: &[(Message, Option<crate::db::conversation_db::MessageAttachment>)],
 ) -> Vec<Message> {
@@ -37,21 +42,28 @@ pub(crate) fn get_latest_branch_messages(
     });
 
     let mut result: Vec<Message> = Vec::new();
+    // 记录 group 替换链：old_group_id -> new_group_id
+    let mut group_replacement: HashMap<String, String> = HashMap::new();
+
     for msg in ordered {
-        // 处理分支：当遇到带有 parent_group_id 的消息时，移除 parent group 并截断后续消息
+        // 处理分支：当遇到带有 parent_group_id 的消息时，通过替换链解析真正的目标 group
         if let Some(parent_group_id) = &msg.parent_group_id {
+            let resolved_parent = resolve_group(&group_replacement, parent_group_id);
+
             if let Some(first_index) = result.iter().position(|m| {
-                m.generation_group_id.as_ref().map(|id| id == parent_group_id).unwrap_or(false)
+                m.generation_group_id.as_deref() == Some(resolved_parent.as_str())
             }) {
-                // 移除 parent group 消息，截断之后的所有消息
+                // 记录替换关系：被截断的 group -> 新 group
+                let replaced_group = resolved_parent.clone();
                 result.truncate(first_index);
+                if let Some(new_group) = &msg.generation_group_id {
+                    group_replacement.insert(replaced_group, new_group.clone());
+                }
             }
         }
 
         // 处理同一 generation_group_id 的多个消息：只保留最新的
-        // 如果当前消息有 generation_group_id，检查 result 中是否已有相同 group_id 的消息
         if let Some(current_group_id) = &msg.generation_group_id {
-            // 找到并移除所有具有相同 generation_group_id 的旧消息
             result.retain(|m| {
                 m.generation_group_id.as_ref().map(|id| id != current_group_id).unwrap_or(true)
             });
@@ -61,6 +73,19 @@ pub(crate) fn get_latest_branch_messages(
     }
 
     result
+}
+
+/// 通过替换链解析 group_id 的最终目标
+fn resolve_group(replacements: &HashMap<String, String>, group_id: &str) -> String {
+    let mut current = group_id.to_string();
+    let mut visited = HashSet::new();
+    while let Some(next) = replacements.get(&current) {
+        if !visited.insert(next.clone()) {
+            break; // 防循环
+        }
+        current = next.clone();
+    }
+    current
 }
 
 /// 生成对话总结

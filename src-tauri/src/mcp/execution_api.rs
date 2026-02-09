@@ -53,6 +53,25 @@ fn continuation_lock_registry() -> &'static ContinuationLockRegistry {
     CONTINUATION_LOCKS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
+/// 从 FeatureConfigState 读取工具错误自动继续配置
+/// 默认返回 true（开启）
+async fn get_tool_error_auto_continue_config(
+    feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
+) -> bool {
+    let configs = feature_config_state.configs.lock().await;
+
+    // 查找 feature_code="other" 且 key="tool_error_auto_continue" 的配置
+    for config in configs.iter() {
+        if config.feature_code == "other" && config.key == "tool_error_auto_continue" {
+            // 值为 "false" 时返回 false，其他情况（包括空值）返回 true
+            return config.value != "false";
+        }
+    }
+
+    // 默认开启
+    true
+}
+
 async fn register_cancel_token(call_id: i64) -> CancellationToken {
     let token = CancellationToken::new();
     let mut registry = tool_cancel_registry().lock().await;
@@ -265,36 +284,50 @@ async fn handle_tool_execution_result(
                 .map_err(|e| format!("更新工具调用状态失败: {}", e))?;
 
             tool_call.status = "failed".to_string();
-            tool_call.error = Some(error);
+            tool_call.error = Some(error.clone());
             tool_call.result = None;
 
             // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
             broadcast_mcp_tool_call_update(app_handle, &tool_call);
 
-            if trigger_continuation && continue_on_error {
-                info!("准备触发工具失败续写，call_id={}", call_id);
-                if let Err(e) = trigger_conversation_continuation_with_error(
-                    app_handle,
-                    state,
-                    feature_config_state,
-                    window,
-                    &tool_call,
-                    tool_call.error.as_deref().unwrap_or("Tool execution failed"),
-                )
-                .await
-                {
-                    warn!(error=%e, "tool execution failed but continuation with error failed");
+            let mut auto_continued = false;
+            if trigger_continuation {
+                if continue_on_error {
+                    info!("准备触发工具失败续写，call_id={}", call_id);
+                    if let Err(e) = trigger_conversation_continuation_with_error(
+                        app_handle,
+                        state,
+                        feature_config_state,
+                        window,
+                        &tool_call,
+                        tool_call.error.as_deref().unwrap_or("Tool execution failed"),
+                    )
+                    .await
+                    {
+                        warn!(error=%e, "tool execution failed but continuation with error failed");
+                    }
+                } else {
+                    // 判断是否需要自动以错误继续
+                    // 条件：1. 配置开启  2. 工具标记为自动执行（is_auto_run=true）
+                    auto_continued = check_and_auto_continue_on_error(
+                        app_handle,
+                        state,
+                        feature_config_state,
+                        window,
+                        &tool_call,
+                        &error,
+                    )
+                    .await;
                 }
+            }
+
+            // 只有在未自动继续时，才恢复活动状态（暂停对话）
+            if !auto_continued {
                 if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
                     activity_manager
                         .restore_after_mcp(&app_handle, tool_call.conversation_id)
                         .await;
                 }
-            } else if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
-                // 工具执行失败后，恢复 MCP 执行前的活动状态
-                activity_manager
-                    .restore_after_mcp(&app_handle, tool_call.conversation_id)
-                    .await;
             }
         }
     }
@@ -592,6 +625,7 @@ pub async fn continue_with_error(
     .await
     .map_err(|e| format!("续写失败: {}", e))?;
 
+    // 恢复活动状态（让续写的流式响应接管）
     if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
         activity_manager
             .restore_after_mcp(&app_handle, tool_call.conversation_id)
@@ -699,6 +733,13 @@ pub async fn send_mcp_tool_results(
     let model_id = assistant_detail.model[0].id;
     let model_code = assistant_detail.model[0].model_code.clone();
 
+    // 查找触发工具调用的 response 消息的 generation_group_id，使 tool_result 与 response 同组
+    let tool_result_group_id = conversation_db
+        .message_repo()
+        .ok()
+        .and_then(|repo| repo.read(message_id).ok().flatten())
+        .and_then(|m| m.generation_group_id);
+
     // 为每个工具调用创建独立的 tool_result 消息
     // 使用与 tool_result_continue_ask_ai_impl 相同的格式
     for tc in &tool_calls {
@@ -739,7 +780,7 @@ pub async fn send_mcp_tool_results(
             Some(chrono::Utc::now()),
             Some(chrono::Utc::now()),
             0,
-            None,
+            tool_result_group_id.clone(),
             None,
         ).map_err(|e| format!("创建工具结果消息失败: {}", e))?;
 
@@ -1005,6 +1046,165 @@ async fn trigger_conversation_continuation(
     Ok(())
 }
 
+/// 检查工具是否标记为自动执行
+async fn check_tool_is_auto_run(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    server_name: &str,
+    tool_name: &str,
+) -> bool {
+    // 获取对话信息
+    let conversation_db = match crate::db::conversation_db::ConversationDatabase::new(app_handle) {
+        Ok(db) => db,
+        Err(e) => {
+            warn!(error=%e, "Failed to open conversation database for auto-run check");
+            return false;
+        }
+    };
+
+    let repository = match conversation_db.conversation_repo() {
+        Ok(repo) => repo,
+        Err(e) => {
+            warn!(error=%e, "Failed to get conversation repo for auto-run check");
+            return false;
+        }
+    };
+
+    let conversation = match repository.read(conversation_id) {
+        Ok(Some(conv)) => conv,
+        Ok(None) => {
+            warn!("Conversation not found for auto-run check");
+            return false;
+        }
+        Err(e) => {
+            warn!(error=%e, "Failed to read conversation for auto-run check");
+            return false;
+        }
+    };
+
+    let assistant_id = match conversation.assistant_id {
+        Some(id) => id,
+        None => {
+            debug!("Conversation has no assistant, assuming not auto-run");
+            return false;
+        }
+    };
+
+    // 查询助手的 MCP 配置
+    let servers_with_tools = match crate::api::assistant_api::get_assistant_mcp_servers_with_tools(
+        app_handle.clone(),
+        assistant_id,
+    )
+    .await
+    {
+        Ok(servers) => servers,
+        Err(e) => {
+            warn!(error=%e, "Failed to get assistant MCP configs for auto-run check");
+            return false;
+        }
+    };
+
+    // 查找匹配的工具
+    for server in servers_with_tools.iter() {
+        // 支持精确匹配和清理后名称匹配
+        let name_matches = server.name == server_name
+            || crate::api::ai_api::sanitize_tool_name(&server.name) == server_name;
+
+        if name_matches && server.is_enabled {
+            if let Some(tool) = server.tools.iter().find(|t| t.name == tool_name && t.is_enabled) {
+                debug!(
+                    server = %server_name,
+                    tool = %tool_name,
+                    is_auto_run = tool.is_auto_run,
+                    "Found tool auto-run configuration"
+                );
+                return tool.is_auto_run;
+            }
+        }
+    }
+
+    debug!(
+        server = %server_name,
+        tool = %tool_name,
+        "Tool not found in assistant configs, assuming not auto-run"
+    );
+    false
+}
+
+/// 检查并在满足条件时自动以错误继续对话
+///
+/// 返回值：
+/// - true: 已触发自动继续
+/// - false: 未触发自动继续（配置关闭或工具非自动执行）
+async fn check_and_auto_continue_on_error(
+    app_handle: &tauri::AppHandle,
+    state: &tauri::State<'_, crate::AppState>,
+    feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
+    window: &tauri::Window,
+    tool_call: &MCPToolCall,
+    error_message: &str,
+) -> bool {
+    // 1. 检查配置是否开启
+    let config_enabled = get_tool_error_auto_continue_config(feature_config_state).await;
+    if !config_enabled {
+        debug!(
+            call_id = tool_call.id,
+            "Tool error auto-continue disabled by config"
+        );
+        return false;
+    }
+
+    // 2. 检查工具是否标记为自动执行
+    let is_auto_run = check_tool_is_auto_run(
+        app_handle,
+        tool_call.conversation_id,
+        &tool_call.server_name,
+        &tool_call.tool_name,
+    )
+    .await;
+
+    if !is_auto_run {
+        debug!(
+            call_id = tool_call.id,
+            server = %tool_call.server_name,
+            tool = %tool_call.tool_name,
+            "Tool is not marked as auto-run, skipping auto-continue"
+        );
+        return false;
+    }
+
+    // 3. 满足条件，触发自动续写
+    info!(
+        call_id = tool_call.id,
+        server = %tool_call.server_name,
+        tool = %tool_call.tool_name,
+        "Auto-continuing conversation after tool error (is_auto_run=true, config enabled)"
+    );
+
+    if let Err(e) = trigger_conversation_continuation_with_error(
+        app_handle,
+        state,
+        feature_config_state,
+        window,
+        tool_call,
+        error_message,
+    )
+    .await
+    {
+        warn!(error=%e, "Failed to auto-continue conversation after tool error");
+        return false;
+    }
+
+    // 恢复活动状态（让续写的流式响应接管）
+    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+        activity_manager
+            .restore_after_mcp(app_handle, tool_call.conversation_id)
+            .await;
+    }
+
+    true
+}
+
 /// 触发会话继续：把工具错误作为 tool_result 语义传递给 AI 继续生成。
 /// 与 trigger_conversation_continuation 的区别在于消息格式表明这是错误继续。
 #[instrument(skip(app_handle, _state, feature_config_state, window, error_message), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
@@ -1198,6 +1398,18 @@ pub async fn trigger_conversation_continuation_batch(
     let model_id = assistant_detail.model[0].id;
     let model_code = assistant_detail.model[0].model_code.clone();
 
+    // 查找最近的 response 消息的 generation_group_id，使 tool_result 与 response 同组
+    let tool_result_group_id = conversation_db
+        .message_repo()
+        .ok()
+        .and_then(|repo| repo.list_by_conversation_id(conversation_id).ok())
+        .and_then(|msgs| {
+            msgs.iter()
+                .filter(|(m, _)| m.message_type == "response")
+                .max_by_key(|(m, _)| m.id)
+                .and_then(|(m, _)| m.generation_group_id.clone())
+        });
+
     // 为每个工具调用创建独立的 tool_result 消息
     for tc in &tool_calls {
         // 使用 llm_call_id（如果存在），否则使用数据库 id 作为 fallback
@@ -1233,7 +1445,7 @@ pub async fn trigger_conversation_continuation_batch(
             Some(chrono::Utc::now()),
             Some(chrono::Utc::now()),
             0,
-            None,
+            tool_result_group_id.clone(),
             None,
         ).map_err(|e| anyhow!("创建工具结果消息失败: {}", e))?;
 

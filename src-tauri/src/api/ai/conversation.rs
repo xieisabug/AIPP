@@ -262,7 +262,6 @@ fn collect_sticky_response_ids(
     }
     sticky
 }
-
 pub fn build_chat_messages(
     init_message_list: &[(String, String, Vec<MessageAttachment>)],
 ) -> Vec<ChatMessage> {
@@ -496,7 +495,6 @@ fn build_native_toolcall_paired_messages(
 pub enum BranchSelection {
     All,
     LatestBranch,
-    LatestChildren,
 }
 
 pub fn build_message_list_from_selected_messages(
@@ -649,124 +647,6 @@ pub fn build_message_list_from_db(
                 .collect()
         }
     }
-}
-
-/// 获取每个父消息的最新子消息（统一的排序逻辑）
-/// 返回: (latest_children_map, child_ids_set)
-pub(crate) fn get_latest_child_messages(
-    messages: &[(Message, Option<MessageAttachment>)],
-) -> (HashMap<i64, (Message, Option<MessageAttachment>)>, HashSet<i64>) {
-    let mut latest_children: HashMap<i64, (Message, Option<MessageAttachment>)> = HashMap::new();
-    let mut child_ids: HashSet<i64> = HashSet::new();
-
-    // 按 generation_group_id 分组，每组只保留 ID 最大的消息
-    let mut group_to_latest: HashMap<String, (Message, Option<MessageAttachment>)> = HashMap::new();
-
-    for (message, attachment) in messages.iter() {
-        if let Some(parent_id) = message.parent_id {
-            child_ids.insert(message.id);
-            latest_children
-                .entry(parent_id)
-                .and_modify(|existing| {
-                    // 选择ID更大的消息作为最新版本
-                    if message.id > existing.0.id {
-                        *existing = (message.clone(), attachment.clone());
-                    }
-                })
-                .or_insert((message.clone(), attachment.clone()));
-        }
-
-        // 按 generation_group_id 分组，每组只保留最新的消息
-        if let Some(ref group_id) = message.generation_group_id {
-            group_to_latest
-                .entry(group_id.clone())
-                .and_modify(|existing| {
-                    if message.id > existing.0.id {
-                        *existing = (message.clone(), attachment.clone());
-                    }
-                })
-                .or_insert((message.clone(), attachment.clone()));
-        }
-    }
-
-    // 将被 group 机制过滤掉的消息加入 child_ids
-    for (message, _) in messages.iter() {
-        if let Some(ref group_id) = message.generation_group_id {
-            if let Some((latest_msg, _)) = group_to_latest.get(group_id) {
-                if message.id != latest_msg.id {
-                    child_ids.insert(message.id);
-                }
-            }
-        }
-    }
-
-    (latest_children, child_ids)
-}
-
-/// 按照group和ID排序消息列表
-/// 规则：
-/// 1. 按照root group的最小消息ID排序
-/// 2. 同一group内的消息按ID排序
-/// 3. 没有generation_group_id的消息排在最前面（按ID排序）
-pub(crate) fn sort_messages_by_group_and_id(
-    messages: Vec<(String, String, Vec<MessageAttachment>)>,
-    original_messages: &[(Message, Option<MessageAttachment>)],
-) -> Vec<(String, String, Vec<MessageAttachment>)> {
-    let mut result = messages;
-
-    // 创建消息内容到原始消息的映射，用于获取group信息
-    let mut content_to_message: HashMap<String, &Message> = HashMap::new();
-    for (msg, _) in original_messages {
-        content_to_message.insert(msg.content.clone(), msg);
-    }
-
-    // 创建group到最小ID的映射
-    let mut group_to_min_id: HashMap<String, i64> = HashMap::new();
-    for (msg, _) in original_messages {
-        if let Some(ref group_id) = msg.generation_group_id {
-            group_to_min_id
-                .entry(group_id.clone())
-                .and_modify(|min_id| {
-                    if msg.id < *min_id {
-                        *min_id = msg.id;
-                    }
-                })
-                .or_insert(msg.id);
-        }
-    }
-
-    // 排序逻辑
-    result.sort_by(|a, b| {
-        let msg_a = content_to_message.get(&a.1);
-        let msg_b = content_to_message.get(&b.1);
-
-        match (msg_a, msg_b) {
-            (Some(ma), Some(mb)) => match (&ma.generation_group_id, &mb.generation_group_id) {
-                // 两个都有group_id
-                (Some(group_a), Some(group_b)) => {
-                    if group_a == group_b {
-                        // 同一个group内，按消息ID排序
-                        ma.id.cmp(&mb.id)
-                    } else {
-                        // 不同group，按group的最小ID排序
-                        let min_a = group_to_min_id.get(group_a).unwrap_or(&ma.id);
-                        let min_b = group_to_min_id.get(group_b).unwrap_or(&mb.id);
-                        min_a.cmp(min_b)
-                    }
-                }
-                // 只有A有group_id，按消息ID排序（而不是固定让B排前面）
-                (Some(_), None) => ma.id.cmp(&mb.id),
-                // 只有B有group_id，按消息ID排序（而不是固定让A排前面）
-                (None, Some(_)) => ma.id.cmp(&mb.id),
-                // 两个都没有group_id，按消息ID排序
-                (None, None) => ma.id.cmp(&mb.id),
-            },
-            // 如果找不到对应的原始消息，保持原顺序
-            _ => std::cmp::Ordering::Equal,
-        }
-    });
-
-    result
 }
 
 // Helper function to extract tool call ID from tool result content

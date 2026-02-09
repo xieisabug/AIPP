@@ -21,12 +21,21 @@ export const OtherConfigForm: React.FC<OtherConfigFormProps> = ({ form }) => {
     const [continueOnToolErrorEnabled, setContinueOnToolErrorEnabled] = useState(true);
     const [isTogglingContinueOnToolError, setIsTogglingContinueOnToolError] = useState(false);
 
+    // 工具错误自动继续配置
+    const [toolErrorAutoContinue, setToolErrorAutoContinue] = useState<boolean>(true);
+    const [isTogglingToolError, setIsTogglingToolError] = useState(false);
+
     // 加载防泄露模式配置
     useEffect(() => {
         if (!featureConfigLoading) {
             const enabled = getConfigValue("anti_leakage", "enabled") === "true";
             setAntiLeakageEnabled(enabled);
             form.setValue("anti_leakage_enabled", enabled ? "true" : "false");
+
+            // 加载工具错误自动继续配置
+            const autoContinue = getConfigValue("other", "tool_error_auto_continue") !== "false";
+            setToolErrorAutoContinue(autoContinue);
+            form.setValue("tool_error_auto_continue", autoContinue ? "true" : "false");
         }
     }, [featureConfigLoading, getConfigValue, form]);
 
@@ -107,6 +116,22 @@ export const OtherConfigForm: React.FC<OtherConfigFormProps> = ({ form }) => {
             setIsTogglingContinueOnToolError(false);
         }
     }, [form, continueOnToolErrorEnabled, saveFeatureConfig]);
+    const handleToolErrorAutoContinueChange = useCallback(async (value: string | boolean) => {
+        const checked = value === true || value === "true";
+        setIsTogglingToolError(true);
+        try {
+            await saveFeatureConfig("other", { tool_error_auto_continue: checked ? "true" : "false" });
+            setToolErrorAutoContinue(checked);
+            form.setValue("tool_error_auto_continue", checked ? "true" : "false");
+            toast.success(checked ? "已开启工具错误自动继续" : "已关闭工具错误自动继续");
+        } catch (e) {
+            console.error("[ToolErrorAutoContinue] save_feature_config failed:", e);
+            toast.error("设置失败: " + e);
+            form.setValue("tool_error_auto_continue", toolErrorAutoContinue ? "true" : "false");
+        } finally {
+            setIsTogglingToolError(false);
+        }
+    }, [form, toolErrorAutoContinue, saveFeatureConfig]);
 
     const AUTOSTART_FORM_CONFIG = [
         {
@@ -137,6 +162,16 @@ export const OtherConfigForm: React.FC<OtherConfigFormProps> = ({ form }) => {
                 tooltip: "开启后，自动运行的工具出错时会携带错误信息继续对话",
                 onChange: handleContinueOnToolErrorChange,
                 disabled: isTogglingContinueOnToolError || featureConfigLoading,
+            },
+        },
+        {
+            key: "tool_error_auto_continue",
+            config: {
+                type: "switch" as const,
+                label: "工具错误仍然继续",
+                tooltip: "开启后，标记为自动执行的MCP工具调用失败时，会自动将错误信息返回给AI并触发对话续写",
+                onChange: handleToolErrorAutoContinueChange,
+                disabled: isTogglingToolError || featureConfigLoading,
             },
         },
     ];

@@ -5,7 +5,6 @@ use crate::api::ai::conversation::extract_tool_result;
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent, MessageUpdateEvent};
 use crate::db::assistant_db::AssistantModelConfig;
 use crate::db::conversation_db::ConversationDatabase;
-use crate::db::conversation_db::Message;
 use crate::db::llm_db::LLMProviderConfig;
 use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
@@ -24,7 +23,7 @@ use agent_client_protocol::{
     self as acp, Agent as _, Client as AcpClient, ClientSideConnection, ToolCallLocation,
 };
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -359,46 +358,30 @@ fn build_acp_history_prompt(app_handle: &tauri::AppHandle, conversation_id: i64)
         return None;
     }
 
-    let mut latest_children: HashMap<i64, Message> = HashMap::new();
-    let mut child_ids: HashSet<i64> = HashSet::new();
-    let mut latest_user_id: Option<i64> = None;
+    // 使用统一的 LatestBranch 算法获取最新分支消息
+    let latest_branch = crate::api::ai::summary::get_latest_branch_messages(&messages);
 
-    for (message, _) in &messages {
-        if message.message_type == "user" {
-            latest_user_id = Some(message.id);
-        }
-        if let Some(parent_id) = message.parent_id {
-            child_ids.insert(message.id);
-            let should_replace = match latest_children.get(&parent_id) {
-                Some(existing) => message.id > existing.id,
-                None => true,
-            };
-            if should_replace {
-                latest_children.insert(parent_id, message.clone());
-            }
-        }
-    }
+    // 找到最新的用户消息 ID（用于排除当前用户提问）
+    let latest_user_id = latest_branch
+        .iter()
+        .filter(|m| m.message_type == "user")
+        .max_by_key(|m| m.id)
+        .map(|m| m.id);
 
     let mut entries: Vec<String> = Vec::new();
 
-    for (message, _) in &messages {
-        if child_ids.contains(&message.id) {
+    for message in &latest_branch {
+        if Some(message.id) == latest_user_id {
             continue;
         }
 
-        let final_message = latest_children.get(&message.id).unwrap_or(message);
-
-        if Some(final_message.id) == latest_user_id {
-            continue;
-        }
-
-        let mut content = strip_mcp_tool_call_hints(&final_message.content);
+        let mut content = strip_mcp_tool_call_hints(&message.content);
         let content_trimmed = content.trim();
         if content_trimmed.is_empty() {
             continue;
         }
 
-        let label = match final_message.message_type.as_str() {
+        let label = match message.message_type.as_str() {
             "system" => "系统",
             "user" => "用户",
             "response" | "assistant" | "reasoning" => "助手",
@@ -406,7 +389,7 @@ fn build_acp_history_prompt(app_handle: &tauri::AppHandle, conversation_id: i64)
             _ => "助手",
         };
 
-        if final_message.message_type == "tool_result" {
+        if message.message_type == "tool_result" {
             if let Some(result) = extract_tool_result(content_trimmed) {
                 content = result;
             }

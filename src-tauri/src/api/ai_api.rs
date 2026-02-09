@@ -628,6 +628,14 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         tool_call_id, tool_result
     );
 
+    // 查找对应的 response 消息的 generation_group_id，使 tool_result 与 response 同组
+    let all_msgs_for_group = db.message_repo().unwrap().list_by_conversation_id(conversation_id_i64)?;
+    let tool_result_group_id = all_msgs_for_group
+        .iter()
+        .filter(|(m, _)| m.message_type == "response")
+        .max_by_key(|(m, _)| m.id)
+        .and_then(|(m, _)| m.generation_group_id.clone());
+
     let tool_result_message = add_message(
         &app_handle,
         None,
@@ -639,7 +647,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         Some(chrono::Utc::now()),
         Some(chrono::Utc::now()),
         0,
-        None,
+        tool_result_group_id,
         None,
     )?;
 
