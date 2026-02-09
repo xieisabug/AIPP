@@ -298,20 +298,36 @@ pub async fn detect_and_process_mcp_calls(
                                             }
 
                                             if should_auto_run {
-                                                let state = app_handle.state::<crate::AppState>();
-                                                let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
-                                                if let Err(e) = crate::mcp::execution_api::execute_mcp_tool_call(
-                                                    app_handle.clone(),
-                                                    state,
-                                                    feature_config_state,
-                                                    window.clone(),
-                                                    tool_call.id,
-                                                    true, // trigger_continuation
-                                                )
-                                                .await
-                                                {
-                                                    error!(call_id = tool_call.id, error = %e, "Auto-execute MCP tool failed");
-                                                }
+                                                let app_handle_clone = app_handle.clone();
+                                                let window_clone = window.clone();
+                                                let tool_call_id = tool_call.id;
+                                                tauri::async_runtime::spawn_blocking(move || {
+                                                    let app_handle_for_state = app_handle_clone.clone();
+                                                    tauri::async_runtime::block_on(async move {
+                                                        let state =
+                                                            app_handle_for_state.state::<crate::AppState>();
+                                                        let feature_config_state =
+                                                            app_handle_for_state
+                                                                .state::<crate::FeatureConfigState>();
+                                                        if let Err(e) =
+                                                            crate::mcp::execution_api::execute_mcp_tool_call(
+                                                                app_handle_clone,
+                                                                state,
+                                                                feature_config_state,
+                                                                window_clone,
+                                                                tool_call_id,
+                                                                true, // trigger_continuation
+                                                            )
+                                                            .await
+                                                        {
+                                                            error!(
+                                                                call_id = tool_call_id,
+                                                                error = %e,
+                                                                "Auto-execute MCP tool failed"
+                                                            );
+                                                        }
+                                                    });
+                                                });
                                             } else {
                                                 debug!(server = %server_name, tool = %tool_name, "MCP tool auto-run disabled");
                                             }
