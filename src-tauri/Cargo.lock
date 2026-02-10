@@ -13,6 +13,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chromiumoxide",
+ "chromiumoxide_cdp",
  "chrono",
  "config",
  "dirs 5.0.1",
