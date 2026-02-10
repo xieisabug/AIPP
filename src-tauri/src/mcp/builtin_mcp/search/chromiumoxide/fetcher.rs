@@ -17,7 +17,7 @@ use tracing::{debug, info, trace, warn};
 /// ========== 调试开关 ==========
 /// 设置为 true 时会保存获取到的HTML到 /tmp 目录
 /// 调试完成后请设置为 false
-const DEBUG_SAVE_HTML: bool = true;
+const DEBUG_SAVE_HTML: bool = false;
 /// 调试HTML保存目录
 const DEBUG_HTML_DIR: &str = "~/tmp";
 
