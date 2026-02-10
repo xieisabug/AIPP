@@ -17,7 +17,7 @@ use tracing::{debug, info, trace, warn};
 /// ========== 调试开关 ==========
 /// 设置为 true 时会保存获取到的HTML到 /tmp 目录
 /// 调试完成后请设置为 false
-const DEBUG_SAVE_HTML: bool = false;
+const DEBUG_SAVE_HTML: bool = true;
 /// 调试HTML保存目录
 const DEBUG_HTML_DIR: &str = "~/tmp";
 
@@ -354,11 +354,23 @@ impl ContentFetcher {
             console.log('[AIPP] Anti-detection scripts injected successfully');
         "#;
 
-        page.evaluate_on_new_document(anti_detection_script)
-            .await
-            .map_err(|e| format!("Failed to inject anti-detection script: {}", e))?;
-
-        info!("Anti-detection scripts injected");
+        match page.evaluate_on_new_document(anti_detection_script).await {
+            Ok(_) => {
+                info!("Anti-detection scripts injected");
+            }
+            Err(e) => {
+                let error_message = e.to_string();
+                let lower = error_message.to_lowercase();
+                if lower.contains("timed out") || lower.contains("timeout") {
+                    warn!(
+                        error = %error_message,
+                        "Anti-detection injection timed out, continuing without it"
+                    );
+                    return Ok(());
+                }
+                return Err(format!("Failed to inject anti-detection script: {}", error_message));
+            }
+        }
         Ok(())
     }
 
@@ -538,14 +550,20 @@ impl ContentFetcher {
 
         use chromiumoxide::BrowserConfig;
 
-        let mut builder = BrowserConfig::builder().user_data_dir(&user_data_dir).no_sandbox();
+        let mut builder = BrowserConfig::builder()
+            .user_data_dir(&user_data_dir)
+            .no_sandbox()
+            .launch_timeout(Duration::from_millis(self.config.wait_timeout_ms.max(30_000)));
 
         if !self.config.headless {
             builder = builder.with_head();
         }
 
-        if browser_path.exists() {
+        let browser_path_exists = browser_path.exists();
+        if browser_path_exists {
             builder = builder.chrome_executable(&browser_path);
+        } else {
+            warn!(path = %browser_path.display(), "Browser executable not found, using default path");
         }
 
         for arg in &stealth_args {
@@ -569,13 +587,33 @@ impl ContentFetcher {
             }
         }
 
+        info!(
+            url = %url,
+            headless = self.config.headless,
+            wait_timeout_ms = self.config.wait_timeout_ms,
+            wait_poll_ms = self.config.wait_poll_ms,
+            browser_path = %browser_path.display(),
+            browser_path_exists = browser_path_exists,
+            user_data_dir = %user_data_dir.display(),
+            "Launching Chromiumoxide for fetch"
+        );
+
         let config = builder
             .build()
             .map_err(|e| format!("Failed to build browser config: {}", e))?;
 
         let (browser, mut handler) = chromiumoxide::browser::Browser::launch(config)
             .await
-            .map_err(|e| format!("Failed to launch browser: {}", e))?;
+            .map_err(|e| {
+                format!(
+                    "Failed to launch browser (path={}, exists={}, headless={}, user_data_dir={}): {}",
+                    browser_path.display(),
+                    browser_path_exists,
+                    self.config.headless,
+                    user_data_dir.display(),
+                    e
+                )
+            })?;
 
         // 启动事件处理器
         tokio::spawn(async move {
@@ -1496,7 +1534,10 @@ impl ContentFetcher {
 
         use chromiumoxide::BrowserConfig;
 
-        let mut builder = BrowserConfig::builder().user_data_dir(&user_data_dir).no_sandbox();
+        let mut builder = BrowserConfig::builder()
+            .user_data_dir(&user_data_dir)
+            .no_sandbox()
+            .launch_timeout(Duration::from_millis(self.config.wait_timeout_ms.max(30_000)));
 
         if !self.config.headless {
             builder = builder.with_head();
@@ -1648,16 +1689,13 @@ impl ContentFetcher {
         {
             Ok(html) => {
                 info!(strategy = "chromiumoxide_search", bytes = html.len(), "Fetched search content");
-                Ok(html)
+                return Ok(html);
             }
-            Err(e) => {
-                warn!(error = %e, strategy = "chromiumoxide_search", "Search flow failed");
-                Err(format!(
-                    "Search flow failed for {} engine: {}",
-                    search_engine.display_name(),
-                    e
-                ))
-            }
+            Err(e) => Err(format!(
+                "Search flow failed for {} engine: {}",
+                search_engine.display_name(),
+                e
+            )),
         }
     }
 
@@ -1696,7 +1734,10 @@ impl ContentFetcher {
 
         use chromiumoxide::BrowserConfig;
 
-        let mut builder = BrowserConfig::builder().user_data_dir(&user_data_dir).no_sandbox();
+        let mut builder = BrowserConfig::builder()
+            .user_data_dir(&user_data_dir)
+            .no_sandbox()
+            .launch_timeout(Duration::from_millis(self.config.wait_timeout_ms.max(30_000)));
 
         if !self.config.headless {
             builder = builder.with_head();

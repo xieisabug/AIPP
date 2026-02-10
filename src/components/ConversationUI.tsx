@@ -192,6 +192,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             });
         }, []);
 
+        const handleAiResponseStart = useCallback(() => {
+            setAiIsResponsing(true);
+        }, [setAiIsResponsing]);
+
         const handleAiResponseComplete = useCallback(() => {
             setAiIsResponsing(false);
         }, []);
@@ -315,6 +319,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 onMessageUpdate: handleMessageUpdate,
                 onGroupMerge: handleGroupMerge,
                 onMCPToolCallUpdate: handleMCPToolCallUpdate,
+                onAiResponseStart: handleAiResponseStart,
                 onAiResponseComplete: handleAiResponseComplete,
                 onError: handleError,
             };
@@ -323,6 +328,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             handleMessageAdd,
             handleGroupMerge,
             handleMCPToolCallUpdate,
+            handleAiResponseStart,
             handleAiResponseComplete,
             handleError,
             handleMessageCompletion,
@@ -337,12 +343,29 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             setShiningMessageIds,
             setManualShineMessage,
             mcpToolCallStates,
+            activeMcpCallIds,
+            streamingAssistantMessageIds,
+            activityFocus,
             updateShiningMessages,
             updateFunctionMap,
             clearStreamingMessages,
             clearShiningMessages,
             setPendingUserMessage,
         } = useConversationEvents(conversationEventsOptions);
+
+        const effectiveAiIsResponsing = useMemo(() => {
+            return (
+                aiIsResponsing ||
+                activityFocus.focus_type !== "none" ||
+                activeMcpCallIds.size > 0 ||
+                streamingAssistantMessageIds.size > 0
+            );
+        }, [
+            aiIsResponsing,
+            activityFocus.focus_type,
+            activeMcpCallIds.size,
+            streamingAssistantMessageIds.size,
+        ]);
 
         // 当 functionMap 变化时更新事件处理器
         useEffect(() => {
@@ -485,7 +508,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             setInputText,
             fileInfoList: fileInfoList || undefined,
             clearFileInfoList,
-            aiIsResponsing,
+            aiIsResponsing: effectiveAiIsResponsing,
             setAiIsResponsing,
             onChangeConversationId,
             setShiningMessageIds,
@@ -797,7 +820,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             handleDeleteFile={handleDeleteFile}
                             handlePaste={handlePaste}
                             handleSend={handleSend}
-                            aiIsResponsing={aiIsResponsing}
+                            aiIsResponsing={effectiveAiIsResponsing}
                             placement="bottom"
                             isMobile={isMobile}
                             sidebarWidth={sidebarWidth}

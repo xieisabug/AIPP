@@ -1,16 +1,54 @@
 use super::browser::BrowserManager;
-use super::chromiumoxide::{BrowserPool, BrowserPoolConfig, ContentFetcher, FetchConfig};
+use super::chromiumoxide::{cleanup_profile_locks, BrowserPool, BrowserPoolConfig, ContentFetcher, FetchConfig};
 use super::engine_manager::{SearchEngine, SearchEngineManager};
 use super::engines::base::SearchEngineBase;
 use super::fingerprint::FingerprintManager;
 use super::types::{SearchRequest, SearchResponse, SearchResultType};
 use anyhow::Result;
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use tauri::AppHandle;
+use tauri::Manager;
 use tokio::sync::OnceCell;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 
 static GLOBAL_BROWSER_POOL: OnceCell<BrowserPool> = OnceCell::const_new();
+
+pub fn cleanup_search_profile_locks(app_handle: &AppHandle) -> Result<(), String> {
+    let config = load_search_config_from_db(app_handle)?;
+    let user_data_dir = resolve_search_user_data_dir(app_handle, &config)?;
+    if let Err(e) = fs::create_dir_all(&user_data_dir) {
+        warn!(error = %e, dir = ?user_data_dir, "Failed to create user_data_dir for cleanup");
+    }
+    info!(
+        user_data_dir = %user_data_dir.display(),
+        "Preparing search profile lock cleanup"
+    );
+    cleanup_profile_locks(&user_data_dir, "app_startup");
+    Ok(())
+}
+
+pub async fn shutdown_search_browser_pool() -> Result<(), String> {
+    if let Some(pool) = GLOBAL_BROWSER_POOL.get() {
+        pool.shutdown().await?;
+    }
+    Ok(())
+}
+
+fn resolve_search_user_data_dir(
+    app_handle: &AppHandle,
+    config: &HashMap<String, String>,
+) -> Result<PathBuf, String> {
+    if let Some(dir) = config.get("USER_DATA_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    let base = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    Ok(base.join("chromiumoxide_profile"))
+}
 
 #[derive(Clone)]
 pub struct SearchHandler {
@@ -40,6 +78,7 @@ impl SearchHandler {
             BrowserManager::new(config.get("BROWSER_TYPE").map(|s| s.as_str()));
         let browser_path = browser_manager.get_browser_path()?;
 
+        let user_data_dir = resolve_search_user_data_dir(&self.app_handle, &config)?;
         let pool_config = BrowserPoolConfig {
             max_pages: config
                 .get("MAX_CONCURRENT_PAGES")
@@ -49,7 +88,7 @@ impl SearchHandler {
                 .get("PAGE_IDLE_TIMEOUT_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(60),
-            user_data_dir: config.get("USER_DATA_DIR").cloned(),
+            user_data_dir: Some(user_data_dir.to_string_lossy().to_string()),
             browser_path,
             headless: config
                 .get("HEADLESS")
@@ -224,28 +263,7 @@ impl SearchHandler {
 
     /// 从数据库加载搜索配置
     fn load_search_config(&self) -> Result<HashMap<String, String>, String> {
-        use crate::db::mcp_db::MCPDatabase;
-        let db = MCPDatabase::new(&self.app_handle).map_err(|e| e.to_string())?;
-        let mut stmt = db.conn.prepare(
-            "SELECT environment_variables FROM mcp_server WHERE command = ? AND is_builtin = 1 LIMIT 1"
-        ).map_err(|e| format!("Database prepare error: {}", e))?;
-
-        let env_text: Option<String> =
-            stmt.query_row(["aipp:search"], |row| row.get::<_, Option<String>>(0)).unwrap_or(None);
-        let mut config = HashMap::new();
-        if let Some(text) = env_text {
-            for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                if let Some((k, v)) = line.split_once('=') {
-                    config.insert(k.trim().to_string(), v.trim().to_string());
-                }
-            }
-        }
-        debug!(?config, "Loaded search config");
-        Ok(config)
+        load_search_config_from_db(&self.app_handle)
     }
 
     /// 构建针对搜索引擎的抓取配置
@@ -313,4 +331,33 @@ impl SearchHandler {
             kagi_session_url: None, // 通用抓取不需要 Kagi 会话链接
         })
     }
+}
+
+fn load_search_config_from_db(app_handle: &AppHandle) -> Result<HashMap<String, String>, String> {
+    use crate::db::mcp_db::MCPDatabase;
+    let db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let mut stmt = db
+        .conn
+        .prepare(
+            "SELECT environment_variables FROM mcp_server WHERE command = ? AND is_builtin = 1 LIMIT 1",
+        )
+        .map_err(|e| format!("Database prepare error: {}", e))?;
+
+    let env_text: Option<String> =
+        stmt.query_row(["aipp:search"], |row| row.get::<_, Option<String>>(0))
+            .unwrap_or(None);
+    let mut config = HashMap::new();
+    if let Some(text) = env_text {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                config.insert(k.trim().to_string(), v.trim().to_string());
+            }
+        }
+    }
+    debug!(?config, "Loaded search config");
+    Ok(config)
 }

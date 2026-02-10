@@ -13,6 +13,7 @@ use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::{MCPDatabase, MCPServer, MCPToolCall};
 use crate::mcp::builtin_mcp::{execute_aipp_builtin_tool, is_builtin_mcp_call};
 use crate::state::activity_state::ConversationActivityManager;
+use crate::state::message_token::MessageTokenManager;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -290,9 +291,15 @@ async fn handle_tool_execution_result(
             // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
             broadcast_mcp_tool_call_update(app_handle, &tool_call);
 
+            let error_lower = error.to_lowercase();
+            let is_user_cancelled = error_lower.contains("cancelled by user")
+                || error_lower.contains("canceled by user")
+                || error_lower.contains("stopped by user");
             let mut auto_continued = false;
             if trigger_continuation {
-                if continue_on_error {
+                if is_user_cancelled {
+                    debug!(call_id = tool_call.id, "Skip continuation for user-cancelled tool error");
+                } else if continue_on_error {
                     info!("准备触发工具失败续写，call_id={}", call_id);
                     if let Err(e) = trigger_conversation_continuation_with_error(
                         app_handle,
@@ -1152,6 +1159,17 @@ async fn check_and_auto_continue_on_error(
             "Tool error auto-continue disabled by config"
         );
         return false;
+    }
+
+    if let Some(token_manager) = app_handle.try_state::<MessageTokenManager>() {
+        if token_manager.is_cancelled(tool_call.conversation_id).await {
+            debug!(
+                call_id = tool_call.id,
+                conversation_id = tool_call.conversation_id,
+                "Conversation cancelled; skipping auto-continue"
+            );
+            return false;
+        }
     }
 
     // 2. 检查工具是否标记为自动执行

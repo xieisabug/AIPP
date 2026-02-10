@@ -34,6 +34,7 @@ use anyhow::Context;
 use std::collections::HashMap;
 use genai::chat::Tool;
 use tauri::Emitter;
+use tauri::Manager;
 use tauri::State;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -277,6 +278,8 @@ pub async fn ask_ai(
     activity_manager
         .set_user_pending(&app_handle, conversation_id, user_message_id)
         .await;
+
+    message_token_manager.reset_cancel_token(conversation_id).await;
 
     // 总是启动流式处理，即使没有预先创建消息
     let _config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
@@ -606,6 +609,9 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     );
 
     let conversation_id_i64 = conversation_id.parse::<i64>()?;
+    if let Some(token_manager) = app_handle.try_state::<MessageTokenManager>() {
+        token_manager.reset_cancel_token(conversation_id_i64).await;
+    }
     let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
 
     // Get conversation details (validate exists)
@@ -839,7 +845,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
     if chat_config.stream {
-        Box::pin(ai_handle_stream_chat(
+        ai_handle_stream_chat(
             &chat_config.client,
             &chat_config.model_name,
             &chat_request,
@@ -857,10 +863,10 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             model_code.clone(),
             None,                      // no MCP override config
             tool_name_mapping.clone(), // 工具名称映射表
-        ))
+        )
         .await?;
     } else {
-        Box::pin(ai_handle_non_stream_chat(
+        ai_handle_non_stream_chat(
             &chat_config.client,
             &chat_config.model_name,
             &chat_request,
@@ -869,16 +875,16 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             &conversation_db,
             &window_clone,
             &app_handle,
-            false,                     // no title generation needed
-            String::new(),             // no user prompt
-            HashMap::new(),            // no feature config needed
-            reuse_generation_group_id, // 复用上一条assistant响应的generation_group_id
-            None,                      // no parent_group_id
+            false,                             // no title generation needed
+            String::new(),                     // no user prompt
+            HashMap::new(),                    // no feature config needed
+            reuse_generation_group_id.clone(), // 复用上一条assistant响应的generation_group_id
+            None,                              // no parent_group_id
             model_id,
             model_code.clone(),
-            None,              // no MCP override config
-            tool_name_mapping, // 工具名称映射表
-        ))
+            None,                      // no MCP override config
+            tool_name_mapping.clone(), // 工具名称映射表
+        )
         .await?;
     }
 
@@ -901,6 +907,9 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     assistant_id: i64,
 ) -> Result<AiResponse, AppError> {
     info!("Batch tool result continuation start");
+    if let Some(token_manager) = app_handle.try_state::<MessageTokenManager>() {
+        token_manager.reset_cancel_token(conversation_id).await;
+    }
 
     let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
 
@@ -1163,6 +1172,10 @@ pub async fn cancel_ai(
         }
     }
 
+    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+        activity_manager.clear_focus(&app_handle, conversation_id).await;
+    }
+
     // Send cancellation event to both ask and chat_ui windows
     let cancel_event = crate::api::ai::events::ConversationEvent {
         r#type: "conversation_cancel".to_string(),
@@ -1216,6 +1229,8 @@ pub async fn regenerate_ai(
             .set_assistant_streaming(&app_handle, conversation_id, message_id)
             .await;
     }
+
+    message_token_manager.reset_cancel_token(conversation_id).await;
 
     // 根据消息类型决定处理逻辑
     let (filtered_messages, _parent_message_id) = if message.message_type == "user" {

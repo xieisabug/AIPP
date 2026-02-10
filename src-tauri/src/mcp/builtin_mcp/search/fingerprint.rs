@@ -206,10 +206,10 @@ impl FingerprintManager {
             // 内存和性能优化
             "--max_old_space_size=4096".to_string(),
             "--memory-pressure-off".to_string(),
-            // 禁用日志和错误报告
-            "--disable-logging".to_string(),
-            "--log-level=3".to_string(),
-            "--silent".to_string(),
+            // 启用 stderr 日志，便于定位启动失败原因
+            "--enable-logging=stderr".to_string(),
+            "--log-level=0".to_string(),
+            "--v=1".to_string(),
             // 网络优化
             "--aggressive-cache-discard".to_string(),
             "--enable-features=NetworkServiceInProcess".to_string(),
@@ -402,9 +402,9 @@ mod tests {
     }
 
     #[test]
-    fn test_get_stealth_launch_args_contains_disable_logging() {
+    fn test_get_stealth_launch_args_contains_enable_logging() {
         let args = FingerprintManager::get_stealth_launch_args();
-        assert!(args.contains(&"--disable-logging".to_string()));
+        assert!(args.contains(&"--enable-logging=stderr".to_string()));
     }
 
     // ============================================
