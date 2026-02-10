@@ -575,63 +575,6 @@ pub fn build_message_list_from_db(
             log_selected_messages(conversation_id, "latest_branch", &latest_branch);
             build_message_list_from_selected_messages(&latest_branch, all_messages)
         }
-        BranchSelection::LatestChildren => {
-            let (latest_children, child_ids) = get_latest_child_messages(all_messages);
-            let mut message_list: Vec<(String, String, Vec<MessageAttachment>)> = Vec::new();
-            let mut included_ids: HashSet<i64> = HashSet::new();
-            let mut selected_messages: Vec<Message> = Vec::new();
-            for (message, attachment) in all_messages.iter() {
-                if child_ids.contains(&message.id) {
-                    continue;
-                }
-                let (final_message, final_attachment) = latest_children
-                    .get(&message.id)
-                    .cloned()
-                    .unwrap_or((message.clone(), attachment.clone()));
-
-                included_ids.insert(final_message.id);
-                selected_messages.push(final_message.clone());
-                message_list.push((
-                    final_message.message_type,
-                    final_message.content,
-                    final_attachment.map(|a| vec![a]).unwrap_or_else(Vec::new),
-                ));
-            }
-            let sticky_response_ids = collect_sticky_response_ids(&selected_messages, all_messages);
-            if !sticky_response_ids.is_empty() {
-                for (message, attachment) in all_messages.iter() {
-                    if sticky_response_ids.contains(&message.id) && !included_ids.contains(&message.id)
-                    {
-                        message_list.push((
-                            message.message_type.clone(),
-                            message.content.clone(),
-                            attachment.clone().map(|a| vec![a]).unwrap_or_else(Vec::new),
-                        ));
-                    }
-                }
-            }
-            log_selected_messages(conversation_id, "latest_children", &selected_messages);
-            if !sticky_response_ids.is_empty() {
-                for (message, _) in all_messages.iter() {
-                    if sticky_response_ids.contains(&message.id) {
-                        debug!(
-                            conversation_id,
-                            selection = "latest_children",
-                            message_id = message.id,
-                            message_type = %message.message_type,
-                            parent_id = ?message.parent_id,
-                            generation_group_id = ?message.generation_group_id,
-                            parent_group_id = ?message.parent_group_id,
-                            created_time = ?message.created_time,
-                            tool_calls_json_len = message.tool_calls_json.as_ref().map(|json| json.len()),
-                            content_len = message.content.len(),
-                            "sticky message item"
-                        );
-                    }
-                }
-            }
-            sort_messages_by_group_and_id(message_list, all_messages)
-        }
         BranchSelection::All => {
             let mut seen = HashSet::new();
             all_messages
