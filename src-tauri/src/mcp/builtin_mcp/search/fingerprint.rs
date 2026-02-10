@@ -1,6 +1,4 @@
 use chrono::Timelike;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-use playwright::api::browser_type::PersistentContextLauncher;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -171,17 +169,6 @@ impl FingerprintManager {
                 screen_height: 1800,
             },
             DeviceTemplate {
-                name: "Desktop Edge Windows".to_string(),
-                user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0".to_string(),
-                viewport_width: 1366,
-                viewport_height: 768,
-                device_scale_factor: 1.0,
-                is_mobile: false,
-                has_touch: false,
-                screen_width: 1366,
-                screen_height: 768,
-            },
-            DeviceTemplate {
                 name: "Desktop High DPI".to_string(),
                 user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36".to_string(),
                 viewport_width: 2560,
@@ -195,48 +182,13 @@ impl FingerprintManager {
         ]
     }
 
-    /// 应用指纹配置到浏览器上下文  
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    pub fn apply_fingerprint_to_context<'a>(
-        &self,
-        mut launcher: PersistentContextLauncher<'a, 'a, 'a, 'a, 'a, 'a, 'a, 'a, 'a, 'a, 'a>,
-        config: &'a FingerprintConfig,
-    ) -> PersistentContextLauncher<'a, 'a, 'a, 'a, 'a, 'a, 'a, 'a, 'a, 'a, 'a> {
-        use playwright::api::Viewport;
-
-        launcher = launcher
-            .user_agent(&config.user_agent)
-            .locale(&config.locale)
-            .timezone_id(&config.timezone_id)
-            .viewport(Some(Viewport {
-                width: config.viewport_width,
-                height: config.viewport_height,
-            }))
-            .device_scale_factor(config.device_scale_factor)
-            .is_mobile(config.is_mobile)
-            .has_touch(config.has_touch);
-
-        // 根据字符串设置颜色方案
-        launcher = match config.color_scheme.as_str() {
-            "dark" => launcher.color_scheme(playwright::api::ColorScheme::Dark),
-            _ => launcher.color_scheme(playwright::api::ColorScheme::Light),
-        };
-
-        // 注意：暂时移除extra_http_headers调用以避免API兼容性问题
-        // 将来可以通过页面级别的set_extra_http_headers来设置
-        //
-        // 其他指纹伪装功能（反检测脚本、人性化行为等）仍然有效
-
-        launcher
-    }
-
     /// 获取增强的浏览器启动参数
     pub fn get_stealth_launch_args() -> Vec<String> {
         vec![
             // 基础隐身参数
             "--no-first-run".to_string(),
             "--no-default-browser-check".to_string(),
-            "--disable-dev-shm-usage".to_string(),
+            "--disable-dev-shm-".to_string(),
             "--disable-extensions".to_string(),
             // 重要：移除自动化控制标识
             "--disable-blink-features=AutomationControlled".to_string(),
@@ -432,7 +384,7 @@ mod tests {
     // ============================================
 
     #[test]
-    fn test_get_stealth_launch_args_not_empty() {
+    fn test_get_stealthy_launch_args_not_empty() {
         let args = FingerprintManager::get_stealth_launch_args();
         assert!(!args.is_empty());
     }

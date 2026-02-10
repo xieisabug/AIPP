@@ -1,9 +1,8 @@
 use super::browser::BrowserManager;
-use super::browser_pool::{BrowserPool, BrowserPoolConfig};
+use super::chromiumoxide::{BrowserPool, BrowserPoolConfig, ContentFetcher, FetchConfig};
 use super::engine_manager::{SearchEngine, SearchEngineManager};
 use super::engines::base::SearchEngineBase;
 use super::fingerprint::FingerprintManager;
-use super::fetcher::{ContentFetcher, FetchConfig};
 use super::types::{SearchRequest, SearchResponse, SearchResultType};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -39,7 +38,7 @@ impl SearchHandler {
 
         let browser_manager =
             BrowserManager::new(config.get("BROWSER_TYPE").map(|s| s.as_str()));
-        let (_browser_type, browser_path) = browser_manager.get_available_browser()?;
+        let browser_path = browser_manager.get_browser_path()?;
 
         let pool_config = BrowserPoolConfig {
             max_pages: config
@@ -206,7 +205,7 @@ impl SearchHandler {
             .await
         {
             Ok(html) => {
-                info!("Successfully fetched URL content");
+                info!("Successfully fetched URL content, bytes = {}", html.len());
 
                 match result_type {
                     "markdown" => {

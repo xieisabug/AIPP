@@ -5,14 +5,12 @@ use tracing::{info, warn};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum BrowserType {
     Chrome,
-    Edge,
 }
 
 impl BrowserType {
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "chrome" => Some(BrowserType::Chrome),
-            "edge" => Some(BrowserType::Edge),
             _ => None,
         }
     }
@@ -20,7 +18,6 @@ impl BrowserType {
     pub fn as_str(&self) -> &'static str {
         match self {
             BrowserType::Chrome => "chrome",
-            BrowserType::Edge => "edge",
         }
     }
 }
@@ -36,36 +33,14 @@ impl BrowserManager {
         Self { preferred_type }
     }
 
-    /// 获取可用的浏览器路径，使用降级策略：Chrome -> Edge -> Error
-    pub fn get_available_browser(&self) -> Result<(BrowserType, PathBuf), String> {
-        // 先尝试用户配置的浏览器类型（或默认Chrome）
-        let primary_type = self.preferred_type.as_ref().unwrap_or(&BrowserType::Chrome);
-
-        if let Some(path) = self.find_browser_path(primary_type) {
-            info!(browser = primary_type.as_str(), path = %path.display(), "Using primary browser");
-            return Ok((primary_type.clone(), path));
+    /// 获取 Chrome 浏览器路径
+    pub fn get_browser_path(&self) -> Result<PathBuf, String> {
+        if let Some(path) = self.find_chrome_path() {
+            info!(browser = "chrome", path = %path.display(), "Using Chrome browser");
+            return Ok(path);
         }
 
-        // 降级到另一种浏览器
-        let fallback_type = match primary_type {
-            BrowserType::Chrome => BrowserType::Edge,
-            BrowserType::Edge => BrowserType::Chrome,
-        };
-
-        if let Some(path) = self.find_browser_path(&fallback_type) {
-            warn!(browser = fallback_type.as_str(), path = %path.display(), "Fallback to alternate browser");
-            return Ok((fallback_type, path));
-        }
-
-        Err(format!("No supported browser (Chrome/Edge) found on system"))
-    }
-
-    /// 查找指定类型浏览器的可执行文件路径
-    fn find_browser_path(&self, browser_type: &BrowserType) -> Option<PathBuf> {
-        match browser_type {
-            BrowserType::Chrome => self.find_chrome_path(),
-            BrowserType::Edge => self.find_edge_path(),
-        }
+        Err("No supported browser (Chrome) found on system".to_string())
     }
 
     /// 查找Chrome浏览器路径
@@ -94,40 +69,6 @@ impl BrowserManager {
         {
             let candidates =
                 ["google-chrome", "google-chrome-stable", "chrome", "chromium", "chromium-browser"];
-            self.try_candidates(&candidates)
-        }
-
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-        {
-            None
-        }
-    }
-
-    /// 查找Edge浏览器路径
-    fn find_edge_path(&self) -> Option<PathBuf> {
-        #[cfg(target_os = "windows")]
-        {
-            let candidates = [
-                r"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-                r"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-                "msedge.exe", // 从PATH中查找
-            ];
-            self.try_candidates(&candidates)
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            let candidates = [
-                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-                "msedge", // 从PATH中查找
-                "edge",
-            ];
-            self.try_candidates(&candidates)
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            let candidates = ["microsoft-edge", "microsoft-edge-stable", "msedge", "edge"];
             self.try_candidates(&candidates)
         }
 
