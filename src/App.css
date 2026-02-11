@@ -187,6 +187,11 @@ body {
         --shine-primary: 0 80% 55%;
         --shine-secondary: 40 90% 60%;
         --shine-tertiary: 0 60% 70%;
+
+        /* 背景图配置 */
+        --theme-bg-image: url("./assets/newyear-2026.png");
+        --theme-bg-position: calc(100% + 2rem) calc(100% - 2rem);
+        --theme-bg-size: 30rem 30rem;
     }
 
     .theme-newyear:not(.dark)
@@ -227,6 +232,28 @@ body {
     body {
         @apply bg-background text-foreground;
     }
+}
+
+/* 主题背景图应用 - 仅在组件显式启用且为新年主题浅色模式时显示 */
+.theme-newyear:not(.dark) .theme-background-image::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-image: var(--theme-bg-image, none);
+    background-position: var(--theme-bg-position, 100% 100%);
+    background-size: var(--theme-bg-size, auto);
+    background-repeat: no-repeat;
+    pointer-events: none;
+    z-index: 0;
+}
+
+/* 确保内容在背景图之上 */
+.theme-newyear:not(.dark) .theme-background-image > * {
+    position: relative;
+    z-index: 1;
 }
 
 /* 为 ReactMarkdown 中的标题标签提供正确的样式 */

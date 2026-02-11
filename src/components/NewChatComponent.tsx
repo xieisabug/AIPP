@@ -1,7 +1,6 @@
 import AskWindowPrepare from "./AskWindowPrepare";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { useIsMobile } from "../hooks/use-mobile";
-import img from "../assets/newyear-2026.png"
 
 interface AssistantListItem {
     id: number;
@@ -28,12 +27,7 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
 
     return (
         <div
-            className="relative flex flex-col items-center justify-center h-full select-none p-10 bg-no-repeat"
-            style={{
-                backgroundImage: `url(${img})`,
-                backgroundPosition: 'calc(100% + 2rem) calc(100% - 2rem)',
-                backgroundSize: '30rem 30rem',
-            }}
+            className="relative flex flex-col items-center justify-center h-full select-none p-10 theme-background-image"
             {...dragProps}
         >
 
