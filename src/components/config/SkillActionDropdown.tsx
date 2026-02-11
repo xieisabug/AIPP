@@ -7,7 +7,7 @@ import {
     DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
-import { ChevronDown, PlusCircle } from 'lucide-react';
+import { ChevronDown, Plus } from 'lucide-react';
 
 interface SkillActionDropdownProps {
     onScan: () => void;
@@ -42,7 +42,7 @@ const SkillActionDropdown: React.FC<SkillActionDropdownProps> = ({
                     className={`gap-2 ${className}`}
                     disabled={disabled || isScanning}
                 >
-                    {showIcon && <PlusCircle className="h-4 w-4" />}
+                    {showIcon && <Plus className="h-4 w-4" />}
                     <ChevronDown className="h-4 w-4" />
                 </Button>
             </DropdownMenuTrigger>

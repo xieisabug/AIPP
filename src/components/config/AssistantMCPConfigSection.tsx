@@ -218,7 +218,7 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
         return (
             <div className="bg-white rounded-lg border border-gray-200 p-6">
                 <div className="text-center py-8">
-                    <Server className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+                    <Server className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
                     <p className="text-sm text-gray-500 mb-2">暂无可用的MCP服务器</p>
                     <p className="text-xs text-gray-400">请先在MCP配置中添加服务器</p>
                 </div>
@@ -287,9 +287,9 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
                             >
                                 <div className="flex items-center gap-3">
                                     {server.is_enabled ? (
-                                        <CheckCircle2 className="h-5 w-5 text-gray-700" />
+                                        <CheckCircle2 className="h-5 w-5 text-foreground" />
                                     ) : (
-                                        <Circle className="h-5 w-5 text-gray-400" />
+                                        <Circle className="h-5 w-5 text-muted-foreground" />
                                     )}
                                     <div>
                                         <div className="font-medium text-gray-900">{server.name}</div>
@@ -329,7 +329,7 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
                                 </div>
                             ) : availableTools.length === 0 ? (
                                 <div className="text-center py-8">
-                                    <Wrench className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+                                    <Wrench className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
                                     <p className="text-sm text-gray-500">该服务器暂无可用工具</p>
                                 </div>
                             ) : (
@@ -337,7 +337,7 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
                                     {availableTools.map(tool => (
                                         <div key={tool.id} className="flex items-center justify-between p-3 border rounded-lg">
                                             <div className="flex items-center gap-3">
-                                                <Wrench className="h-4 w-4 text-gray-500" />
+                                                <Wrench className="h-4 w-4 text-muted-foreground" />
                                                 <div>
                                                     <div className="font-medium text-gray-900">{tool.name}</div>
                                                     <div className="text-sm text-gray-500">
@@ -374,7 +374,7 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
                         </div>
                     ) : (
                         <div className="text-center py-8">
-                            <Server className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+                            <Server className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
                             <p className="text-sm text-gray-500">请先选择一个服务器</p>
                         </div>
                     )}

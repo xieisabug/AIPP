@@ -31,13 +31,13 @@ body {
 .form-input {
     height: 35px;
     border-radius: 4px;
-    border: 1px solid rgb(161, 161, 161);
+    border: 1px solid hsl(var(--input));
     padding: 0 10px;
 }
 
 .form-input:focus {
     outline: none;
-    border-color: rgb(17, 133, 83);
+    border-color: hsl(var(--ring));
 }
 
 .form-textarea {
@@ -110,6 +110,13 @@ body {
         --shine-primary: 270 64% 72%;
         --shine-secondary: 330 72% 82%;
         --shine-tertiary: 35 100% 74%;
+        --action: 240 5.9% 10%;
+        --action-foreground: 0 0% 98%;
+        --icon: 240 10% 3.9%;
+        --icon-selected: 240 10% 3.9%;
+        --success: 142 76% 90%;
+        --success-foreground: 142 72% 29%;
+        --success-border: 142 69% 85%;
     }
 
     .dark {
@@ -140,6 +147,75 @@ body {
         --shine-primary: 270 64% 72%;
         --shine-secondary: 330 72% 82%;
         --shine-tertiary: 35 100% 74%;
+        --action: 0 0% 98%;
+        --action-foreground: 240 5.9% 10%;
+        --icon: 0 0% 98%;
+        --icon-selected: 0 0% 98%;
+        --success: 142 76% 90%;
+        --success-foreground: 142 72% 29%;
+        --success-border: 142 69% 85%;
+    }
+
+    /* 新年主题 - 仅覆盖浅色模式 */
+    .theme-newyear:not(.dark) {
+        --background: 0 20% 99%;
+        --foreground: 0 55% 22%;
+        --card: 0 20% 99%;
+        --card-foreground: 0 55% 22%;
+        --popover: 0 0% 100%;
+        --popover-foreground: 0 55% 22%;
+        --primary: 0 78% 45%;
+        --primary-foreground: 0 0% 100%;
+        --secondary: 0 35% 96%;
+        --secondary-foreground: 0 60% 35%;
+        --muted: 0 20% 95%;
+        --muted-foreground: 0 25% 40%;
+        --accent: 0 30% 95%;
+        --accent-foreground: 0 60% 35%;
+        --destructive: 0 84.2% 60.2%;
+        --destructive-foreground: 0 0% 98%;
+        --border: 0 20% 90%;
+        --input: 0 20% 90%;
+        --ring: 0 78% 45%;
+        --action: 40 85% 50%;
+        --action-foreground: 0 0% 100%;
+        --icon: 0 78% 45%;
+        --icon-selected: 0 60% 35%;
+        --success: 0 78% 45%;
+        --success-foreground: 0 0% 100%;
+        --success-border: 0 60% 35%;
+        --shine-primary: 0 80% 55%;
+        --shine-secondary: 40 90% 60%;
+        --shine-tertiary: 0 60% 70%;
+    }
+
+    .theme-newyear:not(.dark)
+        :is([data-state='active'], [aria-selected='true'], .is-selected, .selected) {
+        --icon: var(--icon-selected);
+    }
+
+    .theme-newyear:not(.dark) .bg-primary {
+        --icon: var(--primary-foreground);
+    }
+
+    .theme-newyear:not(.dark) .bg-action {
+        --icon: var(--action-foreground);
+    }
+
+    .theme-newyear:not(.dark) .bg-primary svg {
+        color: hsl(var(--primary-foreground));
+        fill: hsl(var(--primary-foreground));
+        stroke: hsl(var(--primary-foreground));
+    }
+
+    .theme-newyear:not(.dark) .bg-action svg {
+        color: hsl(var(--action-foreground));
+        fill: hsl(var(--action-foreground));
+        stroke: hsl(var(--action-foreground));
+    }
+
+    .theme-newyear:not(.dark) svg.lucide:not([class*='text-']) {
+        color: hsl(var(--icon));
     }
 }
 
@@ -319,6 +395,18 @@ body {
     --sidebar-accent-foreground: hsl(240 4.8% 95.9%);
     --sidebar-border: hsl(240 3.7% 15.9%);
     --sidebar-ring: hsl(217.2 91.2% 59.8%);
+}
+
+/* 新年主题 sidebar - 仅浅色模式 */
+.theme-newyear:not(.dark) {
+    --sidebar: hsl(0 25% 97%);
+    --sidebar-foreground: hsl(0 10% 25%);
+    --sidebar-primary: hsl(0 78% 45%);
+    --sidebar-primary-foreground: hsl(0 0% 100%);
+    --sidebar-accent: hsl(0 30% 95%);
+    --sidebar-accent-foreground: hsl(0 60% 35%);
+    --sidebar-border: hsl(0 20% 90%);
+    --sidebar-ring: hsl(0 78% 45%);
 }
 
 @theme inline {

@@ -12,6 +12,7 @@
             try {
                 // 从localStorage读取用户的主题设置（由React应用同步）
                 const savedThemeMode = localStorage.getItem('theme-mode');
+                const savedThemeName = localStorage.getItem('theme-name');
 
                 // 检测系统偏好
                 const systemPrefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -31,6 +32,11 @@
                 // 立即应用主题类
                 if (shouldApplyDark) {
                     document.documentElement.classList.add('dark');
+                }
+
+                // 应用外观主题（如新年主题）
+                if (savedThemeName && savedThemeName !== 'default') {
+                    document.documentElement.classList.add('theme-' + savedThemeName);
                 }
             } catch (error) {
                 // 如果出错，fallback到系统偏好

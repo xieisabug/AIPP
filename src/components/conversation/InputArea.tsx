@@ -52,9 +52,7 @@
 import React, { useRef, useEffect, useState, useCallback, forwardRef, useImperativeHandle } from "react";
 import "../../styles/InputArea.css";
 import CircleButton from "../CircleButton";
-import Add from "../../assets/add.svg?react";
-import Stop from "../../assets/stop.svg?react";
-import UpArrow from "../../assets/up-arrow.svg?react";
+import { Plus, Square, ArrowUp } from "lucide-react";
 import { FileInfo } from "../../data/Conversation";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -850,7 +848,7 @@ const InputArea = React.memo(
 
                     <CircleButton
                         onClick={handleChooseFile}
-                        icon={<Add className="fill-foreground" />}
+                        icon={<Plus size={16} className="text-icon" />}
                         className={`input-area-add-button ${placement}`}
                         style={
                             placement === "bottom" && !isMobile
@@ -863,9 +861,9 @@ const InputArea = React.memo(
                         onClick={handleSend}
                         icon={
                             aiIsResponsing ? (
-                                <Stop width={20} height={20} className="fill-primary-foreground" />
+                                <Square size={20} className="text-action-foreground" />
                             ) : (
-                                <UpArrow width={20} height={20} className="fill-primary-foreground" />
+                                <ArrowUp size={20} className="text-action-foreground" />
                             )
                         }
                         primary

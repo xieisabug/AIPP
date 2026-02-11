@@ -43,6 +43,19 @@ export default {
   				DEFAULT: 'hsl(var(--destructive))',
   				foreground: 'hsl(var(--destructive-foreground))'
   			},
+  			action: {
+  				DEFAULT: 'hsl(var(--action))',
+  				foreground: 'hsl(var(--action-foreground))'
+  			},
+			success: {
+				DEFAULT: 'hsl(var(--success))',
+				foreground: 'hsl(var(--success-foreground))',
+				border: 'hsl(var(--success-border))'
+			},
+			icon: {
+				DEFAULT: 'hsl(var(--icon))',
+				selected: 'hsl(var(--icon-selected))'
+			},
   			border: 'hsl(var(--border))',
   			input: 'hsl(var(--input))',
   			ring: 'hsl(var(--ring))',
@@ -63,4 +76,3 @@ export default {
   },
   plugins: [require("tailwindcss-animate"), require("@tailwindcss/typography")],
 }
-

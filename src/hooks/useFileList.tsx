@@ -2,7 +2,7 @@ import React from 'react';
 import { FileInfo, AttachmentType } from '../data/Conversation';
 import Text from '../assets/text.svg?react';
 import IconButton from '@/components/IconButton';
-import Delete from "../assets/delete.svg?react";
+import { Trash2 } from "lucide-react";
 
 interface FileListRendererProps {
   fileInfo: FileInfo;
@@ -77,7 +77,7 @@ export const useFileList = (fileInfoList: FileInfo[] | null, onDelete: (fileId: 
 
         <IconButton
           border
-          icon={<Delete fill="black" />}
+          icon={<Trash2 size={16} fill="black" />}
           className="input-area-img-delete-button"
           onClick={() => {
             fileInfo.id && onDelete(fileInfo.id);

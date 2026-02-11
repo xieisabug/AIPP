@@ -1,6 +1,7 @@
 import AskWindowPrepare from "./AskWindowPrepare";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { useIsMobile } from "../hooks/use-mobile";
+import img from "../assets/newyear-2026.png"
 
 interface AssistantListItem {
     id: number;
@@ -26,7 +27,16 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
     const dragProps = isMobile ? {} : { "data-tauri-drag-region": true };
 
     return (
-        <div className="flex flex-col items-center justify-center h-full select-none p-10" {...dragProps}>
+        <div
+            className="relative flex flex-col items-center justify-center h-full select-none p-10 bg-no-repeat"
+            style={{
+                backgroundImage: `url(${img})`,
+                backgroundPosition: 'calc(100% + 2rem) calc(100% - 2rem)',
+                backgroundSize: '30rem 30rem',
+            }}
+            {...dragProps}
+        >
+
             <div className="text-sm text-gray-500 text-center mb-4" {...dragProps}>
                 <AskWindowPrepare selectedText={selectedText} isMobile={isMobile} />
                 <p className="mt-4" {...dragProps}>

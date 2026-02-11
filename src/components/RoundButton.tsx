@@ -9,7 +9,7 @@ interface RoundButtonProps {
 const RoundButton: React.FC<RoundButtonProps> = ({primary, type, text, onClick, className}) => {
     return <button 
         onClick={onClick} 
-        className={`h-[30px] py-1.5 px-5 border-0 rounded-2xl bg-white shadow-md cursor-pointer max-w-60 overflow-hidden text-ellipsis whitespace-nowrap ${primary ? 'text-white bg-primary' : ''} ${className || ''}`}
+        className={`h-[30px] py-1.5 px-5 border-0 rounded-2xl bg-background shadow-md cursor-pointer max-w-60 overflow-hidden text-ellipsis whitespace-nowrap ${primary ? 'text-action-foreground bg-action' : ''} ${className || ''}`}
         type={type || 'button'}
     >
         {text}

@@ -63,7 +63,7 @@ const SubTaskItem: React.FC<SubTaskItemProps> = ({
                                     ? " text-green-800"
                                     : execution.status === "failed"
                                         ? " text-red-800"
-                                        : " text-black")
+                                        : " text-foreground")
                             }
                             animate={{
                                 scale: execution.status === "running" ? 1.05 : 1,

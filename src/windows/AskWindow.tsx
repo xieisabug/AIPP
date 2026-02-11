@@ -4,12 +4,8 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { listen, once, emitTo } from "@tauri-apps/api/event";
 import UnifiedMarkdown from "../components/UnifiedMarkdown";
 import { useTheme } from "../hooks/useTheme";
+import { Copy, Check, Plus, Settings, Expand } from "lucide-react";
 
-import Copy from "../assets/copy.svg?react";
-import Ok from "../assets/ok.svg?react";
-import OpenFullUI from "../assets/open-fullui.svg?react";
-import Setting from "../assets/setting.svg?react";
-import Add from "../assets/add.svg?react";
 import AskWindowPrepare from "../components/AskWindowPrepare";
 import AskAIHint from "../components/AskAIHint";
 import IconButton from "../components/IconButton";
@@ -367,12 +363,12 @@ function AskWindow() {
                     data-tauri-drag-region
                 >
                     {messageId !== -1 && !aiIsResponsing && (
-                        <IconButton icon={<Add className="fill-foreground" />} onClick={startNewConversation} />
+                        <IconButton icon={<Plus size={16} className="text-icon" />} onClick={startNewConversation} />
                     )}
                     {messageId !== -1 && !aiIsResponsing ? (
                         <IconButton
                             icon={
-                                copySuccess ? <Ok className="fill-foreground" /> : <Copy className="fill-foreground" />
+                                copySuccess ? <Check size={16} className="text-icon" /> : <Copy size={16} className="text-icon" />
                             }
                             onClick={() => {
                                 writeText(displayResponse);
@@ -384,8 +380,8 @@ function AskWindow() {
                         />
                     ) : null}
 
-                    <IconButton icon={<OpenFullUI className="fill-foreground" />} onClick={openChatUI} />
-                    <IconButton icon={<Setting className="fill-foreground" />} onClick={openConfig} />
+                    <IconButton icon={<Expand size={16} className="text-icon" />} onClick={openChatUI} />
+                    <IconButton icon={<Settings size={16} className="text-icon" />} onClick={openConfig} />
                 </div>
             </div>
         </div>

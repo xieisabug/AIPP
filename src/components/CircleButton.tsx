@@ -20,7 +20,7 @@ const CircleButton: React.FC<CircleButtonProps> = ({ primary, icon, type, onClic
 
     return <button 
         onClick={onClick} 
-        className={`fixed border border-primary flex items-center justify-center cursor-pointer ${primary ? 'border-0 bg-primary' : ''} ${sizeClasses[size || 'medium']} ${className || ''}`}
+        className={`fixed border border-primary flex items-center justify-center cursor-pointer ${primary ? 'border-0 bg-action' : ''} ${sizeClasses[size || 'medium']} ${className || ''}`}
         type={type || 'button'}
         style={style}
     >

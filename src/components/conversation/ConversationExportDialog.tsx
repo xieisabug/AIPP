@@ -11,11 +11,10 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import IconButton from "../IconButton";
-import Download from "../../assets/download.svg?react";
 import { conversationExportService } from "@/services/conversationExportService";
 import type { ConversationExportOptions } from "@/utils/exportFormatters";
 import type { ExportData } from "@/utils/exportFormatters";
-import { Loader2, FileText, FileImage, File } from "lucide-react";
+import { Loader2, FileText, FileImage, File, Download } from "lucide-react";
 
 interface ConversationExportDialogProps {
     conversationId: string;
@@ -116,7 +115,7 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
         <Dialog open={open} onOpenChange={setOpen}>
             <DialogTrigger asChild>
                 <IconButton
-                    icon={<Download className="fill-foreground" />}
+                    icon={<Download size={16} className="text-icon" />}
                     onClick={() => {}}
                     border
                 />

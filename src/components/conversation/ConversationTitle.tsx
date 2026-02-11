@@ -1,7 +1,6 @@
 import React, { useState, useCallback, useMemo } from "react";
 import IconButton from "../IconButton";
-import Edit from "../../assets/edit.svg?react";
-import Delete from "../../assets/delete.svg?react";
+import { Edit2, Trash2 } from "lucide-react";
 import { Conversation } from "../../data/Conversation";
 import { useAntiLeakage } from "../../contexts/AntiLeakageContext";
 import { maskTitle } from "../../utils/antiLeakage";
@@ -53,14 +52,14 @@ const ConversationTitle: React.FC<{
         <>
             <div className="flex justify-between flex-none h-[68px] items-center px-6 box-border border-b border-border bg-background rounded-t-xl z-20">
                 <div className="flex-1 overflow-hidden">
-                    <div className="text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap text-foreground cursor-pointer" onClick={onEdit}>{displayName}</div>
+                    <div className="text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap text-icon cursor-pointer" onClick={onEdit}>{displayName}</div>
                     <div className="text-xs text-muted-foreground overflow-hidden text-ellipsis whitespace-nowrap mt-0.5">{displayAssistantName}</div>
                 </div>
                 <div className="flex items-center flex-none w-64 justify-end gap-2">
                     <ConversationStatsDialog conversationId={conversation?.id.toString() || ""} />
                     <ConversationExportDialog conversationId={conversation?.id.toString() || ""} />
-                    <IconButton icon={<Edit className="fill-foreground" />} onClick={onEdit} border />
-                    <IconButton icon={<Delete className="fill-foreground" />} onClick={openDeleteDialog} border />
+                    <IconButton icon={<Edit2 size={16} className="text-icon" />} onClick={onEdit} border />
+                    <IconButton icon={<Trash2 size={16} className="text-icon" />} onClick={openDeleteDialog} border />
                 </div>
             </div>
 
