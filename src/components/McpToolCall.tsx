@@ -67,7 +67,7 @@ const StatusIndicator: React.FC<{ state: ExecutionState }> = ({ state }) => {
                     variant="default"
                     className="flex items-center gap-1 bg-success text-success-foreground border-success-border ml-3"
                 >
-                    <CheckCircle className="h-3 w-3" />
+                    <CheckCircle className="h-3 w-3 text-success-foreground" />
                     成功
                 </Badge>
             );
