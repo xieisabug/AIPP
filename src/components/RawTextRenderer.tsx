@@ -29,7 +29,7 @@ const RawTextRenderer: React.FC<RawTextRendererProps> = ({ content }) => {
                 segments.push(
                     <span
                         key={`text-${cursor}`}
-                        className="whitespace-pre-wrap break-words"
+                        className="whitespace-pre-wrap break-all"
                     >
                         {plainText}
                     </span>,
@@ -59,7 +59,7 @@ const RawTextRenderer: React.FC<RawTextRendererProps> = ({ content }) => {
             segments.push(
                 <span
                     key={`text-${cursor}`}
-                    className="whitespace-pre-wrap break-words"
+                    className="whitespace-pre-wrap break-all"
                 >
                     {trailingText}
                 </span>,
@@ -68,7 +68,7 @@ const RawTextRenderer: React.FC<RawTextRendererProps> = ({ content }) => {
 
         if (segments.length === 0) {
             return (
-                <span className="whitespace-pre-wrap break-words">
+                <span className="whitespace-pre-wrap break-all">
                     {content}
                 </span>
             );

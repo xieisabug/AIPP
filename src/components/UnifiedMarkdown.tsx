@@ -123,7 +123,7 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
     }
 
     return (
-        <div className={`prose prose-sm max-w-none prose-neutral dark:prose-invert text-foreground ${className}`}>
+        <div className={`prose prose-sm max-w-none prose-neutral dark:prose-invert text-foreground break-all ${className}`}>
             {markdownNode}
         </div>
     );
