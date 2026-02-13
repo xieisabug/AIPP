@@ -11,7 +11,7 @@ import { AssistantType } from "../../types/assistant";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { AssistantDetail } from "../../data/Assistant";
-import { PlusCircle } from "lucide-react";
+import { Plus } from "lucide-react";
 
 interface AddAssistantDialogProps {
     assistantTypes: AssistantType[];
@@ -63,7 +63,7 @@ const AddAssistantDialog: React.FC<AddAssistantDialogProps> = ({
         <Dialog open={openAddAssistantDialog} onOpenChange={setOpenAddAssistantDialog}>
             <DialogTrigger asChild>
                 <Button {...triggerButtonProps}>
-                    <PlusCircle className="h-4 w-4" />
+                    <Plus className="h-4 w-4" />
                 </Button>
             </DialogTrigger>
             <DialogContent>

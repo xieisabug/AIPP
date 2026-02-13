@@ -210,14 +210,15 @@ export function useConversationOperations({
 
     // 代码运行处理
     const handleArtifact = useCallback((lang: string, inputStr: string) => {
-        invoke("run_artifacts", { lang, inputStr })
+        const conversationId = conversation?.id;
+        invoke("run_artifacts", { lang, inputStr, conversationId })
             .then((res) => {
                 console.log(res);
             })
             .catch((error) => {
                 toast.error("运行失败: " + JSON.stringify(error));
             });
-    }, []);
+    }, [conversation?.id]);
 
     // 打开标题编辑对话框
     const openTitleEditDialog = useCallback(() => {

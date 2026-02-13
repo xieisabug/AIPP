@@ -51,7 +51,7 @@ export function ConversationStatsDialog({
     return (
         <Dialog open={open} onOpenChange={setOpen}>
             <DialogTrigger asChild>
-                <IconButton icon={<Info className="h-4 w-4" />} onClick={() => { }} border />
+                <IconButton icon={<Info className="h-4 w-4 text-icon" />} onClick={() => { }} border />
             </DialogTrigger>
             <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
                 <DialogHeader>

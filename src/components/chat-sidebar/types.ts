@@ -65,6 +65,7 @@ export const CONTEXT_TOOL_NAMES = [
     'list_allowed_directories',
     'search_files',
     'search',
+    'fetch_url',
     'grep',
     'glob',
     'find',
@@ -76,7 +77,7 @@ export function getContextTypeFromToolName(toolName: string): ContextItem['type'
     if (normalizedName.includes('read') || normalizedName.includes('get_file') || normalizedName === 'view') {
         return 'read_file';
     }
-    if (normalizedName.includes('search') || normalizedName.includes('grep') || normalizedName.includes('find') || normalizedName.includes('glob')) {
+    if (normalizedName.includes('search') || normalizedName.includes('fetch_url') || normalizedName.includes('grep') || normalizedName.includes('find') || normalizedName.includes('glob')) {
         return 'search';
     }
     if (normalizedName.includes('directory') || normalizedName.includes('list')) {

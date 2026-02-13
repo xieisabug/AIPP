@@ -71,8 +71,14 @@ function SidebarWindow() {
             setPreviewMode('artifact');
             setContextPreview(null);
             setHasAutoPreviewedLatest(true);
-            
-            invoke("run_artifacts", { lang: latestArtifact.language, inputStr: latestArtifact.code })
+
+            const conversationId = sidebarData.conversationId ? parseInt(sidebarData.conversationId, 10) : undefined;
+            invoke("run_artifacts", {
+                lang: latestArtifact.language,
+                inputStr: latestArtifact.code,
+                sourceWindow: "sidebar",
+                conversationId,
+            })
                 .then((res) => {
                     console.log("Auto-preview latest artifact:", res);
                 })
@@ -80,7 +86,7 @@ function SidebarWindow() {
                     console.error("Failed to auto-preview artifact:", error);
                 });
         }
-    }, [dataReceived, hasAutoPreviewedLatest, sidebarData.artifacts]);
+    }, [dataReceived, hasAutoPreviewedLatest, sidebarData.artifacts, sidebarData.conversationId]);
 
     // Keep sending ready signal until data is received
     useEffect(() => {
@@ -146,14 +152,15 @@ function SidebarWindow() {
         setContextPreview(null);
         
         // Call run_artifacts to start the preview
-        invoke("run_artifacts", { lang: artifact.language, inputStr: artifact.code })
+        const conversationId = sidebarData.conversationId ? parseInt(sidebarData.conversationId, 10) : undefined;
+        invoke("run_artifacts", { lang: artifact.language, inputStr: artifact.code, sourceWindow: "sidebar", conversationId })
             .then((res) => {
                 console.log("Artifact preview started:", res);
             })
             .catch((error) => {
                 console.error("Failed to run artifact:", error);
             });
-    }, []);
+    }, [sidebarData.conversationId]);
 
     // Handle context click - show context preview
     const handleContextClick = useCallback((item: ContextItem) => {

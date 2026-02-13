@@ -1,7 +1,6 @@
 import React, { useState } from "react";
 import IconButton from "../IconButton";
-import Copy from "../../assets/copy.svg?react";
-import Ok from "../../assets/ok.svg?react";
+import { Copy, Check } from "lucide-react";
 import { useCopyHandler } from "@/hooks/useCopyHandler";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
@@ -288,9 +287,9 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
                 <IconButton
                     icon={
                         copyIconState === "copy" ? (
-                            <Copy fill="#dc2626" />
+                            <Copy size={16} fill="#dc2626" />
                         ) : (
-                            <Ok fill="#dc2626" />
+                            <Check size={16} fill="#dc2626" />
                         )
                     }
                     onClick={handleCopy}

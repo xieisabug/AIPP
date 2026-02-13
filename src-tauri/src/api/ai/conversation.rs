@@ -117,11 +117,121 @@ fn extract_tool_call_ids_from_mcp_comments(content: &str) -> HashSet<String> {
                 }
             }
             if let Some(call_id) = tool_data["call_id"].as_u64() {
-                ids.insert(call_id.to_string());
+                let call_id = call_id.to_string();
+                ids.insert(call_id.clone());
+                ids.insert(format!("mcp_tool_call_{}", call_id));
             }
         }
     }
     ids
+}
+
+fn collect_valid_tool_call_ids(messages: &[Message]) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for message in messages.iter() {
+        if message.message_type != "response" {
+            continue;
+        }
+        ids.extend(extract_tool_call_ids_from_mcp_comments(&message.content));
+    }
+    ids
+}
+
+fn filter_tool_results_for_branch(conversation_id: i64, selection: &str, messages: &mut Vec<Message>) {
+    let valid_tool_call_ids = collect_valid_tool_call_ids(messages);
+    if valid_tool_call_ids.is_empty() {
+        return;
+    }
+
+    let before = messages.len();
+    messages.retain(|message| {
+        if message.message_type != "tool_result" {
+            return true;
+        }
+        match extract_tool_call_id(&message.content) {
+            Some(tool_call_id) => {
+                let keep = valid_tool_call_ids.contains(&tool_call_id);
+                if !keep {
+                    debug!(
+                        conversation_id,
+                        selection,
+                        message_id = message.id,
+                        tool_call_id,
+                        "dropping tool_result not referenced by latest branch"
+                    );
+                }
+                keep
+            }
+            None => {
+                debug!(
+                    conversation_id,
+                    selection,
+                    message_id = message.id,
+                    "dropping tool_result missing tool_call_id"
+                );
+                false
+            }
+        }
+    });
+
+    let dropped = before.saturating_sub(messages.len());
+    if dropped > 0 {
+        debug!(
+            conversation_id,
+            selection,
+            dropped_tool_results = dropped,
+            "filtered tool_result messages"
+        );
+    }
+}
+
+pub fn filter_messages_for_parent_group(
+    messages: Vec<(Message, Option<MessageAttachment>)>,
+    parent_group_id: Option<&str>,
+) -> Vec<(Message, Option<MessageAttachment>)> {
+    let Some(parent_group_id) = parent_group_id else {
+        return messages;
+    };
+
+    let mut removed_tool_call_ids = HashSet::new();
+    for (message, _) in messages.iter() {
+        if message.message_type != "response" {
+            continue;
+        }
+        if message.generation_group_id.as_deref() == Some(parent_group_id) {
+            removed_tool_call_ids.extend(extract_tool_call_ids_from_mcp_comments(&message.content));
+        }
+    }
+
+    let mut removed_group = 0;
+    let mut removed_tool_results = 0;
+    let mut filtered = Vec::with_capacity(messages.len());
+    for (message, attachment) in messages.into_iter() {
+        if message.generation_group_id.as_deref() == Some(parent_group_id) {
+            removed_group += 1;
+            continue;
+        }
+        if message.message_type == "tool_result" {
+            if let Some(tool_call_id) = extract_tool_call_id(&message.content) {
+                if removed_tool_call_ids.contains(&tool_call_id) {
+                    removed_tool_results += 1;
+                    continue;
+                }
+            }
+        }
+        filtered.push((message, attachment));
+    }
+
+    if removed_group > 0 || removed_tool_results > 0 {
+        debug!(
+            parent_group_id,
+            removed_group,
+            removed_tool_results,
+            "filtered messages by parent group"
+        );
+    }
+
+    filtered
 }
 
 fn collect_sticky_response_ids(
@@ -152,7 +262,6 @@ fn collect_sticky_response_ids(
     }
     sticky
 }
-
 pub fn build_chat_messages(
     init_message_list: &[(String, String, Vec<MessageAttachment>)],
 ) -> Vec<ChatMessage> {
@@ -386,7 +495,6 @@ fn build_native_toolcall_paired_messages(
 pub enum BranchSelection {
     All,
     LatestBranch,
-    LatestChildren,
 }
 
 pub fn build_message_list_from_selected_messages(
@@ -411,10 +519,45 @@ pub fn build_message_list_from_selected_messages(
         .collect()
 }
 
+fn log_selected_messages(conversation_id: i64, selection: &str, messages: &[Message]) {
+    debug!(
+        conversation_id,
+        selection,
+        selected_messages = messages.len(),
+        "selected messages for chat request"
+    );
+    for (index, msg) in messages.iter().enumerate() {
+        debug!(
+            conversation_id,
+            selection,
+            message_index = index,
+            message_id = msg.id,
+            message_type = %msg.message_type,
+            parent_id = ?msg.parent_id,
+            generation_group_id = ?msg.generation_group_id,
+            parent_group_id = ?msg.parent_group_id,
+            created_time = ?msg.created_time,
+            tool_calls_json_len = msg.tool_calls_json.as_ref().map(|json| json.len()),
+            content_len = msg.content.len(),
+            "selected message item"
+        );
+    }
+}
+
 pub fn build_message_list_from_db(
     all_messages: &[(Message, Option<MessageAttachment>)],
     branch_selection: BranchSelection,
 ) -> Vec<(String, String, Vec<MessageAttachment>)> {
+    let conversation_id = all_messages
+        .first()
+        .map(|(msg, _)| msg.conversation_id)
+        .unwrap_or_default();
+    debug!(
+        conversation_id,
+        branch_selection = ?branch_selection,
+        total_messages = all_messages.len(),
+        "building message list from db"
+    );
     match branch_selection {
         BranchSelection::LatestBranch => {
             let mut latest_branch = get_latest_branch_messages(all_messages);
@@ -428,44 +571,9 @@ pub fn build_message_list_from_db(
                     }
                 }
             }
+            filter_tool_results_for_branch(conversation_id, "latest_branch", &mut latest_branch);
+            log_selected_messages(conversation_id, "latest_branch", &latest_branch);
             build_message_list_from_selected_messages(&latest_branch, all_messages)
-        }
-        BranchSelection::LatestChildren => {
-            let (latest_children, child_ids) = get_latest_child_messages(all_messages);
-            let mut message_list: Vec<(String, String, Vec<MessageAttachment>)> = Vec::new();
-            let mut included_ids: HashSet<i64> = HashSet::new();
-            let mut selected_messages: Vec<Message> = Vec::new();
-            for (message, attachment) in all_messages.iter() {
-                if child_ids.contains(&message.id) {
-                    continue;
-                }
-                let (final_message, final_attachment) = latest_children
-                    .get(&message.id)
-                    .cloned()
-                    .unwrap_or((message.clone(), attachment.clone()));
-
-                included_ids.insert(final_message.id);
-                selected_messages.push(final_message.clone());
-                message_list.push((
-                    final_message.message_type,
-                    final_message.content,
-                    final_attachment.map(|a| vec![a]).unwrap_or_else(Vec::new),
-                ));
-            }
-            let sticky_response_ids = collect_sticky_response_ids(&selected_messages, all_messages);
-            if !sticky_response_ids.is_empty() {
-                for (message, attachment) in all_messages.iter() {
-                    if sticky_response_ids.contains(&message.id) && !included_ids.contains(&message.id)
-                    {
-                        message_list.push((
-                            message.message_type.clone(),
-                            message.content.clone(),
-                            attachment.clone().map(|a| vec![a]).unwrap_or_else(Vec::new),
-                        ));
-                    }
-                }
-            }
-            sort_messages_by_group_and_id(message_list, all_messages)
         }
         BranchSelection::All => {
             let mut seen = HashSet::new();
@@ -482,124 +590,6 @@ pub fn build_message_list_from_db(
                 .collect()
         }
     }
-}
-
-/// 获取每个父消息的最新子消息（统一的排序逻辑）
-/// 返回: (latest_children_map, child_ids_set)
-pub(crate) fn get_latest_child_messages(
-    messages: &[(Message, Option<MessageAttachment>)],
-) -> (HashMap<i64, (Message, Option<MessageAttachment>)>, HashSet<i64>) {
-    let mut latest_children: HashMap<i64, (Message, Option<MessageAttachment>)> = HashMap::new();
-    let mut child_ids: HashSet<i64> = HashSet::new();
-
-    // 按 generation_group_id 分组，每组只保留 ID 最大的消息
-    let mut group_to_latest: HashMap<String, (Message, Option<MessageAttachment>)> = HashMap::new();
-
-    for (message, attachment) in messages.iter() {
-        if let Some(parent_id) = message.parent_id {
-            child_ids.insert(message.id);
-            latest_children
-                .entry(parent_id)
-                .and_modify(|existing| {
-                    // 选择ID更大的消息作为最新版本
-                    if message.id > existing.0.id {
-                        *existing = (message.clone(), attachment.clone());
-                    }
-                })
-                .or_insert((message.clone(), attachment.clone()));
-        }
-
-        // 按 generation_group_id 分组，每组只保留最新的消息
-        if let Some(ref group_id) = message.generation_group_id {
-            group_to_latest
-                .entry(group_id.clone())
-                .and_modify(|existing| {
-                    if message.id > existing.0.id {
-                        *existing = (message.clone(), attachment.clone());
-                    }
-                })
-                .or_insert((message.clone(), attachment.clone()));
-        }
-    }
-
-    // 将被 group 机制过滤掉的消息加入 child_ids
-    for (message, _) in messages.iter() {
-        if let Some(ref group_id) = message.generation_group_id {
-            if let Some((latest_msg, _)) = group_to_latest.get(group_id) {
-                if message.id != latest_msg.id {
-                    child_ids.insert(message.id);
-                }
-            }
-        }
-    }
-
-    (latest_children, child_ids)
-}
-
-/// 按照group和ID排序消息列表
-/// 规则：
-/// 1. 按照root group的最小消息ID排序
-/// 2. 同一group内的消息按ID排序
-/// 3. 没有generation_group_id的消息排在最前面（按ID排序）
-pub(crate) fn sort_messages_by_group_and_id(
-    messages: Vec<(String, String, Vec<MessageAttachment>)>,
-    original_messages: &[(Message, Option<MessageAttachment>)],
-) -> Vec<(String, String, Vec<MessageAttachment>)> {
-    let mut result = messages;
-
-    // 创建消息内容到原始消息的映射，用于获取group信息
-    let mut content_to_message: HashMap<String, &Message> = HashMap::new();
-    for (msg, _) in original_messages {
-        content_to_message.insert(msg.content.clone(), msg);
-    }
-
-    // 创建group到最小ID的映射
-    let mut group_to_min_id: HashMap<String, i64> = HashMap::new();
-    for (msg, _) in original_messages {
-        if let Some(ref group_id) = msg.generation_group_id {
-            group_to_min_id
-                .entry(group_id.clone())
-                .and_modify(|min_id| {
-                    if msg.id < *min_id {
-                        *min_id = msg.id;
-                    }
-                })
-                .or_insert(msg.id);
-        }
-    }
-
-    // 排序逻辑
-    result.sort_by(|a, b| {
-        let msg_a = content_to_message.get(&a.1);
-        let msg_b = content_to_message.get(&b.1);
-
-        match (msg_a, msg_b) {
-            (Some(ma), Some(mb)) => match (&ma.generation_group_id, &mb.generation_group_id) {
-                // 两个都有group_id
-                (Some(group_a), Some(group_b)) => {
-                    if group_a == group_b {
-                        // 同一个group内，按消息ID排序
-                        ma.id.cmp(&mb.id)
-                    } else {
-                        // 不同group，按group的最小ID排序
-                        let min_a = group_to_min_id.get(group_a).unwrap_or(&ma.id);
-                        let min_b = group_to_min_id.get(group_b).unwrap_or(&mb.id);
-                        min_a.cmp(min_b)
-                    }
-                }
-                // 只有A有group_id，按消息ID排序（而不是固定让B排前面）
-                (Some(_), None) => ma.id.cmp(&mb.id),
-                // 只有B有group_id，按消息ID排序（而不是固定让A排前面）
-                (None, Some(_)) => ma.id.cmp(&mb.id),
-                // 两个都没有group_id，按消息ID排序
-                (None, None) => ma.id.cmp(&mb.id),
-            },
-            // 如果找不到对应的原始消息，保持原顺序
-            _ => std::cmp::Ordering::Equal,
-        }
-    });
-
-    result
 }
 
 // Helper function to extract tool call ID from tool result content

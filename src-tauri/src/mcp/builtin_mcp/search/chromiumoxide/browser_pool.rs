@@ -1,8 +1,10 @@
-use playwright::api::{BrowserContext, Page};
+use chromiumoxide::browser::Browser;
+use futures::StreamExt;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, OnceCell};
 use tracing::{debug, info, warn};
 
@@ -11,12 +13,10 @@ use tracing::{debug, info, warn};
 /// 管理单个浏览器实例和多个页面，支持并发访问
 #[derive(Clone)]
 pub struct BrowserPool {
-    /// Playwright 实例，必须保持存活以维持连接
-    playwright: Arc<OnceCell<Playwright>>,
-    /// 单个浏览器上下文（persistent context）
-    context: Arc<OnceCell<BrowserContext>>,
+    /// Browser 实例
+    browser: Arc<OnceCell<Arc<Mutex<Browser>>>>,
     /// 可用页面队列
-    idle_pages: Arc<Mutex<Vec<Page>>>,
+    idle_pages: Arc<Mutex<Vec<chromiumoxide::page::Page>>>,
     /// 当前活跃页面计数
     active_count: Arc<AtomicUsize>,
     /// 配置
@@ -44,8 +44,7 @@ impl BrowserPool {
     /// 创建新的浏览器池（懒加载，首次使用时初始化）
     pub fn new(config: BrowserPoolConfig) -> Self {
         Self {
-            playwright: Arc::new(OnceCell::new()),
-            context: Arc::new(OnceCell::new()),
+            browser: Arc::new(OnceCell::new()),
             idle_pages: Arc::new(Mutex::new(Vec::new())),
             active_count: Arc::new(AtomicUsize::new(0)),
             config,
@@ -67,8 +66,8 @@ impl BrowserPool {
         self.active_count.fetch_add(1, Ordering::AcqRel);
 
         // 确保浏览器已初始化（使用 OnceCell 确保只初始化一次）
-        let context = self
-            .get_or_init_context()
+        let browser = self
+            .get_or_init_browser()
             .await
             .map_err(|e| {
                 // 初始化失败，减少计数
@@ -89,14 +88,17 @@ impl BrowserPool {
         }
 
         // 创建新页面
-        let page = context
-            .new_page()
-            .await
-            .map_err(|e| {
-                // 创建失败，减少计数
-                self.active_count.fetch_sub(1, Ordering::AcqRel);
-                format!("Failed to create new page: {}", e)
-            })?;
+        let page = {
+            let browser_guard = browser.lock().await;
+            browser_guard
+                .new_page("about:blank")
+                .await
+                .map_err(|e| {
+                    // 创建失败，减少计数
+                    self.active_count.fetch_sub(1, Ordering::AcqRel);
+                    format!("Failed to create new page: {}", e)
+                })?
+        };
 
         debug!("Created new page");
         Ok(PooledPage {
@@ -105,60 +107,112 @@ impl BrowserPool {
         })
     }
 
-    /// 获取或初始化浏览器上下文
-    async fn get_or_init_context(&self) -> Result<&BrowserContext, String> {
+    /// 获取或初始化浏览器
+    async fn get_or_init_browser(&self) -> Result<Arc<Mutex<Browser>>, String> {
         // OnceCell::get_or_try_init 确保初始化只执行一次
-        self.context
+        let browser = self
+            .browser
             .get_or_try_init(|| async {
-                self.initialize_browser().await
+                let browser = self.initialize_browser().await?;
+                Ok::<Arc<Mutex<Browser>>, String>(Arc::new(Mutex::new(browser)))
             })
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        Ok(browser.clone())
     }
 
     /// 初始化浏览器（只在首次调用时执行）
-    async fn initialize_browser(&self) -> Result<BrowserContext, String> {
-        info!("Initializing BrowserPool");
-
-        let playwright = self
-            .playwright
-            .get_or_try_init(|| async {
-                Playwright::initialize()
-                    .await
-                    .map_err(|e| format!("Playwright init error: {}", e))
-            })
-            .await?;
-
-        let chromium = playwright.chromium();
+    async fn initialize_browser(&self) -> Result<Browser, String> {
+        info!("Initializing Chromium BrowserPool");
 
         // 创建用户数据目录
         let user_data_dir = if let Some(ref dir) = self.config.user_data_dir {
             PathBuf::from(dir)
         } else {
-            std::env::temp_dir().join("aipp_playwright_pool")
+            std::env::temp_dir().join("aipp_chromiumoxide_pool")
         };
 
         if let Err(e) = fs::create_dir_all(&user_data_dir) {
             warn!(error = %e, "Failed to create user_data_dir");
         }
 
-        let mut launcher = chromium.persistent_context_launcher(&user_data_dir);
-        launcher = launcher
-            .executable(&self.config.browser_path)
-            .headless(self.config.headless)
-            .args(&self.config.launch_args);
+        use chromiumoxide::BrowserConfig;
 
-        let context = launcher
-            .launch()
+        let mut builder = BrowserConfig::builder()
+            .user_data_dir(&user_data_dir)
+            .no_sandbox()
+            .launch_timeout(Duration::from_secs(60));
+
+        if !self.config.headless {
+            builder = builder.with_head();
+        }
+
+        // 设置浏览器路径
+        let browser_path_exists = self.config.browser_path.exists();
+        if browser_path_exists {
+            builder = builder.chrome_executable(&self.config.browser_path);
+        } else {
+            warn!(path = %self.config.browser_path.display(), "Browser executable not found, using default path");
+        }
+
+        // 添加启动参数
+        for arg in &self.config.launch_args {
+            builder = builder.arg(arg);
+        }
+
+        info!(
+            headless = self.config.headless,
+            browser_path = %self.config.browser_path.display(),
+            browser_path_exists = browser_path_exists,
+            user_data_dir = %user_data_dir.display(),
+            launch_args = ?self.config.launch_args,
+            "Launching Chromiumoxide BrowserPool"
+        );
+
+        let config = builder
+            .build()
+            .map_err(|e| format!("Failed to build browser config: {}", e))?;
+
+        let (browser, mut handler) = Browser::launch(config)
             .await
-            .map_err(|e| format!("Failed to launch browser: {}", e))?;
+            .map_err(|e| {
+                format!(
+                    "Failed to launch browser (path={}, exists={}, headless={}, user_data_dir={}, args={:?}): {}",
+                    self.config.browser_path.display(),
+                    browser_path_exists,
+                    self.config.headless,
+                    user_data_dir.display(),
+                    self.config.launch_args,
+                    e
+                )
+            })?;
 
-        info!("BrowserPool initialized successfully");
-        Ok(context)
+        tokio::spawn(async move {
+            while let Some(event) = handler.next().await {
+                tracing::trace!(?event, "Chromium event received");
+            }
+        });
+
+        info!("Chromium BrowserPool initialized successfully");
+        Ok(browser)
+    }
+
+    pub async fn shutdown(&self) -> Result<(), String> {
+        if let Some(browser) = self.browser.get() {
+            let mut guard = browser.lock().await;
+            guard
+                .close()
+                .await
+                .map_err(|e| format!("Failed to close browser: {}", e))?;
+            if let Err(e) = guard.wait().await {
+                warn!(error = %e, "Failed to wait for browser process exit");
+            }
+        }
+        Ok(())
     }
 
     /// 归还页面到池中
-    async fn return_page(&self, page: Page) {
+    async fn return_page(&self, page: chromiumoxide::page::Page) {
         let mut idle = self.idle_pages.lock().await;
         idle.push(page);
         // 减少活跃计数
@@ -178,18 +232,23 @@ impl BrowserPool {
 
 /// 池化的页面，自动归还到池中
 pub struct PooledPage {
-    page: Option<Page>,
+    page: Option<chromiumoxide::page::Page>,
     pool: Option<BrowserPool>,
 }
 
 impl PooledPage {
     /// 获取底层页面引用
-    pub fn page(&self) -> &Page {
+    pub fn page(&self) -> &chromiumoxide::page::Page {
         self.page.as_ref().expect("Page not available")
     }
 
+    /// 获取底层页面可变引用
+    pub fn page_mut(&mut self) -> &mut chromiumoxide::page::Page {
+        self.page.as_mut().expect("Page not available")
+    }
+
     /// 消费 self，不归还页面（用于出错时）
-    pub fn consume(mut self) -> Page {
+    pub fn consume(mut self) -> chromiumoxide::page::Page {
         // 消费时需要减少活跃计数
         if let Some(ref pool) = self.pool {
             pool.active_count.fetch_sub(1, Ordering::AcqRel);
@@ -210,6 +269,3 @@ impl Drop for PooledPage {
         }
     }
 }
-
-// 将 Playwright 导入
-use playwright::Playwright;

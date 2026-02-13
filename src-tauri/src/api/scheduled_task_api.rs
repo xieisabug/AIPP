@@ -854,6 +854,7 @@ pub async fn execute_scheduled_task(
             network_proxy.as_deref(),
             proxy_enabled,
             Some(request_timeout),
+            &config_feature_map,
         )
         .map_err(|e| format!("Failed to create AI client: {}", e))?;
         log_task_message(

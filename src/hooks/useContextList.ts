@@ -165,8 +165,8 @@ export function useContextList({
                 if (toolCall.parameters) {
                     const params = JSON.parse(toolCall.parameters);
                     // Common parameter names for file paths and search queries
-                    details = params.path || params.file_path || params.query || 
-                              params.pattern || params.directory || params.uri || '';
+                    details = params.path || params.file_path || params.query ||
+                              params.pattern || params.directory || params.uri || params.url || '';
                     resultType = typeof params.result_type === 'string' ? params.result_type : undefined;
                 }
             } catch {

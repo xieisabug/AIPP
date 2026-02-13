@@ -82,10 +82,6 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     // 基于 activityFocus 计算闪亮边框状态
     // 这是新的逻辑：优先使用后端发送的活动焦点状态，必要时回退本地/手动状态
     const updateShiningMessagesFromFocus = useCallback(() => {
-        const activeToolCount = activeMcpCallIds.size;
-        const hasActiveTools =
-            activeToolCount > 0 || activityFocus.focus_type === 'mcp_executing';
-
         setShiningMessageIds(() => {
             const newShining = new Set<number>();
 
@@ -104,12 +100,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     break;
             }
 
-            if (hasActiveTools) {
-                // 有工具执行时，消息边框暂停闪亮
-                return newShining;
-            }
-
-            // 回退：activity_focus 丢失时，使用本地流式/等待状态
+            // 回退：activity_focus 丢失时，使用本地流式/等待状态（避免工具执行期间失去闪亮提示）
             if (streamingAssistantMessageIds.size > 0) {
                 streamingAssistantMessageIds.forEach((id) => newShining.add(id));
                 return newShining;

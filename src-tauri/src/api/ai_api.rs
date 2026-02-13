@@ -8,7 +8,8 @@ use crate::api::ai::config::{
     get_network_proxy_from_config, get_request_timeout_from_config, ChatConfig, ConfigBuilder,
 };
 use crate::api::ai::conversation::{
-    build_chat_request_from_messages, build_message_list_from_db, init_conversation,
+    build_chat_request_from_messages, build_message_list_from_db, filter_messages_for_parent_group,
+    init_conversation,
     BranchSelection, ChatRequestBuildResult, ToolCallStrategy, ToolConfig,
 };
 use crate::api::ai::events::{ActivityFocus, ConversationEvent, MessageAddEvent, MessageUpdateEvent};
@@ -33,6 +34,7 @@ use anyhow::Context;
 use std::collections::HashMap;
 use genai::chat::Tool;
 use tauri::Emitter;
+use tauri::Manager;
 use tauri::State;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -277,6 +279,8 @@ pub async fn ask_ai(
         .set_user_pending(&app_handle, conversation_id, user_message_id)
         .await;
 
+    message_token_manager.reset_cancel_token(conversation_id).await;
+
     // 总是启动流式处理，即使没有预先创建消息
     let _config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
     let _request_prompt_result_with_context_clone = request_prompt_result_with_context.clone();
@@ -443,6 +447,7 @@ pub async fn ask_ai(
             network_proxy.as_deref(),
             proxy_enabled,
             Some(request_timeout),
+            &_config_feature_map,
         )?;
 
         // 创建一个临时的 ModelDetail 用于配置合并
@@ -587,9 +592,10 @@ pub async fn ask_ai(
     Ok(AiResponse { conversation_id, request_prompt_result_with_context })
 }
 
-#[instrument(skip(app_handle, window, tool_result), fields(conversation_id = %conversation_id, assistant_id, tool_call_id))]
+#[instrument(skip(app_handle, feature_config_state, window, tool_result), fields(conversation_id = %conversation_id, assistant_id, tool_call_id))]
 pub(crate) async fn tool_result_continue_ask_ai_impl(
     app_handle: tauri::AppHandle,
+    feature_config_state: State<'_, FeatureConfigState>,
     window: tauri::Window,
     conversation_id: String,
     assistant_id: i64,
@@ -603,6 +609,9 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     );
 
     let conversation_id_i64 = conversation_id.parse::<i64>()?;
+    if let Some(token_manager) = app_handle.try_state::<MessageTokenManager>() {
+        token_manager.reset_cancel_token(conversation_id_i64).await;
+    }
     let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
 
     // Get conversation details (validate exists)
@@ -625,6 +634,14 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         tool_call_id, tool_result
     );
 
+    // 查找对应的 response 消息的 generation_group_id，使 tool_result 与 response 同组
+    let all_msgs_for_group = db.message_repo().unwrap().list_by_conversation_id(conversation_id_i64)?;
+    let tool_result_group_id = all_msgs_for_group
+        .iter()
+        .filter(|(m, _)| m.message_type == "response")
+        .max_by_key(|(m, _)| m.id)
+        .and_then(|(m, _)| m.generation_group_id.clone());
+
     let tool_result_message = add_message(
         &app_handle,
         None,
@@ -636,7 +653,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         Some(chrono::Utc::now()),
         Some(chrono::Utc::now()),
         0,
-        None,
+        tool_result_group_id,
         None,
     )?;
 
@@ -717,6 +734,9 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let provider_api_type = model_detail.provider.api_type.clone();
     let assistant_model_configs = assistant_detail.model_configs.clone();
 
+    // 获取配置
+    let config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
+
     let conversation_db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
     // Build chat configuration (same as ask_ai)
     let client = genai_client::create_client_with_config(
@@ -726,6 +746,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         None,
         false,
         None,
+        &config_feature_map,
     )
     .map_err(|e| {
         error!(error = %e, "failed to create client in tool_result_continue_ask_ai");
@@ -824,7 +845,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
     if chat_config.stream {
-        Box::pin(ai_handle_stream_chat(
+        ai_handle_stream_chat(
             &chat_config.client,
             &chat_config.model_name,
             &chat_request,
@@ -842,10 +863,10 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             model_code.clone(),
             None,                      // no MCP override config
             tool_name_mapping.clone(), // 工具名称映射表
-        ))
+        )
         .await?;
     } else {
-        Box::pin(ai_handle_non_stream_chat(
+        ai_handle_non_stream_chat(
             &chat_config.client,
             &chat_config.model_name,
             &chat_request,
@@ -854,16 +875,16 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             &conversation_db,
             &window_clone,
             &app_handle,
-            false,                     // no title generation needed
-            String::new(),             // no user prompt
-            HashMap::new(),            // no feature config needed
-            reuse_generation_group_id, // 复用上一条assistant响应的generation_group_id
-            None,                      // no parent_group_id
+            false,                             // no title generation needed
+            String::new(),                     // no user prompt
+            HashMap::new(),                    // no feature config needed
+            reuse_generation_group_id.clone(), // 复用上一条assistant响应的generation_group_id
+            None,                              // no parent_group_id
             model_id,
             model_code.clone(),
-            None,              // no MCP override config
-            tool_name_mapping, // 工具名称映射表
-        ))
+            None,                      // no MCP override config
+            tool_name_mapping.clone(), // 工具名称映射表
+        )
         .await?;
     }
 
@@ -877,14 +898,18 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
 
 /// 批量工具结果续写：不创建新的 tool_result 消息，只触发 AI 续写
 /// 用于 send_mcp_tool_results 已经创建了所有 tool_result 消息后的续写
-#[instrument(skip(app_handle, window), fields(conversation_id, assistant_id))]
+#[instrument(skip(app_handle, feature_config_state, window), fields(conversation_id, assistant_id))]
 pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     app_handle: tauri::AppHandle,
+    feature_config_state: State<'_, FeatureConfigState>,
     window: tauri::Window,
     conversation_id: i64,
     assistant_id: i64,
 ) -> Result<AiResponse, AppError> {
     info!("Batch tool result continuation start");
+    if let Some(token_manager) = app_handle.try_state::<MessageTokenManager>() {
+        token_manager.reset_cancel_token(conversation_id).await;
+    }
 
     let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
 
@@ -944,6 +969,9 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let provider_api_type = model_detail.provider.api_type.clone();
     let assistant_model_configs = assistant_detail.model_configs.clone();
 
+    // 获取配置
+    let config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
+
     let conversation_db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
     // Build chat configuration
     let client = genai_client::create_client_with_config(
@@ -953,6 +981,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         None,
         false,
         None,
+        &config_feature_map,
     )
     .map_err(|e| {
         error!(error = %e, "failed to create client in batch_tool_result_continue_ask_ai");
@@ -1092,11 +1121,11 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
 }
 
 #[tauri::command]
-#[instrument(skip(app_handle, _state, _feature_config_state, window, tool_result), fields(conversation_id = %conversation_id, assistant_id, tool_call_id))]
+#[instrument(skip(app_handle, _state, feature_config_state, window, tool_result), fields(conversation_id = %conversation_id, assistant_id, tool_call_id))]
 pub async fn tool_result_continue_ask_ai(
     app_handle: tauri::AppHandle,
     _state: State<'_, AppState>,
-    _feature_config_state: State<'_, FeatureConfigState>,
+    feature_config_state: State<'_, FeatureConfigState>,
     window: tauri::Window,
     conversation_id: String,
     assistant_id: i64,
@@ -1105,6 +1134,7 @@ pub async fn tool_result_continue_ask_ai(
 ) -> Result<AiResponse, AppError> {
     tool_result_continue_ask_ai_impl(
         app_handle,
+        feature_config_state,
         window,
         conversation_id,
         assistant_id,
@@ -1140,6 +1170,10 @@ pub async fn cancel_ai(
                 }
             }
         }
+    }
+
+    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+        activity_manager.clear_focus(&app_handle, conversation_id).await;
     }
 
     // Send cancellation event to both ask and chat_ui windows
@@ -1196,6 +1230,8 @@ pub async fn regenerate_ai(
             .await;
     }
 
+    message_token_manager.reset_cancel_token(conversation_id).await;
+
     // 根据消息类型决定处理逻辑
     let (filtered_messages, _parent_message_id) = if message.message_type == "user" {
         // 用户消息重发：包含当前用户消息和之前的所有消息，新生成的assistant消息没有parent（新一轮对话）
@@ -1210,24 +1246,6 @@ pub async fn regenerate_ai(
             messages.into_iter().filter(|m| m.0.id < message_id).collect();
         (filtered_messages, Some(message_id)) // 使用被重发消息的ID作为parent_id表示这是它的一个版本
     };
-
-    let init_message_list =
-        build_message_list_from_db(&filtered_messages, BranchSelection::LatestChildren);
-
-    debug!(?init_message_list, "initial message list for regenerate");
-
-    // 获取助手信息（在构建消息列表之后，以确保对话已确定）
-    let assistant_id = conversation.assistant_id.unwrap();
-    let assistant_detail = get_assistant(app_handle.clone(), assistant_id).unwrap();
-
-    if assistant_detail.model.is_empty() {
-        return Err(AppError::NoModelFound);
-    }
-
-    // 兼容 MCP：根据助手配置判断是否使用提供商原生 toolcall
-    let mcp_info =
-        crate::mcp::collect_mcp_info_for_assistant(&app_handle, assistant_id, None, None).await?;
-    let is_native_toolcall = mcp_info.use_native_toolcall;
 
     // 确定要使用的generation_group_id和parent_group_id
     let (regenerate_generation_group_id, regenerate_parent_group_id) = if message.message_type
@@ -1261,6 +1279,27 @@ pub async fn regenerate_ai(
         let original_group_id = message.generation_group_id.clone();
         (Some(uuid::Uuid::new_v4().to_string()), original_group_id)
     };
+
+    let filtered_messages =
+        filter_messages_for_parent_group(filtered_messages, regenerate_parent_group_id.as_deref());
+
+    let init_message_list =
+        build_message_list_from_db(&filtered_messages, BranchSelection::LatestBranch);
+
+    debug!(?init_message_list, "initial message list for regenerate");
+
+    // 获取助手信息（在构建消息列表之后，以确保对话已确定）
+    let assistant_id = conversation.assistant_id.unwrap();
+    let assistant_detail = get_assistant(app_handle.clone(), assistant_id).unwrap();
+
+    if assistant_detail.model.is_empty() {
+        return Err(AppError::NoModelFound);
+    }
+
+    // 兼容 MCP：根据助手配置判断是否使用提供商原生 toolcall
+    let mcp_info =
+        crate::mcp::collect_mcp_info_for_assistant(&app_handle, assistant_id, None, None).await?;
+    let is_native_toolcall = mcp_info.use_native_toolcall;
 
     // 在异步任务外获取模型详情（避免线程安全问题）
     let llm_db = LLMDatabase::new(&app_handle).map_err(AppError::from)?;
@@ -1303,6 +1342,7 @@ pub async fn regenerate_ai(
             network_proxy.as_deref(),
             proxy_enabled,
             Some(request_timeout),
+            &_config_feature_map,
         )?;
 
         // 创建一个临时的 ModelDetail 用于配置合并
@@ -1586,7 +1626,7 @@ async fn initialize_conversation(
             let all_messages =
                 db.message_repo().unwrap().list_by_conversation_id(conversation_id)?;
 
-            let message_list = build_message_list_from_db(&all_messages, BranchSelection::LatestChildren);
+            let message_list = build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
             // 获取到消息的附件列表
             let message_attachment_list = db

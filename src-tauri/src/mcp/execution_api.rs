@@ -6,7 +6,7 @@
 //! 3. 统一的参数解析、响应序列化与错误处理抽象
 //! 4. 将执行结果写回数据库并触发前端事件
 //! 5. 在工具成功后继续驱动 AI 对话（包含重试场景）
-use crate::api::ai::config::get_network_proxy_from_config;
+use crate::api::ai::config::{get_continue_on_tool_error_from_config, get_network_proxy_from_config};
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
 use crate::api::ai_api::{batch_tool_result_continue_ask_ai_impl, sanitize_tool_name, tool_result_continue_ask_ai_impl};
 use crate::db::conversation_db::{ConversationDatabase, Repository};
@@ -204,6 +204,10 @@ async fn handle_tool_execution_result(
     trigger_continuation: bool,
 ) -> Result<MCPToolCall, String> {
     let db = MCPDatabase::new(app_handle).map_err(|e| format!("初始化数据库失败: {}", e))?;
+    let continue_on_error = {
+        let config_map = feature_config_state.config_feature_map.lock().await;
+        get_continue_on_tool_error_from_config(&config_map)
+    };
 
     match execution_result {
         Ok(result) => {
@@ -261,13 +265,36 @@ async fn handle_tool_execution_result(
                 .map_err(|e| format!("更新工具调用状态失败: {}", e))?;
 
             tool_call.status = "failed".to_string();
-            tool_call.error = Some(error);
+            tool_call.error = Some(error.clone());
             tool_call.result = None;
 
             // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
             broadcast_mcp_tool_call_update(app_handle, &tool_call);
 
-            // 工具执行失败后，恢复 MCP 执行前的活动状态
+            let error_lower = error.to_lowercase();
+            let is_user_cancelled = error_lower.contains("cancelled by user")
+                || error_lower.contains("canceled by user")
+                || error_lower.contains("stopped by user");
+            if trigger_continuation && continue_on_error {
+                if is_user_cancelled {
+                    debug!(call_id = tool_call.id, "Skip continuation for user-cancelled tool error");
+                } else {
+                    info!("准备触发工具失败续写，call_id={}", call_id);
+                    if let Err(e) = trigger_conversation_continuation_with_error(
+                        app_handle,
+                        state,
+                        feature_config_state,
+                        window,
+                        &tool_call,
+                        tool_call.error.as_deref().unwrap_or("Tool execution failed"),
+                    )
+                    .await
+                    {
+                        warn!(error=%e, "tool execution failed but continuation with error failed");
+                    }
+                }
+            }
+
             if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
                 activity_manager
                     .restore_after_mcp(&app_handle, tool_call.conversation_id)
@@ -569,6 +596,13 @@ pub async fn continue_with_error(
     .await
     .map_err(|e| format!("续写失败: {}", e))?;
 
+    // 恢复活动状态（让续写的流式响应接管）
+    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+        activity_manager
+            .restore_after_mcp(&app_handle, tool_call.conversation_id)
+            .await;
+    }
+
     info!(call_id = call_id, "continued conversation with tool error");
     Ok(())
 }
@@ -616,11 +650,11 @@ pub async fn stop_mcp_tool_call(
 /// - 只在最后一个工具结果处理后触发 AI 续写
 /// - 使用 llm_call_id 作为工具调用标识（用于原生 toolcall 模式匹配）
 #[tauri::command]
-#[instrument(skip(app_handle, _state, _feature_config_state, window), fields(message_id))]
+#[instrument(skip(app_handle, _state, feature_config_state, window), fields(message_id))]
 pub async fn send_mcp_tool_results(
     app_handle: tauri::AppHandle,
     _state: tauri::State<'_, crate::AppState>,
-    _feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
+    feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
     window: tauri::Window,
     message_id: i64,
 ) -> std::result::Result<(), String> {
@@ -670,6 +704,13 @@ pub async fn send_mcp_tool_results(
     let model_id = assistant_detail.model[0].id;
     let model_code = assistant_detail.model[0].model_code.clone();
 
+    // 查找触发工具调用的 response 消息的 generation_group_id，使 tool_result 与 response 同组
+    let tool_result_group_id = conversation_db
+        .message_repo()
+        .ok()
+        .and_then(|repo| repo.read(message_id).ok().flatten())
+        .and_then(|m| m.generation_group_id);
+
     // 为每个工具调用创建独立的 tool_result 消息
     // 使用与 tool_result_continue_ask_ai_impl 相同的格式
     for tc in &tool_calls {
@@ -710,7 +751,7 @@ pub async fn send_mcp_tool_results(
             Some(chrono::Utc::now()),
             Some(chrono::Utc::now()),
             0,
-            None,
+            tool_result_group_id.clone(),
             None,
         ).map_err(|e| format!("创建工具结果消息失败: {}", e))?;
 
@@ -764,6 +805,7 @@ pub async fn send_mcp_tool_results(
     // 触发续写 - 使用专门的批量续写实现
     let continuation_result = match batch_tool_result_continue_ask_ai_impl(
         app_handle.clone(),
+        feature_config_state,
         window,
         conversation_id,
         assistant_id,
@@ -898,11 +940,11 @@ async fn handle_retry_success_continuation(
 }
 
 /// 触发会话继续：把工具结果作为 tool_result 语义传递给 AI 继续生成。
-#[instrument(skip(app_handle, _state, _feature_config_state, window, result), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
+#[instrument(skip(app_handle, _state, feature_config_state, window, result), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
 async fn trigger_conversation_continuation(
     app_handle: &tauri::AppHandle,
     _state: &tauri::State<'_, crate::AppState>,
-    _feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
+    feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
     window: &tauri::Window,
     tool_call: &MCPToolCall,
     result: &str,
@@ -944,6 +986,7 @@ async fn trigger_conversation_continuation(
     let _lock_guard = continuation_lock.lock().await;
     match tool_result_continue_ask_ai_impl(
         app_handle_clone.clone(),
+        feature_config_state.clone(),
         window_clone,
         conversation_id_str,
         assistant_id,
@@ -976,11 +1019,11 @@ async fn trigger_conversation_continuation(
 
 /// 触发会话继续：把工具错误作为 tool_result 语义传递给 AI 继续生成。
 /// 与 trigger_conversation_continuation 的区别在于消息格式表明这是错误继续。
-#[instrument(skip(app_handle, _state, _feature_config_state, window, error_message), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
+#[instrument(skip(app_handle, _state, feature_config_state, window, error_message), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
 async fn trigger_conversation_continuation_with_error(
     app_handle: &tauri::AppHandle,
     _state: &tauri::State<'_, crate::AppState>,
-    _feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
+    feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
     window: &tauri::Window,
     tool_call: &MCPToolCall,
     error_message: &str,
@@ -1039,6 +1082,7 @@ async fn trigger_conversation_continuation_with_error(
     let _lock_guard = continuation_lock.lock().await;
     match tool_result_continue_ask_ai_impl(
         app_handle_clone.clone(),
+        feature_config_state.clone(),
         window_clone,
         conversation_id_str,
         assistant_id,
@@ -1070,14 +1114,14 @@ async fn trigger_conversation_continuation_with_error(
 }
 
 /// 批量续写：将多个工具执行结果一次性传递给 AI
-/// 只有所有执行的工具都成功时才触发续写
+/// 默认仅在全部成功时续写；可通过配置允许包含失败结果继续
 ///
 /// 修复：为每个工具调用创建独立的 tool_result 消息，使用正确的格式
-#[instrument(skip(app_handle, _state, _feature_config_state, window), fields(conversation_id, tool_call_count = tool_call_ids.len()))]
+#[instrument(skip(app_handle, _state, feature_config_state, window), fields(conversation_id, tool_call_count = tool_call_ids.len()))]
 pub async fn trigger_conversation_continuation_batch(
     app_handle: &tauri::AppHandle,
     _state: tauri::State<'_, crate::AppState>,
-    _feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
+    feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
     window: tauri::Window,
     conversation_id: i64,
     tool_call_ids: Vec<i64>,
@@ -1090,6 +1134,11 @@ pub async fn trigger_conversation_continuation_batch(
         debug!("No tool calls to continue, skipping batch continuation");
         return Ok(());
     }
+
+    let continue_on_error = {
+        let config_map = feature_config_state.config_feature_map.lock().await;
+        get_continue_on_tool_error_from_config(&config_map)
+    };
 
     info!(
         conversation_id,
@@ -1118,14 +1167,14 @@ pub async fn trigger_conversation_continuation_batch(
     // 按 tool_call_id 升序排序，确保与 AI 返回顺序一致
     tool_calls.sort_by_key(|tc| tc.id);
 
-    // 检查是否所有工具都执行成功（有任何失败则不续写）
+    // 检查是否所有工具都执行成功（有任何失败则默认不续写）
     let all_success = tool_calls.iter().all(|tc| tc.status == "success");
     debug!(
         all_success,
         tool_statuses = ?tool_calls.iter().map(|tc| (&tc.id, &tc.status)).collect::<Vec<_>>(),
         "checking tool call statuses for batch continuation"
     );
-    if !all_success {
+    if !all_success && !continue_on_error {
         let failed_calls: Vec<_> = tool_calls
             .iter()
             .filter(|tc| tc.status != "success")
@@ -1161,6 +1210,18 @@ pub async fn trigger_conversation_continuation_batch(
     let model_id = assistant_detail.model[0].id;
     let model_code = assistant_detail.model[0].model_code.clone();
 
+    // 查找最近的 response 消息的 generation_group_id，使 tool_result 与 response 同组
+    let tool_result_group_id = conversation_db
+        .message_repo()
+        .ok()
+        .and_then(|repo| repo.list_by_conversation_id(conversation_id).ok())
+        .and_then(|msgs| {
+            msgs.iter()
+                .filter(|(m, _)| m.message_type == "response")
+                .max_by_key(|(m, _)| m.id)
+                .and_then(|(m, _)| m.generation_group_id.clone())
+        });
+
     // 为每个工具调用创建独立的 tool_result 消息
     for tc in &tool_calls {
         // 使用 llm_call_id（如果存在），否则使用数据库 id 作为 fallback
@@ -1168,7 +1229,11 @@ pub async fn trigger_conversation_continuation_batch(
             .unwrap_or_else(|| format!("mcp_tool_call_{}", tc.id));
 
         // 构建工具结果内容
-        let result_content = tc.result.clone().unwrap_or_else(|| "(空)".to_string());
+        let result_content = match tc.status.as_str() {
+            "success" => tc.result.clone().unwrap_or_else(|| "(空)".to_string()),
+            "failed" => format!("Error: {}", tc.error.as_deref().unwrap_or("未知错误")),
+            _ => continue,
+        };
 
         // 使用正确的格式
         let tool_result_content = format!(
@@ -1192,7 +1257,7 @@ pub async fn trigger_conversation_continuation_batch(
             Some(chrono::Utc::now()),
             Some(chrono::Utc::now()),
             0,
-            None,
+            tool_result_group_id.clone(),
             None,
         ).map_err(|e| anyhow!("创建工具结果消息失败: {}", e))?;
 
@@ -1246,6 +1311,7 @@ pub async fn trigger_conversation_continuation_batch(
     // 触发续写
     match batch_tool_result_continue_ask_ai_impl(
         app_handle.clone(),
+        feature_config_state,
         window,
         conversation_id,
         assistant_id,
@@ -1258,6 +1324,11 @@ pub async fn trigger_conversation_continuation_batch(
                 tool_count = tool_calls.len(),
                 "Batch tool continuation succeeded"
             );
+            if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+                activity_manager
+                    .restore_after_mcp(&app_handle, conversation_id)
+                    .await;
+            }
             Ok(())
         }
         Err(e) => {

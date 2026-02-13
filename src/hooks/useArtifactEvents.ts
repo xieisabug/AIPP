@@ -18,6 +18,10 @@ export interface ArtifactData {
     created_time?: string;
     last_used_time?: string;
     use_count?: number;
+    db_id?: string;
+    assistant_id?: number;
+    conversation_id?: number;
+    request_id?: string;
 }
 
 export interface EnvironmentCheckData {
@@ -95,6 +99,45 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
     const isRegisteredRef = useRef(false);
     const readyIntervalRef = useRef<NodeJS.Timeout | null>(null);
     const hasReceivedDataRef = useRef(false);
+    const currentRequestIdRef = useRef<string | null>(null);
+
+    const getRequestId = useCallback((payload: unknown): string | undefined => {
+        if (!payload || typeof payload !== 'object') {
+            return undefined;
+        }
+        const requestId = (payload as { request_id?: unknown }).request_id;
+        return typeof requestId === 'string' ? requestId : undefined;
+    }, []);
+
+    const shouldIgnoreEvent = useCallback((requestId?: string) => {
+        const currentRequestId = currentRequestIdRef.current;
+        if (!currentRequestId) {
+            return false;
+        }
+        if (!requestId) {
+            return true;
+        }
+        return requestId !== currentRequestId;
+    }, []);
+
+    const ensureRequestId = useCallback((requestId?: string) => {
+        if (!requestId || currentRequestIdRef.current) {
+            return;
+        }
+        currentRequestIdRef.current = requestId;
+    }, []);
+
+    const parseMessagePayload = useCallback((payload: unknown): { message: string; requestId?: string } => {
+        if (typeof payload === 'string') {
+            return { message: payload };
+        }
+        if (payload && typeof payload === 'object') {
+            const messageField = (payload as { message?: unknown }).message;
+            const message = typeof messageField === 'string' ? messageField : JSON.stringify(payload);
+            return { message, requestId: getRequestId(payload) };
+        }
+        return { message: String(payload) };
+    }, [getRequestId]);
 
     // 同步 hasReceivedData 到 ref
     useEffect(() => {
@@ -146,14 +189,30 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
 
             // 创建日志处理函数
             const createLogHandler = (type: LogLine['type']) => (event: { payload: any }) => {
-                const message = event.payload as string;
+                const { message, requestId } = parseMessagePayload(event.payload);
+                if (shouldIgnoreEvent(requestId)) {
+                    console.log(`🔧 [${windowType}] 忽略过期日志: ${requestId ?? 'no-request'}`);
+                    return;
+                }
+                ensureRequestId(requestId);
                 console.log(`🔧 [${windowType}] 收到日志[${type}]: ${message}`);
                 setLogs(prev => [...prev, { type, message }]);
             };
 
             // 处理 artifact 数据
             const handleArtifactData = (event: { payload: any }) => {
-                const data = event.payload as ArtifactData;
+                const payload = event.payload as ArtifactData | null;
+                if (!payload || typeof payload !== 'object') {
+                    console.warn(`🔧 [${windowType}] 收到无效 artifact 数据:`, event.payload);
+                    return;
+                }
+                const requestId = getRequestId(payload);
+                if (shouldIgnoreEvent(requestId)) {
+                    console.log(`🔧 [${windowType}] 忽略过期 artifact 数据: ${requestId ?? 'no-request'}`);
+                    return;
+                }
+                ensureRequestId(requestId);
+                const data = payload as ArtifactData;
                 console.log(`🔧 [${windowType}] 收到 artifact 数据:`, data);
 
                 // 标记已接收数据
@@ -172,7 +231,21 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
 
             // 处理重定向
             const handleRedirect = (event: { payload: any }) => {
-                const url = event.payload as string;
+                const payload = event.payload as { url?: string; request_id?: string } | string;
+                const url = typeof payload === 'string' ? payload : payload?.url;
+                const requestId = typeof payload === 'string' ? undefined : payload?.request_id;
+
+                if (!url) {
+                    console.warn(`🔧 [${windowType}] 收到无效重定向 payload:`, payload);
+                    return;
+                }
+
+                if (shouldIgnoreEvent(requestId)) {
+                    console.log(`🔧 [${windowType}] 忽略过期重定向: ${requestId ?? 'no-request'}`);
+                    return;
+                }
+                ensureRequestId(requestId);
+
                 console.log(`🔧 [${windowType}] 收到重定向: ${url}`);
 
                 // 标记已接收数据
@@ -190,6 +263,12 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
 
             // 处理环境检查
             const handleEnvironmentCheck = (event: { payload: any }) => {
+                const requestId = getRequestId(event.payload);
+                if (shouldIgnoreEvent(requestId)) {
+                    console.log(`🔧 [${windowType}] 忽略过期环境检查: ${requestId ?? 'no-request'}`);
+                    return;
+                }
+                ensureRequestId(requestId);
                 const data = event.payload as EnvironmentCheckData;
                 console.log(`🔧 [${windowType}] 收到环境检查:`, data);
                 onEnvironmentCheck?.(data);
@@ -217,7 +296,11 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
             };
 
             // 处理重置事件（切换 artifact 时）
-            const handleReset = () => {
+            const handleReset = (event: { payload: any }) => {
+                const nextRequestId = typeof event.payload?.request_id === 'string'
+                    ? event.payload.request_id
+                    : null;
+                currentRequestIdRef.current = nextRequestId;
                 console.log(`🔧 [${windowType}] 收到 reset 事件，重置状态`);
                 reset();  // 清除内部状态
                 onReset?.();  // 调用外部回调
@@ -337,6 +420,10 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
         onReset,
         stopReadySignal,
         sendDataReceivedConfirmation,
+        ensureRequestId,
+        getRequestId,
+        parseMessagePayload,
+        shouldIgnoreEvent,
     ]);
 
     return {

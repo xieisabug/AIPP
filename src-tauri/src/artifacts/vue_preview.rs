@@ -49,8 +49,16 @@ impl VuePreviewManager {
         &self,
         component_code: String,
         component_name: String,
+        target_window: Option<String>,
+        request_id: Option<String>,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        self.create_preview_internal(component_code, component_name, VuePreviewMode::Artifact)
+        self.create_preview_internal(
+            component_code,
+            component_name,
+            VuePreviewMode::Artifact,
+            target_window,
+            request_id,
+        )
     }
 
     pub fn create_preview(
@@ -58,7 +66,7 @@ impl VuePreviewManager {
         component_code: String,
         component_name: String,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        self.create_preview_internal(component_code, component_name, VuePreviewMode::Window)
+        self.create_preview_internal(component_code, component_name, VuePreviewMode::Window, None, None)
     }
 
     fn create_preview_internal(
@@ -66,11 +74,17 @@ impl VuePreviewManager {
         component_code: String,
         component_name: String,
         mode: VuePreviewMode,
+        target_window: Option<String>,
+        request_id: Option<String>,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let preview_id = "vue".to_string();
         println!("🚀 [Vue Preview] 开始创建预览, ID: {}", preview_id);
-        if let Some(window) = self.app_handle.get_webview_window("artifact_preview") {
-            let _ = window.emit("artifact-preview-log", "开始创建 Vue 预览...");
+        let target_window_name = target_window.unwrap_or_else(|| "artifact_preview".to_string());
+        if let Some(window) = self.app_handle.get_webview_window(&target_window_name) {
+            let _ = window.emit(
+                "artifact-preview-log",
+                serde_json::json!({ "message": "开始创建 Vue 预览...", "request_id": request_id }),
+            );
         }
 
         let port = self.find_available_port()?;
@@ -79,14 +93,22 @@ impl VuePreviewManager {
         // 关闭已存在的预览实例
         let _ = self.close_preview(&preview_id);
 
-        let (template_path, need_install_deps) =
-            self.setup_template_project(&preview_id, &component_code, &component_name)?;
+        let (template_path, need_install_deps) = self.setup_template_project(
+            &preview_id,
+            &component_code,
+            &component_name,
+            &target_window_name,
+            request_id.as_deref(),
+        )?;
         println!("🚀 [Vue Preview] 模板项目已设置到: {:?}", template_path);
 
         let process_id = self.start_dev_server(&template_path, port, need_install_deps)?;
         println!("🚀 [Vue Preview] 开发服务器已启动, PID: {}", process_id);
-        if let Some(window) = self.app_handle.get_webview_window("artifact_preview") {
-            let _ = window.emit("artifact-preview-log", "Vue 预览服务启动");
+        if let Some(window) = self.app_handle.get_webview_window(&target_window_name) {
+            let _ = window.emit(
+                "artifact-preview-log",
+                serde_json::json!({ "message": "Vue 预览服务启动", "request_id": request_id }),
+            );
         }
 
         let server = VuePreviewServer {
@@ -105,12 +127,17 @@ impl VuePreviewManager {
 
         // 等待开发服务器启动并执行相应操作
         let app_handle = self.app_handle.clone();
+        let target_window_name = target_window_name.clone();
         let preview_id_clone = preview_id.clone();
+        let request_id = request_id.clone();
         std::thread::spawn(move || {
             // 等待服务器启动
             println!("🚀 [Vue Preview] 等待服务器启动...");
-            if let Some(window) = app_handle.get_webview_window("artifact_preview") {
-                let _ = window.emit("artifact-preview-log", "等待 Vue 服务器启动完毕...");
+            if let Some(window) = app_handle.get_webview_window(&target_window_name) {
+                let _ = window.emit(
+                    "artifact-preview-log",
+                    serde_json::json!({ "message": "等待 Vue 服务器启动完毕...", "request_id": request_id }),
+                );
             }
             std::thread::sleep(std::time::Duration::from_secs(3));
 
@@ -118,19 +145,28 @@ impl VuePreviewManager {
                 VuePreviewMode::Artifact => {
                     let preview_url = format!("http://localhost:{}", port);
                     println!("🚀 [Vue Preview] 预览已准备完成: {}", preview_url);
-                    if let Some(window) = app_handle.get_webview_window("artifact_preview") {
-                        let _ = window.emit("artifact-preview-success", "Vue 预览服务器已启动完成");
+                    if let Some(window) = app_handle.get_webview_window(&target_window_name) {
+                        let _ = window.emit(
+                            "artifact-preview-success",
+                            serde_json::json!({ "message": "Vue 预览服务器已启动完成", "request_id": request_id }),
+                        );
                     }
 
                     // 发送跳转事件，让前端窗口自动跳转到预览页面
-                    if let Some(window) = app_handle.get_webview_window("artifact_preview") {
-                        let _ = window.emit("artifact-preview-redirect", preview_url);
+                    if let Some(window) = app_handle.get_webview_window(&target_window_name) {
+                        let _ = window.emit(
+                            "artifact-preview-redirect",
+                            serde_json::json!({ "url": preview_url, "request_id": request_id }),
+                        );
                     }
                 }
                 VuePreviewMode::Window => {
                     println!("🚀 [Vue Preview] 尝试打开预览窗口");
-                    if let Some(window) = app_handle.get_webview_window("artifact_preview") {
-                        let _ = window.emit("artifact-preview-log", "打开Vue预览窗口...");
+                    if let Some(window) = app_handle.get_webview_window(&target_window_name) {
+                        let _ = window.emit(
+                            "artifact-preview-log",
+                            serde_json::json!({ "message": "打开Vue预览窗口...", "request_id": request_id }),
+                        );
                     }
                     let _ = Self::open_preview_window_static(&app_handle, &preview_id_clone, port);
                 }
@@ -212,6 +248,8 @@ impl VuePreviewManager {
         preview_id: &str,
         component_code: &str,
         _component_name: &str,
+        target_window_name: &str,
+        request_id: Option<&str>,
     ) -> Result<(PathBuf, bool), Box<dyn std::error::Error>> {
         let preview_dir = self.shared_utils.get_preview_directory("vue", preview_id)?;
         println!("🛠️ [VueSetup] 设置预览目录: {:?}", preview_dir);
@@ -263,8 +301,14 @@ impl VuePreviewManager {
         // 如果需要安装依赖
         if need_install_deps {
             println!("📦 [VueSetup] 需要安装/更新依赖");
-            if let Some(window) = self.app_handle.get_webview_window("artifact_preview") {
-                let _ = window.emit("artifact-preview-log", "安装/更新Vue依赖");
+            if let Some(window) = self.app_handle.get_webview_window(target_window_name) {
+                let _ = window.emit(
+                    "artifact-preview-log",
+                    serde_json::json!({
+                        "message": "安装/更新Vue依赖",
+                        "request_id": request_id
+                    }),
+                );
             }
             // 删除现有的 node_modules（如果存在）
             let node_modules_dir = preview_dir.join("node_modules");
@@ -495,9 +539,13 @@ pub async fn create_vue_preview_for_artifact(
     app_handle: AppHandle,
     component_code: String,
     component_name: String,
+    target_window: Option<String>,
+    request_id: Option<String>,
 ) -> Result<String, String> {
     let manager = VuePreviewManager::new(app_handle);
-    manager.create_preview_for_artifact(component_code, component_name).map_err(|e| e.to_string())
+    manager
+        .create_preview_for_artifact(component_code, component_name, target_window, request_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -8,6 +8,9 @@ use serde::Serialize;
 use std::collections::HashMap;
 use tracing::debug;
 
+// 用于 HTML 内容清理
+use crate::mcp::builtin_mcp::search::engines::base::SearchEngineBase;
+
 // 定义命令处理函数类型
 type CommandFn = fn(TemplateEngine, String, HashMap<String, String>) -> BoxFuture<'static, String>;
 
@@ -75,7 +78,9 @@ fn web(_: TemplateEngine, url: String, _: HashMap<String, String>) -> BoxFuture<
                     .text()
                     .await
                     .unwrap_or_else(|_| "Failed to get web content".to_string());
-                format!("<bangweb url=\"{}\">\n{}\n</bangweb>", url, html)
+                // 清理HTML：只保留body，移除script/style/nav等非核心内容
+                let cleaned_html = SearchEngineBase::extract_main_content(&html);
+                format!("<bangweb url=\"{}\">\n{}\n</bangweb>", url, cleaned_html)
             }
             Err(err) => err.to_string(),
         }
@@ -97,10 +102,12 @@ fn web_to_markdown(
         match client.get(url).send().await {
             Ok(response) => {
                 let html = response.text().await.unwrap_or_default();
+                // 先清理HTML，再转换为Markdown
+                let cleaned_html = SearchEngineBase::extract_main_content(&html);
                 format!(
                     "<bangwebtomarkdown url=\"{}\">\n{}\n</bangwebtomarkdown>",
                     url,
-                    htmd::convert(&html).unwrap()
+                    htmd::convert(&cleaned_html).unwrap()
                 )
             }
             Err(_) => "".to_string(),

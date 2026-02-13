@@ -56,7 +56,7 @@ export function MessageTokenTooltip({
             }}
         >
             <PopoverTrigger asChild>
-                <IconButton icon={<Info className="h-4 w-4" />} onClick={() => {}} />
+                <IconButton icon={<Info className="h-4 w-4 text-icon" />} onClick={() => {}} />
             </PopoverTrigger>
             <PopoverContent side="top" align="start" className="w-auto">
                 <div className="space-y-2">

@@ -17,7 +17,7 @@ import rehypeRaw from 'rehype-raw';
 import TipsComponent from '@/react-markdown/components/TipsComponent';
 import { resolveCodeBlockMeta } from '@/react-markdown/remarkCodeBlockMeta';
 import { useArtifactEvents, ArtifactData, EnvironmentCheckData } from '@/hooks/useArtifactEvents';
-import { Button } from '@/components/ui/button';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Loader2 } from 'lucide-react';
 import EnvironmentInstallDialog from '@/components/EnvironmentInstallDialog';
 import 'katex/dist/katex.min.css';
@@ -31,7 +31,7 @@ type PreviewType = 'react' | 'vue' | 'mermaid' | 'html' | 'svg' | 'xml' | 'markd
 export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactPreviewProps) {
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [isPreviewReady, setIsPreviewReady] = useState(false);
-    const [currentView, setCurrentView] = useState<'logs' | 'preview'>('logs');
+    const [currentView, setCurrentView] = useState<'logs' | 'preview' | 'code'>('logs');
     const [previewType, setPreviewType] = useState<PreviewType>(null);
     const previewTypeRef = useRef<PreviewType>(null);
     const mermaidContainerRef = useRef<HTMLDivElement | null>(null);
@@ -39,9 +39,11 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
     const [htmlContent, setHtmlContent] = useState<string>('');
     const [markdownContent, setMarkdownContent] = useState<string>('');
     const [drawioXmlContent, setDrawioXmlContent] = useState<string>('');
+    const [originalCode, setOriginalCode] = useState<string>('');
     const drawioIframeRef = useRef<HTMLIFrameElement>(null);
     const logsEndRef = useRef<HTMLDivElement | null>(null);
     const isInstalling = useRef<boolean>(false);
+    const restoreAbortRef = useRef<boolean>(false);
 
     // 环境安装相关状态
     const [showEnvironmentDialog, setShowEnvironmentDialog] = useState<boolean>(false);
@@ -64,6 +66,7 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
 
     // 重置预览状态
     const resetPreviewState = useCallback(async () => {
+        restoreAbortRef.current = true;
         const currentType = previewTypeRef.current;
         if (currentType === 'vue') {
             try {
@@ -85,6 +88,7 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
         setHtmlContent('');
         setMarkdownContent('');
         setDrawioXmlContent('');
+        setOriginalCode('');
         setIsPreviewReady(false);
         setCurrentView('logs');
     }, []);
@@ -92,6 +96,8 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
     // 处理 artifact 数据
     const handleArtifactData = useCallback((data: ArtifactData) => {
         if (data.original_code && data.type) {
+            restoreAbortRef.current = true;
+            setOriginalCode(data.original_code);
             switch (data.type) {
                 case 'vue':
                 case 'react':
@@ -136,12 +142,14 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
 
     // 处理重定向
     const handleRedirect = useCallback((url: string) => {
+        restoreAbortRef.current = true;
         setPreviewUrl(url);
         setIsPreviewReady(true);
     }, []);
 
     // 处理环境检查
     const handleEnvironmentCheck = useCallback((data: EnvironmentCheckData) => {
+        restoreAbortRef.current = true;
         setEnvironmentTool(data.tool);
         setEnvironmentMessage(data.message);
         setCurrentLang(data.lang);
@@ -163,7 +171,8 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
             artifactEvents.addLog('success', 'Bun 安装成功，正在重新启动预览...');
             invoke('retry_preview_after_install', {
                 lang: currentLangRef.current,
-                inputStr: currentInputStrRef.current
+                inputStr: currentInputStrRef.current,
+                sourceWindow: 'sidebar',
             }).then(() => {
                 isInstalling.current = false;
             }).catch(error => {
@@ -182,7 +191,8 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
             artifactEvents.addLog('success', 'uv 安装成功，正在重新启动预览...');
             invoke('retry_preview_after_install', {
                 lang: currentLangRef.current,
-                inputStr: currentInputStrRef.current
+                inputStr: currentInputStrRef.current,
+                sourceWindow: 'sidebar',
             }).then(() => {
                 isInstalling.current = false;
             }).catch(error => {
@@ -287,16 +297,25 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
         }
     }, [previewType, drawioXmlContent]);
 
-    const handleToggleView = () => {
-        setCurrentView(current => current === 'logs' ? 'preview' : 'logs');
-    };
 
     const handleEnvironmentInstallConfirm = async () => {
         try {
             if (environmentTool === 'bun') {
-                await invoke('install_bun');
+                await invoke('confirm_environment_install', {
+                    tool: 'bun',
+                    confirmed: true,
+                    lang: currentLangRef.current,
+                    inputStr: currentInputStrRef.current,
+                    sourceWindow: 'sidebar',
+                });
             } else if (environmentTool === 'uv') {
-                await invoke('install_uv');
+                await invoke('confirm_environment_install', {
+                    tool: 'uv',
+                    confirmed: true,
+                    lang: currentLangRef.current,
+                    inputStr: currentInputStrRef.current,
+                    sourceWindow: 'sidebar',
+                });
             }
             setShowEnvironmentDialog(false);
         } catch (error) {
@@ -306,11 +325,13 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
 
     const handleEnvironmentInstallCancel = async () => {
         try {
-            if (environmentTool === 'bun') {
-                await invoke('cancel_bun_install');
-            } else if (environmentTool === 'uv') {
-                await invoke('cancel_uv_install');
-            }
+            await invoke('confirm_environment_install', {
+                tool: environmentTool,
+                confirmed: false,
+                lang: currentLangRef.current,
+                inputStr: currentInputStrRef.current,
+                sourceWindow: 'sidebar',
+            });
             setShowEnvironmentDialog(false);
         } catch (error) {
             artifactEvents.addLog('error', `取消安装失败: ${error}`);
@@ -355,7 +376,7 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
             {isPreviewReady && (
                 <div className="flex-shrink-0 p-2 border-b border-border flex items-center justify-between">
                     <div className="text-xs text-muted-foreground">
-                        {currentView === 'logs' ? '日志' :
+                        {currentView === 'logs' ? '日志' : currentView === 'code' ? '代码' :
                             previewType === 'mermaid' ? 'Mermaid' :
                                 previewType === 'html' ? 'HTML' :
                                     previewType === 'svg' ? 'SVG' :
@@ -365,9 +386,13 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
                                                     previewType === 'react' ? 'React' :
                                                         previewType === 'vue' ? 'Vue' : '预览'}
                     </div>
-                    <Button onClick={handleToggleView} variant="ghost" size="sm" className="h-6 text-xs">
-                        {currentView === 'logs' ? '查看预览' : '查看日志'}
-                    </Button>
+                    <Tabs value={currentView} onValueChange={(value) => setCurrentView(value as 'logs' | 'preview' | 'code')}>
+                        <TabsList>
+                            <TabsTrigger value="logs">日志</TabsTrigger>
+                            <TabsTrigger value="code">代码</TabsTrigger>
+                            <TabsTrigger value="preview">预览</TabsTrigger>
+                        </TabsList>
+                    </Tabs>
                 </div>
             )}
 
@@ -390,6 +415,12 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
                                 </div>
                             ))}
                             <div ref={logsEndRef} />
+                        </div>
+                    </div>
+                ) : currentView === 'code' ? (
+                    <div className="h-full overflow-y-auto p-3">
+                        <div className="text-xs font-mono whitespace-pre-wrap bg-muted border border-border rounded p-3">
+                            {originalCode || htmlContent || mermaidContent || markdownContent}
                         </div>
                     </div>
                 ) : (

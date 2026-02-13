@@ -26,7 +26,11 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
     const dragProps = isMobile ? {} : { "data-tauri-drag-region": true };
 
     return (
-        <div className="flex flex-col items-center justify-center h-full select-none p-10" {...dragProps}>
+        <div
+            className="relative flex flex-col items-center justify-center h-full select-none p-10 theme-background-image"
+            {...dragProps}
+        >
+
             <div className="text-sm text-gray-500 text-center mb-4" {...dragProps}>
                 <AskWindowPrepare selectedText={selectedText} isMobile={isMobile} />
                 <p className="mt-4" {...dragProps}>

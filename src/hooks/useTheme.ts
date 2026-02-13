@@ -29,12 +29,19 @@ export const useTheme = () => {
     }, []);
 
     // 应用主题到DOM
-    const applyTheme = useCallback((theme: ResolvedTheme) => {
+    const applyTheme = useCallback((theme: ResolvedTheme, themeName?: string) => {
         const root = document.documentElement;
         if (theme === 'dark') {
             root.classList.add('dark');
         } else {
             root.classList.remove('dark');
+        }
+        // 移除所有 theme- 前缀的 class，再添加当前主题
+        root.classList.forEach(cls => {
+            if (cls.startsWith('theme-')) root.classList.remove(cls);
+        });
+        if (themeName && themeName !== 'default') {
+            root.classList.add(`theme-${themeName}`);
         }
     }, []);
 
@@ -61,7 +68,7 @@ export const useTheme = () => {
             const newSystemTheme: ResolvedTheme = e.matches ? 'dark' : 'light';
             setThemeState(prev => {
                 const newResolvedTheme = resolveTheme(prev.mode, newSystemTheme);
-                applyTheme(newResolvedTheme);
+                applyTheme(newResolvedTheme, config?.theme);
                 return {
                     ...prev,
                     systemTheme: newSystemTheme,
@@ -79,7 +86,7 @@ export const useTheme = () => {
             mediaQuery.addListener(handleChange);
             return () => mediaQuery.removeListener(handleChange);
         }
-    }, [resolveTheme, applyTheme]);
+    }, [resolveTheme, applyTheme, config?.theme]);
 
     // 监听配置变化
     useEffect(() => {
@@ -97,8 +104,9 @@ export const useTheme = () => {
 
         // 同步到localStorage以供加载页面使用
         localStorage.setItem('theme-mode', mode);
+        localStorage.setItem('theme-name', config.theme || 'default');
 
-        applyTheme(resolvedTheme);
+        applyTheme(resolvedTheme, config.theme);
     }, [config, isLoading, detectSystemTheme, resolveTheme, applyTheme]);
 
     // 注意：不在初始化时强制设置主题，避免在子组件挂载时反复切换 .dark 导致白屏闪烁。
@@ -130,6 +138,7 @@ export const useTheme = () => {
 
             // 同步到localStorage以供加载页面使用
             localStorage.setItem('theme-mode', newMode);
+            localStorage.setItem('theme-name', config?.theme || 'default');
 
             // 发出主题变化事件，通知其他窗口
             await emit('theme-changed', { mode: newMode });

@@ -9,7 +9,7 @@
 
 .circle-button.primary {
     border: 0;
-    background: hsl(var(--primary));
+    background: hsl(var(--action));
 }
 
 .circle-button.medium {

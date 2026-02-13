@@ -20,7 +20,22 @@ import EnvironmentInstallDialog from '../components/EnvironmentInstallDialog';
 import SaveArtifactDialog from '../components/SaveArtifactDialog';
 import { useTheme } from '../hooks/useTheme';
 import { useArtifactEvents, ArtifactData, EnvironmentCheckData } from '../hooks/useArtifactEvents';
+import { useArtifactBridge } from '../hooks/useArtifactBridge';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Bot, Database, Settings2 } from 'lucide-react';
+import { AssistantBasicInfo } from '@/data/ArtifactCollection';
+import ArtifactPreviewCodeBlock from '@/components/ArtifactPreviewCodeBlock';
+import {
+    generateRandomDbId,
+    loadArtifactRuntimeConfig,
+    normalizeDbId,
+    persistArtifactRuntimeConfig,
+} from '@/utils/artifactConfig';
 
 // localStorage 键名：用于缓存当前 artifact 信息，实现刷新后恢复
 const ARTIFACT_CACHE_KEY = 'artifact_preview_cache';
@@ -37,7 +52,7 @@ export default function ArtifactPreviewWindow() {
 
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [isPreviewReady, setIsPreviewReady] = useState(false);
-    const [currentView, setCurrentView] = useState<'logs' | 'preview'>('logs');
+    const [currentView, setCurrentView] = useState<'logs' | 'preview' | 'code'>('logs');
     const [previewType, setPreviewType] = useState<'react' | 'vue' | 'mermaid' | 'html' | 'svg' | 'xml' | 'markdown' | 'md' | 'drawio' | null>(null);
     const logsEndRef = useRef<HTMLDivElement | null>(null);
     const previewTypeRef = useRef<'react' | 'vue' | 'mermaid' | 'html' | 'svg' | 'xml' | 'markdown' | 'md' | 'drawio' | null>(null);
@@ -53,6 +68,7 @@ export default function ArtifactPreviewWindow() {
     const [isSpacePressed, setIsSpacePressed] = useState<boolean>(false);
     const isInstalling = useRef<boolean>(false);
     const drawioIframeRef = useRef<HTMLIFrameElement>(null);
+    const previewIframeRef = useRef<HTMLIFrameElement>(null);
 
     // 环境安装相关状态
     const [showEnvironmentDialog, setShowEnvironmentDialog] = useState<boolean>(false);
@@ -64,6 +80,13 @@ export default function ArtifactPreviewWindow() {
     // 保存 artifact 相关状态
     const [showSaveDialog, setShowSaveDialog] = useState<boolean>(false);
     const [originalCode, setOriginalCode] = useState<string>(''); // 存储原始代码
+
+    // Artifact Bridge 配置
+    const [bridgeConfig, setBridgeConfig] = useState<{ db_id?: string; assistant_id?: number }>({});
+    // Track current conversation for session-level config
+    const [currentConversationId, setCurrentConversationId] = useState<number | undefined>(undefined);
+    const [runtimeConfig, setRuntimeConfig] = useState<{ db_id?: string; assistant_id?: number }>({});
+    const [assistants, setAssistants] = useState<AssistantBasicInfo[]>([]);
 
     // 使用 refs 来存储最新的值，避免闭包陷阱
     const currentLangRef = useRef<string>('');
@@ -79,6 +102,22 @@ export default function ArtifactPreviewWindow() {
         currentLangRef.current = currentLang;
         currentInputStrRef.current = currentInputStr;
     }, [currentLang, currentInputStr]);
+
+    // ====== Artifact Bridge ======
+    // 集成 postMessage 桥接，允许 artifact 访问数据库和 AI 助手
+    const { sendConfig } = useArtifactBridge({
+        iframeRef: previewIframeRef,
+        config: bridgeConfig,
+        allowedOrigins: ['http://localhost', 'http://127.0.0.1'],
+    });
+
+    useEffect(() => {
+        invoke<AssistantBasicInfo[]>('artifact_get_assistants')
+            .then(setAssistants)
+            .catch(() => {
+                setAssistants([]);
+            });
+    }, []);
 
     // ====== 缓存相关函数 ======
 
@@ -125,6 +164,7 @@ export default function ArtifactPreviewWindow() {
 
     // 标记是否已尝试从缓存恢复，防止无限循环
     const hasTriedRestoreRef = useRef(false);
+    const restoreAbortRef = useRef(false);
 
     // ====== 重置函数 ======
 
@@ -134,6 +174,7 @@ export default function ArtifactPreviewWindow() {
 
         // 设置恢复标记，防止切换 artifact 时触发缓存恢复
         hasTriedRestoreRef.current = true;
+        restoreAbortRef.current = true;
 
         // 1. 清理旧的预览服务器
         const currentType = previewTypeRef.current;
@@ -174,8 +215,32 @@ export default function ArtifactPreviewWindow() {
     // 处理 artifact 数据
     const handleArtifactData = useCallback((data: ArtifactData) => {
         if (data.original_code && data.type) {
+            restoreAbortRef.current = true;
             // 保存到缓存，用于刷新恢复
             saveArtifactToCache(data.type, data.original_code);
+
+            // Update conversation ID and load session-level config
+            const convId = data.conversation_id;
+            setCurrentConversationId(convId);
+
+            // Load config for this conversation (or global if no conversation)
+            const sessionConfig = loadArtifactRuntimeConfig(convId);
+
+            // If data has explicit overrides, use them; otherwise use session config
+            const hasRuntimeOverride = Boolean(data.db_id) || typeof data.assistant_id === 'number';
+            const nextRuntime = hasRuntimeOverride ? {
+                db_id: data.db_id || sessionConfig.db_id,
+                assistant_id: typeof data.assistant_id === 'number' ? data.assistant_id : sessionConfig.assistant_id,
+            } : sessionConfig;
+
+            setRuntimeConfig(nextRuntime);
+            if (hasRuntimeOverride) {
+                persistArtifactRuntimeConfig(nextRuntime, convId);
+            }
+            setBridgeConfig({
+                db_id: nextRuntime.db_id,
+                assistant_id: nextRuntime.assistant_id,
+            });
 
             switch (data.type) {
                 case 'vue':
@@ -222,12 +287,14 @@ export default function ArtifactPreviewWindow() {
 
     // 处理重定向
     const handleRedirect = useCallback((url: string) => {
+        restoreAbortRef.current = true;
         setPreviewUrl(url);
         setIsPreviewReady(true);
     }, []);
 
     // 处理环境检查
     const handleEnvironmentCheck = useCallback((data: EnvironmentCheckData) => {
+        restoreAbortRef.current = true;
         setEnvironmentTool(data.tool);
         setEnvironmentMessage(data.message);
         setCurrentLang(data.lang);
@@ -294,6 +361,17 @@ export default function ArtifactPreviewWindow() {
         onReset: resetPreviewState,
     });
 
+    useEffect(() => {
+        setBridgeConfig({
+            db_id: runtimeConfig.db_id,
+            assistant_id: runtimeConfig.assistant_id,
+        });
+    }, [runtimeConfig]);
+
+    useEffect(() => {
+        sendConfig();
+    }, [sendConfig, runtimeConfig.db_id, runtimeConfig.assistant_id]);
+
     // 初始化 mermaid - 根据主题动态配置
     useEffect(() => {
         // 检测当前主题
@@ -322,15 +400,18 @@ export default function ArtifactPreviewWindow() {
             const hasData = previewUrl || previewType || mermaidContent || htmlContent || markdownContent || drawioXmlContent;
             if (!hasData && !artifactEvents.hasReceivedData && !hasTriedRestoreRef.current) {
                 hasTriedRestoreRef.current = true;  // 标记已尝试
-                const restored = await loadArtifactFromCache();
-                if (restored) {
-                    artifactEvents.addLog('log', '正在恢复上次的预览...');
+                await new Promise(resolve => setTimeout(resolve, 300));
+                if (!restoreAbortRef.current) {
+                    const restored = await loadArtifactFromCache();
+                    if (restored) {
+                        artifactEvents.addLog('log', '正在恢复上次的预览...');
+                    }
                 }
             }
         };
 
         initFromCache();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [loadArtifactFromCache]);
 
     // 自动滚动到底部
@@ -568,10 +649,6 @@ export default function ArtifactPreviewWindow() {
     }, []);
 
     // 添加切换视图的按钮（可选）
-    const handleToggleView = () => {
-        setCurrentView(current => current === 'logs' ? 'preview' : 'logs');
-    };
-
     // 在浏览器中打开预览页面
     const handleOpenInBrowser = async () => {
         if (previewUrl) {
@@ -602,6 +679,33 @@ export default function ArtifactPreviewWindow() {
 
     // 检查是否可以保存（仅支持 vue, react, html）
     const canSave = previewTypeRef.current && ['vue', 'react', 'html'].includes(previewTypeRef.current);
+
+    const handleRuntimeDbChange = (value: string) => {
+        const normalized = normalizeDbId(value);
+        setRuntimeConfig(prev => {
+            const next = { ...prev, db_id: normalized || undefined };
+            persistArtifactRuntimeConfig(next, currentConversationId);
+            return next;
+        });
+    };
+
+    const handleAssistantChange = (value: string) => {
+        const assistantId = value && value !== 'none' ? parseInt(value, 10) : undefined;
+        setRuntimeConfig(prev => {
+            const next = { ...prev, assistant_id: assistantId };
+            persistArtifactRuntimeConfig(next, currentConversationId);
+            return next;
+        });
+    };
+
+    const handleGenerateDbId = () => {
+        const dbId = generateRandomDbId();
+        setRuntimeConfig(prev => {
+            const next = { ...prev, db_id: dbId };
+            persistArtifactRuntimeConfig(next, currentConversationId);
+            return next;
+        });
+    };
 
     // draw.io postMessage 通信
     useEffect(() => {
@@ -677,14 +781,29 @@ export default function ArtifactPreviewWindow() {
         }
     }, [previewType, drawioXmlContent, artifactEvents]);
 
+    const codeContent = originalCode || htmlContent || mermaidContent || markdownContent || '';
+    const codeLanguage = previewType === 'react'
+        ? 'tsx'
+        : previewType === 'vue'
+            ? 'vue'
+            : previewType === 'mermaid'
+                ? 'mermaid'
+                : previewType === 'html'
+                    ? 'html'
+                    : previewType === 'svg' || previewType === 'xml' || previewType === 'drawio'
+                        ? 'xml'
+                        : previewType === 'markdown' || previewType === 'md'
+                            ? 'markdown'
+                            : 'text';
+
     return (
-        <div className="flex h-screen bg-background">
-            <div className="flex flex-col flex-1 bg-background rounded-xl m-2 shadow-lg border border-border">
+        <div className="flex h-screen bg-background overflow-hidden">
+            <div className="flex flex-col flex-1 bg-background rounded-xl m-2 shadow-lg border border-border min-h-0 overflow-hidden">
                 {/* 顶部工具栏 */}
                 {isPreviewReady && (previewUrl || previewType === 'mermaid' || previewType === 'html' || previewType === 'svg' || previewType === 'xml' || previewType === 'markdown' || previewType === 'md' || previewType === 'drawio') && (
                     <div className="flex-shrink-0 p-4 border-b border-border flex items-center justify-between">
                         <div className="text-sm text-muted-foreground">
-                            {currentView === 'logs' ? '日志视图' :
+                            {currentView === 'logs' ? '日志视图' : currentView === 'code' ? '代码视图' :
                                 previewType === 'mermaid' ? 'Mermaid 图表预览' :
                                     previewType === 'html' ? 'HTML 预览' :
                                         previewType === 'svg' ? 'SVG 预览' :
@@ -693,7 +812,61 @@ export default function ArtifactPreviewWindow() {
                                                     previewType === 'drawio' ? 'Draw.io 图表预览' :
                                                         `预览地址: ${previewUrl}`}
                         </div>
-                        <div className="flex gap-2">
+                        <div className="flex items-center gap-2">
+                            <Popover>
+                                <PopoverTrigger asChild>
+                                    <Button variant="outline" size="sm" title="临时配置">
+                                        <Settings2 className="h-4 w-4" />
+                                    </Button>
+                                </PopoverTrigger>
+                                <PopoverContent align="end" className="w-80">
+                                    <div className="space-y-4">
+                                        <div className="text-sm font-medium text-foreground">临时配置（未保存也可用）</div>
+                                        <div className="space-y-2">
+                                            <Label className="flex items-center gap-2 text-sm">
+                                                <Database className="h-4 w-4" />
+                                                数据库标识
+                                            </Label>
+                                            <div className="flex gap-2">
+                                                <Input
+                                                    value={runtimeConfig.db_id || ''}
+                                                    onChange={(event) => handleRuntimeDbChange(event.target.value)}
+                                                    placeholder="artifact-xxxx"
+                                                />
+                                                <Button variant="outline" size="sm" onClick={handleGenerateDbId}>
+                                                    随机
+                                                </Button>
+                                            </div>
+                                            <p className="text-xs text-muted-foreground">仅支持字母、数字、下划线和连字符</p>
+                                        </div>
+                                        <div className="space-y-2">
+                                            <Label className="flex items-center gap-2 text-sm">
+                                                <Bot className="h-4 w-4" />
+                                                关联助手
+                                            </Label>
+                                            <Select
+                                                value={runtimeConfig.assistant_id ? String(runtimeConfig.assistant_id) : 'none'}
+                                                onValueChange={handleAssistantChange}
+                                            >
+                                                <SelectTrigger className="w-full">
+                                                    <SelectValue placeholder="选择一个助手（可选）" />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    <SelectItem value="none">不关联助手</SelectItem>
+                                                    {assistants.map((assistant) => (
+                                                        <SelectItem key={assistant.id} value={String(assistant.id)}>
+                                                            <span className="flex items-center gap-2">
+                                                                <span>{assistant.icon}</span>
+                                                                <span>{assistant.name}</span>
+                                                            </span>
+                                                        </SelectItem>
+                                                    ))}
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
+                                    </div>
+                                </PopoverContent>
+                            </Popover>
                             {/* 保存按钮 - 仅在预览模式且可保存时显示 */}
                             {currentView === 'preview' && canSave && (
                                 <Button
@@ -725,19 +898,19 @@ export default function ArtifactPreviewWindow() {
                                     </Button>
                                 </>
                             )}
-                            <Button
-                                onClick={handleToggleView}
-                                variant="default"
-                                size="sm"
-                            >
-                                {currentView === 'logs' ? '查看预览' : '查看日志'}
-                            </Button>
+                            <Tabs value={currentView} onValueChange={(value) => setCurrentView(value as 'logs' | 'preview' | 'code')}>
+                                <TabsList>
+                                    <TabsTrigger value="logs">日志</TabsTrigger>
+                                    <TabsTrigger value="code">代码</TabsTrigger>
+                                    <TabsTrigger value="preview">预览</TabsTrigger>
+                                </TabsList>
+                            </Tabs>
                         </div>
                     </div>
                 )}
 
                 {/* 主要内容区域 */}
-                <div className="flex-1 flex flex-col">
+                <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
                     {currentView === 'logs' ? (
                         /* 日志视图 - 全屏显示 */
                         <div className="flex-1 flex flex-col p-4">
@@ -768,6 +941,17 @@ export default function ArtifactPreviewWindow() {
                                     </p>
                                 </div>
                             )}
+                        </div>
+                    ) : currentView === 'code' ? (
+                        <div className="flex-1 flex flex-col p-4 gap-3 overflow-hidden min-h-0">
+                            <div className="text-sm text-muted-foreground flex-shrink-0">Artifact 代码</div>
+                            <div className="flex-1 overflow-auto rounded border border-border bg-muted p-3 min-h-0">
+                                <div className="w-full max-w-[1100px] [&_pre]:!overflow-visible [&_pre]:!m-0 [&_pre]:!p-0 [&_pre]:!bg-transparent">
+                                    <ArtifactPreviewCodeBlock language={codeLanguage} className="bg-transparent">
+                                        {codeContent}
+                                    </ArtifactPreviewCodeBlock>
+                                </div>
+                            </div>
                         </div>
                     ) : (
                         /* 预览视图 - 根据类型显示不同内容 */
@@ -900,6 +1084,7 @@ export default function ArtifactPreviewWindow() {
                             ) : (
                                 /* iframe 预览 - 用于 React 和 Vue */
                                 <iframe
+                                    ref={previewIframeRef}
                                     src={previewUrl || ''}
                                     className="flex-1 w-full border-0"
                                     sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
@@ -930,6 +1115,8 @@ export default function ArtifactPreviewWindow() {
                     onClose={() => setShowSaveDialog(false)}
                     artifactType={previewTypeRef.current}
                     code={originalCode || htmlContent || mermaidContent || markdownContent}
+                    initialDbId={runtimeConfig.db_id}
+                    initialAssistantId={runtimeConfig.assistant_id}
                 />
             )}
         </div>

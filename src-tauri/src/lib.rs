@@ -13,6 +13,8 @@ mod template_engine;
 mod utils;
 mod window;
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use crate::api::ai_api::{
     ask_ai, cancel_ai, get_activity_focus, regenerate_ai, regenerate_conversation_title,
     tool_result_continue_ask_ai,
@@ -74,6 +76,11 @@ use crate::api::updater_api::{
     download_and_install_update_with_proxy, get_app_version,
 };
 use crate::artifacts::artifacts_db::ArtifactsDatabase;
+use crate::artifacts::artifact_bridge_api::{
+    artifact_ai_ask, artifact_db_batch_execute, artifact_db_delete, artifact_db_execute,
+    artifact_db_exists, artifact_db_get_columns, artifact_db_get_tables, artifact_db_list,
+    artifact_db_query, artifact_get_assistants, artifact_get_config,
+};
 use crate::artifacts::collection_api::{
     delete_artifact_collection, generate_artifact_metadata, get_artifact_by_id,
     get_artifacts_collection, get_artifacts_for_completion, get_artifacts_statistics,
@@ -97,8 +104,9 @@ use crate::artifacts::vue_preview::{
     close_vue_preview, create_vue_preview, create_vue_preview_for_artifact,
 };
 use crate::artifacts::{
-    react_runner::{close_react_artifact, run_react_artifact},
-    vue_runner::{close_vue_artifact, run_vue_artifact},
+    react_runner::{clear_react_artifact_cache, close_react_artifact, run_react_artifact},
+    shared_components::clear_all_template_cache,
+    vue_runner::{clear_vue_artifact_cache, close_vue_artifact, run_vue_artifact},
 };
 use crate::db::assistant_db::AssistantDatabase;
 use crate::db::llm_db::LLMDatabase;
@@ -209,6 +217,15 @@ struct NameCacheState {
 #[derive(Serialize, Deserialize)]
 struct Config {
     selected_text: String,
+}
+
+fn request_app_exit(app_handle: &tauri::AppHandle) {
+    if EXIT_STATE
+        .compare_exchange(EXIT_STATE_IDLE, EXIT_STATE_REQUESTED, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        app_handle.exit(0);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -415,7 +432,7 @@ pub fn run() {
                         }
                     }
                     "quit" => {
-                        std::process::exit(0);
+                        request_app_exit(app);
                     }
                     _ => {}
                 });
@@ -460,6 +477,11 @@ pub fn run() {
             // 初始化内置工具集（搜索、操作），如果不存在则自动创建
             if let Err(e) = init_builtin_mcp_servers(&app_handle) {
                 warn!(error = %e, "Failed to initialize builtin MCP servers");
+            }
+
+            info!("Running search profile lock cleanup on startup");
+            if let Err(e) = crate::mcp::builtin_mcp::search::handler::cleanup_search_profile_locks(&app_handle) {
+                warn!(error = %e, "Failed to cleanup search profile locks on startup");
             }
 
             // Initialize TodoState with app handle for database persistence
@@ -580,6 +602,18 @@ pub fn run() {
             open_artifact_collections_window,
             get_artifacts_statistics,
             get_artifacts_for_completion,
+            // Artifact bridge API
+            artifact_db_query,
+            artifact_db_execute,
+            artifact_db_batch_execute,
+            artifact_db_get_tables,
+            artifact_db_get_columns,
+            artifact_db_exists,
+            artifact_db_delete,
+            artifact_db_list,
+            artifact_ai_ask,
+            artifact_get_assistants,
+            artifact_get_config,
             get_bang_list,
             get_selected_text_api,
             set_shortcut_recording,
@@ -612,8 +646,11 @@ pub fn run() {
             close_vue_preview,
             run_react_artifact,
             close_react_artifact,
+            clear_react_artifact_cache,
             run_vue_artifact,
             close_vue_artifact,
+            clear_vue_artifact_cache,
+            clear_all_template_cache,
             confirm_environment_install,
             retry_preview_after_install,
             get_mcp_servers,
@@ -735,13 +772,45 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application");
 
-    app.run(|_app_handle, e| match e {
+    app.run(|app_handle, e| match e {
         RunEvent::ExitRequested { api, .. } => {
-            api.prevent_exit();
+            match EXIT_STATE.load(Ordering::SeqCst) {
+                EXIT_STATE_IDLE => {
+                    api.prevent_exit();
+                }
+                EXIT_STATE_REQUESTED => {
+                    api.prevent_exit();
+                    if EXIT_STATE
+                        .compare_exchange(
+                            EXIT_STATE_REQUESTED,
+                            EXIT_STATE_CLEANING,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_ok()
+                    {
+                        let app_handle = app_handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) = crate::mcp::builtin_mcp::search::handler::shutdown_search_browser_pool().await {
+                                warn!(error = %e, "Failed to shutdown search browser pool");
+                            }
+                            EXIT_STATE.store(EXIT_STATE_READY, Ordering::SeqCst);
+                            app_handle.exit(0);
+                        });
+                    }
+                }
+                EXIT_STATE_CLEANING => {
+                    api.prevent_exit();
+                }
+                EXIT_STATE_READY => {}
+                _ => {
+                    api.prevent_exit();
+                }
+            }
         }
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => {
-            awaken_aipp(_app_handle);
+            awaken_aipp(app_handle);
         }
         _ => {}
     });
@@ -1069,3 +1138,8 @@ pub(crate) async fn reconfigure_global_shortcuts_async(app_handle: &tauri::AppHa
         }
     }
 }
+const EXIT_STATE_IDLE: u8 = 0;
+const EXIT_STATE_REQUESTED: u8 = 1;
+const EXIT_STATE_CLEANING: u8 = 2;
+const EXIT_STATE_READY: u8 = 3;
+static EXIT_STATE: AtomicU8 = AtomicU8::new(EXIT_STATE_IDLE);

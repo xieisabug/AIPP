@@ -37,8 +37,20 @@ impl SearchEngineBase {
     }
 
     /// 提取HTML中的主要内容
-    fn extract_main_content(html: &str) -> String {
+    pub fn extract_main_content(html: &str) -> String {
         let mut content = html.to_string();
+
+        // 只保留body内容，移除head
+        let head_pattern = regex::Regex::new(r"(?is)<head[^>]*>.*?</head>").unwrap();
+        content = head_pattern.replace_all(&content, "").to_string();
+
+        // 提取body内容，如果没有body则保留原内容
+        let body_pattern = regex::Regex::new(r"(?is)<body[^>]*>(.*?)</body>").unwrap();
+        if let Some(cap) = body_pattern.captures(&content) {
+            if let Some(matched) = cap.get(1) {
+                content = matched.as_str().to_string();
+            }
+        }
 
         // 移除脚本和样式标签
         let script_pattern = regex::Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap();
@@ -51,12 +63,34 @@ impl SearchEngineBase {
         let comment_pattern = regex::Regex::new(r"<!--.*?-->").unwrap();
         content = comment_pattern.replace_all(&content, "").to_string();
 
+        // 移除非核心内容：导航、页眉、页脚、侧边栏
+        let remove_patterns = [
+            r"(?is)<nav[^>]*>.*?</nav>",           // 导航栏
+            r"(?is)<header[^>]*>.*?</header>",     // 页眉
+            r"(?is)<footer[^>]*>.*?</footer>",     // 页脚
+            r"(?is)<aside[^>]*>.*?</aside>",       // 侧边栏
+            r#"(?is)<div[^>]*class="[^"]*nav[^"]*"[^>]*>.*?</div>"#,
+            r#"(?is)<div[^>]*class="[^"]*header[^"]*"[^>]*>.*?</div>"#,
+            r#"(?is)<div[^>]*class="[^"]*footer[^"]*"[^>]*>.*?</div>"#,
+            r#"(?is)<div[^>]*class="[^"]*sidebar[^"]*"[^>]*>.*?</div>"#,
+        ];
+
+        for pattern in &remove_patterns {
+            if let Ok(re) = regex::Regex::new(pattern) {
+                content = re.replace_all(&content, "").to_string();
+            }
+        }
+
+        // SVG特殊处理：保留标签但清空内容，添加图片注释
+        let svg_pattern = regex::Regex::new(r"(?is)<svg[^>]*>.*?</svg>").unwrap();
+        content = svg_pattern.replace_all(&content, "<svg><!-- 图片 --></svg>").to_string();
+
         // 尝试提取主要内容区域
         let main_patterns = [
             r"(?is)<main[^>]*>(.*?)</main>",
             r"(?is)<article[^>]*>(.*?)</article>",
-            r#"(?is)<div[^>]*id=\"?content\"?[^>]*>(.*?)</div>"#,
-            r#"(?is)<div[^>]*class=\"[^"]*content[^"]*\"[^>]*>(.*?)</div>"#,
+            r#"(?is)<div[^>]*id="?content"?[^>]*>(.*?)</div>"#,
+            r#"(?is)<div[^>]*class="[^"]*content[^"]*"[^>]*>(.*?)</div>"#,
         ];
 
         for pattern in &main_patterns {
@@ -231,5 +265,151 @@ mod tests {
         let result = SearchEngineBase::html_to_markdown(html);
         // Should extract article content
         assert!(result.contains("Article content"));
+    }
+
+    // ============================================
+    // Content Filtering Tests
+    // ============================================
+
+    #[test]
+    fn test_html_to_markdown_removes_head_and_body_tags() {
+        let html = r#"
+        <html>
+        <head><title>Title</title><meta charset="utf-8"></head>
+        <body>
+        <p>Body content</p>
+        </body>
+        </html>
+        "#;
+        let result = SearchEngineBase::html_to_markdown(html);
+        // Should extract body content, not head
+        assert!(result.contains("Body content"));
+        assert!(!result.contains("Title"));
+        assert!(!result.contains("charset"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_removes_nav_header_footer() {
+        let html = r#"
+        <body>
+        <nav>Navigation menu</nav>
+        <header>Site header</header>
+        <main><p>Main content</p></main>
+        <footer>Site footer</footer>
+        </body>
+        "#;
+        let result = SearchEngineBase::html_to_markdown(html);
+        // Should keep main content but remove nav/header/footer
+        assert!(result.contains("Main content"));
+        assert!(!result.contains("Navigation menu"));
+        assert!(!result.contains("Site header"));
+        assert!(!result.contains("Site footer"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_removes_aside_and_div_nav_classes() {
+        let html = r#"
+        <body>
+        <aside>Sidebar content</aside>
+        <div class="navigation">Div navigation</div>
+        <div class="header-area">Div header</div>
+        <div class="footer-section">Div footer</div>
+        <div class="sidebar">Div sidebar</div>
+        <p>Main content</p>
+        </body>
+        "#;
+        let result = SearchEngineBase::html_to_markdown(html);
+        // Should remove all navigation elements and keep main content
+        assert!(result.contains("Main content"));
+        assert!(!result.contains("Sidebar content"));
+        assert!(!result.contains("Div navigation"));
+        assert!(!result.contains("Div header"));
+        assert!(!result.contains("Div footer"));
+        assert!(!result.contains("Div sidebar"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_svg_replaced_with_placeholder() {
+        let html = r#"
+        <body>
+        <p>Before SVG</p>
+        <svg width="100" height="100">
+        <circle cx="50" cy="50" r="40" stroke="green" stroke-width="4" fill="yellow" />
+        </svg>
+        <p>After SVG</p>
+        </body>
+        "#;
+        let result = SearchEngineBase::html_to_markdown(html);
+        // SVG should be replaced with placeholder comment
+        assert!(result.contains("Before SVG"));
+        assert!(result.contains("After SVG"));
+        assert!(result.contains("<svg>") || result.contains("图片"));
+        // Should not contain SVG content
+        assert!(!result.contains("circle"));
+        assert!(!result.contains("yellow"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_complex_page_cleanup() {
+        let html = r#"
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+        <meta charset="UTF-8">
+        <title>Test Page</title>
+        <script src="analytics.js"></script>
+        <style>.hidden { display: none; }</style>
+        </head>
+        <body>
+        <nav>
+        <a href="/">Home</a>
+        <a href="/about">About</a>
+        </nav>
+        <header>
+        <h1>Site Header</h1>
+        </header>
+        <main>
+        <article>
+        <h2>Article Title</h2>
+        <p>This is the main article content.</p>
+        <svg viewBox="0 0 100 100">
+        <rect width="100" height="100" fill="blue" />
+        </svg>
+        <p>More content after the image.</p>
+        </article>
+        </main>
+        <aside>
+        <h3>Related Links</h3>
+        <ul>
+        <li><a href="/link1">Link 1</a></li>
+        <li><a href="/link2">Link 2</a></li>
+        </ul>
+        </aside>
+        <footer>
+        <p>&copy; 2024 Test Site</p>
+        </footer>
+        </body>
+        </html>
+        "#;
+        let result = SearchEngineBase::html_to_markdown(html);
+
+        // 应该保留核心内容
+        assert!(result.contains("Article Title"), "应该保留文章标题");
+        assert!(result.contains("This is the main article content"), "应该保留文章正文");
+        assert!(result.contains("More content after the image"), "应该保留后续内容");
+
+        // 应该移除非核心内容
+        assert!(!result.contains("Home"), "应该移除导航栏");
+        assert!(!result.contains("Site Header"), "应该移除页眉");
+        assert!(!result.contains("Related Links"), "应该移除侧边栏");
+        assert!(!result.contains("Link 1"), "应该移除侧边栏链接");
+        assert!(!result.contains("2024 Test Site"), "应该移除页脚");
+        assert!(!result.contains("analytics.js"), "应该移除script标签");
+        assert!(!result.contains("display: none"), "应该移除style标签");
+        assert!(!result.contains("Test Page"), "应该移除head中的title");
+
+        // SVG应该被替换为占位符
+        assert!(!result.contains("rect width"), "应该移除SVG内容");
+        assert!(!result.contains("fill=\"blue\""), "应该移除SVG属性");
     }
 }

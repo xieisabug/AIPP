@@ -16,7 +16,10 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({ form, onSa
     const previousNotificationValue = useRef<boolean | undefined>(undefined);
     const { themes, themeInfo } = useSyntectThemes();
     
-    const themeOptions = [{ value: "default", label: "默认主题" }];
+    const themeOptions = [
+        { value: "default", label: "默认主题" },
+        { value: "newyear", label: "新年主题" },
+    ];
 
     const colorModeOptions = [
         { value: "light", label: "浅色" },

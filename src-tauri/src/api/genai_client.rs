@@ -1,7 +1,9 @@
+use crate::api::ai::config::get_custom_headers_from_config;
 use crate::errors::AppError;
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{adapter::AdapterKind, ModelIden, ServiceTarget};
 use genai::{Client, WebConfig};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -84,6 +86,7 @@ pub fn create_client_with_config(
     network_proxy: Option<&str>,
     proxy_enabled: bool,
     request_timeout: Option<u64>, // 超时时间（秒）
+    config_feature_map: &std::collections::HashMap<String, std::collections::HashMap<String, crate::db::system_db::FeatureConfig>>,
 ) -> Result<Client, AppError> {
     let adapter_kind = infer_adapter_kind(model_name, api_type);
 
@@ -137,6 +140,21 @@ pub fn create_client_with_config(
                 }
             }
         }
+    }
+
+    // 配置自定义 headers
+    let custom_headers = get_custom_headers_from_config(config_feature_map);
+    if !custom_headers.is_empty() {
+        let mut headers = HeaderMap::new();
+        for (key, value) in custom_headers {
+            if let Ok(header_name) = HeaderName::from_bytes(key.as_bytes()) {
+                if let Ok(header_value) = HeaderValue::from_str(&value) {
+                    headers.insert(header_name, header_value);
+                }
+            }
+        }
+        web_config = web_config.with_default_headers(headers);
+        info!("custom headers configured");
     }
 
     // 克隆值以便在闭包中使用

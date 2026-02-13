@@ -365,3 +365,12 @@ pub async fn close_vue_artifact(app_handle: AppHandle, artifact_id: i64) -> Resu
     let runner = VueArtifactRunner::new(app_handle);
     runner.close_artifact(&server_id).map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub fn clear_vue_artifact_cache(app_handle: AppHandle) -> Result<(), String> {
+    println!("🗑️ [VueRunner] 清除 Vue artifact 模板缓存");
+    let shared_utils = SharedPreviewUtils::new(app_handle);
+    shared_utils
+        .clear_template_cache("vue-artifacts")
+        .map_err(|e| e.to_string())
+}

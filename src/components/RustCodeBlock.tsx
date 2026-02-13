@@ -2,9 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useTheme } from "@/hooks/useTheme";
 import IconButton from "./IconButton";
-import Ok from "../assets/ok.svg?react";
-import Copy from "../assets/copy.svg?react";
-import Run from "../assets/run.svg?react";
+import { Copy, Check, SquareTerminal } from "lucide-react";
 import { useRustHighlight } from "@/hooks/highlight/useRustHighlight";
 import { useCodeTheme } from "@/hooks/useCodeTheme";
 import type { CodeBlockMetaInfo } from "@/react-markdown/remarkCodeBlockMeta";
@@ -17,6 +15,7 @@ interface RustCodeBlockProps {
     // 是否处于大模型流式输出中（用于首次阈值超限时自动折叠）
     isStreaming?: boolean;
     meta?: CodeBlockMetaInfo | null;
+    disableCollapse?: boolean;
 }
 
 const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
@@ -26,6 +25,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
     className = "",
     isStreaming = false,
     meta = null,
+    disableCollapse = false,
 }) => {
     const code = useMemo(() => (typeof children === "string" ? children : String(children)), [children]);
     const { resolvedTheme } = useTheme();
@@ -75,6 +75,12 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
 
     // 计算是否超出折叠阈值，并在需要时进行自动折叠
     useEffect(() => {
+        if (disableCollapse) {
+            setIsCollapsed(false);
+            setIsOverflow(false);
+            return;
+        }
+
         const el = codeRef.current;
         if (!el) return;
 
@@ -121,7 +127,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
             window.removeEventListener('resize', onResize);
         };
         // 依赖 html 与 code，在代码或高亮结果变化时重新测量
-    }, [html, code, isStreaming]);
+    }, [html, code, isStreaming, disableCollapse]);
 
     // 监听滚动判断是否需要 sticky - 使用 RAF 节流
     useEffect(() => {
@@ -210,10 +216,10 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                 style={isSticky ? { right: `${toolbarRight}px` } : undefined}
             >
                 <IconButton
-                    icon={copyState === "copy" ? <Copy fill="black" /> : <Ok fill="black" />}
+                    icon={copyState === "copy" ? <Copy size={16} className="text-icon" /> : <Check size={16} className="text-icon" />}
                     onClick={handleCopy}
                 />
-                <IconButton icon={<Run fill="black" />} onClick={() => onCodeRun?.(language, code)} />
+                <IconButton icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => onCodeRun?.(language, code)} />
             </div>
 
             {metaLabel && (
@@ -229,8 +235,8 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
             <div
                 className="relative"
                 style={{
-                    maxHeight: isCollapsed ? COLLAPSED_MAX_HEIGHT : undefined,
-                    overflow: isCollapsed ? 'hidden' : 'auto',
+                    maxHeight: !disableCollapse && isCollapsed ? COLLAPSED_MAX_HEIGHT : undefined,
+                    overflow: !disableCollapse && isCollapsed ? 'hidden' : 'auto',
                 }}
             >
                 {html ? (
@@ -245,13 +251,13 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                     </pre>
                 )}
                 {/* Gradient overlay when collapsed */}
-                {isCollapsed && isOverflow && (
+                {!disableCollapse && isCollapsed && isOverflow && (
                     <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-muted to-transparent pointer-events-none" />
                 )}
             </div>
 
             {/* Expand/Collapse control */}
-            {isOverflow && (
+            {!disableCollapse && isOverflow && (
                 <div className="flex justify-center pt-2 pb-1 bg-muted">
                     <button
                         type="button"

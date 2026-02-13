@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
@@ -14,22 +14,33 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import EmojiPicker from "@/components/ui/emoji-picker";
 import { getDefaultIcon, getEmojisByCategory } from "@/utils/emojiUtils";
-import { ArtifactMetadata } from "@/data/ArtifactCollection";
-import { Sparkles } from "lucide-react";
+import { ArtifactMetadata, AssistantBasicInfo } from "@/data/ArtifactCollection";
+import { Sparkles, Database, Bot } from "lucide-react";
 
 interface SaveArtifactDialogProps {
     isOpen: boolean;
     onClose: () => void;
     artifactType: string;
     code: string;
+    initialDbId?: string;
+    initialAssistantId?: number;
 }
 
-export default function SaveArtifactDialog({ isOpen, onClose, artifactType, code }: SaveArtifactDialogProps) {
+export default function SaveArtifactDialog({
+    isOpen,
+    onClose,
+    artifactType,
+    code,
+    initialDbId,
+    initialAssistantId,
+}: SaveArtifactDialogProps) {
     const [isLoading, setIsLoading] = useState(false);
     const [isGeneratingMetadata, setIsGeneratingMetadata] = useState(false);
+    const [assistants, setAssistants] = useState<AssistantBasicInfo[]>([]);
 
     const form = useForm({
         defaultValues: {
@@ -37,8 +48,19 @@ export default function SaveArtifactDialog({ isOpen, onClose, artifactType, code
             icon: getDefaultIcon(),
             description: "",
             tags: "",
+            db_id: initialDbId ?? "",
+            assistant_id: initialAssistantId ? String(initialAssistantId) : "none",
         },
     });
+
+    // 加载可用的助手列表
+    useEffect(() => {
+        if (isOpen) {
+            invoke<AssistantBasicInfo[]>("artifact_get_assistants")
+                .then(setAssistants)
+                .catch(console.error);
+        }
+    }, [isOpen]);
 
     const handleSave = async (data: any) => {
         setIsLoading(true);
@@ -50,6 +72,8 @@ export default function SaveArtifactDialog({ isOpen, onClose, artifactType, code
                 artifact_type: artifactType,
                 code,
                 tags: data.tags.trim() || null,
+                db_id: data.db_id.trim() || null,
+                assistant_id: data.assistant_id && data.assistant_id !== "none" ? parseInt(data.assistant_id, 10) : null,
             };
 
             await invoke<number>("save_artifact_to_collection", { request });
@@ -108,25 +132,40 @@ export default function SaveArtifactDialog({ isOpen, onClose, artifactType, code
         }
     }, [isOpen, form]);
 
+    React.useEffect(() => {
+        if (isOpen) {
+            form.reset({
+                name: "",
+                icon: getDefaultIcon(),
+                description: "",
+                tags: "",
+                db_id: initialDbId ?? "",
+                assistant_id: initialAssistantId ? String(initialAssistantId) : "none",
+            });
+        }
+    }, [isOpen, form, initialDbId, initialAssistantId]);
+
     return (
         <Dialog open={isOpen} onOpenChange={handleCancel}>
             <DialogContent className="sm:max-w-[525px] max-h-[80vh] overflow-y-auto">
                 <DialogHeader>
                     <DialogTitle>保存 Artifact 到合集</DialogTitle>
-                    <DialogDescription>
-                        将当前的 {artifactType} artifact 保存到您的合集中，方便以后快速访问。
-                        <div className="mt-2">
-                            <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                onClick={handleGenerateMetadata}
-                                disabled={isGeneratingMetadata}
-                                className="gap-2"
-                            >
-                                <Sparkles className={`h-4 w-4 ${isGeneratingMetadata ? "animate-pulse" : ""}`} />
-                                {isGeneratingMetadata ? "生成中..." : "智能填写"}
-                            </Button>
+                    <DialogDescription asChild>
+                        <div>
+                            <span>将当前的 {artifactType} artifact 保存到您的合集中，方便以后快速访问。</span>
+                            <div className="mt-2">
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={handleGenerateMetadata}
+                                    disabled={isGeneratingMetadata}
+                                    className="gap-2"
+                                >
+                                    <Sparkles className={`h-4 w-4 ${isGeneratingMetadata ? "animate-pulse" : ""}`} />
+                                    {isGeneratingMetadata ? "生成中..." : "智能填写"}
+                                </Button>
+                            </div>
                         </div>
                     </DialogDescription>
                 </DialogHeader>
@@ -211,6 +250,65 @@ export default function SaveArtifactDialog({ isOpen, onClose, artifactType, code
                                             {...field}
                                         />
                                     </FormControl>
+                                    <FormMessage />
+                                </FormItem>
+                            )}
+                        />
+
+                        <FormField
+                            control={form.control}
+                            name="db_id"
+                            render={({ field }) => (
+                                <FormItem className="space-y-3">
+                                    <FormLabel className="flex items-center gap-2 font-semibold text-sm text-foreground">
+                                        <Database className="h-4 w-4" />
+                                        数据库标识
+                                    </FormLabel>
+                                    <FormControl>
+                                        <Input
+                                            className="focus:ring-ring/20 focus:border-ring"
+                                            placeholder="例如: my-todo-app（留空则不启用数据库）"
+                                            {...field}
+                                        />
+                                    </FormControl>
+                                    <p className="text-xs text-muted-foreground">
+                                        为 artifact 分配独立的数据库，只能包含字母、数字、下划线和连字符
+                                    </p>
+                                    <FormMessage />
+                                </FormItem>
+                            )}
+                        />
+
+                        <FormField
+                            control={form.control}
+                            name="assistant_id"
+                            render={({ field }) => (
+                                <FormItem className="space-y-3">
+                                    <FormLabel className="flex items-center gap-2 font-semibold text-sm text-foreground">
+                                        <Bot className="h-4 w-4" />
+                                        关联助手
+                                    </FormLabel>
+                                <Select onValueChange={field.onChange} value={field.value}>
+                                    <FormControl>
+                                        <SelectTrigger className="focus:ring-ring/20 focus:border-ring">
+                                            <SelectValue placeholder="选择一个助手（可选）" />
+                                        </SelectTrigger>
+                                    </FormControl>
+                                    <SelectContent>
+                                        <SelectItem value="none">不关联助手</SelectItem>
+                                        {assistants.map((assistant) => (
+                                            <SelectItem key={assistant.id} value={String(assistant.id)}>
+                                                <span className="flex items-center gap-2">
+                                                    <span>{assistant.icon}</span>
+                                                        <span>{assistant.name}</span>
+                                                    </span>
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                    <p className="text-xs text-muted-foreground">
+                                        关联后 artifact 可以调用此助手进行 AI 对话
+                                    </p>
                                     <FormMessage />
                                 </FormItem>
                             )}

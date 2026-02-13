@@ -8,7 +8,7 @@ import {
     DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
-import { ChevronDown, PlusCircle } from 'lucide-react';
+import { ChevronDown, Plus } from 'lucide-react';
 import { MCP_QUICK_TEMPLATES, MCPTemplate } from '../../data/MCPTemplates';
 
 interface MCPActionDropdownProps {
@@ -50,7 +50,7 @@ const MCPActionDropdown: React.FC<MCPActionDropdownProps> = ({
                     className={`gap-2 ${className}`}
                     disabled={disabled}
                 >
-                    {showIcon && <PlusCircle className="h-4 w-4" />}
+                    {showIcon && <Plus className="h-4 w-4" />}
                     <ChevronDown className="h-4 w-4" />
                 </Button>
             </DropdownMenuTrigger>

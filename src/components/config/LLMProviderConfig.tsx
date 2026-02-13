@@ -9,7 +9,7 @@ import ImportDialog from "../ImportDialog";
 import PasswordDialog from "../PasswordDialog";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
-import { PlusCircle, Zap, Settings, ServerCrash, Download } from "lucide-react";
+import { Zap, Settings, ServerCrash, Download, Plus } from "lucide-react";
 import { toast } from 'sonner';
 
 // 导入公共组件
@@ -255,7 +255,7 @@ const LLMProviderConfig: React.FC = () => {
                         onClick={openNewProviderDialog}
                         className="gap-2 bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm hover:shadow-md transition-all"
                     >
-                        <PlusCircle className="h-4 w-4" />
+                        <Plus className="h-4 w-4" />
                     </Button>
                 </TooltipTrigger>
                 <TooltipContent>添加提供商</TooltipContent>
@@ -347,7 +347,7 @@ const LLMProviderConfig: React.FC = () => {
                                             onClick={openNewProviderDialog}
                                             className="gap-2 bg-primary hover:bg-primary/90 text-primary-foreground shadow-lg hover:shadow-xl transition-all"
                                         >
-                                            <PlusCircle className="h-4 w-4" />
+                                            <Plus className="h-4 w-4" />
                                             添加第一个提供商
                                         </Button>
                                         <Tooltip delayDuration={500}>

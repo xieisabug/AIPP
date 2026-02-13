@@ -2,7 +2,6 @@ import React, { useCallback, useState } from 'react';
 import { File, Search, FolderOpen, FileInput, FileQuestion, ExternalLink, ChevronDown, Image } from 'lucide-react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { invoke } from '@tauri-apps/api/core';
-import { emitTo, once } from '@tauri-apps/api/event';
 import { ContextItem } from './types';
 import { cn } from '@/utils/utils';
 
@@ -56,16 +55,7 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
     const handleOpenMarkdownPreview = useCallback(async (markdown: string) => {
         if (!markdown) return;
         try {
-            await invoke('open_artifact_preview_window');
-            const payload = { type: 'markdown', original_code: markdown };
-            try {
-                await emitTo('artifact_preview', 'artifact-preview-data', payload);
-            } catch (_) {
-                // Ignore direct send failure, fallback to ready event.
-            }
-            await once('artifact-preview-ready', () => {
-                emitTo('artifact_preview', 'artifact-preview-data', payload);
-            });
+            await invoke('run_artifacts', { lang: 'markdown', inputStr: markdown });
         } catch (error) {
             console.error('Open markdown preview failed', error);
         }

@@ -138,6 +138,38 @@ pub fn get_network_proxy_from_config(
     None
 }
 
+/// 从工具错误配置中获取是否继续对话（默认开启）
+pub fn get_continue_on_tool_error_from_config(
+    config_feature_map: &HashMap<String, HashMap<String, crate::db::system_db::FeatureConfig>>,
+) -> bool {
+    if let Some(tool_config) = config_feature_map.get("tool_error_continue") {
+        if let Some(enabled_config) = tool_config.get("enabled") {
+            let raw_value = enabled_config.value.trim().to_lowercase();
+            if raw_value == "false" || raw_value == "0" {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// 从网络配置中获取自定义 HTTP Headers
+pub fn get_custom_headers_from_config(
+    config_feature_map: &HashMap<String, HashMap<String, crate::db::system_db::FeatureConfig>>,
+) -> HashMap<String, String> {
+    if let Some(network_config) = config_feature_map.get("network_config") {
+        if let Some(headers_config) = network_config.get("custom_headers") {
+            let headers_json = headers_config.value.trim();
+            if !headers_json.is_empty() {
+                if let Ok(parsed) = serde_json::from_str::<HashMap<String, String>>(headers_json) {
+                    return parsed;
+                }
+            }
+        }
+    }
+    HashMap::new()
+}
+
 /// 计算重试延迟，使用指数退避策略
 pub fn calculate_retry_delay(attempt: u32) -> u64 {
     RETRY_DELAY_BASE_MS * (2_u64.pow(attempt.saturating_sub(1)))

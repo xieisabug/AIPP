@@ -1,14 +1,13 @@
 import { useMemo } from 'react';
 import { Message } from '../data/Conversation';
 import { CodeArtifact } from '../components/chat-sidebar/types';
+import { parseCodeBlockMeta } from '../react-markdown/remarkCodeBlockMeta';
 
 // Regex to match markdown code blocks with optional meta info
 // Matches ```lang meta\n...``` where meta can contain title="..." or other attributes
 // Group 1: language, Group 2: meta info (optional), Group 3: code content
 const CODE_BLOCK_REGEX = /```(\w*)([^\n]*)\n([\s\S]*?)```/g;
 
-// Extract title from meta info like: title="App.tsx" or title='App.tsx'
-const META_TITLE_REGEX = /title\s*=\s*["']([^"']+)["']/i;
 
 const ARTIFACT_LIST_LANGUAGES = new Set([
     'vue',
@@ -28,11 +27,6 @@ interface UseArtifactExtractorOptions {
 
 interface UseArtifactExtractorReturn {
     artifacts: CodeArtifact[];
-}
-
-function extractMetaTitle(meta: string): string | undefined {
-    const match = meta.match(META_TITLE_REGEX);
-    return match ? match[1] : undefined;
 }
 
 export function useArtifactExtractor({ messages }: UseArtifactExtractorOptions): UseArtifactExtractorReturn {
@@ -63,9 +57,10 @@ export function useArtifactExtractor({ messages }: UseArtifactExtractorOptions):
                 if (code.length < 20) continue;
 
                 blockIndex++;
-                const metaTitle = extractMetaTitle(meta);
+                const metaInfo = meta.trim() ? parseCodeBlockMeta(meta) : {};
+                const metaTitle = metaInfo.title;
                 
-                // Display title: use metaTitle if available, otherwise "消息X - 代码块Y"
+                // Display title: use meta title if available, otherwise fall back to default
                 const displayTitle = metaTitle || `消息${messageIdx + 1} - 代码块${blockIndex}`;
 
                 result.push({

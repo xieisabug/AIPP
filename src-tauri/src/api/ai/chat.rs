@@ -7,6 +7,7 @@ use crate::db::conversation_db::{ConversationDatabase, Message, Repository};
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
 use crate::state::activity_state::ConversationActivityManager;
+use crate::state::message_token::MessageTokenManager;
 use crate::utils::window_utils::send_error_to_appropriate_window;
 use anyhow::Context as _;
 use futures::StreamExt;
@@ -18,6 +19,7 @@ use std::collections::HashMap;
 use tauri::{Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tokio::time::{sleep, Duration};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 /// HTTP 错误详情，包含状态码、响应体、端点等
@@ -1502,6 +1504,11 @@ pub async fn handle_stream_chat(
 ) -> Result<(), anyhow::Error> {
     let mut main_attempts = 0;
     let app_handle_clone = app_handle.clone();
+    let cancel_token = if let Some(token_manager) = app_handle.try_state::<MessageTokenManager>() {
+        token_manager.get_cancel_token(conversation_id).await
+    } else {
+        None
+    };
 
     // 从配置中获取最大重试次数
     let max_retry_attempts = get_retry_attempts_from_config(&config_feature_map);
@@ -1529,6 +1536,7 @@ pub async fn handle_stream_chat(
             llm_model_name.clone(),
             mcp_override_config.clone(),
             tool_name_mapping.clone(),
+            cancel_token.clone(),
         )
         .await;
 
@@ -1618,13 +1626,35 @@ async fn attempt_stream_chat(
     llm_model_name: String,
     mcp_override_config: Option<McpOverrideConfig>,
     tool_name_mapping: ToolNameMapping,
+    cancel_token: Option<CancellationToken>,
 ) -> Result<(), anyhow::Error> {
+    if let Some(token) = cancel_token.as_ref() {
+        if token.is_cancelled() {
+            info!(conversation_id, "stream chat cancelled before start");
+            return Ok(());
+        }
+    }
     // 尝试建立流式连接
     info!(model_name, "establishing stream connection");
 
+    let generation_group_id =
+        generation_group_id_override.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
     debug!("stream chat_request messages");
     for (i, msg) in chat_request.messages.iter().enumerate() {
-        debug!(message_index = i, role = ?msg.role, "stream message");
+        let preview = msg.content.first_text().map(|text| {
+            text.chars().take(60).collect::<String>()
+        });
+        let tool_calls_count = msg.content.tool_calls().len();
+        debug!(
+            message_index = i,
+            role = ?msg.role,
+            generation_group_id = %generation_group_id,
+            parent_group_id = ?parent_group_id_override,
+            tool_calls_count,
+            preview = preview.as_deref().unwrap_or(""),
+            "stream message"
+        );
         match &msg.role {
             genai::chat::ChatRole::Assistant => {
                 if let Some(text) = msg.content.first_text() {
@@ -1688,9 +1718,6 @@ async fn attempt_stream_chat(
     let mut reasoning_chunk_count: usize = 0;
     let mut reasoning_char_count: usize = 0;
 
-    let generation_group_id =
-        generation_group_id_override.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
     let is_regeneration = parent_group_id_override.is_some();
     let mut group_merge_event_emitted = false;
 
@@ -1702,7 +1729,17 @@ async fn attempt_stream_chat(
     let mut first_any_token_time: Option<chrono::DateTime<chrono::Utc>> = None; // 任意类型首字到达时间（用于 TPS 计算备用）
 
     loop {
-        let stream_result = chat_stream.next().await;
+        let stream_result = if let Some(token) = cancel_token.as_ref() {
+            tokio::select! {
+                _ = token.cancelled() => {
+                    info!(conversation_id, "stream chat cancelled");
+                    return Ok(());
+                }
+                result = chat_stream.next() => result,
+            }
+        } else {
+            chat_stream.next().await
+        };
         match stream_result {
             Some(Ok(stream_event)) => {
                 match stream_event {
@@ -2382,6 +2419,17 @@ pub async fn handle_non_stream_chat(
 
     // 记录请求开始时间，用于估算非流式响应的 TTFT
     let request_start_time = chrono::Utc::now();
+    let cancel_token = if let Some(token_manager) = app_handle.try_state::<MessageTokenManager>() {
+        token_manager.get_cancel_token(conversation_id).await
+    } else {
+        None
+    };
+    if let Some(token) = cancel_token.as_ref() {
+        if token.is_cancelled() {
+            info!(conversation_id, "non-stream chat cancelled before start");
+            return Ok(());
+        }
+    }
 
     // 从配置中获取最大重试次数
     let max_retry_attempts = get_retry_attempts_from_config(&config_feature_map);
@@ -2391,7 +2439,19 @@ pub async fn handle_non_stream_chat(
 
     debug!("non_stream chat_request messages");
     for (i, msg) in chat_request.messages.iter().enumerate() {
-        debug!(message_index = i, role = ?msg.role, "non stream message");
+        let preview = msg.content.first_text().map(|text| {
+            text.chars().take(60).collect::<String>()
+        });
+        let tool_calls_count = msg.content.tool_calls().len();
+        debug!(
+            message_index = i,
+            role = ?msg.role,
+            generation_group_id = %generation_group_id,
+            parent_group_id = ?parent_group_id_override,
+            tool_calls_count,
+            preview = preview.as_deref().unwrap_or(""),
+            "non stream message"
+        );
         match &msg.role {
             genai::chat::ChatRole::Assistant => {
                 if let Some(text) = msg.content.first_text() {
@@ -2433,10 +2493,21 @@ pub async fn handle_non_stream_chat(
 
             info!(attempts, max_retry_attempts, "non stream chat attempt");
 
-            match client
-                .exec_chat(model_name, chat_request.clone(), Some(&non_stream_options))
-                .await
-            {
+            let exec_result = if let Some(token) = cancel_token.as_ref() {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        info!(conversation_id, "non-stream chat cancelled");
+                        return Ok(());
+                    }
+                    res = client.exec_chat(model_name, chat_request.clone(), Some(&non_stream_options)) => res,
+                }
+            } else {
+                client
+                    .exec_chat(model_name, chat_request.clone(), Some(&non_stream_options))
+                    .await
+            };
+
+            match exec_result {
                 Ok(response) => {
                     info!(attempts, "non stream chat succeeded attempt");
                     break Ok(response);
