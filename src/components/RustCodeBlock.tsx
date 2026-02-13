@@ -2,8 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useTheme } from "@/hooks/useTheme";
 import IconButton from "./IconButton";
-import { Copy, Check } from "lucide-react";
-import Run from "../assets/run.svg?react";
+import { Copy, Check, SquareTerminal } from "lucide-react";
 import { useRustHighlight } from "@/hooks/highlight/useRustHighlight";
 import { useCodeTheme } from "@/hooks/useCodeTheme";
 import type { CodeBlockMetaInfo } from "@/react-markdown/remarkCodeBlockMeta";
@@ -217,10 +216,10 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                 style={isSticky ? { right: `${toolbarRight}px` } : undefined}
             >
                 <IconButton
-                    icon={copyState === "copy" ? <Copy size={16} fill="black" /> : <Check size={16} fill="black" />}
+                    icon={copyState === "copy" ? <Copy size={16} className="text-icon" /> : <Check size={16} className="text-icon" />}
                     onClick={handleCopy}
                 />
-                <IconButton icon={<Run fill="black" />} onClick={() => onCodeRun?.(language, code)} />
+                <IconButton icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => onCodeRun?.(language, code)} />
             </div>
 
             {metaLabel && (

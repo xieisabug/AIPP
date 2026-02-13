@@ -1,8 +1,7 @@
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import React, { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import IconButton from "./IconButton";
-import { Copy, Check } from "lucide-react";
-import Run from "../assets/run.svg?react";
+import { Copy, Check, SquareTerminal } from "lucide-react";
 import { useCodeTheme } from "../hooks/useCodeTheme";
 import { listen } from "@tauri-apps/api/event";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
@@ -90,10 +89,10 @@ const CodeBlock = React.memo(
         const ButtonGroup = () => (
             <div className="flex items-center gap-1 bg-background/90 dark:bg-muted/90 opacity-0 group-hover/codeblock:opacity-100 hover:opacity-100 transition-opacity duration-200 rounded-md p-1 backdrop-blur-sm">
                 <IconButton
-                    icon={copyIconState === "copy" ? <Copy size={16} fill="black" /> : <Check size={16} fill="black" />}
+                    icon={copyIconState === "copy" ? <Copy size={16} className="text-icon" /> : <Check size={16} className="text-icon" />}
                     onClick={handleCopy}
                 />
-                <IconButton icon={<Run fill="black" />} onClick={() => onCodeRun(language, getCodeString())} />
+                <IconButton icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => onCodeRun(language, getCodeString())} />
             </div>
         );
 
