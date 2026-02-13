@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, memo } from "react";
 import { listen } from "@tauri-apps/api/event";
-import MenuIcon from "../assets/menu.svg?react";
+import { EllipsisVertical } from "lucide-react";
 import ConversationTitleEditDialog from "./ConversationTitleEditDialog";
 import useConversationManager from "../hooks/useConversationManager";
 import { Conversation } from "../data/Conversation";
@@ -61,7 +61,7 @@ const ConversationItem = memo(function ConversationItem({
                             e.stopPropagation();
                         }}
                     >
-                        <MenuIcon className="fill-foreground" />
+                        <EllipsisVertical className="h-4 w-4 text-icon" />
                     </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent
