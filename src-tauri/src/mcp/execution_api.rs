@@ -454,32 +454,117 @@ pub async fn execute_mcp_tool_call(
     let is_retry = validate_tool_call_execution(&tool_call).map_err(|e| e.to_string())?;
     debug!(retry=?is_retry, status=%tool_call.status, "validated tool call status");
 
-    // 获取并验证服务器状态
-    let server = db
-        .get_mcp_server(tool_call.server_id)
-        .map_err(|e| format!("获取MCP服务器信息失败: {}", e))?;
-    validate_server_status(&server).map_err(|e| e.to_string())?;
+    // 获取并验证服务器状态；前置校验失败也写入 failed/error，便于 UI 展示和错误续写
+    let server = match db.get_mcp_server(tool_call.server_id) {
+        Ok(server) => server,
+        Err(e) => {
+            return handle_tool_execution_result(
+                &app_handle,
+                &state,
+                &feature_config_state,
+                &window,
+                call_id,
+                tool_call,
+                Err(format!("获取MCP服务器信息失败: {}", e)),
+                is_retry,
+                trigger_continuation,
+            )
+            .await;
+        }
+    };
+    if let Err(e) = validate_server_status(&server) {
+        return handle_tool_execution_result(
+            &app_handle,
+            &state,
+            &feature_config_state,
+            &window,
+            call_id,
+            tool_call,
+            Err(e.to_string()),
+            is_retry,
+            trigger_continuation,
+        )
+        .await;
+    }
     debug!(server_id=server.id, transport=%server.transport_type, "server validated");
 
     let is_dynamic_builtin = server.command.as_deref() == Some("aipp:dynamic_mcp");
     if !is_dynamic_builtin {
-        let dynamic_mode_enabled =
-            is_dynamic_loading_enabled_for_conversation(&app_handle, tool_call.conversation_id).await?;
-        if dynamic_mode_enabled {
-            db.refresh_conversation_loaded_tool_statuses(tool_call.conversation_id)
-                .map_err(|e| format!("刷新已加载工具状态失败: {}", e))?;
-            let is_loaded = db
-                .is_tool_loaded_for_conversation(
-                    tool_call.conversation_id,
-                    tool_call.server_id,
-                    &tool_call.tool_name,
+        let dynamic_mode_enabled = match is_dynamic_loading_enabled_for_conversation(
+            &app_handle,
+            tool_call.conversation_id,
+        )
+        .await
+        {
+            Ok(enabled) => enabled,
+            Err(e) => {
+                return handle_tool_execution_result(
+                    &app_handle,
+                    &state,
+                    &feature_config_state,
+                    &window,
+                    call_id,
+                    tool_call,
+                    Err(e),
+                    is_retry,
+                    trigger_continuation,
                 )
-                .map_err(|e| format!("检查会话已加载工具失败: {}", e))?;
+                .await;
+            }
+        };
+        if dynamic_mode_enabled {
+            if let Err(e) = db.refresh_conversation_loaded_tool_statuses(tool_call.conversation_id) {
+                return handle_tool_execution_result(
+                    &app_handle,
+                    &state,
+                    &feature_config_state,
+                    &window,
+                    call_id,
+                    tool_call,
+                    Err(format!("刷新已加载工具状态失败: {}", e)),
+                    is_retry,
+                    trigger_continuation,
+                )
+                .await;
+            }
+            let is_loaded = match db.is_tool_loaded_for_conversation(
+                tool_call.conversation_id,
+                tool_call.server_id,
+                &tool_call.tool_name,
+            ) {
+                Ok(is_loaded) => is_loaded,
+                Err(e) => {
+                    return handle_tool_execution_result(
+                        &app_handle,
+                        &state,
+                        &feature_config_state,
+                        &window,
+                        call_id,
+                        tool_call,
+                        Err(format!("检查会话已加载工具失败: {}", e)),
+                        is_retry,
+                        trigger_continuation,
+                    )
+                    .await;
+                }
+            };
             if !is_loaded {
-                return Err(format!(
+                let not_loaded_error = format!(
                     "工具 {}::{} 尚未加载。请先调用 load_mcp_tool，例如 names=[\"{}\"]。",
                     tool_call.server_name, tool_call.tool_name, tool_call.tool_name
-                ));
+                );
+                return handle_tool_execution_result(
+                    &app_handle,
+                    &state,
+                    &feature_config_state,
+                    &window,
+                    call_id,
+                    tool_call,
+                    Err(not_loaded_error),
+                    is_retry,
+                    trigger_continuation,
+                )
+                .await;
             }
         }
     }
@@ -619,6 +704,7 @@ pub async fn continue_with_error(
     feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
     window: tauri::Window,
     call_id: i64,
+    error_message: Option<String>,
 ) -> std::result::Result<(), String> {
     let db = MCPDatabase::new(&app_handle).map_err(|e| format!("初始化数据库失败: {}", e))?;
 
@@ -632,9 +718,12 @@ pub async fn continue_with_error(
         return Err("只能从失败状态继续".to_string());
     }
 
-    // 获取错误信息，若无则使用默认消息
-    let error_message = tool_call.error.as_ref()
-        .map(|s| s.as_str())
+    // 获取错误信息，优先使用前端传入的错误文本（用于兜底保留细节）
+    let error_message = error_message
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| tool_call.error.as_deref().map(str::trim).filter(|s| !s.is_empty()))
         .unwrap_or("Tool execution failed with no error details")
         .to_string();
 
