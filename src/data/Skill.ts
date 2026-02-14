@@ -2,11 +2,11 @@
 
 /** Skill source type - identifies where the skill comes from */
 export type SkillSourceType =
-  | 'aipp'
   | 'claude_code_agents'
   | 'claude_code_rules'
   | 'claude_code_memory'
   | 'codex'
+  | 'agents'
   | string; // Custom sources
 
 /** Configuration for a skill source */

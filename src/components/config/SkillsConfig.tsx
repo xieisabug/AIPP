@@ -257,7 +257,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
     }, [skills]);
 
     // Source order for display
-    const sourceOrder: SkillSourceType[] = ['aipp', 'claude_code_agents', 'claude_code_rules', 'claude_code_memory', 'codex'];
+    const sourceOrder: SkillSourceType[] = ['agents', 'claude_code_agents', 'claude_code_rules', 'claude_code_memory', 'codex'];
 
     // Check if skill is enabled for assistant
     const isSkillEnabled = useCallback((identifier: string) => {
@@ -383,7 +383,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
                             />
                         </div>
                     )}
-                    {selectedSkill.source_type === 'aipp' && (
+                    {selectedSkill.source_type === 'agents' && (
                         <Button
                             variant="ghost"
                             size="icon"

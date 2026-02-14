@@ -181,7 +181,7 @@ use tauri::{
 #[cfg(mobile)]
 use tauri::{Manager, RunEvent};
 use tokio::sync::Mutex as TokioMutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 struct AppState {
@@ -470,6 +470,50 @@ pub fn run() {
             // Migration: Remove old Claude Code agents/rules skill configs
             if let Err(e) = skill_db.migrate_claude_code_skills() {
                 warn!(error = %e, "Failed to migrate Claude Code skills");
+            }
+
+            // 检查并执行技能迁移（独立于数据库版本，确保每次都检查）
+            debug!("Checking if skill migration is needed...");
+            match system_db.get_config("skills_migrated_to_agents") {
+                Ok(val) if val == "1" => {
+                    debug!("skills_migrated_to_agents = 1, skipping migration");
+                }
+                Ok(val) => {
+                    debug!("skills_migrated_to_agents = '{}', will run migration", val);
+                    info!("Starting skill migration...");
+                    match crate::api::skill_api::migrate_skills_to_agents_dir(&app_handle) {
+                        Ok(_) => {
+                            info!("Skill migration completed successfully");
+                        }
+                        Err(e) => {
+                            error!("Skill migration failed: {}", e);
+                        }
+                    }
+                    // 即使迁移失败也设置标记，避免下次重复尝试
+                    if let Err(e) = system_db.add_system_config("skills_migrated_to_agents", "1") {
+                        warn!("Failed to set migration flag: {}", e);
+                    } else {
+                        debug!("Migration flag set to 1");
+                    }
+                }
+                Err(e) => {
+                    debug!("Failed to read skills_migrated_to_agents: {}, will run migration", e);
+                    info!("Starting skill migration...");
+                    match crate::api::skill_api::migrate_skills_to_agents_dir(&app_handle) {
+                        Ok(_) => {
+                            info!("Skill migration completed successfully");
+                        }
+                        Err(e) => {
+                            error!("Skill migration failed: {}", e);
+                        }
+                    }
+                    // 即使迁移失败也设置标记，避免下次重复尝试
+                    if let Err(e) = system_db.add_system_config("skills_migrated_to_agents", "1") {
+                        warn!("Failed to set migration flag: {}", e);
+                    } else {
+                        debug!("Migration flag set to 1");
+                    }
+                }
             }
 
             let _ = database_upgrade(&app_handle, system_db, llm_db, assistant_db, conversation_db);

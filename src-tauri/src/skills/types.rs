@@ -25,14 +25,14 @@ pub struct InstalledPluginsJson {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillSourceType {
-    /// AIPP's internal skills directory ({app_data}/skills/)
-    Aipp,
     /// Claude Code skills (from ~/.claude/plugins/installed_plugins.json)
     ClaudeCodeSkills,
     /// Codex CLI instructions
     Codex,
     /// Copilot CLI skills
     Copilot,
+    /// Agents skills (from ~/.agents/skills/)
+    Agents,
     /// Custom user-defined source
     Custom(String),
 }
@@ -40,30 +40,31 @@ pub enum SkillSourceType {
 impl SkillSourceType {
     pub fn as_str(&self) -> &str {
         match self {
-            SkillSourceType::Aipp => "aipp",
             SkillSourceType::ClaudeCodeSkills => "claude_code_skills",
             SkillSourceType::Codex => "codex",
             SkillSourceType::Copilot => "copilot",
+            SkillSourceType::Agents => "agents",
             SkillSourceType::Custom(name) => name.as_str(),
         }
     }
 
     pub fn from_str(s: &str) -> Self {
         match s {
-            "aipp" => SkillSourceType::Aipp,
+            "aipp" => SkillSourceType::Agents,  // 向后兼容：aipp 映射到 agents
             "claude_code_skills" => SkillSourceType::ClaudeCodeSkills,
             "codex" => SkillSourceType::Codex,
             "copilot" => SkillSourceType::Copilot,
+            "agents" => SkillSourceType::Agents,
             other => SkillSourceType::Custom(other.to_string()),
         }
     }
 
     pub fn display_name(&self) -> &str {
         match self {
-            SkillSourceType::Aipp => "AIPP Skills",
             SkillSourceType::ClaudeCodeSkills => "Claude Code Skills",
             SkillSourceType::Codex => "Codex",
             SkillSourceType::Copilot => "Copilot",
+            SkillSourceType::Agents => "Agents",
             SkillSourceType::Custom(name) => name.as_str(),
         }
     }
@@ -91,15 +92,6 @@ impl SkillSourceConfig {
     /// Create default built-in source configurations
     pub fn builtin_sources() -> Vec<Self> {
         vec![
-            // AIPP internal skills - will be set to app_data_dir/skills at runtime
-            SkillSourceConfig {
-                source_type: SkillSourceType::Aipp,
-                display_name: SkillSourceType::Aipp.display_name().to_string(),
-                paths: vec!["{app_data}/skills".to_string()],
-                file_pattern: "*.md".to_string(),
-                is_enabled: true,
-                is_builtin: true,
-            },
             // Claude Code skills (from ~/.claude/plugins/installed_plugins.json)
             SkillSourceConfig {
                 source_type: SkillSourceType::ClaudeCodeSkills,
@@ -123,6 +115,15 @@ impl SkillSourceConfig {
                 source_type: SkillSourceType::Copilot,
                 display_name: SkillSourceType::Copilot.display_name().to_string(),
                 paths: vec!["~/.copilot/skills/".to_string()],
+                file_pattern: "*.md".to_string(),
+                is_enabled: true,
+                is_builtin: true,
+            },
+            // Agents skills (each subdirectory with .md is a skill)
+            SkillSourceConfig {
+                source_type: SkillSourceType::Agents,
+                display_name: SkillSourceType::Agents.display_name().to_string(),
+                paths: vec!["~/.agents/skills/".to_string()],
                 file_pattern: "*.md".to_string(),
                 is_enabled: true,
                 is_builtin: true,
