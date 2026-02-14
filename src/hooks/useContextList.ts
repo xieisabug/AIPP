@@ -1,4 +1,5 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { FileInfo, MCPToolCallUpdateEvent, Message } from '../data/Conversation';
 import { ContextItem, CONTEXT_TOOL_NAMES, SearchResultItem, getContextTypeFromToolName } from '../components/chat-sidebar/types';
 
@@ -9,6 +10,7 @@ interface Attachment {
 }
 
 interface UseContextListOptions {
+    conversationId?: string | number;
     // User provided files from input area (pending to be sent)
     userFiles: FileInfo[] | null;
     // MCP tool call states
@@ -21,6 +23,16 @@ interface UseContextListOptions {
 
 interface UseContextListReturn {
     contextItems: ContextItem[];
+}
+
+interface LoadedMcpToolItem {
+    id: number;
+    conversation_id: number;
+    tool_id: number;
+    loaded_server_name: string;
+    loaded_tool_name: string;
+    status: string;
+    invalid_reason?: string | null;
 }
 
 const parseSearchResultItems = (rawResult: string): SearchResultItem[] | undefined => {
@@ -83,11 +95,30 @@ const getAttachmentTypeName = (type: string): string => {
 };
 
 export function useContextList({
+    conversationId,
     userFiles,
     mcpToolCallStates,
     messages,
     acpWorkingDirectory,
 }: UseContextListOptions): UseContextListReturn {
+    const [loadedMcpTools, setLoadedMcpTools] = useState<LoadedMcpToolItem[]>([]);
+
+    useEffect(() => {
+        const cid = Number(conversationId);
+        if (!conversationId || Number.isNaN(cid)) {
+            setLoadedMcpTools([]);
+            return;
+        }
+        invoke<LoadedMcpToolItem[]>("get_conversation_loaded_mcp_tools", {
+            conversationId: cid,
+        })
+            .then((tools) => setLoadedMcpTools(tools))
+            .catch((error) => {
+                console.warn("Failed to fetch loaded MCP tools", error);
+                setLoadedMcpTools([]);
+            });
+    }, [conversationId, mcpToolCallStates]);
+
     const contextItems = useMemo(() => {
         const items: ContextItem[] = [];
 
@@ -197,8 +228,21 @@ export function useContextList({
             });
         });
 
+        loadedMcpTools.forEach((tool) => {
+            const statusLabel = tool.status === "valid" ? "已加载" : `失效: ${tool.status}`;
+            const reason = tool.invalid_reason ? ` (${tool.invalid_reason})` : "";
+            items.push({
+                id: `loaded-mcp-tool-${tool.id}`,
+                type: "loaded_mcp_tool",
+                name: `${tool.loaded_server_name}::${tool.loaded_tool_name}`,
+                details: `${statusLabel}${reason}`,
+                source: "mcp",
+                timestamp: new Date(),
+            });
+        });
+
         return items;
-    }, [userFiles, mcpToolCallStates, messages, acpWorkingDirectory]);
+    }, [userFiles, mcpToolCallStates, messages, acpWorkingDirectory, loadedMcpTools]);
 
     return { contextItems };
 }

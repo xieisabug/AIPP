@@ -74,6 +74,60 @@ pub struct MCPToolCall {
     pub assistant_message_id: Option<i64>, // 关联的 assistant 消息ID
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MCPServerCapabilityEpochCatalog {
+    pub server_id: i64,
+    pub server_name: String,
+    pub epoch: i64,
+    pub last_refresh_at: String,
+    pub summary: String,
+    pub summary_generated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MCPToolCatalogEntry {
+    pub tool_id: i64,
+    pub server_id: i64,
+    pub server_name: String,
+    pub tool_name: String,
+    pub summary: String,
+    pub keywords_json: String,
+    pub schema_hash: String,
+    pub capability_epoch: i64,
+    pub updated_at: String,
+    pub summary_generated_at: Option<String>,
+    pub server_enabled: bool,
+    pub tool_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationLoadedMCPTool {
+    pub id: i64,
+    pub conversation_id: i64,
+    pub tool_id: i64,
+    pub loaded_server_name: String,
+    pub loaded_tool_name: String,
+    pub loaded_schema_hash: String,
+    pub loaded_epoch: i64,
+    pub status: String,
+    pub invalid_reason: Option<String>,
+    pub source: Option<String>,
+    pub loaded_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationLoadedMCPToolResolved {
+    pub id: i64,
+    pub conversation_id: i64,
+    pub tool_id: i64,
+    pub server_id: i64,
+    pub server_name: String,
+    pub tool_name: String,
+    pub tool_description: String,
+    pub parameters: String,
+}
+
 pub struct MCPDatabase {
     pub conn: Connection,
 }
@@ -84,6 +138,22 @@ impl MCPDatabase {
         let db_path = get_db_path(app_handle, "mcp.db");
         let conn = Connection::open(db_path.unwrap())?;
         Ok(MCPDatabase { conn })
+    }
+
+    fn short_hash(s: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        s.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    fn schema_hash(parameters: Option<&str>) -> String {
+        Self::short_hash(parameters.unwrap_or("{}").trim())
+    }
+
+    fn now_string() -> String {
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
     }
 
     pub fn create_tables(&self) -> rusqlite::Result<()> {
@@ -182,7 +252,67 @@ impl MCPDatabase {
 
         self.migrate_mcp_tool_call_table()?;
         self.migrate_mcp_server_table()?; // ensure headers column exists
+        self.create_dynamic_loading_tables()?;
+        let _ = self.rebuild_dynamic_mcp_catalog();
 
+        Ok(())
+    }
+
+    fn create_dynamic_loading_tables(&self) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS mcp_server_capability_epoch_catalog (
+                server_id INTEGER PRIMARY KEY,
+                epoch INTEGER NOT NULL DEFAULT 1,
+                last_refresh_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                summary TEXT NOT NULL DEFAULT '',
+                summary_generated_at DATETIME
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS mcp_tool_catalog (
+                tool_id INTEGER PRIMARY KEY,
+                server_id INTEGER NOT NULL,
+                tool_name TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                keywords_json TEXT NOT NULL DEFAULT '[]',
+                schema_hash TEXT NOT NULL,
+                capability_epoch INTEGER NOT NULL DEFAULT 1,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                summary_generated_at DATETIME
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mcp_tool_catalog_server_tool_name ON mcp_tool_catalog(server_id, tool_name)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mcp_tool_catalog_schema_hash ON mcp_tool_catalog(schema_hash)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS conversation_mcp_loaded_tool (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                tool_id INTEGER NOT NULL,
+                loaded_server_name TEXT NOT NULL DEFAULT '',
+                loaded_tool_name TEXT NOT NULL DEFAULT '',
+                loaded_schema_hash TEXT NOT NULL,
+                loaded_epoch INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                invalid_reason TEXT,
+                source TEXT,
+                loaded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(conversation_id, tool_id)
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversation_mcp_loaded_tool_conversation ON conversation_mcp_loaded_tool(conversation_id)",
+            [],
+        )?;
         Ok(())
     }
 
@@ -1189,6 +1319,511 @@ impl MCPDatabase {
         let mut result = Vec::new();
         for call in calls {
             result.push(call?);
+        }
+        Ok(result)
+    }
+
+    pub fn rebuild_dynamic_mcp_catalog(&self) -> rusqlite::Result<()> {
+        let now = Self::now_string();
+        self.conn.execute(
+            "DELETE FROM mcp_server_capability_epoch_catalog WHERE server_id NOT IN (SELECT id FROM mcp_server)",
+            [],
+        )?;
+        self.conn.execute(
+            "DELETE FROM mcp_tool_catalog
+             WHERE server_id NOT IN (SELECT id FROM mcp_server)
+                OR tool_id NOT IN (SELECT id FROM mcp_server_tool)",
+            [],
+        )?;
+        let mut server_stmt = self.conn.prepare(
+            "SELECT id, name, description
+             FROM mcp_server
+             WHERE is_enabled = 1 OR command = 'aipp:dynamic_mcp'",
+        )?;
+        let servers: Vec<(i64, String, String)> = server_stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        for (server_id, server_name, server_description) in servers {
+            let existing_epoch = self
+                .conn
+                .prepare(
+                    "SELECT epoch FROM mcp_server_capability_epoch_catalog WHERE server_id = ? LIMIT 1",
+                )?
+                .query_row(params![server_id], |row| row.get::<_, i64>(0))
+                .optional()?
+                .unwrap_or(1);
+
+            let mut old_hash_stmt = self
+                .conn
+                .prepare("SELECT tool_id, schema_hash FROM mcp_tool_catalog WHERE server_id = ?")?;
+            let old_hashes: std::collections::HashMap<i64, String> = old_hash_stmt
+                .query_map(params![server_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+
+            let mut tool_stmt = self.conn.prepare(
+                "SELECT id, tool_name, COALESCE(tool_description, ''), parameters
+                 FROM mcp_server_tool
+                 WHERE server_id = ?",
+            )?;
+            let tools: Vec<(i64, String, String, Option<String>)> = tool_stmt
+                .query_map(params![server_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            let mut changed = false;
+            let mut current_tool_ids = std::collections::HashSet::new();
+
+            for (tool_id, _tool_name, _tool_summary, parameters) in &tools {
+                current_tool_ids.insert(*tool_id);
+                let new_hash = Self::schema_hash(parameters.as_deref());
+                if old_hashes.get(tool_id).map(|h| h != &new_hash).unwrap_or(true) {
+                    changed = true;
+                }
+            }
+
+            if !changed {
+                for old_id in old_hashes.keys() {
+                    if !current_tool_ids.contains(old_id) {
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+
+            let next_epoch = if changed { existing_epoch + 1 } else { existing_epoch };
+            let summary = if server_description.trim().is_empty() {
+                server_name.clone()
+            } else {
+                server_description.clone()
+            };
+
+            self.conn.execute(
+                "INSERT INTO mcp_server_capability_epoch_catalog (
+                    server_id, epoch, last_refresh_at, summary
+                 ) VALUES (?, ?, ?, ?)
+                 ON CONFLICT(server_id) DO UPDATE SET
+                    epoch = excluded.epoch,
+                    last_refresh_at = excluded.last_refresh_at,
+                    summary = CASE
+                        WHEN excluded.epoch != mcp_server_capability_epoch_catalog.epoch THEN excluded.summary
+                        WHEN mcp_server_capability_epoch_catalog.summary_generated_at IS NOT NULL
+                             AND trim(mcp_server_capability_epoch_catalog.summary) != '' THEN mcp_server_capability_epoch_catalog.summary
+                        ELSE excluded.summary
+                    END,
+                    summary_generated_at = CASE
+                        WHEN excluded.epoch != mcp_server_capability_epoch_catalog.epoch THEN NULL
+                        ELSE mcp_server_capability_epoch_catalog.summary_generated_at
+                    END",
+                params![server_id, next_epoch, now, summary],
+            )?;
+
+            for (tool_id, tool_name, tool_summary, parameters) in tools.iter() {
+                let schema_hash = Self::schema_hash(parameters.as_deref());
+                let summary = if tool_summary.trim().is_empty() {
+                    tool_name.clone()
+                } else {
+                    tool_summary.clone()
+                };
+                let keywords = serde_json::json!([server_name, tool_name]).to_string();
+                self.conn.execute(
+                    "INSERT INTO mcp_tool_catalog (
+                        tool_id, server_id, tool_name, summary, keywords_json, schema_hash, capability_epoch, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(tool_id) DO UPDATE SET
+                        server_id = excluded.server_id,
+                        tool_name = excluded.tool_name,
+                        summary = CASE
+                            WHEN excluded.capability_epoch != mcp_tool_catalog.capability_epoch THEN excluded.summary
+                            WHEN mcp_tool_catalog.summary_generated_at IS NOT NULL
+                                 AND trim(mcp_tool_catalog.summary) != '' THEN mcp_tool_catalog.summary
+                            ELSE excluded.summary
+                        END,
+                        keywords_json = excluded.keywords_json,
+                        schema_hash = excluded.schema_hash,
+                        capability_epoch = excluded.capability_epoch,
+                        updated_at = excluded.updated_at,
+                        summary_generated_at = CASE
+                            WHEN excluded.capability_epoch != mcp_tool_catalog.capability_epoch THEN NULL
+                            ELSE mcp_tool_catalog.summary_generated_at
+                        END",
+                    params![
+                        tool_id,
+                        server_id,
+                        tool_name,
+                        summary,
+                        keywords,
+                        schema_hash,
+                        next_epoch,
+                        now
+                    ],
+                )?;
+            }
+
+            self.conn.execute(
+                "DELETE FROM mcp_tool_catalog WHERE server_id = ? AND tool_id NOT IN (
+                    SELECT id FROM mcp_server_tool WHERE server_id = ?
+                 )",
+                params![server_id, server_id],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn list_server_capability_catalog(&self) -> rusqlite::Result<Vec<MCPServerCapabilityEpochCatalog>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.server_id, s.name, c.epoch, c.last_refresh_at, c.summary, c.summary_generated_at
+             FROM mcp_server_capability_epoch_catalog c
+             JOIN mcp_server s ON s.id = c.server_id
+             WHERE s.is_enabled = 1 OR s.command = 'aipp:dynamic_mcp'
+             ORDER BY s.name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(MCPServerCapabilityEpochCatalog {
+                server_id: row.get(0)?,
+                server_name: row.get(1)?,
+                epoch: row.get(2)?,
+                last_refresh_at: row.get(3)?,
+                summary: row.get(4)?,
+                summary_generated_at: row.get(5)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    pub fn list_tool_catalog(&self, server_id: Option<i64>) -> rusqlite::Result<Vec<MCPToolCatalogEntry>> {
+        let sql = if server_id.is_some() {
+            "SELECT c.tool_id, c.server_id, s.name, c.tool_name, c.summary, c.keywords_json, c.schema_hash,
+                    c.capability_epoch, c.updated_at, c.summary_generated_at, s.is_enabled, t.is_enabled
+             FROM mcp_tool_catalog c
+             JOIN mcp_server s ON s.id = c.server_id
+             JOIN mcp_server_tool t ON t.id = c.tool_id
+             WHERE c.server_id = ?
+             ORDER BY s.name, c.tool_name"
+        } else {
+            "SELECT c.tool_id, c.server_id, s.name, c.tool_name, c.summary, c.keywords_json, c.schema_hash,
+                    c.capability_epoch, c.updated_at, c.summary_generated_at, s.is_enabled, t.is_enabled
+             FROM mcp_tool_catalog c
+             JOIN mcp_server s ON s.id = c.server_id
+             JOIN mcp_server_tool t ON t.id = c.tool_id
+             ORDER BY s.name, c.tool_name"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let mapper = |row: &rusqlite::Row<'_>| {
+            Ok(MCPToolCatalogEntry {
+                tool_id: row.get(0)?,
+                server_id: row.get(1)?,
+                server_name: row.get(2)?,
+                tool_name: row.get(3)?,
+                summary: row.get(4)?,
+                keywords_json: row.get(5)?,
+                schema_hash: row.get(6)?,
+                capability_epoch: row.get(7)?,
+                updated_at: row.get(8)?,
+                summary_generated_at: row.get(9)?,
+                server_enabled: row.get(10)?,
+                tool_enabled: row.get(11)?,
+            })
+        };
+        let rows = if let Some(sid) = server_id {
+            stmt.query_map(params![sid], mapper)?
+        } else {
+            stmt.query_map([], mapper)?
+        };
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    pub fn update_server_catalog_summary(&self, server_id: i64, summary: &str) -> rusqlite::Result<()> {
+        let now = Self::now_string();
+        self.conn.execute(
+            "UPDATE mcp_server_capability_epoch_catalog
+             SET summary = ?, summary_generated_at = ?
+             WHERE server_id = ?",
+            params![summary, now, server_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_tool_catalog_summary(&self, tool_id: i64, summary: &str) -> rusqlite::Result<()> {
+        let now = Self::now_string();
+        self.conn.execute(
+            "UPDATE mcp_tool_catalog
+             SET summary = ?, summary_generated_at = ?, updated_at = ?
+             WHERE tool_id = ?",
+            params![summary, now, now, tool_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_conversation_loaded_tool(
+        &self,
+        conversation_id: i64,
+        tool_id: i64,
+        source: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let now = Self::now_string();
+        let mut stmt = self.conn.prepare(
+            "SELECT c.schema_hash, c.capability_epoch, s.name, t.tool_name
+             FROM mcp_tool_catalog c
+             JOIN mcp_server s ON s.id = c.server_id
+             JOIN mcp_server_tool t ON t.id = c.tool_id
+             WHERE c.tool_id = ?",
+        )?;
+        let row = stmt
+            .query_row(params![tool_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .optional()?;
+
+        let (schema_hash, capability_epoch, server_name, tool_name) = if let Some(v) = row {
+            v
+        } else {
+            let mut fallback = self.conn.prepare(
+                "SELECT s.name, t.tool_name, t.parameters
+                 FROM mcp_server_tool t
+                 JOIN mcp_server s ON s.id = t.server_id
+                 WHERE t.id = ?",
+            )?;
+            let (server_name, tool_name, parameters): (String, String, Option<String>) =
+                fallback.query_row(params![tool_id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?;
+            (Self::schema_hash(parameters.as_deref()), 1, server_name, tool_name)
+        };
+
+        self.conn.execute(
+            "INSERT INTO conversation_mcp_loaded_tool (
+                conversation_id, tool_id, loaded_server_name, loaded_tool_name, loaded_schema_hash,
+                loaded_epoch, status, invalid_reason, source, loaded_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, 'valid', NULL, ?, ?, ?)
+             ON CONFLICT(conversation_id, tool_id) DO UPDATE SET
+                loaded_server_name = excluded.loaded_server_name,
+                loaded_tool_name = excluded.loaded_tool_name,
+                loaded_schema_hash = excluded.loaded_schema_hash,
+                loaded_epoch = excluded.loaded_epoch,
+                status = 'valid',
+                invalid_reason = NULL,
+                source = excluded.source,
+                updated_at = excluded.updated_at",
+            params![
+                conversation_id,
+                tool_id,
+                server_name,
+                tool_name,
+                schema_hash,
+                capability_epoch,
+                source,
+                now,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn refresh_conversation_loaded_tool_statuses(&self, conversation_id: i64) -> rusqlite::Result<()> {
+        let now = Self::now_string();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, tool_id, loaded_schema_hash
+             FROM conversation_mcp_loaded_tool
+             WHERE conversation_id = ?",
+        )?;
+        let rows: Vec<(i64, i64, String)> = stmt
+            .query_map(params![conversation_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        for (id, tool_id, loaded_schema_hash) in rows {
+            let tool_row = self
+                .conn
+                .prepare(
+                    "SELECT s.name, t.tool_name, t.is_enabled, s.is_enabled, t.parameters
+                     FROM mcp_server_tool t
+                     JOIN mcp_server s ON s.id = t.server_id
+                     WHERE t.id = ?",
+                )?
+                .query_row(params![tool_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, bool>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                })
+                .optional()?;
+
+            let (status, invalid_reason, server_name, tool_name) = match tool_row {
+                None => (
+                    "invalid_deleted".to_string(),
+                    Some("Tool no longer exists".to_string()),
+                    None,
+                    None,
+                ),
+                Some((server_name, tool_name, tool_enabled, server_enabled, parameters)) => {
+                    let current_hash = Self::schema_hash(parameters.as_deref());
+                    if !server_enabled {
+                        (
+                            "invalid_server_disabled".to_string(),
+                            Some("Server is disabled".to_string()),
+                            Some(server_name),
+                            Some(tool_name),
+                        )
+                    } else if !tool_enabled {
+                        (
+                            "invalid_disabled".to_string(),
+                            Some("Tool is disabled".to_string()),
+                            Some(server_name),
+                            Some(tool_name),
+                        )
+                    } else if current_hash != loaded_schema_hash {
+                        (
+                            "invalid_changed".to_string(),
+                            Some("Tool schema has changed".to_string()),
+                            Some(server_name),
+                            Some(tool_name),
+                        )
+                    } else {
+                        ("valid".to_string(), None, Some(server_name), Some(tool_name))
+                    }
+                }
+            };
+
+            self.conn.execute(
+                "UPDATE conversation_mcp_loaded_tool
+                 SET status = ?, invalid_reason = ?, updated_at = ?,
+                     loaded_server_name = COALESCE(?, loaded_server_name),
+                     loaded_tool_name = COALESCE(?, loaded_tool_name)
+                 WHERE id = ?",
+                params![status, invalid_reason, now, server_name, tool_name, id],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn is_tool_loaded_for_conversation(
+        &self,
+        conversation_id: i64,
+        server_id: i64,
+        tool_name: &str,
+    ) -> rusqlite::Result<bool> {
+        let found = self
+            .conn
+            .prepare(
+                "SELECT 1
+                 FROM conversation_mcp_loaded_tool c
+                 JOIN mcp_server_tool t ON t.id = c.tool_id
+                 WHERE c.conversation_id = ?
+                   AND c.status = 'valid'
+                   AND t.server_id = ?
+                   AND t.tool_name = ?
+                 LIMIT 1",
+            )?
+            .query_row(params![conversation_id, server_id, tool_name], |row| row.get::<_, i64>(0))
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    pub fn get_valid_loaded_tools_for_conversation(
+        &self,
+        conversation_id: i64,
+    ) -> rusqlite::Result<Vec<ConversationLoadedMCPToolResolved>> {
+        self.refresh_conversation_loaded_tool_statuses(conversation_id)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, c.conversation_id, c.tool_id, t.server_id, s.name, t.tool_name,
+                    COALESCE(t.tool_description, ''), COALESCE(t.parameters, '{}')
+             FROM conversation_mcp_loaded_tool c
+             JOIN mcp_server_tool t ON t.id = c.tool_id
+             JOIN mcp_server s ON s.id = t.server_id
+             WHERE c.conversation_id = ?
+               AND c.status = 'valid'
+               AND s.is_enabled = 1
+               AND t.is_enabled = 1
+             ORDER BY c.loaded_at ASC",
+        )?;
+        let rows = stmt.query_map(params![conversation_id], |row| {
+            Ok(ConversationLoadedMCPToolResolved {
+                id: row.get(0)?,
+                conversation_id: row.get(1)?,
+                tool_id: row.get(2)?,
+                server_id: row.get(3)?,
+                server_name: row.get(4)?,
+                tool_name: row.get(5)?,
+                tool_description: row.get(6)?,
+                parameters: row.get(7)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    pub fn get_conversation_loaded_mcp_tools(
+        &self,
+        conversation_id: i64,
+    ) -> rusqlite::Result<Vec<ConversationLoadedMCPTool>> {
+        self.refresh_conversation_loaded_tool_statuses(conversation_id)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, conversation_id, tool_id, loaded_server_name, loaded_tool_name,
+                    loaded_schema_hash, loaded_epoch, status, invalid_reason, source, loaded_at, updated_at
+             FROM conversation_mcp_loaded_tool
+             WHERE conversation_id = ?
+             ORDER BY loaded_at ASC",
+        )?;
+        let rows = stmt.query_map(params![conversation_id], |row| {
+            Ok(ConversationLoadedMCPTool {
+                id: row.get(0)?,
+                conversation_id: row.get(1)?,
+                tool_id: row.get(2)?,
+                loaded_server_name: row.get(3)?,
+                loaded_tool_name: row.get(4)?,
+                loaded_schema_hash: row.get(5)?,
+                loaded_epoch: row.get(6)?,
+                status: row.get(7)?,
+                invalid_reason: row.get(8)?,
+                source: row.get(9)?,
+                loaded_at: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
         }
         Ok(result)
     }

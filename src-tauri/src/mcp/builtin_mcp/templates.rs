@@ -208,6 +208,15 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
             ],
             default_timeout: Some(180000), // 3分钟，操作工具可能执行较长命令
         },
+        BuiltinTemplateInfo {
+            id: "dynamic_mcp".into(),
+            name: "MCP 动态加载工具".into(),
+            description: "为 MCP 动态加载场景提供按需加载工具能力。".into(),
+            command: "aipp:dynamic_mcp".into(),
+            transport_type: "stdio".into(),
+            required_envs: vec![],
+            default_timeout: Some(30000),
+        },
     ]
 }
 
@@ -485,6 +494,41 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         }
                     },
                     "required": ["bash_id"]
+                }),
+            },
+        ],
+        Some("dynamic_mcp") => vec![
+            BuiltinToolInfo {
+                name: "load_mcp_server".into(),
+                description: "根据需求关键词检索 MCP 工具集目录，并返回对应工具集下的工具摘要。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "要检索的工具集名称或关键词"
+                        }
+                    },
+                    "required": ["name"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "load_mcp_tool".into(),
+                description: "按关键词加载 MCP 工具到当前会话，并返回这些工具的完整定义（含 description 与 parameters schema）。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "names": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "需要加载的工具关键词列表，可一次传入多个"
+                        },
+                        "server_name": {
+                            "type": "string",
+                            "description": "可选。限定在指定工具集（参数名为 server_name）下搜索工具"
+                        }
+                    },
+                    "required": ["names"]
                 }),
             },
         ],

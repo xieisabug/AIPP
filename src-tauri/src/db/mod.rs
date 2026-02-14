@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use assistant_db::AssistantDatabase;
 use conversation_db::ConversationDatabase;
 use llm_db::LLMDatabase;
+use mcp_db::MCPDatabase;
 use rusqlite::params;
 use semver::Version;
 use scheduled_task_db::ScheduledTaskDatabase;
@@ -24,7 +25,7 @@ pub mod system_db;
 #[cfg(test)]
 mod tests;
 
-const CURRENT_VERSION: &str = "0.0.9";
+const CURRENT_VERSION: &str = "0.0.10";
 
 pub(crate) fn get_db_path(app_handle: &tauri::AppHandle, db_name: &str) -> Result<PathBuf, String> {
     let app_dir = app_handle.path().app_data_dir().unwrap();
@@ -86,6 +87,7 @@ pub fn database_upgrade(
                     ("0.0.7", special_logic_0_0_7),
                     ("0.0.8", special_logic_0_0_8),
                     ("0.0.9", special_logic_0_0_9),
+                    ("0.0.10", special_logic_0_0_10),
                 ];
 
                 for (version_str, logic) in special_versions.iter() {
@@ -581,5 +583,22 @@ fn special_logic_0_0_9(
     }
 
     info!("special_logic_0_0_9 done: 技能迁移流程完成");
+    Ok(())
+}
+
+fn special_logic_0_0_10(
+    _system_db: &SystemDatabase,
+    _llm_db: &LLMDatabase,
+    _assistant_db: &AssistantDatabase,
+    _conversation_db: &ConversationDatabase,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    info!("special_logic_0_0_10: 初始化 MCP 动态加载数据表");
+    let mcp_db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    mcp_db.create_tables().map_err(|e| e.to_string())?;
+    mcp_db
+        .rebuild_dynamic_mcp_catalog()
+        .map_err(|e| format!("重建 MCP 动态目录失败: {}", e))?;
+    info!("special_logic_0_0_10 done: MCP 动态加载数据表初始化完成");
     Ok(())
 }

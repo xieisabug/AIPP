@@ -5,6 +5,7 @@ import { AssistantFormConfig } from "@/types/forms";
 import { validateConfig } from "@/utils/validate";
 import AssistantMCPFieldDisplay from "@/components/config/AssistantMCPFieldDisplay";
 import AssistantSkillsFieldDisplay from "@/components/config/AssistantSkillsFieldDisplay";
+import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 
 interface UseAssistantFormConfigProps {
     currentAssistant: AssistantDetail | null;
@@ -29,6 +30,8 @@ export const useAssistantFormConfig = ({
     onConfigChange,
     onPromptChange,
 }: UseAssistantFormConfigProps) => {
+    const { getConfigValue } = useFeatureConfig();
+
     // 处理配置修改
     const handleConfigChange = useCallback(
         (key: string, value: string | boolean, value_type: string) => {
@@ -61,6 +64,16 @@ export const useAssistantFormConfig = ({
     // 生成表单配置
     const formConfig: AssistantFormConfig[] = useMemo(() => {
         if (!currentAssistant) return [];
+
+        const globalDynamicMcpEnabled =
+            getConfigValue("experimental", "dynamic_mcp_loading_enabled") === "true";
+        const assistantDynamicRaw = currentAssistant.model_configs.find(
+            (config) => config.name === "dynamic_mcp_loading_enabled"
+        )?.value;
+        const assistantDynamicEnabled =
+            globalDynamicMcpEnabled &&
+            (assistantDynamicRaw == null ||
+                (assistantDynamicRaw !== "false" && assistantDynamicRaw !== "0"));
 
         // ACP 助手类型 (assistant_type === 4) 的专用配置
         if (currentAssistant?.assistant.assistant_type === 4) {
@@ -163,7 +176,8 @@ export const useAssistantFormConfig = ({
                     (config) =>
                         !assistantTypeHideField.includes(config.name) &&
                         !assistantTypeCustomField.find((field) => field.key === config.name) &&
-                        config.name !== "reasoning_effort"
+                        config.name !== "reasoning_effort" &&
+                        config.name !== "dynamic_mcp_loading_enabled"
                 )
                 .map((config) => ({
                     key: config.name,
@@ -235,7 +249,21 @@ export const useAssistantFormConfig = ({
             });
         }
 
-        if (!assistantTypeHideField.includes("mcp_config")) {
+        if (globalDynamicMcpEnabled && !assistantTypeHideField.includes("dynamic_mcp_loading_enabled")) {
+            baseConfigs.push({
+                key: "dynamic_mcp_loading_enabled",
+                config: {
+                    type: "switch" as const,
+                    label: "MCP 动态加载（实验）",
+                    value: assistantDynamicEnabled,
+                    tooltip: "开启后采用目录摘要 + 按需加载模式，并隐藏手动 MCP 选择",
+                    onChange: (value: string | boolean) =>
+                        handleConfigChange("dynamic_mcp_loading_enabled", value, "boolean"),
+                },
+            });
+        }
+
+        if (!assistantTypeHideField.includes("mcp_config") && !assistantDynamicEnabled) {
             baseConfigs.push({
                 key: "mcp_config",
                 config: {
@@ -294,6 +322,7 @@ export const useAssistantFormConfig = ({
         assistantTypeCustomLabel,
         assistantTypeHideField,
         assistantTypeCustomTips,
+        getConfigValue,
         handleConfigChange,
         handleModelChange,
         navigateTo,

@@ -37,7 +37,7 @@ export interface SearchResultItem {
 
 export interface ContextItem {
     id: string;
-    type: 'user_file' | 'read_file' | 'search' | 'list_directory' | 'other';
+    type: 'user_file' | 'read_file' | 'search' | 'list_directory' | 'loaded_mcp_tool' | 'other';
     name: string;
     // Optional details like file path, search query
     details?: string;

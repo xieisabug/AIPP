@@ -10,8 +10,9 @@ use crate::api::ai::config::{get_continue_on_tool_error_from_config, get_network
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
 use crate::api::ai_api::{batch_tool_result_continue_ask_ai_impl, sanitize_tool_name, tool_result_continue_ask_ai_impl};
 use crate::db::conversation_db::{ConversationDatabase, Repository};
-use crate::db::mcp_db::{MCPDatabase, MCPServer, MCPToolCall};
+use crate::db::mcp_db::{ConversationLoadedMCPTool, MCPDatabase, MCPServer, MCPToolCall};
 use crate::mcp::builtin_mcp::{execute_aipp_builtin_tool, is_builtin_mcp_call};
+use crate::mcp::is_dynamic_mcp_loading_enabled_for_assistant;
 use crate::state::activity_state::ConversationActivityManager;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use anyhow::{anyhow, bail, Context, Result};
@@ -183,10 +184,28 @@ fn validate_tool_call_execution(tool_call: &MCPToolCall) -> Result<bool> {
 // 验证服务器状态
 /// 校验服务器是否启用。
 fn validate_server_status(server: &MCPServer) -> Result<()> {
-    if !server.is_enabled {
+    if !server.is_enabled && server.command.as_deref() != Some("aipp:dynamic_mcp") {
         bail!("MCP服务器已禁用");
     }
     Ok(())
+}
+
+async fn is_dynamic_loading_enabled_for_conversation(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+) -> Result<bool, String> {
+    let conversation_db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conversation = conversation_db
+        .conversation_repo()
+        .unwrap()
+        .read(conversation_id)
+        .map_err(|e| e.to_string())?;
+    let assistant_id = if let Some(conversation) = conversation {
+        conversation.assistant_id.unwrap_or(1)
+    } else {
+        1
+    };
+    Ok(is_dynamic_mcp_loading_enabled_for_assistant(app_handle, assistant_id).await)
 }
 
 // 处理工具执行结果
@@ -347,7 +366,8 @@ pub async fn create_mcp_tool_call(
     let server = servers
         .iter()
         .find(|s| {
-            s.is_enabled && (s.name == server_name || sanitize_tool_name(&s.name) == server_name)
+            (s.is_enabled || s.command.as_deref() == Some("aipp:dynamic_mcp"))
+                && (s.name == server_name || sanitize_tool_name(&s.name) == server_name)
         })
         .ok_or_else(|| format!("服务器 '{}' 未找到或已禁用", server_name))?;
 
@@ -441,6 +461,29 @@ pub async fn execute_mcp_tool_call(
     validate_server_status(&server).map_err(|e| e.to_string())?;
     debug!(server_id=server.id, transport=%server.transport_type, "server validated");
 
+    let is_dynamic_builtin = server.command.as_deref() == Some("aipp:dynamic_mcp");
+    if !is_dynamic_builtin {
+        let dynamic_mode_enabled =
+            is_dynamic_loading_enabled_for_conversation(&app_handle, tool_call.conversation_id).await?;
+        if dynamic_mode_enabled {
+            db.refresh_conversation_loaded_tool_statuses(tool_call.conversation_id)
+                .map_err(|e| format!("刷新已加载工具状态失败: {}", e))?;
+            let is_loaded = db
+                .is_tool_loaded_for_conversation(
+                    tool_call.conversation_id,
+                    tool_call.server_id,
+                    &tool_call.tool_name,
+                )
+                .map_err(|e| format!("检查会话已加载工具失败: {}", e))?;
+            if !is_loaded {
+                return Err(format!(
+                    "工具 {}::{} 尚未加载。请先调用 load_mcp_tool，例如 names=[\"{}\"]。",
+                    tool_call.server_name, tool_call.tool_name, tool_call.tool_name
+                ));
+            }
+        }
+    }
+
     // 原子性地将状态转为执行中，避免并发重复执行
     if !db
         .mark_mcp_tool_call_executing_if_pending(call_id)
@@ -521,6 +564,17 @@ pub async fn get_mcp_tool_calls_by_conversation(
 ) -> std::result::Result<Vec<MCPToolCall>, String> {
     let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.get_mcp_tool_calls_by_conversation(conversation_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle))]
+pub async fn get_conversation_loaded_mcp_tools(
+    app_handle: tauri::AppHandle,
+    conversation_id: i64,
+) -> std::result::Result<Vec<ConversationLoadedMCPTool>, String> {
+    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    db.get_conversation_loaded_mcp_tools(conversation_id)
+        .map_err(|e| format!("获取会话已加载工具失败: {}", e))
 }
 
 pub async fn cancel_mcp_tool_calls_by_conversation(

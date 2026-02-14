@@ -241,6 +241,7 @@ pub async fn add_mcp_server(
             request.proxy_enabled,
         )
         .map_err(|e| e.to_string())?;
+    let _ = db.rebuild_dynamic_mcp_catalog();
 
     Ok(server_id)
 }
@@ -270,6 +271,7 @@ pub async fn update_mcp_server(
         request.proxy_enabled,
     )
     .map_err(|e| e.to_string())?;
+    let _ = db.rebuild_dynamic_mcp_catalog();
 
     Ok(())
 }
@@ -286,6 +288,7 @@ pub async fn delete_mcp_server(app_handle: tauri::AppHandle, id: i64) -> Result<
     }
 
     db.delete_mcp_server(id).map_err(|e| e.to_string())?;
+    let _ = db.rebuild_dynamic_mcp_catalog();
     Ok(())
 }
 
@@ -298,6 +301,7 @@ pub async fn toggle_mcp_server(
 ) -> Result<(), String> {
     let db = open_db(&app_handle)?;
     db.toggle_mcp_server(id, is_enabled).map_err(|e| e.to_string())?;
+    let _ = db.rebuild_dynamic_mcp_catalog();
     Ok(())
 }
 
@@ -322,6 +326,7 @@ pub async fn update_mcp_server_tool(
 ) -> Result<(), String> {
     let db = open_db(&app_handle)?;
     db.update_mcp_server_tool(tool_id, is_enabled, is_auto_run).map_err(|e| e.to_string())?;
+    let _ = db.rebuild_dynamic_mcp_catalog();
     Ok(())
 }
 
@@ -607,6 +612,11 @@ pub async fn refresh_mcp_server_capabilities(
 
     match result {
         Ok(_) => {
+            let _ = db.rebuild_dynamic_mcp_catalog();
+            crate::mcp::summarizer::trigger_mcp_catalog_summary_generation(
+                app_handle.clone(),
+                server_id,
+            );
             let tools = db.get_mcp_server_tools(server_id).map_err(|e| e.to_string())?;
             let resources = db.get_mcp_server_resources(server_id).map_err(|e| e.to_string())?;
             let prompts = db.get_mcp_server_prompts(server_id).map_err(|e| e.to_string())?;
@@ -1147,6 +1157,7 @@ pub async fn build_mcp_prompt(
         let server_with_tools = MCPServerWithTools {
             id: server.id,
             name: server.name,
+            summary: String::new(),
             command: server.command.clone(),
             is_enabled: server.is_enabled,
             tools: enabled_tools,
@@ -1163,6 +1174,7 @@ pub async fn build_mcp_prompt(
     let mcp_info = crate::mcp::MCPInfoForAssistant {
         enabled_servers,
         use_native_toolcall: false, // For prompt generation, we use prompt-based mode
+        dynamic_loading_enabled: false,
     };
 
     // Use existing format_mcp_prompt function

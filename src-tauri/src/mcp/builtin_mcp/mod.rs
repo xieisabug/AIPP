@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use tracing::{debug, error, instrument};
+use crate::db::mcp_db::MCPDatabase;
 
 pub mod agent;
 pub mod operation;
@@ -36,6 +37,10 @@ pub fn is_builtin_mcp_call(command: &str) -> bool {
 pub struct BuiltinExecutionResult {
     pub content: Vec<serde_json::Value>,
     pub is_error: bool,
+}
+
+fn matches_keyword(value: &str, keyword: &str) -> bool {
+    value.to_lowercase().contains(&keyword.to_lowercase())
 }
 
 #[tauri::command]
@@ -381,6 +386,235 @@ pub async fn execute_aipp_builtin_tool(
                 }
                 _ => serde_json::json!({
                     "content": [{"type": "text", "text": format!("Unknown operation tool: {}", tool_name)}],
+                    "isError": true
+                }),
+            }
+        }
+        "dynamic_mcp" => {
+            let db = MCPDatabase::new(&app_handle)
+                .map_err(|e| format!("Failed to open MCP database: {}", e))?;
+            let _ = db.rebuild_dynamic_mcp_catalog();
+
+            match tool_name.as_str() {
+                "load_mcp_server" => {
+                    let keyword = args
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing required parameter: name".to_string())?;
+                    let catalogs = db
+                        .list_server_capability_catalog()
+                        .map_err(|e| format!("Failed to list MCP toolset catalog: {}", e))?;
+                    let tool_catalog = db
+                        .list_tool_catalog(None)
+                        .map_err(|e| format!("Failed to list MCP tool catalog: {}", e))?;
+                    let mut matched_servers = Vec::new();
+                    for server in catalogs {
+                        if server.summary_generated_at.is_none() {
+                            continue;
+                        }
+                        if !matches_keyword(&server.server_name, keyword)
+                            && !matches_keyword(&server.summary, keyword)
+                        {
+                            continue;
+                        }
+                        let tools: Vec<serde_json::Value> = tool_catalog
+                            .iter()
+                            .filter(|tool| {
+                                tool.server_id == server.server_id
+                                    && tool.server_enabled
+                                    && tool.tool_enabled
+                                    && tool.summary_generated_at.is_some()
+                                    && tool.server_name != "MCP 动态加载工具"
+                            })
+                            .map(|tool| {
+                                serde_json::json!({
+                                    "tool_name": tool.tool_name,
+                                    "summary": tool.summary,
+                                })
+                            })
+                            .collect();
+                        matched_servers.push(serde_json::json!({
+                            "toolset_id": server.server_id,
+                            "toolset_name": server.server_name,
+                            "server_id": server.server_id,
+                            "server_name": server.server_name,
+                            "summary": server.summary,
+                            "epoch": server.epoch,
+                            "tools": tools,
+                        }));
+                    }
+
+                    if matched_servers.is_empty() {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!("No MCP toolset matched '{}'. Try another keyword.", keyword)
+                            }],
+                            "isError": true
+                        })
+                    } else {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "json",
+                                "json": {
+                                    "toolsets": matched_servers.clone(),
+                                    "servers": matched_servers
+                                }
+                            }],
+                            "isError": false
+                        })
+                    }
+                }
+                "load_mcp_tool" => {
+                    let names = if let Some(values) = args.get("names").and_then(|v| v.as_array()) {
+                        values
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .map(|v| v.to_string())
+                            .collect::<Vec<_>>()
+                    } else if let Some(single) = args.get("name").and_then(|v| v.as_str()) {
+                        vec![single.to_string()]
+                    } else {
+                        Vec::new()
+                    };
+                    if names.is_empty() {
+                        return Err("Missing required parameter: names".to_string());
+                    }
+                    let conversation_id = conversation_id
+                        .ok_or_else(|| "load_mcp_tool requires conversation context".to_string())?;
+                    let server_filter = args
+                        .get("server_name")
+                        .and_then(|v| v.as_str())
+                        .map(|v| v.to_lowercase());
+                    let tool_catalog = db
+                        .list_tool_catalog(None)
+                        .map_err(|e| format!("Failed to list MCP tool catalog: {}", e))?;
+                    let mut selected = Vec::new();
+                    let mut selected_ids = std::collections::HashSet::new();
+
+                    for keyword in &names {
+                        for tool in &tool_catalog {
+                            if !tool.server_enabled || !tool.tool_enabled {
+                                continue;
+                            }
+                            if tool.summary_generated_at.is_none() {
+                                continue;
+                            }
+                            if tool.server_name == "MCP 动态加载工具" {
+                                continue;
+                            }
+                            if let Some(filter) = &server_filter {
+                                if !matches_keyword(&tool.server_name, filter) {
+                                    continue;
+                                }
+                            }
+                            let matched = matches_keyword(&tool.tool_name, keyword)
+                                || matches_keyword(&tool.summary, keyword)
+                                || matches_keyword(&tool.server_name, keyword);
+                            if !matched {
+                                continue;
+                            }
+                            if selected_ids.insert(tool.tool_id) {
+                                selected.push(tool.clone());
+                            }
+                        }
+                    }
+
+                    if selected.is_empty() {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!("No MCP tool matched {:?}. Try more specific keywords.", names)
+                            }],
+                            "isError": true
+                        })
+                    } else {
+                        let mut server_ids = Vec::new();
+                        let mut seen_server_ids = std::collections::HashSet::new();
+                        for tool in &selected {
+                            if seen_server_ids.insert(tool.server_id) {
+                                server_ids.push(tool.server_id);
+                            }
+                        }
+                        let mut tool_definition_map: std::collections::HashMap<
+                            i64,
+                            (String, String, bool),
+                        > = std::collections::HashMap::new();
+                        if !server_ids.is_empty() {
+                            let server_tool_pairs = db
+                                .get_mcp_servers_with_tools_by_ids(&server_ids)
+                                .map_err(|e| {
+                                    format!("Failed to load MCP tool definitions: {}", e)
+                                })?;
+                            for (_server, tools) in server_tool_pairs {
+                                for actual_tool in tools {
+                                    if actual_tool.is_enabled {
+                                        tool_definition_map.insert(
+                                            actual_tool.id,
+                                            (
+                                                actual_tool.tool_description.unwrap_or_default(),
+                                                actual_tool
+                                                    .parameters
+                                                    .unwrap_or_else(|| "{}".to_string()),
+                                                actual_tool.is_auto_run,
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        let mut loaded = Vec::new();
+                        for tool in &selected {
+                            db.upsert_conversation_loaded_tool(conversation_id, tool.tool_id, Some("manual"))
+                                .map_err(|e| format!("Failed to persist loaded tool {}: {}", tool.tool_name, e))?;
+                            let (description, parameters_json, is_auto_run) = tool_definition_map
+                                .get(&tool.tool_id)
+                                .cloned()
+                                .unwrap_or_else(|| (String::new(), "{}".to_string(), false));
+                            let resolved_description = if description.trim().is_empty() {
+                                tool.summary.clone()
+                            } else {
+                                description
+                            };
+                            let parameters_schema = serde_json::from_str::<serde_json::Value>(&parameters_json)
+                                .unwrap_or_else(|_| {
+                                    serde_json::json!({
+                                        "type": "object",
+                                        "additionalProperties": true
+                                    })
+                                });
+                            loaded.push(serde_json::json!({
+                                "tool_id": tool.tool_id,
+                                "toolset_name": tool.server_name,
+                                "server_name": tool.server_name,
+                                "tool_name": tool.tool_name,
+                                "summary": tool.summary,
+                                "description": resolved_description.clone(),
+                                "parameters": parameters_schema.clone(),
+                                "parameters_json": parameters_json,
+                                "is_auto_run": is_auto_run,
+                                "tool_definition": {
+                                    "server_name": tool.server_name,
+                                    "tool_name": tool.tool_name,
+                                    "description": resolved_description,
+                                    "parameters": parameters_schema
+                                }
+                            }));
+                        }
+                        serde_json::json!({
+                            "content": [{
+                                "type": "json",
+                                "json": {
+                                    "loaded_count": loaded.len(),
+                                    "loaded_tools": loaded
+                                }
+                            }],
+                            "isError": false
+                        })
+                    }
+                }
+                _ => serde_json::json!({
+                    "content": [{"type": "text", "text": format!("Unknown dynamic_mcp tool: {}", tool_name)}],
                     "isError": true
                 }),
             }

@@ -121,7 +121,8 @@ use crate::mcp::builtin_mcp::{
 use crate::api::todo_api::get_todos;
 use crate::mcp::execution_api::{
     continue_with_error, create_mcp_tool_call, execute_mcp_tool_call, get_mcp_tool_call,
-    get_mcp_tool_calls_by_conversation, send_mcp_tool_results, stop_mcp_tool_call,
+    get_mcp_tool_calls_by_conversation, get_conversation_loaded_mcp_tools, send_mcp_tool_results,
+    stop_mcp_tool_call,
 };
 use crate::mcp::registry_api::{
     add_mcp_server,
@@ -152,6 +153,7 @@ use crate::mcp::registry_api::{
     update_mcp_server_prompt,
     update_mcp_server_tool,
 };
+use crate::mcp::summarizer::summarize_all_mcp_catalogs;
 use crate::window::{
     awaken_aipp, create_ask_window, create_chat_ui_window_hidden, create_config_window_hidden,
     create_schedule_window_hidden, ensure_hidden_search_window, handle_open_ask_window,
@@ -714,6 +716,7 @@ pub fn run() {
             update_mcp_server_prompt,
             test_mcp_connection,
             refresh_mcp_server_capabilities,
+            summarize_all_mcp_catalogs,
             // Skills 与操作 MCP 联动校验 API
             check_operation_mcp_for_skills,
             enable_operation_mcp_and_skill,
@@ -745,6 +748,7 @@ pub fn run() {
             execute_mcp_tool_call,
             get_mcp_tool_call,
             get_mcp_tool_calls_by_conversation,
+            get_conversation_loaded_mcp_tools,
             stop_mcp_tool_call,
             continue_with_error,
             send_mcp_tool_results,

@@ -520,13 +520,15 @@ async fn handle_captured_tool_calls_common(
                     .read(conversation_id)
                 {
                     if let Some(assistant_id) = conv.and_then(|c| c.assistant_id) {
-                        if let Ok(servers) =
-                            crate::api::assistant_api::get_assistant_mcp_servers_with_tools(
-                                app_handle.clone(),
-                                assistant_id,
-                            )
-                            .await
+                        if let Ok(mcp_info) = crate::mcp::collect_mcp_info_for_assistant(
+                            app_handle,
+                            assistant_id,
+                            None,
+                            None,
+                        )
+                        .await
                         {
+                            let servers = mcp_info.enabled_servers;
                             let mut should_auto_run = false;
                             for s in servers.iter() {
                                 // 支持精确匹配和清理后名称匹配
@@ -715,13 +717,15 @@ async fn handle_captured_tool_calls_concurrent(
         .read(conversation_id)
     {
         if let Some(assistant_id) = conv.and_then(|c| c.assistant_id) {
-            if let Ok(servers) =
-                crate::api::assistant_api::get_assistant_mcp_servers_with_tools(
-                    app_handle.clone(),
-                    assistant_id,
-                )
-                .await
+            if let Ok(mcp_info) = crate::mcp::collect_mcp_info_for_assistant(
+                app_handle,
+                assistant_id,
+                None,
+                None,
+            )
+            .await
             {
+                let servers = mcp_info.enabled_servers;
                 for (call_id, server_name, tool_name) in &tool_call_records {
                     let mut should_auto_run = false;
                     for s in servers.iter() {

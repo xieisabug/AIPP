@@ -410,6 +410,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // Context items (user files + MCP tool calls + message attachments)
         const { contextItems } = useContextList({
+            conversationId,
             userFiles: fileInfoList,
             mcpToolCallStates,
             messages,

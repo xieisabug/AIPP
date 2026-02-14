@@ -21,6 +21,7 @@ use crate::api::genai_client;
 use crate::db::conversation_db::{AttachmentType, Repository};
 use crate::db::conversation_db::{ConversationDatabase, Message, MessageAttachment};
 use crate::db::llm_db::LLMDatabase;
+use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
 use crate::mcp::execution_api::cancel_mcp_tool_calls_by_conversation;
 use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt};
@@ -31,7 +32,7 @@ use crate::template_engine::TemplateEngine;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use crate::{AcpSessionState, AppState, FeatureConfigState};
 use anyhow::Context;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use genai::chat::Tool;
 use tauri::Emitter;
 use tauri::Manager;
@@ -152,13 +153,48 @@ pub fn build_tools_with_mapping(
 }
 
 fn build_tool_config(
+    app_handle: &tauri::AppHandle,
     mcp_info: &crate::mcp::MCPInfoForAssistant,
     enable_tools: bool,
+    conversation_id: Option<i64>,
 ) -> Option<ToolConfig> {
     if !enable_tools {
         return None;
     }
-    let (tools, tool_name_mapping) = build_tools_with_mapping(&mcp_info.enabled_servers);
+    let servers_for_injection = if mcp_info.dynamic_loading_enabled {
+        let mut allowed: HashSet<(i64, String)> = HashSet::new();
+        if let Some(cid) = conversation_id {
+            if let Ok(db) = MCPDatabase::new(app_handle) {
+                let _ = db.refresh_conversation_loaded_tool_statuses(cid);
+                if let Ok(loaded) = db.get_valid_loaded_tools_for_conversation(cid) {
+                    for tool in loaded {
+                        allowed.insert((tool.server_id, tool.tool_name));
+                    }
+                }
+            }
+        }
+
+        let mut filtered = Vec::new();
+        for server in &mcp_info.enabled_servers {
+            let mut tools = Vec::new();
+            let is_dynamic_builtin = server.command.as_deref() == Some("aipp:dynamic_mcp");
+            for tool in &server.tools {
+                if is_dynamic_builtin || allowed.contains(&(server.id, tool.name.clone())) {
+                    tools.push(tool.clone());
+                }
+            }
+            if !tools.is_empty() {
+                let mut server_cloned = server.clone();
+                server_cloned.tools = tools;
+                filtered.push(server_cloned);
+            }
+        }
+        filtered
+    } else {
+        mcp_info.enabled_servers.clone()
+    };
+
+    let (tools, tool_name_mapping) = build_tools_with_mapping(&servers_for_injection);
     debug!(tools = ?tools, "injected MCP tools");
     Some(ToolConfig { tools, tool_name_mapping })
 }
@@ -531,7 +567,8 @@ pub async fn ask_ai(
         } else {
             ToolCallStrategy::NonNative
         };
-        let tool_config = build_tool_config(&mcp_info, has_available_tools);
+        let tool_config =
+            build_tool_config(&app_handle_clone, &mcp_info, has_available_tools, Some(conversation_id));
         let ChatRequestBuildResult { chat_request, tool_name_mapping } =
             build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
@@ -840,7 +877,8 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     } else {
         ToolCallStrategy::NonNative
     };
-    let tool_config = build_tool_config(&mcp_info, has_available_tools);
+    let tool_config =
+        build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id_i64));
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
@@ -1064,7 +1102,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     } else {
         ToolCallStrategy::NonNative
     };
-    let tool_config = build_tool_config(&mcp_info, has_available_tools);
+    let tool_config = build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id));
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
@@ -1434,7 +1472,7 @@ pub async fn regenerate_ai(
             )
             .await
             {
-                build_tool_config(&mcp_info, true)
+                build_tool_config(&app_handle_clone, &mcp_info, true, Some(conversation_id))
             } else {
                 None
             }

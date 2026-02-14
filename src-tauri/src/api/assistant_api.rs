@@ -48,6 +48,7 @@ pub struct MCPToolInfo {
 pub struct MCPServerWithTools {
     pub id: i64,
     pub name: String,
+    pub summary: String,
     pub command: Option<String>,
     pub is_enabled: bool,
     pub tools: Vec<MCPToolInfo>,
@@ -640,6 +641,7 @@ pub async fn get_assistant_mcp_servers_with_tools(
             MCPServerWithTools {
                 id: server_id,
                 name: server_name,
+                summary: String::new(),
                 command: server_command,
                 is_enabled: server_is_enabled,
                 tools,
