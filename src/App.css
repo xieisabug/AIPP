@@ -209,13 +209,11 @@ body {
 
     .theme-newyear:not(.dark) .bg-primary svg {
         color: hsl(var(--primary-foreground));
-        fill: hsl(var(--primary-foreground));
         stroke: hsl(var(--primary-foreground));
     }
 
     .theme-newyear:not(.dark) .bg-action svg {
         color: hsl(var(--action-foreground));
-        fill: hsl(var(--action-foreground));
         stroke: hsl(var(--action-foreground));
     }
 
