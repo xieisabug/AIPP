@@ -24,14 +24,15 @@ import 'katex/dist/katex.min.css';
 
 interface EmbeddedArtifactPreviewProps {
     className?: string;
+    previewOnly?: boolean;
 }
 
 type PreviewType = 'react' | 'vue' | 'mermaid' | 'html' | 'svg' | 'xml' | 'markdown' | 'md' | 'drawio' | null;
 
-export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactPreviewProps) {
+export default function EmbeddedArtifactPreview({ className, previewOnly = false }: EmbeddedArtifactPreviewProps) {
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [isPreviewReady, setIsPreviewReady] = useState(false);
-    const [currentView, setCurrentView] = useState<'logs' | 'preview' | 'code'>('logs');
+    const [currentView, setCurrentView] = useState<'logs' | 'preview' | 'code'>(previewOnly ? 'preview' : 'logs');
     const [previewType, setPreviewType] = useState<PreviewType>(null);
     const previewTypeRef = useRef<PreviewType>(null);
     const mermaidContainerRef = useRef<HTMLDivElement | null>(null);
@@ -90,8 +91,8 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
         setDrawioXmlContent('');
         setOriginalCode('');
         setIsPreviewReady(false);
-        setCurrentView('logs');
-    }, []);
+        setCurrentView(previewOnly ? 'preview' : 'logs');
+    }, [previewOnly]);
 
     // 处理 artifact 数据
     const handleArtifactData = useCallback((data: ArtifactData) => {
@@ -263,6 +264,12 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
         }
     }, [isPreviewReady, previewUrl, previewType]);
 
+    useEffect(() => {
+        if (previewOnly && currentView !== 'preview') {
+            setCurrentView('preview');
+        }
+    }, [currentView, previewOnly]);
+
     // draw.io postMessage 通信
     useEffect(() => {
         if (previewType === 'drawio' && drawioXmlContent) {
@@ -370,10 +377,12 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
         },
     };
 
+    const activeView = previewOnly ? 'preview' : currentView;
+
     return (
         <div className={`flex flex-col h-full ${className}`}>
             {/* 顶部工具栏 */}
-            {isPreviewReady && (
+            {!previewOnly && isPreviewReady && (
                 <div className="flex-shrink-0 p-2 border-b border-border flex items-center justify-between">
                     <div className="text-xs text-muted-foreground">
                         {currentView === 'logs' ? '日志' : currentView === 'code' ? '代码' :
@@ -398,7 +407,7 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
 
             {/* 主要内容区域 */}
             <div className="flex-1 min-h-0 overflow-hidden">
-                {currentView === 'logs' ? (
+                {activeView === 'logs' ? (
                     /* 日志视图 */
                     <div className="h-full overflow-y-auto p-3">
                         <div className="text-xs font-mono space-y-1">
@@ -417,7 +426,7 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
                             <div ref={logsEndRef} />
                         </div>
                     </div>
-                ) : currentView === 'code' ? (
+                ) : activeView === 'code' ? (
                     <div className="h-full overflow-y-auto p-3">
                         <div className="text-xs font-mono whitespace-pre-wrap bg-muted border border-border rounded p-3">
                             {originalCode || htmlContent || mermaidContent || markdownContent}
@@ -453,6 +462,13 @@ export default function EmbeddedArtifactPreview({ className }: EmbeddedArtifactP
                                 className="w-full h-full border-0 bg-background"
                                 sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                             />
+                        ) : (previewType === 'react' || previewType === 'vue') && !previewUrl ? (
+                            <div className="h-full flex items-center justify-center text-muted-foreground">
+                                <div className="text-center">
+                                    <Loader2 className="h-6 w-6 mx-auto mb-2 animate-spin opacity-60" />
+                                    <p className="text-sm">正在启动预览...</p>
+                                </div>
+                            </div>
                         ) : (
                             /* React/Vue iframe 预览 */
                             <iframe

@@ -5,7 +5,7 @@ import { useTheme } from "../hooks/useTheme";
 import { ChatSidebarContent } from "../components/chat-sidebar";
 import { TodoItem, CodeArtifact, ContextItem } from "../components/chat-sidebar/types";
 import { Button } from "../components/ui/button";
-import { X, FileText, Globe, Image } from "lucide-react";
+import { X, FileText, Globe, Image, ExternalLink } from "lucide-react";
 import EmbeddedArtifactPreview from "../components/EmbeddedArtifactPreview";
 import { cn } from "../utils/utils";
 
@@ -41,6 +41,7 @@ function SidebarWindow() {
     });
     const [previewMode, setPreviewMode] = useState<PreviewMode>('none');
     const [contextPreview, setContextPreview] = useState<ContextPreview | null>(null);
+    const [previewPayload, setPreviewPayload] = useState<{ lang: string; inputStr: string } | null>(null);
     const [dataReceived, setDataReceived] = useState(false);
     const [hasAutoPreviewedLatest, setHasAutoPreviewedLatest] = useState(false);
     
@@ -70,6 +71,7 @@ function SidebarWindow() {
             // Auto-preview it
             setPreviewMode('artifact');
             setContextPreview(null);
+            setPreviewPayload({ lang: latestArtifact.language, inputStr: latestArtifact.code });
             setHasAutoPreviewedLatest(true);
 
             const conversationId = sidebarData.conversationId ? parseInt(sidebarData.conversationId, 10) : undefined;
@@ -150,6 +152,7 @@ function SidebarWindow() {
         // Switch to artifact preview mode
         setPreviewMode('artifact');
         setContextPreview(null);
+        setPreviewPayload({ lang: artifact.language, inputStr: artifact.code });
         
         // Call run_artifacts to start the preview
         const conversationId = sidebarData.conversationId ? parseInt(sidebarData.conversationId, 10) : undefined;
@@ -164,9 +167,25 @@ function SidebarWindow() {
 
     // Handle context click - show context preview
     const handleContextClick = useCallback((item: ContextItem) => {
+        if (item.type === 'search' && item.searchMarkdown) {
+            setPreviewMode('artifact');
+            setContextPreview(null);
+            setPreviewPayload({ lang: "markdown", inputStr: item.searchMarkdown });
+            const conversationId = sidebarData.conversationId ? parseInt(sidebarData.conversationId, 10) : undefined;
+            invoke("run_artifacts", {
+                lang: "markdown",
+                inputStr: item.searchMarkdown,
+                sourceWindow: "sidebar",
+                conversationId,
+            }).catch((error) => {
+                console.error("Failed to preview search markdown:", error);
+            });
+            return;
+        }
         setPreviewMode('context');
         setContextPreview({ context: item });
-    }, []);
+        setPreviewPayload(null);
+    }, [sidebarData.conversationId]);
 
     // Close the window
     const handleClose = useCallback(() => {
@@ -177,7 +196,22 @@ function SidebarWindow() {
     const handleClearPreview = useCallback(() => {
         setPreviewMode('none');
         setContextPreview(null);
+        setPreviewPayload(null);
     }, []);
+
+    const handleOpenInPreviewWindow = useCallback(() => {
+        if (!previewPayload) return;
+        const conversationId = sidebarData.conversationId ? parseInt(sidebarData.conversationId, 10) : undefined;
+        invoke("run_artifacts", {
+            lang: previewPayload.lang,
+            inputStr: previewPayload.inputStr,
+            conversationId,
+        }).catch((error) => {
+            console.error("Failed to open preview in preview window:", error);
+        });
+    }, [previewPayload, sidebarData.conversationId]);
+
+    const canOpenInPreviewWindow = !!previewPayload;
 
     // Render preview content based on mode
     const renderPreview = () => {
@@ -194,7 +228,7 @@ function SidebarWindow() {
 
         if (previewMode === 'artifact') {
             // Use embedded artifact preview component
-            return <EmbeddedArtifactPreview className="flex-1" />;
+            return <EmbeddedArtifactPreview className="flex-1" previewOnly />;
         }
 
         if (previewMode === 'context' && contextPreview) {
@@ -287,8 +321,20 @@ function SidebarWindow() {
     return (
         <div className={cn("flex h-screen bg-background", isResizing && "select-none")}>
             {/* Left side - Preview area */}
-            <div className="flex-1 flex flex-col border-r border-border min-w-0">
+            <div className="relative flex-1 flex flex-col border-r border-border min-w-0">
                 {renderPreview()}
+                {canOpenInPreviewWindow && (
+                    <Button
+                        variant="secondary"
+                        size="sm"
+                        className="absolute top-3 right-3 z-20 h-8 px-3 shadow-md bg-background/90 backdrop-blur-sm"
+                        onClick={handleOpenInPreviewWindow}
+                        title="在预览窗口打开"
+                    >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                        在预览窗口打开
+                    </Button>
+                )}
             </div>
 
             {/* Right side - Sidebar content with resize handle */}

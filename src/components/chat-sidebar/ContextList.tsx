@@ -101,12 +101,14 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
     }, []);
 
     const handleItemClick = useCallback((item: ContextItem) => {
+        if (onItemClick) {
+            onItemClick(item);
+            return;
+        }
         if (item.type === 'search' && item.searchMarkdown) {
             handleOpenMarkdownPreview(item.searchMarkdown);
         } else if (item.attachmentData) {
             handleOpenAttachment(item);
-        } else if (onItemClick) {
-            onItemClick(item);
         }
     }, [handleOpenAttachment, handleOpenMarkdownPreview, onItemClick]);
 
