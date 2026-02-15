@@ -57,24 +57,11 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
         BuiltinTemplateInfo {
             id: "search".into(),
             name: "搜索工具".into(),
-            description: "内置的网络搜索和网页访问工具，支持多种搜索引擎和浏览器，可以通过搜索引擎获取到相关信息，并且可以调用访问工具进一步获取页面的具体信息".into(),
+            description: "内置的网络搜索和网页访问工具，支持多种搜索引擎，基于 Chromium 内核抓取页面信息，并且可以调用访问工具进一步获取页面的具体信息".into(),
             command: "aipp:search".into(),
             transport_type: "stdio".into(),
             default_timeout: Some(60000), // 60秒，搜索和抓取需要更多时间
         required_envs: vec![
-            BuiltinTemplateEnvVar {
-                key: "BROWSER_TYPE".into(),
-                label: "浏览器类型".into(),
-                required: false,
-                tip: Some("搜索使用的浏览器类型，默认使用 Chrome，如果不可用则降级为 Edge".into()),
-                field_type: "select".into(),
-                default_value: Some("chrome".into()),
-                placeholder: None,
-                options: Some(vec![
-                    EnvVarOption { label: "Chrome".into(), value: "chrome".into() },
-                    EnvVarOption { label: "Edge".into(), value: "edge".into() },
-                ]),
-            },
             BuiltinTemplateEnvVar {
                 key: "SEARCH_ENGINE".into(),
                 label: "搜索引擎".into(),
@@ -755,20 +742,15 @@ mod tests {
     }
 
     #[test]
-    fn test_search_template_browser_type_env() {
+    fn test_search_template_browser_type_env_removed() {
         let templates = builtin_templates();
         let search = templates.iter().find(|t| t.id == "search").unwrap();
 
         let browser_env = search.required_envs.iter().find(|e| e.key == "BROWSER_TYPE");
-        assert!(browser_env.is_some(), "BROWSER_TYPE env should exist");
-
-        let env = browser_env.unwrap();
-        assert_eq!(env.field_type, "select");
-        assert!(env.options.is_some());
-
-        let options = env.options.as_ref().unwrap();
-        assert!(options.iter().any(|o| o.value == "chrome"));
-        assert!(options.iter().any(|o| o.value == "edge"));
+        assert!(
+            browser_env.is_none(),
+            "BROWSER_TYPE env should be removed because chromiumoxide now uses fixed browser path detection"
+        );
     }
 
     #[test]

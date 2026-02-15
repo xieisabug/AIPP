@@ -1781,6 +1781,7 @@ async fn execute_builtin_tool(
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
     // 获取超时配置，使用服务器配置的超时或默认值
     let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
+    let start = std::time::Instant::now();
 
     // 验证是否为内置工具调用
     let command = server.command.clone().unwrap_or_default();
@@ -1788,6 +1789,13 @@ async fn execute_builtin_tool(
         error!(command=%command, "invalid builtin tool command");
         bail!("Unknown builtin tool: {} for command: {}", tool_name, command);
     }
+    debug!(
+        server_id = server.id,
+        command = %command,
+        tool_name = %tool_name,
+        timeout_ms,
+        "Executing builtin MCP tool"
+    );
 
     // 定义实际的执行逻辑
     let execution = async {
@@ -1810,7 +1818,22 @@ async fn execute_builtin_tool(
             match result {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => return Err(anyhow!("工具执行失败: {}", e)),
-                Err(_) => return Err(anyhow!("工具执行超时（{}ms）", timeout_ms)),
+                Err(_) => {
+                    error!(
+                        server_id = server.id,
+                        command = %command,
+                        tool_name = %tool_name,
+                        timeout_ms,
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        "Builtin tool execution timed out"
+                    );
+                    let detail = if command == "aipp:search" {
+                        "内置搜索链路包含 Chromium 导航与结果等待，请结合 search 日志中的 stage 字段定位具体超时步骤。"
+                    } else {
+                        "请结合日志排查具体超时步骤。"
+                    };
+                    return Err(anyhow!("工具执行超时（{}ms）。{}", timeout_ms, detail));
+                },
             }
         }
     };
@@ -1823,6 +1846,13 @@ async fn execute_builtin_tool(
         error!(tool_name=%tool_name, "builtin tool returned error flag");
         bail!("工具执行错误: {}", v.get("content").unwrap_or(&serde_json::Value::Null));
     }
+    info!(
+        server_id = server.id,
+        command = %command,
+        tool_name = %tool_name,
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "Builtin MCP tool executed successfully"
+    );
     let content = v.get("content").cloned().unwrap_or(serde_json::Value::Null);
     Ok(serde_json::to_string(&content).context("序列化结果失败")?)
 }

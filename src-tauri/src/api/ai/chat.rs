@@ -2326,7 +2326,26 @@ async fn attempt_stream_chat(
                 let _user_friendly_error = enhanced_error_logging_v2(&e, "Stream Processing").await;
                 return Err(anyhow::anyhow!("Stream processing failed: {}", e));
             }
-            None => break,
+            None => {
+                error!(
+                    conversation_id,
+                    current_output_type = ?current_output_type,
+                    response_chunks = response_chunk_count,
+                    response_chars = response_char_count,
+                    reasoning_chunks = reasoning_chunk_count,
+                    reasoning_chars = reasoning_char_count,
+                    captured_tool_calls = captured_tool_calls.len(),
+                    has_response_message = response_message_id.is_some(),
+                    has_reasoning_message = reasoning_message_id.is_some(),
+                    "stream closed unexpectedly without End event"
+                );
+                return Err(anyhow::anyhow!(
+                    "Stream ended unexpectedly without End event (response_chunks={}, reasoning_chunks={}, captured_tool_calls={})",
+                    response_chunk_count,
+                    reasoning_chunk_count,
+                    captured_tool_calls.len()
+                ));
+            }
         }
     }
 
