@@ -212,6 +212,16 @@ function SidebarWindow() {
     }, [previewPayload, sidebarData.conversationId]);
 
     const canOpenInPreviewWindow = !!previewPayload;
+    const formatToolParameters = useCallback((raw?: string) => {
+        if (!raw || raw.trim().length === 0) {
+            return '{}';
+        }
+        try {
+            return JSON.stringify(JSON.parse(raw), null, 2);
+        } catch {
+            return raw;
+        }
+    }, []);
 
     // Render preview content based on mode
     const renderPreview = () => {
@@ -256,59 +266,91 @@ function SidebarWindow() {
                         </Button>
                     </div>
                     <div className="flex-1 overflow-auto p-4">
-                        {/* Image preview */}
-                        {context.attachmentData?.type === 'Image' && context.attachmentData.content && (
-                            <img
-                                src={`data:image/png;base64,${context.attachmentData.content}`}
-                                alt={context.name}
-                                className="max-w-full h-auto rounded-lg"
-                            />
-                        )}
-                        {/* Text content preview */}
-                        {context.attachmentData?.type === 'Text' && context.attachmentData.content && (
-                            <pre className="text-sm font-mono whitespace-pre-wrap break-all bg-muted p-4 rounded-lg">
-                                {context.attachmentData.content}
-                            </pre>
-                        )}
-                        {/* Search results */}
-                        {context.type === 'search' && context.searchMarkdown && (
-                            <div className="prose prose-sm dark:prose-invert max-w-none">
-                                <pre className="whitespace-pre-wrap">{context.searchMarkdown}</pre>
-                            </div>
-                        )}
-                        {/* Search result items */}
-                        {context.type === 'search' && context.searchResults && context.searchResults.length > 0 && (
-                            <div className="space-y-3">
-                                {context.searchResults.map((result, idx) => (
-                                    <div key={idx} className="p-3 bg-muted rounded-lg">
-                                        <a
-                                            href={result.url}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            className="text-sm font-medium text-primary hover:underline"
-                                        >
-                                            {result.title}
-                                        </a>
-                                        {result.snippet && (
-                                            <p className="text-xs text-muted-foreground mt-1">{result.snippet}</p>
-                                        )}
+                        {context.type === 'loaded_mcp_tool' ? (
+                            <div className="space-y-4">
+                                <div className="rounded-lg border border-border bg-muted/30 p-3">
+                                    <p className="text-xs text-muted-foreground">工具</p>
+                                    <p className="text-sm font-mono break-all mt-1">
+                                        {context.loadedToolData?.serverName || '未知服务'}::{context.loadedToolData?.toolName || context.name}
+                                    </p>
+                                    <p className="text-xs text-muted-foreground mt-2">
+                                        状态: {context.details || context.loadedToolData?.status || '未知'}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-xs text-muted-foreground mb-1">介绍</p>
+                                    <div className="rounded border border-border bg-background max-h-64 overflow-auto">
+                                        <pre className="p-3 text-sm whitespace-pre-wrap leading-6">
+                                            {context.loadedToolData?.description?.trim() || '暂无工具介绍'}
+                                        </pre>
                                     </div>
-                                ))}
+                                </div>
+                                <div>
+                                    <p className="text-xs text-muted-foreground mb-1">参数</p>
+                                    <div className="rounded border border-border bg-background max-h-80 overflow-auto">
+                                        <pre className="p-3 text-xs font-mono whitespace-pre-wrap break-all leading-5">
+                                            {formatToolParameters(context.loadedToolData?.parameters)}
+                                        </pre>
+                                    </div>
+                                </div>
                             </div>
-                        )}
-                        {/* File path details */}
-                        {context.details && !context.searchMarkdown && !context.searchResults && (
-                            <div className="text-sm text-muted-foreground">
-                                <p className="font-medium mb-2">路径：</p>
-                                <code className="text-xs bg-muted p-2 rounded block">{context.details}</code>
-                            </div>
-                        )}
-                        {/* Fallback for no content */}
-                        {!context.attachmentData?.content && 
-                         !context.searchMarkdown && 
-                         !context.searchResults?.length && 
-                         !context.details && (
-                            <p className="text-muted-foreground">暂无可预览的内容</p>
+                        ) : (
+                            <>
+                                {/* Image preview */}
+                                {context.attachmentData?.type === 'Image' && context.attachmentData.content && (
+                                    <img
+                                        src={`data:image/png;base64,${context.attachmentData.content}`}
+                                        alt={context.name}
+                                        className="max-w-full h-auto rounded-lg"
+                                    />
+                                )}
+                                {/* Text content preview */}
+                                {context.attachmentData?.type === 'Text' && context.attachmentData.content && (
+                                    <pre className="text-sm font-mono whitespace-pre-wrap break-all bg-muted p-4 rounded-lg">
+                                        {context.attachmentData.content}
+                                    </pre>
+                                )}
+                                {/* Search results */}
+                                {context.type === 'search' && context.searchMarkdown && (
+                                    <div className="prose prose-sm dark:prose-invert max-w-none">
+                                        <pre className="whitespace-pre-wrap">{context.searchMarkdown}</pre>
+                                    </div>
+                                )}
+                                {/* Search result items */}
+                                {context.type === 'search' && context.searchResults && context.searchResults.length > 0 && (
+                                    <div className="space-y-3">
+                                        {context.searchResults.map((result, idx) => (
+                                            <div key={idx} className="p-3 bg-muted rounded-lg">
+                                                <a
+                                                    href={result.url}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="text-sm font-medium text-primary hover:underline"
+                                                >
+                                                    {result.title}
+                                                </a>
+                                                {result.snippet && (
+                                                    <p className="text-xs text-muted-foreground mt-1">{result.snippet}</p>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                                {/* File path details */}
+                                {context.details && !context.searchMarkdown && !context.searchResults && (
+                                    <div className="text-sm text-muted-foreground">
+                                        <p className="font-medium mb-2">路径：</p>
+                                        <code className="text-xs bg-muted p-2 rounded block">{context.details}</code>
+                                    </div>
+                                )}
+                                {/* Fallback for no content */}
+                                {!context.attachmentData?.content &&
+                                    !context.searchMarkdown &&
+                                    !context.searchResults?.length &&
+                                    !context.details && (
+                                        <p className="text-muted-foreground">暂无可预览的内容</p>
+                                    )}
+                            </>
                         )}
                     </div>
                 </div>

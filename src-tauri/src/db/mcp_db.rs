@@ -114,6 +114,8 @@ pub struct ConversationLoadedMCPTool {
     pub source: Option<String>,
     pub loaded_at: String,
     pub updated_at: String,
+    pub tool_description: Option<String>,
+    pub parameters: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1799,11 +1801,13 @@ impl MCPDatabase {
     ) -> rusqlite::Result<Vec<ConversationLoadedMCPTool>> {
         self.refresh_conversation_loaded_tool_statuses(conversation_id)?;
         let mut stmt = self.conn.prepare(
-            "SELECT id, conversation_id, tool_id, loaded_server_name, loaded_tool_name,
-                    loaded_schema_hash, loaded_epoch, status, invalid_reason, source, loaded_at, updated_at
-             FROM conversation_mcp_loaded_tool
-             WHERE conversation_id = ?
-             ORDER BY loaded_at ASC",
+            "SELECT c.id, c.conversation_id, c.tool_id, c.loaded_server_name, c.loaded_tool_name,
+                    c.loaded_schema_hash, c.loaded_epoch, c.status, c.invalid_reason, c.source,
+                    c.loaded_at, c.updated_at, t.tool_description, t.parameters
+             FROM conversation_mcp_loaded_tool c
+             LEFT JOIN mcp_server_tool t ON t.id = c.tool_id
+             WHERE c.conversation_id = ?
+             ORDER BY c.loaded_at ASC",
         )?;
         let rows = stmt.query_map(params![conversation_id], |row| {
             Ok(ConversationLoadedMCPTool {
@@ -1819,6 +1823,8 @@ impl MCPDatabase {
                 source: row.get(9)?,
                 loaded_at: row.get(10)?,
                 updated_at: row.get(11)?,
+                tool_description: row.get(12)?,
+                parameters: row.get(13)?,
             })
         })?;
         let mut result = Vec::new();

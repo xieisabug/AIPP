@@ -55,6 +55,16 @@ export interface ContextItem {
         content?: string; // base64 for images
         url?: string; // file path
     };
+    loadedToolData?: {
+        loadedToolId: number;
+        toolId: number;
+        serverName: string;
+        toolName: string;
+        status: string;
+        invalidReason?: string;
+        description?: string;
+        parameters?: string;
+    };
 }
 
 // Tool names that represent context operations

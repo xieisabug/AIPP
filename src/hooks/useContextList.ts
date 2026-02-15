@@ -33,6 +33,8 @@ interface LoadedMcpToolItem {
     loaded_tool_name: string;
     status: string;
     invalid_reason?: string | null;
+    tool_description?: string | null;
+    parameters?: string | null;
 }
 
 const parseSearchResultItems = (rawResult: string): SearchResultItem[] | undefined => {
@@ -238,6 +240,16 @@ export function useContextList({
                 details: `${statusLabel}${reason}`,
                 source: "mcp",
                 timestamp: new Date(),
+                loadedToolData: {
+                    loadedToolId: tool.id,
+                    toolId: tool.tool_id,
+                    serverName: tool.loaded_server_name,
+                    toolName: tool.loaded_tool_name,
+                    status: tool.status,
+                    invalidReason: tool.invalid_reason ?? undefined,
+                    description: tool.tool_description ?? undefined,
+                    parameters: tool.parameters ?? undefined,
+                },
             });
         });
 
