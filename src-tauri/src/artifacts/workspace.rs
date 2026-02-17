@@ -151,34 +151,23 @@ pub fn show_artifact(
     let context = ensure_workspace_context(app_handle, request.conversation_id)?;
     let mut manifest = read_manifest(&context, request.conversation_id)?;
 
-    let normalized_artifact_key =
-        sanitize_relative_path(&request.artifact_key, "artifact_key")?;
+    let normalized_artifact_key = sanitize_relative_path(&request.artifact_key, "artifact_key")?;
     let normalized_entry_file = sanitize_relative_path(&request.entry_file, "entry_file")?;
 
     let artifact_dir_relative = PathBuf::from("artifacts").join(&normalized_artifact_key);
     let artifact_dir_absolute = context.workspace_path.join(&artifact_dir_relative);
     let entry_absolute = artifact_dir_absolute.join(&normalized_entry_file);
     if !entry_absolute.exists() {
-        return Err(format!(
-            "Artifact entry file does not exist: {}",
-            entry_absolute.display()
-        ));
+        return Err(format!("Artifact entry file does not exist: {}", entry_absolute.display()));
     }
     if !entry_absolute.is_file() {
-        return Err(format!(
-            "Artifact entry path is not a file: {}",
-            entry_absolute.display()
-        ));
+        return Err(format!("Artifact entry path is not a file: {}", entry_absolute.display()));
     }
     ensure_within_workspace(&context.workspace_path, &entry_absolute)?;
     ensure_preview_size(&entry_absolute)?;
 
     let inferred_language = infer_language_from_path(&entry_absolute);
-    let language = request
-        .language
-        .as_deref()
-        .map(normalize_language)
-        .unwrap_or(inferred_language);
+    let language = request.language.as_deref().map(normalize_language).unwrap_or(inferred_language);
     if !is_supported_language(&language) {
         return Err(format!(
             "Unsupported artifact language '{}'. Supported: html, markdown, mermaid, drawio, react/vue and code component formats.",
@@ -198,10 +187,7 @@ pub fn show_artifact(
     let artifact_key = normalize_path_string(&normalized_artifact_key);
     let entry_file = normalize_path_string(&normalized_entry_file);
     let artifact_dir = normalize_path_string(&artifact_dir_relative);
-    let title = request
-        .title
-        .clone()
-        .unwrap_or_else(|| artifact_key.clone());
+    let title = request.title.clone().unwrap_or_else(|| artifact_key.clone());
     let files = collect_artifact_files(&artifact_dir_absolute)?;
 
     let mut entry_to_persist = ArtifactManifestEntry {
@@ -219,10 +205,8 @@ pub fn show_artifact(
         assistant_id: request.assistant_id,
     };
 
-    if let Some(existing) = manifest
-        .artifacts
-        .iter_mut()
-        .find(|artifact| artifact.artifact_key == artifact_key)
+    if let Some(existing) =
+        manifest.artifacts.iter_mut().find(|artifact| artifact.artifact_key == artifact_key)
     {
         entry_to_persist.created_at = existing.created_at.clone();
         if request.title.is_none() && !existing.title.trim().is_empty() {
@@ -240,11 +224,7 @@ pub fn show_artifact(
     }
 
     write_manifest(&context, &manifest)?;
-    write_artifact_json(
-        &artifact_dir_absolute,
-        request.conversation_id,
-        &entry_to_persist,
-    )?;
+    write_artifact_json(&artifact_dir_absolute, request.conversation_id, &entry_to_persist)?;
 
     let event_payload = ArtifactManifestEvent {
         conversation_id: request.conversation_id,
@@ -284,15 +264,9 @@ pub fn list_published_artifacts(
     let manifest = read_manifest(&context, conversation_id)?;
     let mut items = Vec::new();
 
-    for artifact in manifest
-        .artifacts
-        .iter()
-        .filter(|artifact| artifact.status == "published")
-    {
-        let entry_path = context
-            .workspace_path
-            .join(&artifact.artifact_dir)
-            .join(&artifact.entry_file);
+    for artifact in manifest.artifacts.iter().filter(|artifact| artifact.status == "published") {
+        let entry_path =
+            context.workspace_path.join(&artifact.artifact_dir).join(&artifact.entry_file);
         if !entry_path.exists() {
             return Err(format!(
                 "Published artifact entry file not found: {}",
@@ -302,11 +276,7 @@ pub fn list_published_artifacts(
         ensure_within_workspace(&context.workspace_path, &entry_path)?;
         ensure_preview_size(&entry_path)?;
         let code = fs::read_to_string(&entry_path).map_err(|e| {
-            format!(
-                "Failed to read artifact entry file '{}': {}",
-                entry_path.display(),
-                e
-            )
+            format!("Failed to read artifact entry file '{}': {}", entry_path.display(), e)
         })?;
         items.push(ConversationArtifactItem {
             artifact_key: artifact.artifact_key.clone(),
@@ -333,26 +303,19 @@ fn ensure_workspace_context(
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to resolve app data directory: {}", e))?;
-    let workspace_path = app_data_dir
-        .join("artifact_workspaces")
-        .join(format!("conversation_{}", conversation_id));
+    let workspace_path =
+        app_data_dir.join("artifact_workspaces").join(format!("conversation_{}", conversation_id));
     let metadata_dir = workspace_path.join(".aipp");
     fs::create_dir_all(&metadata_dir)
         .map_err(|e| format!("Failed to create artifact metadata directory: {}", e))?;
     let manifest_path = metadata_dir.join("artifacts.json");
     if !manifest_path.exists() {
-        let initial_manifest = ArtifactManifest {
-            version: MANIFEST_VERSION,
-            conversation_id,
-            artifacts: Vec::new(),
-        };
+        let initial_manifest =
+            ArtifactManifest { version: MANIFEST_VERSION, conversation_id, artifacts: Vec::new() };
         write_manifest_to_path(&manifest_path, &initial_manifest)?;
     }
 
-    Ok(WorkspaceContext {
-        workspace_path,
-        manifest_path,
-    })
+    Ok(WorkspaceContext { workspace_path, manifest_path })
 }
 
 fn read_manifest(
@@ -360,18 +323,10 @@ fn read_manifest(
     conversation_id: i64,
 ) -> Result<ArtifactManifest, String> {
     let content = fs::read_to_string(&context.manifest_path).map_err(|e| {
-        format!(
-            "Failed to read artifact manifest '{}': {}",
-            context.manifest_path.display(),
-            e
-        )
+        format!("Failed to read artifact manifest '{}': {}", context.manifest_path.display(), e)
     })?;
     let mut manifest: ArtifactManifest = serde_json::from_str(&content).map_err(|e| {
-        format!(
-            "Failed to parse artifact manifest '{}': {}",
-            context.manifest_path.display(),
-            e
-        )
+        format!("Failed to parse artifact manifest '{}': {}", context.manifest_path.display(), e)
     })?;
 
     if manifest.conversation_id != conversation_id {
@@ -425,10 +380,7 @@ fn write_artifact_json(
 
 fn collect_artifact_files(artifact_dir_absolute: &Path) -> Result<Vec<String>, String> {
     if !artifact_dir_absolute.is_dir() {
-        return Err(format!(
-            "Artifact directory not found: {}",
-            artifact_dir_absolute.display()
-        ));
+        return Err(format!("Artifact directory not found: {}", artifact_dir_absolute.display()));
     }
     let mut files = Vec::new();
     collect_artifact_files_recursive(artifact_dir_absolute, artifact_dir_absolute, &mut files)?;
@@ -441,11 +393,11 @@ fn collect_artifact_files_recursive(
     current_dir: &Path,
     files: &mut Vec<String>,
 ) -> Result<(), String> {
-    let entries = fs::read_dir(current_dir)
-        .map_err(|e| format!("Failed to read artifact directory '{}': {}", current_dir.display(), e))?;
+    let entries = fs::read_dir(current_dir).map_err(|e| {
+        format!("Failed to read artifact directory '{}': {}", current_dir.display(), e)
+    })?;
     for entry in entries {
-        let entry = entry
-            .map_err(|e| format!("Failed to read artifact directory entry: {}", e))?;
+        let entry = entry.map_err(|e| format!("Failed to read artifact directory entry: {}", e))?;
         let path = entry.path();
         if path.is_dir() {
             collect_artifact_files_recursive(base_dir, &path, files)?;
@@ -510,11 +462,7 @@ fn normalize_language(raw: &str) -> String {
 }
 
 fn infer_language_from_path(path: &Path) -> String {
-    let extension = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("text")
-        .to_lowercase();
+    let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("text").to_lowercase();
     match extension.as_str() {
         "md" => "markdown".to_string(),
         "htm" => "html".to_string(),
@@ -576,18 +524,10 @@ fn ensure_preview_size(path: &Path) -> Result<(), String> {
 
 fn ensure_within_workspace(workspace_root: &Path, target_path: &Path) -> Result<(), String> {
     let workspace_canonical = workspace_root.canonicalize().map_err(|e| {
-        format!(
-            "Failed to canonicalize workspace root '{}': {}",
-            workspace_root.display(),
-            e
-        )
+        format!("Failed to canonicalize workspace root '{}': {}", workspace_root.display(), e)
     })?;
     let target_canonical = target_path.canonicalize().map_err(|e| {
-        format!(
-            "Failed to canonicalize target path '{}': {}",
-            target_path.display(),
-            e
-        )
+        format!("Failed to canonicalize target path '{}': {}", target_path.display(), e)
     })?;
     if !target_canonical.starts_with(&workspace_canonical) {
         return Err(format!(

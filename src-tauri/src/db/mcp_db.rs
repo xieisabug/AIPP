@@ -1344,11 +1344,7 @@ impl MCPDatabase {
         )?;
         let servers: Vec<(i64, String, String)> = server_stmt
             .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
@@ -1487,7 +1483,9 @@ impl MCPDatabase {
         Ok(())
     }
 
-    pub fn list_server_capability_catalog(&self) -> rusqlite::Result<Vec<MCPServerCapabilityEpochCatalog>> {
+    pub fn list_server_capability_catalog(
+        &self,
+    ) -> rusqlite::Result<Vec<MCPServerCapabilityEpochCatalog>> {
         let mut stmt = self.conn.prepare(
             "SELECT c.server_id, s.name, c.epoch, c.last_refresh_at, c.summary, c.summary_generated_at
              FROM mcp_server_capability_epoch_catalog c
@@ -1512,7 +1510,10 @@ impl MCPDatabase {
         Ok(result)
     }
 
-    pub fn list_tool_catalog(&self, server_id: Option<i64>) -> rusqlite::Result<Vec<MCPToolCatalogEntry>> {
+    pub fn list_tool_catalog(
+        &self,
+        server_id: Option<i64>,
+    ) -> rusqlite::Result<Vec<MCPToolCatalogEntry>> {
         let sql = if server_id.is_some() {
             "SELECT c.tool_id, c.server_id, s.name, c.tool_name, c.summary, c.keywords_json, c.schema_hash,
                     c.capability_epoch, c.updated_at, c.summary_generated_at, s.is_enabled, t.is_enabled
@@ -1558,7 +1559,11 @@ impl MCPDatabase {
         Ok(result)
     }
 
-    pub fn update_server_catalog_summary(&self, server_id: i64, summary: &str) -> rusqlite::Result<()> {
+    pub fn update_server_catalog_summary(
+        &self,
+        server_id: i64,
+        summary: &str,
+    ) -> rusqlite::Result<()> {
         let now = Self::now_string();
         self.conn.execute(
             "UPDATE mcp_server_capability_epoch_catalog
@@ -1615,9 +1620,7 @@ impl MCPDatabase {
                  WHERE t.id = ?",
             )?;
             let (server_name, tool_name, parameters): (String, String, Option<String>) =
-                fallback.query_row(params![tool_id], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                })?;
+                fallback.query_row(params![tool_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             (Self::schema_hash(parameters.as_deref()), 1, server_name, tool_name)
         };
 
@@ -1650,7 +1653,10 @@ impl MCPDatabase {
         Ok(())
     }
 
-    pub fn refresh_conversation_loaded_tool_statuses(&self, conversation_id: i64) -> rusqlite::Result<()> {
+    pub fn refresh_conversation_loaded_tool_statuses(
+        &self,
+        conversation_id: i64,
+    ) -> rusqlite::Result<()> {
         let now = Self::now_string();
         let mut stmt = self.conn.prepare(
             "SELECT id, tool_id, loaded_schema_hash
@@ -1659,11 +1665,7 @@ impl MCPDatabase {
         )?;
         let rows: Vec<(i64, i64, String)> = stmt
             .query_map(params![conversation_id], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 

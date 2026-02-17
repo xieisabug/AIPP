@@ -23,7 +23,7 @@ pub async fn get_todos(
     todo_state: State<'_, TodoState>,
 ) -> Result<Vec<TodoItemResponse>, String> {
     let todos = todo_state.get_todos(conversation_id);
-    
+
     let response: Vec<TodoItemResponse> = todos
         .into_iter()
         .map(|t| TodoItemResponse {
@@ -32,25 +32,22 @@ pub async fn get_todos(
             active_form: t.active_form,
         })
         .collect();
-    
+
     Ok(response)
 }
 
 /// Emit a todo update event to the frontend
 pub fn emit_todo_update(app_handle: &AppHandle, conversation_id: i64, todos: &[TodoItemResponse]) {
     use tauri::Emitter;
-    
+
     #[derive(Clone, Serialize)]
     struct TodoUpdateEvent {
         conversation_id: i64,
         todos: Vec<TodoItemResponse>,
     }
-    
-    let event = TodoUpdateEvent {
-        conversation_id,
-        todos: todos.to_vec(),
-    };
-    
+
+    let event = TodoUpdateEvent { conversation_id, todos: todos.to_vec() };
+
     if let Err(e) = app_handle.emit("todo_update", event) {
         tracing::warn!(error = %e, "Failed to emit todo_update event");
     }

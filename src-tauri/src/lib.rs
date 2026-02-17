@@ -15,6 +15,7 @@ mod window;
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use crate::api::ai::acp::AcpPermissionState;
 use crate::api::ai_api::{
     ask_ai, cancel_ai, get_activity_focus, regenerate_ai, regenerate_conversation_title,
     tool_result_continue_ask_ai,
@@ -29,8 +30,8 @@ use crate::api::assistant_api::{
 use crate::api::attachment_api::{add_attachment, open_attachment_with_default_app};
 use crate::api::conversation_api::{
     create_conversation_with_messages, create_message, delete_conversation, fork_conversation,
-    get_conversation_with_messages, list_conversations, update_assistant_message,
-    search_conversations, update_conversation, update_message_content,
+    get_conversation_with_messages, list_conversations, search_conversations,
+    update_assistant_message, update_conversation, update_message_content,
 };
 use crate::api::copilot_api::{poll_github_copilot_token, start_github_copilot_device_flow};
 #[cfg(desktop)]
@@ -47,16 +48,15 @@ use crate::api::llm_api::{
 };
 use crate::api::operation_api::{confirm_acp_permission, confirm_operation_permission};
 use crate::api::scheduled_task_api::{
-    create_scheduled_task, delete_scheduled_task, list_scheduled_task_logs, list_scheduled_tasks,
-    list_scheduled_task_runs, run_scheduled_task_now, update_scheduled_task,
+    create_scheduled_task, delete_scheduled_task, list_scheduled_task_logs,
+    list_scheduled_task_runs, list_scheduled_tasks, run_scheduled_task_now, update_scheduled_task,
 };
-use crate::api::ai::acp::AcpPermissionState;
 use crate::api::skill_api::{
-    bulk_update_assistant_skills, cleanup_orphaned_skill_configs, delete_skill, fetch_official_skills,
-    get_assistant_skills, get_enabled_assistant_skills, get_skill, get_skill_content,
-    get_skill_sources, get_skills_directory, install_official_skill, open_skill_parent_folder,
-    open_skills_folder, open_source_url, remove_assistant_skill, scan_skills, skill_exists,
-    toggle_assistant_skill, update_assistant_skill_config,
+    bulk_update_assistant_skills, cleanup_orphaned_skill_configs, delete_skill,
+    fetch_official_skills, get_assistant_skills, get_enabled_assistant_skills, get_skill,
+    get_skill_content, get_skill_sources, get_skills_directory, install_official_skill,
+    open_skill_parent_folder, open_skills_folder, open_source_url, remove_assistant_skill,
+    scan_skills, skill_exists, toggle_assistant_skill, update_assistant_skill_config,
 };
 use crate::api::sub_task_api::{
     cancel_sub_task_execution, cancel_sub_task_execution_for_ui, create_sub_task_execution,
@@ -70,17 +70,18 @@ use crate::api::system_api::{
     get_selected_text_api, open_data_folder, open_image, resume_global_shortcut,
     save_feature_config, set_autostart, set_shortcut_recording, suspend_global_shortcut,
 };
+use crate::api::todo_api::get_todos;
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
 use crate::api::updater_api::{
     check_update, check_update_with_proxy, download_and_install_update,
     download_and_install_update_with_proxy, get_app_version,
 };
-use crate::artifacts::artifacts_db::ArtifactsDatabase;
 use crate::artifacts::artifact_bridge_api::{
     artifact_ai_ask, artifact_db_batch_execute, artifact_db_delete, artifact_db_execute,
     artifact_db_exists, artifact_db_get_columns, artifact_db_get_tables, artifact_db_list,
     artifact_db_query, artifact_get_assistants, artifact_get_config,
 };
+use crate::artifacts::artifacts_db::ArtifactsDatabase;
 use crate::artifacts::collection_api::{
     delete_artifact_collection, generate_artifact_metadata, get_artifact_by_id,
     get_artifacts_collection, get_artifacts_for_completion, get_artifacts_statistics,
@@ -89,21 +90,21 @@ use crate::artifacts::collection_api::{
 };
 use crate::artifacts::env_installer::{
     check_acp_library, check_bun_update, check_bun_update_with_proxy, check_bun_version,
-    check_uv_update, check_uv_update_with_proxy, check_uv_version, get_python_info, install_acp_library,
-    install_bun, install_python3, install_uv, update_bun, update_bun_with_proxy, update_uv,
-    update_uv_with_proxy,
+    check_uv_update, check_uv_update_with_proxy, check_uv_version, get_python_info,
+    install_acp_library, install_bun, install_python3, install_uv, update_bun,
+    update_bun_with_proxy, update_uv, update_uv_with_proxy,
 };
 use crate::artifacts::preview_router::{
     confirm_environment_install, preview_react_component, restore_artifact_preview,
     retry_preview_after_install, run_artifacts,
 };
-use crate::artifacts::workspace::list_conversation_artifacts;
 use crate::artifacts::react_preview::{
     close_react_preview, create_react_preview, create_react_preview_for_artifact,
 };
 use crate::artifacts::vue_preview::{
     close_vue_preview, create_vue_preview, create_vue_preview_for_artifact,
 };
+use crate::artifacts::workspace::list_conversation_artifacts;
 use crate::artifacts::{
     react_runner::{clear_react_artifact_cache, close_react_artifact, run_react_artifact},
     shared_components::clear_all_template_cache,
@@ -119,11 +120,10 @@ use crate::mcp::builtin_mcp::{
     add_or_update_aipp_builtin_server, execute_aipp_builtin_tool, init_builtin_mcp_servers,
     list_aipp_builtin_templates, OperationState, TodoState,
 };
-use crate::api::todo_api::get_todos;
 use crate::mcp::execution_api::{
-    continue_with_error, create_mcp_tool_call, execute_mcp_tool_call, get_mcp_tool_call,
-    get_mcp_tool_calls_by_conversation, get_conversation_loaded_mcp_tools, send_mcp_tool_results,
-    stop_mcp_tool_call,
+    continue_with_error, create_mcp_tool_call, execute_mcp_tool_call,
+    get_conversation_loaded_mcp_tools, get_mcp_tool_call, get_mcp_tool_calls_by_conversation,
+    send_mcp_tool_results, stop_mcp_tool_call,
 };
 use crate::mcp::registry_api::{
     add_mcp_server,
@@ -156,11 +156,11 @@ use crate::mcp::registry_api::{
 };
 use crate::mcp::summarizer::summarize_all_mcp_catalogs;
 use crate::window::{
-    awaken_aipp, create_ask_window, create_chat_ui_window_hidden, create_config_window_hidden,
-    create_schedule_window_hidden, ensure_hidden_search_window, handle_open_ask_window,
-    open_artifact_collections_window, open_artifact_preview_window, open_chat_ui_window,
-    open_chat_ui_window_inner, open_config_window, open_config_window_inner, open_plugin_window,
-    open_schedule_window, open_sidebar_window, close_sidebar_window,
+    awaken_aipp, close_sidebar_window, create_ask_window, create_chat_ui_window_hidden,
+    create_config_window_hidden, create_schedule_window_hidden, ensure_hidden_search_window,
+    handle_open_ask_window, open_artifact_collections_window, open_artifact_preview_window,
+    open_chat_ui_window, open_chat_ui_window_inner, open_config_window, open_config_window_inner,
+    open_plugin_window, open_schedule_window, open_sidebar_window,
 };
 use db::conversation_db::ConversationDatabase;
 use db::database_upgrade;
@@ -169,8 +169,8 @@ use db::system_db::FeatureConfig;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use get_selected_text::get_selected_text;
 use serde::{Deserialize, Serialize};
-use state::message_token::MessageTokenManager;
 use state::activity_state::ConversationActivityManager;
+use state::message_token::MessageTokenManager;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::path::BaseDirectory;
@@ -199,9 +199,7 @@ struct AcpSessionState {
 
 impl AcpSessionState {
     fn new() -> Self {
-        Self {
-            sessions: Arc::new(TokioMutex::new(HashMap::new())),
-        }
+        Self { sessions: Arc::new(TokioMutex::new(HashMap::new())) }
     }
 }
 
@@ -527,7 +525,9 @@ pub fn run() {
             }
 
             info!("Running search profile lock cleanup on startup");
-            if let Err(e) = crate::mcp::builtin_mcp::search::handler::cleanup_search_profile_locks(&app_handle) {
+            if let Err(e) =
+                crate::mcp::builtin_mcp::search::handler::cleanup_search_profile_locks(&app_handle)
+            {
                 warn!(error = %e, "Failed to cleanup search profile locks on startup");
             }
 
@@ -537,7 +537,9 @@ pub fn run() {
 
             app.manage(initialize_state(&app_handle));
             app.manage(initialize_name_cache_state(&app_handle));
-            crate::mcp::summarizer::trigger_pending_mcp_catalog_summary_generation(app_handle.clone());
+            crate::mcp::summarizer::trigger_pending_mcp_catalog_summary_generation(
+                app_handle.clone(),
+            );
 
             // 初始化并启动定时任务调度器
             let scheduler_state = scheduler::SchedulerState::new();

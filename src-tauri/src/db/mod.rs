@@ -5,8 +5,8 @@ use conversation_db::ConversationDatabase;
 use llm_db::LLMDatabase;
 use mcp_db::MCPDatabase;
 use rusqlite::params;
-use semver::Version;
 use scheduled_task_db::ScheduledTaskDatabase;
+use semver::Version;
 use sub_task_db::SubTaskDatabase;
 use system_db::SystemDatabase;
 use tauri::Manager;
@@ -596,9 +596,7 @@ fn special_logic_0_0_10(
     info!("special_logic_0_0_10: 初始化 MCP 动态加载数据表");
     let mcp_db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
     mcp_db.create_tables().map_err(|e| e.to_string())?;
-    mcp_db
-        .rebuild_dynamic_mcp_catalog()
-        .map_err(|e| format!("重建 MCP 动态目录失败: {}", e))?;
+    mcp_db.rebuild_dynamic_mcp_catalog().map_err(|e| format!("重建 MCP 动态目录失败: {}", e))?;
     info!("special_logic_0_0_10 done: MCP 动态加载数据表初始化完成");
     Ok(())
 }

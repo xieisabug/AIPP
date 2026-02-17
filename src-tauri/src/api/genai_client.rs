@@ -86,7 +86,10 @@ pub fn create_client_with_config(
     network_proxy: Option<&str>,
     proxy_enabled: bool,
     request_timeout: Option<u64>, // 超时时间（秒）
-    config_feature_map: &std::collections::HashMap<String, std::collections::HashMap<String, crate::db::system_db::FeatureConfig>>,
+    config_feature_map: &std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, crate::db::system_db::FeatureConfig>,
+    >,
 ) -> Result<Client, AppError> {
     let adapter_kind = infer_adapter_kind(model_name, api_type);
 

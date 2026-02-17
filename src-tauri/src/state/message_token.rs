@@ -103,9 +103,7 @@ impl MessageTokenManager {
         tokens.get(&conversation_id).cloned()
     }
 
-    pub fn get_task_handles(
-        &self,
-    ) -> Arc<Mutex<HashMap<i64, AbortHandle>>> {
+    pub fn get_task_handles(&self) -> Arc<Mutex<HashMap<i64, AbortHandle>>> {
         Arc::clone(&self.task_handles)
     }
 }

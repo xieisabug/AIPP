@@ -1,5 +1,6 @@
 use crate::api::assistant_api::{
-    get_assistant_field_value, get_assistant_mcp_servers_with_tools, MCPServerWithTools, MCPToolInfo,
+    get_assistant_field_value, get_assistant_mcp_servers_with_tools, MCPServerWithTools,
+    MCPToolInfo,
 };
 use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
@@ -26,24 +27,22 @@ pub async fn is_dynamic_mcp_loading_enabled_for_assistant(
     app_handle: &tauri::AppHandle,
     assistant_id: i64,
 ) -> bool {
-    let global_enabled = if let Some(feature_state) = app_handle.try_state::<crate::FeatureConfigState>() {
-        let config_map = feature_state.config_feature_map.lock().await;
-        config_map
-            .get("experimental")
-            .and_then(|cfg| cfg.get("dynamic_mcp_loading_enabled"))
-            .map(|cfg| parse_bool(&cfg.value, false))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    let global_enabled =
+        if let Some(feature_state) = app_handle.try_state::<crate::FeatureConfigState>() {
+            let config_map = feature_state.config_feature_map.lock().await;
+            config_map
+                .get("experimental")
+                .and_then(|cfg| cfg.get("dynamic_mcp_loading_enabled"))
+                .map(|cfg| parse_bool(&cfg.value, false))
+                .unwrap_or(false)
+        } else {
+            false
+        };
     if !global_enabled {
         return false;
     }
-    match get_assistant_field_value(
-        app_handle.clone(),
-        assistant_id,
-        "dynamic_mcp_loading_enabled",
-    ) {
+    match get_assistant_field_value(app_handle.clone(), assistant_id, "dynamic_mcp_loading_enabled")
+    {
         Ok(v) => parse_bool(&v, true),
         Err(_) => true,
     }
@@ -57,9 +56,9 @@ fn collect_all_enabled_servers_for_dynamic_mode(
     let all_servers = db
         .get_mcp_servers()
         .map_err(|e| AppError::DatabaseError(format!("Failed to load MCP servers: {}", e)))?;
-    let server_catalog = db
-        .list_server_capability_catalog()
-        .map_err(|e| AppError::DatabaseError(format!("Failed to load MCP server catalog: {}", e)))?;
+    let server_catalog = db.list_server_capability_catalog().map_err(|e| {
+        AppError::DatabaseError(format!("Failed to load MCP server catalog: {}", e))
+    })?;
     let tool_catalog = db
         .list_tool_catalog(None)
         .map_err(|e| AppError::DatabaseError(format!("Failed to load MCP tool catalog: {}", e)))?;
@@ -75,7 +74,9 @@ fn collect_all_enabled_servers_for_dynamic_mode(
         }
         let tools = db
             .get_mcp_server_tools(server.id)
-            .map_err(|e| AppError::DatabaseError(format!("Failed to load MCP server tools: {}", e)))?
+            .map_err(|e| {
+                AppError::DatabaseError(format!("Failed to load MCP server tools: {}", e))
+            })?
             .into_iter()
             .filter(|tool| tool.tool_name == "load_mcp_server" || tool.tool_name == "load_mcp_tool")
             .map(|tool| MCPToolInfo {
@@ -109,12 +110,15 @@ fn collect_all_enabled_servers_for_dynamic_mode(
 
     let summary_map: HashMap<(i64, String), String> = tool_catalog
         .into_iter()
-        .filter(|tool| tool.summary_generated_at.is_some() && tool.server_enabled && tool.tool_enabled)
+        .filter(|tool| {
+            tool.summary_generated_at.is_some() && tool.server_enabled && tool.tool_enabled
+        })
         .map(|tool| ((tool.server_id, tool.tool_name.clone()), tool.summary))
         .collect();
-    let servers_with_tools = db
-        .get_mcp_servers_with_tools_by_ids(&summarized_server_ids)
-        .map_err(|e| AppError::DatabaseError(format!("Failed to load summarized MCP tools: {}", e)))?;
+    let servers_with_tools =
+        db.get_mcp_servers_with_tools_by_ids(&summarized_server_ids).map_err(|e| {
+            AppError::DatabaseError(format!("Failed to load summarized MCP tools: {}", e))
+        })?;
     for (server, tools) in servers_with_tools {
         if !server.is_enabled || server.command.as_deref() == Some("aipp:dynamic_mcp") {
             continue;
@@ -123,16 +127,14 @@ fn collect_all_enabled_servers_for_dynamic_mode(
             .into_iter()
             .filter(|tool| tool.is_enabled)
             .filter_map(|tool| {
-                summary_map
-                    .get(&(server.id, tool.tool_name.clone()))
-                    .map(|summary| MCPToolInfo {
-                        id: tool.id,
-                        name: tool.tool_name,
-                        description: summary.clone(),
-                        is_enabled: true,
-                        is_auto_run: tool.is_auto_run,
-                        parameters: tool.parameters.unwrap_or_else(|| "{}".to_string()),
-                    })
+                summary_map.get(&(server.id, tool.tool_name.clone())).map(|summary| MCPToolInfo {
+                    id: tool.id,
+                    name: tool.tool_name,
+                    description: summary.clone(),
+                    is_enabled: true,
+                    is_auto_run: tool.is_auto_run,
+                    parameters: tool.parameters.unwrap_or_else(|| "{}".to_string()),
+                })
             })
             .collect();
 
@@ -351,11 +353,8 @@ pub async fn format_mcp_prompt_with_filters(
                 } else {
                     tool.description.as_str()
                 };
-                let parameters = if tool.parameters.trim().is_empty() {
-                    "{}"
-                } else {
-                    tool.parameters.as_str()
-                };
+                let parameters =
+                    if tool.parameters.trim().is_empty() { "{}" } else { tool.parameters.as_str() };
                 load_tools_info.push_str(&format!("**{}** \n", tool.name));
                 load_tools_info.push_str(&format!(" - description: {}\n", description));
                 load_tools_info.push_str(&format!(" - parameters: {}\n\n", parameters));
@@ -386,7 +385,7 @@ pub async fn format_mcp_prompt_with_filters(
   <tool_name>load_mcp_tool</tool_name>
   <parameters>{"names":["Agent::load_skills"]}</parameters>
 </mcp_tool_call>
-            "#
+            "#,
         );
 
         let mut tools_info = String::from("\n## MCP 工具集目录摘要\n\n");

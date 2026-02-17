@@ -43,7 +43,9 @@ pub fn start_scheduler(app_handle: tauri::AppHandle, scheduler_state: SchedulerS
 
     // 使用 tauri::async_runtime::spawn 确保在 Tauri 的异步运行时中执行
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = scheduled_task::run_scheduled_tasks(app_handle.clone(), &scheduler_state).await {
+        if let Err(e) =
+            scheduled_task::run_scheduled_tasks(app_handle.clone(), &scheduler_state).await
+        {
             error!(error = %e, "定时任务执行失败");
         }
 
@@ -61,7 +63,9 @@ pub fn start_scheduler(app_handle: tauri::AppHandle, scheduler_state: SchedulerS
                 error!(error = %e, "对话总结定时任务执行失败");
             }
 
-            if let Err(e) = scheduled_task::run_scheduled_tasks(app_handle.clone(), &scheduler_state).await {
+            if let Err(e) =
+                scheduled_task::run_scheduled_tasks(app_handle.clone(), &scheduler_state).await
+            {
                 error!(error = %e, "定时任务执行失败");
             }
         }

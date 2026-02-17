@@ -1,5 +1,7 @@
 use super::browser::BrowserManager;
-use super::chromiumoxide::{cleanup_profile_locks, BrowserPool, BrowserPoolConfig, ContentFetcher, FetchConfig};
+use super::chromiumoxide::{
+    cleanup_profile_locks, BrowserPool, BrowserPoolConfig, ContentFetcher, FetchConfig,
+};
 use super::engine_manager::{SearchEngine, SearchEngineManager};
 use super::engines::base::SearchEngineBase;
 use super::fingerprint::FingerprintManager;
@@ -85,10 +87,7 @@ impl SearchHandler {
 
         let user_data_dir = resolve_search_user_data_dir(&self.app_handle, &config)?;
         let pool_config = BrowserPoolConfig {
-            max_pages: config
-                .get("MAX_CONCURRENT_PAGES")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(5), // 默认最多5个并发页面
+            max_pages: config.get("MAX_CONCURRENT_PAGES").and_then(|v| v.parse().ok()).unwrap_or(5), // 默认最多5个并发页面
             page_idle_timeout_secs: config
                 .get("PAGE_IDLE_TIMEOUT_SECS")
                 .and_then(|v| v.parse().ok())
@@ -103,9 +102,9 @@ impl SearchHandler {
         };
 
         let pool = GLOBAL_BROWSER_POOL
-            .get_or_try_init(|| async move {
-                Ok::<BrowserPool, String>(BrowserPool::new(pool_config))
-            })
+            .get_or_try_init(
+                || async move { Ok::<BrowserPool, String>(BrowserPool::new(pool_config)) },
+            )
             .await?;
 
         Ok(Some(pool.clone()))
@@ -168,11 +167,8 @@ impl SearchHandler {
             wait_timeout_ms = fetch_config.wait_timeout_ms,
             wait_poll_ms = fetch_config.wait_poll_ms,
             headless = fetch_config.headless,
-            has_proxy = fetch_config
-                .proxy_server
-                .as_ref()
-                .map(|p| !p.trim().is_empty())
-                .unwrap_or(false),
+            has_proxy =
+                fetch_config.proxy_server.as_ref().map(|p| !p.trim().is_empty()).unwrap_or(false),
             "Search fetch config prepared"
         );
         let mut fetcher = ContentFetcher::new(self.app_handle.clone(), fetch_config);
@@ -288,10 +284,7 @@ impl SearchHandler {
         // 获取浏览器池
         let browser_pool = self.get_or_create_browser_pool().await?;
 
-        match fetcher
-            .fetch_content(url, &browser_manager, browser_pool.as_ref())
-            .await
-        {
+        match fetcher.fetch_content(url, &browser_manager, browser_pool.as_ref()).await {
             Ok(html) => {
                 info!("Successfully fetched URL content, bytes = {}", html.len());
 
@@ -399,8 +392,7 @@ fn load_search_config_from_db(app_handle: &AppHandle) -> Result<HashMap<String, 
         .map_err(|e| format!("Database prepare error: {}", e))?;
 
     let env_text: Option<String> =
-        stmt.query_row(["aipp:search"], |row| row.get::<_, Option<String>>(0))
-            .unwrap_or(None);
+        stmt.query_row(["aipp:search"], |row| row.get::<_, Option<String>>(0)).unwrap_or(None);
     let mut config = HashMap::new();
     if let Some(text) = env_text {
         for line in text.lines() {

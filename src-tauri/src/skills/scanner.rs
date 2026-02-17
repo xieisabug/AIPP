@@ -391,7 +391,11 @@ impl SkillScanner {
 
         match SkillParser::parse_metadata(skill_file) {
             Ok(metadata) => {
-                let display_name = metadata.name.clone().unwrap_or_else(|| skill_name.to_string());
+                let display_name = Self::resolve_folder_display_name(
+                    metadata.name.clone(),
+                    skill_file,
+                    skill_name,
+                );
 
                 Some(ScannedSkill {
                     identifier,
@@ -411,6 +415,31 @@ impl SkillScanner {
         }
     }
 
+    /// Resolve display name for folder-based skills.
+    /// If metadata.name only mirrors markdown filename, prefer folder name.
+    fn resolve_folder_display_name(
+        metadata_name: Option<String>,
+        skill_file: &Path,
+        folder_name: &str,
+    ) -> String {
+        match metadata_name {
+            Some(name) => {
+                let inferred_from_filename = skill_file
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|stem| stem.eq_ignore_ascii_case(name.as_str()))
+                    .unwrap_or(false);
+
+                if inferred_from_filename {
+                    folder_name.to_string()
+                } else {
+                    name
+                }
+            }
+            None => folder_name.to_string(),
+        }
+    }
+
     /// Scan a skill folder (folder with SKILL.md)
     fn scan_skill_folder(
         &self,
@@ -422,7 +451,11 @@ impl SkillScanner {
 
         match SkillParser::parse_metadata(skill_file) {
             Ok(metadata) => {
-                let display_name = metadata.name.clone().unwrap_or_else(|| folder_name.to_string());
+                let display_name = Self::resolve_folder_display_name(
+                    metadata.name.clone(),
+                    skill_file,
+                    folder_name,
+                );
 
                 Some(ScannedSkill {
                     identifier,
@@ -737,6 +770,36 @@ description: A skill with non-standard filename
 
         let skill = custom_skill.unwrap();
         assert_eq!(skill.display_name, "Custom Skill");
+    }
+
+    #[test]
+    fn test_scan_skill_folder_with_skills_md_without_frontmatter_uses_folder_name() {
+        let (scanner, home_dir, _) = create_test_scanner();
+
+        let skills_dir = home_dir.path().join(".agents/skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+
+        let skill_folder = skills_dir.join("AIPP-artifact");
+        fs::create_dir_all(&skill_folder).unwrap();
+
+        let md_file = skill_folder.join("SKILLS.md");
+        let mut f = fs::File::create(&md_file).unwrap();
+        writeln!(
+            f,
+            r#"# AIPP Artifact Skill Prompt
+
+用于测试无 frontmatter 时的显示名称回退行为。
+"#
+        )
+        .unwrap();
+
+        let skills = scanner.scan_all();
+        let scanned = skills.iter().find(|s| s.relative_path == "AIPP-artifact");
+        assert!(scanned.is_some());
+
+        let skill = scanned.unwrap();
+        assert_eq!(skill.metadata.name, Some("SKILLS".to_string()));
+        assert_eq!(skill.display_name, "AIPP-artifact");
     }
 
     #[test]

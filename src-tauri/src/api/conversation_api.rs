@@ -406,13 +406,15 @@ pub async fn fork_conversation(
     let mut seen_ids = std::collections::HashSet::new();
     let all_messages: Vec<Message> = all_messages_with_attachments
         .iter()
-        .filter_map(|(message, _)| {
-            if seen_ids.insert(message.id) {
-                Some(message.clone())
-            } else {
-                None
-            }
-        })
+        .filter_map(
+            |(message, _)| {
+                if seen_ids.insert(message.id) {
+                    Some(message.clone())
+                } else {
+                    None
+                }
+            },
+        )
         .collect();
 
     // 找到目标消息的位置

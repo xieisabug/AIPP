@@ -553,10 +553,8 @@ pub fn get_acp_working_directory(
 
     let model_configs =
         assistant_db.get_assistant_model_configs(assistant_id).map_err(|e| e.to_string())?;
-    let provider_configs = if let Some(model) = assistant_db
-        .get_assistant_model(assistant_id)
-        .map_err(|e| e.to_string())?
-        .first()
+    let provider_configs = if let Some(model) =
+        assistant_db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?.first()
     {
         let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
         llm_db.get_llm_provider_config(model.provider_id).map_err(|e| e.to_string())?
@@ -564,8 +562,8 @@ pub fn get_acp_working_directory(
         Vec::new()
     };
 
-    let acp_config =
-        crate::api::ai::acp::extract_acp_config(&model_configs, &provider_configs).map_err(|e| e.to_string())?;
+    let acp_config = crate::api::ai::acp::extract_acp_config(&model_configs, &provider_configs)
+        .map_err(|e| e.to_string())?;
 
     Ok(acp_config.working_directory.display().to_string())
 }

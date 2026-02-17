@@ -65,10 +65,10 @@ impl SearchEngineBase {
 
         // 移除非核心内容：导航、页眉、页脚、侧边栏
         let remove_patterns = [
-            r"(?is)<nav[^>]*>.*?</nav>",           // 导航栏
-            r"(?is)<header[^>]*>.*?</header>",     // 页眉
-            r"(?is)<footer[^>]*>.*?</footer>",     // 页脚
-            r"(?is)<aside[^>]*>.*?</aside>",       // 侧边栏
+            r"(?is)<nav[^>]*>.*?</nav>",       // 导航栏
+            r"(?is)<header[^>]*>.*?</header>", // 页眉
+            r"(?is)<footer[^>]*>.*?</footer>", // 页脚
+            r"(?is)<aside[^>]*>.*?</aside>",   // 侧边栏
             r#"(?is)<div[^>]*class="[^"]*nav[^"]*"[^>]*>.*?</div>"#,
             r#"(?is)<div[^>]*class="[^"]*header[^"]*"[^>]*>.*?</div>"#,
             r#"(?is)<div[^>]*class="[^"]*footer[^"]*"[^>]*>.*?</div>"#,

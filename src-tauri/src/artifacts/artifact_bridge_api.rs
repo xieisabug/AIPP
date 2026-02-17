@@ -167,12 +167,12 @@ pub async fn artifact_ai_ask(
     request: AiAskRequest,
 ) -> Result<AiAskResponse, String> {
     // 使用 assistant_api::get_assistant 获取完整的助手信息
-    let assistant_detail = crate::api::assistant_api::get_assistant(app_handle.clone(), request.assistant_id)
-        .map_err(|e| format!("Failed to get assistant: {}", e))?;
+    let assistant_detail =
+        crate::api::assistant_api::get_assistant(app_handle.clone(), request.assistant_id)
+            .map_err(|e| format!("Failed to get assistant: {}", e))?;
 
     // 获取模型信息
-    let model = assistant_detail.model.first()
-        .ok_or("Assistant has no model configured")?;
+    let model = assistant_detail.model.first().ok_or("Assistant has no model configured")?;
 
     let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
@@ -199,7 +199,9 @@ pub async fn artifact_ai_ask(
     .map_err(|e| format!("Failed to create AI client: {}", e))?;
 
     // 构建消息 - 从助手的 prompts 获取系统提示
-    let assistant_prompt = assistant_detail.prompts.first()
+    let assistant_prompt = assistant_detail
+        .prompts
+        .first()
         .map(|p| p.prompt.clone())
         .unwrap_or_else(|| "You are a helpful assistant.".to_string());
 
@@ -237,11 +239,7 @@ pub async fn artifact_ai_ask(
         total_tokens: u.total_tokens.map(|t| t as i64),
     });
 
-    Ok(AiAskResponse {
-        content,
-        model: model_detail.model.code,
-        usage,
-    })
+    Ok(AiAskResponse { content, model: model_detail.model.code, usage })
 }
 
 // ============================================

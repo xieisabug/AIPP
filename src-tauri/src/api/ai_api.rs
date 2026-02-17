@@ -9,10 +9,11 @@ use crate::api::ai::config::{
 };
 use crate::api::ai::conversation::{
     build_chat_request_from_messages, build_message_list_from_db, filter_messages_for_parent_group,
-    init_conversation,
-    BranchSelection, ChatRequestBuildResult, ToolCallStrategy, ToolConfig,
+    init_conversation, BranchSelection, ChatRequestBuildResult, ToolCallStrategy, ToolConfig,
 };
-use crate::api::ai::events::{ActivityFocus, ConversationEvent, MessageAddEvent, MessageUpdateEvent};
+use crate::api::ai::events::{
+    ActivityFocus, ConversationEvent, MessageAddEvent, MessageUpdateEvent,
+};
 use crate::api::ai::title::generate_title;
 use crate::api::ai::types::{AiRequest, AiResponse, McpOverrideConfig};
 use crate::api::assistant_api::{get_assistant, get_assistants};
@@ -32,8 +33,8 @@ use crate::template_engine::TemplateEngine;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use crate::{AcpSessionState, AppState, FeatureConfigState};
 use anyhow::Context;
-use std::collections::{HashMap, HashSet};
 use genai::chat::Tool;
+use std::collections::{HashMap, HashSet};
 use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
@@ -299,21 +300,24 @@ pub async fn ask_ai(
         template_engine.parse(&processed_request.prompt, &template_context).await;
 
     let app_handle_clone = app_handle.clone();
-    let (conversation_id, _new_message_id, user_message_id, request_prompt_result_with_context, init_message_list) =
-        initialize_conversation(
-            &app_handle_clone,
-            &processed_request,
-            &assistant_detail,
-            assistant_prompt_result,
-            request_prompt_result.clone(),
-            override_prompt.clone(),
-        )
-        .await?;
+    let (
+        conversation_id,
+        _new_message_id,
+        user_message_id,
+        request_prompt_result_with_context,
+        init_message_list,
+    ) = initialize_conversation(
+        &app_handle_clone,
+        &processed_request,
+        &assistant_detail,
+        assistant_prompt_result,
+        request_prompt_result.clone(),
+        override_prompt.clone(),
+    )
+    .await?;
 
     // 设置用户消息的活动状态（闪亮边框）
-    activity_manager
-        .set_user_pending(&app_handle, conversation_id, user_message_id)
-        .await;
+    activity_manager.set_user_pending(&app_handle, conversation_id, user_message_id).await;
 
     message_token_manager.reset_cancel_token(conversation_id).await;
 
@@ -334,11 +338,11 @@ pub async fn ask_ai(
         let provider_configs = if let Some(model) = assistant_detail.model.first() {
             let provider_id = model.provider_id;
             debug!("ACP: Getting provider config for provider_id={}", provider_id);
-            
+
             let llm_db = LLMDatabase::new(&app_handle).map_err(|e| {
                 AppError::UnknownError(format!("Failed to open LLM database: {}", e))
             })?;
-            
+
             llm_db.get_llm_provider_config(provider_id).unwrap_or_else(|e| {
                 warn!("ACP: Failed to get provider config: {}", e);
                 Vec::new()
@@ -347,7 +351,7 @@ pub async fn ask_ai(
             debug!("ACP: No model found, using empty provider configs");
             Vec::new()
         };
-        
+
         debug!("ACP: Loaded {} provider configs", provider_configs.len());
 
         // 从 assistant_model_configs 和 llm_provider_configs 提取 ACP 配置
@@ -366,8 +370,8 @@ pub async fn ask_ai(
             None,
             conversation_id,
             "response".to_string(),
-            String::new(), // 初始为空，通过流式更新
-            Some(0), // ACP 使用占位 model_id = 0
+            String::new(),           // 初始为空，通过流式更新
+            Some(0),                 // ACP 使用占位 model_id = 0
             Some("acp".to_string()), // ACP 使用占位 model_code
             Some(chrono::Utc::now()),
             None,
@@ -398,18 +402,13 @@ pub async fn ask_ai(
                 let (handle, join_handle) =
                     spawn_acp_session_task(app_handle_clone, conversation_id, acp_config);
                 sessions.insert(conversation_id, handle.clone());
-                message_token_manager
-                    .store_task_handle(conversation_id, join_handle)
-                    .await;
+                message_token_manager.store_task_handle(conversation_id, join_handle).await;
                 handle
             }
         };
 
-        if let Err(e) = session_handle.send_prompt(
-            response_message.id,
-            prompt_clone,
-            window_clone,
-        ) {
+        if let Err(e) = session_handle.send_prompt(response_message.id, prompt_clone, window_clone)
+        {
             error!(error = %e, "ACP session send prompt failed");
         }
 
@@ -567,8 +566,12 @@ pub async fn ask_ai(
         } else {
             ToolCallStrategy::NonNative
         };
-        let tool_config =
-            build_tool_config(&app_handle_clone, &mcp_info, has_available_tools, Some(conversation_id));
+        let tool_config = build_tool_config(
+            &app_handle_clone,
+            &mcp_info,
+            has_available_tools,
+            Some(conversation_id),
+        );
         let ChatRequestBuildResult { chat_request, tool_name_mapping } =
             build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
@@ -672,7 +675,8 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     );
 
     // 查找对应的 response 消息的 generation_group_id，使 tool_result 与 response 同组
-    let all_msgs_for_group = db.message_repo().unwrap().list_by_conversation_id(conversation_id_i64)?;
+    let all_msgs_for_group =
+        db.message_repo().unwrap().list_by_conversation_id(conversation_id_i64)?;
     let tool_result_group_id = all_msgs_for_group
         .iter()
         .filter(|(m, _)| m.message_type == "response")
@@ -727,7 +731,6 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
 
     // Get all existing messages
     let all_messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id_i64)?;
-
 
     // 使用 get_latest_branch_messages 获取最新分支的消息（正确过滤掉废弃分支）
     let latest_branch = crate::api::ai::summary::get_latest_branch_messages(&all_messages);
@@ -872,11 +875,8 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         "chat configuration (tool_result_continue)"
     );
 
-    let tool_call_strategy = if has_available_tools {
-        ToolCallStrategy::Native
-    } else {
-        ToolCallStrategy::NonNative
-    };
+    let tool_call_strategy =
+        if has_available_tools { ToolCallStrategy::Native } else { ToolCallStrategy::NonNative };
     let tool_config =
         build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id_i64));
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
@@ -1097,12 +1097,10 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         "chat configuration (batch_tool_result_continue)"
     );
 
-    let tool_call_strategy = if has_available_tools {
-        ToolCallStrategy::Native
-    } else {
-        ToolCallStrategy::NonNative
-    };
-    let tool_config = build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id));
+    let tool_call_strategy =
+        if has_available_tools { ToolCallStrategy::Native } else { ToolCallStrategy::NonNative };
+    let tool_config =
+        build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id));
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
@@ -1259,13 +1257,9 @@ pub async fn regenerate_ai(
 
     // 重新生成开始时，优先让被点击的消息闪亮（可被后续 streaming 覆盖）
     if message.message_type == "user" {
-        activity_manager
-            .set_user_pending(&app_handle, conversation_id, message_id)
-            .await;
+        activity_manager.set_user_pending(&app_handle, conversation_id, message_id).await;
     } else {
-        activity_manager
-            .set_assistant_streaming(&app_handle, conversation_id, message_id)
-            .await;
+        activity_manager.set_assistant_streaming(&app_handle, conversation_id, message_id).await;
     }
 
     message_token_manager.reset_cancel_token(conversation_id).await;
@@ -1596,171 +1590,170 @@ async fn initialize_conversation(
     assistant_prompt_result: String,
     request_prompt_result: String,
     override_prompt: Option<String>,
-) -> Result<(i64, Option<i64>, i64, String, Vec<(String, String, Vec<MessageAttachment>)>), AppError> {
+) -> Result<(i64, Option<i64>, i64, String, Vec<(String, String, Vec<MessageAttachment>)>), AppError>
+{
     // 返回值：(conversation_id, add_message_id, user_message_id, request_prompt_with_context, init_message_list)
     let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
 
-    let (conversation_id, add_message_id, user_message_id, request_prompt_result_with_context, init_message_list) =
-        if request.conversation_id.is_empty() {
-            let message_attachment_list = db
-                .attachment_repo()
-                .unwrap()
-                .list_by_id(&request.attachment_list.clone().unwrap_or(vec![]))?;
-            // 新对话逻辑
-            let text_attachments: Vec<String> = message_attachment_list
-                .iter()
-                .filter(|a| matches!(a.attachment_type, AttachmentType::Text))
-                .filter_map(|a| {
-                    Some(format!(
-                        r#"<fileattachment name="{}">{}</fileattachment>"#,
-                        a.attachment_url.clone().unwrap(),
-                        a.attachment_content.clone().unwrap().as_str()
-                    ))
-                })
-                .collect();
-            let context = text_attachments.join("\n");
-            let request_prompt_result_with_context =
-                format!("{}\n{}", request_prompt_result, context);
-            let init_message_list = vec![
-                (
-                    String::from("system"),
-                    override_prompt.unwrap_or(assistant_prompt_result),
-                    vec![],
-                ),
-                (
-                    String::from("user"),
-                    request_prompt_result_with_context.clone(),
-                    message_attachment_list,
-                ),
-            ];
-            debug!(
-                assistant_id = request.assistant_id,
-                ?init_message_list,
-                "initialize new conversation"
-            );
-            let (conversation, created_messages) = init_conversation(
-                app_handle,
-                request.assistant_id,
-                assistant_detail.model[0].id,
-                assistant_detail.model[0].model_code.clone(),
-                &init_message_list,
-            )?;
-            // 获取用户消息的 ID（第二条消息是 user 类型）
-            let user_msg_id = created_messages
-                .iter()
-                .find(|m| m.message_type == "user")
-                .map(|m| m.id)
-                .unwrap_or(0);
+    let (
+        conversation_id,
+        add_message_id,
+        user_message_id,
+        request_prompt_result_with_context,
+        init_message_list,
+    ) = if request.conversation_id.is_empty() {
+        let message_attachment_list = db
+            .attachment_repo()
+            .unwrap()
+            .list_by_id(&request.attachment_list.clone().unwrap_or(vec![]))?;
+        // 新对话逻辑
+        let text_attachments: Vec<String> = message_attachment_list
+            .iter()
+            .filter(|a| matches!(a.attachment_type, AttachmentType::Text))
+            .filter_map(|a| {
+                Some(format!(
+                    r#"<fileattachment name="{}">{}</fileattachment>"#,
+                    a.attachment_url.clone().unwrap(),
+                    a.attachment_content.clone().unwrap().as_str()
+                ))
+            })
+            .collect();
+        let context = text_attachments.join("\n");
+        let request_prompt_result_with_context = format!("{}\n{}", request_prompt_result, context);
+        let init_message_list = vec![
+            (String::from("system"), override_prompt.unwrap_or(assistant_prompt_result), vec![]),
             (
-                conversation.id,
-                None, // 不预先创建空的assistant消息，让流式处理动态创建
-                user_msg_id,
-                request_prompt_result_with_context,
-                init_message_list,
-            )
-        } else {
-            // 已存在对话逻辑
-            let conversation_id = request.conversation_id.parse::<i64>()?;
-            let all_messages =
-                db.message_repo().unwrap().list_by_conversation_id(conversation_id)?;
-
-            let message_list = build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
-
-            // 获取到消息的附件列表
-            let message_attachment_list = db
-                .attachment_repo()
-                .unwrap()
-                .list_by_id(&request.attachment_list.clone().unwrap_or(vec![]))?;
-            // 过滤出文本附件
-            let text_attachments: Vec<String> = message_attachment_list
-                .iter()
-                .filter(|a| matches!(a.attachment_type, AttachmentType::Text))
-                .filter_map(|a| {
-                    Some(format!(
-                        r#"<fileattachment name="{}">{}</fileattachment>"#,
-                        a.attachment_url.clone().unwrap(),
-                        a.attachment_content.clone().unwrap().as_str()
-                    ))
-                })
-                .collect();
-            let context = text_attachments.join("\n");
-
-            let request_prompt_result_with_context =
-                format!("{}\n{}", request_prompt_result, context);
-            // 添加用户消息
-            let user_message = add_message(
-                app_handle,
-                None,
-                conversation_id,
-                "user".to_string(),
-                request_prompt_result_with_context.clone(),
-                Some(assistant_detail.model[0].id),
-                Some(assistant_detail.model[0].model_code.clone()),
-                None,
-                None,
-                0,
-                None, // 用户消息不需要 generation_group_id
-                None, // 用户消息不需要 parent_group_id
-            )?;
-
-            // 更新 attachment 的 message_id，关联到新创建的用户消息
-            // 这确保后续查询时能正确获取 attachment（通过 LEFT JOIN message.id = ma.message_id）
-            for attachment in message_attachment_list.iter() {
-                let mut updated_attachment = attachment.clone();
-                updated_attachment.message_id = user_message.id;
-                db.attachment_repo()
-                    .unwrap()
-                    .update(&updated_attachment)
-                    .map_err(AppError::from)?;
-            }
-
-            // 发送消息添加事件
-            let add_event = ConversationEvent {
-                r#type: "message_add".to_string(),
-                data: serde_json::to_value(MessageAddEvent {
-                    message_id: user_message.id,
-                    message_type: "user".to_string(),
-                })
-                .unwrap(),
-            };
-
-            let _ = app_handle
-                .emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
-
-            let update_event = ConversationEvent {
-                r#type: "message_update".to_string(),
-                data: serde_json::to_value(MessageUpdateEvent {
-                    message_id: user_message.id,
-                    message_type: "user".to_string(),
-                    content: request_prompt_result_with_context.clone(),
-                    is_done: false,
-                    token_count: None,
-                    input_token_count: None,
-                    output_token_count: None,
-                    ttft_ms: None,
-                    tps: None,
-                })
-                .unwrap(),
-            };
-            let _ = app_handle
-                .emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
-
-            let mut updated_message_list = message_list;
-            updated_message_list.push((
                 String::from("user"),
                 request_prompt_result_with_context.clone(),
                 message_attachment_list,
-            ));
+            ),
+        ];
+        debug!(
+            assistant_id = request.assistant_id,
+            ?init_message_list,
+            "initialize new conversation"
+        );
+        let (conversation, created_messages) = init_conversation(
+            app_handle,
+            request.assistant_id,
+            assistant_detail.model[0].id,
+            assistant_detail.model[0].model_code.clone(),
+            &init_message_list,
+        )?;
+        // 获取用户消息的 ID（第二条消息是 user 类型）
+        let user_msg_id =
+            created_messages.iter().find(|m| m.message_type == "user").map(|m| m.id).unwrap_or(0);
+        (
+            conversation.id,
+            None, // 不预先创建空的assistant消息，让流式处理动态创建
+            user_msg_id,
+            request_prompt_result_with_context,
+            init_message_list,
+        )
+    } else {
+        // 已存在对话逻辑
+        let conversation_id = request.conversation_id.parse::<i64>()?;
+        let all_messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id)?;
 
-            (
-                conversation_id,
-                None, // 不预先创建空的assistant消息，让流式处理动态创建
-                user_message.id,
-                request_prompt_result_with_context,
-                updated_message_list,
-            )
+        let message_list = build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
+
+        // 获取到消息的附件列表
+        let message_attachment_list = db
+            .attachment_repo()
+            .unwrap()
+            .list_by_id(&request.attachment_list.clone().unwrap_or(vec![]))?;
+        // 过滤出文本附件
+        let text_attachments: Vec<String> = message_attachment_list
+            .iter()
+            .filter(|a| matches!(a.attachment_type, AttachmentType::Text))
+            .filter_map(|a| {
+                Some(format!(
+                    r#"<fileattachment name="{}">{}</fileattachment>"#,
+                    a.attachment_url.clone().unwrap(),
+                    a.attachment_content.clone().unwrap().as_str()
+                ))
+            })
+            .collect();
+        let context = text_attachments.join("\n");
+
+        let request_prompt_result_with_context = format!("{}\n{}", request_prompt_result, context);
+        // 添加用户消息
+        let user_message = add_message(
+            app_handle,
+            None,
+            conversation_id,
+            "user".to_string(),
+            request_prompt_result_with_context.clone(),
+            Some(assistant_detail.model[0].id),
+            Some(assistant_detail.model[0].model_code.clone()),
+            None,
+            None,
+            0,
+            None, // 用户消息不需要 generation_group_id
+            None, // 用户消息不需要 parent_group_id
+        )?;
+
+        // 更新 attachment 的 message_id，关联到新创建的用户消息
+        // 这确保后续查询时能正确获取 attachment（通过 LEFT JOIN message.id = ma.message_id）
+        for attachment in message_attachment_list.iter() {
+            let mut updated_attachment = attachment.clone();
+            updated_attachment.message_id = user_message.id;
+            db.attachment_repo().unwrap().update(&updated_attachment).map_err(AppError::from)?;
+        }
+
+        // 发送消息添加事件
+        let add_event = ConversationEvent {
+            r#type: "message_add".to_string(),
+            data: serde_json::to_value(MessageAddEvent {
+                message_id: user_message.id,
+                message_type: "user".to_string(),
+            })
+            .unwrap(),
         };
-    Ok((conversation_id, add_message_id, user_message_id, request_prompt_result_with_context, init_message_list))
+
+        let _ =
+            app_handle.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
+
+        let update_event = ConversationEvent {
+            r#type: "message_update".to_string(),
+            data: serde_json::to_value(MessageUpdateEvent {
+                message_id: user_message.id,
+                message_type: "user".to_string(),
+                content: request_prompt_result_with_context.clone(),
+                is_done: false,
+                token_count: None,
+                input_token_count: None,
+                output_token_count: None,
+                ttft_ms: None,
+                tps: None,
+            })
+            .unwrap(),
+        };
+        let _ = app_handle
+            .emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+
+        let mut updated_message_list = message_list;
+        updated_message_list.push((
+            String::from("user"),
+            request_prompt_result_with_context.clone(),
+            message_attachment_list,
+        ));
+
+        (
+            conversation_id,
+            None, // 不预先创建空的assistant消息，让流式处理动态创建
+            user_message.id,
+            request_prompt_result_with_context,
+            updated_message_list,
+        )
+    };
+    Ok((
+        conversation_id,
+        add_message_id,
+        user_message_id,
+        request_prompt_result_with_context,
+        init_message_list,
+    ))
 }
 
 /// 获取指定对话的当前活动焦点状态（用于前端闪亮边框同步）

@@ -97,10 +97,7 @@ impl TodoState {
                         "Failed to persist todos to database"
                     );
                 } else {
-                    debug!(
-                        conversation_id = conversation_id,
-                        "Todos persisted to database"
-                    );
+                    debug!(conversation_id = conversation_id, "Todos persisted to database");
                 }
             }
         }

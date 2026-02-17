@@ -6,9 +6,13 @@
 //! 3. 统一的参数解析、响应序列化与错误处理抽象
 //! 4. 将执行结果写回数据库并触发前端事件
 //! 5. 在工具成功后继续驱动 AI 对话（包含重试场景）
-use crate::api::ai::config::{get_continue_on_tool_error_from_config, get_network_proxy_from_config};
+use crate::api::ai::config::{
+    get_continue_on_tool_error_from_config, get_network_proxy_from_config,
+};
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
-use crate::api::ai_api::{batch_tool_result_continue_ask_ai_impl, sanitize_tool_name, tool_result_continue_ask_ai_impl};
+use crate::api::ai_api::{
+    batch_tool_result_continue_ask_ai_impl, sanitize_tool_name, tool_result_continue_ask_ai_impl,
+};
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::{ConversationLoadedMCPTool, MCPDatabase, MCPServer, MCPToolCall};
 use crate::mcp::builtin_mcp::{execute_aipp_builtin_tool, is_builtin_mcp_call};
@@ -138,7 +142,6 @@ fn serialize_tool_response(response: &rmcp::model::CallToolResult) -> Result<Str
     }
 }
 
-
 // 发送MCP工具调用状态更新事件
 /// 向前端发送工具调用状态更新事件（包括执行中 / 成功 / 失败）。
 fn build_mcp_tool_call_update_event(tool_call: &MCPToolCall) -> ConversationEvent {
@@ -262,15 +265,22 @@ async fn handle_tool_execution_result(
                     warn!(error=%e, "tool execution succeeded but continuation failed");
                 }
                 // Restore focus after continuation so the assistant streaming state can take over.
-                if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+                if let Some(activity_manager) =
+                    app_handle.try_state::<ConversationActivityManager>()
+                {
                     activity_manager
                         .restore_after_mcp(&app_handle, tool_call.conversation_id)
                         .await;
                 }
             } else {
-                debug!("trigger_continuation=false, skipping tool continuation, call_id={}", call_id);
+                debug!(
+                    "trigger_continuation=false, skipping tool continuation, call_id={}",
+                    call_id
+                );
                 // No continuation path: restore immediately.
-                if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+                if let Some(activity_manager) =
+                    app_handle.try_state::<ConversationActivityManager>()
+                {
                     activity_manager
                         .restore_after_mcp(&app_handle, tool_call.conversation_id)
                         .await;
@@ -296,7 +306,10 @@ async fn handle_tool_execution_result(
                 || error_lower.contains("stopped by user");
             if trigger_continuation && continue_on_error {
                 if is_user_cancelled {
-                    debug!(call_id = tool_call.id, "Skip continuation for user-cancelled tool error");
+                    debug!(
+                        call_id = tool_call.id,
+                        "Skip continuation for user-cancelled tool error"
+                    );
                 } else {
                     info!("准备触发工具失败续写，call_id={}", call_id);
                     if let Err(e) = trigger_conversation_continuation_with_error(
@@ -315,9 +328,7 @@ async fn handle_tool_execution_result(
             }
 
             if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
-                activity_manager
-                    .restore_after_mcp(&app_handle, tool_call.conversation_id)
-                    .await;
+                activity_manager.restore_after_mcp(&app_handle, tool_call.conversation_id).await;
             }
         }
     }
@@ -573,7 +584,8 @@ pub async fn execute_mcp_tool_call(
             }
         };
         if dynamic_mode_enabled {
-            if let Err(e) = db.refresh_conversation_loaded_tool_statuses(tool_call.conversation_id) {
+            if let Err(e) = db.refresh_conversation_loaded_tool_statuses(tool_call.conversation_id)
+            {
                 return handle_tool_execution_result(
                     &app_handle,
                     &state,
@@ -655,8 +667,7 @@ pub async fn execute_mcp_tool_call(
             if !is_loaded {
                 let not_loaded_error = format!(
                     "工具 {}::{} 尚未加载。请先调用 MCP动态加载工具::load_mcp_tool。",
-                    tool_call.server_name,
-                    resolved_tool_name
+                    tool_call.server_name, resolved_tool_name
                 );
                 return handle_tool_execution_result(
                     &app_handle,
@@ -694,9 +705,7 @@ pub async fn execute_mcp_tool_call(
 
     // 设置 MCP 执行中的活动状态（闪亮边框）
     if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
-        activity_manager
-            .set_mcp_executing(&app_handle, tool_call.conversation_id, call_id)
-            .await;
+        activity_manager.set_mcp_executing(&app_handle, tool_call.conversation_id, call_id).await;
     }
 
     // 执行工具
@@ -814,9 +823,8 @@ pub async fn continue_with_error(
     let db = MCPDatabase::new(&app_handle).map_err(|e| format!("初始化数据库失败: {}", e))?;
 
     // 获取工具调用信息
-    let tool_call = db
-        .get_mcp_tool_call(call_id)
-        .map_err(|e| format!("获取工具调用信息失败: {}", e))?;
+    let tool_call =
+        db.get_mcp_tool_call(call_id).map_err(|e| format!("获取工具调用信息失败: {}", e))?;
 
     // 验证工具调用状态必须为 failed
     if tool_call.status != "failed" {
@@ -846,9 +854,7 @@ pub async fn continue_with_error(
 
     // 恢复活动状态（让续写的流式响应接管）
     if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
-        activity_manager
-            .restore_after_mcp(&app_handle, tool_call.conversation_id)
-            .await;
+        activity_manager.restore_after_mcp(&app_handle, tool_call.conversation_id).await;
     }
 
     info!(call_id = call_id, "continued conversation with tool error");
@@ -881,9 +887,7 @@ pub async fn stop_mcp_tool_call(
 
         // 4. 恢复 MCP 执行前的活动状态
         if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
-            activity_manager
-                .restore_after_mcp(&app_handle, current_call.conversation_id)
-                .await;
+            activity_manager.restore_after_mcp(&app_handle, current_call.conversation_id).await;
         }
     }
 
@@ -910,7 +914,8 @@ pub async fn send_mcp_tool_results(
     use crate::db::conversation_db::Repository;
     use tauri::Emitter;
 
-    let mcp_db = MCPDatabase::new(&app_handle).map_err(|e| format!("初始化 MCP 数据库失败: {}", e))?;
+    let mcp_db =
+        MCPDatabase::new(&app_handle).map_err(|e| format!("初始化 MCP 数据库失败: {}", e))?;
 
     // 获取指定消息下的所有工具调用
     let tool_calls = mcp_db
@@ -922,7 +927,8 @@ pub async fn send_mcp_tool_results(
     }
 
     // 检查是否所有工具调用都已完成（非 pending/executing）
-    let has_pending = tool_calls.iter().any(|tc| tc.status == "pending" || tc.status == "executing");
+    let has_pending =
+        tool_calls.iter().any(|tc| tc.status == "pending" || tc.status == "executing");
     if has_pending {
         return Err("有工具调用尚未完成，请等待所有工具执行完成后再发送结果".to_string());
     }
@@ -939,13 +945,12 @@ pub async fn send_mcp_tool_results(
         .map_err(|e| format!("获取对话信息失败: {}", e))?
         .ok_or_else(|| "未找到对话".to_string())?;
 
-    let assistant_id = conversation
-        .assistant_id
-        .ok_or_else(|| "对话未关联助手".to_string())?;
+    let assistant_id = conversation.assistant_id.ok_or_else(|| "对话未关联助手".to_string())?;
 
     // 获取助手信息以获取模型详情
-    let assistant_detail = crate::api::assistant_api::get_assistant(app_handle.clone(), assistant_id)
-        .map_err(|e| format!("获取助手信息失败: {}", e))?;
+    let assistant_detail =
+        crate::api::assistant_api::get_assistant(app_handle.clone(), assistant_id)
+            .map_err(|e| format!("获取助手信息失败: {}", e))?;
     if assistant_detail.model.is_empty() {
         return Err("助手未配置模型".to_string());
     }
@@ -963,14 +968,12 @@ pub async fn send_mcp_tool_results(
     // 使用与 tool_result_continue_ask_ai_impl 相同的格式
     for tc in &tool_calls {
         // 使用 llm_call_id（如果存在），否则使用数据库 id 作为 fallback
-        let tool_call_id = tc.llm_call_id.clone()
-            .unwrap_or_else(|| format!("mcp_tool_call_{}", tc.id));
+        let tool_call_id =
+            tc.llm_call_id.clone().unwrap_or_else(|| format!("mcp_tool_call_{}", tc.id));
 
         // 构建工具结果内容
         let result_content = match tc.status.as_str() {
-            "success" => {
-                tc.result.clone().unwrap_or_else(|| "(空)".to_string())
-            }
+            "success" => tc.result.clone().unwrap_or_else(|| "(空)".to_string()),
             "failed" => {
                 format!("Error: {}", tc.error.as_deref().unwrap_or("未知错误"))
             }
@@ -1001,7 +1004,8 @@ pub async fn send_mcp_tool_results(
             0,
             tool_result_group_id.clone(),
             None,
-        ).map_err(|e| format!("创建工具结果消息失败: {}", e))?;
+        )
+        .map_err(|e| format!("创建工具结果消息失败: {}", e))?;
 
         // 发送 UI 事件
         let add_event = ConversationEvent {
@@ -1029,7 +1033,8 @@ pub async fn send_mcp_tool_results(
             })
             .unwrap(),
         };
-        let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+        let _ =
+            window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
 
         debug!(
             tool_call_id = %tool_call_id,
@@ -1042,10 +1047,7 @@ pub async fn send_mcp_tool_results(
     let continuation_lock = {
         let registry = continuation_lock_registry();
         let mut guard = registry.lock().await;
-        guard
-            .entry(conversation_id)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+        guard.entry(conversation_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     };
 
     let _lock_guard = continuation_lock.lock().await;
@@ -1080,9 +1082,7 @@ pub async fn send_mcp_tool_results(
 
     // Restore focus after batch continuation to keep MCP executing state until streaming starts.
     if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
-        activity_manager
-            .restore_after_mcp(&app_handle, conversation_id)
-            .await;
+        activity_manager.restore_after_mcp(&app_handle, conversation_id).await;
     }
 
     continuation_result
@@ -1428,16 +1428,12 @@ pub async fn trigger_conversation_continuation_batch(
             .filter(|tc| tc.status != "success")
             .map(|tc| (tc.id, &tc.server_name, &tc.tool_name, &tc.status))
             .collect();
-        warn!(
-            ?failed_calls,
-            "Not all tools succeeded, skipping batch continuation"
-        );
+        warn!(?failed_calls, "Not all tools succeeded, skipping batch continuation");
         return Ok(());
     }
 
     // 获取对话和助手信息
-    let conversation_db = ConversationDatabase::new(app_handle)
-        .context("初始化对话数据库失败")?;
+    let conversation_db = ConversationDatabase::new(app_handle).context("初始化对话数据库失败")?;
     let conversation = conversation_db
         .conversation_repo()
         .unwrap()
@@ -1445,13 +1441,12 @@ pub async fn trigger_conversation_continuation_batch(
         .map_err(|e| anyhow!("获取对话信息失败: {}", e))?
         .ok_or_else(|| anyhow!("未找到对话"))?;
 
-    let assistant_id = conversation
-        .assistant_id
-        .ok_or_else(|| anyhow!("对话未关联助手"))?;
+    let assistant_id = conversation.assistant_id.ok_or_else(|| anyhow!("对话未关联助手"))?;
 
     // 获取助手信息以获取模型详情
-    let assistant_detail = crate::api::assistant_api::get_assistant(app_handle.clone(), assistant_id)
-        .map_err(|e| anyhow!("获取助手信息失败: {}", e))?;
+    let assistant_detail =
+        crate::api::assistant_api::get_assistant(app_handle.clone(), assistant_id)
+            .map_err(|e| anyhow!("获取助手信息失败: {}", e))?;
     if assistant_detail.model.is_empty() {
         return Err(anyhow!("助手未配置模型"));
     }
@@ -1473,8 +1468,8 @@ pub async fn trigger_conversation_continuation_batch(
     // 为每个工具调用创建独立的 tool_result 消息
     for tc in &tool_calls {
         // 使用 llm_call_id（如果存在），否则使用数据库 id 作为 fallback
-        let tool_call_id = tc.llm_call_id.clone()
-            .unwrap_or_else(|| format!("mcp_tool_call_{}", tc.id));
+        let tool_call_id =
+            tc.llm_call_id.clone().unwrap_or_else(|| format!("mcp_tool_call_{}", tc.id));
 
         // 构建工具结果内容
         let result_content = match tc.status.as_str() {
@@ -1507,7 +1502,8 @@ pub async fn trigger_conversation_continuation_batch(
             0,
             tool_result_group_id.clone(),
             None,
-        ).map_err(|e| anyhow!("创建工具结果消息失败: {}", e))?;
+        )
+        .map_err(|e| anyhow!("创建工具结果消息失败: {}", e))?;
 
         // 发送 UI 事件
         let add_event = ConversationEvent {
@@ -1535,7 +1531,8 @@ pub async fn trigger_conversation_continuation_batch(
             })
             .unwrap(),
         };
-        let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+        let _ =
+            window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
 
         debug!(
             tool_call_id = %tool_call_id,
@@ -1548,10 +1545,7 @@ pub async fn trigger_conversation_continuation_batch(
     let continuation_lock = {
         let registry = continuation_lock_registry();
         let mut guard = registry.lock().await;
-        guard
-            .entry(conversation_id)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+        guard.entry(conversation_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     };
 
     let _lock_guard = continuation_lock.lock().await;
@@ -1573,9 +1567,7 @@ pub async fn trigger_conversation_continuation_batch(
                 "Batch tool continuation succeeded"
             );
             if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
-                activity_manager
-                    .restore_after_mcp(&app_handle, conversation_id)
-                    .await;
+                activity_manager.restore_after_mcp(&app_handle, conversation_id).await;
             }
             Ok(())
         }
@@ -1611,34 +1603,70 @@ pub async fn execute_tool_by_transport(
         "stdio" => {
             if let Some(cmd) = &server.command {
                 if crate::mcp::builtin_mcp::is_builtin_mcp_call(cmd) {
-                    execute_builtin_tool(app_handle, server, tool_name, parameters, conversation_id, Some(cancel_token.clone()))
-                        .await
-                        .map_err(|e| e.to_string())
-                } else {
-                    execute_stdio_tool(app_handle, server, tool_name, parameters, Some(cancel_token.clone()))
-                        .await
-                        .map_err(|e| e.to_string())
-                }
-            } else {
-                execute_stdio_tool(app_handle, server, tool_name, parameters, Some(cancel_token.clone()))
+                    execute_builtin_tool(
+                        app_handle,
+                        server,
+                        tool_name,
+                        parameters,
+                        conversation_id,
+                        Some(cancel_token.clone()),
+                    )
                     .await
                     .map_err(|e| e.to_string())
+                } else {
+                    execute_stdio_tool(
+                        app_handle,
+                        server,
+                        tool_name,
+                        parameters,
+                        Some(cancel_token.clone()),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+                }
+            } else {
+                execute_stdio_tool(
+                    app_handle,
+                    server,
+                    tool_name,
+                    parameters,
+                    Some(cancel_token.clone()),
+                )
+                .await
+                .map_err(|e| e.to_string())
             }
         }
-        "sse" => execute_sse_tool(app_handle, feature_config_state, server, tool_name, parameters, Some(cancel_token.clone()))
-            .await
-            .map_err(|e| e.to_string()),
-        "http" => {
-            execute_http_tool(app_handle, feature_config_state, server, tool_name, parameters, Some(cancel_token.clone()))
-                .await
-                .map_err(|e| e.to_string())
-        }
+        "sse" => execute_sse_tool(
+            app_handle,
+            feature_config_state,
+            server,
+            tool_name,
+            parameters,
+            Some(cancel_token.clone()),
+        )
+        .await
+        .map_err(|e| e.to_string()),
+        "http" => execute_http_tool(
+            app_handle,
+            feature_config_state,
+            server,
+            tool_name,
+            parameters,
+            Some(cancel_token.clone()),
+        )
+        .await
+        .map_err(|e| e.to_string()),
         // Legacy builtin type is no longer used, but keep for backward compatibility
-        "builtin" => {
-            execute_builtin_tool(app_handle, server, tool_name, parameters, conversation_id, Some(cancel_token.clone()))
-                .await
-                .map_err(|e| e.to_string())
-        }
+        "builtin" => execute_builtin_tool(
+            app_handle,
+            server,
+            tool_name,
+            parameters,
+            conversation_id,
+            Some(cancel_token.clone()),
+        )
+        .await
+        .map_err(|e| e.to_string()),
         _ => {
             let error_msg = format!("不支持的传输类型: {}", server.transport_type);
             Err(error_msg)

@@ -6,11 +6,9 @@ use tauri::Emitter;
 use crate::db::mcp_db::{MCPDatabase, MCPToolCall};
 use crate::{
     api::{
-        ai::{
-            config::{
-                calculate_retry_delay, get_network_proxy_from_config,
-                get_request_timeout_from_config, get_retry_attempts_from_config,
-            },
+        ai::config::{
+            calculate_retry_delay, get_network_proxy_from_config, get_request_timeout_from_config,
+            get_retry_attempts_from_config,
         },
         assistant_api::get_assistant,
         genai_client::create_client_with_config,

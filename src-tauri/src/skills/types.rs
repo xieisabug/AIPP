@@ -50,7 +50,7 @@ impl SkillSourceType {
 
     pub fn from_str(s: &str) -> Self {
         match s {
-            "aipp" => SkillSourceType::Agents,  // 向后兼容：aipp 映射到 agents
+            "aipp" => SkillSourceType::Agents, // 向后兼容：aipp 映射到 agents
             "claude_code_skills" => SkillSourceType::ClaudeCodeSkills,
             "codex" => SkillSourceType::Codex,
             "copilot" => SkillSourceType::Copilot,

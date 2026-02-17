@@ -85,8 +85,9 @@ impl PermissionManager {
             return false;
         };
 
-        let workspace_root =
-            app_data_dir.join("artifact_workspaces").join(format!("conversation_{}", conversation_id));
+        let workspace_root = app_data_dir
+            .join("artifact_workspaces")
+            .join(format!("conversation_{}", conversation_id));
         let Some(normalized_workspace_root) = Self::normalize_absolute_path(&workspace_root) else {
             return false;
         };
@@ -225,10 +226,8 @@ impl PermissionManager {
         // 解析并更新白名单
         let mut env_map: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        let mut current_dirs: Vec<String> = env_text
-            .as_deref()
-            .map(Self::parse_allowed_directories)
-            .unwrap_or_default();
+        let mut current_dirs: Vec<String> =
+            env_text.as_deref().map(Self::parse_allowed_directories).unwrap_or_default();
         if let Some(text) = &env_text {
             let mut in_allowed_directories = false;
             for line in text.lines() {

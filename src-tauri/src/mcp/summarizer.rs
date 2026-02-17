@@ -126,10 +126,8 @@ fn parse_summary_response(raw: &str) -> Option<(Option<String>, HashMap<String, 
         .filter(|v| !v.is_empty());
 
     let mut tool_summaries = HashMap::new();
-    if let Some(items) = value
-        .get("tool_summaries")
-        .or_else(|| value.get("tools"))
-        .and_then(|v| v.as_array())
+    if let Some(items) =
+        value.get("tool_summaries").or_else(|| value.get("tools")).and_then(|v| v.as_array())
     {
         for item in items {
             let tool_name = item
@@ -137,10 +135,8 @@ fn parse_summary_response(raw: &str) -> Option<(Option<String>, HashMap<String, 
                 .or_else(|| item.get("name"))
                 .and_then(|v| v.as_str())
                 .map(|v| v.trim().to_lowercase());
-            let summary = item
-                .get("summary")
-                .and_then(|v| v.as_str())
-                .map(|v| v.trim().to_string());
+            let summary =
+                item.get("summary").and_then(|v| v.as_str()).map(|v| v.trim().to_string());
             if let (Some(tool_name), Some(summary)) = (tool_name, summary) {
                 if !tool_name.is_empty() && !summary.is_empty() {
                     tool_summaries.insert(tool_name, summary);

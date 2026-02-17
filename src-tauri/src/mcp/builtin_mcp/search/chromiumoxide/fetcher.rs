@@ -1,7 +1,7 @@
-use super::browser_pool::BrowserPool;
 use super::super::browser::BrowserManager;
 use super::super::engine_manager::SearchEngine;
 use super::super::fingerprint::{FingerprintConfig, FingerprintManager, TimingConfig};
+use super::browser_pool::BrowserPool;
 use chromiumoxide_cdp::cdp::browser_protocol::{emulation, network, page as cdp_page};
 use futures::StreamExt;
 use rand::Rng;
@@ -218,9 +218,7 @@ impl ContentFetcher {
             .platform(config.platform.clone())
             .build()
             .map_err(|e| format!("Failed to build user agent override: {}", e))?;
-        page.execute(ua_params)
-            .await
-            .map_err(|e| format!("Failed to set user agent: {}", e))?;
+        page.execute(ua_params).await.map_err(|e| format!("Failed to set user agent: {}", e))?;
 
         let metrics = emulation::SetDeviceMetricsOverrideParams::builder()
             .width(config.viewport_width as i64)
@@ -231,9 +229,7 @@ impl ContentFetcher {
             .screen_height(config.screen_height as i64)
             .build()
             .map_err(|e| format!("Failed to build device metrics override: {}", e))?;
-        page.execute(metrics)
-            .await
-            .map_err(|e| format!("Failed to set device metrics: {}", e))?;
+        page.execute(metrics).await.map_err(|e| format!("Failed to set device metrics: {}", e))?;
 
         let mut touch_builder =
             emulation::SetTouchEmulationEnabledParams::builder().enabled(config.has_touch);
@@ -248,11 +244,9 @@ impl ContentFetcher {
             .map_err(|e| format!("Failed to set touch emulation: {}", e))?;
 
         if !config.timezone_id.is_empty() {
-            page.execute(emulation::SetTimezoneOverrideParams::new(
-                config.timezone_id.clone(),
-            ))
-            .await
-            .map_err(|e| format!("Failed to set timezone override: {}", e))?;
+            page.execute(emulation::SetTimezoneOverrideParams::new(config.timezone_id.clone()))
+                .await
+                .map_err(|e| format!("Failed to set timezone override: {}", e))?;
         }
 
         if !config.locale.is_empty() {
@@ -300,11 +294,9 @@ impl ContentFetcher {
             "Sec-Ch-Ua": "\"Not A(Brand\";v=\"99\", \"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\"",
         });
 
-        page.execute(network::SetExtraHttpHeadersParams::new(network::Headers::new(
-            headers,
-        )))
-        .await
-        .map_err(|e| format!("Failed to set extra HTTP headers: {}", e))?;
+        page.execute(network::SetExtraHttpHeadersParams::new(network::Headers::new(headers)))
+            .await
+            .map_err(|e| format!("Failed to set extra HTTP headers: {}", e))?;
 
         Ok(())
     }
@@ -494,10 +486,7 @@ impl ContentFetcher {
         info!(%url, "Starting content fetch");
 
         // 策略1: Chromiumoxide（最优，支持复杂动态内容）
-        match self
-            .fetch_with_chromiumoxide(url, browser_manager, browser_pool)
-            .await
-        {
+        match self.fetch_with_chromiumoxide(url, browser_manager, browser_pool).await {
             Ok(html) => {
                 info!(strategy = "chromiumoxide", bytes = html.len(), "Fetched content");
                 return Ok(html);
@@ -619,9 +608,8 @@ impl ContentFetcher {
             "Launching Chromiumoxide for fetch"
         );
 
-        let config = builder
-            .build()
-            .map_err(|e| format!("Failed to build browser config: {}", e))?;
+        let config =
+            builder.build().map_err(|e| format!("Failed to build browser config: {}", e))?;
 
         let (browser, mut handler) = chromiumoxide::browser::Browser::launch(config)
             .await
@@ -663,10 +651,8 @@ impl ContentFetcher {
         self.wait_for_content(&page).await?;
 
         // 获取 HTML
-        let html = page
-            .content()
-            .await
-            .map_err(|e| format!("Failed to get page content: {}", e))?;
+        let html =
+            page.content().await.map_err(|e| format!("Failed to get page content: {}", e))?;
 
         if html.trim().is_empty() {
             let page_state = self.capture_page_state(&page).await;
@@ -708,10 +694,8 @@ impl ContentFetcher {
         self.wait_for_content(page).await?;
 
         // 获取 HTML
-        let html = page
-            .content()
-            .await
-            .map_err(|e| format!("Failed to get page content: {}", e))?;
+        let html =
+            page.content().await.map_err(|e| format!("Failed to get page content: {}", e))?;
 
         if html.trim().is_empty() {
             let page_state = self.capture_page_state(page).await;
@@ -848,16 +832,10 @@ impl ContentFetcher {
     ) -> Result<String, String> {
         info!(%query, engine = search_engine.as_str(), "Starting humanized search");
 
-        let action_range = self
-            .timing_config
-            .action_delay_max
-            .saturating_sub(self.timing_config.action_delay_min);
+        let action_range =
+            self.timing_config.action_delay_max.saturating_sub(self.timing_config.action_delay_min);
         let initial_delay = self.timing_config.action_delay_min
-            + if action_range > 0 {
-                rand::random::<u64>() % action_range
-            } else {
-                0
-            };
+            + if action_range > 0 { rand::random::<u64>() % action_range } else { 0 };
         sleep(Duration::from_millis(initial_delay)).await;
 
         // 带重试的导航到搜索引擎首页
@@ -975,11 +953,8 @@ impl ContentFetcher {
                     info!(attempt, "Page ready check passed");
                     match page.evaluate("() => document.documentElement.outerHTML").await {
                         Ok(val) => {
-                            let html_str = val
-                                .value()
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
+                            let html_str =
+                                val.value().and_then(|v| v.as_str()).unwrap_or("").to_string();
                             last_html = Some(html_str.clone());
 
                             if html_str.len() > 1000 {
@@ -990,8 +965,7 @@ impl ContentFetcher {
                                 );
                                 return Ok(html_str);
                             } else {
-                                last_error =
-                                    format!("HTML too short ({} bytes)", html_str.len());
+                                last_error = format!("HTML too short ({} bytes)", html_str.len());
                                 warn!(len = html_str.len(), attempt, "HTML too short, retrying");
                                 Self::save_debug_html(
                                     &html_str,
@@ -1288,8 +1262,10 @@ impl ContentFetcher {
                     let info_obj = info.value().cloned().unwrap_or_default();
                     trace!(selector = %selector, ?info_obj, "Element info");
                     let exists = info_obj.get("exists").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let visible = info_obj.get("visible").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let disabled = info_obj.get("disabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                    let visible =
+                        info_obj.get("visible").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let disabled =
+                        info_obj.get("disabled").and_then(|v| v.as_bool()).unwrap_or(true);
 
                     if !exists {
                         debug!(selector = %selector, "Element not found");
@@ -1343,7 +1319,8 @@ impl ContentFetcher {
                 }
             };
 
-            let input_success = input_result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+            let input_success =
+                input_result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
             trace!(selector = %selector, ?input_result, "Input result");
 
             if input_success {
@@ -1382,9 +1359,9 @@ impl ContentFetcher {
             .await
             .ok()
             .and_then(|val| val.value().cloned())
-            .unwrap_or_else(|| {
-                json!({"success":false, "stage":"fallback", "error": "eval_failed"})
-            });
+            .unwrap_or_else(
+                || json!({"success":false, "stage":"fallback", "error": "eval_failed"}),
+            );
         trace!(?fb_res, "Fallback fill result");
         if fb_res.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
             info!("Fallback candidate strategy succeeded");
@@ -1599,9 +1576,7 @@ impl ContentFetcher {
 
         // 如果有浏览器池，使用池化页面
         if let Some(pool) = browser_pool {
-            return self
-                .fetch_search_with_pooled_page(query, search_engine, pool)
-                .await;
+            return self.fetch_search_with_pooled_page(query, search_engine, pool).await;
         }
 
         // 使用新建浏览器执行搜索
@@ -1649,9 +1624,8 @@ impl ContentFetcher {
             }
         }
 
-        let config = builder
-            .build()
-            .map_err(|e| format!("Failed to build browser config: {}", e))?;
+        let config =
+            builder.build().map_err(|e| format!("Failed to build browser config: {}", e))?;
 
         let (browser, mut handler) = chromiumoxide::browser::Browser::launch(config)
             .await
@@ -1679,9 +1653,7 @@ impl ContentFetcher {
         self.set_page_http_headers(&page, &fingerprint).await?;
 
         // 执行搜索流程（使用人性化的延时）
-        let html = self
-            .perform_humanized_search(&page, query, search_engine)
-            .await?;
+        let html = self.perform_humanized_search(&page, query, search_engine).await?;
 
         if html.trim().is_empty() {
             warn!(
@@ -1694,10 +1666,7 @@ impl ContentFetcher {
             return Err("Empty HTML from search flow".to_string());
         }
 
-        info!(
-            bytes = html.len(),
-            "Successfully fetched search content"
-        );
+        info!(bytes = html.len(), "Successfully fetched search content");
 
         Ok(html)
     }
@@ -1722,9 +1691,7 @@ impl ContentFetcher {
         self.set_page_http_headers(page, &fingerprint).await?;
 
         // 执行搜索流程（使用人性化的延时）
-        let html = self
-            .perform_humanized_search(page, query, search_engine)
-            .await?;
+        let html = self.perform_humanized_search(page, query, search_engine).await?;
 
         if html.trim().is_empty() {
             warn!(
@@ -1769,7 +1736,11 @@ impl ContentFetcher {
             .await
         {
             Ok(html) => {
-                info!(strategy = "chromiumoxide_search", bytes = html.len(), "Fetched search content");
+                info!(
+                    strategy = "chromiumoxide_search",
+                    bytes = html.len(),
+                    "Fetched search content"
+                );
                 return Ok(html);
             }
             Err(e) => {
@@ -1860,9 +1831,8 @@ impl ContentFetcher {
             }
         }
 
-        let config = builder
-            .build()
-            .map_err(|e| format!("Failed to build browser config: {}", e))?;
+        let config =
+            builder.build().map_err(|e| format!("Failed to build browser config: {}", e))?;
 
         let (browser, mut handler) = chromiumoxide::browser::Browser::launch(config)
             .await
@@ -1897,10 +1867,8 @@ impl ContentFetcher {
         self.wait_for_results_with_selectors(&page, &kagi_selectors).await?;
 
         // 提取 HTML
-        let html = page
-            .content()
-            .await
-            .map_err(|e| format!("Failed to get page content: {}", e))?;
+        let html =
+            page.content().await.map_err(|e| format!("Failed to get page content: {}", e))?;
 
         if html.trim().is_empty() {
             let page_state = self.capture_page_state(&page).await;
@@ -1947,10 +1915,8 @@ impl ContentFetcher {
         self.wait_for_results_with_selectors(page, &kagi_selectors).await?;
 
         // 提取 HTML
-        let html = page
-            .content()
-            .await
-            .map_err(|e| format!("Failed to get page content: {}", e))?;
+        let html =
+            page.content().await.map_err(|e| format!("Failed to get page content: {}", e))?;
 
         if html.trim().is_empty() {
             let page_state = self.capture_page_state(page).await;

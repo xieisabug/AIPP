@@ -776,14 +776,15 @@ fn create_schedule_window_with_visibility(app_handle: &AppHandle, visible: bool)
         let (window_size, window_position) =
             get_window_size_and_position(app_handle, 1200.0, 800.0, &["chat_ui", "ask", "config"]);
 
-        let mut builder = WebviewWindowBuilder::new(app_handle, "schedule", WebviewUrl::App("index.html".into()))
-            .title("定时任务")
-            .inner_size(window_size.width, window_size.height)
-            .resizable(true)
-            .minimizable(true)
-            .maximizable(true)
-            .visible(visible)
-            .decorations(true);
+        let mut builder =
+            WebviewWindowBuilder::new(app_handle, "schedule", WebviewUrl::App("index.html".into()))
+                .title("定时任务")
+                .inner_size(window_size.width, window_size.height)
+                .resizable(true)
+                .minimizable(true)
+                .maximizable(true)
+                .visible(visible)
+                .decorations(true);
 
         if let Some(position) = window_position {
             builder = builder.position(position.x, position.y);
@@ -812,7 +813,8 @@ fn create_schedule_window_with_visibility(app_handle: &AppHandle, visible: bool)
     }
     #[cfg(mobile)]
     {
-        let builder = WebviewWindowBuilder::new(app_handle, "schedule", WebviewUrl::App("index.html".into()));
+        let builder =
+            WebviewWindowBuilder::new(app_handle, "schedule", WebviewUrl::App("index.html".into()));
         if let Err(e) = builder.build() {
             error!(error=%e, "Failed to create schedule window");
         }
@@ -913,17 +915,14 @@ fn create_sidebar_window(app_handle: &AppHandle) {
         let (window_size, window_position) =
             get_window_size_and_position(app_handle, 900.0, 700.0, &["chat_ui", "ask"]);
 
-        let mut builder = WebviewWindowBuilder::new(
-            app_handle,
-            "sidebar",
-            WebviewUrl::App("index.html".into()),
-        )
-        .title("详情 - Aipp")
-        .inner_size(window_size.width, window_size.height)
-        .resizable(true)
-        .minimizable(true)
-        .maximizable(true)
-        .decorations(true);
+        let mut builder =
+            WebviewWindowBuilder::new(app_handle, "sidebar", WebviewUrl::App("index.html".into()))
+                .title("详情 - Aipp")
+                .inner_size(window_size.width, window_size.height)
+                .resizable(true)
+                .minimizable(true)
+                .maximizable(true)
+                .decorations(true);
 
         if let Some(position) = window_position {
             builder = builder.position(position.x, position.y);
@@ -957,11 +956,8 @@ fn create_sidebar_window(app_handle: &AppHandle) {
     }
     #[cfg(mobile)]
     {
-        let builder = WebviewWindowBuilder::new(
-            app_handle,
-            "sidebar",
-            WebviewUrl::App("index.html".into()),
-        );
+        let builder =
+            WebviewWindowBuilder::new(app_handle, "sidebar", WebviewUrl::App("index.html".into()));
         if let Err(e) = builder.build() {
             error!(error=%e, "Failed to create sidebar window");
         }

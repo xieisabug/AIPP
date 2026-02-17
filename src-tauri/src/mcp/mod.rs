@@ -11,6 +11,6 @@ pub mod util;
 // Re-exports for convenience to minimize callsite churn
 pub use detection::detect_and_process_mcp_calls;
 pub use prompt::{
-    collect_mcp_info_for_assistant, format_mcp_prompt, is_dynamic_mcp_loading_enabled_for_assistant,
-    MCPInfoForAssistant,
+    collect_mcp_info_for_assistant, format_mcp_prompt,
+    is_dynamic_mcp_loading_enabled_for_assistant, MCPInfoForAssistant,
 };

@@ -1,5 +1,5 @@
-use tauri::{AppHandle, State};
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, State};
 
 use crate::FeatureConfigState;
 
@@ -52,13 +52,15 @@ async fn get_network_proxy(state: &State<'_, FeatureConfigState>) -> Result<Stri
 }
 
 /// 检查更新的内部实现
-async fn check_update_impl(app_handle: AppHandle, proxy: Option<String>) -> Result<UpdateInfo, String> {
+async fn check_update_impl(
+    app_handle: AppHandle,
+    proxy: Option<String>,
+) -> Result<UpdateInfo, String> {
     #[cfg(desktop)]
     {
         use tauri_plugin_updater::UpdaterExt;
 
-        let updater = app_handle.updater()
-            .map_err(|e| format!("获取 updater 失败: {}", e))?;
+        let updater = app_handle.updater().map_err(|e| format!("获取 updater 失败: {}", e))?;
 
         // 设置代理环境变量
         if let Some(ref proxy_url) = proxy {
@@ -67,24 +69,20 @@ async fn check_update_impl(app_handle: AppHandle, proxy: Option<String>) -> Resu
         }
 
         let result = match updater.check().await {
-            Ok(Some(update)) => {
-                Ok(UpdateInfo {
-                    available: true,
-                    current_version: env!("CARGO_PKG_VERSION").to_string(),
-                    latest_version: Some(update.version.clone()),
-                    body: update.body,
-                    date: update.date.map(|d| d.to_string()),
-                })
-            }
-            Ok(None) => {
-                Ok(UpdateInfo {
-                    available: false,
-                    current_version: env!("CARGO_PKG_VERSION").to_string(),
-                    latest_version: None,
-                    body: None,
-                    date: None,
-                })
-            }
+            Ok(Some(update)) => Ok(UpdateInfo {
+                available: true,
+                current_version: env!("CARGO_PKG_VERSION").to_string(),
+                latest_version: Some(update.version.clone()),
+                body: update.body,
+                date: update.date.map(|d| d.to_string()),
+            }),
+            Ok(None) => Ok(UpdateInfo {
+                available: false,
+                current_version: env!("CARGO_PKG_VERSION").to_string(),
+                latest_version: None,
+                body: None,
+                date: None,
+            }),
             Err(e) => {
                 let error_msg = e.to_string();
                 // 提供更友好的错误提示
@@ -119,11 +117,12 @@ pub async fn download_and_install_update(app_handle: AppHandle) -> Result<String
     {
         use tauri_plugin_updater::UpdaterExt;
 
-        let updater = app_handle.updater()
-            .map_err(|e| format!("获取 updater 失败: {}", e))?;
+        let updater = app_handle.updater().map_err(|e| format!("获取 updater 失败: {}", e))?;
 
         // 检查更新
-        let update = updater.check().await
+        let update = updater
+            .check()
+            .await
             .map_err(|e| format!("检查更新失败: {}", e))?
             .ok_or("没有可用的更新")?;
 
@@ -132,11 +131,7 @@ pub async fn download_and_install_update(app_handle: AppHandle) -> Result<String
             .download_and_install(
                 |chunk_length, content_length| {
                     downloaded = downloaded.saturating_add(chunk_length as u64);
-                    tracing::info!(
-                        "下载进度: {} / {}",
-                        downloaded,
-                        content_length.unwrap_or(0)
-                    );
+                    tracing::info!("下载进度: {} / {}", downloaded, content_length.unwrap_or(0));
                 },
                 || {
                     tracing::info!("下载完成，开始安装");
@@ -164,9 +159,7 @@ pub async fn download_and_install_update_with_proxy(
     {
         use tauri_plugin_updater::UpdaterExt;
 
-        let updater = app_handle
-            .updater()
-            .map_err(|e| format!("获取 updater 失败: {}", e))?;
+        let updater = app_handle.updater().map_err(|e| format!("获取 updater 失败: {}", e))?;
 
         // 设置代理环境变量
         std::env::set_var("HTTP_PROXY", &proxy);

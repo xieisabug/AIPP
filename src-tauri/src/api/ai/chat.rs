@@ -1,5 +1,7 @@
 use crate::api::ai::config::{calculate_retry_delay, get_retry_attempts_from_config};
-use crate::api::ai::events::{ActivityFocus, ConversationEvent, MessageAddEvent, MessageUpdateEvent};
+use crate::api::ai::events::{
+    ActivityFocus, ConversationEvent, MessageAddEvent, MessageUpdateEvent,
+};
 use crate::api::ai::types::McpOverrideConfig;
 use crate::api::ai_api::{resolve_tool_name, sanitize_tool_name, ToolNameMapping};
 use crate::db::assistant_db::Assistant;
@@ -652,7 +654,11 @@ async fn handle_captured_tool_calls_concurrent(
         .await
         {
             Ok(tool_call_record) => {
-                tool_call_records.push((tool_call_record.id, server_name.clone(), tool_name.clone()));
+                tool_call_records.push((
+                    tool_call_record.id,
+                    server_name.clone(),
+                    tool_name.clone(),
+                ));
                 all_tool_call_ids.push(tool_call_record.id);
 
                 // 追加 UI hint（使用原始名称）
@@ -717,13 +723,9 @@ async fn handle_captured_tool_calls_concurrent(
         .read(conversation_id)
     {
         if let Some(assistant_id) = conv.and_then(|c| c.assistant_id) {
-            if let Ok(mcp_info) = crate::mcp::collect_mcp_info_for_assistant(
-                app_handle,
-                assistant_id,
-                None,
-                None,
-            )
-            .await
+            if let Ok(mcp_info) =
+                crate::mcp::collect_mcp_info_for_assistant(app_handle, assistant_id, None, None)
+                    .await
             {
                 let servers = mcp_info.enabled_servers;
                 for (call_id, server_name, tool_name) in &tool_call_records {
@@ -737,16 +739,13 @@ async fn handle_captured_tool_calls_concurrent(
                             {
                                 let tool_key = format!("{}/{}", server_name, tool_name);
                                 let auto_run = if let Some(all_auto_run) =
-                                    mcp_override_config
-                                        .and_then(|config| config.all_tool_auto_run)
+                                    mcp_override_config.and_then(|config| config.all_tool_auto_run)
                                 {
                                     all_auto_run
                                 } else {
                                     *mcp_override_config
                                         .and_then(|config| config.tool_auto_run.as_ref())
-                                        .and_then(|auto_run_map| {
-                                            auto_run_map.get(&tool_key)
-                                        })
+                                        .and_then(|auto_run_map| auto_run_map.get(&tool_key))
                                         .unwrap_or(&t.is_auto_run)
                                 };
 
@@ -1646,9 +1645,8 @@ async fn attempt_stream_chat(
 
     debug!("stream chat_request messages");
     for (i, msg) in chat_request.messages.iter().enumerate() {
-        let preview = msg.content.first_text().map(|text| {
-            text.chars().take(60).collect::<String>()
-        });
+        let preview =
+            msg.content.first_text().map(|text| text.chars().take(60).collect::<String>());
         let tool_calls_count = msg.content.tool_calls().len();
         debug!(
             message_index = i,
@@ -2112,18 +2110,19 @@ async fn attempt_stream_chat(
                             }
                             if let Some(msg_id) = response_message_id {
                                 // 使用并发处理函数，返回 (所有工具ID, 需要执行的工具ID)
-                                if let Ok((_all_ids, exec_ids)) = handle_captured_tool_calls_concurrent(
-                                    &app_handle,
-                                    &conversation_db,
-                                    &window,
-                                    conversation_id,
-                                    msg_id,
-                                    &captured_tool_calls,
-                                    &mut response_content,
-                                    mcp_override_config.as_ref(),
-                                    &tool_name_mapping,
-                                )
-                                .await
+                                if let Ok((_all_ids, exec_ids)) =
+                                    handle_captured_tool_calls_concurrent(
+                                        &app_handle,
+                                        &conversation_db,
+                                        &window,
+                                        conversation_id,
+                                        msg_id,
+                                        &captured_tool_calls,
+                                        &mut response_content,
+                                        mcp_override_config.as_ref(),
+                                        &tool_name_mapping,
+                                    )
+                                    .await
                                 {
                                     // 批量续写：所有工具执行完成后统一触发
                                     if !exec_ids.is_empty() {
@@ -2132,7 +2131,8 @@ async fn attempt_stream_chat(
                                             "triggering batch continuation after concurrent tool execution"
                                         );
                                         let state = app_handle.state::<crate::AppState>();
-                                        let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+                                        let feature_config_state =
+                                            app_handle.state::<crate::FeatureConfigState>();
                                         if let Err(e) = crate::mcp::execution_api::trigger_conversation_continuation_batch(
                                             &app_handle,
                                             state,
@@ -2307,9 +2307,7 @@ async fn attempt_stream_chat(
                         {
                             let current_focus = activity_manager.get_focus(conversation_id).await;
                             if !matches!(current_focus, ActivityFocus::McpExecuting { .. }) {
-                                activity_manager
-                                    .clear_focus(&app_handle, conversation_id)
-                                    .await;
+                                activity_manager.clear_focus(&app_handle, conversation_id).await;
                             } else {
                                 debug!(
                                     conversation_id = conversation_id,
@@ -2462,9 +2460,8 @@ pub async fn handle_non_stream_chat(
 
     debug!("non_stream chat_request messages");
     for (i, msg) in chat_request.messages.iter().enumerate() {
-        let preview = msg.content.first_text().map(|text| {
-            text.chars().take(60).collect::<String>()
-        });
+        let preview =
+            msg.content.first_text().map(|text| text.chars().take(60).collect::<String>());
         let tool_calls_count = msg.content.tool_calls().len();
         debug!(
             message_index = i,
@@ -2525,9 +2522,7 @@ pub async fn handle_non_stream_chat(
                     res = client.exec_chat(model_name, chat_request.clone(), Some(&non_stream_options)) => res,
                 }
             } else {
-                client
-                    .exec_chat(model_name, chat_request.clone(), Some(&non_stream_options))
-                    .await
+                client.exec_chat(model_name, chat_request.clone(), Some(&non_stream_options)).await
             };
 
             match exec_result {
@@ -2702,14 +2697,17 @@ pub async fn handle_non_stream_chat(
                         );
                         let state = app_handle.state::<crate::AppState>();
                         let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
-                        if let Err(e) = crate::mcp::execution_api::trigger_conversation_continuation_batch(
-                            app_handle,
-                            state,
-                            feature_config_state,
-                            window.clone(),
-                            conversation_id,
-                            exec_ids,
-                        ).await {
+                        if let Err(e) =
+                            crate::mcp::execution_api::trigger_conversation_continuation_batch(
+                                app_handle,
+                                state,
+                                feature_config_state,
+                                window.clone(),
+                                conversation_id,
+                                exec_ids,
+                            )
+                            .await
+                        {
                             warn!(error = %e, "batch continuation failed after non-stream concurrent tool execution");
                         }
                     } else {

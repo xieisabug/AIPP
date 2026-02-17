@@ -410,10 +410,7 @@ impl SharedPreviewUtils {
                             .join("artifacts")
                             .join("templates")
                             .join(component_type);
-                        println!(
-                            "📁 [SharedTemplate] 尝试开发模式路径: {:?}",
-                            dev_template_path
-                        );
+                        println!("📁 [SharedTemplate] 尝试开发模式路径: {:?}", dev_template_path);
                         if dev_template_path.exists() {
                             println!("✅ [SharedTemplate] 找到开发模式模板路径");
                             return Ok(dev_template_path);

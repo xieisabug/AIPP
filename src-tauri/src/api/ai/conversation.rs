@@ -41,11 +41,7 @@ fn build_user_message_with_attachments(
                 let url_lower = url.to_lowercase();
                 if url_lower.starts_with("http://") || url_lower.starts_with("https://") {
                     let mime = infer_media_type_from_url(url);
-                    parts.push(genai::chat::ContentPart::from_binary_url(
-                        mime,
-                        url.clone(),
-                        None,
-                    ));
+                    parts.push(genai::chat::ContentPart::from_binary_url(mime, url.clone(), None));
                     continue;
                 }
 
@@ -137,7 +133,11 @@ fn collect_valid_tool_call_ids(messages: &[Message]) -> HashSet<String> {
     ids
 }
 
-fn filter_tool_results_for_branch(conversation_id: i64, selection: &str, messages: &mut Vec<Message>) {
+fn filter_tool_results_for_branch(
+    conversation_id: i64,
+    selection: &str,
+    messages: &mut Vec<Message>,
+) {
     let valid_tool_call_ids = collect_valid_tool_call_ids(messages);
     if valid_tool_call_ids.is_empty() {
         return;
@@ -225,9 +225,7 @@ pub fn filter_messages_for_parent_group(
     if removed_group > 0 || removed_tool_results > 0 {
         debug!(
             parent_group_id,
-            removed_group,
-            removed_tool_results,
-            "filtered messages by parent group"
+            removed_group, removed_tool_results, "filtered messages by parent group"
         );
     }
 
@@ -308,7 +306,8 @@ pub fn build_chat_messages_with_context(
             }
             "tool_result" => {
                 debug!("processing tool_result message");
-                let tool_call_id = current_tool_call_id.clone().or_else(|| extract_tool_call_id(content));
+                let tool_call_id =
+                    current_tool_call_id.clone().or_else(|| extract_tool_call_id(content));
                 if let Some(tool_call_id) = tool_call_id {
                     if !valid_tool_call_ids.contains(&tool_call_id) {
                         debug!(tool_call_id, "tool_result without matching tool_call; downgrading");
@@ -411,10 +410,8 @@ pub fn build_chat_request_from_messages(
     };
 
     let mut chat_request = ChatRequest::new(chat_messages);
-    let tool_name_mapping = tool_config
-        .as_ref()
-        .map(|config| config.tool_name_mapping.clone())
-        .unwrap_or_default();
+    let tool_name_mapping =
+        tool_config.as_ref().map(|config| config.tool_name_mapping.clone()).unwrap_or_default();
     if let Some(config) = tool_config {
         if !config.tools.is_empty() {
             chat_request = chat_request.with_tools(config.tools);
@@ -465,10 +462,13 @@ fn build_native_toolcall_paired_messages(
                     message_trace.push(format!("assistant:tool_calls={:?}", tool_call_ids));
 
                     for tool_call in assistant_with_calls.content.tool_calls() {
-                        if let Some(response_content) = tool_call_to_response.get(&tool_call.call_id)
+                        if let Some(response_content) =
+                            tool_call_to_response.get(&tool_call.call_id)
                         {
-                            let tool_response =
-                                ToolResponse::new(tool_call.call_id.clone(), response_content.clone());
+                            let tool_response = ToolResponse::new(
+                                tool_call.call_id.clone(),
+                                response_content.clone(),
+                            );
                             chat_messages.push(ChatMessage::from(tool_response));
                             message_trace.push(format!("tool:call_id={}", tool_call.call_id));
                         }
@@ -501,10 +501,8 @@ pub fn build_message_list_from_selected_messages(
     selected_messages: &[Message],
     all_messages: &[(Message, Option<MessageAttachment>)],
 ) -> Vec<(String, String, Vec<MessageAttachment>)> {
-    let msg_to_attachment: HashMap<i64, Option<MessageAttachment>> = all_messages
-        .iter()
-        .map(|(msg, att)| (msg.id, att.clone()))
-        .collect();
+    let msg_to_attachment: HashMap<i64, Option<MessageAttachment>> =
+        all_messages.iter().map(|(msg, att)| (msg.id, att.clone())).collect();
 
     selected_messages
         .iter()
@@ -548,10 +546,8 @@ pub fn build_message_list_from_db(
     all_messages: &[(Message, Option<MessageAttachment>)],
     branch_selection: BranchSelection,
 ) -> Vec<(String, String, Vec<MessageAttachment>)> {
-    let conversation_id = all_messages
-        .first()
-        .map(|(msg, _)| msg.conversation_id)
-        .unwrap_or_default();
+    let conversation_id =
+        all_messages.first().map(|(msg, _)| msg.conversation_id).unwrap_or_default();
     debug!(
         conversation_id,
         branch_selection = ?branch_selection,

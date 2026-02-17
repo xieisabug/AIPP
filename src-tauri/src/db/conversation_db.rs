@@ -627,10 +627,7 @@ impl ConversationDatabase {
             )",
             [],
         )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_conversation_name ON conversation(name)",
-            [],
-        )?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_conversation_name ON conversation(name)", [])?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS message (
                 id              INTEGER
@@ -719,10 +716,7 @@ impl ConversationDatabase {
             "CREATE INDEX IF NOT EXISTS idx_message_conversation_created ON message(conversation_id, created_time)",
             [],
         )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_message_content ON message(content)",
-            [],
-        )?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_message_content ON message(content)", [])?;
         conn.execute("CREATE INDEX IF NOT EXISTS idx_message_parent_id ON message(parent_id)", [])?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_message_attachment_message_id ON message_attachment(message_id)",
@@ -1351,9 +1345,9 @@ pub struct MessageTokenStats {
 pub struct ConversationSummary {
     pub id: i64,
     pub conversation_id: i64,
-    pub summary: String,       // 对话整体总结
-    pub user_intent: String,   // 用户目的
-    pub key_outcomes: String,  // 关键成果
+    pub summary: String,      // 对话整体总结
+    pub user_intent: String,  // 用户目的
+    pub key_outcomes: String, // 关键成果
     #[serde(serialize_with = "serialize_datetime_millis")]
     pub created_time: DateTime<Utc>,
 }
@@ -1392,7 +1386,10 @@ impl ConversationSummaryRepository {
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub fn get_by_conversation_id(&self, conversation_id: i64) -> Result<Option<ConversationSummary>> {
+    pub fn get_by_conversation_id(
+        &self,
+        conversation_id: i64,
+    ) -> Result<Option<ConversationSummary>> {
         self.conn
             .query_row(
                 "SELECT id, conversation_id, summary, user_intent, key_outcomes, created_time FROM conversation_summary WHERE conversation_id = ?",

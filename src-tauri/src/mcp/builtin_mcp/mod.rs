@@ -1,7 +1,7 @@
+use crate::db::mcp_db::MCPDatabase;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use tracing::{debug, error, instrument};
-use crate::db::mcp_db::MCPDatabase;
 
 pub mod agent;
 pub mod operation;
@@ -437,19 +437,21 @@ pub async fn execute_aipp_builtin_tool(
                 .ok_or_else(|| "Artifact tools require conversation context".to_string())?;
 
             match tool_name.as_str() {
-                "get_artifact_workspace" => match get_artifact_workspace(&app_handle, resolved_conversation_id) {
-                    Ok(response) => serde_json::json!({
-                        "content": [{"type": "json", "json": response}],
-                        "isError": false
-                    }),
-                    Err(e) => {
-                        error!(error = %e, "get_artifact_workspace tool execution failed");
-                        serde_json::json!({
-                            "content": [{"type": "text", "text": e}],
-                            "isError": true
-                        })
+                "get_artifact_workspace" => {
+                    match get_artifact_workspace(&app_handle, resolved_conversation_id) {
+                        Ok(response) => serde_json::json!({
+                            "content": [{"type": "json", "json": response}],
+                            "isError": false
+                        }),
+                        Err(e) => {
+                            error!(error = %e, "get_artifact_workspace tool execution failed");
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": e}],
+                                "isError": true
+                            })
+                        }
                     }
-                },
+                }
                 "show_artifact" => {
                     let artifact_key = args
                         .get("artifact_key")
@@ -587,10 +589,8 @@ pub async fn execute_aipp_builtin_tool(
                     }
                     let conversation_id = conversation_id
                         .ok_or_else(|| "load_mcp_tool requires conversation context".to_string())?;
-                    let server_filter = args
-                        .get("server_name")
-                        .and_then(|v| v.as_str())
-                        .map(|v| v.to_lowercase());
+                    let server_filter =
+                        args.get("server_name").and_then(|v| v.as_str()).map(|v| v.to_lowercase());
                     let tool_catalog = db
                         .list_tool_catalog(None)
                         .map_err(|e| format!("Failed to list MCP tool catalog: {}", e))?;
@@ -659,9 +659,8 @@ pub async fn execute_aipp_builtin_tool(
                             (String, String, bool),
                         > = std::collections::HashMap::new();
                         if !server_ids.is_empty() {
-                            let server_tool_pairs = db
-                                .get_mcp_servers_with_tools_by_ids(&server_ids)
-                                .map_err(|e| {
+                            let server_tool_pairs =
+                                db.get_mcp_servers_with_tools_by_ids(&server_ids).map_err(|e| {
                                     format!("Failed to load MCP tool definitions: {}", e)
                                 })?;
                             for (_server, tools) in server_tool_pairs {
@@ -683,8 +682,14 @@ pub async fn execute_aipp_builtin_tool(
                         }
                         let mut loaded = Vec::new();
                         for tool in &selected {
-                            db.upsert_conversation_loaded_tool(conversation_id, tool.tool_id, Some("manual"))
-                                .map_err(|e| format!("Failed to persist loaded tool {}: {}", tool.tool_name, e))?;
+                            db.upsert_conversation_loaded_tool(
+                                conversation_id,
+                                tool.tool_id,
+                                Some("manual"),
+                            )
+                            .map_err(|e| {
+                                format!("Failed to persist loaded tool {}: {}", tool.tool_name, e)
+                            })?;
                             let (description, parameters_json, is_auto_run) = tool_definition_map
                                 .get(&tool.tool_id)
                                 .cloned()
@@ -694,13 +699,14 @@ pub async fn execute_aipp_builtin_tool(
                             } else {
                                 description
                             };
-                            let parameters_schema = serde_json::from_str::<serde_json::Value>(&parameters_json)
-                                .unwrap_or_else(|_| {
-                                    serde_json::json!({
-                                        "type": "object",
-                                        "additionalProperties": true
-                                    })
-                                });
+                            let parameters_schema =
+                                serde_json::from_str::<serde_json::Value>(&parameters_json)
+                                    .unwrap_or_else(|_| {
+                                        serde_json::json!({
+                                            "type": "object",
+                                            "additionalProperties": true
+                                        })
+                                    });
                             loaded.push(serde_json::json!({
                                 "tool_id": tool.tool_id,
                                 "toolset_name": tool.server_name,
@@ -805,8 +811,8 @@ pub async fn execute_aipp_builtin_tool(
                     }
                 }
                 "todo_write" => {
-                    use agent::todo::{TodoHandler, TodoItem, TodoState, TodoWriteRequest};
                     use crate::api::todo_api::{emit_todo_update, TodoItemResponse};
+                    use agent::todo::{TodoHandler, TodoItem, TodoState, TodoWriteRequest};
 
                     // Get TodoState from app state (must use the managed state)
                     let state = app_handle

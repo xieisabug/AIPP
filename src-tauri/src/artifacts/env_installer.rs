@@ -1155,16 +1155,10 @@ fn get_acp_library_config(cli_command: &str) -> (String, bool, String) {
             false,
             "需要设置 OPENAI_API_KEY 环境变量".to_string(),
         ),
-        "gemini" => (
-            "gemini".to_string(),
-            true,
-            "请参考 Google Gemini CLI 官方文档安装".to_string(),
-        ),
-        _ => (
-            cli_command.to_string(),
-            true,
-            "请手动安装该 CLI 工具".to_string(),
-        ),
+        "gemini" => {
+            ("gemini".to_string(), true, "请参考 Google Gemini CLI 官方文档安装".to_string())
+        }
+        _ => (cli_command.to_string(), true, "请手动安装该 CLI 工具".to_string()),
     }
 }
 
@@ -1183,9 +1177,7 @@ pub async fn check_acp_library(
 
         // 对于需要外部安装的工具，直接检查系统 PATH
         if requires_external {
-            let output = std::process::Command::new(&cli_command_clone)
-                .arg("--version")
-                .output();
+            let output = std::process::Command::new(&cli_command_clone).arg("--version").output();
 
             return match output {
                 Ok(out) if out.status.success() => {
@@ -1226,9 +1218,7 @@ pub async fn check_acp_library(
         };
 
         // 使用 bun pm ls -g 检查全局包
-        let output = std::process::Command::new(&bun_path)
-            .args(["pm", "ls", "-g"])
-            .output();
+        let output = std::process::Command::new(&bun_path).args(["pm", "ls", "-g"]).output();
 
         match output {
             Ok(out) if out.status.success() => {
@@ -1273,17 +1263,11 @@ pub async fn check_acp_library(
 
 /// 安装 ACP 库
 #[tauri::command]
-pub async fn install_acp_library(
-    app: tauri::AppHandle,
-    cli_command: String,
-) -> Result<(), String> {
+pub async fn install_acp_library(app: tauri::AppHandle, cli_command: String) -> Result<(), String> {
     let (package_name, requires_external, _) = get_acp_library_config(&cli_command);
 
     if requires_external {
-        return Err(format!(
-            "{} 需要手动安装，无法自动安装",
-            cli_command
-        ));
+        return Err(format!("{} 需要手动安装，无法自动安装", cli_command));
     }
 
     let bun_path = crate::utils::bun_utils::BunUtils::get_bun_executable(&app)
@@ -1306,11 +1290,14 @@ pub async fn install_acp_library(
         };
 
         let emit_finished = |success: bool| {
-            let _ = app_clone.emit("acp-install-finished", serde_json::json!({
-                "success": success,
-                "cli_command": cli_command_clone,
-                "package_name": package_name_clone,
-            }));
+            let _ = app_clone.emit(
+                "acp-install-finished",
+                serde_json::json!({
+                    "success": success,
+                    "cli_command": cli_command_clone,
+                    "package_name": package_name_clone,
+                }),
+            );
         };
 
         emit_log(&format!("执行: bun add -g {}", package_name_clone));
@@ -1337,10 +1324,7 @@ pub async fn install_acp_library(
                     emit_log(&format!("{} 安装成功!", package_name_clone));
                     emit_finished(true);
                 } else {
-                    emit_log(&format!(
-                        "安装失败，退出码: {}",
-                        out.status.code().unwrap_or(-1)
-                    ));
+                    emit_log(&format!("安装失败，退出码: {}", out.status.code().unwrap_or(-1)));
                     emit_finished(false);
                 }
             }
