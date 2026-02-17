@@ -53,6 +53,15 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
             required_envs: vec![],
             default_timeout: Some(30000), // 30秒
         },
+        BuiltinTemplateInfo {
+            id: "ui_interaction".into(),
+            name: "UI交互工具".into(),
+            description: "内置的 UI 交互工具集，用于向用户提问和展示文件预览。".into(),
+            command: "aipp:ui_interaction".into(),
+            transport_type: "stdio".into(),
+            required_envs: vec![],
+            default_timeout: Some(30000),
+        },
         // 搜索工具
         BuiltinTemplateInfo {
             id: "search".into(),
@@ -311,6 +320,182 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                             }
                         }
                     }
+                }),
+            },
+            BuiltinToolInfo {
+                name: "load_mcp_server".into(),
+                description: "根据需求关键词检索 MCP 工具集目录，并返回对应工具集下的工具摘要。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "要检索的工具集名称或关键词"
+                        }
+                    },
+                    "required": ["name"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "load_mcp_tool".into(),
+                description: "按关键词加载 MCP 工具到当前会话，并返回这些工具的完整定义（含 description 与 parameters schema）。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "names": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "需要加载的工具关键词列表；支持关键词或完整 server::tool 形式，可一次传入多个"
+                        },
+                        "server_name": {
+                            "type": "string",
+                            "description": "可选。限定在指定工具集（参数名为 server_name）下搜索工具"
+                        }
+                    },
+                    "required": ["names"]
+                }),
+            },
+        ],
+        Some("ui_interaction") => vec![
+            BuiltinToolInfo {
+                name: "ask_user_question".into(),
+                description: "Use this tool when you need to ask the user questions during execution. This allows gathering preferences, clarifying ambiguity, and getting implementation decisions. User answers are returned as tool results.".into(),
+                input_schema: serde_json::json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "properties": {
+                        "questions": {
+                            "description": "Questions to ask the user (1-4 questions)",
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 4,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "question": {
+                                        "type": "string",
+                                        "description": "The complete question to ask the user."
+                                    },
+                                    "header": {
+                                        "type": "string",
+                                        "description": "Very short label displayed as a chip/tag (max 12 chars)."
+                                    },
+                                    "options": {
+                                        "type": "array",
+                                        "description": "Must have 2-4 options. Do not include 'Other' (auto-provided by UI).",
+                                        "minItems": 2,
+                                        "maxItems": 4,
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "label": {
+                                                    "type": "string",
+                                                    "description": "Display text shown to the user."
+                                                },
+                                                "description": {
+                                                    "type": "string",
+                                                    "description": "Explanation of this option."
+                                                }
+                                            },
+                                            "required": ["label", "description"],
+                                            "additionalProperties": false
+                                        }
+                                    },
+                                    "multiSelect": {
+                                        "type": "boolean",
+                                        "default": false,
+                                        "description": "Set true to allow selecting multiple options."
+                                    }
+                                },
+                                "required": ["question", "header", "options", "multiSelect"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "answers": {
+                            "description": "User answers collected by the UI component.",
+                            "type": "object",
+                            "propertyNames": { "type": "string" },
+                            "additionalProperties": { "type": "string" }
+                        },
+                        "metadata": {
+                            "description": "Optional metadata for tracking purposes.",
+                            "type": "object",
+                            "properties": {
+                                "source": {
+                                    "type": "string",
+                                    "description": "Optional source identifier."
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["questions"],
+                    "additionalProperties": false
+                }),
+            },
+            BuiltinToolInfo {
+                name: "preview_file".into(),
+                description: "Display file content or rich media in a specialized UI component. Supports markdown, text, image, pdf and html, including multi-file tab/grid/list views.".into(),
+                input_schema: serde_json::json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "properties": {
+                        "files": {
+                            "description": "Files or content items to display.",
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 10,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "title": {
+                                        "type": "string",
+                                        "description": "Title of the file/tab."
+                                    },
+                                    "type": {
+                                        "type": "string",
+                                        "enum": ["markdown", "text", "image", "pdf", "html"],
+                                        "description": "Content format used by the renderer."
+                                    },
+                                    "content": {
+                                        "type": "string",
+                                        "description": "Inline content (text/markdown or base64 image/pdf/html)."
+                                    },
+                                    "url": {
+                                        "type": "string",
+                                        "description": "Direct URL or local path to the resource."
+                                    },
+                                    "language": {
+                                        "type": "string",
+                                        "description": "Programming language for syntax highlighting when type=text."
+                                    },
+                                    "description": {
+                                        "type": "string",
+                                        "description": "Optional caption for this file."
+                                    }
+                                },
+                                "required": ["title", "type"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "viewMode": {
+                            "type": "string",
+                            "enum": ["tabs", "list", "grid"],
+                            "default": "tabs",
+                            "description": "Preferred layout mode for multiple files."
+                        },
+                        "metadata": {
+                            "type": "object",
+                            "properties": {
+                                "origin": {
+                                    "type": "string",
+                                    "description": "Optional source marker."
+                                }
+                            }
+                        }
+                    },
+                    "required": ["files"],
+                    "additionalProperties": false
                 }),
             },
         ],
@@ -767,7 +952,13 @@ mod tests {
     #[test]
     fn test_get_tools_for_agent_command() {
         let tools = get_builtin_tools_for_command("aipp:agent");
-        assert_eq!(tools.len(), 1, "Agent command should have 1 tool");
+        assert_eq!(tools.len(), 4, "Agent command should have 4 tools");
+    }
+
+    #[test]
+    fn test_get_tools_for_ui_interaction_command() {
+        let tools = get_builtin_tools_for_command("aipp:ui_interaction");
+        assert_eq!(tools.len(), 2, "UI interaction command should have 2 tools");
     }
 
     #[test]

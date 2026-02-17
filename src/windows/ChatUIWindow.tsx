@@ -6,11 +6,21 @@ import ConversationList from "../components/ConversationList";
 import ChatUIInfomation from "../components/ChatUIInfomation";
 import ConversationSearchDialog from "../components/ConversationSearchDialog";
 import ConversationUI, { ConversationUIRef } from "../components/ConversationUI";
-import { AcpPermissionDialog, OperationPermissionDialog } from "../components/OperationPermissionDialog";
+import {
+    AcpPermissionDialog,
+    AskUserQuestionDialog,
+    OperationPermissionDialog,
+    PreviewFileDialog,
+} from "../components/OperationPermissionDialog";
 import { Conversation, ConversationSearchHit } from "../data/Conversation";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
-import { useAcpPermission, useOperationPermission } from "../hooks/useOperationPermission";
+import {
+    useAcpPermission,
+    useAskUserQuestion,
+    useOperationPermission,
+    usePreviewFile,
+} from "../hooks/useOperationPermission";
 import { useFeatureConfig } from "../hooks/feature/useFeatureConfig";
 import { AntiLeakageProvider } from "../contexts/AntiLeakageContext";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
@@ -50,6 +60,21 @@ function ChatUIWindow() {
         isDialogOpen: isAcpDialogOpen,
         handleDecision: handleAcpDecision,
     } = useAcpPermission({
+        conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
+    });
+    const {
+        pendingRequest: pendingAskUserRequest,
+        isDialogOpen: isAskUserDialogOpen,
+        handleSubmit: handleAskUserSubmit,
+        handleCancel: handleAskUserCancel,
+    } = useAskUserQuestion({
+        conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
+    });
+    const {
+        pendingRequest: pendingPreviewFileRequest,
+        isDialogOpen: isPreviewFileDialogOpen,
+        handleOpenChange: handlePreviewFileOpenChange,
+    } = usePreviewFile({
         conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
     });
 
@@ -301,6 +326,17 @@ function ChatUIWindow() {
                         isOpen={isAcpDialogOpen}
                         onDecision={handleAcpDecision}
                     />
+                    <AskUserQuestionDialog
+                        request={pendingAskUserRequest}
+                        isOpen={isAskUserDialogOpen}
+                        onSubmit={handleAskUserSubmit}
+                        onCancel={handleAskUserCancel}
+                    />
+                    <PreviewFileDialog
+                        request={pendingPreviewFileRequest}
+                        isOpen={isPreviewFileDialogOpen}
+                        onOpenChange={handlePreviewFileOpenChange}
+                    />
                 </div>
             </AntiLeakageProvider>
         );
@@ -347,6 +383,17 @@ function ChatUIWindow() {
                     request={pendingAcpRequest}
                     isOpen={isAcpDialogOpen}
                     onDecision={handleAcpDecision}
+                />
+                <AskUserQuestionDialog
+                    request={pendingAskUserRequest}
+                    isOpen={isAskUserDialogOpen}
+                    onSubmit={handleAskUserSubmit}
+                    onCancel={handleAskUserCancel}
+                />
+                <PreviewFileDialog
+                    request={pendingPreviewFileRequest}
+                    isOpen={isPreviewFileDialogOpen}
+                    onOpenChange={handlePreviewFileOpenChange}
                 />
             </div>
         </AntiLeakageProvider>

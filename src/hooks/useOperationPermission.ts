@@ -4,7 +4,10 @@ import { invoke } from "@tauri-apps/api/core";
 import {
     OperationPermissionRequest,
     AcpPermissionRequest,
+    AskUserQuestionRequest,
+    PreviewFileRequest,
 } from "@/components/OperationPermissionDialog";
+import { getErrorMessage } from "@/utils/error";
 
 interface UseOperationPermissionOptions {
     /** 当前会话 ID，用于过滤只处理当前会话的权限请求 */
@@ -123,5 +126,137 @@ export function useAcpPermission(options: UseAcpPermissionOptions = {}) {
         pendingRequest,
         isDialogOpen,
         handleDecision,
+    };
+}
+
+interface UseAskUserQuestionOptions {
+    conversationId?: number;
+}
+
+export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
+    const { conversationId } = options;
+    const [pendingRequest, setPendingRequest] = useState<AskUserQuestionRequest | null>(null);
+    const [, setRequestQueue] = useState<AskUserQuestionRequest[]>([]);
+    const [isDialogOpen, setIsDialogOpen] = useState(false);
+
+    const shiftNextRequest = useCallback(() => {
+        setRequestQueue((prev) => {
+            const [, ...rest] = prev;
+            setPendingRequest(rest[0] ?? null);
+            setIsDialogOpen(rest.length > 0);
+            return rest;
+        });
+    }, []);
+
+    useEffect(() => {
+        const unsubscribe = listen<AskUserQuestionRequest>("ask-user-question-request", (event) => {
+            const request = event.payload;
+
+            if (
+                conversationId !== undefined &&
+                request.conversation_id !== undefined &&
+                request.conversation_id !== conversationId
+            ) {
+                return;
+            }
+
+            setRequestQueue((prev) => {
+                const next = [...prev, request];
+                if (next.length === 1) {
+                    setPendingRequest(request);
+                    setIsDialogOpen(true);
+                }
+                return next;
+            });
+        });
+
+        return () => {
+            unsubscribe.then((f) => f());
+        };
+    }, [conversationId]);
+
+    const handleSubmit = useCallback(
+        async (requestId: string, answers: Record<string, string>) => {
+            try {
+                await invoke("submit_ask_user_question_response", {
+                    requestId,
+                    answers,
+                    cancelled: false,
+                });
+            } catch (error) {
+                console.error("Failed to submit AskUserQuestion response:", getErrorMessage(error));
+            } finally {
+                shiftNextRequest();
+            }
+        },
+        [shiftNextRequest]
+    );
+
+    const handleCancel = useCallback(
+        async (requestId: string) => {
+            try {
+                await invoke("submit_ask_user_question_response", {
+                    requestId,
+                    answers: null,
+                    cancelled: true,
+                });
+            } catch (error) {
+                console.error("Failed to cancel AskUserQuestion response:", getErrorMessage(error));
+            } finally {
+                shiftNextRequest();
+            }
+        },
+        [shiftNextRequest]
+    );
+
+    return {
+        pendingRequest,
+        isDialogOpen,
+        handleSubmit,
+        handleCancel,
+    };
+}
+
+interface UsePreviewFileOptions {
+    conversationId?: number;
+}
+
+export function usePreviewFile(options: UsePreviewFileOptions = {}) {
+    const { conversationId } = options;
+    const [pendingRequest, setPendingRequest] = useState<PreviewFileRequest | null>(null);
+    const [isDialogOpen, setIsDialogOpen] = useState(false);
+
+    useEffect(() => {
+        const unsubscribe = listen<PreviewFileRequest>("preview-file-request", (event) => {
+            const request = event.payload;
+
+            if (
+                conversationId !== undefined &&
+                request.conversation_id !== undefined &&
+                request.conversation_id !== conversationId
+            ) {
+                return;
+            }
+
+            setPendingRequest(request);
+            setIsDialogOpen(true);
+        });
+
+        return () => {
+            unsubscribe.then((f) => f());
+        };
+    }, [conversationId]);
+
+    const handleOpenChange = useCallback((open: boolean) => {
+        setIsDialogOpen(open);
+        if (!open) {
+            setPendingRequest(null);
+        }
+    }, []);
+
+    return {
+        pendingRequest,
+        isDialogOpen,
+        handleOpenChange,
     };
 }

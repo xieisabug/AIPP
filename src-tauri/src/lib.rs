@@ -118,7 +118,8 @@ use crate::db::sub_task_db::SubTaskDatabase;
 use crate::db::system_db::SystemDatabase;
 use crate::mcp::builtin_mcp::{
     add_or_update_aipp_builtin_server, execute_aipp_builtin_tool, init_builtin_mcp_servers,
-    list_aipp_builtin_templates, OperationState, TodoState,
+    list_aipp_builtin_templates, submit_ask_user_question_response, InteractionState,
+    OperationState, TodoState,
 };
 use crate::mcp::execution_api::{
     continue_with_error, create_mcp_tool_call, execute_mcp_tool_call,
@@ -578,7 +579,8 @@ pub fn run() {
         .manage(ConversationActivityManager::new())
         .manage(OperationState::new())
         .manage(AcpPermissionState::new())
-        .manage(TodoState::new());
+        .manage(TodoState::new())
+        .manage(InteractionState::new());
     #[cfg(desktop)]
     let app = app.manage(CopilotLspState::default());
     let app = app
@@ -760,6 +762,7 @@ pub fn run() {
             list_aipp_builtin_templates,
             add_or_update_aipp_builtin_server,
             execute_aipp_builtin_tool,
+            submit_ask_user_question_response,
             confirm_operation_permission,
             confirm_acp_permission,
             register_sub_task_definition,

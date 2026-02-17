@@ -1912,12 +1912,16 @@ async fn execute_builtin_tool(
     cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
+    let command = server.command.clone().unwrap_or_default();
     // 获取超时配置，使用服务器配置的超时或默认值
-    let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
+    let mut timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
+    // AskUserQuestion 需要等待用户交互，最低超时提升到 30 分钟。
+    if command == "aipp:ui_interaction" && tool_name == "ask_user_question" {
+        timeout_ms = timeout_ms.max(1_800_000);
+    }
     let start = std::time::Instant::now();
 
     // 验证是否为内置工具调用
-    let command = server.command.clone().unwrap_or_default();
     if !is_builtin_mcp_call(&command) {
         error!(command=%command, "invalid builtin tool command");
         bail!("Unknown builtin tool: {} for command: {}", tool_name, command);
