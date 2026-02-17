@@ -26,6 +26,310 @@ interface ToolCallData {
     call_id?: number;
 }
 
+interface ParsedMcpToolCallComment {
+    start: number;
+    end: number;
+    complete: boolean;
+    data: ToolCallData;
+}
+
+const MCP_TOOL_CALL_KEY = "MCP_TOOL_CALL";
+
+function decodeJsonString(raw: string): string {
+    try {
+        return JSON.parse(`"${raw}"`);
+    } catch {
+        return raw;
+    }
+}
+
+function normalizeToolCallData(raw: unknown): ToolCallData {
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+        return { call_id: raw };
+    }
+    if (typeof raw === "string" && /^\d+$/.test(raw.trim())) {
+        return { call_id: Number.parseInt(raw.trim(), 10) };
+    }
+    if (!raw || typeof raw !== "object") {
+        return {};
+    }
+    const value = raw as Record<string, unknown>;
+    const callIdRaw = value.call_id;
+    const callId =
+        typeof callIdRaw === "number"
+            ? callIdRaw
+            : typeof callIdRaw === "string" && /^\d+$/.test(callIdRaw.trim())
+                ? Number.parseInt(callIdRaw.trim(), 10)
+                : undefined;
+    return {
+        server_name: typeof value.server_name === "string" ? value.server_name : undefined,
+        tool_name: typeof value.tool_name === "string" ? value.tool_name : undefined,
+        parameters: typeof value.parameters === "string" ? value.parameters : undefined,
+        call_id: callId,
+    };
+}
+
+function parseToolCallPayload(rawPayload: string): ToolCallData | null {
+    const payload = rawPayload.trim();
+    if (!payload) return null;
+    try {
+        return normalizeToolCallData(JSON.parse(payload));
+    } catch {
+        return null;
+    }
+}
+
+function parsePartialToolCallPayload(rawPayload: string): ToolCallData {
+    const result: ToolCallData = {};
+    const serverMatch = rawPayload.match(/"server_name"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (serverMatch) {
+        result.server_name = decodeJsonString(serverMatch[1]);
+    }
+    const toolMatch = rawPayload.match(/"tool_name"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (toolMatch) {
+        result.tool_name = decodeJsonString(toolMatch[1]);
+    }
+    const callIdMatch = rawPayload.match(/"call_id"\s*:\s*(\d+)/);
+    if (callIdMatch) {
+        result.call_id = Number.parseInt(callIdMatch[1], 10);
+    }
+    return result;
+}
+
+function parsePartialXmlToolCallPayload(rawPayload: string): ToolCallData {
+    const result: ToolCallData = {};
+    const serverMatch = rawPayload.match(/<server_name>([\s\S]*?)(?:<\/server_name>|$)/i);
+    if (serverMatch) {
+        result.server_name = serverMatch[1].trim();
+    }
+    const toolMatch = rawPayload.match(/<tool_name>([\s\S]*?)(?:<\/tool_name>|$)/i);
+    if (toolMatch) {
+        result.tool_name = toolMatch[1].trim();
+    }
+    const paramsMatch = rawPayload.match(/<parameters>([\s\S]*?)(?:<\/parameters>|$)/i);
+    if (paramsMatch) {
+        result.parameters = paramsMatch[1].trim();
+    }
+    return result;
+}
+
+function findJsonObjectEnd(content: string, startIndex: number): number | null {
+    if (startIndex >= content.length || content[startIndex] !== "{") {
+        return null;
+    }
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = startIndex; i < content.length; i++) {
+        const char = content[i];
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (char === "\\") {
+                escaped = true;
+                continue;
+            }
+            if (char === '"') {
+                inString = false;
+            }
+            continue;
+        }
+        if (char === '"') {
+            inString = true;
+            continue;
+        }
+        if (char === "{") {
+            depth += 1;
+            continue;
+        }
+        if (char === "}") {
+            depth -= 1;
+            if (depth === 0) {
+                return i;
+            }
+        }
+    }
+    return null;
+}
+
+function findNextMcpToolCallStart(
+    content: string,
+    fromIndex: number,
+): { commentStart: number; payloadStart: number } | null {
+    let cursor = fromIndex;
+    while (cursor < content.length) {
+        const commentStart = content.indexOf("<!--", cursor);
+        if (commentStart === -1) {
+            return null;
+        }
+
+        let head = commentStart + 4;
+        while (head < content.length && /\s/.test(content[head])) {
+            head += 1;
+        }
+
+        if (!content.startsWith(MCP_TOOL_CALL_KEY, head)) {
+            cursor = commentStart + 4;
+            continue;
+        }
+
+        let payloadStart = head + MCP_TOOL_CALL_KEY.length;
+        while (payloadStart < content.length && /\s/.test(content[payloadStart])) {
+            payloadStart += 1;
+        }
+        if (content[payloadStart] === ":") {
+            payloadStart += 1;
+        }
+        while (payloadStart < content.length && /\s/.test(content[payloadStart])) {
+            payloadStart += 1;
+        }
+
+        return { commentStart, payloadStart };
+    }
+
+    return null;
+}
+
+function extractMcpToolCallComments(content: string): ParsedMcpToolCallComment[] {
+    const comments: ParsedMcpToolCallComment[] = [];
+    let cursor = 0;
+
+    while (cursor < content.length) {
+        const startInfo = findNextMcpToolCallStart(content, cursor);
+        if (!startInfo) {
+            break;
+        }
+        const start = startInfo.commentStart;
+        const payloadStart = startInfo.payloadStart;
+        let firstNonWhitespace = payloadStart;
+        while (
+            firstNonWhitespace < content.length &&
+            /\s/.test(content[firstNonWhitespace])
+        ) {
+            firstNonWhitespace += 1;
+        }
+
+        let end = content.length;
+        let complete = false;
+        let parsedData: ToolCallData = {};
+
+        const jsonEnd = findJsonObjectEnd(content, firstNonWhitespace);
+        if (jsonEnd !== null) {
+            const rawJson = content.slice(firstNonWhitespace, jsonEnd + 1);
+            parsedData = parseToolCallPayload(rawJson) ?? parsePartialToolCallPayload(rawJson);
+            const commentClose = content.indexOf("-->", jsonEnd + 1);
+            if (commentClose !== -1) {
+                end = commentClose + 3;
+                complete = true;
+            } else {
+                end = content.length;
+            }
+        } else {
+            const commentClose = content.indexOf("-->", payloadStart);
+            if (commentClose !== -1) {
+                const rawPayload = content.slice(payloadStart, commentClose);
+                parsedData = parseToolCallPayload(rawPayload) ?? parsePartialToolCallPayload(rawPayload);
+                end = commentClose + 3;
+                complete = true;
+            } else {
+                const rawPayload = content.slice(payloadStart);
+                parsedData = parsePartialToolCallPayload(rawPayload);
+                end = content.length;
+            }
+        }
+
+        comments.push({
+            start,
+            end,
+            complete,
+            data: parsedData,
+        });
+
+        if (!complete) {
+            break;
+        }
+        cursor = end;
+    }
+
+    return comments;
+}
+
+function extractMcpToolCallXmlTags(content: string): ParsedMcpToolCallComment[] {
+    const tags: ParsedMcpToolCallComment[] = [];
+    const openTag = "<mcp_tool_call";
+    const closeTag = "</mcp_tool_call>";
+    let cursor = 0;
+
+    while (cursor < content.length) {
+        const start = content.indexOf(openTag, cursor);
+        if (start === -1) {
+            break;
+        }
+
+        const openTagEnd = content.indexOf(">", start);
+        if (openTagEnd === -1) {
+            tags.push({
+                start,
+                end: content.length,
+                complete: false,
+                data: {},
+            });
+            break;
+        }
+
+        const closeStart = content.indexOf(closeTag, openTagEnd + 1);
+        if (closeStart === -1) {
+            const rawPayload = content.slice(openTagEnd + 1);
+            tags.push({
+                start,
+                end: content.length,
+                complete: false,
+                data: parsePartialXmlToolCallPayload(rawPayload),
+            });
+            break;
+        }
+
+        const rawPayload = content.slice(openTagEnd + 1, closeStart);
+        tags.push({
+            start,
+            end: closeStart + closeTag.length,
+            complete: true,
+            data: parsePartialXmlToolCallPayload(rawPayload),
+        });
+
+        cursor = closeStart + closeTag.length;
+    }
+
+    return tags;
+}
+
+function extractMcpToolCalls(content: string): ParsedMcpToolCallComment[] {
+    const merged = [
+        ...extractMcpToolCallComments(content),
+        ...extractMcpToolCallXmlTags(content),
+    ].sort((a, b) => a.start - b.start);
+
+    if (merged.length <= 1) {
+        return merged;
+    }
+
+    const deduped: ParsedMcpToolCallComment[] = [];
+    let lastEnd = -1;
+    for (const item of merged) {
+        if (item.start < lastEnd) {
+            continue;
+        }
+        deduped.push(item);
+        lastEnd = item.end;
+        if (!item.complete) {
+            break;
+        }
+    }
+    return deduped;
+}
+
 const McpToolCallResultsButton: React.FC<{
     toolCallIds: number[];
     mcpToolCallStates: Map<number, MCPToolCallUpdateEvent> | undefined;
@@ -110,9 +414,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         markdownContent: string,
         fallbackElement: React.ReactElement
     ): React.ReactElement => {
-        // 检查是否包含 MCP_TOOL_CALL 注释
-        const mcpMatches = markdownContent.matchAll(/<!-- MCP_TOOL_CALL:(.*?) -->/g);
-        const mcpCalls = Array.from(mcpMatches);
+        const mcpCalls = extractMcpToolCalls(markdownContent);
 
         if (mcpCalls.length === 0) {
             return fallbackElement;
@@ -120,7 +422,12 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
 
         console.log(
             "[MCP] detected MCP_TOOL_CALL comments",
-            mcpCalls.map((match) => match[1]),
+            mcpCalls.map((match) => ({
+                complete: match.complete,
+                call_id: match.data.call_id,
+                server_name: match.data.server_name,
+                tool_name: match.data.tool_name,
+            })),
             { conversationId, messageId },
         );
 
@@ -133,50 +440,46 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         let lastIndex = 0;
 
         for (const [index, match] of mcpCalls.entries()) {
-            try {
-                const data = JSON.parse(match[1]) as ToolCallData;
-                toolCallDataList.push(data);
-                if (data.call_id) {
-                    toolCallIds.push(data.call_id);
-                }
+            const data = match.data;
+            toolCallDataList.push(data);
+            if (data.call_id) {
+                toolCallIds.push(data.call_id);
+            }
 
-                const beforeComment = markdownContent.slice(lastIndex, match.index);
+            const beforeComment = markdownContent.slice(lastIndex, match.start);
 
-                // 添加注释前的内容
-                if (beforeComment.trim()) {
-                    parts.push(
-                        <ReactMarkdown
-                            key={`before-${index}`}
-                            children={beforeComment}
-                            remarkPlugins={[...remarkPlugins]}
-                            rehypePlugins={[...rehypePlugins]}
-                            components={markdownComponents}
-                            urlTransform={customUrlTransform}
-                        />
-                    );
-                }
-
-                // 添加 MCP 工具调用组件
-                // 只有最后一个工具调用在执行成功后才触发续写
-                const isLastCall = index === mcpCalls.length - 1;
+            // 添加注释前的内容
+            if (beforeComment.trim()) {
                 parts.push(
-                    <McpToolCall
-                        key={`mcp-${index}`}
-                        serverName={data.server_name}
-                        toolName={data.tool_name}
-                        parameters={data.parameters}
-                        conversationId={conversationId}
-                        messageId={messageId}
-                        callId={data.call_id} // 传递 callId，如果存在的话
-                        mcpToolCallStates={mcpToolCallStates} // 传递全局 MCP 状态
-                        isLastCall={isLastCall} // 是否是最后一个工具调用
+                    <ReactMarkdown
+                        key={`before-${index}`}
+                        children={beforeComment}
+                        remarkPlugins={[...remarkPlugins]}
+                        rehypePlugins={[...rehypePlugins]}
+                        components={markdownComponents}
+                        urlTransform={customUrlTransform}
                     />
                 );
-
-                lastIndex = match.index! + match[0].length;
-            } catch (error) {
-                console.error('Error parsing MCP_TOOL_CALL data:', error);
             }
+
+            // 添加 MCP 工具调用组件
+            // 只有最后一个工具调用在执行成功后才触发续写
+            const isLastCall = index === mcpCalls.length - 1;
+            parts.push(
+                <McpToolCall
+                    key={`mcp-${index}`}
+                    serverName={data.server_name}
+                    toolName={data.tool_name}
+                    parameters={data.parameters ?? "{}"}
+                    conversationId={conversationId}
+                    messageId={messageId}
+                    callId={data.call_id} // 传递 callId，如果存在的话
+                    mcpToolCallStates={mcpToolCallStates} // 传递全局 MCP 状态
+                    isLastCall={isLastCall} // 是否是最后一个工具调用
+                />
+            );
+
+            lastIndex = match.end;
         }
 
         // 添加剩余的内容

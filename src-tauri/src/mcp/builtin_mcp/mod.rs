@@ -43,6 +43,44 @@ fn matches_keyword(value: &str, keyword: &str) -> bool {
     value.to_lowercase().contains(&keyword.to_lowercase())
 }
 
+fn parse_tool_selector(selector: &str) -> (Option<String>, String) {
+    let trimmed = selector.trim();
+    if let Some((server_name, tool_name)) = trimmed.split_once("::") {
+        let server_name = server_name.trim();
+        let tool_name = tool_name.trim();
+        if !server_name.is_empty() && !tool_name.is_empty() {
+            return (Some(server_name.to_lowercase()), tool_name.to_string());
+        }
+    }
+    (None, trimmed.to_string())
+}
+
+fn parse_builtin_parameters(parameters: &str) -> Result<serde_json::Value, String> {
+    let trimmed = parameters.trim();
+    if trimmed.is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+
+    // Strict parse first (expected path).
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return Ok(value);
+    }
+
+    // Fallback: some providers append trailing garbage after a valid JSON object.
+    // Deserialize the first JSON value and ignore trailing characters.
+    let mut de = serde_json::Deserializer::from_str(trimmed);
+    match serde_json::Value::deserialize(&mut de) {
+        Ok(value) => {
+            debug!("Parsed builtin parameters with tolerant deserializer");
+            Ok(value)
+        }
+        Err(e) => {
+            error!(error = %e, "Invalid parameters JSON");
+            Err(format!("Invalid parameters: {}", e))
+        }
+    }
+}
+
 #[tauri::command]
 #[instrument(skip(app_handle, parameters), fields(command = %server_command, tool = %tool_name))]
 pub async fn execute_aipp_builtin_tool(
@@ -54,10 +92,7 @@ pub async fn execute_aipp_builtin_tool(
 ) -> Result<String, String> {
     use search::types::{SearchRequest, SearchResponse, SearchResultType};
 
-    let args: serde_json::Value = serde_json::from_str(&parameters).map_err(|e| {
-        error!(error = %e, "Invalid parameters JSON");
-        format!("Invalid parameters: {}", e)
-    })?;
+    let args = parse_builtin_parameters(&parameters)?;
 
     let cmd_id = builtin_command_id(&server_command).ok_or("Not a builtin command")?;
 
@@ -390,6 +425,76 @@ pub async fn execute_aipp_builtin_tool(
                 }),
             }
         }
+        "artifact" => {
+            use crate::artifacts::workspace::{
+                get_artifact_workspace, show_artifact, ShowArtifactRequest,
+            };
+
+            let resolved_conversation_id = args
+                .get("conversation_id")
+                .and_then(|v| v.as_i64())
+                .or(conversation_id)
+                .ok_or_else(|| "Artifact tools require conversation context".to_string())?;
+
+            match tool_name.as_str() {
+                "get_artifact_workspace" => match get_artifact_workspace(&app_handle, resolved_conversation_id) {
+                    Ok(response) => serde_json::json!({
+                        "content": [{"type": "json", "json": response}],
+                        "isError": false
+                    }),
+                    Err(e) => {
+                        error!(error = %e, "get_artifact_workspace tool execution failed");
+                        serde_json::json!({
+                            "content": [{"type": "text", "text": e}],
+                            "isError": true
+                        })
+                    }
+                },
+                "show_artifact" => {
+                    let artifact_key = args
+                        .get("artifact_key")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing required parameter: artifact_key".to_string())?;
+                    let entry_file = args
+                        .get("entry_file")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing required parameter: entry_file".to_string())?;
+                    let request = ShowArtifactRequest {
+                        conversation_id: resolved_conversation_id,
+                        artifact_key: artifact_key.to_string(),
+                        entry_file: entry_file.to_string(),
+                        title: args.get("title").and_then(|v| v.as_str()).map(|v| v.to_string()),
+                        language: args
+                            .get("language")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                        preview_type: args
+                            .get("preview_type")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                        db_id: args.get("db_id").and_then(|v| v.as_str()).map(|v| v.to_string()),
+                        assistant_id: args.get("assistant_id").and_then(|v| v.as_i64()),
+                    };
+                    match show_artifact(&app_handle, request) {
+                        Ok(response) => serde_json::json!({
+                            "content": [{"type": "json", "json": response}],
+                            "isError": false
+                        }),
+                        Err(e) => {
+                            error!(error = %e, "show_artifact tool execution failed");
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": e}],
+                                "isError": true
+                            })
+                        }
+                    }
+                }
+                _ => serde_json::json!({
+                    "content": [{"type": "text", "text": format!("Unknown artifact tool: {}", tool_name)}],
+                    "isError": true
+                }),
+            }
+        }
         "dynamic_mcp" => {
             let db = MCPDatabase::new(&app_handle)
                 .map_err(|e| format!("Failed to open MCP database: {}", e))?;
@@ -493,6 +598,10 @@ pub async fn execute_aipp_builtin_tool(
                     let mut selected_ids = std::collections::HashSet::new();
 
                     for keyword in &names {
+                        let (name_server_filter, name_keyword) = parse_tool_selector(keyword);
+                        if name_keyword.is_empty() {
+                            continue;
+                        }
                         for tool in &tool_catalog {
                             if !tool.server_enabled || !tool.tool_enabled {
                                 continue;
@@ -508,9 +617,18 @@ pub async fn execute_aipp_builtin_tool(
                                     continue;
                                 }
                             }
-                            let matched = matches_keyword(&tool.tool_name, keyword)
-                                || matches_keyword(&tool.summary, keyword)
-                                || matches_keyword(&tool.server_name, keyword);
+                            if let Some(filter) = &name_server_filter {
+                                if !matches_keyword(&tool.server_name, filter) {
+                                    continue;
+                                }
+                            }
+                            let matched = if name_server_filter.is_some() {
+                                matches_keyword(&tool.tool_name, &name_keyword)
+                            } else {
+                                matches_keyword(&tool.tool_name, &name_keyword)
+                                    || matches_keyword(&tool.summary, &name_keyword)
+                                    || matches_keyword(&tool.server_name, &name_keyword)
+                            };
                             if !matched {
                                 continue;
                             }

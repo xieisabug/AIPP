@@ -328,7 +328,7 @@ async fn handle_tool_execution_result(
 /// 规范化从 LLM 返回的 parameters JSON，移除可能的 markdown 代码块包裹。
 fn normalize_parameters_json(parameters: &str) -> String {
     let trimmed = parameters.trim();
-    if trimmed.starts_with("```") {
+    let candidate = if trimmed.starts_with("```") {
         // 去掉首尾 ```，并移除可能的语言标识（如 ```json）
         let without_start = trimmed.trim_start_matches("```");
         // 可能存在语言标签，截到首个换行
@@ -340,7 +340,67 @@ fn normalize_parameters_json(parameters: &str) -> String {
         without_end.to_string()
     } else {
         trimmed.to_string()
+    };
+
+    // 1) 正常 JSON
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&candidate) {
+        // 某些模型会返回双重编码字符串，尝试二次解码
+        if let serde_json::Value::String(inner) = value {
+            if let Ok(inner_value) = serde_json::from_str::<serde_json::Value>(&inner) {
+                if inner_value.is_object() {
+                    return inner;
+                }
+            }
+        } else {
+            return candidate;
+        }
     }
+
+    // 2) 容错：提取第一个完整 JSON 对象（忽略尾部脏字符）
+    if let Some(extracted) = extract_first_json_object(&candidate) {
+        return extracted;
+    }
+
+    candidate
+}
+
+fn extract_first_json_object(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let start = bytes.iter().position(|b| *b == b'{')?;
+    let mut depth = 0i64;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (idx, ch) in input.char_indices().skip_while(|(i, _)| *i < start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(input[start..=idx].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 #[tauri::command]
@@ -527,10 +587,54 @@ pub async fn execute_mcp_tool_call(
                 )
                 .await;
             }
+            let server_tools = match db.get_mcp_server_tools(tool_call.server_id) {
+                Ok(tools) => tools,
+                Err(e) => {
+                    return handle_tool_execution_result(
+                        &app_handle,
+                        &state,
+                        &feature_config_state,
+                        &window,
+                        call_id,
+                        tool_call,
+                        Err(format!("查询工具集工具列表失败: {}", e)),
+                        is_retry,
+                        trigger_continuation,
+                    )
+                    .await;
+                }
+            };
+            let requested_tool_name = tool_call.tool_name.clone();
+            let requested_tool_name_sanitized = sanitize_tool_name(&requested_tool_name);
+            let resolved_tool = server_tools.iter().find(|tool| {
+                tool.is_enabled
+                    && (tool.tool_name == requested_tool_name
+                        || sanitize_tool_name(&tool.tool_name) == requested_tool_name
+                        || sanitize_tool_name(&tool.tool_name) == requested_tool_name_sanitized)
+            });
+            let Some(resolved_tool) = resolved_tool else {
+                let not_found_error = format!(
+                    "工具 {}::{} 不存在或已禁用。",
+                    tool_call.server_name, tool_call.tool_name
+                );
+                return handle_tool_execution_result(
+                    &app_handle,
+                    &state,
+                    &feature_config_state,
+                    &window,
+                    call_id,
+                    tool_call,
+                    Err(not_found_error),
+                    is_retry,
+                    trigger_continuation,
+                )
+                .await;
+            };
+            let resolved_tool_name = resolved_tool.tool_name.clone();
             let is_loaded = match db.is_tool_loaded_for_conversation(
                 tool_call.conversation_id,
                 tool_call.server_id,
-                &tool_call.tool_name,
+                &resolved_tool_name,
             ) {
                 Ok(is_loaded) => is_loaded,
                 Err(e) => {
@@ -550,8 +654,9 @@ pub async fn execute_mcp_tool_call(
             };
             if !is_loaded {
                 let not_loaded_error = format!(
-                    "工具 {}::{} 尚未加载。请先调用 load_mcp_tool，例如 names=[\"{}\"]。",
-                    tool_call.server_name, tool_call.tool_name, tool_call.tool_name
+                    "工具 {}::{} 尚未加载。请先调用 MCP动态加载工具::load_mcp_tool。",
+                    tool_call.server_name,
+                    resolved_tool_name
                 );
                 return handle_tool_execution_result(
                     &app_handle,

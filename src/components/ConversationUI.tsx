@@ -49,6 +49,7 @@ import ConversationContent from "./conversation/ConversationContent";
 import { ChatSidebar } from "./chat-sidebar";
 import { useTodoList } from "@/hooks/useTodoList";
 import { useArtifactExtractor } from "@/hooks/useArtifactExtractor";
+import { useExplicitArtifacts } from "@/hooks/useExplicitArtifacts";
 import { useContextList } from "@/hooks/useContextList";
 
 // 暴露给外部的方法接口
@@ -404,9 +405,14 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // ============= Chat Sidebar 数据提取 =============
         
         // Artifacts from messages (code blocks)
-        const { artifacts } = useArtifactExtractor({
+        const { artifacts: inferredArtifacts } = useArtifactExtractor({
             messages: allDisplayMessages,
         });
+        const { artifacts: explicitArtifacts } = useExplicitArtifacts({
+            conversationId,
+            mcpToolCallStates,
+        });
+        const artifacts = explicitArtifacts.length > 0 ? explicitArtifacts : inferredArtifacts;
 
         // Context items (user files + MCP tool calls + message attachments)
         const { contextItems } = useContextList({

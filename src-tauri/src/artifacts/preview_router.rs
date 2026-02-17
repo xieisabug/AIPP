@@ -17,6 +17,8 @@ use crate::utils::bun_utils::BunUtils;
 struct LastArtifactCache {
     lang: String,
     input_str: String,
+    db_id: Option<String>,
+    assistant_id: Option<i64>,
 }
 
 // 使用 LazyLock 延迟初始化全局状态
@@ -104,6 +106,8 @@ pub async fn run_artifacts(
     input_str: &str,
     source_window: Option<String>,
     conversation_id: Option<i64>,
+    db_id: Option<String>,
+    assistant_id: Option<i64>,
 ) -> Result<String, AppError> {
     let target_window = match source_window.as_deref() {
         Some("sidebar") => Some("sidebar"),
@@ -140,8 +144,12 @@ pub async fn run_artifacts(
     // 缓存当前 artifact 信息，用于刷新恢复
     {
         let mut cache = LAST_ARTIFACT_CACHE.lock().await;
-        *cache =
-            Some(LastArtifactCache { lang: lang.to_string(), input_str: input_str.to_string() });
+        *cache = Some(LastArtifactCache {
+            lang: lang.to_string(),
+            input_str: input_str.to_string(),
+            db_id: db_id.clone(),
+            assistant_id,
+        });
         tracing::debug!("Cached artifact: lang={}, input_len={}", lang, input_str.len());
     }
 
@@ -214,6 +222,8 @@ pub async fn run_artifacts(
                         "type": "mermaid",
                         "original_code": input_str,
                         "conversation_id": conversation_id,
+                        "db_id": db_id.clone(),
+                        "assistant_id": assistant_id,
                         "request_id": request_id
                     }),
                 );
@@ -248,6 +258,8 @@ pub async fn run_artifacts(
                         "type": lang,
                         "original_code": input_str,
                         "conversation_id": conversation_id,
+                        "db_id": db_id.clone(),
+                        "assistant_id": assistant_id,
                         "request_id": request_id
                     }),
                 );
@@ -283,6 +295,8 @@ pub async fn run_artifacts(
                         "type": "drawio",
                         "original_code": input_str,
                         "conversation_id": conversation_id,
+                        "db_id": db_id.clone(),
+                        "assistant_id": assistant_id,
                         "request_id": request_id
                     }),
                 );
@@ -325,6 +339,8 @@ pub async fn run_artifacts(
                             "type": "react",
                             "original_code": input_str,
                             "conversation_id": conversation_id,
+                            "db_id": db_id.clone(),
+                            "assistant_id": assistant_id,
                             "request_id": request_id
                         }),
                     );
@@ -399,6 +415,8 @@ pub async fn run_artifacts(
                             "type": "vue",
                             "original_code": input_str,
                             "conversation_id": conversation_id,
+                            "db_id": db_id.clone(),
+                            "assistant_id": assistant_id,
                             "request_id": request_id
                         }),
                     );
@@ -474,6 +492,9 @@ pub async fn run_artifacts(
                         serde_json::json!({
                             "type": "vue",
                             "original_code": input_str,
+                            "conversation_id": conversation_id,
+                            "db_id": db_id.clone(),
+                            "assistant_id": assistant_id,
                             "request_id": request_id
                         }),
                     );
@@ -540,6 +561,9 @@ pub async fn run_artifacts(
                         serde_json::json!({
                             "type": "react",
                             "original_code": input_str,
+                            "conversation_id": conversation_id,
+                            "db_id": db_id.clone(),
+                            "assistant_id": assistant_id,
                             "request_id": request_id
                         }),
                     );
@@ -667,8 +691,20 @@ pub async fn retry_preview_after_install(
     input_str: String,
     source_window: Option<String>,
     conversation_id: Option<i64>,
+    db_id: Option<String>,
+    assistant_id: Option<i64>,
 ) -> Result<String, String> {
-    match run_artifacts(app_handle.clone(), &lang, &input_str, source_window, conversation_id).await {
+    match run_artifacts(
+        app_handle.clone(),
+        &lang,
+        &input_str,
+        source_window,
+        conversation_id,
+        db_id,
+        assistant_id,
+    )
+    .await
+    {
         Ok(result) => Ok(result),
         Err(e) => Err(e.to_string()),
     }
@@ -686,6 +722,8 @@ pub async fn restore_artifact_preview(
     if let Some(artifact) = cache.as_ref() {
         let lang = artifact.lang.clone();
         let input_str = artifact.input_str.clone();
+        let db_id = artifact.db_id.clone();
+        let assistant_id = artifact.assistant_id;
 
         // 释放锁，因为 run_artifacts 可能需要时间
         drop(cache);
@@ -693,7 +731,7 @@ pub async fn restore_artifact_preview(
         tracing::info!("Restoring artifact preview: lang={}, input_len={}", lang, input_str.len());
 
         // 重新处理 artifact
-        match run_artifacts(app_handle, &lang, &input_str, None, None).await {
+        match run_artifacts(app_handle, &lang, &input_str, None, None, db_id, assistant_id).await {
             Ok(_) => Ok(Some(format!("Restored {} preview", lang))),
             Err(e) => Err(e.to_string()),
         }

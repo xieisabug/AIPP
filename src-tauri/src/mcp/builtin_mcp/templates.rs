@@ -196,6 +196,15 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
             default_timeout: Some(180000), // 3分钟，操作工具可能执行较长命令
         },
         BuiltinTemplateInfo {
+            id: "artifact".into(),
+            name: "Artifact 工作区工具".into(),
+            description: "管理会话级 Artifact 工作区。用于获取工作区路径并将文件显式发布为 Artifact，避免依赖消息代码块推断。".into(),
+            command: "aipp:artifact".into(),
+            transport_type: "stdio".into(),
+            required_envs: vec![],
+            default_timeout: Some(30000),
+        },
+        BuiltinTemplateInfo {
             id: "dynamic_mcp".into(),
             name: "MCP 动态加载工具".into(),
             description: "为 MCP 动态加载场景提供按需加载工具能力。".into(),
@@ -484,6 +493,63 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                 }),
             },
         ],
+        Some("artifact") => vec![
+            BuiltinToolInfo {
+                name: "get_artifact_workspace".into(),
+                description: "获取当前会话的 Artifact 工作区路径和 manifest 路径。首次调用会自动初始化目录结构。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "conversation_id": {
+                            "type": "number",
+                            "description": "可选。会话 ID，不提供时会使用当前会话上下文。"
+                        }
+                    }
+                }),
+            },
+            BuiltinToolInfo {
+                name: "show_artifact".into(),
+                description: "将工作区中的文件显式发布为 Artifact。发布后会更新 artifact manifest，Sidebar 将展示该 Artifact。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "conversation_id": {
+                            "type": "number",
+                            "description": "可选。会话 ID，不提供时会使用当前会话上下文。"
+                        },
+                        "artifact_key": {
+                            "type": "string",
+                            "description": "Artifact 标识，相对路径风格（例如: ui/dashboard）"
+                        },
+                        "entry_file": {
+                            "type": "string",
+                            "description": "Artifact 入口文件，相对 artifact_key 目录（例如: src/App.tsx）"
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "可选。展示标题"
+                        },
+                        "language": {
+                            "type": "string",
+                            "description": "可选。用于预览的语言类型（如 html/markdown/vue/tsx）"
+                        },
+                        "preview_type": {
+                            "type": "string",
+                            "description": "可选。预览类型，不传则自动推断"
+                        },
+                        "db_id": {
+                            "type": "string",
+                            "description": "可选。传递给 Artifact 预览运行时的数据库标识"
+                        },
+                        "assistant_id": {
+                            "type": "number",
+                            "description": "可选。传递给 Artifact 预览运行时的助手 ID"
+                        }
+                    },
+                    "required": ["artifact_key", "entry_file"]
+                }),
+            },
+        ],
         Some("dynamic_mcp") => vec![
             BuiltinToolInfo {
                 name: "load_mcp_server".into(),
@@ -508,7 +574,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         "names": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "需要加载的工具关键词列表，可一次传入多个"
+                            "description": "需要加载的工具关键词列表；支持关键词或完整 server::tool 形式，可一次传入多个"
                         },
                         "server_name": {
                             "type": "string",
@@ -539,7 +605,9 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
             .query_row([&tpl.command], |row| row.get::<_, i64>(0))
             .optional()?;
 
-        if exists.is_none() {
+        let server_id = if let Some(server_id) = exists {
+            server_id
+        } else {
             info!(template_id = %tpl.id, name = %tpl.name, "Initializing builtin MCP server");
 
             // 插入内置工具集（系统初始化的不可删除）
@@ -560,21 +628,28 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
                     false,                  // proxy_enabled - builtin 不使用代理
                 )
                 .context("Insert builtin server failed")?;
-
-            // 注册工具
-            for tool in get_builtin_tools_for_command(&tpl.command) {
-                db.upsert_mcp_server_tool(
-                    server_id,
-                    &tool.name,
-                    Some(&tool.description),
-                    Some(&tool.input_schema.to_string()),
-                )
-                .with_context(|| format!("Insert server tool failed: {}", tool.name))?;
-            }
-
             info!(template_id = %tpl.id, server_id = server_id, "Builtin MCP server initialized");
+            server_id
+        };
+
+        // 每次启动都同步工具定义，确保内置工具集升级后自动更新
+        let tools = get_builtin_tools_for_command(&tpl.command);
+        for tool in &tools {
+            db.upsert_mcp_server_tool(
+                server_id,
+                &tool.name,
+                Some(&tool.description),
+                Some(&tool.input_schema.to_string()),
+            )
+            .with_context(|| format!("Upsert server tool failed: {}", tool.name))?;
         }
+        let keep_names = tools.into_iter().map(|tool| tool.name).collect::<Vec<_>>();
+        let _ = db
+            .delete_mcp_server_tools_not_in(server_id, &keep_names)
+            .with_context(|| format!("Sync builtin server tools failed: {}", tpl.id))?;
     }
+
+    let _ = db.rebuild_dynamic_mcp_catalog();
 
     Ok(())
 }

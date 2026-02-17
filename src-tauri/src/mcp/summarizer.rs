@@ -8,7 +8,7 @@ use crate::db::mcp_db::{MCPDatabase, MCPServer, MCPServerTool};
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{Emitter, Manager};
 use tokio::time::{sleep, Duration};
@@ -309,11 +309,73 @@ pub async fn summarize_all_mcp_catalogs(app_handle: tauri::AppHandle) -> Result<
 }
 
 pub fn trigger_mcp_catalog_summary_generation(app_handle: tauri::AppHandle, server_id: i64) {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         if let Err(err) = generate_mcp_catalog_summary(&app_handle, server_id).await {
             warn!(server_id, error = %err, "MCP summary generation failed");
         }
     });
+}
+
+pub fn trigger_pending_mcp_catalog_summary_generation(app_handle: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = summarize_pending_mcp_catalogs(&app_handle).await {
+            warn!(error = %err, "Pending MCP summary check failed on startup");
+        }
+    });
+}
+
+async fn summarize_pending_mcp_catalogs(app_handle: &tauri::AppHandle) -> Result<(), AppError> {
+    let config_map = get_feature_config_map(app_handle).await?;
+    if parse_model_selection(&config_map).is_none() {
+        debug!("MCP summarizer model not configured, skip startup summary check");
+        return Ok(());
+    }
+
+    let db = MCPDatabase::new(app_handle)?;
+    let _ = db.rebuild_dynamic_mcp_catalog();
+
+    let eligible_servers: HashSet<i64> = db
+        .get_mcp_servers()?
+        .into_iter()
+        .filter(|server| server.is_enabled && server.command.as_deref() != Some("aipp:dynamic_mcp"))
+        .map(|server| server.id)
+        .collect();
+
+    if eligible_servers.is_empty() {
+        return Ok(());
+    }
+
+    let mut pending_server_ids = HashSet::new();
+    for server in db.list_server_capability_catalog()? {
+        if server.summary_generated_at.is_none() && eligible_servers.contains(&server.server_id) {
+            pending_server_ids.insert(server.server_id);
+        }
+    }
+    for tool in db.list_tool_catalog(None)? {
+        if tool.summary_generated_at.is_none()
+            && tool.server_enabled
+            && tool.tool_enabled
+            && eligible_servers.contains(&tool.server_id)
+        {
+            pending_server_ids.insert(tool.server_id);
+        }
+    }
+
+    if pending_server_ids.is_empty() {
+        debug!("No pending MCP catalog summaries on startup");
+        return Ok(());
+    }
+
+    let mut pending = pending_server_ids.into_iter().collect::<Vec<_>>();
+    pending.sort_unstable();
+    info!(count = pending.len(), "Found pending MCP catalog summaries on startup");
+    for server_id in pending {
+        if let Err(err) = generate_mcp_catalog_summary(app_handle, server_id).await {
+            warn!(server_id, error = %err, "Startup MCP summary generation failed");
+        }
+    }
+
+    Ok(())
 }
 
 async fn generate_mcp_catalog_summary(

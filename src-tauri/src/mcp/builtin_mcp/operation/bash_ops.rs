@@ -307,6 +307,7 @@ impl Clone for OperationState {
     fn clone(&self) -> Self {
         Self {
             read_files: self.read_files.clone(),
+            written_files: self.written_files.clone(),
             bash_processes: self.bash_processes.clone(),
             pending_permissions: self.pending_permissions.clone(),
         }

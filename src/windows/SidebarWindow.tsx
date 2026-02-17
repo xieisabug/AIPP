@@ -41,7 +41,12 @@ function SidebarWindow() {
     });
     const [previewMode, setPreviewMode] = useState<PreviewMode>('none');
     const [contextPreview, setContextPreview] = useState<ContextPreview | null>(null);
-    const [previewPayload, setPreviewPayload] = useState<{ lang: string; inputStr: string } | null>(null);
+    const [previewPayload, setPreviewPayload] = useState<{
+        lang: string;
+        inputStr: string;
+        dbId?: string;
+        assistantId?: number;
+    } | null>(null);
     const [dataReceived, setDataReceived] = useState(false);
     const [hasAutoPreviewedLatest, setHasAutoPreviewedLatest] = useState(false);
     
@@ -71,7 +76,12 @@ function SidebarWindow() {
             // Auto-preview it
             setPreviewMode('artifact');
             setContextPreview(null);
-            setPreviewPayload({ lang: latestArtifact.language, inputStr: latestArtifact.code });
+            setPreviewPayload({
+                lang: latestArtifact.language,
+                inputStr: latestArtifact.code,
+                dbId: latestArtifact.dbId,
+                assistantId: latestArtifact.assistantId,
+            });
             setHasAutoPreviewedLatest(true);
 
             const conversationId = sidebarData.conversationId ? parseInt(sidebarData.conversationId, 10) : undefined;
@@ -80,6 +90,8 @@ function SidebarWindow() {
                 inputStr: latestArtifact.code,
                 sourceWindow: "sidebar",
                 conversationId,
+                dbId: latestArtifact.dbId,
+                assistantId: latestArtifact.assistantId,
             })
                 .then((res) => {
                     console.log("Auto-preview latest artifact:", res);
@@ -152,11 +164,23 @@ function SidebarWindow() {
         // Switch to artifact preview mode
         setPreviewMode('artifact');
         setContextPreview(null);
-        setPreviewPayload({ lang: artifact.language, inputStr: artifact.code });
+        setPreviewPayload({
+            lang: artifact.language,
+            inputStr: artifact.code,
+            dbId: artifact.dbId,
+            assistantId: artifact.assistantId,
+        });
         
         // Call run_artifacts to start the preview
         const conversationId = sidebarData.conversationId ? parseInt(sidebarData.conversationId, 10) : undefined;
-        invoke("run_artifacts", { lang: artifact.language, inputStr: artifact.code, sourceWindow: "sidebar", conversationId })
+        invoke("run_artifacts", {
+            lang: artifact.language,
+            inputStr: artifact.code,
+            sourceWindow: "sidebar",
+            conversationId,
+            dbId: artifact.dbId,
+            assistantId: artifact.assistantId,
+        })
             .then((res) => {
                 console.log("Artifact preview started:", res);
             })
@@ -206,6 +230,8 @@ function SidebarWindow() {
             lang: previewPayload.lang,
             inputStr: previewPayload.inputStr,
             conversationId,
+            dbId: previewPayload.dbId,
+            assistantId: previewPayload.assistantId,
         }).catch((error) => {
             console.error("Failed to open preview in preview window:", error);
         });

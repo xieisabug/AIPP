@@ -14,6 +14,7 @@ async fn test_operation_state_new() {
 
     // 验证初始状态为空
     assert!(!state.has_file_been_read("/some/path").await);
+    assert!(!state.has_file_been_written("/some/path").await);
     assert!(!state.bash_process_exists("some-id").await);
 }
 
@@ -53,6 +54,25 @@ async fn test_file_read_record() {
     state.clear_all_file_reads().await;
     assert!(!state.has_file_been_read(path1).await);
     assert!(!state.has_file_been_read(path2).await);
+}
+
+/// 测试文件写入记录功能
+#[tokio::test]
+async fn test_file_write_record() {
+    let state = OperationState::new();
+    let path = "/tmp/test_file_write.txt";
+
+    assert!(!state.has_file_been_written(path).await);
+
+    state.record_file_write(path).await;
+    assert!(state.has_file_been_written(path).await);
+
+    state.clear_file_write(path).await;
+    assert!(!state.has_file_been_written(path).await);
+
+    state.record_file_write(path).await;
+    state.clear_all_file_writes().await;
+    assert!(!state.has_file_been_written(path).await);
 }
 
 /// 测试 Bash 进程存储和输出追加

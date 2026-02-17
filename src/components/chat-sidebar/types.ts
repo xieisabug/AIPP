@@ -16,15 +16,21 @@ export interface CodeArtifact {
     id: string;
     language: string;
     code: string;
-    messageId: number;
+    messageId?: number;
     // Message index (1-based for display)
-    messageIndex: number;
+    messageIndex?: number;
     // Block index within the message (1-based for display)
-    blockIndex: number;
+    blockIndex?: number;
     // Meta title from code block (e.g., ```ts title="App.tsx")
     metaTitle?: string;
     // Computed display title
     title: string;
+    source?: 'inferred' | 'manifest';
+    artifactKey?: string;
+    entryFile?: string;
+    dbId?: string;
+    assistantId?: number;
+    updatedAt?: string;
 }
 
 export interface SearchResultItem {

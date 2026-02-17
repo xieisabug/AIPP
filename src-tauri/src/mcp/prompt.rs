@@ -328,7 +328,7 @@ pub async fn format_mcp_prompt_with_filters(
 ## 动态加载流程
 1. 先查看工具集摘要，再决定要深入哪个工具集；
 2. 使用 `load_mcp_server` 获取目标工具集下的工具列表与工具摘要；
-3. 使用 `load_mcp_tool` 将目标工具加载到当前会话；
+3. 使用 `load_mcp_tool` 将目标工具加载到当前会话（优先使用完整 `server::tool` 形式）；
 4. 当调用某工具失败提示“未加载”时，先调用 `load_mcp_tool` 再重试；
 5. 仅在工具已加载后再直接调用该工具。
 
@@ -367,7 +367,7 @@ pub async fn format_mcp_prompt_with_filters(
                 "**load_mcp_server** \n - description: 根据关键词加载工具集的工具目录摘要\n - parameters: {\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"要检索的工具集名称或关键词\"}},\"required\":[\"name\"]}\n\n",
             );
             load_tools_info.push_str(
-                "**load_mcp_tool** \n - description: 按关键词加载 MCP 工具到当前会话，加载后后续轮次可直接调用\n - parameters: {\"type\":\"object\",\"properties\":{\"names\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"需要加载的工具关键词列表，可一次传入多个\"},\"server_name\":{\"type\":\"string\",\"description\":\"可选。限定在指定工具集（参数名为 server_name）下搜索工具\"}},\"required\":[\"names\"]}\n\n",
+                "**load_mcp_tool** \n - description: 按关键词加载 MCP 工具到当前会话，加载后后续轮次可直接调用\n - parameters: {\"type\":\"object\",\"properties\":{\"names\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"需要加载的工具关键词列表，支持关键词或完整 server::tool 形式，可一次传入多个\"},\"server_name\":{\"type\":\"string\",\"description\":\"可选。限定在指定工具集（参数名为 server_name）下搜索工具\"}},\"required\":[\"names\"]}\n\n",
             );
         }
         load_tools_info.push_str(
@@ -384,7 +384,7 @@ pub async fn format_mcp_prompt_with_filters(
 <mcp_tool_call>
   <server_name>MCP 动态加载工具</server_name>
   <tool_name>load_mcp_tool</tool_name>
-  <parameters>{"names":["load_skills"], "server_name":"Agent"}</parameters>
+  <parameters>{"names":["Agent::load_skills"]}</parameters>
 </mcp_tool_call>
             "#
         );

@@ -97,6 +97,7 @@ use crate::artifacts::preview_router::{
     confirm_environment_install, preview_react_component, restore_artifact_preview,
     retry_preview_after_install, run_artifacts,
 };
+use crate::artifacts::workspace::list_conversation_artifacts;
 use crate::artifacts::react_preview::{
     close_react_preview, create_react_preview, create_react_preview_for_artifact,
 };
@@ -536,6 +537,7 @@ pub fn run() {
 
             app.manage(initialize_state(&app_handle));
             app.manage(initialize_name_cache_state(&app_handle));
+            crate::mcp::summarizer::trigger_pending_mcp_catalog_summary_generation(app_handle.clone());
 
             // 初始化并启动定时任务调度器
             let scheduler_state = scheduler::SchedulerState::new();
@@ -637,6 +639,7 @@ pub fn run() {
             update_conversation,
             update_message_content,
             run_artifacts,
+            list_conversation_artifacts,
             restore_artifact_preview,
             save_artifact_to_collection,
             get_artifacts_collection,
