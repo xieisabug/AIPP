@@ -8,6 +8,7 @@ import {
     forwardRef,
     useImperativeHandle,
     useLayoutEffect,
+    type ReactNode,
 } from "react";
 
 import {
@@ -58,16 +59,36 @@ export interface ConversationUIRef {
     scrollToMessage: (messageId: number) => void;
 }
 
+export interface InlineInteractionItem {
+    key: string;
+    callId?: number | null;
+    messageId?: number | null;
+    content: ReactNode;
+}
+
 interface ConversationUIProps {
     conversationId: string;
     onChangeConversationId: (conversationId: string) => void;
     pluginList: any[];
     isMobile?: boolean;
     onConversationChange?: (conversation?: Conversation) => void;
+    inlineInteractionItems?: InlineInteractionItem[];
+    inlineInteractionVisible?: boolean;
 }
 
 const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
-    ({ conversationId, onChangeConversationId, pluginList, isMobile = false, onConversationChange }, ref) => {
+    (
+        {
+            conversationId,
+            onChangeConversationId,
+            pluginList,
+            isMobile = false,
+            onConversationChange,
+            inlineInteractionItems,
+            inlineInteractionVisible = false,
+        },
+        ref
+    ) => {
         // ============= 基础状态管理 =============
 
         // 当前对话信息和助手列表
@@ -769,6 +790,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             }
         }, [allDisplayMessages.length, scrollToUserMessage]);
 
+        useEffect(() => {
+            if (!inlineInteractionVisible) {
+                return;
+            }
+            requestAnimationFrame(() => {
+                smartScroll();
+            });
+        }, [inlineInteractionVisible, smartScroll]);
+
         // ============= 组件渲染 =============
 
         return (
@@ -807,6 +837,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onMessageEdit={handleMessageEdit}
                             onMessageFork={handleMessageFork}
                             onToggleReasoningExpand={toggleReasoningExpand}
+                            inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
                             // NewChatComponent props
                             selectedText={selectedText}
                             selectedAssistant={selectedAssistant}

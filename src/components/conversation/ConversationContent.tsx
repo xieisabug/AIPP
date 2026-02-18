@@ -5,6 +5,7 @@ import { Message, StreamEvent } from "../../data/Conversation";
 import { AssistantListItem } from "../../data/Assistant";
 import { SubTaskList, SubTaskDetailDialog } from "../sub-task";
 import { SubTaskExecutionSummary } from "../../data/SubTask";
+import type { InlineInteractionItem } from "../ConversationUI";
 
 export interface ConversationContentProps {
     conversationId: string;
@@ -23,6 +24,7 @@ export interface ConversationContentProps {
     onMessageEdit: (message: Message) => void;
     onMessageFork: (messageId: number) => void;
     onToggleReasoningExpand: (messageId: number) => void;
+    inlineInteractionItems?: InlineInteractionItem[];
     // NewChatComponent props
     selectedText: string;
     selectedAssistant: number;
@@ -47,6 +49,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     onMessageEdit,
     onMessageFork,
     onToggleReasoningExpand,
+    inlineInteractionItems,
     // NewChatComponent props
     selectedText,
     selectedAssistant,
@@ -98,6 +101,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
                         onMessageEdit={onMessageEdit}
                         onMessageFork={onMessageFork}
                         onToggleReasoningExpand={onToggleReasoningExpand}
+                        inlineInteractionItems={inlineInteractionItems}
                     />
                 </>
 

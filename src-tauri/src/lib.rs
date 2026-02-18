@@ -117,9 +117,10 @@ use crate::db::scheduled_task_db::ScheduledTaskDatabase;
 use crate::db::sub_task_db::SubTaskDatabase;
 use crate::db::system_db::SystemDatabase;
 use crate::mcp::builtin_mcp::{
-    add_or_update_aipp_builtin_server, execute_aipp_builtin_tool, init_builtin_mcp_servers,
-    list_aipp_builtin_templates, submit_ask_user_question_response, InteractionState,
-    OperationState, TodoState,
+    add_or_update_aipp_builtin_server, execute_aipp_builtin_tool,
+    handle_preview_file_relay_request, init_builtin_mcp_servers, list_aipp_builtin_templates,
+    prepare_preview_file_request_for_ui, submit_ask_user_question_response, InteractionState,
+    OperationState, PreviewFileRelayState, TodoState, PREVIEW_FILE_RELAY_SCHEME,
 };
 use crate::mcp::execution_api::{
     continue_with_error, create_mcp_tool_call, execute_mcp_tool_call,
@@ -373,6 +374,10 @@ pub fn run() {
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
     let app = tauri::Builder::default()
+        .register_uri_scheme_protocol(
+            PREVIEW_FILE_RELAY_SCHEME,
+            handle_preview_file_relay_request,
+        )
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_fs::init())
@@ -580,7 +585,8 @@ pub fn run() {
         .manage(OperationState::new())
         .manage(AcpPermissionState::new())
         .manage(TodoState::new())
-        .manage(InteractionState::new());
+        .manage(InteractionState::new())
+        .manage(PreviewFileRelayState::new());
     #[cfg(desktop)]
     let app = app.manage(CopilotLspState::default());
     let app = app
@@ -762,6 +768,7 @@ pub fn run() {
             list_aipp_builtin_templates,
             add_or_update_aipp_builtin_server,
             execute_aipp_builtin_tool,
+            prepare_preview_file_request_for_ui,
             submit_ask_user_question_response,
             confirm_operation_permission,
             confirm_acp_permission,

@@ -1914,11 +1914,10 @@ async fn execute_builtin_tool(
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
     let command = server.command.clone().unwrap_or_default();
     // 获取超时配置，使用服务器配置的超时或默认值
-    let mut timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
-    // AskUserQuestion 需要等待用户交互，最低超时提升到 30 分钟。
-    if command == "aipp:ui_interaction" && tool_name == "ask_user_question" {
-        timeout_ms = timeout_ms.max(1_800_000);
-    }
+    let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
+    // AskUserQuestion 需要等待用户交互，不应受超时限制。
+    let wait_indefinitely =
+        command == "aipp:ui_interaction" && tool_name == "ask_user_question";
     let start = std::time::Instant::now();
 
     // 验证是否为内置工具调用
@@ -1931,6 +1930,7 @@ async fn execute_builtin_tool(
         command = %command,
         tool_name = %tool_name,
         timeout_ms,
+        wait_indefinitely,
         "Executing builtin MCP tool"
     );
 
@@ -1946,31 +1946,45 @@ async fn execute_builtin_tool(
         .await
     };
 
-    // 使用 select! 同时监听取消信号和超时
-    let raw: String = tokio::select! {
-        _ = cancel_token.cancelled() => {
-            return Err(anyhow!("Cancelled by user"));
+    // 使用 select! 同时监听取消信号；ask_user_question 不做超时限制。
+    let raw: String = if wait_indefinitely {
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Err(anyhow!("Cancelled by user"));
+            }
+            result = execution => {
+                match result {
+                    Ok(r) => r,
+                    Err(e) => return Err(anyhow!("工具执行失败: {}", e)),
+                }
+            }
         }
-        result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), execution) => {
-            match result {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => return Err(anyhow!("工具执行失败: {}", e)),
-                Err(_) => {
-                    error!(
-                        server_id = server.id,
-                        command = %command,
-                        tool_name = %tool_name,
-                        timeout_ms,
-                        elapsed_ms = start.elapsed().as_millis() as u64,
-                        "Builtin tool execution timed out"
-                    );
-                    let detail = if command == "aipp:search" {
-                        "内置搜索链路包含 Chromium 导航与结果等待，请结合 search 日志中的 stage 字段定位具体超时步骤。"
-                    } else {
-                        "请结合日志排查具体超时步骤。"
-                    };
-                    return Err(anyhow!("工具执行超时（{}ms）。{}", timeout_ms, detail));
-                },
+    } else {
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Err(anyhow!("Cancelled by user"));
+            }
+            result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), execution) => {
+                match result {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => return Err(anyhow!("工具执行失败: {}", e)),
+                    Err(_) => {
+                        error!(
+                            server_id = server.id,
+                            command = %command,
+                            tool_name = %tool_name,
+                            timeout_ms,
+                            elapsed_ms = start.elapsed().as_millis() as u64,
+                            "Builtin tool execution timed out"
+                        );
+                        let detail = if command == "aipp:search" {
+                            "内置搜索链路包含 Chromium 导航与结果等待，请结合 search 日志中的 stage 字段定位具体超时步骤。"
+                        } else {
+                            "请结合日志排查具体超时步骤。"
+                        };
+                        return Err(anyhow!("工具执行超时（{}ms）。{}", timeout_ms, detail));
+                    },
+                }
             }
         }
     };

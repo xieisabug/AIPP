@@ -4,6 +4,7 @@ import { Message, StreamEvent, MCPToolCallUpdateEvent } from "../data/Conversati
 import { useMcpToolCallProcessor } from "../hooks/useMcpToolCallProcessor";
 import { useMarkdownConfig } from "../hooks/useMarkdownConfig";
 import { useCustomTagParser } from "../hooks/useCustomTagParser";
+import type { InlineInteractionItem } from "./ConversationUI";
 
 interface ReasoningMessageProps {
     message: Message;
@@ -13,6 +14,7 @@ interface ReasoningMessageProps {
     onToggleReasoningExpand?: () => void;
     conversationId?: number;
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>;
+    inlineInteractionItems?: InlineInteractionItem[];
     useRawTextRenderer?: boolean; // 脱敏内容使用纯文本渲染，避免 Markdown 解析问题
 }
 
@@ -25,6 +27,7 @@ const ReasoningMessage = React.memo(
         onToggleReasoningExpand,
         conversationId,
         mcpToolCallStates,
+        inlineInteractionItems,
         useRawTextRenderer = false,
     }: ReasoningMessageProps) => {
         const [currentTime, setCurrentTime] = useState(new Date());
@@ -50,6 +53,7 @@ const ReasoningMessage = React.memo(
             conversationId,
             messageId: message.id,
             mcpToolCallStates,
+            inlineInteractionItems,
         });
 
         // 为正在思考的消息添加定时器，实时更新显示时间 - 优化更新频率
@@ -309,6 +313,7 @@ const ReasoningMessage = React.memo(
         // MCP 相关属性比较
         if (prevProps.conversationId !== nextProps.conversationId) return false;
         if (prevProps.mcpToolCallStates !== nextProps.mcpToolCallStates) return false;
+        if (prevProps.inlineInteractionItems !== nextProps.inlineInteractionItems) return false;
 
         // 脱敏模式比较
         if (prevProps.useRawTextRenderer !== nextProps.useRawTextRenderer) return false;

@@ -10,7 +10,11 @@ pub mod search;
 pub mod templates;
 
 pub use agent::{AgentHandler, TodoHandler, TodoState};
-pub use interaction::{submit_ask_user_question_response, InteractionState};
+pub use interaction::{
+    handle_preview_file_relay_request, prepare_preview_file_request_for_ui,
+    submit_ask_user_question_response, InteractionState, PreviewFileRelayState,
+    PREVIEW_FILE_RELAY_SCHEME,
+};
 pub use operation::{OperationHandler, OperationState};
 pub use search::SearchHandler;
 pub use templates::{

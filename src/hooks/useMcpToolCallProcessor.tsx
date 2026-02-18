@@ -6,6 +6,7 @@ import { customUrlTransform } from '@/constants/markdown';
 import { Button } from '@/components/ui/button';
 import { Send, Loader2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import type { InlineInteractionItem } from '@/components/ConversationUI';
 
 interface McpProcessorOptions {
     remarkPlugins: readonly any[];
@@ -17,6 +18,7 @@ interface ProcessorContext {
     conversationId?: number;
     messageId?: number;
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>;
+    inlineInteractionItems?: InlineInteractionItem[];
 }
 
 interface ToolCallData {
@@ -408,7 +410,7 @@ const McpToolCallResultsButton: React.FC<{
 
 export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: ProcessorContext) => {
     const { remarkPlugins, rehypePlugins, markdownComponents } = options;
-    const { conversationId, messageId, mcpToolCallStates } = context || {};
+    const { conversationId, messageId, mcpToolCallStates, inlineInteractionItems } = context || {};
 
     const processContent = useCallback((
         markdownContent: string,
@@ -416,8 +418,27 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
     ): React.ReactElement => {
         const mcpCalls = extractMcpToolCalls(markdownContent);
 
+        const renderInlineInteractionGroup = (
+            key: string,
+            items: InlineInteractionItem[]
+        ): React.ReactElement => (
+            <div key={key} className="flex flex-col gap-4 pt-2">
+                {items.map((item) => (
+                    <React.Fragment key={item.key}>{item.content}</React.Fragment>
+                ))}
+            </div>
+        );
+
         if (mcpCalls.length === 0) {
-            return fallbackElement;
+            if (!inlineInteractionItems || inlineInteractionItems.length === 0) {
+                return fallbackElement;
+            }
+            return (
+                <div>
+                    {fallbackElement}
+                    {renderInlineInteractionGroup("inline-tail-no-mcp", inlineInteractionItems)}
+                </div>
+            );
         }
 
         console.log(
@@ -434,6 +455,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         // 收集所有工具调用数据
         const toolCallDataList: ToolCallData[] = [];
         const toolCallIds: number[] = [];
+        const renderedInlineKeys = new Set<string>();
 
         // 将注释替换为实际的 React 组件
         const parts: React.ReactNode[] = [];
@@ -479,6 +501,21 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
                 />
             );
 
+            if (data.call_id && inlineInteractionItems && inlineInteractionItems.length > 0) {
+                const matchedInlineItems = inlineInteractionItems.filter(
+                    (item) => item.callId === data.call_id
+                );
+                if (matchedInlineItems.length > 0) {
+                    matchedInlineItems.forEach((item) => renderedInlineKeys.add(item.key));
+                    parts.push(
+                        renderInlineInteractionGroup(
+                            `inline-after-call-${data.call_id}-${index}`,
+                            matchedInlineItems
+                        )
+                    );
+                }
+            }
+
             lastIndex = match.end;
         }
 
@@ -497,6 +534,20 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             );
         }
 
+        if (inlineInteractionItems && inlineInteractionItems.length > 0) {
+            const remainingInlineItems = inlineInteractionItems.filter(
+                (item) => !renderedInlineKeys.has(item.key)
+            );
+            if (remainingInlineItems.length > 0) {
+                parts.push(
+                    renderInlineInteractionGroup(
+                        "inline-message-tail",
+                        remainingInlineItems
+                    )
+                );
+            }
+        }
+
         // 添加"发送结果"按钮（如果有多工具调用且都已完成）
         if (toolCallIds.length >= 2) {
             parts.push(
@@ -510,7 +561,15 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         }
 
         return <div>{parts}</div>;
-    }, [remarkPlugins, rehypePlugins, markdownComponents, conversationId, messageId, mcpToolCallStates]);
+    }, [
+        remarkPlugins,
+        rehypePlugins,
+        markdownComponents,
+        conversationId,
+        messageId,
+        mcpToolCallStates,
+        inlineInteractionItems,
+    ]);
 
     return { processContent };
 };

@@ -58,11 +58,11 @@
             ],
             "csp": {
                 "default-src": "'self'",
-                "frame-src": "'self' http://localhost:* https://localhost:*",
+                "frame-src": "'self' http://localhost:* https://localhost:* aipp-preview: http://aipp-preview.localhost",
                 "connect-src": "'self' http://localhost:* https://localhost:* ipc: http://ipc.localhost",
                 "style-src": "'self' 'unsafe-inline'",
                 "font-src": "'self' data:",
-                "img-src": "'self' asset: data:",
+                "img-src": "'self' asset: data: aipp-preview: http://aipp-preview.localhost",
                 "script-src": "'self' 'unsafe-eval'"
             },
             "assetProtocol": {
