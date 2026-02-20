@@ -47,8 +47,10 @@ const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 type ToolCancelRegistry = Arc<Mutex<HashMap<i64, CancellationToken>>>;
 type ContinuationLockRegistry = Arc<Mutex<HashMap<i64, Arc<Mutex<()>>>>>;
+type PendingBatchContinuationRegistry = Arc<Mutex<HashMap<i64, bool>>>;
 static TOOL_CANCEL_REGISTRY: OnceLock<ToolCancelRegistry> = OnceLock::new();
 static CONTINUATION_LOCKS: OnceLock<ContinuationLockRegistry> = OnceLock::new();
+static PENDING_BATCH_CONTINUATIONS: OnceLock<PendingBatchContinuationRegistry> = OnceLock::new();
 
 fn tool_cancel_registry() -> &'static ToolCancelRegistry {
     TOOL_CANCEL_REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
@@ -56,6 +58,10 @@ fn tool_cancel_registry() -> &'static ToolCancelRegistry {
 
 fn continuation_lock_registry() -> &'static ContinuationLockRegistry {
     CONTINUATION_LOCKS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+fn pending_batch_continuation_registry() -> &'static PendingBatchContinuationRegistry {
+    PENDING_BATCH_CONTINUATIONS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
 async fn register_cancel_token(call_id: i64) -> CancellationToken {
@@ -1361,6 +1367,37 @@ async fn trigger_conversation_continuation_with_error(
     Ok(())
 }
 
+async fn run_batch_continuation_once(
+    app_handle: tauri::AppHandle,
+    window: tauri::Window,
+    conversation_id: i64,
+    assistant_id: i64,
+    tool_count: usize,
+) -> Result<()> {
+    let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+    match batch_tool_result_continue_ask_ai_impl(
+        app_handle.clone(),
+        feature_config_state,
+        window,
+        conversation_id,
+        assistant_id,
+    )
+    .await
+    {
+        Ok(_) => {
+            info!(conversation_id, tool_count, "Batch tool continuation succeeded");
+            if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+                activity_manager.restore_after_mcp(&app_handle, conversation_id).await;
+            }
+            Ok(())
+        }
+        Err(e) => {
+            warn!(conversation_id, error = %e, "Batch tool continuation failed");
+            Err(anyhow!(e.to_string()))
+        }
+    }
+}
+
 /// 批量续写：将多个工具执行结果一次性传递给 AI
 /// 默认仅在全部成功时续写；可通过配置允许包含失败结果继续
 ///
@@ -1548,38 +1585,47 @@ pub async fn trigger_conversation_continuation_batch(
         guard.entry(conversation_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     };
 
-    let _lock_guard = continuation_lock.lock().await;
+    // 避免在同一会话续写过程中递归等待锁导致阻塞：
+    // 若锁空闲，当前请求负责执行并顺带清空排队请求；
+    // 若锁已占用，仅登记“有待处理续写”，由持锁方释放前继续处理。
+    if let Ok(_lock_guard) = continuation_lock.try_lock() {
+        loop {
+            run_batch_continuation_once(
+                app_handle.clone(),
+                window.clone(),
+                conversation_id,
+                assistant_id,
+                tool_calls.len(),
+            )
+            .await?;
 
-    // 触发续写
-    match batch_tool_result_continue_ask_ai_impl(
-        app_handle.clone(),
-        feature_config_state,
-        window,
-        conversation_id,
-        assistant_id,
-    )
-    .await
-    {
-        Ok(_) => {
+            let has_queued = {
+                let registry = pending_batch_continuation_registry();
+                let mut guard = registry.lock().await;
+                guard.remove(&conversation_id).unwrap_or(false)
+            };
+            if !has_queued {
+                break;
+            }
             info!(
                 conversation_id,
-                tool_count = tool_calls.len(),
-                "Batch tool continuation succeeded"
+                "Detected queued batch continuation request, draining next round"
             );
-            if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
-                activity_manager.restore_after_mcp(&app_handle, conversation_id).await;
-            }
-            Ok(())
         }
-        Err(e) => {
-            warn!(
-                conversation_id,
-                error = %e,
-                "Batch tool continuation failed"
-            );
-            Err(anyhow!(e.to_string()))
-        }
+        return Ok(());
     }
+
+    {
+        let registry = pending_batch_continuation_registry();
+        let mut guard = registry.lock().await;
+        guard.insert(conversation_id, true);
+    }
+    info!(
+        conversation_id,
+        tool_count = tool_calls.len(),
+        "Continuation lock busy, queued pending batch continuation"
+    );
+    Ok(())
 }
 
 /// 统一的工具执行函数，根据传输类型选择相应的执行策略（公开供子任务复用）

@@ -119,6 +119,27 @@ pub fn resolve_tool_name(sanitized_full_name: &str, mapping: &ToolNameMapping) -
     }
 }
 
+fn has_missing_required_parameter_tool_error(messages: &[Message]) -> bool {
+    messages.iter().filter(|message| message.message_type == "tool_result").any(|message| {
+        let result_text = crate::api::ai::conversation::extract_tool_result(&message.content)
+            .unwrap_or_else(|| message.content.clone());
+        result_text.contains("Missing required parameter:")
+    })
+}
+
+fn has_missing_required_parameter_tool_error_in_message_list(
+    messages: &[(String, String, Vec<MessageAttachment>)],
+) -> bool {
+    messages.iter().any(|(message_type, content, _)| {
+        if message_type != "tool_result" {
+            return false;
+        }
+        let result_text = crate::api::ai::conversation::extract_tool_result(content)
+            .unwrap_or_else(|| content.clone());
+        result_text.contains("Missing required parameter:")
+    })
+}
+
 /// 从 MCP 服务器列表构建 genai 工具列表和名称映射表
 /// 返回 (工具列表, 映射表)
 pub fn build_tools_with_mapping(
@@ -273,15 +294,26 @@ pub async fn ask_ai(
     );
     let is_native_toolcall = mcp_info.use_native_toolcall;
 
-    // 注意：native toolcall 不改写 prompt，仅非原生时拼接 XML 约束
-    let assistant_prompt_result =
-        if mcp_info.enabled_servers.len() > 0 && !mcp_info.use_native_toolcall {
+    // 动态加载模式：即使原生 toolcall 也需要注入 MCP 动态加载规范
+    // 非动态加载模式：仅非原生时拼接 XML 约束
+    let assistant_prompt_result = if mcp_info.enabled_servers.len() > 0 {
+        if mcp_info.dynamic_loading_enabled {
+            // 动态加载模式：总是注入 prompt（根据是否原生 toolcall 提供不同内容）
+            let prompt = format_mcp_prompt(assistant_prompt_result, &mcp_info).await;
+            debug!(formatted_prompt = prompt.as_str(), "MCP formatted prompt (dynamic loading)");
+            prompt
+        } else if !mcp_info.use_native_toolcall {
+            // 非动态加载模式 + 非原生 toolcall：注入 XML 约束
             let prompt = format_mcp_prompt(assistant_prompt_result, &mcp_info).await;
             debug!(formatted_prompt = prompt.as_str(), "MCP formatted prompt");
             prompt
         } else {
+            // 非动态加载模式 + 原生 toolcall：不注入 XML 约束
             assistant_prompt_result
-        };
+        }
+    } else {
+        assistant_prompt_result
+    };
 
     // Collect and format Skills prompt
     let skills_info =
@@ -527,8 +559,19 @@ pub async fn ask_ai(
 
         let chat_options = ConfigBuilder::build_chat_options(&config_map);
 
+        let force_non_native_for_invalid_tool_args =
+            has_missing_required_parameter_tool_error_in_message_list(&init_message_list);
+        if force_non_native_for_invalid_tool_args {
+            warn!(
+                conversation_id,
+                "detected missing required parameter tool error in history; forcing non-native ask_ai"
+            );
+        }
+
         // 动态判断是否有可用的工具
-        let has_available_tools = is_native_toolcall && !mcp_info.enabled_servers.is_empty();
+        let has_available_tools = is_native_toolcall
+            && !mcp_info.enabled_servers.is_empty()
+            && !force_non_native_for_invalid_tool_args;
 
         // 某些 OpenAI 兼容通道在使用 Gemini 模型时不会返回 usage（或返回 null），
         // 而 genai 的 OpenAI 适配器会尝试严格反序列化 usage，从而在日志中出现错误。
@@ -558,6 +601,7 @@ pub async fn ask_ai(
             capture_usage = capture_usage,
             is_openai_like = is_openai_like,
             is_gemini = is_gemini,
+            force_non_native_for_invalid_tool_args,
             "chat configuration established"
         );
 
@@ -834,11 +878,20 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     // 先计算强制降级条件
     let force_non_native_for_toolresult =
         provider_api_type == "openai" && model_code.to_lowercase().contains("gemini");
+    let force_non_native_for_invalid_tool_args =
+        has_missing_required_parameter_tool_error(&latest_branch);
+    if force_non_native_for_invalid_tool_args {
+        warn!(
+            conversation_id = conversation_id_i64,
+            "detected missing required parameter tool error; forcing non-native continuation"
+        );
+    }
 
     // 动态判断是否有可用的工具（考虑强制降级的情况）
     let has_available_tools = is_native_toolcall
         && !mcp_info.enabled_servers.is_empty()
-        && !force_non_native_for_toolresult;
+        && !force_non_native_for_toolresult
+        && !force_non_native_for_invalid_tool_args;
 
     // 同 ask_ai：避免 OpenAI 兼容通道 + Gemini 模型导致的 usage 反序列化报错日志
     let provider_api_type_lc = provider_api_type.to_lowercase();
@@ -865,6 +918,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         capture_usage = capture_usage,
         is_openai_like = is_openai_like,
         is_gemini = is_gemini,
+        force_non_native_for_invalid_tool_args,
         "chat configuration (tool_result_continue)"
     );
 
@@ -1067,11 +1121,20 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     // 先计算强制降级条件
     let force_non_native_for_toolresult =
         provider_api_type == "openai" && model_code.to_lowercase().contains("gemini");
+    let force_non_native_for_invalid_tool_args =
+        has_missing_required_parameter_tool_error(&latest_branch);
+    if force_non_native_for_invalid_tool_args {
+        warn!(
+            conversation_id,
+            "detected missing required parameter tool error; forcing non-native continuation"
+        );
+    }
 
     // 动态判断是否有可用的工具（考虑强制降级的情况）
     let has_available_tools = is_native_toolcall
         && !mcp_info.enabled_servers.is_empty()
-        && !force_non_native_for_toolresult;
+        && !force_non_native_for_toolresult
+        && !force_non_native_for_invalid_tool_args;
 
     let provider_api_type_lc = provider_api_type.to_lowercase();
     let model_code_lc = model_code.to_lowercase();
@@ -1094,6 +1157,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         stream = chat_config.stream,
         has_tools = has_available_tools,
         provider_api_type = %provider_api_type,
+        force_non_native_for_invalid_tool_args,
         "chat configuration (batch_tool_result_continue)"
     );
 
@@ -1420,8 +1484,19 @@ pub async fn regenerate_ai(
 
         let chat_options = ConfigBuilder::build_chat_options(&config_map);
 
+        let force_non_native_for_invalid_tool_args =
+            has_missing_required_parameter_tool_error_in_message_list(&init_message_list);
+        if force_non_native_for_invalid_tool_args {
+            warn!(
+                conversation_id,
+                "detected missing required parameter tool error in history; forcing non-native regenerate"
+            );
+        }
+
         // 动态判断是否有可用的工具
-        let has_available_tools = is_native_toolcall && !mcp_info.enabled_servers.is_empty();
+        let has_available_tools = is_native_toolcall
+            && !mcp_info.enabled_servers.is_empty()
+            && !force_non_native_for_invalid_tool_args;
 
         // 同 ask_ai：避免 OpenAI 兼容通道 + Gemini 模型导致的 usage 反序列化报错日志
         let provider_api_type_lc = regenerate_provider_api_type.to_lowercase();
@@ -1449,6 +1524,7 @@ pub async fn regenerate_ai(
             capture_usage = capture_usage,
             is_openai_like = is_openai_like,
             is_gemini = is_gemini,
+            force_non_native_for_invalid_tool_args,
             "chat configuration (regenerate)"
         );
 

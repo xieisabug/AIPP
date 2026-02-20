@@ -629,8 +629,10 @@ pub fn reconstruct_assistant_with_tool_calls_from_content(content: &str) -> Opti
             ) {
                 // 使用正确的格式：server__tool (双下划线)，并清理名称以符合 API 规范
                 let fn_name = build_tool_name(server_name, tool_name);
-                let fn_arguments =
-                    serde_json::from_str(parameters).unwrap_or(serde_json::json!({}));
+                let fn_arguments = serde_json::from_str::<serde_json::Value>(parameters)
+                    .ok()
+                    .filter(|value| value.is_object())
+                    .unwrap_or_else(|| serde_json::json!({}));
 
                 // 优先使用 llm_call_id，如果没有则使用 call_id 转换为字符串
                 let call_id = tool_data["llm_call_id"]

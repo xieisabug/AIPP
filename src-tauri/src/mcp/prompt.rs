@@ -198,7 +198,7 @@ pub async fn collect_mcp_info_for_assistant(
             use std::collections::HashSet;
             let filter_set: HashSet<&String> = filters.iter().collect();
 
-            // 1. 先加入助手“已启用”的服务器（基础集合的一部分）
+            // 1. 先加入助手"已启用"的服务器（基础集合的一部分）
             let mut picked: Vec<MCPServerWithTools> = Vec::new();
             let mut existing_id_set: HashSet<i64> = HashSet::new();
             for server in &all_servers {
@@ -306,7 +306,28 @@ pub async fn format_mcp_prompt_with_filters(
     enabled_tools: Option<&std::collections::HashMap<String, Vec<String>>>,
 ) -> String {
     if mcp_info.dynamic_loading_enabled {
-        let mcp_dynamic_prompt: &str = r#"
+        // 根据是否使用原生 toolcall 提供不同的 prompt
+        let mcp_dynamic_prompt = if mcp_info.use_native_toolcall {
+            r#"
+# MCP 动态加载规范（实验）
+
+作为 AI 助手，你可以使用系统提供的工具来执行任务。请严格遵守以下规则：
+
+## 使用原则
+1. 你只能调用系统明确提供的工具，不得虚构或调用未提及的工具
+2. 仅在有助于完成任务时调用工具；能靠自身知识完成时不调用
+3. 信任工具的返回结果（除非工具明确报错、超时或返回无效数据）
+4. 一次只调用一个工具；如需多个步骤，请分多轮依次调用
+
+## 动态加载流程
+1. 先查看工具集摘要，再决定要深入哪个工具集；
+2. 使用 `load_mcp_server` 获取目标工具集下的工具列表与工具摘要；
+3. 使用 `load_mcp_tool` 将目标工具加载到当前会话（优先使用完整 `server::tool` 形式）；
+4. 当调用某工具失败提示"未加载"时，先调用 `load_mcp_tool` 再重试；
+5. 仅在工具已加载后再直接调用该工具。
+"#
+        } else {
+            r#"
 # MCP 动态加载规范（实验）
 
 作为 AI 助手，你可以使用 MCP 工具来执行任务。请严格遵守以下规则：
@@ -331,14 +352,15 @@ pub async fn format_mcp_prompt_with_filters(
 1. 先查看工具集摘要，再决定要深入哪个工具集；
 2. 使用 `load_mcp_server` 获取目标工具集下的工具列表与工具摘要；
 3. 使用 `load_mcp_tool` 将目标工具加载到当前会话（优先使用完整 `server::tool` 形式）；
-4. 当调用某工具失败提示“未加载”时，先调用 `load_mcp_tool` 再重试；
+4. 当调用某工具失败提示"未加载"时，先调用 `load_mcp_tool` 再重试；
 5. 仅在工具已加载后再直接调用该工具。
 
 ## 重要注意事项
 - 参数必须是有效的 JSON 格式
 - 如果工具不需要参数，parameters 标签内应该为空对象 {}
 - 不得伪造工具响应或猜测未返回的数据
-"#;
+"#
+        };
 
         let mut load_tools_info = String::from("\n## 必备加载工具（始终可用）\n\n");
         load_tools_info.push_str("### 工具集: MCP 动态加载工具\n\n");
@@ -369,9 +391,11 @@ pub async fn format_mcp_prompt_with_filters(
                 "**load_mcp_tool** \n - description: 按关键词加载 MCP 工具到当前会话，加载后后续轮次可直接调用\n - parameters: {\"type\":\"object\",\"properties\":{\"names\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"需要加载的工具关键词列表，支持关键词或完整 server::tool 形式，可一次传入多个\"},\"server_name\":{\"type\":\"string\",\"description\":\"可选。限定在指定工具集（参数名为 server_name）下搜索工具\"}},\"required\":[\"names\"]}\n\n",
             );
         }
-        load_tools_info.push_str(
-            r#"### 使用范例
-        
+        // 只有非原生 toolcall 模式才显示 XML 范例
+        if !mcp_info.use_native_toolcall {
+            load_tools_info.push_str(
+                r#"### 使用范例
+
 加入需要使用Agent相关的工具，先加载对应的server：
 <mcp_tool_call>
   <server_name>MCP 动态加载工具</server_name>
@@ -386,7 +410,8 @@ pub async fn format_mcp_prompt_with_filters(
   <parameters>{"names":["Agent::load_skills"]}</parameters>
 </mcp_tool_call>
             "#,
-        );
+            );
+        }
 
         let mut tools_info = String::from("\n## MCP 工具集目录摘要\n\n");
         let mut has_toolset = false;

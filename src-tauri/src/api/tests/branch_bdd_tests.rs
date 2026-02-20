@@ -56,6 +56,13 @@ fn response_with_tool_call(call_id: u64, content: &str) -> String {
     format!("{}\n\n{}", content, mcp_tool_call_comment(call_id))
 }
 
+fn response_with_tool_call_null_params(call_id: u64, content: &str) -> String {
+    format!(
+        "{}\n\n<!-- MCP_TOOL_CALL: {{\"server_name\":\"test\",\"tool_name\":\"search\",\"parameters\":\"null\",\"call_id\":{},\"llm_call_id\":\"call_{}\"}} -->",
+        content, call_id, call_id
+    )
+}
+
 #[test]
 fn given_parent_group_when_latest_branch_then_truncates_parent_group() {
     let t1 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -169,6 +176,30 @@ fn given_tool_call_response_and_tool_result_when_build_chat_request_then_include
     assert_eq!(messages.len(), 4);
     assert!(matches!(&messages[2].role, ChatRole::Assistant));
     assert_eq!(messages[2].content.tool_calls().len(), 1);
+    assert!(matches!(&messages[3].role, ChatRole::Tool));
+}
+
+#[test]
+fn given_tool_call_with_null_parameters_when_build_chat_request_then_normalizes_to_object() {
+    let init_message_list = vec![
+        ("system".to_string(), "system".to_string(), vec![]),
+        ("user".to_string(), "question".to_string(), vec![]),
+        (
+            "response".to_string(),
+            response_with_tool_call_null_params(1, "call tool"),
+            vec![],
+        ),
+        ("tool_result".to_string(), tool_result_content("call_1", "tool error"), vec![]),
+    ];
+
+    let result =
+        build_chat_request_from_messages(&init_message_list, ToolCallStrategy::Native, None);
+    let messages = result.chat_request.messages;
+    assert_eq!(messages.len(), 4);
+    assert!(matches!(&messages[2].role, ChatRole::Assistant));
+    let tool_calls = messages[2].content.tool_calls();
+    assert_eq!(tool_calls.len(), 1);
+    assert!(tool_calls[0].fn_arguments.is_object());
     assert!(matches!(&messages[3].role, ChatRole::Tool));
 }
 

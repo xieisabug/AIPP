@@ -422,6 +422,10 @@ fn persist_and_emit_update(
     Ok(())
 }
 
+fn normalize_tool_arguments_json(arguments: &serde_json::Value) -> String {
+    if arguments.is_object() { arguments.to_string() } else { "{}".to_string() }
+}
+
 /// 统一处理捕获到的工具调用：创建DB记录、插入UI注释、更新消息、可选自动执行、可选向UI发事件
 async fn handle_captured_tool_calls_common(
     app_handle: &tauri::AppHandle,
@@ -451,7 +455,19 @@ async fn handle_captured_tool_calls_common(
     for tool_call in captured_tool_calls {
         // 使用映射表还原原始名称，用于 UI 显示和数据库记录
         let (server_name, tool_name) = resolve_tool_name(&tool_call.fn_name, tool_name_mapping);
-        let params_str = tool_call.fn_arguments.to_string();
+        let raw_params_str = tool_call.fn_arguments.to_string();
+        let params_str = normalize_tool_arguments_json(&tool_call.fn_arguments);
+        info!(
+            conversation_id,
+            response_message_id,
+            llm_call_id = %tool_call.call_id,
+            fn_name = %tool_call.fn_name,
+            server_name = %server_name,
+            tool_name = %tool_name,
+            raw_arguments = %raw_params_str,
+            normalized_arguments = %params_str,
+            "captured native tool call"
+        );
 
         // 创建工具调用记录（使用原始名称）
         match crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
@@ -638,7 +654,19 @@ async fn handle_captured_tool_calls_concurrent(
         // 使用映射表还原原始名称，用于 UI 显示和数据库记录
         let (server_name, tool_name) =
             crate::api::ai_api::resolve_tool_name(&tool_call.fn_name, tool_name_mapping);
-        let params_str = tool_call.fn_arguments.to_string();
+        let raw_params_str = tool_call.fn_arguments.to_string();
+        let params_str = normalize_tool_arguments_json(&tool_call.fn_arguments);
+        info!(
+            conversation_id,
+            response_message_id,
+            llm_call_id = %tool_call.call_id,
+            fn_name = %tool_call.fn_name,
+            server_name = %server_name,
+            tool_name = %tool_name,
+            raw_arguments = %raw_params_str,
+            normalized_arguments = %params_str,
+            "captured native tool call"
+        );
 
         // 创建工具调用记录（使用原始名称）
         match crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
@@ -1665,7 +1693,12 @@ async fn attempt_stream_chat(
                     let tool_calls = msg.content.tool_calls();
                     debug!(tool_calls_count = tool_calls.len(), "assistant tool calls");
                     for tc in tool_calls {
-                        debug!(call_id = %tc.call_id, fn_name = %tc.fn_name, "tool call item");
+                        info!(
+                            call_id = %tc.call_id,
+                            fn_name = %tc.fn_name,
+                            fn_arguments = %tc.fn_arguments,
+                            "chat request assistant tool call"
+                        );
                     }
                 } else {
                     debug!("assistant content other type");
@@ -2480,7 +2513,12 @@ pub async fn handle_non_stream_chat(
                     let tool_calls = msg.content.tool_calls();
                     debug!(tool_calls_count = tool_calls.len(), "assistant tool calls non stream");
                     for tc in tool_calls {
-                        debug!(call_id = %tc.call_id, fn_name = %tc.fn_name, "tool call item non stream");
+                        info!(
+                            call_id = %tc.call_id,
+                            fn_name = %tc.fn_name,
+                            fn_arguments = %tc.fn_arguments,
+                            "chat request assistant tool call non stream"
+                        );
                     }
                 } else {
                     debug!("assistant content other type non stream");

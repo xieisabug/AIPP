@@ -5,6 +5,7 @@ import { AssistantFormConfig } from "@/types/forms";
 import { validateConfig } from "@/utils/validate";
 import AssistantMCPFieldDisplay from "@/components/config/AssistantMCPFieldDisplay";
 import AssistantSkillsFieldDisplay from "@/components/config/AssistantSkillsFieldDisplay";
+import AssistantNativeToolCallField from "@/components/config/AssistantNativeToolCallField";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 
 interface UseAssistantFormConfigProps {
@@ -259,6 +260,27 @@ export const useAssistantFormConfig = ({
                     tooltip: "开启后采用目录摘要 + 按需加载模式，并隐藏手动 MCP 选择",
                     onChange: (value: string | boolean) =>
                         handleConfigChange("dynamic_mcp_loading_enabled", value, "boolean"),
+                },
+            });
+        }
+
+        // 原生 ToolCall 配置：在动态加载模式下独立显示，非动态加载模式在 MCP 配置对话框中
+        // 注意：不检查 assistantTypeHideField，因为 use_native_toolcall 被全局隐藏了
+        if (assistantDynamicEnabled) {
+            // 动态加载模式：使用独立组件显示
+            baseConfigs.push({
+                key: "use_native_toolcall_independent",
+                config: {
+                    type: "custom" as const,
+                    label: "工具调用方式",
+                    customRender: () => {
+                        return React.createElement(AssistantNativeToolCallField, {
+                            assistantId: currentAssistant?.assistant.id ?? 0,
+                            onConfigChange: () => {
+                                console.log("Native toolcall configuration changed");
+                            },
+                        });
+                    },
                 },
             });
         }
