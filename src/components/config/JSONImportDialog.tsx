@@ -86,7 +86,10 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
 
             // 根据配置确定传输类型
             if (config.url) {
-                transport_type = config.url.startsWith('http') ? 'http' : 'sse';
+                if (!config.url.startsWith('http')) {
+                    throw new Error(`服务器 "${serverName}" 的url必须是http/https`);
+                }
+                transport_type = 'http';
                 url = config.url;
             } else if (config.command || config.args) {
                 transport_type = 'stdio';
@@ -141,8 +144,8 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
             throw new Error('缺少必需的字段: name');
         }
 
-        if (!config.transport_type || !['stdio', 'sse', 'http'].includes(config.transport_type)) {
-            throw new Error('transport_type必须是stdio、sse或http之一');
+        if (!config.transport_type || !['stdio', 'http'].includes(config.transport_type)) {
+            throw new Error('transport_type必须是stdio或http之一');
         }
 
         // 类型特定验证
@@ -150,7 +153,7 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
             throw new Error('stdio类型必须提供command字段');
         }
 
-        if ((config.transport_type === 'sse' || config.transport_type === 'http') && !config.url) {
+        if ((config.transport_type === 'http') && !config.url) {
             throw new Error(`${config.transport_type}类型必须提供url字段`);
         }
 

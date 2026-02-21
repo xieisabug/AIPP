@@ -2,7 +2,7 @@
 //!
 //! 该模块负责：
 //! 1. 创建与查询 MCP 工具调用记录
-//! 2. 根据不同传输类型（stdio / sse / http / builtin）执行工具
+//! 2. 根据不同传输类型（stdio / http / builtin）执行工具
 //! 3. 统一的参数解析、响应序列化与错误处理抽象
 //! 4. 将执行结果写回数据库并触发前端事件
 //! 5. 在工具成功后继续驱动 AI 对话（包含重试场景）
@@ -20,12 +20,11 @@ use crate::mcp::is_dynamic_mcp_loading_enabled_for_assistant;
 use crate::state::activity_state::ConversationActivityManager;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use anyhow::{anyhow, bail, Context, Result};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use rmcp::{
-    model::{CallToolRequestParam, ClientCapabilities, ClientInfo, Implementation},
+    model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation},
     transport::{
-        sse_client::SseClientConfig, streamable_http_client::StreamableHttpClientTransportConfig,
-        ConfigureCommandExt, SseClientTransport, StreamableHttpClientTransport, TokioChildProcess,
+        streamable_http_client::StreamableHttpClientTransportConfig, ConfigureCommandExt,
+        StreamableHttpClientTransport, TokioChildProcess,
     },
     ServiceExt,
 };
@@ -104,8 +103,13 @@ fn parse_tool_arguments(parameters: &str) -> Result<JsonMap<String, serde_json::
 fn build_call_tool_request(
     tool_name: &str,
     arguments: JsonMap<String, serde_json::Value>,
-) -> CallToolRequestParam {
-    CallToolRequestParam { name: tool_name.to_string().into(), arguments: Some(arguments) }
+) -> CallToolRequestParams {
+    CallToolRequestParams {
+        meta: None,
+        name: tool_name.to_string().into(),
+        arguments: Some(arguments),
+        task: None,
+    }
 }
 
 /// 根据响应结构统一提取并序列化返回内容；若标记错误则返回 Err。
@@ -1797,153 +1801,17 @@ async fn execute_stdio_tool(
     }
 }
 
-/// 通过 SSE 传输执行工具。
-/// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
-#[instrument(skip(feature_config_state,server,parameters,cancel_token), fields(server_id=server.id, tool_name=%tool_name))]
+/// 通过 SSE 传输执行工具（rmcp >= 0.16 已移除，保留显式错误）。
+#[instrument(skip_all)]
 async fn execute_sse_tool(
     _app_handle: &tauri::AppHandle,
-    feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
-    server: &MCPServer,
-    tool_name: &str,
-    parameters: &str,
-    cancel_token: Option<CancellationToken>,
+    _feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
+    _server: &MCPServer,
+    _tool_name: &str,
+    _parameters: &str,
+    _cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
-    let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
-    let url = server.url.as_ref().ok_or_else(|| anyhow!("No URL specified for SSE transport"))?;
-
-    // 获取代理配置
-    let network_proxy = if server.proxy_enabled {
-        let config_map = feature_config_state.config_feature_map.lock().await;
-        get_network_proxy_from_config(&config_map)
-    } else {
-        None
-    };
-
-    // Build SSE transport with a preconfigured reqwest client (propagate all headers)
-    let (_auth_header, __all_headers_for_sse) = parse_server_headers(server);
-    let sse_transport = if let Some(hdrs) = __all_headers_for_sse {
-        // log sanitized headers
-        let to_log = sanitize_headers_for_log(&hdrs);
-        info!(server_id = server.id, headers = ?to_log, "Using SSE headers");
-        let mut header_map = HeaderMap::new();
-        for (k, v) in hdrs.iter() {
-            if let (Ok(name), Ok(value)) =
-                (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v.as_str()))
-            {
-                header_map.insert(name, value);
-            }
-        }
-        let mut client_builder = reqwest::Client::builder().default_headers(header_map);
-
-        // 配置代理
-        if let Some(ref proxy_url) = network_proxy {
-            if !proxy_url.trim().is_empty() {
-                match reqwest::Proxy::all(proxy_url) {
-                    Ok(proxy) => {
-                        client_builder = client_builder.proxy(proxy);
-                        info!(proxy_url = %proxy_url, server_id = server.id, "SSE proxy configured");
-                    }
-                    Err(e) => {
-                        warn!(error = %e, proxy_url = %proxy_url, server_id = server.id, "SSE proxy configuration failed");
-                    }
-                }
-            }
-        }
-
-        let client = client_builder.build().context("Failed to build reqwest client for SSE")?;
-        // Requires rmcp feature `transport-sse-client-reqwest`
-        SseClientTransport::start_with_client(
-            client,
-            SseClientConfig { sse_endpoint: url.as_str().into(), ..Default::default() },
-        )
-        .await
-        .context("Failed to start SSE transport with client")?
-    } else {
-        let mut client_builder = reqwest::Client::builder();
-
-        // 配置代理（无自定义 headers 的情况）
-        if let Some(ref proxy_url) = network_proxy {
-            if !proxy_url.trim().is_empty() {
-                match reqwest::Proxy::all(proxy_url) {
-                    Ok(proxy) => {
-                        client_builder = client_builder.proxy(proxy);
-                        info!(proxy_url = %proxy_url, server_id = server.id, "SSE proxy configured");
-                    }
-                    Err(e) => {
-                        warn!(error = %e, proxy_url = %proxy_url, server_id = server.id, "SSE proxy configuration failed");
-                    }
-                }
-            }
-        }
-
-        let client = client_builder.build().context("Failed to build reqwest client for SSE")?;
-        SseClientTransport::start_with_client(
-            client,
-            SseClientConfig { sse_endpoint: url.as_str().into(), ..Default::default() },
-        )
-        .await
-        .context("Failed to start SSE transport with client")?
-    };
-
-    // TODO: SSE 传输暂未支持将 Authorization 注入底层 rmcp 客户端（rmcp 默认 SseClientTransport::start 内部不暴露 token 参数）。
-    // 后续可通过实现自定义 SseClient 并启用 transport-sse-client-reqwest 特性来完成。当前仅解析保留以便未来使用。
-    let (_auth_header, _all) = parse_server_headers(server);
-
-    let start = std::time::Instant::now();
-    let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
-
-    // 定义实际的执行逻辑
-    let execution = async move {
-        let transport = sse_transport;
-        let client_info = ClientInfo {
-            protocol_version: Default::default(),
-            capabilities: ClientCapabilities::default(),
-            client_info: Implementation {
-                name: "AIPP MCP SSE Client".to_string(),
-                version: "0.1.0".to_string(),
-                ..Default::default()
-            },
-        };
-        let client =
-            client_info.serve(transport).await.context("Failed to initialize SSE client")?;
-        let args = parse_tool_arguments(parameters).context("解析工具参数失败")?;
-        let request_param = build_call_tool_request(tool_name, args);
-
-        // TODO: rmcp 当前 SseClientTransport::send 未暴露 auth_token; 通过自定义 client 已用于初始化，后续调用暂不重复 header
-        let response = client.call_tool(request_param).await.context("Tool call failed")?;
-        debug!(is_error=?response.is_error, parts=?response.content.len(), "received sse tool response");
-
-        // Cancel the client connection
-        client.cancel().await.context("Failed to cancel client")?;
-
-        // 不包裹序列化错误上下文，避免将服务器端错误误标为"序列化失败"
-        serialize_tool_response(&response)
-    };
-
-    // 使用 select! 同时监听取消信号和超时
-    let result: Result<String, anyhow::Error> = tokio::select! {
-        _ = cancel_token.cancelled() => {
-            Err(anyhow!("Cancelled by user"))
-        }
-        result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), execution) => {
-            match result {
-                Ok(Ok(r)) => Ok(r),
-                Ok(Err(e)) => Err(anyhow!("Tool execution failed: {}", e)),
-                Err(_) => Err(anyhow!("Timeout while executing tool")),
-            }
-        }
-    };
-
-    match result {
-        Ok(result) => {
-            info!(elapsed_ms=?start.elapsed().as_millis(), "sse tool executed successfully");
-            Ok(result)
-        }
-        Err(e) => {
-            error!(elapsed_ms=?start.elapsed().as_millis(), error=%e, "sse tool execution failed");
-            Err(e)
-        }
-    }
+    Err(anyhow!("SSE transport 已在当前 rmcp 版本移除，请改用 HTTP transport"))
 }
 
 /// 执行内置（aipp:*）工具：不经网络，直接在本地实现。
@@ -2119,6 +1987,7 @@ async fn execute_http_tool(
         StreamableHttpClientTransport::with_client(client, config)
     };
     let client_info = ClientInfo {
+        meta: None,
         protocol_version: Default::default(),
         capabilities: ClientCapabilities::default(),
         client_info: Implementation {

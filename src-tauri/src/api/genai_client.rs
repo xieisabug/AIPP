@@ -126,15 +126,9 @@ pub fn create_client_with_config(
     if proxy_enabled {
         if let Some(proxy_url) = network_proxy {
             if !proxy_url.trim().is_empty() {
-                match reqwest::Proxy::all(proxy_url) {
-                    Ok(proxy) => {
-                        web_config = WebConfig::default().with_proxy(proxy);
-                        if let Some(timeout_secs) = request_timeout {
-                            if timeout_secs > 0 {
-                                web_config =
-                                    web_config.with_timeout(Duration::from_secs(timeout_secs));
-                            }
-                        }
+                match web_config.clone().with_all_proxy_url(proxy_url) {
+                    Ok(config_with_proxy) => {
+                        web_config = config_with_proxy;
                         info!(proxy_url = %proxy_url, "proxy configured");
                     }
                     Err(e) => {

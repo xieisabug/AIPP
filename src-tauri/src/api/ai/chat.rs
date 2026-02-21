@@ -72,15 +72,10 @@ fn extract_http_error_details(error: &genai::Error) -> HttpErrorDetails {
             }
         }
         // WebStream 错误
-        genai::Error::WebStream { model_iden, cause } => {
+        genai::Error::WebStream { model_iden, cause, .. } => {
             details.endpoint = Some(format!("{:?}", model_iden));
             // 尝试从 cause 字符串中解析状态码
             parse_status_from_string(cause, &mut details);
-        }
-        // ReqwestEventSource 错误
-        genai::Error::ReqwestEventSource(es_error) => {
-            let error_str = format!("{:?}", es_error);
-            parse_status_from_string(&error_str, &mut details);
         }
         _ => {
             // 对于其他错误，尝试从错误字符串解析
@@ -105,7 +100,7 @@ fn extract_webc_error_details(webc_error: &genai::webc::Error, details: &mut Htt
                 }
             }
         }
-        genai::webc::Error::ResponseFailedNotJson { content_type } => {
+        genai::webc::Error::ResponseFailedNotJson { content_type, .. } => {
             details.response_body =
                 Some(format!("响应不是有效的 JSON，Content-Type: {}", content_type));
         }
@@ -1942,6 +1937,9 @@ async fn attempt_stream_chat(
                                 false,
                             );
                         }
+                    }
+                    ChatStreamEvent::ThoughtSignatureChunk(thought_chunk) => {
+                        debug!(?thought_chunk, "thought signature chunk");
                     }
                     ChatStreamEvent::ToolCallChunk(tool_call_chunk) => {
                         debug!(?tool_call_chunk, "tool call chunk");

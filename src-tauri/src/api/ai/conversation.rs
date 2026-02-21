@@ -641,7 +641,12 @@ pub fn reconstruct_assistant_with_tool_calls_from_content(content: &str) -> Opti
                     .or_else(|| tool_data["call_id"].as_u64().map(|n| n.to_string()))
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-                tool_calls.push(ToolCall { call_id, fn_name, fn_arguments });
+                tool_calls.push(ToolCall {
+                    call_id,
+                    fn_name,
+                    fn_arguments,
+                    thought_signatures: None,
+                });
             }
         }
     }

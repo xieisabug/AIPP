@@ -45,7 +45,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
 
     // UI state
     const [isSubmitting, setIsSubmitting] = useState(false);
-    // Header rows state for SSE/HTTP
+    // Header rows state for HTTP
     type HeaderRow = { id: string; key: string; value: string };
     const [headerRows, setHeaderRows] = useState<HeaderRow[]>([]);
 
@@ -137,9 +137,9 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
         }));
     }, []);
 
-    // Keep formData.headers in sync with headerRows for http/sse
+    // Keep formData.headers in sync with headerRows for http
     useEffect(() => {
-        if (formData.transport_type === 'http' || formData.transport_type === 'sse') {
+        if (formData.transport_type === 'http') {
             const headersStr = rowsToHeadersString(headerRows);
             if (headersStr !== (formData.headers || '')) {
                 setFormData(prev => ({ ...prev, headers: headersStr }));
@@ -148,9 +148,9 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [headerRows, formData.transport_type]);
 
-    // When transport type changes away from http/sse, clear header rows sync (but keep stored string)
+    // When transport type changes away from http, clear header rows sync (but keep stored string)
     useEffect(() => {
-        if (formData.transport_type !== 'http' && formData.transport_type !== 'sse') {
+        if (formData.transport_type !== 'http') {
             setHeaderRows([]);
         } else {
             // ensure rows reflect current headers string once upon switch
@@ -182,8 +182,8 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
             return;
         }
 
-        if ((formData.transport_type === 'sse' || formData.transport_type === 'http') && !formData.url?.trim()) {
-            toast.error('SSE/HTTP类型需要提供URL');
+        if ((formData.transport_type === 'http') && !formData.url?.trim()) {
+            toast.error('HTTP类型需要提供URL');
             return;
         }
 
@@ -285,8 +285,8 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                             </div>
                         )}
 
-                        {/* SSE/HTTP specific fields */}
-                        {(formData.transport_type === 'sse' || formData.transport_type === 'http') && (
+                        {/* HTTP specific fields */}
+                        {(formData.transport_type === 'http') && (
                             <div className="space-y-2">
                                 <Label htmlFor="url">URL *</Label>
                                 <Input
@@ -341,7 +341,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                                     />
                                 </div>
 
-                                {(formData.transport_type === 'http' || formData.transport_type === 'sse') && (
+                                {(formData.transport_type === 'http') && (
                                     <div className="space-y-2">
                                         <Label>自定义请求头</Label>
                                         <div className="space-y-2">
@@ -378,7 +378,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                                     </div>
                                 )}
 
-                                {(formData.transport_type === 'http' || formData.transport_type === 'sse') && (
+                                {(formData.transport_type === 'http') && (
                                     <div className="flex items-center justify-between">
                                         <div>
                                             <Label>使用网络代理进行请求</Label>
