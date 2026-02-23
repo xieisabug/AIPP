@@ -273,14 +273,13 @@ async fn handle_tool_execution_result(
                 .await
                 {
                     warn!(error=%e, "tool execution succeeded but continuation failed");
-                }
-                // Restore focus after continuation so the assistant streaming state can take over.
-                if let Some(activity_manager) =
-                    app_handle.try_state::<ConversationActivityManager>()
-                {
-                    activity_manager
-                        .restore_after_mcp(&app_handle, tool_call.conversation_id)
-                        .await;
+                    if let Some(activity_manager) =
+                        app_handle.try_state::<ConversationActivityManager>()
+                    {
+                        activity_manager
+                            .restore_after_mcp(&app_handle, tool_call.conversation_id)
+                            .await;
+                    }
                 }
             } else {
                 debug!(
@@ -314,6 +313,7 @@ async fn handle_tool_execution_result(
             let is_user_cancelled = error_lower.contains("cancelled by user")
                 || error_lower.contains("canceled by user")
                 || error_lower.contains("stopped by user");
+            let mut continuation_dispatched = false;
             if trigger_continuation && continue_on_error {
                 if is_user_cancelled {
                     debug!(
@@ -333,12 +333,17 @@ async fn handle_tool_execution_result(
                     .await
                     {
                         warn!(error=%e, "tool execution failed but continuation with error failed");
+                    } else {
+                        continuation_dispatched = true;
                     }
                 }
             }
 
-            if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
-                activity_manager.restore_after_mcp(&app_handle, tool_call.conversation_id).await;
+            if !continuation_dispatched {
+                if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>()
+                {
+                    activity_manager.restore_after_mcp(&app_handle, tool_call.conversation_id).await;
+                }
             }
         }
     }
@@ -653,6 +658,9 @@ pub async fn execute_mcp_tool_call(
                 .await;
             };
             let resolved_tool_name = resolved_tool.tool_name.clone();
+            let is_agent_loader_tool = server.command.as_deref() == Some("aipp:agent")
+                && (resolved_tool_name == "load_mcp_server"
+                    || resolved_tool_name == "load_mcp_tool");
             let is_loaded = match db.is_tool_loaded_for_conversation(
                 tool_call.conversation_id,
                 tool_call.server_id,
@@ -674,9 +682,9 @@ pub async fn execute_mcp_tool_call(
                     .await;
                 }
             };
-            if !is_loaded {
+            if !is_loaded && !is_agent_loader_tool {
                 let not_loaded_error = format!(
-                    "工具 {}::{} 尚未加载。请先调用 MCP动态加载工具::load_mcp_tool。",
+                    "工具 {}::{} 尚未加载。请先调用 Agent::load_mcp_tool。",
                     tool_call.server_name, resolved_tool_name
                 );
                 return handle_tool_execution_result(
@@ -1198,11 +1206,11 @@ async fn handle_retry_success_continuation(
 }
 
 /// 触发会话继续：把工具结果作为 tool_result 语义传递给 AI 继续生成。
-#[instrument(skip(app_handle, _state, feature_config_state, window, result), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
+#[instrument(skip(app_handle, _state, _feature_config_state, window, result), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
 async fn trigger_conversation_continuation(
     app_handle: &tauri::AppHandle,
     _state: &tauri::State<'_, crate::AppState>,
-    feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
+    _feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
     window: &tauri::Window,
     tool_call: &MCPToolCall,
     result: &str,
@@ -1239,49 +1247,56 @@ async fn trigger_conversation_continuation(
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     };
-
-    // 使用会话级锁保证续写串行，避免同一会话并发触发续写
-    let _lock_guard = continuation_lock.lock().await;
-    match tool_result_continue_ask_ai_impl(
-        app_handle_clone.clone(),
-        feature_config_state.clone(),
-        window_clone,
-        conversation_id_str,
-        assistant_id,
-        tool_call_id,
-        continuation_result,
-    )
-    .await
-    {
-        Ok(_) => {
-            info!(
-                call_id = continuation_call_id,
-                conversation_id = continuation_conversation_id,
-                "triggered conversation continuation (serialized)"
-            );
-            Ok(())
-        }
-        Err(e) => {
-            warn!(
-                call_id = continuation_call_id,
-                conversation_id = continuation_conversation_id,
-                error = %e,
-                "failed to trigger conversation continuation (serialized)"
-            );
-            Err(anyhow!(e.to_string()))
-        }
-    }?;
-
+    tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::block_on(async move {
+            // 使用会话级锁保证续写串行，避免同一会话并发触发续写
+            let _lock_guard = continuation_lock.lock().await;
+            let feature_config_state = app_handle_clone.state::<crate::FeatureConfigState>();
+            match tool_result_continue_ask_ai_impl(
+                app_handle_clone.clone(),
+                feature_config_state,
+                window_clone,
+                conversation_id_str,
+                assistant_id,
+                tool_call_id,
+                continuation_result,
+            )
+            .await
+            {
+                Ok(_) => {
+                    info!(
+                        call_id = continuation_call_id,
+                        conversation_id = continuation_conversation_id,
+                        "triggered conversation continuation (serialized)"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        call_id = continuation_call_id,
+                        conversation_id = continuation_conversation_id,
+                        error = %e,
+                        "failed to trigger conversation continuation (serialized)"
+                    );
+                }
+            }
+            if let Some(activity_manager) = app_handle_clone.try_state::<ConversationActivityManager>()
+            {
+                activity_manager
+                    .restore_after_mcp(&app_handle_clone, continuation_conversation_id)
+                    .await;
+            }
+        });
+    });
     Ok(())
 }
 
 /// 触发会话继续：把工具错误作为 tool_result 语义传递给 AI 继续生成。
 /// 与 trigger_conversation_continuation 的区别在于消息格式表明这是错误继续。
-#[instrument(skip(app_handle, _state, feature_config_state, window, error_message), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
+#[instrument(skip(app_handle, _state, _feature_config_state, window, error_message), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id))]
 async fn trigger_conversation_continuation_with_error(
     app_handle: &tauri::AppHandle,
     _state: &tauri::State<'_, crate::AppState>,
-    feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
+    _feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
     window: &tauri::Window,
     tool_call: &MCPToolCall,
     error_message: &str,
@@ -1335,39 +1350,46 @@ async fn trigger_conversation_continuation_with_error(
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     };
-
-    // 使用会话级锁保证续写串行，避免同一会话并发触发续写
-    let _lock_guard = continuation_lock.lock().await;
-    match tool_result_continue_ask_ai_impl(
-        app_handle_clone.clone(),
-        feature_config_state.clone(),
-        window_clone,
-        conversation_id_str,
-        assistant_id,
-        tool_call_id,
-        error_result,
-    )
-    .await
-    {
-        Ok(_) => {
-            info!(
-                call_id = continuation_call_id,
-                conversation_id = continuation_conversation_id,
-                "triggered conversation continuation with error (serialized)"
-            );
-            Ok(())
-        }
-        Err(e) => {
-            warn!(
-                call_id = continuation_call_id,
-                conversation_id = continuation_conversation_id,
-                error = %e,
-                "failed to trigger conversation continuation with error (serialized)"
-            );
-            Err(anyhow!(e.to_string()))
-        }
-    }?;
-
+    tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::block_on(async move {
+            // 使用会话级锁保证续写串行，避免同一会话并发触发续写
+            let _lock_guard = continuation_lock.lock().await;
+            let feature_config_state = app_handle_clone.state::<crate::FeatureConfigState>();
+            match tool_result_continue_ask_ai_impl(
+                app_handle_clone.clone(),
+                feature_config_state,
+                window_clone,
+                conversation_id_str,
+                assistant_id,
+                tool_call_id,
+                error_result,
+            )
+            .await
+            {
+                Ok(_) => {
+                    info!(
+                        call_id = continuation_call_id,
+                        conversation_id = continuation_conversation_id,
+                        "triggered conversation continuation with error (serialized)"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        call_id = continuation_call_id,
+                        conversation_id = continuation_conversation_id,
+                        error = %e,
+                        "failed to trigger conversation continuation with error (serialized)"
+                    );
+                }
+            }
+            if let Some(activity_manager) = app_handle_clone.try_state::<ConversationActivityManager>()
+            {
+                activity_manager
+                    .restore_after_mcp(&app_handle_clone, continuation_conversation_id)
+                    .await;
+            }
+        });
+    });
     Ok(())
 }
 

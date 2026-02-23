@@ -240,9 +240,9 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
                                 className="flex items-center space-x-1 text-xs text-red-600 hover:text-red-800 transition-colors"
                             >
                                 {isExpanded ? (
-                                    <ChevronDown className="w-3 h-3" />
+                                    <ChevronDown className="w-3 h-3 text-icon" />
                                 ) : (
-                                    <ChevronRight className="w-3 h-3" />
+                                    <ChevronRight className="w-3 h-3 text-icon" />
                                 )}
                                 <span>
                                     {isExpanded ? "隐藏详情" : "查看详情（响应体/原始错误）"}
@@ -287,9 +287,9 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
                 <IconButton
                     icon={
                         copyIconState === "copy" ? (
-                            <Copy size={16} fill="#dc2626" />
+                            <Copy size={16} className="text-icon" />
                         ) : (
-                            <Check size={16} fill="#dc2626" />
+                            <Check size={16} className="text-icon" />
                         )
                     }
                     onClick={handleCopy}

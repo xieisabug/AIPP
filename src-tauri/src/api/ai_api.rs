@@ -201,7 +201,13 @@ fn build_tool_config(
             let mut tools = Vec::new();
             let is_dynamic_builtin = server.command.as_deref() == Some("aipp:dynamic_mcp");
             for tool in &server.tools {
-                if is_dynamic_builtin || allowed.contains(&(server.id, tool.name.clone())) {
+                let is_agent_loader_tool =
+                    server.command.as_deref() == Some("aipp:agent")
+                        && (tool.name == "load_mcp_server" || tool.name == "load_mcp_tool");
+                if is_dynamic_builtin
+                    || is_agent_loader_tool
+                    || allowed.contains(&(server.id, tool.name.clone()))
+                {
                     tools.push(tool.clone());
                 }
             }

@@ -4,7 +4,7 @@ use crate::api::assistant_api::{
 };
 use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tauri::Manager;
 use tracing::{debug, instrument, trace, warn};
 
@@ -64,12 +64,12 @@ fn collect_all_enabled_servers_for_dynamic_mode(
         .map_err(|e| AppError::DatabaseError(format!("Failed to load MCP tool catalog: {}", e)))?;
 
     let mut result = Vec::new();
+    let mut loader_server_ids = HashSet::new();
     for server in &all_servers {
-        let is_dynamic_builtin = server.command.as_deref() == Some("aipp:dynamic_mcp");
-        if !server.is_enabled && !is_dynamic_builtin {
+        if !server.is_enabled {
             continue;
         }
-        if !is_dynamic_builtin {
+        if server.command.as_deref() != Some("aipp:agent") {
             continue;
         }
         let tools = db
@@ -88,6 +88,10 @@ fn collect_all_enabled_servers_for_dynamic_mode(
                 parameters: tool.parameters.unwrap_or_else(|| "{}".to_string()),
             })
             .collect::<Vec<_>>();
+        if tools.is_empty() {
+            continue;
+        }
+        loader_server_ids.insert(server.id);
         result.push(MCPServerWithTools {
             id: server.id,
             name: server.name.clone(),
@@ -120,7 +124,10 @@ fn collect_all_enabled_servers_for_dynamic_mode(
             AppError::DatabaseError(format!("Failed to load summarized MCP tools: {}", e))
         })?;
     for (server, tools) in servers_with_tools {
-        if !server.is_enabled || server.command.as_deref() == Some("aipp:dynamic_mcp") {
+        if !server.is_enabled
+            || server.command.as_deref() == Some("aipp:dynamic_mcp")
+            || loader_server_ids.contains(&server.id)
+        {
             continue;
         }
         let tools: Vec<MCPToolInfo> = tools
@@ -363,10 +370,10 @@ pub async fn format_mcp_prompt_with_filters(
         };
 
         let mut load_tools_info = String::from("\n## 必备加载工具（始终可用）\n\n");
-        load_tools_info.push_str("### 工具集: MCP 动态加载工具\n\n");
+        load_tools_info.push_str("### 工具集: Agent\n\n");
         let mut has_load_tools = false;
         for server_details in &mcp_info.enabled_servers {
-            if server_details.command.as_deref() != Some("aipp:dynamic_mcp") {
+            if server_details.command.as_deref() != Some("aipp:agent") {
                 continue;
             }
             for tool in &server_details.tools {
@@ -398,16 +405,16 @@ pub async fn format_mcp_prompt_with_filters(
 
 加入需要使用Agent相关的工具，先加载对应的server：
 <mcp_tool_call>
-  <server_name>MCP 动态加载工具</server_name>
+  <server_name>Agent</server_name>
   <tool_name>load_mcp_server</tool_name>
   <parameters>{"name":"Agent"}</parameters>
 </mcp_tool_call>
 
 再获取对应的工具详情：
 <mcp_tool_call>
-  <server_name>MCP 动态加载工具</server_name>
+  <server_name>Agent</server_name>
   <tool_name>load_mcp_tool</tool_name>
-  <parameters>{"names":["Agent::load_skills"]}</parameters>
+  <parameters>{"names":["Agent::load_skill"]}</parameters>
 </mcp_tool_call>
             "#,
             );
@@ -416,7 +423,9 @@ pub async fn format_mcp_prompt_with_filters(
         let mut tools_info = String::from("\n## MCP 工具集目录摘要\n\n");
         let mut has_toolset = false;
         for server_details in &mcp_info.enabled_servers {
-            if server_details.command.as_deref() == Some("aipp:dynamic_mcp") {
+            if server_details.command.as_deref() == Some("aipp:dynamic_mcp")
+                || server_details.command.as_deref() == Some("aipp:agent")
+            {
                 continue;
             }
             if let Some(enabled_server_id) = enabled_servers {

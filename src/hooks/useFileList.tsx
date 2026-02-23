@@ -77,7 +77,7 @@ export const useFileList = (fileInfoList: FileInfo[] | null, onDelete: (fileId: 
 
         <IconButton
           border
-          icon={<Trash2 size={16} fill="black" />}
+          icon={<Trash2 size={16} className="text-icon" />}
           className="input-area-img-delete-button"
           onClick={() => {
             fileInfo.id && onDelete(fileInfo.id);
