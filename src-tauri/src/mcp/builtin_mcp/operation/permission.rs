@@ -1,6 +1,6 @@
 use crate::db::mcp_db::MCPDatabase;
-use std::path::Path;
-use tauri::{AppHandle, Emitter};
+use std::path::{Component, Path, PathBuf};
+use tauri::{AppHandle, Emitter, Manager};
 use tracing::{debug, info, warn};
 
 use super::state::OperationState;
@@ -14,6 +14,88 @@ pub struct PermissionManager {
 impl PermissionManager {
     pub fn new(app_handle: AppHandle) -> Self {
         Self { app_handle }
+    }
+
+    fn parse_allowed_directories(env_text: &str) -> Vec<String> {
+        let mut dirs = Vec::new();
+        let mut collecting = false;
+
+        for raw_line in env_text.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            if let Some(value) = line.strip_prefix("ALLOWED_DIRECTORIES=") {
+                collecting = true;
+                let value = value.trim();
+                if !value.is_empty() {
+                    dirs.push(value.to_string());
+                }
+                continue;
+            }
+
+            if collecting {
+                // 下一条 KEY=VALUE 说明白名单段结束
+                if line.contains('=') {
+                    break;
+                }
+                dirs.push(line.to_string());
+            }
+        }
+
+        dirs
+    }
+
+    fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {
+        if !path.is_absolute() {
+            return None;
+        }
+        if path.exists() {
+            return path.canonicalize().ok();
+        }
+
+        // 非存在路径也做词法归一化，避免 `..` 绕过判断
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+                Component::RootDir => normalized.push(std::path::MAIN_SEPARATOR.to_string()),
+                Component::CurDir => {}
+                Component::Normal(part) => normalized.push(part),
+                Component::ParentDir => {
+                    if !normalized.pop() {
+                        return None;
+                    }
+                }
+            }
+        }
+        Some(normalized)
+    }
+
+    fn is_conversation_artifact_workspace_path(
+        &self,
+        path: &str,
+        conversation_id: Option<i64>,
+    ) -> bool {
+        let Some(conversation_id) = conversation_id else {
+            return false;
+        };
+        let Ok(app_data_dir) = self.app_handle.path().app_data_dir() else {
+            return false;
+        };
+
+        let workspace_root = app_data_dir
+            .join("artifact_workspaces")
+            .join(format!("conversation_{}", conversation_id));
+        let Some(normalized_workspace_root) = Self::normalize_absolute_path(&workspace_root) else {
+            return false;
+        };
+        let Some(normalized_target_path) = Self::normalize_absolute_path(Path::new(path)) else {
+            return false;
+        };
+
+        normalized_target_path.starts_with(&normalized_workspace_root)
     }
 
     /// 加载白名单目录列表
@@ -31,18 +113,11 @@ impl PermissionManager {
                     .unwrap_or(None);
 
                 if let Some(text) = env_text {
-                    for line in text.lines() {
-                        let line = line.trim();
-                        if line.starts_with("ALLOWED_DIRECTORIES=") {
-                            let dirs = line.trim_start_matches("ALLOWED_DIRECTORIES=");
-                            return dirs
-                                .lines()
-                                .flat_map(|l| l.split('\n'))
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                        }
-                    }
+                    return Self::parse_allowed_directories(&text)
+                        .into_iter()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                 }
                 Vec::new()
             }
@@ -62,8 +137,11 @@ impl PermissionManager {
         }
 
         let path = Path::new(path);
-        let path =
-            if path.is_relative() { path.canonicalize().ok() } else { Some(path.to_path_buf()) };
+        let path = if path.is_relative() {
+            path.canonicalize().ok()
+        } else {
+            Self::normalize_absolute_path(path)
+        };
 
         if let Some(abs_path) = path {
             for allowed_dir in &whitelist {
@@ -71,7 +149,7 @@ impl PermissionManager {
                 let allowed = if allowed.is_relative() {
                     allowed.canonicalize().ok()
                 } else {
-                    Some(allowed.to_path_buf())
+                    Self::normalize_absolute_path(allowed)
                 };
 
                 if let Some(allowed_abs) = allowed {
@@ -148,14 +226,26 @@ impl PermissionManager {
         // 解析并更新白名单
         let mut env_map: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        let mut current_dirs: Vec<String> =
+            env_text.as_deref().map(Self::parse_allowed_directories).unwrap_or_default();
         if let Some(text) = &env_text {
+            let mut in_allowed_directories = false;
             for line in text.lines() {
                 let line = line.trim();
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
                 if let Some((k, v)) = line.split_once('=') {
-                    env_map.insert(k.trim().to_string(), v.trim().to_string());
+                    let key = k.trim();
+                    if key == "ALLOWED_DIRECTORIES" {
+                        in_allowed_directories = true;
+                        continue;
+                    }
+                    in_allowed_directories = false;
+                    env_map.insert(key.to_string(), v.trim().to_string());
+                } else if in_allowed_directories {
+                    // ALLOWED_DIRECTORIES 的续行，由 parse_allowed_directories 统一处理
+                    continue;
                 }
             }
         }
@@ -167,15 +257,10 @@ impl PermissionManager {
             .unwrap_or_else(|| path.to_string());
 
         // 更新白名单
-        let mut current_dirs: Vec<String> = env_map
-            .get("ALLOWED_DIRECTORIES")
-            .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|s| !s.is_empty()).collect())
-            .unwrap_or_default();
-
         if !current_dirs.contains(&parent_path) {
             current_dirs.push(parent_path);
-            env_map.insert("ALLOWED_DIRECTORIES".to_string(), current_dirs.join("\n"));
         }
+        env_map.insert("ALLOWED_DIRECTORIES".to_string(), current_dirs.join("\n"));
 
         // 重建环境变量字符串
         let new_env_text =
@@ -201,6 +286,16 @@ impl PermissionManager {
         path: &str,
         conversation_id: Option<i64>,
     ) -> Result<bool, String> {
+        // 对会话专属 Artifact 工作区自动放行，避免每次弹窗确认
+        if self.is_conversation_artifact_workspace_path(path, conversation_id) {
+            debug!(
+                path = %path,
+                conversation_id = ?conversation_id,
+                "Path auto-allowed for conversation artifact workspace"
+            );
+            return Ok(true);
+        }
+
         // 首先检查白名单
         if self.is_path_allowed(path) {
             return Ok(true);

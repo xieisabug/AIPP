@@ -66,45 +66,33 @@ impl BrowserPool {
         self.active_count.fetch_add(1, Ordering::AcqRel);
 
         // 确保浏览器已初始化（使用 OnceCell 确保只初始化一次）
-        let browser = self
-            .get_or_init_browser()
-            .await
-            .map_err(|e| {
-                // 初始化失败，减少计数
-                self.active_count.fetch_sub(1, Ordering::AcqRel);
-                e
-            })?;
+        let browser = self.get_or_init_browser().await.map_err(|e| {
+            // 初始化失败，减少计数
+            self.active_count.fetch_sub(1, Ordering::AcqRel);
+            e
+        })?;
 
         // 尝试从空闲队列获取页面
         {
             let mut idle = self.idle_pages.lock().await;
             if let Some(page) = idle.pop() {
                 debug!("Reusing idle page");
-                return Ok(PooledPage {
-                    page: Some(page),
-                    pool: Some(self.clone()),
-                });
+                return Ok(PooledPage { page: Some(page), pool: Some(self.clone()) });
             }
         }
 
         // 创建新页面
         let page = {
             let browser_guard = browser.lock().await;
-            browser_guard
-                .new_page("about:blank")
-                .await
-                .map_err(|e| {
-                    // 创建失败，减少计数
-                    self.active_count.fetch_sub(1, Ordering::AcqRel);
-                    format!("Failed to create new page: {}", e)
-                })?
+            browser_guard.new_page("about:blank").await.map_err(|e| {
+                // 创建失败，减少计数
+                self.active_count.fetch_sub(1, Ordering::AcqRel);
+                format!("Failed to create new page: {}", e)
+            })?
         };
 
         debug!("Created new page");
-        Ok(PooledPage {
-            page: Some(page),
-            pool: Some(self.clone()),
-        })
+        Ok(PooledPage { page: Some(page), pool: Some(self.clone()) })
     }
 
     /// 获取或初始化浏览器
@@ -169,9 +157,8 @@ impl BrowserPool {
             "Launching Chromiumoxide BrowserPool"
         );
 
-        let config = builder
-            .build()
-            .map_err(|e| format!("Failed to build browser config: {}", e))?;
+        let config =
+            builder.build().map_err(|e| format!("Failed to build browser config: {}", e))?;
 
         let (browser, mut handler) = Browser::launch(config)
             .await
@@ -200,10 +187,7 @@ impl BrowserPool {
     pub async fn shutdown(&self) -> Result<(), String> {
         if let Some(browser) = self.browser.get() {
             let mut guard = browser.lock().await;
-            guard
-                .close()
-                .await
-                .map_err(|e| format!("Failed to close browser: {}", e))?;
+            guard.close().await.map_err(|e| format!("Failed to close browser: {}", e))?;
             if let Err(e) = guard.wait().await {
                 warn!(error = %e, "Failed to wait for browser process exit");
             }

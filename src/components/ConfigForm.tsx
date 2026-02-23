@@ -310,15 +310,16 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                         />
                     );
                 case "switch":
+                    const switchValue = fieldRenderData.value ?? field.value;
                     return (
                         <Switch
                             className={field.className}
                             disabled={field.disabled}
                             checked={
-                                fieldRenderData.value === true ||
-                                fieldRenderData.value === "true" ||
-                                fieldRenderData.value === 1 ||
-                                fieldRenderData.value === "1"
+                                switchValue === true ||
+                                switchValue === "true" ||
+                                switchValue === 1 ||
+                                switchValue === "1"
                             }
                             onCheckedChange={(value) => {
                                 // 先调用表单的 onChange

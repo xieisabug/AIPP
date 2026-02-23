@@ -14,8 +14,8 @@ pub struct ArtifactCollection {
     pub created_time: String,
     pub last_used_time: Option<String>,
     pub use_count: i64,
-    pub db_id: Option<String>,       // 独立数据库标识
-    pub assistant_id: Option<i64>,   // 关联的助手 ID
+    pub db_id: Option<String>,     // 独立数据库标识
+    pub assistant_id: Option<i64>, // 关联的助手 ID
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -92,7 +92,9 @@ impl ArtifactsDatabase {
 
         // Migrate: add db_id and assistant_id columns if they don't exist
         let _ = self.conn.execute("ALTER TABLE artifacts_collection ADD COLUMN db_id TEXT", []);
-        let _ = self.conn.execute("ALTER TABLE artifacts_collection ADD COLUMN assistant_id INTEGER", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE artifacts_collection ADD COLUMN assistant_id INTEGER", []);
 
         Ok(())
     }
@@ -235,7 +237,7 @@ impl ArtifactsDatabase {
     /// Update artifact metadata (name, icon, description, tags, db_id, assistant_id)
     pub fn update_artifact(&self, update: UpdateArtifactCollection) -> Result<()> {
         let mut set_clauses = Vec::new();
-        
+
         if update.name.is_some() {
             set_clauses.push("name = ?");
         }
@@ -263,7 +265,7 @@ impl ArtifactsDatabase {
             format!("UPDATE artifacts_collection SET {} WHERE id = ?", set_clauses.join(", "));
 
         let mut stmt = self.conn.prepare(&query)?;
-        
+
         let mut idx = 1;
         if let Some(ref name) = update.name {
             stmt.raw_bind_parameter(idx, name)?;
@@ -290,7 +292,7 @@ impl ArtifactsDatabase {
             idx += 1;
         }
         stmt.raw_bind_parameter(idx, update.id)?;
-        
+
         stmt.raw_execute()?;
         Ok(())
     }
@@ -666,16 +668,15 @@ mod tests {
         let db = setup_test_db();
         let id = db.save_artifact(create_sample_artifact("NoChange", "react")).unwrap();
 
-        let update =
-            UpdateArtifactCollection {
-                id,
-                name: None,
-                icon: None,
-                description: None,
-                tags: None,
-                db_id: None,
-                assistant_id: None,
-            };
+        let update = UpdateArtifactCollection {
+            id,
+            name: None,
+            icon: None,
+            description: None,
+            tags: None,
+            db_id: None,
+            assistant_id: None,
+        };
 
         let result = db.update_artifact(update);
         assert!(result.is_ok(), "Update with no changes should succeed");

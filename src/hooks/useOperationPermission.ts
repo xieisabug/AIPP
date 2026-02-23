@@ -21,12 +21,14 @@ export function useOperationPermission(options: UseOperationPermissionOptions = 
             "operation-permission-request",
             (event) => {
                 const request = event.payload;
-                
+
                 // 如果指定了 conversationId，只处理匹配的请求
                 // 如果请求没有 conversation_id，则显示给所有窗口
-                if (conversationId !== undefined && 
-                    request.conversation_id !== undefined && 
-                    request.conversation_id !== conversationId) {
+                if (
+                    conversationId !== undefined &&
+                    request.conversation_id !== undefined &&
+                    request.conversation_id !== conversationId
+                ) {
                     return;
                 }
 
@@ -42,7 +44,7 @@ export function useOperationPermission(options: UseOperationPermissionOptions = 
     }, [conversationId]);
 
     const handleDecision = useCallback(
-        async (requestId: string, decision: 'allow' | 'allow_and_save' | 'deny') => {
+        async (requestId: string, decision: "allow" | "allow_and_save" | "deny") => {
             try {
                 console.log("Sending permission decision:", { requestId, decision });
                 await invoke("confirm_operation_permission", {

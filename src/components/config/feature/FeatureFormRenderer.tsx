@@ -8,6 +8,7 @@ import { DataFolderConfigForm } from "./forms/DataFolderConfigForm";
 import { ShortcutsConfigForm } from "./forms/ShortcutsConfigForm";
 import { OtherConfigForm } from "./forms/OtherConfigForm";
 import { AboutConfigForm } from "./forms/AboutConfigForm";
+import { ExperimentalConfigForm } from "./forms/ExperimentalConfigForm";
 
 interface FeatureItem {
     id: string;
@@ -27,6 +28,7 @@ interface FeatureFormRendererProps {
         dataFolderForm: UseFormReturn<any>;
         shortcutsForm: UseFormReturn<any>;
         otherForm: UseFormReturn<any>;
+        experimentalForm: UseFormReturn<any>;
         aboutForm: UseFormReturn<any>;
     };
     versionManager: {
@@ -62,6 +64,7 @@ interface FeatureFormRendererProps {
     onSaveSummary: () => Promise<void>;
     onSaveNetwork: () => Promise<void>;
     onSaveShortcuts: () => Promise<void>;
+    onSaveExperimental: () => Promise<void>;
 }
 
 export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
@@ -72,6 +75,7 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
     onSaveSummary,
     onSaveNetwork,
     onSaveShortcuts,
+    onSaveExperimental,
 }) => {
     switch (selectedFeature.id) {
         case "display":
@@ -145,6 +149,13 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
             return (
                 <OtherConfigForm
                     form={forms.otherForm}
+                />
+            );
+        case "experimental":
+            return (
+                <ExperimentalConfigForm
+                    form={forms.experimentalForm}
+                    onSave={onSaveExperimental}
                 />
             );
         case "about":

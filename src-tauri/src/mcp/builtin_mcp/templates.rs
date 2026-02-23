@@ -53,28 +53,24 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
             required_envs: vec![],
             default_timeout: Some(30000), // 30秒
         },
+        BuiltinTemplateInfo {
+            id: "ui_interaction".into(),
+            name: "UI交互工具".into(),
+            description: "内置的 UI 交互工具集，用于向用户提问和展示文件预览。".into(),
+            command: "aipp:ui_interaction".into(),
+            transport_type: "stdio".into(),
+            required_envs: vec![],
+            default_timeout: Some(30000),
+        },
         // 搜索工具
         BuiltinTemplateInfo {
             id: "search".into(),
             name: "搜索工具".into(),
-            description: "内置的网络搜索和网页访问工具，支持多种搜索引擎和浏览器，可以通过搜索引擎获取到相关信息，并且可以调用访问工具进一步获取页面的具体信息".into(),
+            description: "内置的网络搜索和网页访问工具，支持多种搜索引擎，基于 Chromium 内核抓取页面信息，并且可以调用访问工具进一步获取页面的具体信息".into(),
             command: "aipp:search".into(),
             transport_type: "stdio".into(),
             default_timeout: Some(60000), // 60秒，搜索和抓取需要更多时间
         required_envs: vec![
-            BuiltinTemplateEnvVar {
-                key: "BROWSER_TYPE".into(),
-                label: "浏览器类型".into(),
-                required: false,
-                tip: Some("搜索使用的浏览器类型，默认使用 Chrome，如果不可用则降级为 Edge".into()),
-                field_type: "select".into(),
-                default_value: Some("chrome".into()),
-                placeholder: None,
-                options: Some(vec![
-                    EnvVarOption { label: "Chrome".into(), value: "chrome".into() },
-                    EnvVarOption { label: "Edge".into(), value: "edge".into() },
-                ]),
-            },
             BuiltinTemplateEnvVar {
                 key: "SEARCH_ENGINE".into(),
                 label: "搜索引擎".into(),
@@ -208,6 +204,15 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
             ],
             default_timeout: Some(180000), // 3分钟，操作工具可能执行较长命令
         },
+        BuiltinTemplateInfo {
+            id: "artifact".into(),
+            name: "Artifact 工作区工具".into(),
+            description: "管理会话级 Artifact 工作区。用于获取工作区路径并将文件显式发布为 Artifact，避免依赖消息代码块推断。".into(),
+            command: "aipp:artifact".into(),
+            transport_type: "stdio".into(),
+            required_envs: vec![],
+            default_timeout: Some(30000),
+        },
     ]
 }
 
@@ -306,6 +311,182 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                             }
                         }
                     }
+                }),
+            },
+            BuiltinToolInfo {
+                name: "load_mcp_server".into(),
+                description: "根据需求关键词检索 MCP 工具集目录，并返回对应工具集下的工具摘要。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "要检索的工具集名称或关键词"
+                        }
+                    },
+                    "required": ["name"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "load_mcp_tool".into(),
+                description: "按关键词加载 MCP 工具到当前会话，并返回这些工具的完整定义（含 description 与 parameters schema）。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "names": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "需要加载的工具关键词列表；支持关键词或完整 server::tool 形式，可一次传入多个"
+                        },
+                        "server_name": {
+                            "type": "string",
+                            "description": "可选。限定在指定工具集（参数名为 server_name）下搜索工具"
+                        }
+                    },
+                    "required": ["names"]
+                }),
+            },
+        ],
+        Some("ui_interaction") => vec![
+            BuiltinToolInfo {
+                name: "ask_user_question".into(),
+                description: "Use this tool when you need to ask the user questions during execution. This allows gathering preferences, clarifying ambiguity, and getting implementation decisions. User answers are returned as tool results.".into(),
+                input_schema: serde_json::json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "properties": {
+                        "questions": {
+                            "description": "Questions to ask the user (1-4 questions)",
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 4,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "question": {
+                                        "type": "string",
+                                        "description": "The complete question to ask the user."
+                                    },
+                                    "header": {
+                                        "type": "string",
+                                        "description": "Very short label displayed as a chip/tag (max 12 chars)."
+                                    },
+                                    "options": {
+                                        "type": "array",
+                                        "description": "Must have 2-4 options. Do not include 'Other' (auto-provided by UI).",
+                                        "minItems": 2,
+                                        "maxItems": 4,
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "label": {
+                                                    "type": "string",
+                                                    "description": "Display text shown to the user."
+                                                },
+                                                "description": {
+                                                    "type": "string",
+                                                    "description": "Explanation of this option."
+                                                }
+                                            },
+                                            "required": ["label", "description"],
+                                            "additionalProperties": false
+                                        }
+                                    },
+                                    "multiSelect": {
+                                        "type": "boolean",
+                                        "default": false,
+                                        "description": "Set true to allow selecting multiple options."
+                                    }
+                                },
+                                "required": ["question", "header", "options", "multiSelect"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "answers": {
+                            "description": "User answers collected by the UI component.",
+                            "type": "object",
+                            "propertyNames": { "type": "string" },
+                            "additionalProperties": { "type": "string" }
+                        },
+                        "metadata": {
+                            "description": "Optional metadata for tracking purposes.",
+                            "type": "object",
+                            "properties": {
+                                "source": {
+                                    "type": "string",
+                                    "description": "Optional source identifier."
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["questions"],
+                    "additionalProperties": false
+                }),
+            },
+            BuiltinToolInfo {
+                name: "preview_file".into(),
+                description: "Display file content or rich media in a specialized UI component. Supports markdown, text, image, pdf and html, including multi-file tab/grid/list views.".into(),
+                input_schema: serde_json::json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "properties": {
+                        "files": {
+                            "description": "Files or content items to display.",
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 10,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "title": {
+                                        "type": "string",
+                                        "description": "Title of the file/tab."
+                                    },
+                                    "type": {
+                                        "type": "string",
+                                        "enum": ["markdown", "text", "image", "pdf", "html"],
+                                        "description": "Content format used by the renderer."
+                                    },
+                                    "content": {
+                                        "type": "string",
+                                        "description": "Inline content (text/markdown or base64 image/pdf/html)."
+                                    },
+                                    "url": {
+                                        "type": "string",
+                                        "description": "Direct URL or local path to the resource."
+                                    },
+                                    "language": {
+                                        "type": "string",
+                                        "description": "Programming language for syntax highlighting when type=text."
+                                    },
+                                    "description": {
+                                        "type": "string",
+                                        "description": "Optional caption for this file."
+                                    }
+                                },
+                                "required": ["title", "type"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "viewMode": {
+                            "type": "string",
+                            "enum": ["tabs", "list", "grid"],
+                            "default": "tabs",
+                            "description": "Preferred layout mode for multiple files."
+                        },
+                        "metadata": {
+                            "type": "object",
+                            "properties": {
+                                "origin": {
+                                    "type": "string",
+                                    "description": "Optional source marker."
+                                }
+                            }
+                        }
+                    },
+                    "required": ["files"],
+                    "additionalProperties": false
                 }),
             },
         ],
@@ -488,6 +669,63 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                 }),
             },
         ],
+        Some("artifact") => vec![
+            BuiltinToolInfo {
+                name: "get_artifact_workspace".into(),
+                description: "获取当前会话的 Artifact 工作区路径和 manifest 路径。首次调用会自动初始化目录结构。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "conversation_id": {
+                            "type": "number",
+                            "description": "可选。会话 ID，不提供时会使用当前会话上下文。"
+                        }
+                    }
+                }),
+            },
+            BuiltinToolInfo {
+                name: "show_artifact".into(),
+                description: "将工作区中的文件显式发布为 Artifact。发布后会更新 artifact manifest，Sidebar 将展示该 Artifact。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "conversation_id": {
+                            "type": "number",
+                            "description": "可选。会话 ID，不提供时会使用当前会话上下文。"
+                        },
+                        "artifact_key": {
+                            "type": "string",
+                            "description": "Artifact 标识，相对路径风格（例如: ui/dashboard）"
+                        },
+                        "entry_file": {
+                            "type": "string",
+                            "description": "Artifact 入口文件，相对 artifact_key 目录（例如: src/App.tsx）"
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "可选。展示标题"
+                        },
+                        "language": {
+                            "type": "string",
+                            "description": "可选。用于预览的语言类型（如 html/markdown/vue/tsx）"
+                        },
+                        "preview_type": {
+                            "type": "string",
+                            "description": "可选。预览类型，不传则自动推断"
+                        },
+                        "db_id": {
+                            "type": "string",
+                            "description": "可选。传递给 Artifact 预览运行时的数据库标识"
+                        },
+                        "assistant_id": {
+                            "type": "number",
+                            "description": "可选。传递给 Artifact 预览运行时的助手 ID"
+                        }
+                    },
+                    "required": ["artifact_key", "entry_file"]
+                }),
+            },
+        ],
         _ => vec![],
     }
 }
@@ -508,7 +746,9 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
             .query_row([&tpl.command], |row| row.get::<_, i64>(0))
             .optional()?;
 
-        if exists.is_none() {
+        let server_id = if let Some(server_id) = exists {
+            server_id
+        } else {
             info!(template_id = %tpl.id, name = %tpl.name, "Initializing builtin MCP server");
 
             // 插入内置工具集（系统初始化的不可删除）
@@ -529,21 +769,28 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
                     false,                  // proxy_enabled - builtin 不使用代理
                 )
                 .context("Insert builtin server failed")?;
-
-            // 注册工具
-            for tool in get_builtin_tools_for_command(&tpl.command) {
-                db.upsert_mcp_server_tool(
-                    server_id,
-                    &tool.name,
-                    Some(&tool.description),
-                    Some(&tool.input_schema.to_string()),
-                )
-                .with_context(|| format!("Insert server tool failed: {}", tool.name))?;
-            }
-
             info!(template_id = %tpl.id, server_id = server_id, "Builtin MCP server initialized");
+            server_id
+        };
+
+        // 每次启动都同步工具定义，确保内置工具集升级后自动更新
+        let tools = get_builtin_tools_for_command(&tpl.command);
+        for tool in &tools {
+            db.upsert_mcp_server_tool(
+                server_id,
+                &tool.name,
+                Some(&tool.description),
+                Some(&tool.input_schema.to_string()),
+            )
+            .with_context(|| format!("Upsert server tool failed: {}", tool.name))?;
         }
+        let keep_names = tools.into_iter().map(|tool| tool.name).collect::<Vec<_>>();
+        let _ = db
+            .delete_mcp_server_tools_not_in(server_id, &keep_names)
+            .with_context(|| format!("Sync builtin server tools failed: {}", tpl.id))?;
     }
+
+    let _ = db.rebuild_dynamic_mcp_catalog();
 
     Ok(())
 }
@@ -661,7 +908,13 @@ mod tests {
     #[test]
     fn test_get_tools_for_agent_command() {
         let tools = get_builtin_tools_for_command("aipp:agent");
-        assert_eq!(tools.len(), 1, "Agent command should have 1 tool");
+        assert_eq!(tools.len(), 4, "Agent command should have 4 tools");
+    }
+
+    #[test]
+    fn test_get_tools_for_ui_interaction_command() {
+        let tools = get_builtin_tools_for_command("aipp:ui_interaction");
+        assert_eq!(tools.len(), 2, "UI interaction command should have 2 tools");
     }
 
     #[test]
@@ -711,20 +964,15 @@ mod tests {
     }
 
     #[test]
-    fn test_search_template_browser_type_env() {
+    fn test_search_template_browser_type_env_removed() {
         let templates = builtin_templates();
         let search = templates.iter().find(|t| t.id == "search").unwrap();
 
         let browser_env = search.required_envs.iter().find(|e| e.key == "BROWSER_TYPE");
-        assert!(browser_env.is_some(), "BROWSER_TYPE env should exist");
-
-        let env = browser_env.unwrap();
-        assert_eq!(env.field_type, "select");
-        assert!(env.options.is_some());
-
-        let options = env.options.as_ref().unwrap();
-        assert!(options.iter().any(|o| o.value == "chrome"));
-        assert!(options.iter().any(|o| o.value == "edge"));
+        assert!(
+            browser_env.is_none(),
+            "BROWSER_TYPE env should be removed because chromiumoxide now uses fixed browser path detection"
+        );
     }
 
     #[test]

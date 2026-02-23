@@ -136,6 +136,12 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                                         ?.value ?? "";
                             return acc;
                         }, {} as Record<string, any>),
+                        dynamic_mcp_loading_enabled: (() => {
+                            const raw = assistantDetail.model_configs.find(
+                                (config) => config.name === "dynamic_mcp_loading_enabled"
+                            )?.value;
+                            return raw ? raw === "true" : true;
+                        })(),
                     });
                     setAssistantTypeCustomField([]);
                     const plugin = assistantTypePluginMap.get(assistantDetail.assistant.assistant_type);
@@ -283,6 +289,10 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         return true;
                     }
 
+                    if (key === "dynamic_mcp_loading_enabled") {
+                        return true;
+                    }
+
                     // 如果是插件自定义字段，直接允许保存
                     if (customField) {
                         return true;
@@ -308,6 +318,8 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     const isAcpField = key.startsWith("acp_") && currentAssistant.assistant.assistant_type === 4;
                     if (isAcpField) {
                         valueType = "string";
+                    } else if (key === "dynamic_mcp_loading_enabled") {
+                        valueType = "boolean";
                     } else if (customField) {
                         // 根据插件字段的类型映射到数据库的 value_type
                         const fieldType = customField.value.type;

@@ -222,7 +222,11 @@ fn test_parse_env_no_equals() {
 /// 测试空 MCP 信息格式化
 #[tokio::test]
 async fn test_format_mcp_prompt_empty_servers() {
-    let mcp_info = MCPInfoForAssistant { enabled_servers: vec![], use_native_toolcall: false };
+    let mcp_info = MCPInfoForAssistant {
+        enabled_servers: vec![],
+        use_native_toolcall: false,
+        dynamic_loading_enabled: false,
+    };
 
     let result = format_mcp_prompt("Initial prompt".to_string(), &mcp_info).await;
     // 即使没有服务器，也会添加 MCP 规范头部，并在最后包含原始提示
@@ -237,6 +241,7 @@ async fn test_format_mcp_prompt_single_server() {
         enabled_servers: vec![MCPServerWithTools {
             id: 1,
             name: "weather-server".to_string(),
+            summary: String::new(),
             command: None,
             is_enabled: true,
             tools: vec![MCPToolInfo {
@@ -250,6 +255,7 @@ async fn test_format_mcp_prompt_single_server() {
             }],
         }],
         use_native_toolcall: false,
+        dynamic_loading_enabled: false,
     };
 
     let result = format_mcp_prompt("".to_string(), &mcp_info).await;
@@ -266,6 +272,7 @@ async fn test_format_mcp_prompt_multiple_tools() {
         enabled_servers: vec![MCPServerWithTools {
             id: 1,
             name: "multi-tool-server".to_string(),
+            summary: String::new(),
             command: None,
             is_enabled: true,
             tools: vec![
@@ -288,6 +295,7 @@ async fn test_format_mcp_prompt_multiple_tools() {
             ],
         }],
         use_native_toolcall: false,
+        dynamic_loading_enabled: false,
     };
 
     let result = format_mcp_prompt("".to_string(), &mcp_info).await;
@@ -303,6 +311,7 @@ async fn test_format_mcp_prompt_native_toolcall() {
         enabled_servers: vec![MCPServerWithTools {
             id: 1,
             name: "test-server".to_string(),
+            summary: String::new(),
             command: None,
             is_enabled: true,
             tools: vec![MCPToolInfo {
@@ -315,6 +324,7 @@ async fn test_format_mcp_prompt_native_toolcall() {
             }],
         }],
         use_native_toolcall: true, // 使用原生工具调用
+        dynamic_loading_enabled: false,
     };
 
     let result = format_mcp_prompt("".to_string(), &mcp_info).await;
@@ -330,6 +340,7 @@ async fn test_format_mcp_prompt_with_initial_prompt() {
         enabled_servers: vec![MCPServerWithTools {
             id: 1,
             name: "server".to_string(),
+            summary: String::new(),
             command: None,
             is_enabled: true,
             tools: vec![MCPToolInfo {
@@ -342,6 +353,7 @@ async fn test_format_mcp_prompt_with_initial_prompt() {
             }],
         }],
         use_native_toolcall: false,
+        dynamic_loading_enabled: false,
     };
 
     let result = format_mcp_prompt("You are a helpful assistant.".to_string(), &mcp_info).await;
@@ -359,6 +371,7 @@ async fn test_format_mcp_prompt_multiple_servers() {
             MCPServerWithTools {
                 id: 1,
                 name: "server-a".to_string(),
+                summary: String::new(),
                 command: None,
                 is_enabled: true,
                 tools: vec![MCPToolInfo {
@@ -373,6 +386,7 @@ async fn test_format_mcp_prompt_multiple_servers() {
             MCPServerWithTools {
                 id: 2,
                 name: "server-b".to_string(),
+                summary: String::new(),
                 command: None,
                 is_enabled: true,
                 tools: vec![MCPToolInfo {
@@ -386,6 +400,7 @@ async fn test_format_mcp_prompt_multiple_servers() {
             },
         ],
         use_native_toolcall: false,
+        dynamic_loading_enabled: false,
     };
 
     let result = format_mcp_prompt("".to_string(), &mcp_info).await;

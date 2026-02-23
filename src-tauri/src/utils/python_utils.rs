@@ -1,6 +1,6 @@
+use crate::utils::uv_utils::UvUtils;
 use std::process::Command;
 use tauri::AppHandle;
-use crate::utils::uv_utils::UvUtils;
 
 /// Python 版本信息
 #[derive(Clone, serde::Serialize, serde::Deserialize, Default)]

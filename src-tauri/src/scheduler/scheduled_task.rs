@@ -1,7 +1,9 @@
 use chrono::Utc;
 use tracing::{error, info, warn};
 
-use crate::api::scheduled_task_api::{compute_next_run_at_with_config, execute_scheduled_task, ScheduleConfig};
+use crate::api::scheduled_task_api::{
+    compute_next_run_at_with_config, execute_scheduled_task, ScheduleConfig,
+};
 use crate::db::scheduled_task_db::{ScheduledTask, ScheduledTaskDatabase};
 use crate::FeatureConfigState;
 use tauri::Manager;
@@ -77,11 +79,7 @@ async fn process_scheduled_task(
     };
 
     let updated = ScheduledTask {
-        is_enabled: if task.schedule_type == "once" {
-            false
-        } else {
-            task.is_enabled
-        },
+        is_enabled: if task.schedule_type == "once" { false } else { task.is_enabled },
         last_run_at: Some(now),
         next_run_at,
         updated_time: now,

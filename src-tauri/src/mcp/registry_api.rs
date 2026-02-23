@@ -241,6 +241,7 @@ pub async fn add_mcp_server(
             request.proxy_enabled,
         )
         .map_err(|e| e.to_string())?;
+    let _ = db.rebuild_dynamic_mcp_catalog();
 
     Ok(server_id)
 }
@@ -270,6 +271,7 @@ pub async fn update_mcp_server(
         request.proxy_enabled,
     )
     .map_err(|e| e.to_string())?;
+    let _ = db.rebuild_dynamic_mcp_catalog();
 
     Ok(())
 }
@@ -286,6 +288,7 @@ pub async fn delete_mcp_server(app_handle: tauri::AppHandle, id: i64) -> Result<
     }
 
     db.delete_mcp_server(id).map_err(|e| e.to_string())?;
+    let _ = db.rebuild_dynamic_mcp_catalog();
     Ok(())
 }
 
@@ -298,6 +301,7 @@ pub async fn toggle_mcp_server(
 ) -> Result<(), String> {
     let db = open_db(&app_handle)?;
     db.toggle_mcp_server(id, is_enabled).map_err(|e| e.to_string())?;
+    let _ = db.rebuild_dynamic_mcp_catalog();
     Ok(())
 }
 
@@ -322,6 +326,7 @@ pub async fn update_mcp_server_tool(
 ) -> Result<(), String> {
     let db = open_db(&app_handle)?;
     db.update_mcp_server_tool(tool_id, is_enabled, is_auto_run).map_err(|e| e.to_string())?;
+    let _ = db.rebuild_dynamic_mcp_catalog();
     Ok(())
 }
 
@@ -415,64 +420,9 @@ async fn test_stdio_connection(server: &MCPServer) -> Result<(), String> {
     }
 }
 
-// 测试SSE连接
-async fn test_sse_connection(server: &MCPServer) -> Result<(), String> {
-    use crate::mcp::util::parse_server_headers;
-    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-    use rmcp::{
-        model::{ClientCapabilities, ClientInfo, Implementation},
-        transport::{sse_client::SseClientConfig, SseClientTransport},
-        ServiceExt,
-    };
-
-    let url = server.url.as_ref().ok_or("No URL specified for SSE transport")?;
-
-    // 简短的连接测试，超时时间更短
-    let client_result = tokio::time::timeout(STDIO_TEST_TIMEOUT, async {
-        // Build client with default headers if configured
-        let (_auth_header, all_headers) = parse_server_headers(server);
-        let transport = if let Some(hdrs) = all_headers {
-            let to_log = crate::mcp::util::sanitize_headers_for_log(&hdrs);
-            info!(server_id = server.id, headers = ?to_log, "Testing SSE with headers");
-            let mut header_map = HeaderMap::new();
-            for (k, v) in hdrs.iter() {
-                if let (Ok(name), Ok(value)) =
-                    (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v.as_str()))
-                {
-                    header_map.insert(name, value);
-                }
-            }
-            let client = reqwest::Client::builder().default_headers(header_map).build()?;
-            SseClientTransport::start_with_client(
-                client,
-                SseClientConfig { sse_endpoint: url.as_str().into(), ..Default::default() },
-            )
-            .await?
-        } else {
-            SseClientTransport::start(url.as_str()).await?
-        };
-        let client_info = ClientInfo {
-            protocol_version: Default::default(),
-            capabilities: ClientCapabilities::default(),
-            client_info: Implementation {
-                name: "AIPP MCP SSE Test Client".to_string(),
-                version: "0.1.0".to_string(),
-                ..Default::default()
-            },
-        };
-        let client = client_info.serve(transport).await?;
-
-        // 测试成功，取消连接
-        client.cancel().await?;
-        Ok::<(), anyhow::Error>(())
-    })
-    .await;
-
-    match client_result {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(e)) => Err(format!("Failed to create MCP SSE client: {}", e)),
-        Err(_) => Err("Timeout while connecting to SSE server".to_string()),
-    }
+// 测试SSE连接（rmcp >= 0.16 已移除，保留显式错误）
+async fn test_sse_connection(_server: &MCPServer) -> Result<(), String> {
+    Err("SSE transport 已在当前 rmcp 版本移除，请改用 HTTP transport".to_string())
 }
 
 // 测试HTTP连接
@@ -518,6 +468,7 @@ async fn test_http_connection(server: &MCPServer) -> Result<(), String> {
 
     // 创建客户端信息
     let client_info = ClientInfo {
+        meta: None,
         protocol_version: Default::default(),
         capabilities: ClientCapabilities::default(),
         client_info: Implementation {
@@ -607,6 +558,11 @@ pub async fn refresh_mcp_server_capabilities(
 
     match result {
         Ok(_) => {
+            let _ = db.rebuild_dynamic_mcp_catalog();
+            crate::mcp::summarizer::trigger_mcp_catalog_summary_generation(
+                app_handle.clone(),
+                server_id,
+            );
             let tools = db.get_mcp_server_tools(server_id).map_err(|e| e.to_string())?;
             let resources = db.get_mcp_server_resources(server_id).map_err(|e| e.to_string())?;
             let prompts = db.get_mcp_server_prompts(server_id).map_err(|e| e.to_string())?;
@@ -621,7 +577,7 @@ pub async fn refresh_mcp_server_capabilities(
 }
 
 // Stdio transport implementation
-#[instrument(level = "debug", skip(app_handle, server), fields(server_id))]
+#[instrument(level = "debug", skip_all)]
 async fn get_stdio_capabilities(
     app_handle: tauri::AppHandle,
     server_id: i64,
@@ -755,145 +711,13 @@ async fn get_stdio_capabilities(
     Ok(())
 }
 
-#[instrument(level = "debug", skip(app_handle, server), fields(server_id))]
+#[instrument(level = "debug", skip_all)]
 async fn get_sse_capabilities(
-    app_handle: tauri::AppHandle,
-    server_id: i64,
-    server: MCPServer,
+    _app_handle: tauri::AppHandle,
+    _server_id: i64,
+    _server: MCPServer,
 ) -> Result<(), String> {
-    use crate::mcp::util::parse_server_headers;
-    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-    use rmcp::{
-        model::{ClientCapabilities, ClientInfo, Implementation},
-        transport::SseClientTransport,
-        ServiceExt,
-    };
-
-    let db = open_db(&app_handle)?;
-
-    // 获取URL，如果没有则返回错误
-    let url = server.url.clone().ok_or("No URL specified for SSE transport")?;
-
-    // 创建SSE传输和客户端（复用与 test_sse_connection 相同的模式，仅增加能力同步逻辑）
-    let client_result = tokio::time::timeout(
-        std::time::Duration::from_millis(server.timeout.unwrap_or(CONNECT_TIMEOUT_DEFAULT_MS as i32) as u64),
-        async {
-            let (_auth_header, all_headers) = parse_server_headers(&server);
-            let transport = if let Some(hdrs) = all_headers {
-                let to_log = crate::mcp::util::sanitize_headers_for_log(&hdrs);
-                info!(server_id = server.id, headers = ?to_log, "Fetching SSE capabilities with headers");
-                let mut header_map = HeaderMap::new();
-                for (k, v) in hdrs.iter() {
-                    if let (Ok(name), Ok(value)) =
-                        (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v.as_str()))
-                    {
-                        header_map.insert(name, value);
-                    }
-                }
-                let client = reqwest::Client::builder().default_headers(header_map).build()?;
-                SseClientTransport::start_with_client(
-                    client,
-                    rmcp::transport::sse_client::SseClientConfig {
-                        sse_endpoint: url.as_str().into(),
-                        ..Default::default()
-                    },
-                )
-                .await?
-            } else {
-                SseClientTransport::start(url.as_str()).await?
-            };
-
-            let client_info = ClientInfo {
-                protocol_version: Default::default(),
-                capabilities: ClientCapabilities::default(),
-                client_info: Implementation {
-                    name: "AIPP MCP SSE Client".to_string(),
-                    version: "0.1.0".to_string(),
-                    ..Default::default()
-                },
-            };
-            let client = client_info.serve(transport).await?;
-            Ok::<_, anyhow::Error>(client)
-        },
-    )
-    .await;
-
-    let client = match client_result {
-        Ok(Ok(client)) => client,
-        Ok(Err(e)) => {
-            return Err(format!("Failed to create MCP SSE client: {}", e));
-        }
-        Err(_) => {
-            return Err("Timeout while connecting to SSE server".to_string());
-        }
-    };
-
-    // 获取服务器信息
-    let _server_info = client.peer_info();
-
-    // 获取能力
-    let capabilities_result = tokio::time::timeout(CAPABILITY_TIMEOUT, async {
-        let (tools_result, resources_result, prompts_result) = tokio::join!(
-            client.list_all_tools(),
-            client.list_all_resources(),
-            client.list_all_prompts()
-        );
-        (tools_result, resources_result, prompts_result)
-    })
-    .await;
-
-    let (tools_result, resources_result, prompts_result) = match capabilities_result {
-        Ok(results) => results,
-        Err(_) => {
-            return Err("Timeout while getting SSE server capabilities".to_string());
-        }
-    };
-
-    let tools_simple = tools_result.ok().map(|tools| {
-        tools
-            .into_iter()
-            .map(|tool| SimpleTool {
-                name: tool.name.to_string(),
-                description: tool.description.as_ref().map(|d| d.to_string()),
-                params_json: serde_json::to_string(&tool.input_schema)
-                    .unwrap_or_else(|_| "{}".to_string()),
-            })
-            .collect::<Vec<_>>()
-    });
-    let resources_simple = resources_result.ok().map(|resources| {
-        resources
-            .into_iter()
-            .map(|r| SimpleResource {
-                uri: r.uri.to_string(),
-                name: r.name.to_string(),
-                mime_type: r.mime_type.as_deref().unwrap_or("unknown").to_string(),
-                description: r.description.as_ref().map(|d| d.to_string()),
-            })
-            .collect::<Vec<_>>()
-    });
-    let prompts_simple = prompts_result.ok().map(|prompts| {
-        prompts
-            .into_iter()
-            .map(|p| {
-                let args_json = if let Some(args) = p.arguments {
-                    serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
-                } else {
-                    "{}".to_string()
-                };
-                SimplePrompt {
-                    name: p.name.to_string(),
-                    description: p.description.as_ref().map(|d| d.to_string()),
-                    args_json,
-                }
-            })
-            .collect::<Vec<_>>()
-    });
-    persist_capability_sets(&db, server_id, "sse", tools_simple, resources_simple, prompts_simple)?;
-
-    // 取消客户端连接
-    let _ = client.cancel().await;
-
-    Ok(())
+    Err("SSE transport 已在当前 rmcp 版本移除，请改用 HTTP transport".to_string())
 }
 
 #[instrument(level = "debug", skip(app_handle, server), fields(server_id))]
@@ -945,6 +769,7 @@ async fn get_http_capabilities(
             };
 
             let client_info = ClientInfo {
+                meta: None,
                 protocol_version: Default::default(),
                 capabilities: ClientCapabilities::default(),
                 client_info: Implementation {
@@ -1147,6 +972,7 @@ pub async fn build_mcp_prompt(
         let server_with_tools = MCPServerWithTools {
             id: server.id,
             name: server.name,
+            summary: String::new(),
             command: server.command.clone(),
             is_enabled: server.is_enabled,
             tools: enabled_tools,
@@ -1163,6 +989,7 @@ pub async fn build_mcp_prompt(
     let mcp_info = crate::mcp::MCPInfoForAssistant {
         enabled_servers,
         use_native_toolcall: false, // For prompt generation, we use prompt-based mode
+        dynamic_loading_enabled: false,
     };
 
     // Use existing format_mcp_prompt function

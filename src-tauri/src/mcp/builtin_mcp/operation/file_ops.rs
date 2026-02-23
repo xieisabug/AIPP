@@ -112,11 +112,14 @@ impl FileOperations {
         }
 
         // 如果文件存在，检查是否已读取过（read-before-write 安全机制）
+        // 但对于当前会话中新建并写入过的文件，允许继续覆盖写入。
         if Path::new(path).exists() {
-            if !state.has_file_been_read(path).await {
+            let has_been_read = state.has_file_been_read(path).await;
+            let has_been_written = state.has_file_been_written(path).await;
+            if !has_been_read && !has_been_written {
                 return Err(format!(
                     "Safety check failed: You must read the file before overwriting it. \
-                    Use read_file to read '{}' first, or use write_file only for new files.",
+                    Use read_file to read '{}' first, or use write_file only for new/session-created files.",
                     path
                 ));
             }
@@ -134,6 +137,7 @@ impl FileOperations {
         let mut file = File::create(path).map_err(|e| format!("Failed to create file: {}", e))?;
         let bytes = request.content.as_bytes();
         file.write_all(bytes).map_err(|e| format!("Failed to write file: {}", e))?;
+        state.record_file_write(path).await;
 
         info!(path = %path, bytes = bytes.len(), "File written successfully");
 

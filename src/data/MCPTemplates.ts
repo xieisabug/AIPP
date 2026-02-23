@@ -23,19 +23,6 @@ export const MCP_QUICK_TEMPLATES: MCPTemplate[] = [
         }
     },
     {
-        id: 'sse',
-        name: 'SSE MCP',
-        description: '服务器发送事件MCP服务器',
-        category: 'Quick Start',
-        template: {
-            transport_type: 'sse',
-            url: 'http://localhost:3000/mcp',
-            is_long_running: true,
-            is_enabled: true,
-            timeout: 30000,
-        }
-    },
-    {
         id: 'http',
         name: 'HTTP MCP',
         description: 'HTTP协议MCP服务器',

@@ -66,7 +66,13 @@ impl ReactPreviewManager {
         component_code: String,
         component_name: String,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        self.create_preview_internal(component_code, component_name, PreviewMode::Window, None, None)
+        self.create_preview_internal(
+            component_code,
+            component_name,
+            PreviewMode::Window,
+            None,
+            None,
+        )
     }
 
     fn create_preview_internal(

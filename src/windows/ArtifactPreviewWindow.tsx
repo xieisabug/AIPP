@@ -955,7 +955,7 @@ export default function ArtifactPreviewWindow() {
                         </div>
                     ) : (
                         /* 预览视图 - 根据类型显示不同内容 */
-                        <div className="flex-1 flex flex-col">
+                        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
                             {previewType === 'mermaid' ? (
                                 /* Mermaid 图表预览 */
                                 <div className="flex-1 flex flex-col p-4">

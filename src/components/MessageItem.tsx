@@ -17,6 +17,7 @@ import { useAntiLeakage } from "../contexts/AntiLeakageContext";
 import { maskContent } from "../utils/antiLeakage";
 import { SubTaskList, SubTaskDetailDialog } from "./sub-task";
 import { SubTaskExecutionSummary } from "../data/SubTask";
+import type { InlineInteractionItem } from "./ConversationUI";
 
 interface MessageItemProps {
     message: Message;
@@ -31,6 +32,7 @@ interface MessageItemProps {
     conversationId?: number; // Add conversation_id context
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>; // Add MCP states
     isLastMessage?: boolean; // 防泄露模式：是否为最后一条消息
+    inlineInteractionItems?: InlineInteractionItem[];
 }
 
 const MessageItem = React.memo<MessageItemProps>(
@@ -47,6 +49,7 @@ const MessageItem = React.memo<MessageItemProps>(
         conversationId,
         mcpToolCallStates,
         isLastMessage = false,
+        inlineInteractionItems,
     }) => {
         // 防泄露模式
         const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
@@ -89,6 +92,7 @@ const MessageItem = React.memo<MessageItemProps>(
             conversationId,
             messageId: message.id,
             mcpToolCallStates,
+            inlineInteractionItems,
         });
 
         // 处理自定义标签解析
@@ -255,6 +259,7 @@ const MessageItem = React.memo<MessageItemProps>(
                     onToggleReasoningExpand={onToggleReasoningExpand}
                     conversationId={conversationId}
                     mcpToolCallStates={mcpToolCallStates}
+                    inlineInteractionItems={inlineInteractionItems}
                     useRawTextRenderer={shouldMaskContent}
                 />
             );
@@ -357,6 +362,8 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
 
     // Re-render when MCP tool call state map updates so tool status can refresh
     if (prevProps.mcpToolCallStates !== nextProps.mcpToolCallStates) return false;
+
+    if (prevProps.inlineInteractionItems !== nextProps.inlineInteractionItems) return false;
 
     // 防泄露模式：isLastMessage 变化时需要重新渲染
     if (prevProps.isLastMessage !== nextProps.isLastMessage) return false;

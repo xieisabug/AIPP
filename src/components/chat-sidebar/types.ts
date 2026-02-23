@@ -16,15 +16,21 @@ export interface CodeArtifact {
     id: string;
     language: string;
     code: string;
-    messageId: number;
+    messageId?: number;
     // Message index (1-based for display)
-    messageIndex: number;
+    messageIndex?: number;
     // Block index within the message (1-based for display)
-    blockIndex: number;
+    blockIndex?: number;
     // Meta title from code block (e.g., ```ts title="App.tsx")
     metaTitle?: string;
     // Computed display title
     title: string;
+    source?: 'inferred' | 'manifest';
+    artifactKey?: string;
+    entryFile?: string;
+    dbId?: string;
+    assistantId?: number;
+    updatedAt?: string;
 }
 
 export interface SearchResultItem {
@@ -37,7 +43,7 @@ export interface SearchResultItem {
 
 export interface ContextItem {
     id: string;
-    type: 'user_file' | 'read_file' | 'search' | 'list_directory' | 'other';
+    type: 'user_file' | 'read_file' | 'search' | 'list_directory' | 'loaded_mcp_tool' | 'other';
     name: string;
     // Optional details like file path, search query
     details?: string;
@@ -54,6 +60,16 @@ export interface ContextItem {
         type: 'Image' | 'Text' | 'PDF' | 'Word' | 'PowerPoint' | 'Excel' | string;
         content?: string; // base64 for images
         url?: string; // file path
+    };
+    loadedToolData?: {
+        loadedToolId: number;
+        toolId: number;
+        serverName: string;
+        toolName: string;
+        status: string;
+        invalidReason?: string;
+        description?: string;
+        parameters?: string;
     };
 }
 

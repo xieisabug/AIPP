@@ -5,12 +5,26 @@ import ChatUIToolbar from "../components/ChatUIToolbar";
 import ConversationList from "../components/ConversationList";
 import ChatUIInfomation from "../components/ChatUIInfomation";
 import ConversationSearchDialog from "../components/ConversationSearchDialog";
-import ConversationUI, { ConversationUIRef } from "../components/ConversationUI";
-import { AcpPermissionDialog, OperationPermissionDialog } from "../components/OperationPermissionDialog";
+import ConversationUI, {
+    ConversationUIRef,
+    type InlineInteractionItem,
+} from "../components/ConversationUI";
+import {
+    AcpPermissionDialog,
+    OperationPermissionDialog,
+} from "../components/OperationPermissionDialog";
+import {
+    AskUserQuestionCard,
+    PreviewFileCard,
+} from "../components/InlineInteractionCards";
 import { Conversation, ConversationSearchHit } from "../data/Conversation";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
-import { useAcpPermission, useOperationPermission } from "../hooks/useOperationPermission";
+import {
+    useAcpPermission,
+    useOperationPermission,
+} from "../hooks/useOperationPermission";
+import { useAskUserQuestion, usePreviewFile } from "../hooks/useInlineInteraction";
 import { useFeatureConfig } from "../hooks/feature/useFeatureConfig";
 import { AntiLeakageProvider } from "../contexts/AntiLeakageContext";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
@@ -52,6 +66,62 @@ function ChatUIWindow() {
     } = useAcpPermission({
         conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
     });
+    const {
+        pendingRequest: pendingAskUserRequest,
+        isDialogOpen: isAskUserDialogOpen,
+        viewMode: askUserViewMode,
+        completedAnswers: askUserCompletedAnswers,
+        readOnly: isAskUserReadOnly,
+        callId: askUserCallId,
+        messageId: askUserMessageId,
+        handleSubmit: handleAskUserSubmit,
+        handleCancel: handleAskUserCancel,
+    } = useAskUserQuestion({
+        conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
+    });
+    const {
+        pendingRequest: pendingPreviewFileRequest,
+        isDialogOpen: isPreviewFileDialogOpen,
+        callId: previewFileCallId,
+        messageId: previewFileMessageId,
+        handleOpenChange: handlePreviewFileOpenChange,
+    } = usePreviewFile({
+        conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
+    });
+    const inlineInteractionItems: InlineInteractionItem[] = [];
+    if (isAskUserDialogOpen && pendingAskUserRequest) {
+        inlineInteractionItems.push({
+            key: `ask-user-question-${pendingAskUserRequest.request_id}`,
+            callId: askUserCallId,
+            messageId: askUserMessageId,
+            content: (
+                <AskUserQuestionCard
+                    request={pendingAskUserRequest}
+                    isOpen={isAskUserDialogOpen}
+                    viewMode={askUserViewMode}
+                    completedAnswers={askUserCompletedAnswers}
+                    readOnly={isAskUserReadOnly}
+                    onSubmit={handleAskUserSubmit}
+                    onCancel={handleAskUserCancel}
+                />
+            ),
+        });
+    }
+    if (isPreviewFileDialogOpen && pendingPreviewFileRequest) {
+        inlineInteractionItems.push({
+            key: `preview-file-${pendingPreviewFileRequest.request_id}`,
+            callId: previewFileCallId,
+            messageId: previewFileMessageId,
+            content: (
+                <PreviewFileCard
+                    request={pendingPreviewFileRequest}
+                    isOpen={isPreviewFileDialogOpen}
+                    onOpenChange={handlePreviewFileOpenChange}
+                />
+            ),
+        });
+    }
+    const hasInlineInteraction = inlineInteractionItems.length > 0;
 
     // 移动端选择对话后自动关闭侧边栏
     const handleSelectConversation = useCallback(
@@ -282,6 +352,8 @@ function ChatUIWindow() {
                             onChangeConversationId={setSelectedConversation}
                             isMobile={true}
                             onConversationChange={handleConversationChange}
+                            inlineInteractionItems={inlineInteractionItems}
+                            inlineInteractionVisible={hasInlineInteraction}
                         />
                     </div>
 
@@ -328,6 +400,8 @@ function ChatUIWindow() {
                         pluginList={pluginList}
                         conversationId={selectedConversation}
                         onChangeConversationId={setSelectedConversation}
+                        inlineInteractionItems={inlineInteractionItems}
+                        inlineInteractionVisible={hasInlineInteraction}
                     />
                 </div>
 

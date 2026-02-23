@@ -1,13 +1,20 @@
+use crate::db::mcp_db::MCPDatabase;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use tracing::{debug, error, instrument};
 
 pub mod agent;
+pub mod interaction;
 pub mod operation;
 pub mod search;
 pub mod templates;
 
 pub use agent::{AgentHandler, TodoHandler, TodoState};
+pub use interaction::{
+    handle_preview_file_relay_request, prepare_preview_file_request_for_ui,
+    submit_ask_user_question_response, InteractionState, PreviewFileRelayState,
+    PREVIEW_FILE_RELAY_SCHEME,
+};
 pub use operation::{OperationHandler, OperationState};
 pub use search::SearchHandler;
 pub use templates::{
@@ -38,6 +45,290 @@ pub struct BuiltinExecutionResult {
     pub is_error: bool,
 }
 
+fn matches_keyword(value: &str, keyword: &str) -> bool {
+    value.to_lowercase().contains(&keyword.to_lowercase())
+}
+
+fn parse_tool_selector(selector: &str) -> (Option<String>, String) {
+    let trimmed = selector.trim();
+    if let Some((server_name, tool_name)) = trimmed.split_once("::") {
+        let server_name = server_name.trim();
+        let tool_name = tool_name.trim();
+        if !server_name.is_empty() && !tool_name.is_empty() {
+            return (Some(server_name.to_lowercase()), tool_name.to_string());
+        }
+    }
+    (None, trimmed.to_string())
+}
+
+fn parse_builtin_parameters(parameters: &str) -> Result<serde_json::Value, String> {
+    let trimmed = parameters.trim();
+    if trimmed.is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+
+    // Strict parse first (expected path).
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return Ok(value);
+    }
+
+    // Fallback: some providers append trailing garbage after a valid JSON object.
+    // Deserialize the first JSON value and ignore trailing characters.
+    let mut de = serde_json::Deserializer::from_str(trimmed);
+    match serde_json::Value::deserialize(&mut de) {
+        Ok(value) => {
+            debug!("Parsed builtin parameters with tolerant deserializer");
+            Ok(value)
+        }
+        Err(e) => {
+            error!(error = %e, "Invalid parameters JSON");
+            Err(format!("Invalid parameters: {}", e))
+        }
+    }
+}
+
+fn execute_dynamic_mcp_tool(
+    app_handle: &AppHandle,
+    tool_name: &str,
+    args: &serde_json::Value,
+    conversation_id: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    let db =
+        MCPDatabase::new(app_handle).map_err(|e| format!("Failed to open MCP database: {}", e))?;
+    let _ = db.rebuild_dynamic_mcp_catalog();
+
+    match tool_name {
+        "load_mcp_server" => {
+            let keyword = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Missing required parameter: name".to_string())?;
+            let catalogs = db
+                .list_server_capability_catalog()
+                .map_err(|e| format!("Failed to list MCP toolset catalog: {}", e))?;
+            let tool_catalog = db
+                .list_tool_catalog(None)
+                .map_err(|e| format!("Failed to list MCP tool catalog: {}", e))?;
+            let mut matched_servers = Vec::new();
+            for server in catalogs {
+                if server.summary_generated_at.is_none() {
+                    continue;
+                }
+                if !matches_keyword(&server.server_name, keyword)
+                    && !matches_keyword(&server.summary, keyword)
+                {
+                    continue;
+                }
+                let tools: Vec<serde_json::Value> = tool_catalog
+                    .iter()
+                    .filter(|tool| {
+                        tool.server_id == server.server_id
+                            && tool.server_enabled
+                            && tool.tool_enabled
+                            && tool.summary_generated_at.is_some()
+                            && tool.server_name != "MCP 动态加载工具"
+                    })
+                    .map(|tool| {
+                        serde_json::json!({
+                            "tool_name": tool.tool_name,
+                            "summary": tool.summary,
+                        })
+                    })
+                    .collect();
+                matched_servers.push(serde_json::json!({
+                    "toolset_id": server.server_id,
+                    "toolset_name": server.server_name,
+                    "server_id": server.server_id,
+                    "server_name": server.server_name,
+                    "summary": server.summary,
+                    "epoch": server.epoch,
+                    "tools": tools,
+                }));
+            }
+
+            if matched_servers.is_empty() {
+                Ok(serde_json::json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("No MCP toolset matched '{}'. Try another keyword.", keyword)
+                    }],
+                    "isError": true
+                }))
+            } else {
+                Ok(serde_json::json!({
+                    "content": [{
+                        "type": "json",
+                        "json": {
+                            "toolsets": matched_servers.clone(),
+                            "servers": matched_servers
+                        }
+                    }],
+                    "isError": false
+                }))
+            }
+        }
+        "load_mcp_tool" => {
+            let names = if let Some(values) = args.get("names").and_then(|v| v.as_array()) {
+                values
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+            } else if let Some(single) = args.get("name").and_then(|v| v.as_str()) {
+                vec![single.to_string()]
+            } else {
+                Vec::new()
+            };
+            if names.is_empty() {
+                return Err("Missing required parameter: names".to_string());
+            }
+            let conversation_id =
+                conversation_id.ok_or_else(|| "load_mcp_tool requires conversation context".to_string())?;
+            let server_filter =
+                args.get("server_name").and_then(|v| v.as_str()).map(|v| v.to_lowercase());
+            let tool_catalog = db
+                .list_tool_catalog(None)
+                .map_err(|e| format!("Failed to list MCP tool catalog: {}", e))?;
+            let mut selected = Vec::new();
+            let mut selected_ids = std::collections::HashSet::new();
+
+            for keyword in &names {
+                let (name_server_filter, name_keyword) = parse_tool_selector(keyword);
+                if name_keyword.is_empty() {
+                    continue;
+                }
+                for tool in &tool_catalog {
+                    if !tool.server_enabled || !tool.tool_enabled {
+                        continue;
+                    }
+                    if tool.summary_generated_at.is_none() {
+                        continue;
+                    }
+                    if tool.server_name == "MCP 动态加载工具" {
+                        continue;
+                    }
+                    if let Some(filter) = &server_filter {
+                        if !matches_keyword(&tool.server_name, filter) {
+                            continue;
+                        }
+                    }
+                    if let Some(filter) = &name_server_filter {
+                        if !matches_keyword(&tool.server_name, filter) {
+                            continue;
+                        }
+                    }
+                    let matched = if name_server_filter.is_some() {
+                        matches_keyword(&tool.tool_name, &name_keyword)
+                    } else {
+                        matches_keyword(&tool.tool_name, &name_keyword)
+                            || matches_keyword(&tool.summary, &name_keyword)
+                            || matches_keyword(&tool.server_name, &name_keyword)
+                    };
+                    if !matched {
+                        continue;
+                    }
+                    if selected_ids.insert(tool.tool_id) {
+                        selected.push(tool.clone());
+                    }
+                }
+            }
+
+            if selected.is_empty() {
+                Ok(serde_json::json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("No MCP tool matched {:?}. Try more specific keywords.", names)
+                    }],
+                    "isError": true
+                }))
+            } else {
+                let mut server_ids = Vec::new();
+                let mut seen_server_ids = std::collections::HashSet::new();
+                for tool in &selected {
+                    if seen_server_ids.insert(tool.server_id) {
+                        server_ids.push(tool.server_id);
+                    }
+                }
+                let mut tool_definition_map: std::collections::HashMap<i64, (String, String, bool)> =
+                    std::collections::HashMap::new();
+                if !server_ids.is_empty() {
+                    let server_tool_pairs = db
+                        .get_mcp_servers_with_tools_by_ids(&server_ids)
+                        .map_err(|e| format!("Failed to load MCP tool definitions: {}", e))?;
+                    for (_server, tools) in server_tool_pairs {
+                        for actual_tool in tools {
+                            if actual_tool.is_enabled {
+                                tool_definition_map.insert(
+                                    actual_tool.id,
+                                    (
+                                        actual_tool.tool_description.unwrap_or_default(),
+                                        actual_tool.parameters.unwrap_or_else(|| "{}".to_string()),
+                                        actual_tool.is_auto_run,
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+                let mut loaded = Vec::new();
+                for tool in &selected {
+                    db.upsert_conversation_loaded_tool(conversation_id, tool.tool_id, Some("manual"))
+                        .map_err(|e| {
+                            format!("Failed to persist loaded tool {}: {}", tool.tool_name, e)
+                        })?;
+                    let (description, parameters_json, is_auto_run) = tool_definition_map
+                        .get(&tool.tool_id)
+                        .cloned()
+                        .unwrap_or_else(|| (String::new(), "{}".to_string(), false));
+                    let resolved_description = if description.trim().is_empty() {
+                        tool.summary.clone()
+                    } else {
+                        description
+                    };
+                    let parameters_schema = serde_json::from_str::<serde_json::Value>(&parameters_json)
+                        .unwrap_or_else(|_| {
+                            serde_json::json!({
+                                "type": "object",
+                                "additionalProperties": true
+                            })
+                        });
+                    loaded.push(serde_json::json!({
+                        "tool_id": tool.tool_id,
+                        "toolset_name": tool.server_name,
+                        "server_name": tool.server_name,
+                        "tool_name": tool.tool_name,
+                        "summary": tool.summary,
+                        "description": resolved_description.clone(),
+                        "parameters": parameters_schema.clone(),
+                        "parameters_json": parameters_json,
+                        "is_auto_run": is_auto_run,
+                        "tool_definition": {
+                            "server_name": tool.server_name,
+                            "tool_name": tool.tool_name,
+                            "description": resolved_description,
+                            "parameters": parameters_schema
+                        }
+                    }));
+                }
+                Ok(serde_json::json!({
+                    "content": [{
+                        "type": "json",
+                        "json": {
+                            "loaded_count": loaded.len(),
+                            "loaded_tools": loaded
+                        }
+                    }],
+                    "isError": false
+                }))
+            }
+        }
+        _ => Ok(serde_json::json!({
+            "content": [{"type": "text", "text": format!("Unknown dynamic_mcp tool: {}", tool_name)}],
+            "isError": true
+        })),
+    }
+}
+
 #[tauri::command]
 #[instrument(skip(app_handle, parameters), fields(command = %server_command, tool = %tool_name))]
 pub async fn execute_aipp_builtin_tool(
@@ -49,10 +340,7 @@ pub async fn execute_aipp_builtin_tool(
 ) -> Result<String, String> {
     use search::types::{SearchRequest, SearchResponse, SearchResultType};
 
-    let args: serde_json::Value = serde_json::from_str(&parameters).map_err(|e| {
-        error!(error = %e, "Invalid parameters JSON");
-        format!("Invalid parameters: {}", e)
-    })?;
+    let args = parse_builtin_parameters(&parameters)?;
 
     let cmd_id = builtin_command_id(&server_command).ok_or("Not a builtin command")?;
 
@@ -385,6 +673,136 @@ pub async fn execute_aipp_builtin_tool(
                 }),
             }
         }
+        "artifact" => {
+            use crate::artifacts::workspace::{
+                get_artifact_workspace, show_artifact, ShowArtifactRequest,
+            };
+
+            let resolved_conversation_id = args
+                .get("conversation_id")
+                .and_then(|v| v.as_i64())
+                .or(conversation_id)
+                .ok_or_else(|| "Artifact tools require conversation context".to_string())?;
+
+            match tool_name.as_str() {
+                "get_artifact_workspace" => {
+                    match get_artifact_workspace(&app_handle, resolved_conversation_id) {
+                        Ok(response) => serde_json::json!({
+                            "content": [{"type": "json", "json": response}],
+                            "isError": false
+                        }),
+                        Err(e) => {
+                            error!(error = %e, "get_artifact_workspace tool execution failed");
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": e}],
+                                "isError": true
+                            })
+                        }
+                    }
+                }
+                "show_artifact" => {
+                    let artifact_key = args
+                        .get("artifact_key")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing required parameter: artifact_key".to_string())?;
+                    let entry_file = args
+                        .get("entry_file")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing required parameter: entry_file".to_string())?;
+                    let request = ShowArtifactRequest {
+                        conversation_id: resolved_conversation_id,
+                        artifact_key: artifact_key.to_string(),
+                        entry_file: entry_file.to_string(),
+                        title: args.get("title").and_then(|v| v.as_str()).map(|v| v.to_string()),
+                        language: args
+                            .get("language")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                        preview_type: args
+                            .get("preview_type")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                        db_id: args.get("db_id").and_then(|v| v.as_str()).map(|v| v.to_string()),
+                        assistant_id: args.get("assistant_id").and_then(|v| v.as_i64()),
+                    };
+                    match show_artifact(&app_handle, request) {
+                        Ok(response) => serde_json::json!({
+                            "content": [{"type": "json", "json": response}],
+                            "isError": false
+                        }),
+                        Err(e) => {
+                            error!(error = %e, "show_artifact tool execution failed");
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": e}],
+                                "isError": true
+                            })
+                        }
+                    }
+                }
+                _ => serde_json::json!({
+                    "content": [{"type": "text", "text": format!("Unknown artifact tool: {}", tool_name)}],
+                    "isError": true
+                }),
+            }
+        }
+        "dynamic_mcp" => execute_dynamic_mcp_tool(&app_handle, &tool_name, &args, conversation_id)?,
+        "ui_interaction" => match tool_name.as_str() {
+            "ask_user_question" => {
+                use interaction::{request_ask_user_question, AskUserQuestionRequest};
+
+                let request: AskUserQuestionRequest = serde_json::from_value(args.clone())
+                    .map_err(|e| format!("Invalid AskUserQuestion parameters: {}", e))?;
+
+                let state = app_handle
+                    .try_state::<InteractionState>()
+                    .ok_or_else(|| "InteractionState not found".to_string())?;
+
+                match request_ask_user_question(
+                    &app_handle,
+                    state.inner(),
+                    conversation_id,
+                    request,
+                )
+                .await
+                {
+                    Ok(answers) => serde_json::json!({
+                        "content": [{"type": "json", "json": {"answers": answers}}],
+                        "isError": false
+                    }),
+                    Err(e) => {
+                        error!(error = %e, "AskUserQuestion tool execution failed");
+                        serde_json::json!({
+                            "content": [{"type": "text", "text": e}],
+                            "isError": true
+                        })
+                    }
+                }
+            }
+            "preview_file" => {
+                use interaction::{emit_preview_file_request, PreviewFileRequest};
+
+                let request: PreviewFileRequest = serde_json::from_value(args.clone())
+                    .map_err(|e| format!("Invalid PreviewFile parameters: {}", e))?;
+
+                match emit_preview_file_request(&app_handle, conversation_id, request) {
+                    Ok(request_id) => serde_json::json!({
+                        "content": [{"type": "json", "json": {"status": "preview_shown", "request_id": request_id}}],
+                        "isError": false
+                    }),
+                    Err(e) => {
+                        error!(error = %e, "PreviewFile tool execution failed");
+                        serde_json::json!({
+                            "content": [{"type": "text", "text": e}],
+                            "isError": true
+                        })
+                    }
+                }
+            }
+            _ => serde_json::json!({
+                "content": [{"type": "text", "text": format!("Unknown ui_interaction tool: {}", tool_name)}],
+                "isError": true
+            }),
+        },
         "agent" => {
             use agent::types::*;
 
@@ -453,8 +871,8 @@ pub async fn execute_aipp_builtin_tool(
                     }
                 }
                 "todo_write" => {
-                    use agent::todo::{TodoHandler, TodoItem, TodoState, TodoWriteRequest};
                     use crate::api::todo_api::{emit_todo_update, TodoItemResponse};
+                    use agent::todo::{TodoHandler, TodoItem, TodoState, TodoWriteRequest};
 
                     // Get TodoState from app state (must use the managed state)
                     let state = app_handle
@@ -522,6 +940,9 @@ pub async fn execute_aipp_builtin_tool(
                             })
                         }
                     }
+                }
+                "load_mcp_server" | "load_mcp_tool" => {
+                    execute_dynamic_mcp_tool(&app_handle, &tool_name, &args, conversation_id)?
                 }
                 _ => serde_json::json!({
                     "content": [{"type": "text", "text": format!("Unknown agent tool: {}", tool_name)}],

@@ -276,13 +276,16 @@ pub async fn detect_and_process_mcp_calls(
                         if let Ok(repository) = conversation_db.conversation_repo() {
                             if let Ok(Some(conversation)) = repository.read(conversation_id) {
                                 if let Some(assistant_id) = conversation.assistant_id {
-                                    match crate::api::assistant_api::get_assistant_mcp_servers_with_tools(
-                                        app_handle.clone(),
+                                    match crate::mcp::collect_mcp_info_for_assistant(
+                                        app_handle,
                                         assistant_id,
+                                        None,
+                                        None,
                                     )
                                     .await
                                     {
-                                        Ok(servers_with_tools) => {
+                                        Ok(mcp_info) => {
+                                            let servers_with_tools = mcp_info.enabled_servers;
                                             let mut should_auto_run = false;
                                             for s in servers_with_tools.iter() {
                                                 // 支持精确匹配和清理后名称匹配
@@ -333,7 +336,7 @@ pub async fn detect_and_process_mcp_calls(
                                             }
                                         }
                                         Err(e) => {
-                                            warn!(error = %e, "Failed to load assistant MCP configs for auto-run");
+                                            warn!(error = %e, "Failed to load MCP configs for auto-run");
                                         }
                                     }
                                 }

@@ -1,5 +1,7 @@
 use super::browser::BrowserManager;
-use super::chromiumoxide::{cleanup_profile_locks, BrowserPool, BrowserPoolConfig, ContentFetcher, FetchConfig};
+use super::chromiumoxide::{
+    cleanup_profile_locks, BrowserPool, BrowserPoolConfig, ContentFetcher, FetchConfig,
+};
 use super::engine_manager::{SearchEngine, SearchEngineManager};
 use super::engines::base::SearchEngineBase;
 use super::fingerprint::FingerprintManager;
@@ -8,6 +10,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::time::Instant;
 use tauri::AppHandle;
 use tauri::Manager;
 use tokio::sync::OnceCell;
@@ -50,6 +53,11 @@ fn resolve_search_user_data_dir(
     Ok(base.join("chromiumoxide_profile"))
 }
 
+fn is_timeout_like(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("timeout") || lower.contains("timed out") || error.contains("超时")
+}
+
 #[derive(Clone)]
 pub struct SearchHandler {
     app_handle: AppHandle,
@@ -74,16 +82,12 @@ impl SearchHandler {
             return Ok(None);
         }
 
-        let browser_manager =
-            BrowserManager::new(config.get("BROWSER_TYPE").map(|s| s.as_str()));
+        let browser_manager = BrowserManager::new(None);
         let browser_path = browser_manager.get_browser_path()?;
 
         let user_data_dir = resolve_search_user_data_dir(&self.app_handle, &config)?;
         let pool_config = BrowserPoolConfig {
-            max_pages: config
-                .get("MAX_CONCURRENT_PAGES")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(5), // 默认最多5个并发页面
+            max_pages: config.get("MAX_CONCURRENT_PAGES").and_then(|v| v.parse().ok()).unwrap_or(5), // 默认最多5个并发页面
             page_idle_timeout_secs: config
                 .get("PAGE_IDLE_TIMEOUT_SECS")
                 .and_then(|v| v.parse().ok())
@@ -98,9 +102,9 @@ impl SearchHandler {
         };
 
         let pool = GLOBAL_BROWSER_POOL
-            .get_or_try_init(|| async move {
-                Ok::<BrowserPool, String>(BrowserPool::new(pool_config))
-            })
+            .get_or_try_init(
+                || async move { Ok::<BrowserPool, String>(BrowserPool::new(pool_config)) },
+            )
             .await?;
 
         Ok(Some(pool.clone()))
@@ -112,10 +116,11 @@ impl SearchHandler {
         &self,
         request: SearchRequest,
     ) -> Result<SearchResponse, String> {
+        let start = Instant::now();
         debug!("Starting web search");
 
         let config = self.load_search_config()?;
-        let browser_manager = BrowserManager::new(config.get("BROWSER_TYPE").map(|s| s.as_str()));
+        let browser_manager = BrowserManager::new(None);
         let engine_manager =
             SearchEngineManager::new(config.get("SEARCH_ENGINE").map(|s| s.as_str()));
 
@@ -133,7 +138,14 @@ impl SearchHandler {
                 self.process_html_by_type(html, &request, &search_engine)
             }
             Err(e) => {
-                error!(error = %e, engine = search_engine.as_str(), "Search failed");
+                let timeout_like = is_timeout_like(&e);
+                error!(
+                    error = %e,
+                    engine = search_engine.as_str(),
+                    timeout_like,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "Search failed"
+                );
                 Err(format!("Search failed: {}", e))
             }
         }
@@ -147,16 +159,48 @@ impl SearchHandler {
         browser_manager: &BrowserManager,
         config: &std::collections::HashMap<String, String>,
     ) -> Result<String, String> {
+        let start = Instant::now();
         let fetch_config =
             self.build_fetch_config(config, &SearchEngineManager::new(None), search_engine)?;
+        debug!(
+            engine = search_engine.as_str(),
+            wait_timeout_ms = fetch_config.wait_timeout_ms,
+            wait_poll_ms = fetch_config.wait_poll_ms,
+            headless = fetch_config.headless,
+            has_proxy =
+                fetch_config.proxy_server.as_ref().map(|p| !p.trim().is_empty()).unwrap_or(false),
+            "Search fetch config prepared"
+        );
         let mut fetcher = ContentFetcher::new(self.app_handle.clone(), fetch_config);
 
         // 获取浏览器池
         let browser_pool = self.get_or_create_browser_pool().await?;
 
-        fetcher
+        match fetcher
             .fetch_search_content(query, search_engine, browser_manager, browser_pool.as_ref())
             .await
+        {
+            Ok(html) => {
+                debug!(
+                    engine = search_engine.as_str(),
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    bytes = html.len(),
+                    "Search HTML fetched"
+                );
+                Ok(html)
+            }
+            Err(e) => {
+                let timeout_like = is_timeout_like(&e);
+                error!(
+                    error = %e,
+                    engine = search_engine.as_str(),
+                    timeout_like,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "Search HTML fetch failed"
+                );
+                Err(e)
+            }
+        }
     }
 
     /// 根据结果类型处理HTML
@@ -228,10 +272,11 @@ impl SearchHandler {
         url: &str,
         result_type: &str,
     ) -> Result<String, String> {
+        let start = Instant::now();
         debug!("Fetching URL with type");
 
         let config = self.load_search_config()?;
-        let browser_manager = BrowserManager::new(config.get("BROWSER_TYPE").map(|s| s.as_str()));
+        let browser_manager = BrowserManager::new(None);
 
         let fetch_config = self.build_general_fetch_config(&config)?;
         let mut fetcher = ContentFetcher::new(self.app_handle.clone(), fetch_config);
@@ -239,10 +284,7 @@ impl SearchHandler {
         // 获取浏览器池
         let browser_pool = self.get_or_create_browser_pool().await?;
 
-        match fetcher
-            .fetch_content(url, &browser_manager, browser_pool.as_ref())
-            .await
-        {
+        match fetcher.fetch_content(url, &browser_manager, browser_pool.as_ref()).await {
             Ok(html) => {
                 info!("Successfully fetched URL content, bytes = {}", html.len());
 
@@ -255,7 +297,13 @@ impl SearchHandler {
                 }
             }
             Err(e) => {
-                error!(error = %e, "Failed to fetch URL");
+                let timeout_like = is_timeout_like(&e);
+                error!(
+                    error = %e,
+                    timeout_like,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "Failed to fetch URL"
+                );
                 Err(format!("Failed to fetch URL: {}", e))
             }
         }
@@ -344,8 +392,7 @@ fn load_search_config_from_db(app_handle: &AppHandle) -> Result<HashMap<String, 
         .map_err(|e| format!("Database prepare error: {}", e))?;
 
     let env_text: Option<String> =
-        stmt.query_row(["aipp:search"], |row| row.get::<_, Option<String>>(0))
-            .unwrap_or(None);
+        stmt.query_row(["aipp:search"], |row| row.get::<_, Option<String>>(0)).unwrap_or(None);
     let mut config = HashMap::new();
     if let Some(text) = env_text {
         for line in text.lines() {
@@ -357,6 +404,12 @@ fn load_search_config_from_db(app_handle: &AppHandle) -> Result<HashMap<String, 
                 config.insert(k.trim().to_string(), v.trim().to_string());
             }
         }
+    }
+    if let Some(legacy_browser_type) = config.remove("BROWSER_TYPE") {
+        warn!(
+            browser_type = %legacy_browser_type,
+            "Ignoring deprecated BROWSER_TYPE config in chromiumoxide mode"
+        );
     }
     debug!(?config, "Loaded search config");
     Ok(config)

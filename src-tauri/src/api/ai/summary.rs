@@ -50,9 +50,10 @@ pub(crate) fn get_latest_branch_messages(
         if let Some(parent_group_id) = &msg.parent_group_id {
             let resolved_parent = resolve_group(&group_replacement, parent_group_id);
 
-            if let Some(first_index) = result.iter().position(|m| {
-                m.generation_group_id.as_deref() == Some(resolved_parent.as_str())
-            }) {
+            if let Some(first_index) = result
+                .iter()
+                .position(|m| m.generation_group_id.as_deref() == Some(resolved_parent.as_str()))
+            {
                 // 记录替换关系：被截断的 group -> 新 group
                 let replaced_group = resolved_parent.clone();
                 result.truncate(first_index);

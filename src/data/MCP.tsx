@@ -2,7 +2,7 @@ export interface MCPServer {
     id: number;
     name: string;
     description: string | null;
-    transport_type: string; // 'stdio' | 'sse' | 'http' | 'builtin'
+    transport_type: string; // 'stdio' | 'http' | 'builtin'
     command: string | null;
     environment_variables: string | null;
     headers?: string | null; // JSON string of custom headers
@@ -70,21 +70,16 @@ export interface MCPTransportConfig {
         command: string[];
         environment_variables?: Record<string, string>;
     };
-    sse?: {
-        url: string;
-        headers?: Record<string, string>;
-    };
     http?: {
         url: string;
         headers?: Record<string, string>;
     };
 }
 
-export type MCPTransportType = 'stdio' | 'sse' | 'http';
+export type MCPTransportType = 'stdio' | 'http';
 
 export const MCP_TRANSPORT_TYPES: { value: MCPTransportType; label: string }[] = [
     { value: 'stdio', label: 'Stdio' },
-    { value: 'sse', label: 'SSE (Server-Sent Events)' },
     { value: 'http', label: 'HTTP' },
     // { value: 'builtin', label: '内置工具' }, // Removed builtin transport option
 ];

@@ -1,5 +1,7 @@
 use crate::api::ai::config::{calculate_retry_delay, get_retry_attempts_from_config};
-use crate::api::ai::events::{ActivityFocus, ConversationEvent, MessageAddEvent, MessageUpdateEvent};
+use crate::api::ai::events::{
+    ActivityFocus, ConversationEvent, MessageAddEvent, MessageUpdateEvent,
+};
 use crate::api::ai::types::McpOverrideConfig;
 use crate::api::ai_api::{resolve_tool_name, sanitize_tool_name, ToolNameMapping};
 use crate::db::assistant_db::Assistant;
@@ -70,15 +72,10 @@ fn extract_http_error_details(error: &genai::Error) -> HttpErrorDetails {
             }
         }
         // WebStream 错误
-        genai::Error::WebStream { model_iden, cause } => {
+        genai::Error::WebStream { model_iden, cause, .. } => {
             details.endpoint = Some(format!("{:?}", model_iden));
             // 尝试从 cause 字符串中解析状态码
             parse_status_from_string(cause, &mut details);
-        }
-        // ReqwestEventSource 错误
-        genai::Error::ReqwestEventSource(es_error) => {
-            let error_str = format!("{:?}", es_error);
-            parse_status_from_string(&error_str, &mut details);
         }
         _ => {
             // 对于其他错误，尝试从错误字符串解析
@@ -103,7 +100,7 @@ fn extract_webc_error_details(webc_error: &genai::webc::Error, details: &mut Htt
                 }
             }
         }
-        genai::webc::Error::ResponseFailedNotJson { content_type } => {
+        genai::webc::Error::ResponseFailedNotJson { content_type, .. } => {
             details.response_body =
                 Some(format!("响应不是有效的 JSON，Content-Type: {}", content_type));
         }
@@ -420,6 +417,10 @@ fn persist_and_emit_update(
     Ok(())
 }
 
+fn normalize_tool_arguments_json(arguments: &serde_json::Value) -> String {
+    if arguments.is_object() { arguments.to_string() } else { "{}".to_string() }
+}
+
 /// 统一处理捕获到的工具调用：创建DB记录、插入UI注释、更新消息、可选自动执行、可选向UI发事件
 async fn handle_captured_tool_calls_common(
     app_handle: &tauri::AppHandle,
@@ -449,7 +450,19 @@ async fn handle_captured_tool_calls_common(
     for tool_call in captured_tool_calls {
         // 使用映射表还原原始名称，用于 UI 显示和数据库记录
         let (server_name, tool_name) = resolve_tool_name(&tool_call.fn_name, tool_name_mapping);
-        let params_str = tool_call.fn_arguments.to_string();
+        let raw_params_str = tool_call.fn_arguments.to_string();
+        let params_str = normalize_tool_arguments_json(&tool_call.fn_arguments);
+        info!(
+            conversation_id,
+            response_message_id,
+            llm_call_id = %tool_call.call_id,
+            fn_name = %tool_call.fn_name,
+            server_name = %server_name,
+            tool_name = %tool_name,
+            raw_arguments = %raw_params_str,
+            normalized_arguments = %params_str,
+            "captured native tool call"
+        );
 
         // 创建工具调用记录（使用原始名称）
         match crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
@@ -520,13 +533,15 @@ async fn handle_captured_tool_calls_common(
                     .read(conversation_id)
                 {
                     if let Some(assistant_id) = conv.and_then(|c| c.assistant_id) {
-                        if let Ok(servers) =
-                            crate::api::assistant_api::get_assistant_mcp_servers_with_tools(
-                                app_handle.clone(),
-                                assistant_id,
-                            )
-                            .await
+                        if let Ok(mcp_info) = crate::mcp::collect_mcp_info_for_assistant(
+                            app_handle,
+                            assistant_id,
+                            None,
+                            None,
+                        )
+                        .await
                         {
+                            let servers = mcp_info.enabled_servers;
                             let mut should_auto_run = false;
                             for s in servers.iter() {
                                 // 支持精确匹配和清理后名称匹配
@@ -634,7 +649,19 @@ async fn handle_captured_tool_calls_concurrent(
         // 使用映射表还原原始名称，用于 UI 显示和数据库记录
         let (server_name, tool_name) =
             crate::api::ai_api::resolve_tool_name(&tool_call.fn_name, tool_name_mapping);
-        let params_str = tool_call.fn_arguments.to_string();
+        let raw_params_str = tool_call.fn_arguments.to_string();
+        let params_str = normalize_tool_arguments_json(&tool_call.fn_arguments);
+        info!(
+            conversation_id,
+            response_message_id,
+            llm_call_id = %tool_call.call_id,
+            fn_name = %tool_call.fn_name,
+            server_name = %server_name,
+            tool_name = %tool_name,
+            raw_arguments = %raw_params_str,
+            normalized_arguments = %params_str,
+            "captured native tool call"
+        );
 
         // 创建工具调用记录（使用原始名称）
         match crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
@@ -650,7 +677,11 @@ async fn handle_captured_tool_calls_concurrent(
         .await
         {
             Ok(tool_call_record) => {
-                tool_call_records.push((tool_call_record.id, server_name.clone(), tool_name.clone()));
+                tool_call_records.push((
+                    tool_call_record.id,
+                    server_name.clone(),
+                    tool_name.clone(),
+                ));
                 all_tool_call_ids.push(tool_call_record.id);
 
                 // 追加 UI hint（使用原始名称）
@@ -715,13 +746,11 @@ async fn handle_captured_tool_calls_concurrent(
         .read(conversation_id)
     {
         if let Some(assistant_id) = conv.and_then(|c| c.assistant_id) {
-            if let Ok(servers) =
-                crate::api::assistant_api::get_assistant_mcp_servers_with_tools(
-                    app_handle.clone(),
-                    assistant_id,
-                )
-                .await
+            if let Ok(mcp_info) =
+                crate::mcp::collect_mcp_info_for_assistant(app_handle, assistant_id, None, None)
+                    .await
             {
+                let servers = mcp_info.enabled_servers;
                 for (call_id, server_name, tool_name) in &tool_call_records {
                     let mut should_auto_run = false;
                     for s in servers.iter() {
@@ -733,16 +762,13 @@ async fn handle_captured_tool_calls_concurrent(
                             {
                                 let tool_key = format!("{}/{}", server_name, tool_name);
                                 let auto_run = if let Some(all_auto_run) =
-                                    mcp_override_config
-                                        .and_then(|config| config.all_tool_auto_run)
+                                    mcp_override_config.and_then(|config| config.all_tool_auto_run)
                                 {
                                     all_auto_run
                                 } else {
                                     *mcp_override_config
                                         .and_then(|config| config.tool_auto_run.as_ref())
-                                        .and_then(|auto_run_map| {
-                                            auto_run_map.get(&tool_key)
-                                        })
+                                        .and_then(|auto_run_map| auto_run_map.get(&tool_key))
                                         .unwrap_or(&t.is_auto_run)
                                 };
 
@@ -1642,9 +1668,8 @@ async fn attempt_stream_chat(
 
     debug!("stream chat_request messages");
     for (i, msg) in chat_request.messages.iter().enumerate() {
-        let preview = msg.content.first_text().map(|text| {
-            text.chars().take(60).collect::<String>()
-        });
+        let preview =
+            msg.content.first_text().map(|text| text.chars().take(60).collect::<String>());
         let tool_calls_count = msg.content.tool_calls().len();
         debug!(
             message_index = i,
@@ -1663,7 +1688,12 @@ async fn attempt_stream_chat(
                     let tool_calls = msg.content.tool_calls();
                     debug!(tool_calls_count = tool_calls.len(), "assistant tool calls");
                     for tc in tool_calls {
-                        debug!(call_id = %tc.call_id, fn_name = %tc.fn_name, "tool call item");
+                        info!(
+                            call_id = %tc.call_id,
+                            fn_name = %tc.fn_name,
+                            fn_arguments = %tc.fn_arguments,
+                            "chat request assistant tool call"
+                        );
                     }
                 } else {
                     debug!("assistant content other type");
@@ -1908,6 +1938,9 @@ async fn attempt_stream_chat(
                             );
                         }
                     }
+                    ChatStreamEvent::ThoughtSignatureChunk(thought_chunk) => {
+                        debug!(?thought_chunk, "thought signature chunk");
+                    }
                     ChatStreamEvent::ToolCallChunk(tool_call_chunk) => {
                         debug!(?tool_call_chunk, "tool call chunk");
                     }
@@ -2108,18 +2141,19 @@ async fn attempt_stream_chat(
                             }
                             if let Some(msg_id) = response_message_id {
                                 // 使用并发处理函数，返回 (所有工具ID, 需要执行的工具ID)
-                                if let Ok((_all_ids, exec_ids)) = handle_captured_tool_calls_concurrent(
-                                    &app_handle,
-                                    &conversation_db,
-                                    &window,
-                                    conversation_id,
-                                    msg_id,
-                                    &captured_tool_calls,
-                                    &mut response_content,
-                                    mcp_override_config.as_ref(),
-                                    &tool_name_mapping,
-                                )
-                                .await
+                                if let Ok((_all_ids, exec_ids)) =
+                                    handle_captured_tool_calls_concurrent(
+                                        &app_handle,
+                                        &conversation_db,
+                                        &window,
+                                        conversation_id,
+                                        msg_id,
+                                        &captured_tool_calls,
+                                        &mut response_content,
+                                        mcp_override_config.as_ref(),
+                                        &tool_name_mapping,
+                                    )
+                                    .await
                                 {
                                     // 批量续写：所有工具执行完成后统一触发
                                     if !exec_ids.is_empty() {
@@ -2128,7 +2162,8 @@ async fn attempt_stream_chat(
                                             "triggering batch continuation after concurrent tool execution"
                                         );
                                         let state = app_handle.state::<crate::AppState>();
-                                        let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+                                        let feature_config_state =
+                                            app_handle.state::<crate::FeatureConfigState>();
                                         if let Err(e) = crate::mcp::execution_api::trigger_conversation_continuation_batch(
                                             &app_handle,
                                             state,
@@ -2303,9 +2338,7 @@ async fn attempt_stream_chat(
                         {
                             let current_focus = activity_manager.get_focus(conversation_id).await;
                             if !matches!(current_focus, ActivityFocus::McpExecuting { .. }) {
-                                activity_manager
-                                    .clear_focus(&app_handle, conversation_id)
-                                    .await;
+                                activity_manager.clear_focus(&app_handle, conversation_id).await;
                             } else {
                                 debug!(
                                     conversation_id = conversation_id,
@@ -2322,7 +2355,26 @@ async fn attempt_stream_chat(
                 let _user_friendly_error = enhanced_error_logging_v2(&e, "Stream Processing").await;
                 return Err(anyhow::anyhow!("Stream processing failed: {}", e));
             }
-            None => break,
+            None => {
+                error!(
+                    conversation_id,
+                    current_output_type = ?current_output_type,
+                    response_chunks = response_chunk_count,
+                    response_chars = response_char_count,
+                    reasoning_chunks = reasoning_chunk_count,
+                    reasoning_chars = reasoning_char_count,
+                    captured_tool_calls = captured_tool_calls.len(),
+                    has_response_message = response_message_id.is_some(),
+                    has_reasoning_message = reasoning_message_id.is_some(),
+                    "stream closed unexpectedly without End event"
+                );
+                return Err(anyhow::anyhow!(
+                    "Stream ended unexpectedly without End event (response_chunks={}, reasoning_chunks={}, captured_tool_calls={})",
+                    response_chunk_count,
+                    reasoning_chunk_count,
+                    captured_tool_calls.len()
+                ));
+            }
         }
     }
 
@@ -2439,9 +2491,8 @@ pub async fn handle_non_stream_chat(
 
     debug!("non_stream chat_request messages");
     for (i, msg) in chat_request.messages.iter().enumerate() {
-        let preview = msg.content.first_text().map(|text| {
-            text.chars().take(60).collect::<String>()
-        });
+        let preview =
+            msg.content.first_text().map(|text| text.chars().take(60).collect::<String>());
         let tool_calls_count = msg.content.tool_calls().len();
         debug!(
             message_index = i,
@@ -2460,7 +2511,12 @@ pub async fn handle_non_stream_chat(
                     let tool_calls = msg.content.tool_calls();
                     debug!(tool_calls_count = tool_calls.len(), "assistant tool calls non stream");
                     for tc in tool_calls {
-                        debug!(call_id = %tc.call_id, fn_name = %tc.fn_name, "tool call item non stream");
+                        info!(
+                            call_id = %tc.call_id,
+                            fn_name = %tc.fn_name,
+                            fn_arguments = %tc.fn_arguments,
+                            "chat request assistant tool call non stream"
+                        );
                     }
                 } else {
                     debug!("assistant content other type non stream");
@@ -2502,9 +2558,7 @@ pub async fn handle_non_stream_chat(
                     res = client.exec_chat(model_name, chat_request.clone(), Some(&non_stream_options)) => res,
                 }
             } else {
-                client
-                    .exec_chat(model_name, chat_request.clone(), Some(&non_stream_options))
-                    .await
+                client.exec_chat(model_name, chat_request.clone(), Some(&non_stream_options)).await
             };
 
             match exec_result {
@@ -2679,14 +2733,17 @@ pub async fn handle_non_stream_chat(
                         );
                         let state = app_handle.state::<crate::AppState>();
                         let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
-                        if let Err(e) = crate::mcp::execution_api::trigger_conversation_continuation_batch(
-                            app_handle,
-                            state,
-                            feature_config_state,
-                            window.clone(),
-                            conversation_id,
-                            exec_ids,
-                        ).await {
+                        if let Err(e) =
+                            crate::mcp::execution_api::trigger_conversation_continuation_batch(
+                                app_handle,
+                                state,
+                                feature_config_state,
+                                window.clone(),
+                                conversation_id,
+                                exec_ids,
+                            )
+                            .await
+                        {
                             warn!(error = %e, "batch continuation failed after non-stream concurrent tool execution");
                         }
                     } else {

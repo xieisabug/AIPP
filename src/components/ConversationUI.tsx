@@ -8,6 +8,7 @@ import {
     forwardRef,
     useImperativeHandle,
     useLayoutEffect,
+    type ReactNode,
 } from "react";
 
 import {
@@ -49,6 +50,7 @@ import ConversationContent from "./conversation/ConversationContent";
 import { ChatSidebar } from "./chat-sidebar";
 import { useTodoList } from "@/hooks/useTodoList";
 import { useArtifactExtractor } from "@/hooks/useArtifactExtractor";
+import { useExplicitArtifacts } from "@/hooks/useExplicitArtifacts";
 import { useContextList } from "@/hooks/useContextList";
 
 // 暴露给外部的方法接口
@@ -57,16 +59,36 @@ export interface ConversationUIRef {
     scrollToMessage: (messageId: number) => void;
 }
 
+export interface InlineInteractionItem {
+    key: string;
+    callId?: number | null;
+    messageId?: number | null;
+    content: ReactNode;
+}
+
 interface ConversationUIProps {
     conversationId: string;
     onChangeConversationId: (conversationId: string) => void;
     pluginList: any[];
     isMobile?: boolean;
     onConversationChange?: (conversation?: Conversation) => void;
+    inlineInteractionItems?: InlineInteractionItem[];
+    inlineInteractionVisible?: boolean;
 }
 
 const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
-    ({ conversationId, onChangeConversationId, pluginList, isMobile = false, onConversationChange }, ref) => {
+    (
+        {
+            conversationId,
+            onChangeConversationId,
+            pluginList,
+            isMobile = false,
+            onConversationChange,
+            inlineInteractionItems,
+            inlineInteractionVisible = false,
+        },
+        ref
+    ) => {
         // ============= 基础状态管理 =============
 
         // 当前对话信息和助手列表
@@ -404,12 +426,18 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // ============= Chat Sidebar 数据提取 =============
         
         // Artifacts from messages (code blocks)
-        const { artifacts } = useArtifactExtractor({
+        const { artifacts: inferredArtifacts } = useArtifactExtractor({
             messages: allDisplayMessages,
         });
+        const { artifacts: explicitArtifacts } = useExplicitArtifacts({
+            conversationId,
+            mcpToolCallStates,
+        });
+        const artifacts = explicitArtifacts.length > 0 ? explicitArtifacts : inferredArtifacts;
 
         // Context items (user files + MCP tool calls + message attachments)
         const { contextItems } = useContextList({
+            conversationId,
             userFiles: fileInfoList,
             mcpToolCallStates,
             messages,
@@ -762,6 +790,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             }
         }, [allDisplayMessages.length, scrollToUserMessage]);
 
+        useEffect(() => {
+            if (!inlineInteractionVisible) {
+                return;
+            }
+            requestAnimationFrame(() => {
+                smartScroll();
+            });
+        }, [inlineInteractionVisible, smartScroll]);
+
         // ============= 组件渲染 =============
 
         return (
@@ -800,6 +837,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onMessageEdit={handleMessageEdit}
                             onMessageFork={handleMessageFork}
                             onToggleReasoningExpand={toggleReasoningExpand}
+                            inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
                             // NewChatComponent props
                             selectedText={selectedText}
                             selectedAssistant={selectedAssistant}

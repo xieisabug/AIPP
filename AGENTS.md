@@ -175,6 +175,14 @@ let config = state.configs.lock().await;
 -   Follow existing component structure and naming conventions
 -   Keep complex logic in Rust, UI logic in React
 -   Use domain-specific component organization (config/, conversation/, etc.)
+-   **Icon 样式规范**：
+    -   使用 `lucide-react` 图标组件
+    -   图标尺寸使用 `w-full h-full` 或指定尺寸如 `h-4 w-4`
+    -   **在 Button/IconButton 内**：通常不需要指定颜色类（由组件继承）
+        -   示例：`<Plus className="h-4 w-4" />`（在 Button 内）
+        -   示例：`<Edit2 size={16} className="text-icon" />`（在 IconButton 内）
+    -   **在自定义容器内**：需要指定颜色类 `text-muted-foreground`
+        -   示例：`<ServerCrash className="w-full h-full text-muted-foreground" />`（侧边栏菜单项）
 
 ## Critical Features to Maintain
 

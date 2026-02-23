@@ -7,7 +7,7 @@ use crate::skills::types::{ScannedSkill, SkillContent, SkillSourceConfig, SkillW
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::Manager;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Official skill from the skills store API
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +36,134 @@ fn get_app_data_dir(app_handle: &tauri::AppHandle) -> PathBuf {
 /// Create a skill scanner with proper paths
 fn create_scanner(app_handle: &tauri::AppHandle) -> SkillScanner {
     SkillScanner::new(get_home_dir(), get_app_data_dir(app_handle))
+}
+
+/// Migrate skills from old {app_data}/skills to new ~/.agents/skills
+pub fn migrate_skills_to_agents_dir(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    let home_dir = get_home_dir();
+    let app_data_dir = get_app_data_dir(app_handle);
+
+    let old_skills_dir = app_data_dir.join("skills");
+    let new_skills_dir = home_dir.join(".agents/skills");
+
+    debug!("Starting skill migration");
+    debug!("  Old dir: {:?}", old_skills_dir);
+    debug!("  New dir: {:?}", new_skills_dir);
+
+    // 检查旧目录是否存在
+    if !old_skills_dir.exists() {
+        debug!("Old skills directory does not exist, skipping migration");
+        return Ok(());
+    }
+
+    // 检查旧目录是否为目录
+    if !old_skills_dir.is_dir() {
+        warn!("Old skills path exists but is not a directory, skipping migration");
+        return Ok(());
+    }
+
+    // 检查旧目录是否为空
+    let entries = match std::fs::read_dir(&old_skills_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            error!("Failed to read old skills directory: {}", e);
+            return Err(format!("Failed to read old skills directory: {}", e));
+        }
+    };
+
+    let entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+
+    if entries.is_empty() {
+        debug!("Old skills directory is empty, skipping migration");
+        // 删除空目录
+        if let Err(e) = std::fs::remove_dir(&old_skills_dir) {
+            debug!("Failed to remove empty old skills directory: {}", e);
+        }
+        return Ok(());
+    }
+
+    info!("Found {} items in old skills directory to migrate", entries.len());
+
+    // 创建新目录
+    if let Err(e) = std::fs::create_dir_all(&new_skills_dir) {
+        error!("Failed to create new skills directory: {}", e);
+        return Err(format!("Failed to create new skills directory: {}", e));
+    }
+    debug!("New skills directory ready");
+
+    // 合并迁移：如果新目录已有同名技能，跳过（新目录优先）
+    let mut migrated_count = 0u32;
+    let mut skipped_count = 0u32;
+    let mut error_count = 0u32;
+
+    for entry in entries {
+        let src_path = entry.path();
+        let file_name = entry.file_name();
+        let dest_path = new_skills_dir.join(&file_name);
+
+        debug!("Processing: {:?}", file_name);
+
+        // 如果目标已存在，跳过
+        if dest_path.exists() {
+            debug!("  Skipping (already exists in new dir)");
+            skipped_count += 1;
+            continue;
+        }
+
+        // 尝试移动（效率高），失败则复制
+        if std::fs::rename(&src_path, &dest_path).is_ok() {
+            debug!("  Moved successfully");
+            migrated_count += 1;
+        } else {
+            debug!("  Rename failed, falling back to copy");
+            if src_path.is_dir() {
+                if let Err(e) = copy_dir_recursive(&src_path, &dest_path) {
+                    error!("  Failed to copy directory: {}", e);
+                    error_count += 1;
+                    continue;
+                }
+                // 复制成功后删除源目录
+                if let Err(e) = std::fs::remove_dir_all(&src_path) {
+                    debug!("  Failed to remove source directory after copy: {}", e);
+                }
+            } else {
+                if let Err(e) = std::fs::copy(&src_path, &dest_path) {
+                    error!("  Failed to copy file: {}", e);
+                    error_count += 1;
+                    continue;
+                }
+                // 复制成功后删除源文件
+                if let Err(e) = std::fs::remove_file(&src_path) {
+                    debug!("  Failed to remove source file after copy: {}", e);
+                }
+            }
+            debug!("  Copied successfully");
+            migrated_count += 1;
+        }
+    }
+
+    info!(
+        "Migration complete: migrated {} skills, skipped {} (already exist), errors {}",
+        migrated_count, skipped_count, error_count
+    );
+
+    // 检查旧目录是否为空
+    if let Ok(mut remaining) = std::fs::read_dir(&old_skills_dir) {
+        if remaining.next().is_none() {
+            debug!("Old directory is empty, removing it");
+            if let Err(e) = std::fs::remove_dir(&old_skills_dir) {
+                debug!("Failed to remove old skills directory: {}", e);
+            }
+        } else {
+            debug!("Old directory still has items, keeping it");
+        }
+    }
+
+    if error_count > 0 {
+        return Err(format!("Migration completed with {} errors", error_count));
+    }
+
+    Ok(())
 }
 
 /// Scan all skills from all configured sources
@@ -290,7 +418,7 @@ pub async fn cleanup_orphaned_skill_configs(app_handle: tauri::AppHandle) -> Res
 /// Open the skills folder in the system file manager
 #[tauri::command]
 pub async fn open_skills_folder(app_handle: tauri::AppHandle) -> Result<(), String> {
-    let skills_dir = get_app_data_dir(&app_handle).join("skills");
+    let skills_dir = get_home_dir().join(".agents/skills");
 
     // Create if not exists
     std::fs::create_dir_all(&skills_dir).map_err(|e| e.to_string())?;
@@ -352,7 +480,7 @@ pub async fn open_skill_parent_folder(file_path: String) -> Result<(), String> {
 /// Get skills directory path
 #[tauri::command]
 pub async fn get_skills_directory(app_handle: tauri::AppHandle) -> Result<String, String> {
-    let skills_dir = get_app_data_dir(&app_handle).join("skills");
+    let skills_dir = get_home_dir().join(".agents/skills");
     Ok(skills_dir.to_string_lossy().to_string())
 }
 
@@ -380,8 +508,7 @@ pub async fn fetch_official_skills(
     // Build client with optional proxy
     let client = if let Some(ref proxy) = proxy_url {
         info!(proxy_url = %proxy, "Using proxy for fetching official skills");
-        let proxy = reqwest::Proxy::all(proxy)
-            .map_err(|e| format!("代理配置失败: {}", e))?;
+        let proxy = reqwest::Proxy::all(proxy).map_err(|e| format!("代理配置失败: {}", e))?;
         reqwest::Client::builder()
             .proxy(proxy)
             .build()
@@ -408,10 +535,7 @@ pub async fn fetch_official_skills(
             })?;
 
         if !response.status().is_success() {
-            return Err(format!(
-                "Official skills API returned error: {}",
-                response.status()
-            ));
+            return Err(format!("Official skills API returned error: {}", response.status()));
         }
 
         let skills = response
@@ -435,7 +559,7 @@ pub async fn install_official_skill(
     info!("Downloading skill from: {}", download_url);
 
     // Create skills directory if it doesn't exist
-    let skills_dir = get_app_data_dir(&app_handle).join("skills");
+    let skills_dir = get_home_dir().join(".agents/skills");
     std::fs::create_dir_all(&skills_dir)
         .map_err(|e| format!("Failed to create skills directory: {}", e))?;
 
@@ -448,19 +572,14 @@ pub async fn install_official_skill(
         .map_err(|e| format!("Failed to download skill: {}", e))?;
 
     if !response.status().is_success() {
-        return Err(format!(
-            "Download failed with status: {}",
-            response.status()
-        ));
+        return Err(format!("Download failed with status: {}", response.status()));
     }
 
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read download: {}", e))?;
+    let bytes = response.bytes().await.map_err(|e| format!("Failed to read download: {}", e))?;
 
     // Create a unique temporary extraction directory
-    let temp_extract_dir = std::env::temp_dir().join(format!("skill_extract_{}", uuid::Uuid::new_v4()));
+    let temp_extract_dir =
+        std::env::temp_dir().join(format!("skill_extract_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_extract_dir)
         .map_err(|e| format!("Failed to create temp directory: {}", e))?;
 
@@ -475,8 +594,8 @@ pub async fn install_official_skill(
             .map_err(|e| format!("Failed to open zip archive: {}", e))?;
 
         for i in 0..zip.len() {
-            let mut file = zip.by_index(i)
-                .map_err(|e| format!("Failed to get file from zip: {}", e))?;
+            let mut file =
+                zip.by_index(i).map_err(|e| format!("Failed to get file from zip: {}", e))?;
             let file_path = temp_extract_dir.join(file.mangled_name());
 
             // Create parent directories if needed
@@ -502,7 +621,8 @@ pub async fn install_official_skill(
                 if let Some(mode) = file.unix_mode() {
                     let mut perms = std::fs::Permissions::from_mode(0o644);
                     perms.set_mode(mode);
-                    output.set_permissions(perms)
+                    output
+                        .set_permissions(perms)
                         .map_err(|e| format!("Failed to set permissions: {}", e))?;
                 }
             }
@@ -514,7 +634,8 @@ pub async fn install_official_skill(
     let entries = std::fs::read_dir(&temp_extract_dir)
         .map_err(|e| format!("Failed to read temp directory: {}", e))?;
 
-    let entries: Vec<_> = entries.collect::<Result<_, _>>()
+    let entries: Vec<_> = entries
+        .collect::<Result<_, _>>()
         .map_err(|e| format!("Failed to collect directory entries: {}", e))?;
 
     info!("Found {} entries in extracted zip", entries.len());
@@ -545,12 +666,9 @@ pub async fn install_official_skill(
 
 /// Recursively copy a directory
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
-    std::fs::create_dir_all(dst)
-        .map_err(|e| format!("Failed to create directory: {}", e))?;
+    std::fs::create_dir_all(dst).map_err(|e| format!("Failed to create directory: {}", e))?;
 
-    for entry in std::fs::read_dir(src)
-        .map_err(|e| format!("Failed to read directory: {}", e))?
-    {
+    for entry in std::fs::read_dir(src).map_err(|e| format!("Failed to read directory: {}", e))? {
         let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
@@ -585,23 +703,15 @@ pub async fn delete_skill(app_handle: tauri::AppHandle, identifier: String) -> R
     let scanner = create_scanner(&app_handle);
 
     // Find the skill
-    let skill = scanner.get_skill(&identifier).ok_or_else(|| {
-        format!("Skill not found: {}", identifier)
-    })?;
+    let skill =
+        scanner.get_skill(&identifier).ok_or_else(|| format!("Skill not found: {}", identifier))?;
 
-    // Only allow deleting AIPP-sourced skills
-    if skill.source_type != SkillSourceType::Aipp {
-        return Err(format!(
-            "Cannot delete skills from '{}' source. Only AIPP-sourced skills can be deleted.",
-            skill.source_display_name
-        ));
-    }
+    // Allow deleting Agents-sourced skills
+    // (Previously AIPP-sourced, now unified with Agents)
 
     // Get the skill folder path (parent of the skill file)
     let skill_path = PathBuf::from(&skill.file_path);
-    let skill_folder = skill_path.parent().ok_or_else(|| {
-        "Invalid skill file path".to_string()
-    })?;
+    let skill_folder = skill_path.parent().ok_or_else(|| "Invalid skill file path".to_string())?;
 
     // Check if folder exists
     if !skill_folder.exists() {

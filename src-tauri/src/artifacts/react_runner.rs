@@ -372,7 +372,5 @@ pub async fn close_react_artifact(app_handle: AppHandle, artifact_id: i64) -> Re
 pub fn clear_react_artifact_cache(app_handle: AppHandle) -> Result<(), String> {
     println!("🗑️ [ReactRunner] 清除 React artifact 模板缓存");
     let shared_utils = SharedPreviewUtils::new(app_handle);
-    shared_utils
-        .clear_template_cache("react-artifacts")
-        .map_err(|e| e.to_string())
+    shared_utils.clear_template_cache("react-artifacts").map_err(|e| e.to_string())
 }

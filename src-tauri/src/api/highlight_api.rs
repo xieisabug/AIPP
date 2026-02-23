@@ -137,10 +137,9 @@ fn load_bat_theme(data: &[u8]) -> Result<Theme, String> {
         Ok(theme) => Ok(theme),
         Err(compressed_error) => match from_uncompressed_data::<Theme>(data) {
             Ok(theme) => Ok(theme),
-            Err(raw_error) => Err(format!(
-                "raw_error={}, compressed_error={}",
-                raw_error, compressed_error
-            )),
+            Err(raw_error) => {
+                Err(format!("raw_error={}, compressed_error={}", raw_error, compressed_error))
+            }
         },
     }
 }
@@ -166,12 +165,9 @@ fn color_luminance(color: Color) -> f32 {
 
 fn theme_name_hint(name: &str) -> Option<bool> {
     let lower = name.to_lowercase();
-    let light_keywords = [
-        "light", "day", "latte", "paper", "snow", "bright", "white", "github",
-    ];
-    let dark_keywords = [
-        "dark", "night", "mocha", "frappe", "macchiato", "dim", "black", "midnight",
-    ];
+    let light_keywords = ["light", "day", "latte", "paper", "snow", "bright", "white", "github"];
+    let dark_keywords =
+        ["dark", "night", "mocha", "frappe", "macchiato", "dim", "black", "midnight"];
     if light_keywords.iter().any(|kw| lower.contains(kw)) {
         return Some(false);
     }
@@ -332,9 +328,7 @@ pub fn highlight_code(
     let raw_token = normalize_lang_token(&lang);
     let mapped = map_lang_alias(raw_token);
     let token_lower = mapped.to_lowercase();
-    let scope_match = Scope::new(&mapped)
-        .ok()
-        .and_then(|scope| ss.find_syntax_by_scope(scope));
+    let scope_match = Scope::new(&mapped).ok().and_then(|scope| ss.find_syntax_by_scope(scope));
     let syntax = scope_match
         .or_else(|| ss.find_syntax_by_token(&mapped))
         .or_else(|| ss.find_syntax_by_token(&token_lower))

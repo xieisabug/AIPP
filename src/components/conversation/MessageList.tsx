@@ -2,6 +2,7 @@ import React, { useMemo } from "react";
 import MessageItem from "../MessageItem";
 import VersionPagination from "../VersionPagination";
 import { Message, StreamEvent } from "../../data/Conversation";
+import type { InlineInteractionItem } from "../ConversationUI";
 
 export interface MessageListProps {
     allDisplayMessages: Message[];
@@ -18,6 +19,7 @@ export interface MessageListProps {
     onMessageEdit: (message: Message) => void;
     onMessageFork: (messageId: number) => void;
     onToggleReasoningExpand: (messageId: number) => void;
+    inlineInteractionItems?: InlineInteractionItem[];
 }
 
 const MessageList: React.FC<MessageListProps> = ({
@@ -35,7 +37,34 @@ const MessageList: React.FC<MessageListProps> = ({
     onMessageEdit,
     onMessageFork,
     onToggleReasoningExpand,
+    inlineInteractionItems,
 }) => {
+    const messageInlineInteractionMap = useMemo(() => {
+        const map = new Map<number, InlineInteractionItem[]>();
+        (inlineInteractionItems ?? []).forEach((item) => {
+            if (item.messageId === undefined || item.messageId === null) {
+                return;
+            }
+            const existing = map.get(item.messageId) ?? [];
+            map.set(item.messageId, [...existing, item]);
+        });
+        return map;
+    }, [inlineInteractionItems]);
+
+    const displayedMessageIdSet = useMemo(
+        () => new Set(allDisplayMessages.map((message) => message.id)),
+        [allDisplayMessages]
+    );
+
+    const fallbackInlineInteractionItems = useMemo(() => {
+        return (inlineInteractionItems ?? []).filter(
+            (item) =>
+                item.messageId === undefined ||
+                item.messageId === null ||
+                !displayedMessageIdSet.has(item.messageId)
+        );
+    }, [inlineInteractionItems, displayedMessageIdSet]);
+
     // 将消息渲染逻辑拆分为更小的部分
     const messageElements = useMemo(() => {
         const t0 = performance.now();
@@ -83,6 +112,7 @@ const MessageList: React.FC<MessageListProps> = ({
                         mcpToolCallStates={mcpToolCallStates}
                         // 防泄露模式：是否为最后一条消息
                         isLastMessage={isLastMessage}
+                        inlineInteractionItems={messageInlineInteractionMap.get(message.id)}
                     />
                 ),
                 groupControl,
@@ -103,6 +133,7 @@ const MessageList: React.FC<MessageListProps> = ({
         onMessageEdit,
         onToggleReasoningExpand,
         onMessageFork,
+        messageInlineInteractionMap,
     ]);
 
     // 优化版本控制组件的渲染
@@ -203,7 +234,7 @@ const MessageList: React.FC<MessageListProps> = ({
                 if (ve) elements.push(ve);
             });
 
-            // 渲染最后一组，放入容器中，保证最小高度
+            // 渲染最后一组，放入容器中
             elements.push(
                 <div
                     key="last-reply-container"
@@ -218,6 +249,13 @@ const MessageList: React.FC<MessageListProps> = ({
                         </React.Fragment>
                     ))}
                     {placeholderElements}
+                    {fallbackInlineInteractionItems.length > 0 && (
+                        <div className="flex flex-col gap-4 pt-2">
+                            {fallbackInlineInteractionItems.map((item) => (
+                                <React.Fragment key={item.key}>{item.content}</React.Fragment>
+                            ))}
+                        </div>
+                    )}
                     <div className="flex-none h-[120px]"></div>
                 </div>
             );
@@ -229,7 +267,13 @@ const MessageList: React.FC<MessageListProps> = ({
         }
 
         return elements;
-    }, [messageElements, versionMap, placeholderElements, allDisplayMessages]);
+    }, [
+        messageElements,
+        versionMap,
+        placeholderElements,
+        allDisplayMessages,
+        fallbackInlineInteractionItems,
+    ]);
 
     return <>{allElements}</>;
 };

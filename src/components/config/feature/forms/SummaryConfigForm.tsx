@@ -123,7 +123,10 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
     );
 };
 
-export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({ form, onSave }) => {
+export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
+    form,
+    onSave,
+}) => {
     const handleSaveSummary = useCallback(async () => {
         try {
             await onSave();

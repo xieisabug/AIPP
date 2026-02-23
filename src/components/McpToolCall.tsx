@@ -9,6 +9,7 @@ import { MCPToolCall } from "@/data/MCPToolCall";
 import { MCPToolCallUpdateEvent } from "@/data/Conversation";
 import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 import { maskToolCall } from "@/utils/antiLeakage";
+import { getErrorMessage } from "@/utils/error";
 
 interface McpToolCallProps {
     serverName?: string;
@@ -361,7 +362,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 setExecutionState("failed");
             }
         } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : "执行失败";
+            const errorMessage = getErrorMessage(error) || "执行失败";
             setExecutionError(errorMessage);
             setExecutionState("failed");
         }
@@ -377,7 +378,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             await invoke("stop_mcp_tool_call", { callId: toolCallId });
             // 状态会通过 mcp_tool_call_update 事件自动更新
         } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : "停止失败";
+            const errorMessage = getErrorMessage(error) || "停止失败";
             console.error("Failed to stop tool call:", errorMessage);
             setExecutionError(errorMessage);
             setExecutionState("failed");
@@ -391,14 +392,14 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         }
 
         try {
-            await invoke("continue_with_error", { callId: toolCallId });
+            await invoke("continue_with_error", { callId: toolCallId, errorMessage: executionError });
             // 继续对话，状态保持为 failed
         } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : "继续失败";
+            const errorMessage = getErrorMessage(error) || "继续失败";
             console.error("Failed to continue with error:", errorMessage);
             setExecutionError(errorMessage);
         }
-    }, [toolCallId]);
+    }, [toolCallId, executionError]);
 
     const renderResult = () => {
         // 防泄露模式：结果也需要脱敏

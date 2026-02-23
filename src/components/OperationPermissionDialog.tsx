@@ -7,7 +7,18 @@ import {
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { FolderOpen, Shield, ShieldAlert, ShieldCheck } from "lucide-react";
+import { Shield, ShieldAlert, ShieldCheck } from "lucide-react";
+
+// Re-export types from InlineInteractionCards for backward compatibility
+export type {
+    AskUserQuestionOption,
+    AskUserQuestionItem,
+    AskUserQuestionMetadata,
+    AskUserQuestionRequest,
+    PreviewFileItem,
+    PreviewFileMetadata,
+    PreviewFileRequest,
+} from "./InlineInteractionCards";
 
 export interface OperationPermissionRequest {
     request_id: string;
@@ -89,7 +100,7 @@ export function OperationPermissionDialog({
                                     <span className="text-muted-foreground">{operationLabel}</span>
                                 </div>
                                 <div className="flex items-start gap-2 text-sm">
-                                    <FolderOpen className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                                    <span className="font-medium text-foreground">路径:</span>
                                     <span className="font-mono text-xs break-all text-foreground">
                                         {request.path}
                                     </span>

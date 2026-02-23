@@ -1,5 +1,5 @@
 import React, { useCallback, useState, useMemo, useEffect } from "react";
-import { MessageSquare, Eye, FolderOpen, Settings, Wifi, Monitor, Keyboard, Power, Info } from "lucide-react";
+import { MessageSquare, Eye, FolderOpen, Settings, Wifi, Monitor, Keyboard, Power, Info, FlaskConical } from "lucide-react";
 import { useForm } from "react-hook-form";
 
 // 导入公共组件
@@ -70,6 +70,13 @@ const FeatureAssistantConfig: React.FC = () => {
             description: "配置呼出窗口的快捷方式和回退组合键",
             icon: <Keyboard className="h-5 w-5" />,
             code: "shortcuts",
+        },
+        {
+            id: "experimental",
+            name: "实验性",
+            description: "实验功能开关与风险控制配置",
+            icon: <FlaskConical className="h-5 w-5" />,
+            code: "experimental",
         },
         {
             id: "other",
@@ -163,6 +170,13 @@ const FeatureAssistantConfig: React.FC = () => {
         },
     });
 
+    const experimentalForm = useForm({
+        defaultValues: {
+            dynamic_mcp_loading_enabled: "false",
+            mcp_summarizer_model_id: "",
+        },
+    });
+
     const aboutForm = useForm({
         defaultValues: {},
     });
@@ -187,6 +201,7 @@ const FeatureAssistantConfig: React.FC = () => {
 
             // 更新 summary 表单 - 支持新旧配置键兼容
             const summaryConfig = featureConfig.get("conversation_summary");
+            const experimentalConfig = featureConfig.get("experimental");
             if (summaryConfig) {
                 // 读取新配置键
                 const titleModel = summaryConfig.get("title_model") || "";
@@ -226,6 +241,13 @@ const FeatureAssistantConfig: React.FC = () => {
                     })(),
                 });
             }
+
+            experimentalForm.reset({
+                dynamic_mcp_loading_enabled:
+                    experimentalConfig?.get("dynamic_mcp_loading_enabled") || "false",
+                mcp_summarizer_model_id:
+                    experimentalConfig?.get("mcp_summarizer_model_id") || "",
+            });
 
             // 更新 preview 表单
             const previewConfig = featureConfig.get("preview");
@@ -287,7 +309,7 @@ const FeatureAssistantConfig: React.FC = () => {
                 tool_error_continue_enabled: toolErrorContinueEnabled,
             });
         }
-    }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm, otherForm]);
+    }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm, otherForm, experimentalForm]);
 
     // 选择功能
     const handleSelectFeature = useCallback((feature: FeatureItem) => {
@@ -372,6 +394,14 @@ const FeatureAssistantConfig: React.FC = () => {
         });
     }, [shortcutsForm, saveFeatureConfig]);
 
+    const handleSaveExperimentalConfig = useCallback(async () => {
+        const v = experimentalForm.getValues();
+        await saveFeatureConfig("experimental", {
+            dynamic_mcp_loading_enabled: String(v.dynamic_mcp_loading_enabled),
+            mcp_summarizer_model_id: String(v.mcp_summarizer_model_id || ""),
+        });
+    }, [experimentalForm, saveFeatureConfig]);
+
     // 下拉菜单选项
     const selectOptions: SelectOption[] = useMemo(
         () =>
@@ -431,6 +461,7 @@ const FeatureAssistantConfig: React.FC = () => {
                     dataFolderForm,
                     shortcutsForm,
                     otherForm,
+                    experimentalForm,
                     aboutForm,
                 }}
                 versionManager={versionManager}
@@ -438,9 +469,10 @@ const FeatureAssistantConfig: React.FC = () => {
                 onSaveSummary={handleSaveSummaryConfig}
                 onSaveNetwork={handleSaveNetworkConfig}
                 onSaveShortcuts={handleSaveShortcutsConfig}
+                onSaveExperimental={handleSaveExperimentalConfig}
             />
         </div>
-    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, otherForm, aboutForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig]);
+    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, otherForm, experimentalForm, aboutForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig, handleSaveExperimentalConfig]);
 
     return (
         <ConfigPageLayout

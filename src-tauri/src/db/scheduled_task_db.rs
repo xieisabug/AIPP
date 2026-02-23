@@ -285,12 +285,8 @@ impl ScheduledTaskDatabase {
 
     #[instrument(level = "debug", skip(self), fields(id))]
     pub fn delete_task(&self, id: i64) -> Result<()> {
-        let _ = self
-            .conn
-            .execute("DELETE FROM scheduled_task_log WHERE task_id = ?", [id]);
-        let _ = self
-            .conn
-            .execute("DELETE FROM scheduled_task_run WHERE task_id = ?", [id]);
+        let _ = self.conn.execute("DELETE FROM scheduled_task_log WHERE task_id = ?", [id]);
+        let _ = self.conn.execute("DELETE FROM scheduled_task_run WHERE task_id = ?", [id]);
         self.conn.execute("DELETE FROM scheduled_task WHERE id = ?", [id])?;
         Ok(())
     }
@@ -333,13 +329,7 @@ impl ScheduledTaskDatabase {
         self.conn.execute(
             "INSERT INTO scheduled_task_log (task_id, run_id, message_type, content, created_time)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                log.task_id,
-                log.run_id,
-                log.message_type,
-                log.content,
-                log.created_time
-            ],
+            params![log.task_id, log.run_id, log.message_type, log.content, log.created_time],
         )?;
         let id = self.conn.last_insert_rowid();
         Ok(ScheduledTaskLog { id, ..log.clone() })
@@ -444,7 +434,11 @@ impl ScheduledTaskDatabase {
         Ok(ScheduledTaskRun { id, ..run.clone() })
     }
 
-    #[instrument(level = "debug", skip(self, summary, error_message, finished_time), fields(run_id, status))]
+    #[instrument(
+        level = "debug",
+        skip(self, summary, error_message, finished_time),
+        fields(run_id, status)
+    )]
     pub fn update_run_result(
         &self,
         run_id: &str,

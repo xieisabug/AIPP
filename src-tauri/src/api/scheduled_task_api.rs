@@ -6,8 +6,12 @@ use tauri::{Emitter, State};
 use tracing::{error, instrument};
 
 use crate::api::ai::chat::handle_non_stream_chat as ai_handle_non_stream_chat;
-use crate::api::ai::config::{get_network_proxy_from_config, get_request_timeout_from_config, ConfigBuilder};
-use crate::api::ai::conversation::{build_chat_request_from_messages, ToolCallStrategy, ToolConfig};
+use crate::api::ai::config::{
+    get_network_proxy_from_config, get_request_timeout_from_config, ConfigBuilder,
+};
+use crate::api::ai::conversation::{
+    build_chat_request_from_messages, ToolCallStrategy, ToolConfig,
+};
 use crate::api::ai_api::build_tools_with_mapping;
 use crate::api::assistant_api::get_assistant;
 use crate::api::genai_client::create_client_with_config;
@@ -15,7 +19,9 @@ use crate::db::assistant_db::AssistantDatabase;
 use crate::db::conversation_db::{ConversationDatabase, Repository as ConversationRepository};
 use crate::db::llm_db::LLMDatabase;
 use crate::db::mcp_db::MCPDatabase;
-use crate::db::scheduled_task_db::{ScheduledTask, ScheduledTaskDatabase, ScheduledTaskLog, ScheduledTaskRun};
+use crate::db::scheduled_task_db::{
+    ScheduledTask, ScheduledTaskDatabase, ScheduledTaskLog, ScheduledTaskRun,
+};
 use crate::db::system_db::FeatureConfig;
 use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt, MCPInfoForAssistant};
 use crate::skills::{collect_skills_info_for_assistant, format_skills_prompt};
@@ -139,12 +145,7 @@ fn parse_local_datetime(input: &str) -> Result<DateTime<Utc>, String> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
         return Ok(dt.with_timezone(&Utc));
     }
-    let formats = [
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d %H:%M",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%dT%H:%M",
-    ];
+    let formats = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"];
     for fmt in &formats {
         if let Ok(naive) = NaiveDateTime::parse_from_str(trimmed, fmt) {
             let local_dt = Local
@@ -179,7 +180,10 @@ fn resolve_ai_window(app_handle: &tauri::AppHandle) -> Result<tauri::Window, Str
     Err("未找到可用的聊天窗口".to_string())
 }
 
-fn build_tool_config_for_mcp(mcp_info: &MCPInfoForAssistant, enable_tools: bool) -> Option<ToolConfig> {
+fn build_tool_config_for_mcp(
+    mcp_info: &MCPInfoForAssistant,
+    enable_tools: bool,
+) -> Option<ToolConfig> {
     if !enable_tools {
         return None;
     }
@@ -190,9 +194,8 @@ fn build_tool_config_for_mcp(mcp_info: &MCPInfoForAssistant, enable_tools: bool)
 fn suppress_completion_notification(
     config_feature_map: &mut HashMap<String, HashMap<String, FeatureConfig>>,
 ) {
-    let display_config = config_feature_map
-        .entry("display".to_string())
-        .or_insert_with(HashMap::new);
+    let display_config =
+        config_feature_map.entry("display".to_string()).or_insert_with(HashMap::new);
     display_config.insert(
         "notification_on_completion".to_string(),
         FeatureConfig {
@@ -245,12 +248,10 @@ fn update_task_run(
     error_message: Option<&str>,
     finished_time: Option<DateTime<Utc>>,
 ) {
-    let _ = ScheduledTaskDatabase::new(app_handle)
-        .map_err(|e| e.to_string())
-        .and_then(|db| {
-            db.update_run_result(run_id, status, notify, summary, error_message, finished_time)
-                .map_err(|e| e.to_string())
-        });
+    let _ = ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string()).and_then(|db| {
+        db.update_run_result(run_id, status, notify, summary, error_message, finished_time)
+            .map_err(|e| e.to_string())
+    });
 }
 
 fn cleanup_conversation(app_handle: &tauri::AppHandle, conversation_id: i64) -> Result<(), String> {
@@ -261,26 +262,21 @@ fn cleanup_conversation(app_handle: &tauri::AppHandle, conversation_id: i64) -> 
         params![conversation_id],
     )
     .map_err(|e| e.to_string())?;
-    conn.execute(
-        "DELETE FROM message WHERE conversation_id = ?",
-        params![conversation_id],
-    )
-    .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM message WHERE conversation_id = ?", params![conversation_id])
+        .map_err(|e| e.to_string())?;
     conn.execute(
         "DELETE FROM conversation_summary WHERE conversation_id = ?",
         params![conversation_id],
     )
     .map_err(|e| e.to_string())?;
-    conn.execute(
-        "DELETE FROM conversation WHERE id = ?",
-        params![conversation_id],
-    )
-    .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM conversation WHERE id = ?", params![conversation_id])
+        .map_err(|e| e.to_string())?;
 
     if let Ok(mcp_db) = MCPDatabase::new(app_handle) {
-        let _ = mcp_db
-            .conn
-            .execute("DELETE FROM mcp_tool_call WHERE conversation_id = ?", params![conversation_id]);
+        let _ = mcp_db.conn.execute(
+            "DELETE FROM mcp_tool_call WHERE conversation_id = ?",
+            params![conversation_id],
+        );
     }
 
     Ok(())
@@ -291,9 +287,9 @@ pub struct ScheduleConfig<'a> {
     pub schedule_type: &'a str,
     pub interval_value: Option<i64>,
     pub interval_unit: Option<&'a str>,
-    pub start_time: Option<&'a str>,      // HH:mm
-    pub week_days: Option<Vec<i32>>,       // 0=Sun, 1=Mon, ..., 6=Sat
-    pub month_days: Option<Vec<i32>>,      // 1-31
+    pub start_time: Option<&'a str>,  // HH:mm
+    pub week_days: Option<Vec<i32>>,  // 0=Sun, 1=Mon, ..., 6=Sat
+    pub month_days: Option<Vec<i32>>, // 1-31
     pub run_at: Option<DateTime<Utc>>,
 }
 
@@ -351,7 +347,8 @@ pub fn compute_next_run_at_with_config(
     }
 
     let local_base = base_time.with_timezone(&Local);
-    let (target_hour, target_minute) = parse_start_time(config.start_time).unwrap_or((local_base.hour(), local_base.minute()));
+    let (target_hour, target_minute) =
+        parse_start_time(config.start_time).unwrap_or((local_base.hour(), local_base.minute()));
 
     match unit {
         "minute" => {
@@ -365,7 +362,14 @@ pub fn compute_next_run_at_with_config(
         "day" => {
             // Every N days at start_time
             let mut candidate = Local
-                .with_ymd_and_hms(local_base.year(), local_base.month(), local_base.day(), target_hour, target_minute, 0)
+                .with_ymd_and_hms(
+                    local_base.year(),
+                    local_base.month(),
+                    local_base.day(),
+                    target_hour,
+                    target_minute,
+                    0,
+                )
                 .single()
                 .ok_or_else(|| "无法构造日期".to_string())?;
 
@@ -376,12 +380,18 @@ pub fn compute_next_run_at_with_config(
         }
         "week" => {
             // Every N weeks on specified week_days at start_time
-            let week_days = config.week_days.clone().unwrap_or_else(|| vec![local_base.weekday().num_days_from_sunday() as i32]);
+            let week_days = config
+                .week_days
+                .clone()
+                .unwrap_or_else(|| vec![local_base.weekday().num_days_from_sunday() as i32]);
             if week_days.is_empty() {
                 return Err("请至少选择一个星期几".to_string());
             }
 
-            let mut week_days_sorted: Vec<u32> = week_days.iter().filter_map(|&d| if d >= 0 && d <= 6 { Some(d as u32) } else { None }).collect();
+            let mut week_days_sorted: Vec<u32> = week_days
+                .iter()
+                .filter_map(|&d| if d >= 0 && d <= 6 { Some(d as u32) } else { None })
+                .collect();
             week_days_sorted.sort();
             week_days_sorted.dedup();
 
@@ -396,10 +406,19 @@ pub fn compute_next_run_at_with_config(
             for week_offset in 0..=(value as i64 * 2) {
                 let week_start = local_base + chrono::Duration::weeks(week_offset);
                 for &wd in &week_days_sorted {
-                    let days_from_week_start = (wd as i64 + 7 - week_start.weekday().num_days_from_sunday() as i64) % 7;
-                    let target_date = week_start.date_naive() + chrono::Duration::days(days_from_week_start);
+                    let days_from_week_start =
+                        (wd as i64 + 7 - week_start.weekday().num_days_from_sunday() as i64) % 7;
+                    let target_date =
+                        week_start.date_naive() + chrono::Duration::days(days_from_week_start);
                     let target_dt = Local
-                        .with_ymd_and_hms(target_date.year(), target_date.month(), target_date.day(), target_hour, target_minute, 0)
+                        .with_ymd_and_hms(
+                            target_date.year(),
+                            target_date.month(),
+                            target_date.day(),
+                            target_hour,
+                            target_minute,
+                            0,
+                        )
                         .single();
 
                     if let Some(dt) = target_dt {
@@ -422,12 +441,16 @@ pub fn compute_next_run_at_with_config(
         }
         "month" => {
             // Every N months on specified month_days at start_time
-            let month_days = config.month_days.clone().unwrap_or_else(|| vec![local_base.day() as i32]);
+            let month_days =
+                config.month_days.clone().unwrap_or_else(|| vec![local_base.day() as i32]);
             if month_days.is_empty() {
                 return Err("请至少选择一天".to_string());
             }
 
-            let mut month_days_sorted: Vec<u32> = month_days.iter().filter_map(|&d| if d >= 1 && d <= 31 { Some(d as u32) } else { None }).collect();
+            let mut month_days_sorted: Vec<u32> = month_days
+                .iter()
+                .filter_map(|&d| if d >= 1 && d <= 31 { Some(d as u32) } else { None })
+                .collect();
             month_days_sorted.sort();
             month_days_sorted.dedup();
 
@@ -443,7 +466,14 @@ pub fn compute_next_run_at_with_config(
             for _ in 0..24 {
                 for &day in &month_days_sorted {
                     let target_dt = Local
-                        .with_ymd_and_hms(check_year, check_month, day, target_hour, target_minute, 0)
+                        .with_ymd_and_hms(
+                            check_year,
+                            check_month,
+                            day,
+                            target_hour,
+                            target_minute,
+                            0,
+                        )
                         .single();
 
                     if let Some(dt) = target_dt {
@@ -526,7 +556,9 @@ fn run_to_dto(run: ScheduledTaskRun) -> ScheduledTaskRunDTO {
 }
 
 #[tauri::command]
-pub async fn list_scheduled_tasks(app_handle: tauri::AppHandle) -> Result<Vec<ScheduledTaskDTO>, String> {
+pub async fn list_scheduled_tasks(
+    app_handle: tauri::AppHandle,
+) -> Result<Vec<ScheduledTaskDTO>, String> {
     let db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let tasks = db.list_tasks().map_err(|e| e.to_string())?;
     Ok(tasks.into_iter().map(to_dto).collect())
@@ -542,16 +574,12 @@ pub async fn list_scheduled_task_logs(
     let db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let limit_value = limit.unwrap_or(200).min(1000);
     let logs = match run_id {
-        Some(run_id) => db
-            .list_logs_by_run(task_id, &run_id, limit_value)
-            .map_err(|e| e.to_string())?,
-        None => db
-            .list_logs_by_task(task_id, limit_value)
-            .map_err(|e| e.to_string())?,
+        Some(run_id) => {
+            db.list_logs_by_run(task_id, &run_id, limit_value).map_err(|e| e.to_string())?
+        }
+        None => db.list_logs_by_task(task_id, limit_value).map_err(|e| e.to_string())?,
     };
-    Ok(ListScheduledTaskLogsResponse {
-        logs: logs.into_iter().map(log_to_dto).collect(),
-    })
+    Ok(ListScheduledTaskLogsResponse { logs: logs.into_iter().map(log_to_dto).collect() })
 }
 
 #[tauri::command]
@@ -562,12 +590,8 @@ pub async fn list_scheduled_task_runs(
 ) -> Result<ListScheduledTaskRunsResponse, String> {
     let db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let limit_value = limit.unwrap_or(50).min(200);
-    let runs = db
-        .list_runs_by_task(task_id, limit_value)
-        .map_err(|e| e.to_string())?;
-    Ok(ListScheduledTaskRunsResponse {
-        runs: runs.into_iter().map(run_to_dto).collect(),
-    })
+    let runs = db.list_runs_by_task(task_id, limit_value).map_err(|e| e.to_string())?;
+    Ok(ListScheduledTaskRunsResponse { runs: runs.into_iter().map(run_to_dto).collect() })
 }
 
 fn serialize_json_array(arr: &Option<Vec<i32>>) -> Option<String> {
@@ -680,7 +704,10 @@ pub async fn update_scheduled_task(
 }
 
 #[tauri::command]
-pub async fn delete_scheduled_task(app_handle: tauri::AppHandle, task_id: i64) -> Result<(), String> {
+pub async fn delete_scheduled_task(
+    app_handle: tauri::AppHandle,
+    task_id: i64,
+) -> Result<(), String> {
     let db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.delete_task(task_id).map_err(|e| e.to_string())?;
     Ok(())
@@ -710,11 +737,7 @@ pub async fn run_scheduled_task_now(
         )?
     };
     let updated = ScheduledTask {
-        is_enabled: if task.schedule_type == "once" {
-            false
-        } else {
-            task.is_enabled
-        },
+        is_enabled: if task.schedule_type == "once" { false } else { task.is_enabled },
         last_run_at: Some(now),
         next_run_at,
         updated_time: now,
@@ -1131,15 +1154,7 @@ pub async fn execute_scheduled_task(
     .await;
 
     if let Err(err) = &run_result {
-        update_task_run(
-            app_handle,
-            &run_id,
-            "failed",
-            false,
-            None,
-            Some(err),
-            Some(Utc::now()),
-        );
+        update_task_run(app_handle, &run_id, "failed", false, None, Some(err), Some(Utc::now()));
     }
     run_result
 }

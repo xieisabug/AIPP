@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use assistant_db::AssistantDatabase;
 use conversation_db::ConversationDatabase;
 use llm_db::LLMDatabase;
+use mcp_db::MCPDatabase;
 use rusqlite::params;
-use semver::Version;
 use scheduled_task_db::ScheduledTaskDatabase;
+use semver::Version;
 use sub_task_db::SubTaskDatabase;
 use system_db::SystemDatabase;
 use tauri::Manager;
@@ -24,7 +25,7 @@ pub mod system_db;
 #[cfg(test)]
 mod tests;
 
-const CURRENT_VERSION: &str = "0.0.8";
+const CURRENT_VERSION: &str = "0.0.10";
 
 pub(crate) fn get_db_path(app_handle: &tauri::AppHandle, db_name: &str) -> Result<PathBuf, String> {
     let app_dir = app_handle.path().app_data_dir().unwrap();
@@ -85,6 +86,8 @@ pub fn database_upgrade(
                     ("0.0.6", special_logic_0_0_6),
                     ("0.0.7", special_logic_0_0_7),
                     ("0.0.8", special_logic_0_0_8),
+                    ("0.0.9", special_logic_0_0_9),
+                    ("0.0.10", special_logic_0_0_10),
                 ];
 
                 for (version_str, logic) in special_versions.iter() {
@@ -529,5 +532,71 @@ fn special_logic_0_0_8(
         .map_err(|e| format!("创建 conversation_todo 表失败: {}", e.to_string()))?;
 
     info!("special_logic_0_0_8 done: conversation_todo 表创建完成");
+    Ok(())
+}
+
+fn special_logic_0_0_9(
+    system_db: &SystemDatabase,
+    _llm_db: &LLMDatabase,
+    _assistant_db: &AssistantDatabase,
+    _conversation_db: &ConversationDatabase,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    info!("special_logic_0_0_9: 开始检查技能迁移");
+
+    // 检查迁移标记（避免重复迁移）
+    match system_db.get_config("skills_migrated_to_agents") {
+        Ok(val) if val == "1" => {
+            debug!("special_logic_0_0_9: 技能迁移标记已存在，跳过迁移");
+            return Ok(());
+        }
+        Ok(val) => {
+            debug!("special_logic_0_0_9: 迁移标记值为 '{}'，将执行迁移", val);
+        }
+        Err(e) => {
+            debug!("special_logic_0_0_9: 读取迁移标记失败: {}，将执行迁移", e);
+        }
+    }
+
+    // 执行迁移
+    debug!("special_logic_0_0_9: 开始执行技能迁移");
+    match crate::api::skill_api::migrate_skills_to_agents_dir(app_handle) {
+        Ok(_) => {
+            info!("special_logic_0_0_9: 技能迁移执行成功");
+        }
+        Err(e) => {
+            error!("special_logic_0_0_9: 技能迁移执行失败: {}", e);
+            // 迁移失败不阻止程序启动，记录错误但继续
+        }
+    }
+
+    // 设置迁移标记（即使迁移失败也设置标记，避免下次重复尝试）
+    debug!("special_logic_0_0_9: 设置迁移标记");
+    match system_db.add_system_config("skills_migrated_to_agents", "1") {
+        Ok(_) => {
+            debug!("special_logic_0_0_9: 迁移标记设置成功");
+        }
+        Err(e) => {
+            error!("special_logic_0_0_9: 设置迁移标记失败: {}", e);
+            // 标记设置失败也不阻止程序启动
+        }
+    }
+
+    info!("special_logic_0_0_9 done: 技能迁移流程完成");
+    Ok(())
+}
+
+fn special_logic_0_0_10(
+    _system_db: &SystemDatabase,
+    _llm_db: &LLMDatabase,
+    _assistant_db: &AssistantDatabase,
+    _conversation_db: &ConversationDatabase,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    info!("special_logic_0_0_10: 初始化 MCP 动态加载数据表");
+    let mcp_db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    mcp_db.create_tables().map_err(|e| e.to_string())?;
+    mcp_db.rebuild_dynamic_mcp_catalog().map_err(|e| format!("重建 MCP 动态目录失败: {}", e))?;
+    info!("special_logic_0_0_10 done: MCP 动态加载数据表初始化完成");
     Ok(())
 }

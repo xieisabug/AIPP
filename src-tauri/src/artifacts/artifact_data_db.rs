@@ -48,14 +48,9 @@ impl ArtifactDataDatabase {
             return Err("db_id too long (max 64 characters)".to_string());
         }
         // 只允许字母、数字、下划线、连字符
-        if !db_id
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-        {
-            return Err(
-                "db_id can only contain alphanumeric characters, underscores, and hyphens"
-                    .to_string(),
-            );
+        if !db_id.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+            return Err("db_id can only contain alphanumeric characters, underscores, and hyphens"
+                .to_string());
         }
         Ok(())
     }
@@ -67,37 +62,27 @@ impl ArtifactDataDatabase {
         let data_dir = Self::get_artifact_data_dir(app_handle)?;
         let db_path = data_dir.join(format!("{}.db", db_id));
 
-        let conn = Connection::open(&db_path).map_err(|e| format!("Failed to open database: {}", e))?;
+        let conn =
+            Connection::open(&db_path).map_err(|e| format!("Failed to open database: {}", e))?;
 
         // 启用 WAL 模式以提高并发性能
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
             .map_err(|e| format!("Failed to set pragmas: {}", e))?;
 
-        Ok(ArtifactDataDatabase {
-            conn,
-            db_id: db_id.to_string(),
-        })
+        Ok(ArtifactDataDatabase { conn, db_id: db_id.to_string() })
     }
 
     /// 执行查询语句 (SELECT)
     pub fn query(&self, sql: &str, params: Vec<JsonValue>) -> Result<QueryResult, String> {
-        let mut stmt = self
-            .conn
-            .prepare(sql)
-            .map_err(|e| format!("Failed to prepare statement: {}", e))?;
+        let mut stmt =
+            self.conn.prepare(sql).map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
         // 获取列名
-        let columns: Vec<String> = stmt
-            .column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
 
         // 转换参数
-        let params_vec: Vec<Box<dyn rusqlite::ToSql>> = params
-            .iter()
-            .map(|v| json_to_sql_param(v))
-            .collect();
+        let params_vec: Vec<Box<dyn rusqlite::ToSql>> =
+            params.iter().map(|v| json_to_sql_param(v)).collect();
 
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
 
@@ -117,20 +102,14 @@ impl ArtifactDataDatabase {
         }
 
         let row_count = rows_data.len();
-        Ok(QueryResult {
-            columns,
-            rows: rows_data,
-            row_count,
-        })
+        Ok(QueryResult { columns, rows: rows_data, row_count })
     }
 
     /// 执行修改语句 (INSERT/UPDATE/DELETE/CREATE/DROP)
     pub fn execute(&self, sql: &str, params: Vec<JsonValue>) -> Result<ExecuteResult, String> {
         // 转换参数
-        let params_vec: Vec<Box<dyn rusqlite::ToSql>> = params
-            .iter()
-            .map(|v| json_to_sql_param(v))
-            .collect();
+        let params_vec: Vec<Box<dyn rusqlite::ToSql>> =
+            params.iter().map(|v| json_to_sql_param(v)).collect();
 
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
 
@@ -141,17 +120,12 @@ impl ArtifactDataDatabase {
 
         let last_insert_rowid = self.conn.last_insert_rowid();
 
-        Ok(ExecuteResult {
-            rows_affected,
-            last_insert_rowid,
-        })
+        Ok(ExecuteResult { rows_affected, last_insert_rowid })
     }
 
     /// 批量执行语句（用于初始化表结构等）
     pub fn execute_batch(&self, sql: &str) -> Result<(), String> {
-        self.conn
-            .execute_batch(sql)
-            .map_err(|e| format!("Failed to execute batch: {}", e))
+        self.conn.execute_batch(sql).map_err(|e| format!("Failed to execute batch: {}", e))
     }
 
     /// 获取数据库中所有表的信息
@@ -178,10 +152,8 @@ impl ArtifactDataDatabase {
     /// 获取指定表的列信息
     pub fn get_table_columns(&self, table_name: &str) -> Result<Vec<String>, String> {
         let sql = format!("PRAGMA table_info({})", table_name);
-        let mut stmt = self
-            .conn
-            .prepare(&sql)
-            .map_err(|e| format!("Failed to prepare statement: {}", e))?;
+        let mut stmt =
+            self.conn.prepare(&sql).map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
         let columns = stmt
             .query_map([], |row| row.get::<_, String>(1))
@@ -207,7 +179,8 @@ impl ArtifactDataDatabase {
         let db_path = data_dir.join(format!("{}.db", db_id));
 
         if db_path.exists() {
-            std::fs::remove_file(&db_path).map_err(|e| format!("Failed to delete database: {}", e))?;
+            std::fs::remove_file(&db_path)
+                .map_err(|e| format!("Failed to delete database: {}", e))?;
             // 也删除 WAL 和 SHM 文件
             let wal_path = data_dir.join(format!("{}.db-wal", db_id));
             let shm_path = data_dir.join(format!("{}.db-shm", db_id));
@@ -221,7 +194,8 @@ impl ArtifactDataDatabase {
     pub fn list_databases(app_handle: &tauri::AppHandle) -> Result<Vec<String>, String> {
         let data_dir = Self::get_artifact_data_dir(app_handle)?;
 
-        let entries = std::fs::read_dir(&data_dir).map_err(|e| format!("Failed to read directory: {}", e))?;
+        let entries =
+            std::fs::read_dir(&data_dir).map_err(|e| format!("Failed to read directory: {}", e))?;
 
         let mut db_ids = Vec::new();
         for entry in entries.flatten() {
@@ -259,17 +233,13 @@ fn json_to_sql_param(value: &JsonValue) -> Box<dyn rusqlite::ToSql> {
 fn row_value_to_json(row: &rusqlite::Row, idx: usize) -> Result<JsonValue, String> {
     use rusqlite::types::ValueRef;
 
-    let value = row
-        .get_ref(idx)
-        .map_err(|e| format!("Failed to get column value: {}", e))?;
+    let value = row.get_ref(idx).map_err(|e| format!("Failed to get column value: {}", e))?;
 
     Ok(match value {
         ValueRef::Null => JsonValue::Null,
         ValueRef::Integer(i) => JsonValue::Number(i.into()),
         ValueRef::Real(f) => {
-            serde_json::Number::from_f64(f)
-                .map(JsonValue::Number)
-                .unwrap_or(JsonValue::Null)
+            serde_json::Number::from_f64(f).map(JsonValue::Number).unwrap_or(JsonValue::Null)
         }
         ValueRef::Text(s) => {
             let text = std::str::from_utf8(s).map_err(|e| format!("Invalid UTF-8: {}", e))?;

@@ -438,7 +438,8 @@ pub async fn generate_artifact_metadata(
                 );
             }
         } else if let (Some(provider_id), Some(model_code)) = (
-            config.get("form_autofill_provider_id")
+            config
+                .get("form_autofill_provider_id")
                 .or(config.get("provider_id"))
                 .and_then(|c| c.value.parse::<i64>().ok()),
             config.get("form_autofill_model").or(config.get("model_code")).map(|c| c.value.clone()),

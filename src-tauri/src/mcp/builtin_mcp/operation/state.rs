@@ -31,6 +31,8 @@ pub struct BashProcessInfo {
 pub struct OperationState {
     /// 已读文件记录（路径 -> 读取记录）
     pub(crate) read_files: Arc<Mutex<HashMap<String, FileReadRecord>>>,
+    /// 当前会话写入过的文件（路径 -> 写入时间戳）
+    pub(crate) written_files: Arc<Mutex<HashMap<String, u64>>>,
     /// 后台 Bash 进程（bash_id -> 进程信息）
     pub(crate) bash_processes: Arc<Mutex<HashMap<String, BashProcessInfo>>>,
     /// 待处理的权限请求（request_id -> 发送通道）
@@ -42,6 +44,7 @@ impl OperationState {
     pub fn new() -> Self {
         Self {
             read_files: Arc::new(Mutex::new(HashMap::new())),
+            written_files: Arc::new(Mutex::new(HashMap::new())),
             bash_processes: Arc::new(Mutex::new(HashMap::new())),
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -73,6 +76,35 @@ impl OperationState {
     /// 清除所有文件读取记录
     pub async fn clear_all_file_reads(&self) {
         let mut files = self.read_files.lock().await;
+        files.clear();
+    }
+
+    /// 记录文件已被写入
+    pub async fn record_file_write(&self, path: &str) {
+        let mut files = self.written_files.lock().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        files.insert(path.to_string(), now);
+        debug!(path = %path, "Recorded file write");
+    }
+
+    /// 检查文件是否在当前会话中已被写入过
+    pub async fn has_file_been_written(&self, path: &str) -> bool {
+        let files = self.written_files.lock().await;
+        files.contains_key(path)
+    }
+
+    /// 清除文件写入记录
+    pub async fn clear_file_write(&self, path: &str) {
+        let mut files = self.written_files.lock().await;
+        files.remove(path);
+    }
+
+    /// 清除所有文件写入记录
+    pub async fn clear_all_file_writes(&self) {
+        let mut files = self.written_files.lock().await;
         files.clear();
     }
 

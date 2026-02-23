@@ -4,6 +4,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { invoke } from '@tauri-apps/api/core';
 import { ContextItem } from './types';
 import { cn } from '@/utils/utils';
+import MCP from '@/assets/mcp.svg?react';
 
 interface ContextListProps {
     items: ContextItem[];
@@ -24,6 +25,8 @@ const getContextIcon = (type: ContextItem['type'], attachmentType?: string) => {
             return <Search className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
         case 'list_directory':
             return <FolderOpen className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
+        case 'loaded_mcp_tool':
+            return <MCP className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
         default:
             return <FileQuestion className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
     }
@@ -39,6 +42,8 @@ const getContextLabel = (type: ContextItem['type']): string => {
             return '搜索';
         case 'list_directory':
             return '目录';
+        case 'loaded_mcp_tool':
+            return '已加载工具';
         default:
             return '其他';
     }
@@ -96,12 +101,14 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
     }, []);
 
     const handleItemClick = useCallback((item: ContextItem) => {
+        if (onItemClick) {
+            onItemClick(item);
+            return;
+        }
         if (item.type === 'search' && item.searchMarkdown) {
             handleOpenMarkdownPreview(item.searchMarkdown);
         } else if (item.attachmentData) {
             handleOpenAttachment(item);
-        } else if (onItemClick) {
-            onItemClick(item);
         }
     }, [handleOpenAttachment, handleOpenMarkdownPreview, onItemClick]);
 
