@@ -245,8 +245,13 @@ async fn handle_tool_execution_result(
         Ok(result) => {
             info!(tool_call_id=tool_call.id, tool_name=%tool_call.tool_name, server=%tool_call.server_name, "工具执行成功");
 
-            db.update_mcp_tool_call_status(call_id, "success", Some(&result), None)
-                .map_err(|e| format!("更新工具调用状态失败: {}", e))?;
+            if let Err(e) = db.update_mcp_tool_call_status(call_id, "success", Some(&result), None) {
+                warn!(
+                    call_id,
+                    error = %e,
+                    "failed to persist success status for MCP tool call"
+                );
+            }
 
             tool_call.status = "success".to_string();
             tool_call.result = Some(result.clone());
@@ -299,8 +304,13 @@ async fn handle_tool_execution_result(
         Err(error) => {
             error!(tool_call_id=tool_call.id, tool_name=%tool_call.tool_name, server=%tool_call.server_name, %error, "tool execution failed");
 
-            db.update_mcp_tool_call_status(call_id, "failed", None, Some(&error))
-                .map_err(|e| format!("更新工具调用状态失败: {}", e))?;
+            if let Err(e) = db.update_mcp_tool_call_status(call_id, "failed", None, Some(&error)) {
+                warn!(
+                    call_id,
+                    error = %e,
+                    "failed to persist failed status for MCP tool call"
+                );
+            }
 
             tool_call.status = "failed".to_string();
             tool_call.error = Some(error.clone());

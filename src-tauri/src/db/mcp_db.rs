@@ -1,5 +1,8 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 use tracing::instrument;
 
 use crate::db::get_db_path;
@@ -134,11 +137,21 @@ pub struct MCPDatabase {
     pub conn: Connection,
 }
 
+const SQLITE_BUSY_RETRY_LIMIT: usize = 4;
+const SQLITE_BUSY_RETRY_BASE_DELAY_MS: u64 = 40;
+const CATALOG_REBUILD_MIN_INTERVAL_MS: u64 = 300;
+
+static CATALOG_REBUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static CATALOG_LAST_REBUILD_AT_MS: AtomicU64 = AtomicU64::new(0);
+
 impl MCPDatabase {
     #[instrument(level = "trace", skip(app_handle))]
     pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
         let db_path = get_db_path(app_handle, "mcp.db");
         let conn = Connection::open(db_path.unwrap())?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;\nPRAGMA synchronous=NORMAL;\nPRAGMA foreign_keys=ON;\nPRAGMA busy_timeout=5000;",
+        )?;
         Ok(MCPDatabase { conn })
     }
 
@@ -156,6 +169,45 @@ impl MCPDatabase {
 
     fn now_string() -> String {
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+    }
+
+    fn now_millis() -> u64 {
+        chrono::Utc::now().timestamp_millis().max(0) as u64
+    }
+
+    fn catalog_rebuild_lock() -> &'static Mutex<()> {
+        CATALOG_REBUILD_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
+        matches!(
+            err,
+            rusqlite::Error::SqliteFailure(sqlite_err, _)
+                if matches!(
+                    sqlite_err.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+        )
+    }
+
+    fn retry_if_busy<T, F>(&self, mut operation: F) -> rusqlite::Result<T>
+    where
+        F: FnMut() -> rusqlite::Result<T>,
+    {
+        let mut attempt = 0usize;
+        loop {
+            match operation() {
+                Ok(value) => return Ok(value),
+                Err(err)
+                    if attempt < SQLITE_BUSY_RETRY_LIMIT && Self::is_sqlite_busy(&err) =>
+                {
+                    let backoff_ms = SQLITE_BUSY_RETRY_BASE_DELAY_MS * (1u64 << attempt);
+                    attempt += 1;
+                    std::thread::sleep(Duration::from_millis(backoff_ms));
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     pub fn create_tables(&self) -> rusqlite::Result<()> {
@@ -1157,22 +1209,31 @@ impl MCPDatabase {
 
         match status {
             "executing" => {
-                self.conn.execute(
-                    "UPDATE mcp_tool_call SET status = ?, started_time = ? WHERE id = ?",
-                    params![status, now, id],
-                )?;
+                self.retry_if_busy(|| {
+                    self.conn.execute(
+                        "UPDATE mcp_tool_call SET status = ?, started_time = ? WHERE id = ?",
+                        params![status, &now, id],
+                    )?;
+                    Ok(())
+                })?;
             }
             "success" | "failed" => {
-                self.conn.execute(
-                    "UPDATE mcp_tool_call SET status = ?, result = ?, error = ?, finished_time = ? WHERE id = ?",
-                    params![status, result, error, now, id],
-                )?;
+                self.retry_if_busy(|| {
+                    self.conn.execute(
+                        "UPDATE mcp_tool_call SET status = ?, result = ?, error = ?, finished_time = ? WHERE id = ?",
+                        params![status, result, error, &now, id],
+                    )?;
+                    Ok(())
+                })?;
             }
             _ => {
-                self.conn.execute(
-                    "UPDATE mcp_tool_call SET status = ? WHERE id = ?",
-                    params![status, id],
-                )?;
+                self.retry_if_busy(|| {
+                    self.conn.execute(
+                        "UPDATE mcp_tool_call SET status = ? WHERE id = ?",
+                        params![status, id],
+                    )?;
+                    Ok(())
+                })?;
             }
         }
         Ok(())
@@ -1199,10 +1260,12 @@ impl MCPDatabase {
     pub fn mark_mcp_tool_call_executing_if_pending(&self, id: i64) -> rusqlite::Result<bool> {
         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
         // 允许从 pending/failed 进入 executing；对于 failed 的重试，覆盖 started_time 即可
-        let rows = self.conn.execute(
-            "UPDATE mcp_tool_call SET status = 'executing', started_time = ? WHERE id = ? AND status IN ('pending', 'failed')",
-            params![now, id],
-        )?;
+        let rows = self.retry_if_busy(|| {
+            self.conn.execute(
+                "UPDATE mcp_tool_call SET status = 'executing', started_time = ? WHERE id = ? AND status IN ('pending', 'failed')",
+                params![&now, id],
+            )
+        })?;
         Ok(rows > 0)
     }
 
@@ -1326,6 +1389,24 @@ impl MCPDatabase {
     }
 
     pub fn rebuild_dynamic_mcp_catalog(&self) -> rusqlite::Result<()> {
+        let now_ms = Self::now_millis();
+        if now_ms.saturating_sub(CATALOG_LAST_REBUILD_AT_MS.load(Ordering::Relaxed))
+            < CATALOG_REBUILD_MIN_INTERVAL_MS
+        {
+            return Ok(());
+        }
+
+        let _rebuild_guard = match Self::catalog_rebuild_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let now_ms = Self::now_millis();
+        if now_ms.saturating_sub(CATALOG_LAST_REBUILD_AT_MS.load(Ordering::Relaxed))
+            < CATALOG_REBUILD_MIN_INTERVAL_MS
+        {
+            return Ok(());
+        }
+
         let now = Self::now_string();
         self.conn.execute(
             "DELETE FROM mcp_server_capability_epoch_catalog WHERE server_id NOT IN (SELECT id FROM mcp_server)",
@@ -1480,6 +1561,7 @@ impl MCPDatabase {
             )?;
         }
 
+        CATALOG_LAST_REBUILD_AT_MS.store(Self::now_millis(), Ordering::Relaxed);
         Ok(())
     }
 
@@ -1624,32 +1706,35 @@ impl MCPDatabase {
             (Self::schema_hash(parameters.as_deref()), 1, server_name, tool_name)
         };
 
-        self.conn.execute(
-            "INSERT INTO conversation_mcp_loaded_tool (
-                conversation_id, tool_id, loaded_server_name, loaded_tool_name, loaded_schema_hash,
-                loaded_epoch, status, invalid_reason, source, loaded_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, 'valid', NULL, ?, ?, ?)
-             ON CONFLICT(conversation_id, tool_id) DO UPDATE SET
-                loaded_server_name = excluded.loaded_server_name,
-                loaded_tool_name = excluded.loaded_tool_name,
-                loaded_schema_hash = excluded.loaded_schema_hash,
-                loaded_epoch = excluded.loaded_epoch,
-                status = 'valid',
-                invalid_reason = NULL,
-                source = excluded.source,
-                updated_at = excluded.updated_at",
-            params![
-                conversation_id,
-                tool_id,
-                server_name,
-                tool_name,
-                schema_hash,
-                capability_epoch,
-                source,
-                now,
-                now
-            ],
-        )?;
+        self.retry_if_busy(|| {
+            self.conn.execute(
+                "INSERT INTO conversation_mcp_loaded_tool (
+                    conversation_id, tool_id, loaded_server_name, loaded_tool_name, loaded_schema_hash,
+                    loaded_epoch, status, invalid_reason, source, loaded_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, 'valid', NULL, ?, ?, ?)
+                 ON CONFLICT(conversation_id, tool_id) DO UPDATE SET
+                    loaded_server_name = excluded.loaded_server_name,
+                    loaded_tool_name = excluded.loaded_tool_name,
+                    loaded_schema_hash = excluded.loaded_schema_hash,
+                    loaded_epoch = excluded.loaded_epoch,
+                    status = 'valid',
+                    invalid_reason = NULL,
+                    source = excluded.source,
+                    updated_at = excluded.updated_at",
+                params![
+                    conversation_id,
+                    tool_id,
+                    &server_name,
+                    &tool_name,
+                    &schema_hash,
+                    capability_epoch,
+                    source,
+                    &now,
+                    &now
+                ],
+            )?;
+            Ok(())
+        })?;
         Ok(())
     }
 
