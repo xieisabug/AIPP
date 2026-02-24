@@ -206,6 +206,12 @@ impl OperationState {
         pending.insert(request_id, sender);
     }
 
+    /// 移除待处理权限请求（用于事件发送失败等场景）
+    pub async fn remove_permission_request(&self, request_id: &str) {
+        let mut pending = self.pending_permissions.lock().await;
+        pending.remove(request_id);
+    }
+
     /// 处理权限确认
     pub async fn resolve_permission_request(
         &self,

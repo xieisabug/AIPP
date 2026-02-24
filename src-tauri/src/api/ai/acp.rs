@@ -76,6 +76,11 @@ impl AcpPermissionState {
             false
         }
     }
+
+    pub async fn remove_request(&self, request_id: &str) {
+        let mut pending = self.pending_requests.lock().await;
+        pending.remove(request_id);
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1424,6 +1429,7 @@ impl AcpClient for AcpTauriClient {
         };
 
         if let Err(e) = self.app_handle.emit("acp-permission-request", &event) {
+            state.remove_request(&request_id).await;
             error!(error = %e, "ACP permission request emit failed");
             return Ok(acp::RequestPermissionResponse::new(
                 acp::RequestPermissionOutcome::Cancelled,

@@ -27,6 +27,12 @@ export interface UseConversationEventsOptions {
     onError?: (errorMessage: string) => void;
 }
 
+const MCP_POLL_BASE_INTERVAL_MS = 1200;
+const MCP_POLL_RETRY_INTERVAL_MS = 2000;
+const MCP_POLL_MAX_INTERVAL_MS = 3000;
+
+type McpRefreshResult = "success" | "failed" | "stale";
+
 export function useConversationEvents(options: UseConversationEventsOptions) {
     // 流式消息状态管理，存储正在流式传输的消息
     const [streamingMessages, setStreamingMessages] = useState<
@@ -67,6 +73,12 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     const hasUnsubscribedRef = useRef<boolean>(false);
     const focusSyncRequestIdRef = useRef<number>(0);
     const hasSyncedAfterMessageAddRef = useRef<boolean>(false);
+    const mcpPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const mcpPollGenerationRef = useRef<number>(0);
+    const mcpPollInFlightRef = useRef<boolean>(false);
+    const mcpPollBackoffMsRef = useRef<number>(MCP_POLL_BASE_INTERVAL_MS);
+    const activeMcpCallIdsRef = useRef<Set<number>>(new Set());
+    const isUnmountedRef = useRef<boolean>(false);
 
     // 使用 ref 存储最新的回调函数，避免依赖项变化
     const callbacksRef = useRef(options);
@@ -78,6 +90,21 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     useEffect(() => {
         callbacksRef.current = options;
     }, [options]);
+
+    const stopMcpCompensationPolling = useCallback((reason: string) => {
+        if (mcpPollTimerRef.current) {
+            clearTimeout(mcpPollTimerRef.current);
+            mcpPollTimerRef.current = null;
+        }
+        mcpPollInFlightRef.current = false;
+        mcpPollBackoffMsRef.current = MCP_POLL_BASE_INTERVAL_MS;
+        console.log(`[MCP] stop compensation polling: ${reason}`);
+    }, []);
+
+    const invalidateMcpCompensationPolling = useCallback((reason: string) => {
+        mcpPollGenerationRef.current += 1;
+        stopMcpCompensationPolling(reason);
+    }, [stopMcpCompensationPolling]);
 
     // 基于 activityFocus 计算闪亮边框状态
     // 这是新的逻辑：优先使用后端发送的活动焦点状态，必要时回退本地/手动状态
@@ -160,6 +187,10 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         updateShiningMessagesFromFocus();
     }, [updateShiningMessagesFromFocus]);
 
+    useEffect(() => {
+        activeMcpCallIdsRef.current = activeMcpCallIds;
+    }, [activeMcpCallIds]);
+
     // 主动从后端同步当前活动焦点，避免在监听尚未建立时丢失状态
     const syncActivityFocus = useCallback((conversationIdNum: number) => {
         if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
@@ -213,34 +244,133 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     }, []);
 
     const refreshMcpToolCalls = useCallback(
-        (cancelRef?: { cancelled: boolean }) => {
-            if (!options.conversationId) {
-                return;
+        async (
+            cancelRef?: { cancelled: boolean },
+            conversationIdOverride?: number,
+            generationGuard?: number,
+        ): Promise<McpRefreshResult> => {
+            const conversationIdNum = conversationIdOverride ?? Number(options.conversationId);
+            if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
+                return "stale";
             }
 
-            const conversationIdNum = Number(options.conversationId);
-            if (Number.isNaN(conversationIdNum)) {
-                return;
-            }
-
-            invoke<MCPToolCall[]>("get_mcp_tool_calls_by_conversation", {
-                conversationId: conversationIdNum,
-            })
-                .then((calls) => {
-                    if (cancelRef?.cancelled) return;
-                    console.log(
-                        `[MCP] refreshMcpToolCalls success for conversation ${conversationIdNum}`,
-                        { callIds: calls.map((c) => c.id), statuses: calls.map((c) => c.status) },
-                    );
-                    applyMcpToolCalls(calls);
-                })
-                .catch((error) => {
-                    if (cancelRef?.cancelled) return;
-                    console.warn("Failed to preload MCP tool calls", error);
+            try {
+                const calls = await invoke<MCPToolCall[]>("get_mcp_tool_calls_by_conversation", {
+                    conversationId: conversationIdNum,
                 });
+
+                if (
+                    cancelRef?.cancelled ||
+                    isUnmountedRef.current ||
+                    (generationGuard !== undefined &&
+                        generationGuard !== mcpPollGenerationRef.current)
+                ) {
+                    return "stale";
+                }
+
+                console.log(
+                    `[MCP] refreshMcpToolCalls success for conversation ${conversationIdNum}`,
+                    { callIds: calls.map((c) => c.id), statuses: calls.map((c) => c.status) },
+                );
+                applyMcpToolCalls(calls);
+                return "success";
+            } catch (error) {
+                if (
+                    cancelRef?.cancelled ||
+                    isUnmountedRef.current ||
+                    (generationGuard !== undefined &&
+                        generationGuard !== mcpPollGenerationRef.current)
+                ) {
+                    return "stale";
+                }
+                console.warn("Failed to preload MCP tool calls", error);
+                return "failed";
+            }
         },
         [options.conversationId, applyMcpToolCalls],
     );
+
+    const scheduleMcpCompensationPoll = useCallback(
+        (delayMs: number, conversationIdNum: number, generation: number) => {
+            if (isUnmountedRef.current || generation !== mcpPollGenerationRef.current) {
+                return;
+            }
+
+            if (mcpPollTimerRef.current) {
+                clearTimeout(mcpPollTimerRef.current);
+            }
+
+            mcpPollTimerRef.current = setTimeout(() => {
+                void (async () => {
+                    mcpPollTimerRef.current = null;
+
+                    if (isUnmountedRef.current || generation !== mcpPollGenerationRef.current) {
+                        return;
+                    }
+
+                    if (mcpPollInFlightRef.current) {
+                        scheduleMcpCompensationPoll(delayMs, conversationIdNum, generation);
+                        return;
+                    }
+
+                    mcpPollInFlightRef.current = true;
+                    const refreshResult = await refreshMcpToolCalls(
+                        undefined,
+                        conversationIdNum,
+                        generation,
+                    );
+                    mcpPollInFlightRef.current = false;
+
+                    if (isUnmountedRef.current || generation !== mcpPollGenerationRef.current) {
+                        return;
+                    }
+                    if (refreshResult === "stale") {
+                        return;
+                    }
+
+                    if (activeMcpCallIdsRef.current.size === 0) {
+                        stopMcpCompensationPolling("all active calls completed");
+                        return;
+                    }
+
+                    const nextDelay = refreshResult === "success"
+                        ? MCP_POLL_BASE_INTERVAL_MS
+                        : mcpPollBackoffMsRef.current <= MCP_POLL_BASE_INTERVAL_MS
+                            ? MCP_POLL_RETRY_INTERVAL_MS
+                            : MCP_POLL_MAX_INTERVAL_MS;
+                    mcpPollBackoffMsRef.current = nextDelay;
+                    scheduleMcpCompensationPoll(nextDelay, conversationIdNum, generation);
+                })();
+            }, delayMs);
+        },
+        [refreshMcpToolCalls, stopMcpCompensationPolling],
+    );
+
+    useEffect(() => {
+        const conversationIdNum = Number(options.conversationId);
+        if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
+            stopMcpCompensationPolling("invalid conversation for polling");
+            return;
+        }
+
+        if (activeMcpCallIds.size === 0) {
+            stopMcpCompensationPolling("no active MCP calls");
+            return;
+        }
+
+        if (mcpPollTimerRef.current || mcpPollInFlightRef.current) {
+            return;
+        }
+
+        const generation = mcpPollGenerationRef.current;
+        mcpPollBackoffMsRef.current = MCP_POLL_BASE_INTERVAL_MS;
+        scheduleMcpCompensationPoll(MCP_POLL_BASE_INTERVAL_MS, conversationIdNum, generation);
+    }, [
+        options.conversationId,
+        activeMcpCallIds.size,
+        scheduleMcpCompensationPoll,
+        stopMcpCompensationPolling,
+    ]);
 
     // 统一的事件处理函数
     const handleConversationEvent = useCallback(
@@ -423,7 +553,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     typeEndData.message_type === "response" ||
                     typeEndData.message_type === "reasoning"
                 ) {
-                    refreshMcpToolCalls();
+                    void refreshMcpToolCalls();
                 }
             } else if (conversationEvent.type === "mcp_tool_call_update") {
                 // 处理MCP工具调用状态更新事件
@@ -479,6 +609,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 // 处理对话取消事件
                 const cancelData = conversationEvent.data as ConversationCancelEvent;
                 console.log("Received conversation_cancel event:", cancelData);
+                invalidateMcpCompensationPolling("conversation cancelled");
 
                 // 立即清理所有流式状态，停止显示闪亮边框和思考计时器
                 setStreamingMessages(new Map());
@@ -496,6 +627,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 // 处理流式完成事件（包括空响应场景）
                 const completionData = conversationEvent.data as StreamCompleteEvent;
                 console.log("Received stream_complete event:", completionData);
+                if (activeMcpCallIdsRef.current.size === 0) {
+                    stopMcpCompensationPolling("stream completed with no active MCP calls");
+                }
 
                 // 清理流式与闪烁状态，避免 UI 长时间处于接收中
                 setStreamingMessages(new Map());
@@ -513,11 +647,13 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 setActivityFocus(focusEvent.focus);
             }
         },
-        [refreshMcpToolCalls],
+        [refreshMcpToolCalls, invalidateMcpCompensationPolling, stopMcpCompensationPolling],
     );
 
     // 设置和清理事件监听
     useEffect(() => {
+        invalidateMcpCompensationPolling("conversation changed");
+
         if (!options.conversationId) {
             // 清理状态
             focusSyncRequestIdRef.current += 1; // 使之前的同步请求失效
@@ -578,6 +714,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     try { f(); } catch (e) { console.warn('unlisten failed (cleanup):', e); }
                 }).catch((e) => console.warn('unlisten rejected (cleanup):', e));
             }
+            stopMcpCompensationPolling("conversation listener cleanup");
         };
     }, [options.conversationId]); // 只依赖 conversationId
 
@@ -588,12 +725,19 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         }
 
         const cancelRef = { cancelled: false };
-        refreshMcpToolCalls(cancelRef);
+        void refreshMcpToolCalls(cancelRef);
 
         return () => {
             cancelRef.cancelled = true;
         };
     }, [options.conversationId, refreshMcpToolCalls]);
+
+    useEffect(() => {
+        return () => {
+            isUnmountedRef.current = true;
+            invalidateMcpCompensationPolling("useConversationEvents unmount");
+        };
+    }, [invalidateMcpCompensationPolling]);
 
     // 清理函数
     const clearStreamingMessages = useCallback(() => {
@@ -602,6 +746,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
     const clearShiningMessages = useCallback(() => {
         console.log("[DEBUG] Clearing shining/MCP state (manual reset)");
+        invalidateMcpCompensationPolling("manual state clear");
         setShiningMessageIds(new Set());
         setStreamingAssistantMessageIds(new Set());
         setPendingUserMessageId(null);
@@ -609,7 +754,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         setMCPToolCallStates(new Map());
         setActivityFocus({ focus_type: 'none' });
         setManualShineMessageId(null);
-    }, []);
+    }, [invalidateMcpCompensationPolling]);
 
     const setPendingUserMessage = useCallback((messageId: number | null) => {
         setPendingUserMessageId(messageId);
@@ -621,6 +766,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
     const handleError = useCallback((errorMessage: string) => {
         console.error("Global error handler called:", errorMessage);
+        invalidateMcpCompensationPolling("global error");
 
         // 清理所有流式消息状态
         setStreamingMessages(new Map());
@@ -634,7 +780,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         // 调用外部错误处理，确保状态重置
         callbacksRef.current.onError?.(errorMessage);
         callbacksRef.current.onAiResponseComplete?.();
-    }, []);
+    }, [invalidateMcpCompensationPolling]);
 
     // 提供稳定的 functionMap 更新接口
     const updateFunctionMap = useCallback((functionMap: Map<number, any>) => {

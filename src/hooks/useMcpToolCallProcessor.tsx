@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Send, Loader2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import type { InlineInteractionItem } from '@/components/ConversationUI';
+import { getErrorMessage } from '@/utils/error';
 
 interface McpProcessorOptions {
     remarkPlugins: readonly any[];
@@ -363,7 +364,7 @@ const McpToolCallResultsButton: React.FC<{
             await invoke('send_mcp_tool_results', { messageId });
         } catch (error) {
             console.error('Failed to send tool results:', error);
-            const errorMessage = error instanceof Error ? error.message : '发送结果失败';
+            const errorMessage = getErrorMessage(error) || '发送结果失败';
             console.error(errorMessage);
         } finally {
             setIsSending(false);
