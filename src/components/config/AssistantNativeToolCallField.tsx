@@ -94,7 +94,7 @@ const AssistantNativeToolCallField: React.FC<AssistantNativeToolCallFieldProps> 
                 />
             </div>
             <p className="text-xs text-muted-foreground">
-                {useNativeToolCall ? '已启用原生ToolCall调用' : '使用传统prompt方式调用工具'}
+                {useNativeToolCall ? '已启用原生ToolCall调用' : '使用prompt方式调用工具'}
             </p>
         </div>
     );
