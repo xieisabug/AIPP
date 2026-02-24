@@ -12,19 +12,23 @@
 你现在并不是从零开始，已有不少好基础：
 
 1. **助手类型机制已经通了（AssistantType）**  
-   `onAssistantTypeInit / onAssistantTypeSelect / onAssistantTypeRun` 已有实战路径。
+   `onAssistantTypeInit / onAssistantTypeSelect / onAssistantTypeRun` 已有实战路径。  
+   ⚠️ 但仅限 `AssistantType`。`InterfaceType` 和 `ApplicationType` 只有类型枚举定义，无运行时支持。
 
 2. **多窗口架构已经成熟**  
    `ask/chat_ui/config/artifact/...` 都有稳定窗口管理能力，适合承载玩法窗口。
 
 3. **事件与状态基础已存在**  
-   对话事件、MCP工具调用状态、activity focus、token 统计都可作为玩法数据源。
+   对话事件、MCP工具调用状态、activity focus、token 统计都可作为玩法数据源。  
+   ⚠️ 但这些事件目前没有桥接到插件——插件无法直接订阅。需要建事件总线。
 
 4. **本地数据库体系完整**  
-   已有多库分域设计（assistant/conversation/mcp/plugin/system 等），可承接插件持久化。
+   已有多库分域设计（assistant/conversation/mcp/plugin/system 等），可承接插件持久化。  
+   ⚠️ `plugin.db` 有完整表结构和 Rust CRUD 方法，但**没有 Tauri Command 暴露给前端**。
 
 5. **插件类型概念已定义**  
-   `AssistantType/InterfaceType/ApplicationType` 在类型层面已存在，方向是对的。
+   `AssistantType/InterfaceType/ApplicationType` 在类型层面已存在，方向是对的。  
+   ⚠️ `SystemApi` 接口为空（`interface SystemApi { }`），插件拿不到任何系统能力。
 
 ---
 
@@ -104,3 +108,5 @@
 
 你的 AIPP 现状已经够好用，**不需要推倒重建**。  
 要做的是：在现有主链路上补一个稳定插件中台，让“玩法”从“写死功能”升级为“可插拔产品能力”。
+> 📖 **详细技术实现请看**：`plugin-kernel-05-技术实现细节.md`  
+> 包含具体代码示例、Capability API 完整规格、四个玩法的插件源码级设计、以及从现有代码迁移的详细步骤。
