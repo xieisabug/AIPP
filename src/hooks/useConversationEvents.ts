@@ -616,10 +616,22 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 setPendingUserMessageId(null);
                 setStreamingAssistantMessageIds(new Set());
                 setActiveMcpCallIds(new Set());
-                setMCPToolCallStates(new Map());
+                // 保留已完成的 MCP 工具调用状态（搜索结果等），仅移除进行中的
+                setMCPToolCallStates((prev) => {
+                    const kept = new Map<number, MCPToolCallUpdateEvent>();
+                    prev.forEach((state, callId) => {
+                        if (state.status === 'success' || state.status === 'failed') {
+                            kept.set(callId, state);
+                        }
+                    });
+                    return kept;
+                });
 
                 // 调用 AI 响应完成回调，确保状态重置
                 callbacksRef.current.onAiResponseComplete?.();
+
+                // 从 DB 刷新 MCP 工具调用状态，确保取消后状态与 DB 一致
+                void refreshMcpToolCalls();
 
                 // 调用外部的取消处理函数
                 callbacksRef.current.onConversationCancel?.(cancelData);
@@ -733,11 +745,14 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     }, [options.conversationId, refreshMcpToolCalls]);
 
     useEffect(() => {
+        // Reset on (re-)mount — critical for React StrictMode double-mount cycle
+        isUnmountedRef.current = false;
         return () => {
             isUnmountedRef.current = true;
             invalidateMcpCompensationPolling("useConversationEvents unmount");
         };
-    }, [invalidateMcpCompensationPolling]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     // 清理函数
     const clearStreamingMessages = useCallback(() => {
@@ -751,7 +766,16 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         setStreamingAssistantMessageIds(new Set());
         setPendingUserMessageId(null);
         setActiveMcpCallIds(new Set());
-        setMCPToolCallStates(new Map());
+        // 保留已完成的 MCP 工具调用状态（搜索结果等），仅移除进行中的
+        setMCPToolCallStates((prev) => {
+            const kept = new Map<number, MCPToolCallUpdateEvent>();
+            prev.forEach((state, callId) => {
+                if (state.status === 'success' || state.status === 'failed') {
+                    kept.set(callId, state);
+                }
+            });
+            return kept;
+        });
         setActivityFocus({ focus_type: 'none' });
         setManualShineMessageId(null);
     }, [invalidateMcpCompensationPolling]);
@@ -771,7 +795,16 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         // 清理所有流式消息状态
         setStreamingMessages(new Map());
         setShiningMessageIds(new Set());
-        setMCPToolCallStates(new Map());
+        // 保留已完成的 MCP 工具调用状态（搜索结果等），仅移除进行中的
+        setMCPToolCallStates((prev) => {
+            const kept = new Map<number, MCPToolCallUpdateEvent>();
+            prev.forEach((state, callId) => {
+                if (state.status === 'success' || state.status === 'failed') {
+                    kept.set(callId, state);
+                }
+            });
+            return kept;
+        });
         setActiveMcpCallIds(new Set());
         setStreamingAssistantMessageIds(new Set());
         setPendingUserMessageId(null); // 清理等待回复的用户消息
