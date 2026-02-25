@@ -28,6 +28,7 @@ import {
 import { MCPServer, MCPServerTool, MCPServerResource, MCPServerPrompt, MCPServerRequest } from "../../data/MCP";
 import { MCPTemplate } from "../../data/MCPTemplates";
 import { useSkillsMcpValidation, DisableOperationMcpCheckResult, AGENT_MCP_COMMAND } from "../../hooks/useSkillsMcpValidation";
+import { PinyinFilter } from "../../utils/pinyinFilter";
 
 const MCPConfig: React.FC = () => {
     const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
@@ -457,14 +458,13 @@ const MCPConfig: React.FC = () => {
     // 侧边栏内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
     const filteredMcpServers = useMemo(() => {
         if (!searchQuery.trim()) return mcpServers;
-        const query = searchQuery.toLowerCase();
         return mcpServers.filter(server => {
-            if (server.name.toLowerCase().includes(query)) return true;
-            if (server.description && server.description.toLowerCase().includes(query)) return true;
+            if (PinyinFilter.matches(server.name, searchQuery)) return true;
+            if (server.description && PinyinFilter.matches(server.description, searchQuery)) return true;
             const tools = allServerTools.get(server.id) || [];
             return tools.some(tool =>
-                tool.tool_name.toLowerCase().includes(query) ||
-                (tool.tool_description && tool.tool_description.toLowerCase().includes(query))
+                PinyinFilter.matches(tool.tool_name, searchQuery) ||
+                (tool.tool_description && PinyinFilter.matches(tool.tool_description, searchQuery))
             );
         });
     }, [mcpServers, allServerTools, searchQuery]);

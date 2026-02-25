@@ -11,6 +11,7 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { Zap, Settings, ServerCrash, Download, Plus } from "lucide-react";
 import { toast } from 'sonner';
+import { PinyinFilter } from "../../utils/pinyinFilter";
 
 // 导入公共组件
 import {
@@ -279,10 +280,9 @@ const LLMProviderConfig: React.FC = () => {
     // 侧边栏内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
     const filteredProviders = useMemo(() => {
         if (!searchQuery.trim()) return LLMProviders;
-        const query = searchQuery.toLowerCase();
         return LLMProviders.filter(provider =>
-            provider.name.toLowerCase().includes(query) ||
-            provider.api_type.toLowerCase().includes(query)
+            PinyinFilter.matches(provider.name, searchQuery) ||
+            PinyinFilter.matches(provider.api_type, searchQuery)
         );
     }, [LLMProviders, searchQuery]);
 

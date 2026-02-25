@@ -7,6 +7,7 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { useForm } from "react-hook-form";
 import { validateConfig } from "../../utils/validate";
+import { PinyinFilter } from "../../utils/pinyinFilter";
 import AddAssistantDialog from "./AddAssistantDialog";
 
 // 导入公共组件
@@ -463,12 +464,11 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         [assistantTypes, handleAssistantAdded, openImportDialog]
     );
 
-    // 按搜索词过滤助手
+    // 按搜索词过滤助手（支持拼音）
     const filteredAssistants = useMemo(() => {
         if (!searchQuery.trim()) return assistants;
-        const query = searchQuery.toLowerCase();
         return assistants.filter(assistant =>
-            assistant.name.toLowerCase().includes(query)
+            PinyinFilter.matches(assistant.name, searchQuery)
         );
     }, [assistants, searchQuery]);
 

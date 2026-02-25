@@ -7,6 +7,7 @@ import { Folder, Sparkles, RefreshCw, FolderOpen, FileText, Trash2 } from "lucid
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { toast } from 'sonner';
 import ConfirmDialog from "../ConfirmDialog";
+import { PinyinFilter } from "../../utils/pinyinFilter";
 
 import {
     ConfigPageLayout,
@@ -257,15 +258,14 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
         return groupSkillsBySource(skills);
     }, [skills]);
 
-    // Filter grouped skills by search query
+    // Filter grouped skills by search query（支持拼音）
     const filteredGroupedSkills = useMemo(() => {
         if (!searchQuery.trim()) return groupedSkills;
-        const query = searchQuery.toLowerCase();
         const filtered = new Map<SkillSourceType, ScannedSkill[]>();
         for (const [sourceType, sourceSkills] of groupedSkills.entries()) {
             const matched = sourceSkills.filter(skill =>
-                skill.display_name.toLowerCase().includes(query) ||
-                skill.identifier.toLowerCase().includes(query)
+                PinyinFilter.matches(skill.display_name, searchQuery) ||
+                PinyinFilter.matches(skill.identifier, searchQuery)
             );
             if (matched.length > 0) {
                 filtered.set(sourceType, matched);

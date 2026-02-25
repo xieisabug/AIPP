@@ -419,6 +419,37 @@ export class PinyinFilter {
             return name.substring(0, 1).toUpperCase();
         }
     }
+
+    /**
+     * 简单判断文本是否匹配查询（支持精确、拼音、首字母匹配）
+     * 用于列表过滤场景，不需要高亮信息
+     */
+    static matches(text: string, query: string): boolean {
+        if (!query.trim()) return true;
+        const queryLower = query.toLowerCase();
+        const textLower = text.toLowerCase();
+
+        // 精确匹配
+        if (textLower.includes(queryLower)) return true;
+
+        // 拼音匹配
+        try {
+            const pinyinArray = pinyin(text, {
+                toneType: "none",
+                type: "array",
+            }).map((p) => p.toLowerCase());
+
+            const pinyinFull = pinyinArray.join("");
+            const pinyinInitials = pinyinArray.map((p) => p.charAt(0)).join("");
+
+            if (pinyinFull.includes(queryLower)) return true;
+            if (this.isInitialsMatch(pinyinInitials, queryLower)) return true;
+        } catch {
+            // 拼音转换失败时忽略
+        }
+
+        return false;
+    }
 }
 
 export default PinyinFilter;

@@ -6,6 +6,7 @@ import { Input } from "../ui/input";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../ui/collapsible";
 import { Server, Wrench, MoreHorizontal, Play, Pause, ChevronDown, ChevronRight, Settings2, Search } from "lucide-react";
 import { toast } from 'sonner';
+import { PinyinFilter } from "../../utils/pinyinFilter";
 import {
     Dialog,
     DialogContent,
@@ -303,14 +304,13 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
 
     const enabledServers = availableServers.filter(server => server.is_enabled);
 
-    // 按搜索词过滤服务器（穿透到工具名称）
+    // 按搜索词过滤服务器（穿透到工具名称，支持拼音）
     const filteredServers = useMemo(() => {
         if (!searchQuery.trim()) return availableServers;
-        const query = searchQuery.toLowerCase();
         return availableServers.filter(server => {
-            if (server.name.toLowerCase().includes(query)) return true;
+            if (PinyinFilter.matches(server.name, searchQuery)) return true;
             const tools = serverTools.get(server.id) || [];
-            return tools.some(tool => tool.name.toLowerCase().includes(query));
+            return tools.some(tool => PinyinFilter.matches(tool.name, searchQuery));
         });
     }, [availableServers, serverTools, searchQuery]);
 

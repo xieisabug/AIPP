@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { AlertTriangle, Eye, Mic, Video, Search } from 'lucide-react';
+import { PinyinFilter } from '../../utils/pinyinFilter';
 
 interface ModelForSelection {
     name: string;
@@ -56,10 +57,9 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
 
     const filteredModels = useMemo(() => {
         if (!searchQuery.trim()) return selectedModels;
-        const query = searchQuery.toLowerCase();
         return selectedModels.filter(model =>
-            model.name.toLowerCase().includes(query) ||
-            model.code.toLowerCase().includes(query)
+            PinyinFilter.matches(model.name, searchQuery) ||
+            PinyinFilter.matches(model.code, searchQuery)
         );
     }, [selectedModels, searchQuery]);
 
