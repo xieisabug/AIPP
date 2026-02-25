@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState, useMemo } from 'react';
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
+import { Input } from "../ui/input";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../ui/collapsible";
-import { Server, Wrench, MoreHorizontal, Play, Pause, ChevronDown, ChevronRight, Settings2 } from "lucide-react";
+import { Server, Wrench, MoreHorizontal, Play, Pause, ChevronDown, ChevronRight, Settings2, Search } from "lucide-react";
 import { toast } from 'sonner';
 import {
     Dialog,
@@ -51,6 +52,7 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
     const [availableServers, setAvailableServers] = useState<MCPServerInfo[]>([]);
     const [expandedServers, setExpandedServers] = useState<Set<number>>(new Set());
     const [serverTools, setServerTools] = useState<Map<number, MCPToolInfo[]>>(new Map());
+    const [searchQuery, setSearchQuery] = useState('');
     // loadingTools 不再需要，因为工具数据在初始化时一次性加载
 
     // Skills/MCP 联动校验
@@ -294,10 +296,23 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
     useEffect(() => {
         if (isOpen) {
             fetchAvailableServers();
+        } else {
+            setSearchQuery('');
         }
     }, [isOpen, assistantId]);
 
     const enabledServers = availableServers.filter(server => server.is_enabled);
+
+    // 按搜索词过滤服务器（穿透到工具名称）
+    const filteredServers = useMemo(() => {
+        if (!searchQuery.trim()) return availableServers;
+        const query = searchQuery.toLowerCase();
+        return availableServers.filter(server => {
+            if (server.name.toLowerCase().includes(query)) return true;
+            const tools = serverTools.get(server.id) || [];
+            return tools.some(tool => tool.name.toLowerCase().includes(query));
+        });
+    }, [availableServers, serverTools, searchQuery]);
 
     // 统计有效启用的工具数量：只有服务器启用时，其工具才算有效启用
     const totalEnabledTools = Array.from(serverTools.entries())
@@ -332,7 +347,18 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
                             </div>
                         ) : (
                             <div className="space-y-4">
-                                {availableServers.map(server => {
+                                {/* 搜索框 */}
+                                <div className="relative">
+                                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                                    <Input
+                                        value={searchQuery}
+                                        onChange={(e) => setSearchQuery(e.target.value)}
+                                        placeholder="搜索MCP服务器..."
+                                        className="pl-8 h-8 text-sm"
+                                    />
+                                </div>
+
+                                {filteredServers.map(server => {
                                     const isExpanded = expandedServers.has(server.id);
                                     const serverToolsList = serverTools.get(server.id) || [];
                                     const isLoadingTools = false; // 不再需要加载状态，因为数据已预加载

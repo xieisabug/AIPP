@@ -35,6 +35,9 @@ const MCPConfig: React.FC = () => {
     const [serverTools, setServerTools] = useState<MCPServerTool[]>([]);
     const [serverResources, setServerResources] = useState<MCPServerResource[]>([]);
     const [serverPrompts, setServerPrompts] = useState<MCPServerPrompt[]>([]);
+    const [searchQuery, setSearchQuery] = useState('');
+    // 所有服务器的工具缓存，用于搜索穿透
+    const [allServerTools, setAllServerTools] = useState<Map<number, MCPServerTool[]>>(new Map());
 
     // Dialog states
     const [serverDialogOpen, setServerDialogOpen] = useState(false);
@@ -103,11 +106,27 @@ const MCPConfig: React.FC = () => {
                 if (selectedServer && !servers.find(s => s.id === selectedServer.id)) {
                     setSelectedServer(servers.length > 0 ? servers[0] : null);
                 }
+                // 加载所有服务器的工具用于搜索
+                loadAllServerTools(servers);
             })
             .catch((e) => {
                 toast.error('获取MCP服务器失败: ' + e);
             });
     }, [selectedServer]);
+
+    // 加载所有服务器的工具（用于搜索穿透）
+    const loadAllServerTools = useCallback(async (servers: MCPServer[]) => {
+        const toolsMap = new Map<number, MCPServerTool[]>();
+        await Promise.all(servers.map(async (server) => {
+            try {
+                const tools = await invoke<MCPServerTool[]>('get_mcp_server_tools', { serverId: server.id });
+                toolsMap.set(server.id, tools);
+            } catch {
+                // 忽略单个服务器的工具加载失败
+            }
+        }));
+        setAllServerTools(toolsMap);
+    }, []);
 
     // 获取服务器工具列表
     const getServerTools = useCallback((serverId: number) => {
@@ -436,11 +455,28 @@ const MCPConfig: React.FC = () => {
     ), [handleTemplateSelect, handleJSONImport]);
 
     // 侧边栏内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
+    const filteredMcpServers = useMemo(() => {
+        if (!searchQuery.trim()) return mcpServers;
+        const query = searchQuery.toLowerCase();
+        return mcpServers.filter(server => {
+            if (server.name.toLowerCase().includes(query)) return true;
+            if (server.description && server.description.toLowerCase().includes(query)) return true;
+            const tools = allServerTools.get(server.id) || [];
+            return tools.some(tool =>
+                tool.tool_name.toLowerCase().includes(query) ||
+                (tool.tool_description && tool.tool_description.toLowerCase().includes(query))
+            );
+        });
+    }, [mcpServers, allServerTools, searchQuery]);
+
     const sidebar = useMemo(() => (
         <SidebarList
             title="MCP列表"
             description="选择MCP进行配置"
             icon={<MCP className="h-5 w-5" />}
+            searchValue={searchQuery}
+            onSearchChange={setSearchQuery}
+            searchPlaceholder="搜索MCP..."
             addButton={
                 <MCPActionDropdown
                     onTemplateSelect={handleTemplateSelect}
@@ -451,7 +487,7 @@ const MCPConfig: React.FC = () => {
                 />
             }
         >
-            {mcpServers.map((server) => (
+            {filteredMcpServers.map((server) => (
                 <ListItemButton
                     key={server.id}
                     isSelected={selectedServer?.id === server.id}
@@ -468,7 +504,7 @@ const MCPConfig: React.FC = () => {
                 </ListItemButton>
             ))}
         </SidebarList>
-    ), [mcpServers, selectedServer?.id, handleSelectServer, handleTemplateSelect, handleJSONImport]);
+    ), [filteredMcpServers, selectedServer?.id, handleSelectServer, handleTemplateSelect, handleJSONImport, searchQuery]);
 
     // 右侧内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
     const content = useMemo(() => selectedServer ? (

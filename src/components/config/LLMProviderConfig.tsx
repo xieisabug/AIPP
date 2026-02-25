@@ -33,6 +33,7 @@ interface LLMProvider {
 const LLMProviderConfig: React.FC = () => {
     const [LLMProviders, setLLMProviders] = useState<Array<LLMProvider>>([]);
     const [selectedProvider, setSelectedProvider] = useState<LLMProvider | null>(null);
+    const [searchQuery, setSearchQuery] = useState('');
 
     const handleToggle = useCallback((index: number) => {
         const newProviders = [...LLMProviders];
@@ -276,14 +277,26 @@ const LLMProviderConfig: React.FC = () => {
     ), [openNewProviderDialog]);
 
     // 侧边栏内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
+    const filteredProviders = useMemo(() => {
+        if (!searchQuery.trim()) return LLMProviders;
+        const query = searchQuery.toLowerCase();
+        return LLMProviders.filter(provider =>
+            provider.name.toLowerCase().includes(query) ||
+            provider.api_type.toLowerCase().includes(query)
+        );
+    }, [LLMProviders, searchQuery]);
+
     const sidebar = useMemo(() => (
         <SidebarList
             title="模型提供商"
             description="选择提供商进行配置"
             icon={<ServerCrash className="h-5 w-5" />}
+            searchValue={searchQuery}
+            onSearchChange={setSearchQuery}
+            searchPlaceholder="搜索提供商..."
             addButton={addButton}
         >
-            {LLMProviders.map((provider) => (
+            {filteredProviders.map((provider) => (
                 <ListItemButton
                     key={provider.id}
                     isSelected={selectedProvider?.id === provider.id}
@@ -300,7 +313,7 @@ const LLMProviderConfig: React.FC = () => {
                 </ListItemButton>
             ))}
         </SidebarList>
-    ), [LLMProviders, selectedProvider?.id, handleSelectProvider, addButton]);
+    ), [filteredProviders, selectedProvider?.id, handleSelectProvider, addButton, searchQuery]);
 
     const selectedProviderApiType = selectedProvider ? apiTypes.find(type => type.value === selectedProvider.api_type)?.label || selectedProvider.api_type : "";
 

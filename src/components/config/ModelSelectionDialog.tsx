@@ -1,12 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { AlertTriangle, Eye, Mic, Video } from 'lucide-react';
+import { AlertTriangle, Eye, Mic, Video, Search } from 'lucide-react';
 
 interface ModelForSelection {
     name: string;
@@ -39,12 +40,28 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
     loading
 }) => {
     const [selectedModels, setSelectedModels] = useState<ModelForSelection[]>([]);
+    const [searchQuery, setSearchQuery] = useState('');
 
     React.useEffect(() => {
         if (modelData) {
             setSelectedModels(modelData.available_models);
         }
     }, [modelData]);
+
+    React.useEffect(() => {
+        if (!open) {
+            setSearchQuery('');
+        }
+    }, [open]);
+
+    const filteredModels = useMemo(() => {
+        if (!searchQuery.trim()) return selectedModels;
+        const query = searchQuery.toLowerCase();
+        return selectedModels.filter(model =>
+            model.name.toLowerCase().includes(query) ||
+            model.code.toLowerCase().includes(query)
+        );
+    }, [selectedModels, searchQuery]);
 
     const handleModelToggle = (modelCode: string, checked: boolean) => {
         setSelectedModels(prev => 
@@ -109,6 +126,17 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
                         </div>
                     </div>
 
+                    {/* 搜索框 */}
+                    <div className="relative">
+                        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                        <Input
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                            placeholder="搜索模型..."
+                            className="pl-8 h-8 text-sm"
+                        />
+                    </div>
+
                     {/* 缺失模型提醒 */}
                     {modelData.missing_models.length > 0 && (
                         <div className="p-3 bg-orange-50/80 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded-lg">
@@ -131,7 +159,7 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
                     {/* 模型列表 */}
                     <ScrollArea className="h-96">
                         <div className="grid grid-cols-2 gap-4">
-                            {selectedModels.map((model) => (
+                            {filteredModels.map((model) => (
                                 <div 
                                     key={model.code} 
                                     className="flex items-center space-x-3 p-3 border rounded-lg hover:bg-muted cursor-pointer"
