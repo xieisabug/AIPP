@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import type {
     ConversationWithMessages,
@@ -14,14 +15,30 @@ import {
     stripMcpToolCallMarkers,
     extractMcpToolCallHints,
     formatJsonContent,
-    getLatestBranchMessages,
 } from "@/utils/exportFormatters";
-import { renderExportContent } from "@/components/conversation/ConversationExportRenderer";
+import {
+    renderExportContent,
+} from "@/components/conversation/ConversationExportRenderer";
 
 /**
  * 对话导出服务
  */
 export const conversationExportService = {
+    showExportSuccess(formatName: string, filePath: string): void {
+        toast.success(`${formatName} 导出成功`, {
+            position: "bottom-right",
+            action: {
+                label: "打开",
+                onClick: () => {
+                    void openPath(filePath).catch((error) => {
+                        const errorMessage = error instanceof Error ? error.message : "打开失败";
+                        toast.error(`打开文件失败: ${errorMessage}`);
+                    });
+                },
+            },
+        });
+    },
+
     /**
      * 获取导出数据
      */
@@ -35,10 +52,10 @@ export const conversationExportService = {
                     conversationId: parseInt(conversationId),
                 }).catch(() => []), // 如果没有工具调用，返回空数组
             ]);
-            const filteredMessages = getLatestBranchMessages(conversation.messages);
-            const messageIdSet = new Set(filteredMessages.map((msg) => msg.id));
+            const exportMessages = conversation.messages;
+            const messageIdSet = new Set(exportMessages.map((msg) => msg.id));
             const hintCallIdSet = new Set<number>();
-            for (const message of filteredMessages) {
+            for (const message of exportMessages) {
                 const hints = extractMcpToolCallHints(message.content || "");
                 for (const hint of hints) {
                     if (typeof hint.call_id === "number") {
@@ -55,7 +72,7 @@ export const conversationExportService = {
             return {
                 conversation: {
                     ...conversation,
-                    messages: filteredMessages,
+                    messages: exportMessages,
                 },
                 toolCalls: filteredToolCalls,
             };
@@ -72,17 +89,17 @@ export const conversationExportService = {
         content: Uint8Array,
         defaultName: string,
         filters: Array<{ name: string; extensions: string[] }>,
-    ): Promise<void> {
+    ): Promise<string | null> {
         try {
             const path = await save({
                 defaultPath: defaultName,
                 filters,
             });
-            if (path) {
-                await writeFile(path, content);
-            } else {
-                throw new Error("用户取消了保存操作");
+            if (!path) {
+                return null;
             }
+            await writeFile(path, content);
+            return path;
         } catch (error) {
             console.error("Failed to save file:", error);
             throw error;
@@ -96,24 +113,24 @@ export const conversationExportService = {
         data: ExportData,
         options: ConversationExportOptions,
         filename: string,
-    ): Promise<void> {
+    ): Promise<boolean> {
         try {
             const markdown = formatAsMarkdown(data, options);
             const encoder = new TextEncoder();
             const content = encoder.encode(markdown);
             const sanitizedName = sanitizeFilename(filename);
-            await this.saveFile(
+            const savePath = await this.saveFile(
                 content,
                 `${sanitizedName}.md`,
                 [{ name: "Markdown", extensions: ["md"] }],
             );
-            toast.success("Markdown 导出成功");
+            if (!savePath) {
+                return false;
+            }
+            this.showExportSuccess("Markdown", savePath);
+            return true;
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "导出失败";
-            if (errorMessage.includes("取消")) {
-                // 用户主动取消，不显示错误
-                return;
-            }
             toast.error(`Markdown 导出失败: ${errorMessage}`);
             throw error;
         }
@@ -168,6 +185,27 @@ export const conversationExportService = {
                 container.parentNode.removeChild(container);
             }
         }
+    },
+
+    async waitForImages(container: HTMLElement): Promise<void> {
+        const images = Array.from(container.querySelectorAll("img"));
+        if (images.length === 0) {
+            return;
+        }
+        await Promise.all(
+            images.map((image) => {
+                if (image.complete) {
+                    return Promise.resolve();
+                }
+                return new Promise<void>((resolve) => {
+                    const done = () => {
+                        resolve();
+                    };
+                    image.addEventListener("load", done, { once: true });
+                    image.addEventListener("error", done, { once: true });
+                });
+            }),
+        );
     },
 
     /**
@@ -456,122 +494,29 @@ export const conversationExportService = {
         data: ExportData,
         options: ConversationExportOptions,
         filename: string,
-    ): Promise<void> {
+    ): Promise<boolean> {
         try {
-            const { jsPDF } = await import("jspdf");
-
-            // 分段渲染
-            const { canvases } = await this.renderPdfToCanvas(data, options);
-
-            // 创建 PDF
-            const pdf = new jsPDF({
-                orientation: "portrait",
-                unit: "pt",
-                format: "a4",
+            const markdown = formatAsMarkdown(data, options, {
+                includeImageAttachments: true,
             });
-
-            const pageWidth = pdf.internal.pageSize.getWidth();
-            const pageHeight = pdf.internal.pageSize.getHeight();
-            const margin = 20;
-
-            let currentY = margin;
-
-            for (let i = 0; i < canvases.length; i++) {
-                const canvas = canvases[i];
-                const imgWidth = pageWidth - margin * 2;
-                const imgHeight = (canvas.height * imgWidth) / canvas.width;
-
-                // 计算当前页剩余空间
-                const remainingSpace = pageHeight - margin - currentY;
-
-                // 如果当前页已经没有空间了（剩余不足10pt），先换页
-                if (remainingSpace < 10) {
-                    pdf.addPage();
-                    currentY = margin;
-                }
-
-                // 如果内容能完整放入当前页剩余空间
-                if (imgHeight <= pageHeight - margin - currentY) {
-                    pdf.addImage(
-                        canvas.toDataURL("image/jpeg", 0.95),
-                        "JPEG",
-                        margin,
-                        currentY,
-                        imgWidth,
-                        imgHeight,
-                    );
-                    currentY += imgHeight;
-                } else {
-                    // 内容需要跨页，进行分割
-                    let remainingImgHeight = imgHeight;
-                    let sourceY = 0;
-
-                    while (remainingImgHeight > 0) {
-                        // 计算当前页可用的空间
-                        const availableHeight = pageHeight - margin - currentY;
-                        
-                        // 如果当前页没有空间了，换页
-                        if (availableHeight < 10) {
-                            pdf.addPage();
-                            currentY = margin;
-                            continue;
-                        }
-
-                        // 计算这一页能放多少
-                        const sliceHeight = Math.min(remainingImgHeight, availableHeight);
-                        const sourceHeight = (sliceHeight / imgHeight) * canvas.height;
-
-                        // 创建临时 canvas 来裁剪
-                        const tempCanvas = document.createElement("canvas");
-                        tempCanvas.width = canvas.width;
-                        tempCanvas.height = Math.ceil(sourceHeight);
-                        const ctx = tempCanvas.getContext("2d");
-                        if (ctx) {
-                            ctx.drawImage(
-                                canvas,
-                                0, sourceY, canvas.width, sourceHeight,
-                                0, 0, canvas.width, sourceHeight
-                            );
-                            pdf.addImage(
-                                tempCanvas.toDataURL("image/jpeg", 0.95),
-                                "JPEG",
-                                margin,
-                                currentY,
-                                imgWidth,
-                                sliceHeight,
-                            );
-                        }
-
-                        currentY += sliceHeight;
-                        sourceY += sourceHeight;
-                        remainingImgHeight -= sliceHeight;
-
-                        // 如果还有剩余内容，换页继续
-                        if (remainingImgHeight > 0) {
-                            pdf.addPage();
-                            currentY = margin;
-                        }
-                    }
-                }
-            }
+            const pdfBytes: number[] = await invoke("markdown_to_pdf", { markdown });
 
             // 保存 PDF
             const sanitizedName = sanitizeFilename(filename);
-            const pdfBytes = pdf.output("arraybuffer");
             const content = new Uint8Array(pdfBytes);
 
-            await this.saveFile(
+            const savePath = await this.saveFile(
                 content,
                 `${sanitizedName}.pdf`,
                 [{ name: "PDF", extensions: ["pdf"] }],
             );
-
-            toast.success("PDF 导出成功");
+            if (!savePath) {
+                return false;
+            }
+            this.showExportSuccess("PDF", savePath);
+            return true;
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "导出失败";
-            if (errorMessage.includes("取消")) {
-                return;
-            }
             toast.error(`PDF 导出失败: ${errorMessage}`);
             throw error;
         }
@@ -584,34 +529,34 @@ export const conversationExportService = {
         data: ExportData,
         options: ConversationExportOptions,
         filename: string,
-    ): Promise<void> {
+    ): Promise<boolean> {
         try {
             // 渲染为 canvas
             const canvas = await this.renderToCanvas(data, options);
-
-            // 转换为 PNG blob
-            canvas.toBlob(async (blob) => {
-                if (!blob) {
-                    throw new Error("无法生成图片");
-                }
-
-                const arrayBuffer = await blob.arrayBuffer();
-                const content = new Uint8Array(arrayBuffer);
-                const sanitizedName = sanitizeFilename(filename);
-
-                await this.saveFile(
-                    content,
-                    `${sanitizedName}.png`,
-                    [{ name: "PNG", extensions: ["png"] }],
-                );
-
-                toast.success("PNG 导出成功");
-            }, "image/png");
+            const blob = await new Promise<Blob>((resolve, reject) => {
+                canvas.toBlob((currentBlob) => {
+                    if (!currentBlob) {
+                        reject(new Error("无法生成图片"));
+                        return;
+                    }
+                    resolve(currentBlob);
+                }, "image/png");
+            });
+            const arrayBuffer = await blob.arrayBuffer();
+            const content = new Uint8Array(arrayBuffer);
+            const sanitizedName = sanitizeFilename(filename);
+            const savePath = await this.saveFile(
+                content,
+                `${sanitizedName}.png`,
+                [{ name: "PNG", extensions: ["png"] }],
+            );
+            if (!savePath) {
+                return false;
+            }
+            this.showExportSuccess("PNG", savePath);
+            return true;
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "导出失败";
-            if (errorMessage.includes("取消")) {
-                return;
-            }
             toast.error(`PNG 导出失败: ${errorMessage}`);
             throw error;
         }
@@ -624,28 +569,30 @@ export const conversationExportService = {
         data: ExportData,
         options: ConversationExportOptions,
         filename: string,
-    ): Promise<void> {
+    ): Promise<boolean> {
         try {
             // 复用已有的 Markdown 格式化逻辑
-            const markdown = formatAsMarkdown(data, options);
+            const markdown = formatAsMarkdown(data, options, {
+                includeImageAttachments: true,
+            });
 
             // 调用 Rust 后端进行 markdown → docx 转换
             const docxBytes: number[] = await invoke("markdown_to_docx", { markdown });
             const content = new Uint8Array(docxBytes);
             const sanitizedName = sanitizeFilename(filename);
 
-            await this.saveFile(
+            const savePath = await this.saveFile(
                 content,
                 `${sanitizedName}.docx`,
                 [{ name: "Word", extensions: ["docx"] }],
             );
-
-            toast.success("Word 导出成功");
+            if (!savePath) {
+                return false;
+            }
+            this.showExportSuccess("Word", savePath);
+            return true;
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "导出失败";
-            if (errorMessage.includes("取消")) {
-                return;
-            }
             toast.error(`Word 导出失败: ${errorMessage}`);
             throw error;
         }

@@ -34,7 +34,7 @@ use crate::api::conversation_api::{
     update_assistant_message, update_conversation, update_message_content,
 };
 use crate::api::copilot_api::{poll_github_copilot_token, start_github_copilot_device_flow};
-use crate::api::export_api::markdown_to_docx;
+use crate::api::export_api::{markdown_to_docx, markdown_to_pdf};
 #[cfg(desktop)]
 use crate::api::copilot_lsp::{
     check_copilot_status, get_copilot_lsp_status, get_copilot_oauth_token_from_config,
@@ -834,6 +834,7 @@ pub fn run() {
             get_todos,
             // Export commands
             markdown_to_docx,
+            markdown_to_pdf,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");

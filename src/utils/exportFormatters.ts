@@ -21,6 +21,16 @@ export interface ExportData {
     toolCalls: MCPToolCall[];
 }
 
+interface ExportAttachment {
+    attachment_type?: string;
+    attachment_url?: string;
+    attachment_content?: string;
+}
+
+export interface MarkdownFormatOptions {
+    includeImageAttachments?: boolean;
+}
+
 /**
  * 解析 tool_calls_json 为 ToolCallData 数组
  */
@@ -272,7 +282,9 @@ export function filterMessages(
 export function formatAsMarkdown(
     data: ExportData,
     options: ConversationExportOptions,
+    formatOptions: MarkdownFormatOptions = {},
 ): string {
+    const { includeImageAttachments = false } = formatOptions;
     const { conversation, toolCalls } = data;
     const { conversation: convInfo, messages } = conversation;
 
@@ -315,6 +327,26 @@ export function formatAsMarkdown(
         const content = sanitizedContent.trim() || '(无内容)';
         lines.push(content);
         lines.push('');
+
+        if (includeImageAttachments && Array.isArray(message.attachment_list)) {
+            const imageAttachments = (message.attachment_list as ExportAttachment[]).filter(
+                (att) => att?.attachment_type === "Image",
+            );
+            for (const imageAttachment of imageAttachments) {
+                const imageSrc =
+                    imageAttachment.attachment_content?.trim() ||
+                    imageAttachment.attachment_url?.trim() ||
+                    "";
+                if (!imageSrc) continue;
+                const imageName =
+                    imageAttachment.attachment_url
+                        ?.split(/[\\/]/)
+                        .pop()
+                        ?.trim() || "attachment-image";
+                lines.push(`![${imageName}](${imageSrc})`);
+                lines.push('');
+            }
+        }
 
         // 工具调用参数
         if (options.includeToolParams) {

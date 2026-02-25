@@ -684,6 +684,12 @@ export function renderPdfExportContent(
         
         // 有序列表
         html = html.replace(/^\s*\d+\.\s+(.*)$/gm, '<li style="margin: 2px 0;">$1</li>');
+
+        // 图片
+        html = html.replace(
+            /!\[([^\]]*)\]\(([^)]+)\)/g,
+            '<img src="$2" alt="$1" style="max-width: 100%; height: auto; border: 1px solid #e5e5e5; border-radius: 6px; margin: 8px 0;" />',
+        );
         
         // 链接
         html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" style="color: #2563eb; text-decoration: underline;">$1</a>');
@@ -701,6 +707,7 @@ export function renderPdfExportContent(
             const label = getMessageLabel(message.message_type);
 
             let toolCallsHtml = "";
+            let imageAttachmentsHtml = "";
             
             // 工具调用参数
             if (options.includeToolParams) {
@@ -752,10 +759,32 @@ export function renderPdfExportContent(
                 }
             }
 
+            if (Array.isArray(message.attachment_list)) {
+                const imageAttachments = message.attachment_list.filter(
+                    (att: any) => att?.attachment_type === "Image",
+                );
+                if (imageAttachments.length > 0) {
+                    imageAttachmentsHtml = imageAttachments
+                        .map((att: any) => {
+                            const imageSrc = att?.attachment_content || att?.attachment_url;
+                            if (!imageSrc) return "";
+                            const imageAlt =
+                                att?.attachment_url?.split(/[\\/]/).pop() || "attachment-image";
+                            return `
+                                <div style="margin-top: 8px;">
+                                    <img src="${escapeHtml(String(imageSrc))}" alt="${escapeHtml(String(imageAlt))}" style="max-width: 100%; height: auto; border: 1px solid #e5e5e5; border-radius: 6px;" />
+                                </div>
+                            `;
+                        })
+                        .join("");
+                }
+            }
+
             return `
-                <div style="margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #e5e5e5;">
+                <div style="margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #e5e5e5; page-break-inside: avoid; break-inside: avoid;">
                     <div style="font-size: 11px; font-weight: 600; color: #666; margin-bottom: 6px;">${escapeHtml(label)}</div>
                     <div style="color: #111; font-size: 12px; line-height: 1.6;">${markdownToHtml(stripMcpToolCallMarkers(message.content || ""))}</div>
+                    ${imageAttachmentsHtml}
                     ${toolCallsHtml}
                 </div>
             `;

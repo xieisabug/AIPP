@@ -76,36 +76,41 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
             setExporting(format);
             try {
                 const filename = getDefaultFilename();
+                let exportSucceeded = false;
 
                 switch (format) {
                     case "markdown":
-                        await conversationExportService.exportToMarkdown(
+                        exportSucceeded = await conversationExportService.exportToMarkdown(
                             exportData,
                             options,
                             filename,
                         );
                         break;
                     case "pdf":
-                        await conversationExportService.exportToPDF(
+                        exportSucceeded = await conversationExportService.exportToPDF(
                             exportData,
                             options,
                             filename,
                         );
                         break;
                     case "png":
-                        await conversationExportService.exportToPNG(
+                        exportSucceeded = await conversationExportService.exportToPNG(
                             exportData,
                             options,
                             filename,
                         );
                         break;
                     case "word":
-                        await conversationExportService.exportToWord(
+                        exportSucceeded = await conversationExportService.exportToWord(
                             exportData,
                             options,
                             filename,
                         );
                         break;
+                }
+
+                if (exportSucceeded) {
+                    setOpen(false);
                 }
             } catch (error) {
                 console.error("Export failed:", error);
