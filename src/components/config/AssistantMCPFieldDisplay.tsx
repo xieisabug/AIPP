@@ -16,7 +16,6 @@ interface MCPSummary {
     enabledServers: number;
     totalTools: number;
     enabledTools: number;
-    useNativeToolCall: boolean;
 }
 
 const AssistantMCPFieldDisplay: React.FC<AssistantMCPFieldDisplayProps> = ({
@@ -29,7 +28,6 @@ const AssistantMCPFieldDisplay: React.FC<AssistantMCPFieldDisplayProps> = ({
         enabledServers: 0,
         totalTools: 0,
         enabledTools: 0,
-        useNativeToolCall: false
     });
     const [configDialogOpen, setConfigDialogOpen] = useState(false);
     const [loading, setLoading] = useState(true);
@@ -46,19 +44,6 @@ const AssistantMCPFieldDisplay: React.FC<AssistantMCPFieldDisplayProps> = ({
                 'get_assistant_mcp_servers_with_tools',
                 { assistantId }
             );
-
-            // 获取原生ToolCall配置
-            let useNativeToolCall = false;
-            try {
-                const nativeToolCallValue = await invoke<string>('get_assistant_field_value', {
-                    assistantId,
-                    fieldName: 'use_native_toolcall'
-                });
-                useNativeToolCall = nativeToolCallValue === 'true';
-            } catch (error) {
-                // 如果没有找到配置，默认为false
-                useNativeToolCall = false;
-            }
 
             const totalServers = serversWithTools.length;
             const enabledServers = serversWithTools.filter(server => server.is_enabled).length;
@@ -79,7 +64,6 @@ const AssistantMCPFieldDisplay: React.FC<AssistantMCPFieldDisplayProps> = ({
                 enabledServers,
                 totalTools,
                 enabledTools,
-                useNativeToolCall
             });
 
         } catch (error) {
@@ -134,8 +118,7 @@ const AssistantMCPFieldDisplay: React.FC<AssistantMCPFieldDisplayProps> = ({
             return "暂无可用的MCP服务器";
         }
 
-        const toolCallMethod = mcpSummary.useNativeToolCall ? "原生ToolCall" : "Prompt调用";
-        return [<div>启用 {mcpSummary.enabledServers} 个服务器</div>, <div>启用 {mcpSummary.enabledTools} 个工具</div>,<div>{toolCallMethod}</div>];
+        return [<div>启用 {mcpSummary.enabledServers} 个服务器</div>, <div>启用 {mcpSummary.enabledTools} 个工具</div>];
     };
 
     return (

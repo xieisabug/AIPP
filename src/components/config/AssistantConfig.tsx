@@ -170,6 +170,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
 
                 // 更新表单值
                 form.setValue(key, parsedValue);
+
                 // 更新模型配置
                 setCurrentAssistant((prev) => {
                     if (!prev) return prev;
@@ -293,6 +294,10 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         return true;
                     }
 
+                    if (key === "use_native_toolcall") {
+                        return true;
+                    }
+
                     // 如果是插件自定义字段，直接允许保存
                     if (customField) {
                         return true;
@@ -320,6 +325,8 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         valueType = "string";
                     } else if (key === "dynamic_mcp_loading_enabled") {
                         valueType = "boolean";
+                    } else if (key === "use_native_toolcall") {
+                        valueType = "boolean";
                     } else if (customField) {
                         // 根据插件字段的类型映射到数据库的 value_type
                         const fieldType = customField.value.type;
@@ -337,7 +344,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
 
                     return {
                         name: key,
-                        value: value ? value.toString() : null,
+                        value: value != null ? value.toString() : null,
                         value_type: valueType,
                         id: config?.id ?? 0,
                         assistant_id: currentAssistant.assistant.id,
@@ -351,9 +358,12 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 },
             ],
         })
-            .then(() => toast.success("保存成功"))
+            .then(() => {
+                toast.success("保存成功");
+                loadAssistantDetail(currentAssistant.assistant.id);
+            })
             .catch((error) => toast.error("保存失败: " + error));
-    }, [currentAssistant, form, saveAssistant, assistantTypeCustomField]);
+    }, [currentAssistant, form, saveAssistant, assistantTypeCustomField, loadAssistantDetail]);
 
     // 删除助手
     const handleDelete = useCallback(() => {

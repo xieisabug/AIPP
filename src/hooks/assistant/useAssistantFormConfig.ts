@@ -5,7 +5,6 @@ import { AssistantFormConfig } from "@/types/forms";
 import { validateConfig } from "@/utils/validate";
 import AssistantMCPFieldDisplay from "@/components/config/AssistantMCPFieldDisplay";
 import AssistantSkillsFieldDisplay from "@/components/config/AssistantSkillsFieldDisplay";
-import AssistantNativeToolCallField from "@/components/config/AssistantNativeToolCallField";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 
 interface UseAssistantFormConfigProps {
@@ -264,23 +263,20 @@ export const useAssistantFormConfig = ({
             });
         }
 
-        // 原生 ToolCall 配置：在动态加载模式下独立显示，非动态加载模式在 MCP 配置对话框中
-        // 注意：不检查 assistantTypeHideField，因为 use_native_toolcall 被全局隐藏了
-        if (assistantDynamicEnabled) {
-            // 动态加载模式：使用独立组件显示
+        // 原生 ToolCall 配置：统一在表单中显示，通过保存按钮持久化
+        if (assistantDynamicEnabled || !assistantTypeHideField.includes("mcp_config")) {
+            const nativeToolCallValue = currentAssistant?.model_configs?.find(
+                (c) => c.name === "use_native_toolcall"
+            )?.value === "true";
             baseConfigs.push({
-                key: "use_native_toolcall_independent",
+                key: "use_native_toolcall",
                 config: {
-                    type: "custom" as const,
-                    label: "工具调用方式",
-                    customRender: () => {
-                        return React.createElement(AssistantNativeToolCallField, {
-                            assistantId: currentAssistant?.assistant.id ?? 0,
-                            onConfigChange: () => {
-                                console.log("Native toolcall configuration changed");
-                            },
-                        });
-                    },
+                    type: "switch" as const,
+                    label: "使用原生ToolCall",
+                    value: nativeToolCallValue,
+                    tooltip: "如果模型支持并且模型能力够强，推荐使用原生Toolcall调用工具更加准确",
+                    onChange: (value: string | boolean) =>
+                        handleConfigChange("use_native_toolcall", value, "boolean"),
                 },
             });
         }
