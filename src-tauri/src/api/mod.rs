@@ -6,6 +6,7 @@ pub mod conversation_api;
 pub mod copilot_api;
 #[cfg(desktop)]
 pub mod copilot_lsp;
+pub mod export_api;
 pub mod genai_client;
 pub mod highlight_api;
 pub mod llm_api;

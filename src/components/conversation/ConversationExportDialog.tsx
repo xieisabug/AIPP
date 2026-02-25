@@ -14,17 +14,17 @@ import IconButton from "../IconButton";
 import { conversationExportService } from "@/services/conversationExportService";
 import type { ConversationExportOptions } from "@/utils/exportFormatters";
 import type { ExportData } from "@/utils/exportFormatters";
-import { Loader2, FileText, FileImage, File, Download } from "lucide-react";
+import { Loader2, FileText, FileImage, File, FileType, Download } from "lucide-react";
 
 interface ConversationExportDialogProps {
     conversationId: string;
 }
 
 const defaultOptions: ConversationExportOptions = {
-    includeSystemPrompt: true,
-    includeReasoning: true,
-    includeToolParams: true,
-    includeToolResults: true,
+    includeSystemPrompt: false,
+    includeReasoning: false,
+    includeToolParams: false,
+    includeToolResults: false,
 };
 
 const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
@@ -70,7 +70,7 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
 
     // 导出处理函数
     const handleExport = useCallback(
-        async (format: "markdown" | "pdf" | "png") => {
+        async (format: "markdown" | "pdf" | "png" | "word") => {
             if (!exportData) return;
 
             setExporting(format);
@@ -94,6 +94,13 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
                         break;
                     case "png":
                         await conversationExportService.exportToPNG(
+                            exportData,
+                            options,
+                            filename,
+                        );
+                        break;
+                    case "word":
+                        await conversationExportService.exportToWord(
                             exportData,
                             options,
                             filename,
@@ -216,7 +223,7 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
                     {!loading && (
                         <div className="space-y-3 pt-2">
                             <h4 className="text-sm font-medium">导出格式</h4>
-                            <div className="grid grid-cols-3 gap-2">
+                            <div className="grid grid-cols-4 gap-2">
                                 <Button
                                     variant="outline"
                                     onClick={() => handleExport("markdown")}
@@ -229,6 +236,20 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
                                         <FileText className="h-4 w-4" />
                                     )}
                                     <span className="text-xs">Markdown</span>
+                                </Button>
+
+                                <Button
+                                    variant="outline"
+                                    onClick={() => handleExport("word")}
+                                    disabled={isExporting}
+                                    className="flex flex-col items-center gap-1 h-auto py-3"
+                                >
+                                    {exporting === "word" ? (
+                                        <Loader2 className="h-4 w-4 animate-spin" />
+                                    ) : (
+                                        <FileType className="h-4 w-4" />
+                                    )}
+                                    <span className="text-xs">Word</span>
                                 </Button>
 
                                 <Button

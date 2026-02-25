@@ -616,4 +616,38 @@ export const conversationExportService = {
             throw error;
         }
     },
+
+    /**
+     * 导出为 Word (.docx) — 通过 Rust 后端转换
+     */
+    async exportToWord(
+        data: ExportData,
+        options: ConversationExportOptions,
+        filename: string,
+    ): Promise<void> {
+        try {
+            // 复用已有的 Markdown 格式化逻辑
+            const markdown = formatAsMarkdown(data, options);
+
+            // 调用 Rust 后端进行 markdown → docx 转换
+            const docxBytes: number[] = await invoke("markdown_to_docx", { markdown });
+            const content = new Uint8Array(docxBytes);
+            const sanitizedName = sanitizeFilename(filename);
+
+            await this.saveFile(
+                content,
+                `${sanitizedName}.docx`,
+                [{ name: "Word", extensions: ["docx"] }],
+            );
+
+            toast.success("Word 导出成功");
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "导出失败";
+            if (errorMessage.includes("取消")) {
+                return;
+            }
+            toast.error(`Word 导出失败: ${errorMessage}`);
+            throw error;
+        }
+    },
 };

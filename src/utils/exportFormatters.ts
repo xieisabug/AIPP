@@ -41,6 +41,21 @@ interface BranchMessage {
 }
 
 /**
+ * 通过替换链解析 group_id 的最终目标（与后端 resolve_group 一致）
+ */
+function resolveGroup(replacements: Map<string, string>, groupId: string): string {
+    let current = groupId;
+    const visited = new Set<string>();
+    while (replacements.has(current)) {
+        const next = replacements.get(current)!;
+        if (visited.has(next)) break;
+        visited.add(next);
+        current = next;
+    }
+    return current;
+}
+
+/**
  * 仅保留最新分支（与后端 get_latest_branch_messages 逻辑一致）
  */
 export function getLatestBranchMessages<T extends BranchMessage>(messages: T[]): T[] {
@@ -57,12 +72,20 @@ export function getLatestBranchMessages<T extends BranchMessage>(messages: T[]):
     });
 
     const result: T[] = [];
+    const groupReplacement = new Map<string, string>();
+
     for (const msg of ordered) {
         if (msg.parent_group_id) {
-            const parentGroupId = msg.parent_group_id;
-            const firstIndex = result.findIndex((item) => item.generation_group_id === parentGroupId);
+            const resolvedParent = resolveGroup(groupReplacement, msg.parent_group_id);
+            const firstIndex = result.findIndex(
+                (item) => item.generation_group_id === resolvedParent,
+            );
             if (firstIndex >= 0) {
+                const replacedGroup = resolvedParent;
                 result.splice(firstIndex);
+                if (msg.generation_group_id) {
+                    groupReplacement.set(replacedGroup, msg.generation_group_id);
+                }
             }
         }
         if (msg.generation_group_id) {
