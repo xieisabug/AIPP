@@ -419,6 +419,7 @@ const LLMProviderConfig: React.FC = () => {
                         <input
                             className="w-full px-3 py-2 border border-input rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors bg-background text-foreground"
                             type="text"
+                            autoCapitalize="none"
                             placeholder="例如：我的 OpenAI"
                             value={providerName}
                             onChange={e => setProviderName(e.target.value)}

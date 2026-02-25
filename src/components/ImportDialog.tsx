@@ -108,6 +108,7 @@ const ImportDialog: React.FC<ImportDialogProps> = ({
                                 onChange={(e) => setShareCode(e.target.value)}
                                 placeholder="请粘贴分享码..."
                                 disabled={loading}
+                                autoCapitalize="none"
                                 className="w-full h-24 px-3 py-2 border border-input rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors bg-background text-foreground resize-none disabled:opacity-50 disabled:cursor-not-allowed"
                             />
                         </div>
@@ -125,6 +126,7 @@ const ImportDialog: React.FC<ImportDialogProps> = ({
                                         onChange={(e) => setPassword(e.target.value)}
                                         placeholder="请输入解密密码"
                                         disabled={loading}
+                                        autoCapitalize="none"
                                         className="w-full px-3 py-2 pr-10 border border-input rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors bg-background text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
                                     />
                                     <button
@@ -154,6 +156,7 @@ const ImportDialog: React.FC<ImportDialogProps> = ({
                                 onChange={(e) => setNewName(e.target.value)}
                                 placeholder="留空则使用默认名称"
                                 disabled={loading}
+                                autoCapitalize="none"
                                 className="w-full px-3 py-2 border border-input rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors bg-background text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
                             />
                         </div>

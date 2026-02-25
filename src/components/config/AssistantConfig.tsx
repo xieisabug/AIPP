@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AssistantDetail, AssistantListItem } from "../../data/Assistant";
 import { useAssistantListListener } from "../../hooks/useAssistantListListener";
@@ -27,6 +27,7 @@ interface AssistantConfigProps {
 }
 const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateTo }) => {
     const form = useForm();
+    const [searchQuery, setSearchQuery] = useState('');
 
     const {
         assistantTypes,
@@ -462,10 +463,20 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         [assistantTypes, handleAssistantAdded, openImportDialog]
     );
 
+    // 按搜索词过滤助手
+    const filteredAssistants = useMemo(() => {
+        if (!searchQuery.trim()) return assistants;
+        const query = searchQuery.toLowerCase();
+        return assistants.filter(assistant =>
+            assistant.name.toLowerCase().includes(query)
+        );
+    }, [assistants, searchQuery]);
+
     // 侧边栏内容 - 使用 useMemo 避免重复创建
     const sidebar = useMemo(() => (
-        <SidebarList title="助手列表" description="选择助手进行配置" icon={<Bot className="h-5 w-5" />} addButton={addButton}>
-            {assistants.map((assistant) => (
+        <SidebarList title="助手列表" description="选择助手进行配置" icon={<Bot className="h-5 w-5" />} addButton={addButton}
+            searchValue={searchQuery} onSearchChange={setSearchQuery} searchPlaceholder="搜索助手...">
+            {filteredAssistants.map((assistant) => (
                 <ListItemButton
                     key={assistant.id}
                     isSelected={currentAssistant?.assistant.id === assistant.id}
@@ -476,7 +487,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 </ListItemButton>
             ))}
         </SidebarList>
-    ), [assistants, currentAssistant?.assistant.id, handleChooseAssistant, addButton]);
+    ), [filteredAssistants, currentAssistant?.assistant.id, handleChooseAssistant, addButton, searchQuery]);
 
     // 右侧内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
     const content = useMemo(() => currentAssistant ? (
