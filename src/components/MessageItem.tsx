@@ -316,6 +316,7 @@ const MessageItem = React.memo<MessageItemProps>(
                         outputTokenCount={message.output_token_count}
                         ttftMs={computedTtftMs}
                         tps={computedTps}
+                        messageContent={message.content}
                     />
                 </div>
 

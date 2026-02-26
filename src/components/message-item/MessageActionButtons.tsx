@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Edit2, GitBranch, Copy, Check, RefreshCw } from "lucide-react";
 import IconButton from "../IconButton";
 import { MessageTokenTooltip } from "../token-statistics";
+import MessageExportDialog from "./MessageExportDialog";
 
 interface MessageActionButtonsProps {
     messageType: string;
@@ -16,6 +17,7 @@ interface MessageActionButtonsProps {
     outputTokenCount: number;
     ttftMs?: number | null;
     tps?: number | null;
+    messageContent?: string;
 }
 
 const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
@@ -31,13 +33,15 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
     outputTokenCount,
     ttftMs,
     tps,
+    messageContent,
 }) => {
     const showEditRegenerate = messageType === "assistant" || messageType === "response" || messageType === "user";
     const [isTokenTooltipOpen, setIsTokenTooltipOpen] = useState(false);
+    const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
 
     return (
         <div
-            className={`${isTokenTooltipOpen ? "flex" : "hidden group-hover:flex"} z-10 items-center absolute -bottom-9 py-3 px-4 box-border h-10 rounded-[21px] border border-border bg-background ${isUserMessage ? "right-0" : "left-0"}`}
+            className={`${isTokenTooltipOpen || isExportDialogOpen ? "flex" : "hidden group-hover:flex"} z-10 items-center absolute -bottom-9 py-3 px-4 box-border h-10 rounded-[21px] border border-border bg-background ${isUserMessage ? "right-0" : "left-0"}`}
         >
             {showEditRegenerate && onEdit && (
                 <IconButton icon={<Edit2 size={16} className="text-icon" />} onClick={onEdit} />
@@ -57,6 +61,13 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
                 tps={tps}
                 onOpenChange={setIsTokenTooltipOpen}
             />
+            {messageContent && (
+                <MessageExportDialog
+                    messageContent={messageContent}
+                    messageType={messageType}
+                    onOpenChange={setIsExportDialogOpen}
+                />
+            )}
             <IconButton
                 icon={
                     copyIconState === "copy" ? <Copy size={16} className="text-icon" /> : <Check size={16} className="text-icon" />

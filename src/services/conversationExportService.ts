@@ -597,4 +597,181 @@ export const conversationExportService = {
             throw error;
         }
     },
+
+    // ---- 单条消息导出 ----
+
+    /**
+     * 生成单条消息的默认文件名
+     */
+    singleMessageFilename(messageType: string): string {
+        const label = this.getMessageLabel(messageType).replace(/[^\w\u4e00-\u9fff]/g, "");
+        const now = new Date();
+        const ts = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}_${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}`;
+        return sanitizeFilename(`${label}_${ts}`);
+    },
+
+    /**
+     * 导出单条消息为 Markdown
+     */
+    async exportSingleMessageToMarkdown(
+        content: string,
+        messageType: string,
+    ): Promise<boolean> {
+        try {
+            const markdown = stripMcpToolCallMarkers(content);
+            const encoded = new TextEncoder().encode(markdown);
+            const filename = this.singleMessageFilename(messageType);
+            const savePath = await this.saveFile(encoded, `${filename}.md`, [
+                { name: "Markdown", extensions: ["md"] },
+            ]);
+            if (!savePath) return false;
+            this.showExportSuccess("Markdown", savePath);
+            return true;
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "导出失败";
+            toast.error(`Markdown 导出失败: ${errorMessage}`);
+            throw error;
+        }
+    },
+
+    /**
+     * 导出单条消息为 Word
+     */
+    async exportSingleMessageToWord(
+        content: string,
+        messageType: string,
+    ): Promise<boolean> {
+        try {
+            const markdown = stripMcpToolCallMarkers(content);
+            const docxBytes: number[] = await invoke("markdown_to_docx", { markdown });
+            const encoded = new Uint8Array(docxBytes);
+            const filename = this.singleMessageFilename(messageType);
+            const savePath = await this.saveFile(encoded, `${filename}.docx`, [
+                { name: "Word", extensions: ["docx"] },
+            ]);
+            if (!savePath) return false;
+            this.showExportSuccess("Word", savePath);
+            return true;
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "导出失败";
+            toast.error(`Word 导出失败: ${errorMessage}`);
+            throw error;
+        }
+    },
+
+    /**
+     * 渲染单条消息到 canvas
+     */
+    async renderSingleMessageToCanvas(
+        content: string,
+        messageType: string,
+        width: number = 800,
+    ): Promise<HTMLCanvasElement> {
+        const { default: html2canvas } = await import("html2canvas");
+        const isDarkMode = document.documentElement.classList.contains("dark");
+        const backgroundColor = isDarkMode ? "#0a0a0b" : "#ffffff";
+
+        const container = document.createElement("div");
+        container.style.position = "fixed";
+        container.style.left = "-9999px";
+        container.style.top = "0";
+        container.style.width = `${width}px`;
+        container.style.background = backgroundColor;
+        container.style.padding = "24px";
+        container.style.fontFamily =
+            '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif';
+        container.style.color = isDarkMode ? "#fafafa" : "#0a0a0b";
+        document.body.appendChild(container);
+
+        try {
+            const label = this.getMessageLabel(messageType);
+            const labelStyle = this.getMessageLabelStyle(messageType);
+            const sanitized = stripMcpToolCallMarkers(content);
+            container.innerHTML = `
+                <div style="padding: 16px 0;">
+                    <div style="${labelStyle}">${this.escapeHtml(label)}</div>
+                    <div style="color: inherit; font-size: 14px; line-height: 1.7; margin-top: 12px;">${this.markdownToHtml(sanitized)}</div>
+                </div>
+            `;
+
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            return await html2canvas(container, {
+                scale: 2,
+                useCORS: true,
+                logging: false,
+                backgroundColor,
+            });
+        } finally {
+            if (container.parentNode) {
+                container.parentNode.removeChild(container);
+            }
+        }
+    },
+
+    /**
+     * 导出单条消息为 PDF
+     */
+    async exportSingleMessageToPDF(
+        content: string,
+        messageType: string,
+    ): Promise<boolean> {
+        try {
+            const { jsPDF } = await import("jspdf");
+            const canvas = await this.renderSingleMessageToCanvas(content, messageType, 595);
+            const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+            const pageWidth = pdf.internal.pageSize.getWidth();
+            const margin = 20;
+            const imgWidth = pageWidth - margin * 2;
+            const imgHeight = (canvas.height * imgWidth) / canvas.width;
+            pdf.addImage(
+                canvas.toDataURL("image/jpeg", 0.95),
+                "JPEG",
+                margin,
+                margin,
+                imgWidth,
+                imgHeight,
+            );
+            const filename = this.singleMessageFilename(messageType);
+            const pdfBytes = pdf.output("arraybuffer");
+            const encoded = new Uint8Array(pdfBytes);
+            const savePath = await this.saveFile(encoded, `${filename}.pdf`, [
+                { name: "PDF", extensions: ["pdf"] },
+            ]);
+            if (!savePath) return false;
+            this.showExportSuccess("PDF", savePath);
+            return true;
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "导出失败";
+            toast.error(`PDF 导出失败: ${errorMessage}`);
+            throw error;
+        }
+    },
+
+    /**
+     * 导出单条消息为 PNG
+     */
+    async exportSingleMessageToPNG(
+        content: string,
+        messageType: string,
+    ): Promise<boolean> {
+        try {
+            const canvas = await this.renderSingleMessageToCanvas(content, messageType);
+            const blob = await new Promise<Blob>((resolve, reject) => {
+                canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("无法生成图片"))), "image/png");
+            });
+            const arrayBuffer = await blob.arrayBuffer();
+            const encoded = new Uint8Array(arrayBuffer);
+            const filename = this.singleMessageFilename(messageType);
+            const savePath = await this.saveFile(encoded, `${filename}.png`, [
+                { name: "PNG", extensions: ["png"] },
+            ]);
+            if (!savePath) return false;
+            this.showExportSuccess("PNG", savePath);
+            return true;
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "导出失败";
+            toast.error(`PNG 导出失败: ${errorMessage}`);
+            throw error;
+        }
+    },
 };
