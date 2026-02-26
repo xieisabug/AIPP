@@ -126,6 +126,10 @@ function AskWindow() {
         if (aiIsResponsing) {
             return;
         }
+        if (query.trim() === "") {
+            setQuery("");
+            return;
+        }
         setAiIsResponsing(true);
         setShouldShowShineBorder(true); // 开始发送消息时显示边框
         setResponse("");
