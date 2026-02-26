@@ -344,10 +344,11 @@ export const conversationExportService = {
                 }
             }
 
+            const contentHtml = await this.markdownToHtml(stripMcpToolCallMarkers(message.content || ""));
             msgContainer.innerHTML = `
                 <div style="padding: 16px 0; border-bottom: 2px solid #e0e0e0;">
                     <div style="${labelStyle}">${this.escapeHtml(label)}</div>
-                    <div style="color: #111; font-size: 12px; line-height: 1.6; margin-top: 8px;">${this.markdownToHtml(stripMcpToolCallMarkers(message.content || ""))}</div>
+                    <div style="color: #111; font-size: 12px; line-height: 1.6; margin-top: 8px;">${contentHtml}</div>
                     ${toolCallsHtml}
                 </div>
             `;
@@ -405,15 +406,44 @@ export const conversationExportService = {
         return styles[messageType] || `${baseStyle} background: #f5f5f5; color: #333; border-left: 4px solid #999;`;
     },
 
-    // Markdown 转 HTML
-    markdownToHtml(md: string): string {
-        let html = this.escapeHtml(md);
-        
-        // 代码块
-        html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, _lang, code) => {
-            return `<pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; margin: 8px 0; border: 1px solid #e0e0e0; overflow-x: auto;"><code style="font-family: Consolas, Monaco, monospace; font-size: 11px; color: #333; white-space: pre-wrap; word-break: break-word;">${code}</code></pre>`;
+    // Markdown 转 HTML（代码块通过 Rust syntect 高亮）
+    async markdownToHtml(md: string, isDark: boolean = false): Promise<string> {
+        // 先提取代码块，用占位符替换，避免 escapeHtml 破坏代码
+        const codeBlocks: { lang: string; code: string }[] = [];
+        const placeholder = (i: number) => `__CODE_BLOCK_${i}__`;
+        const withPlaceholders = md.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, lang, code) => {
+            const idx = codeBlocks.length;
+            codeBlocks.push({ lang: lang || "", code });
+            return placeholder(idx);
         });
-        
+
+        // 对非代码部分进行 HTML 转义和 markdown 处理
+        let html = this.escapeHtml(withPlaceholders);
+
+        // 批量调用 Rust highlight_code 获取高亮 HTML
+        const highlightedBlocks = await Promise.all(
+            codeBlocks.map(async ({ lang, code }) => {
+                try {
+                    return await invoke<string>("highlight_code", {
+                        lang: lang || "text",
+                        code,
+                        isDark,
+                        themeHint: null,
+                    });
+                } catch {
+                    // fallback：无高亮的纯文本代码块
+                    return `<pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; margin: 8px 0; overflow-x: auto;"><code style="font-family: Consolas, Monaco, monospace; font-size: 12px; color: #333; white-space: pre-wrap; word-break: break-word;">${this.escapeHtml(code)}</code></pre>`;
+                }
+            }),
+        );
+
+        // 将高亮后的代码块替换回去，添加容器样式
+        for (let i = 0; i < highlightedBlocks.length; i++) {
+            // Rust syntect 返回的 HTML 已含 <pre> + inline style，直接使用
+            const styledBlock = `<div style="margin: 8px 0; border-radius: 6px; overflow: hidden; font-size: 12px; line-height: 1.5;">${highlightedBlocks[i]}</div>`;
+            html = html.replace(placeholder(i), styledBlock);
+        }
+
         html = html.replace(/`([^`]+)`/g, '<code style="background: #f5f5f5; padding: 1px 4px; border-radius: 3px; font-family: Consolas, Monaco, monospace; font-size: 0.9em; color: #333;">$1</code>');
         
         html = html.replace(/^### (.*$)/gm, '<h4 style="font-size: 13px; font-weight: 600; margin: 10px 0 5px; color: #111;">$1</h4>');
@@ -687,10 +717,11 @@ export const conversationExportService = {
             const label = this.getMessageLabel(messageType);
             const labelStyle = this.getMessageLabelStyle(messageType);
             const sanitized = stripMcpToolCallMarkers(content);
+            const contentHtml = await this.markdownToHtml(sanitized, isDarkMode);
             container.innerHTML = `
                 <div style="padding: 16px 0;">
                     <div style="${labelStyle}">${this.escapeHtml(label)}</div>
-                    <div style="color: inherit; font-size: 14px; line-height: 1.7; margin-top: 12px;">${this.markdownToHtml(sanitized)}</div>
+                    <div style="color: inherit; font-size: 14px; line-height: 1.7; margin-top: 12px;">${contentHtml}</div>
                 </div>
             `;
 
