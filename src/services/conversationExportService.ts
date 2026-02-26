@@ -14,7 +14,6 @@ import {
     type ExportData,
     stripMcpToolCallMarkers,
     extractMcpToolCallHints,
-    formatJsonContent,
 } from "@/utils/exportFormatters";
 import {
     renderExportContent,
@@ -187,188 +186,6 @@ export const conversationExportService = {
         }
     },
 
-    async waitForImages(container: HTMLElement): Promise<void> {
-        const images = Array.from(container.querySelectorAll("img"));
-        if (images.length === 0) {
-            return;
-        }
-        await Promise.all(
-            images.map((image) => {
-                if (image.complete) {
-                    return Promise.resolve();
-                }
-                return new Promise<void>((resolve) => {
-                    const done = () => {
-                        resolve();
-                    };
-                    image.addEventListener("load", done, { once: true });
-                    image.addEventListener("error", done, { once: true });
-                });
-            }),
-        );
-    },
-
-    /**
-     * 渲染 PDF 专用内容到 canvas（简洁文档样式，无气泡）
-     * 按消息分段渲染，支持智能分页
-     */
-    async renderPdfToCanvas(
-        data: ExportData,
-        options: ConversationExportOptions,
-    ): Promise<{ canvases: HTMLCanvasElement[], heights: number[] }> {
-        const { default: html2canvas } = await import("html2canvas");
-
-        // PDF 使用 A4 宽度比例
-        const width = 595;
-        const backgroundColor = "#ffffff";
-
-        const canvases: HTMLCanvasElement[] = [];
-        const heights: number[] = [];
-
-        // 创建头部容器
-        const headerContainer = document.createElement("div");
-        headerContainer.style.position = "fixed";
-        headerContainer.style.left = "-9999px";
-        headerContainer.style.top = "0";
-        headerContainer.style.width = `${width}px`;
-        headerContainer.style.background = backgroundColor;
-        headerContainer.style.padding = "24px";
-        headerContainer.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif';
-        document.body.appendChild(headerContainer);
-
-        const formatDate = (date: Date) => {
-            return new Date(date).toLocaleString("zh-CN", {
-                year: "numeric",
-                month: "2-digit",
-                day: "2-digit",
-                hour: "2-digit",
-                minute: "2-digit",
-            });
-        };
-
-        // 渲染头部
-        headerContainer.innerHTML = `
-            <div style="padding-bottom: 12px; border-bottom: 2px solid #111;">
-                <h1 style="font-size: 18px; font-weight: 600; margin: 0 0 6px 0; color: #111;">${this.escapeHtml(data.conversation.conversation.name)}</h1>
-                <p style="font-size: 11px; color: #666; margin: 0;">
-                    助手: ${this.escapeHtml(data.conversation.conversation.assistant_name)} | 
-                    创建时间: ${formatDate(new Date(data.conversation.conversation.created_time))}
-                </p>
-            </div>
-        `;
-
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        const headerCanvas = await html2canvas(headerContainer, {
-            scale: 2,
-            useCORS: true,
-            logging: false,
-            backgroundColor: backgroundColor,
-        });
-        canvases.push(headerCanvas);
-        heights.push(headerCanvas.height / 2); // 因为 scale: 2
-
-        document.body.removeChild(headerContainer);
-
-        // 过滤消息
-        const messages = data.conversation.messages.filter((msg) => {
-            if (msg.message_type === "tool_result") return false;
-            if (msg.message_type === "user" && msg.content?.startsWith("Tool execution results:\n")) return false;
-            if (msg.message_type === "system") return options.includeSystemPrompt;
-            if (msg.message_type === "reasoning") return options.includeReasoning;
-            return true;
-        });
-
-        // 构建工具调用映射
-        const toolCallMap = new Map<number, typeof data.toolCalls>();
-        for (const tc of data.toolCalls) {
-            if (tc.message_id) {
-                if (!toolCallMap.has(tc.message_id)) {
-                    toolCallMap.set(tc.message_id, []);
-                }
-                toolCallMap.get(tc.message_id)!.push(tc);
-            }
-        }
-        const toolCallById = new Map<number, (typeof data.toolCalls)[number]>();
-        for (const tc of data.toolCalls) {
-            toolCallById.set(tc.id, tc);
-        }
-
-        // 逐条消息渲染
-        for (const message of messages) {
-            const msgContainer = document.createElement("div");
-            msgContainer.style.position = "fixed";
-            msgContainer.style.left = "-9999px";
-            msgContainer.style.top = "0";
-            msgContainer.style.width = `${width}px`;
-            msgContainer.style.background = backgroundColor;
-            msgContainer.style.padding = "0 24px";
-            msgContainer.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif';
-            document.body.appendChild(msgContainer);
-
-            const label = this.getMessageLabel(message.message_type);
-            const labelStyle = this.getMessageLabelStyle(message.message_type);
-            let toolCallsHtml = this.generateToolCallsHtml(message, options, toolCallMap);
-
-            if (options.includeToolParams && (!message.tool_calls_json || message.tool_calls_json.trim() === "") && toolCallMap.has(message.id)) {
-                const mappedCalls = toolCallMap.get(message.id) || [];
-                const paramBlocks = mappedCalls.map((tc) => {
-                    return `
-                            <div style="margin-top: 8px; padding: 8px; background: #f9f9f9; border-left: 3px solid #2563eb; font-size: 11px;">
-                                <div style="font-weight: 500; margin-bottom: 4px; color: #333;">🔧 ${this.escapeHtml(tc.server_name)} / ${this.escapeHtml(tc.tool_name)}</div>
-                                <pre style="background: #f0f0f0; padding: 6px; border-radius: 3px; margin: 0; overflow-x: auto;"><code style="font-family: Consolas, Monaco, monospace; font-size: 10px; color: #333; white-space: pre-wrap; word-break: break-word;">${this.escapeHtml(formatJsonContent(tc.parameters))}</code></pre>
-                            </div>
-                    `;
-                }).join("");
-                toolCallsHtml += paramBlocks;
-            }
-
-            if (options.includeToolResults && toolCallMap.has(message.id)) {
-                const relatedCalls = (toolCallMap.get(message.id) || []).filter(
-                    (call) => call.status === "success" && call.result,
-                );
-                if (relatedCalls.length > 0) {
-                    const resultBlocks = relatedCalls.map((tc) => {
-                        const statusText = tc.status === "success" ? "✓" : tc.status === "failed" ? "✗" : "...";
-                        let resultHtml = "";
-                        if (tc.result) {
-                            resultHtml = `<pre style="background: #f0f0f0; padding: 6px; border-radius: 3px; margin: 4px 0 0; overflow-x: auto;"><code style="font-family: Consolas, Monaco, monospace; font-size: 10px; color: #333; white-space: pre-wrap; word-break: break-word;">${this.escapeHtml(formatJsonContent(tc.result))}</code></pre>`;
-                        }
-                        return `
-                            <div style="margin-top: 8px; padding: 8px; background: #f9f9f9; border-left: 3px solid ${tc.status === "success" ? "#22c55e" : tc.status === "failed" ? "#dc2626" : "#666"}; font-size: 11px;">
-                                <div style="font-weight: 500; margin-bottom: 4px; color: #333;">${statusText} ${this.escapeHtml(tc.server_name)} / ${this.escapeHtml(tc.tool_name)}</div>
-                                ${resultHtml}
-                            </div>
-                        `;
-                    }).join("");
-                    toolCallsHtml += resultBlocks;
-                }
-            }
-
-            const contentHtml = await this.markdownToHtml(stripMcpToolCallMarkers(message.content || ""));
-            msgContainer.innerHTML = `
-                <div style="padding: 16px 0; border-bottom: 2px solid #e0e0e0;">
-                    <div style="${labelStyle}">${this.escapeHtml(label)}</div>
-                    <div style="color: #111; font-size: 12px; line-height: 1.6; margin-top: 8px;">${contentHtml}</div>
-                    ${toolCallsHtml}
-                </div>
-            `;
-
-            await new Promise((resolve) => setTimeout(resolve, 50));
-            const msgCanvas = await html2canvas(msgContainer, {
-                scale: 2,
-                useCORS: true,
-                logging: false,
-                backgroundColor: backgroundColor,
-            });
-            canvases.push(msgCanvas);
-            heights.push(msgCanvas.height / 2);
-
-            document.body.removeChild(msgContainer);
-        }
-
-        return { canvases, heights };
-    },
-
     // HTML 转义辅助函数
     escapeHtml(str: string): string {
         return str
@@ -464,57 +281,6 @@ export const conversationExportService = {
         html = html.replace(/\n/g, '<br>');
         
         return `<p style="margin: 5px 0;">${html}</p>`;
-    },
-
-    // 生成工具调用 HTML
-    generateToolCallsHtml(
-        message: any,
-        options: ConversationExportOptions,
-        toolCallMap: Map<number, any[]>,
-    ): string {
-        let html = "";
-
-        if (options.includeToolParams && message.tool_calls_json) {
-            try {
-                const parsedCalls = JSON.parse(message.tool_calls_json);
-                if (Array.isArray(parsedCalls) && parsedCalls.length > 0) {
-                    html += parsedCalls.map((tc: any) => {
-                        const parts = tc.fn_name?.split("__") || [];
-                        const toolName = parts.length > 1 ? parts.slice(1).join("__") : tc.fn_name;
-                        const serverName = parts[0] || "unknown";
-                        return `
-                            <div style="margin-top: 8px; padding: 8px; background: #f9f9f9; border-left: 3px solid #2563eb; font-size: 11px;">
-                                <div style="font-weight: 500; margin-bottom: 4px; color: #333;">🔧 ${this.escapeHtml(serverName)} / ${this.escapeHtml(toolName)}</div>
-                                <pre style="background: #f0f0f0; padding: 6px; border-radius: 3px; margin: 0; overflow-x: auto;"><code style="font-family: Consolas, Monaco, monospace; font-size: 10px; color: #333; white-space: pre-wrap; word-break: break-word;">${this.escapeHtml(JSON.stringify(tc.fn_arguments, null, 2))}</code></pre>
-                            </div>
-                        `;
-                    }).join("");
-                }
-            } catch { /* ignore */ }
-        }
-
-        if (options.includeToolResults && toolCallMap.has(message.id)) {
-            const relatedCalls = toolCallMap.get(message.id);
-            if (relatedCalls && relatedCalls.length > 0) {
-                html += relatedCalls.map((tc: any) => {
-                    const statusText = tc.status === "success" ? "✓" : tc.status === "failed" ? "✗" : "...";
-                    let resultHtml = "";
-                    if (tc.status === "success" && tc.result) {
-                        resultHtml = `<pre style="background: #f0f0f0; padding: 6px; border-radius: 3px; margin: 4px 0 0; overflow-x: auto;"><code style="font-family: Consolas, Monaco, monospace; font-size: 10px; color: #333; white-space: pre-wrap; word-break: break-word;">${this.escapeHtml(formatJsonContent(tc.result))}</code></pre>`;
-                    } else if (tc.status === "failed" && tc.error) {
-                        resultHtml = `<div style="color: #dc2626; font-size: 10px; margin-top: 4px;">错误: ${this.escapeHtml(tc.error)}</div>`;
-                    }
-                    return `
-                        <div style="margin-top: 8px; padding: 8px; background: #f9f9f9; border-left: 3px solid ${tc.status === "success" ? "#22c55e" : tc.status === "failed" ? "#dc2626" : "#666"}; font-size: 11px;">
-                            <div style="font-weight: 500; margin-bottom: 4px; color: #333;">${statusText} ${this.escapeHtml(tc.server_name)} / ${this.escapeHtml(tc.tool_name)}</div>
-                            ${resultHtml}
-                        </div>
-                    `;
-                }).join("");
-            }
-        }
-
-        return html;
     },
 
     /**
@@ -747,24 +513,10 @@ export const conversationExportService = {
         messageType: string,
     ): Promise<boolean> {
         try {
-            const { jsPDF } = await import("jspdf");
-            const canvas = await this.renderSingleMessageToCanvas(content, messageType, 595);
-            const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
-            const pageWidth = pdf.internal.pageSize.getWidth();
-            const margin = 20;
-            const imgWidth = pageWidth - margin * 2;
-            const imgHeight = (canvas.height * imgWidth) / canvas.width;
-            pdf.addImage(
-                canvas.toDataURL("image/jpeg", 0.95),
-                "JPEG",
-                margin,
-                margin,
-                imgWidth,
-                imgHeight,
-            );
-            const filename = this.singleMessageFilename(messageType);
-            const pdfBytes = pdf.output("arraybuffer");
+            const markdown = stripMcpToolCallMarkers(content);
+            const pdfBytes: number[] = await invoke("markdown_to_pdf", { markdown });
             const encoded = new Uint8Array(pdfBytes);
+            const filename = this.singleMessageFilename(messageType);
             const savePath = await this.saveFile(encoded, `${filename}.pdf`, [
                 { name: "PDF", extensions: ["pdf"] },
             ]);

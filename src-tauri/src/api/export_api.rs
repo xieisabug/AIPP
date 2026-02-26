@@ -1,5 +1,7 @@
 use crate::errors::AppError;
 #[cfg(desktop)]
+use crate::api::highlight_api::highlight_code_for_export;
+#[cfg(desktop)]
 use crate::mcp::builtin_mcp::search::browser::BrowserManager;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use docx_rs::*;
@@ -132,10 +134,7 @@ async fn convert_markdown_to_pdf(markdown: &str) -> Result<Vec<u8>, AppError> {
 
 #[cfg(desktop)]
 fn build_pdf_html(markdown: &str) -> String {
-    let parser_options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let parser = Parser::new_ext(markdown, parser_options);
-    let mut body_html = String::new();
-    pulldown_cmark::html::push_html(&mut body_html, parser);
+    let body_html = render_pdf_markdown_html(markdown);
     let body_html = inline_html_images_as_data_uri(&body_html);
 
     format!(
@@ -244,6 +243,60 @@ fn build_pdf_html(markdown: &str) -> String {
 </body>
 </html>"#
     )
+}
+
+#[cfg(desktop)]
+fn render_pdf_markdown_html(markdown: &str) -> String {
+    let parser_options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let events: Vec<_> = Parser::new_ext(markdown, parser_options).collect();
+    let mut body_html = String::new();
+    let mut index = 0usize;
+
+    while index < events.len() {
+        match &events[index] {
+            Event::Start(Tag::CodeBlock(kind)) => {
+                let lang_hint = match kind {
+                    CodeBlockKind::Fenced(info) => info.as_ref(),
+                    CodeBlockKind::Indented => "",
+                };
+                let mut code = String::new();
+                index += 1;
+                while index < events.len() {
+                    match &events[index] {
+                        Event::End(TagEnd::CodeBlock) => break,
+                        Event::Text(text) | Event::Code(text) => code.push_str(text.as_ref()),
+                        Event::SoftBreak | Event::HardBreak => code.push('\n'),
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                body_html.push_str(&render_pdf_code_block_html(lang_hint, &code));
+            }
+            event => {
+                pulldown_cmark::html::push_html(&mut body_html, std::iter::once(event.clone()));
+            }
+        }
+        index += 1;
+    }
+
+    body_html
+}
+
+#[cfg(desktop)]
+fn render_pdf_code_block_html(lang_hint: &str, code: &str) -> String {
+    match highlight_code_for_export(lang_hint, code, false, Some("InspiredGitHub")) {
+        Ok(html) => html,
+        Err(_) => format!("<pre><code>{}</code></pre>", escape_pdf_html(code)),
+    }
+}
+
+#[cfg(desktop)]
+fn escape_pdf_html(raw: &str) -> String {
+    raw.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 #[cfg(desktop)]

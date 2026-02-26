@@ -281,6 +281,49 @@ fn map_lang_alias(token: &str) -> String {
     }
 }
 
+pub fn highlight_code_for_export(
+    lang: &str,
+    code: &str,
+    is_dark: bool,
+    theme_hint: Option<&str>,
+) -> Result<String, String> {
+    let ss = syntax_set();
+
+    let mut theme_ref: Option<&'static syntect::highlighting::Theme> = None;
+    if let Some(hint) = theme_hint {
+        if let Some(theme) = pick_theme_by_name(hint) {
+            theme_ref = Some(theme);
+        } else if let Some(mapped_name) = map_ui_theme_to_syntect(hint, is_dark) {
+            theme_ref = pick_theme_by_name(mapped_name);
+        }
+    }
+    let theme = theme_ref.unwrap_or_else(|| pick_theme(is_dark));
+
+    let raw_token = normalize_lang_token(lang);
+    let mapped = map_lang_alias(raw_token);
+    let token_lower = mapped.to_lowercase();
+    let scope_match = Scope::new(&mapped)
+        .ok()
+        .and_then(|scope| ss.find_syntax_by_scope(scope));
+    let syntax = scope_match
+        .or_else(|| ss.find_syntax_by_token(&mapped))
+        .or_else(|| ss.find_syntax_by_token(&token_lower))
+        .or_else(|| ss.find_syntax_by_extension(&mapped))
+        .or_else(|| ss.find_syntax_by_extension(&token_lower))
+        .or_else(|| ss.find_syntax_by_name(&mapped))
+        .or_else(|| ss.find_syntax_by_name(&token_lower))
+        .unwrap_or_else(|| ss.find_syntax_plain_text());
+    debug!(
+        raw_lang = %lang,
+        mapped_lang = %mapped,
+        syntax_name = %syntax.name,
+        syntax_scope = %syntax.scope,
+        "Highlight syntax resolved"
+    );
+
+    highlighted_html_for_string(code, ss, syntax, theme).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn highlight_code(
     lang: String,
