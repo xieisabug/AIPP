@@ -6,7 +6,7 @@ export interface MCPToolCall {
     server_name: string;
     tool_name: string;
     parameters: string;
-    status: 'pending' | 'executing' | 'success' | 'failed';
+    status: 'pending' | 'executing' | 'success' | 'failed' | 'unknown';
     result?: string;
     error?: string;
     created_time: string;

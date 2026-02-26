@@ -97,7 +97,7 @@ export interface GroupMergeEvent {
 export interface MCPToolCallUpdateEvent {
     call_id: number;
     conversation_id: number;
-    status: 'pending' | 'executing' | 'success' | 'failed';
+    status: 'pending' | 'executing' | 'success' | 'failed' | 'unknown';
     server_name?: string;
     tool_name?: string;
     parameters?: string;
@@ -133,6 +133,22 @@ export type ActivityFocus =
 export interface ActivityFocusChangeEvent {
     conversation_id: number;
     focus: ActivityFocus;
+}
+
+export type ShineTarget =
+    | { target_type: 'none' }
+    | { target_type: 'message'; message_id: number; reason: string }
+    | { target_type: 'mcp_call'; call_id: number; reason: string };
+
+export interface ConversationShineState {
+    conversation_id: number;
+    epoch: number;
+    revision: number;
+    primary_target: ShineTarget;
+}
+
+export interface ShineStateSnapshotEvent {
+    state: ConversationShineState;
 }
 
 // 消息类型枚举
@@ -227,7 +243,7 @@ export interface MCPToolCall {
     server_name: string;
     tool_name: string;
     parameters: string;
-    status: 'pending' | 'executing' | 'success' | 'failed';
+    status: 'pending' | 'executing' | 'success' | 'failed' | 'unknown';
     result?: string;
     error?: string;
     created_time: string;

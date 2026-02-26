@@ -1,6 +1,6 @@
 use crate::api::ai::config::{calculate_retry_delay, get_retry_attempts_from_config};
 use crate::api::ai::events::{
-    ActivityFocus, ConversationEvent, MessageAddEvent, MessageUpdateEvent,
+    ConversationEvent, MessageAddEvent, MessageUpdateEvent,
 };
 use crate::api::ai::types::McpOverrideConfig;
 use crate::api::ai_api::{resolve_tool_name, sanitize_tool_name, ToolNameMapping};
@@ -2331,20 +2331,14 @@ async fn attempt_stream_chat(
                             stream_complete_event,
                         );
 
-                        // 清除活动状态（闪亮边框）
+                        // 清理消息焦点（保留 MCP 执行焦点）
                         let app_handle = window.app_handle();
                         if let Some(activity_manager) =
                             app_handle.try_state::<ConversationActivityManager>()
                         {
-                            let current_focus = activity_manager.get_focus(conversation_id).await;
-                            if !matches!(current_focus, ActivityFocus::McpExecuting { .. }) {
-                                activity_manager.clear_focus(&app_handle, conversation_id).await;
-                            } else {
-                                debug!(
-                                    conversation_id = conversation_id,
-                                    "Skip clearing activity focus during MCP execution"
-                                );
-                            }
+                            activity_manager
+                                .clear_message_focus_keep_mcp(&app_handle, conversation_id)
+                                .await;
                         }
 
                         return Ok(());

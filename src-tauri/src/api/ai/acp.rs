@@ -18,6 +18,7 @@ use crate::mcp::builtin_mcp::operation::{
         WriteFileRequest,
     },
 };
+use crate::state::activity_state::ConversationActivityManager;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use agent_client_protocol::{
     self as acp, Agent as _, Client as AcpClient, ClientSideConnection, ToolCallLocation,
@@ -619,6 +620,26 @@ impl AcpTauriClient {
         send_conversation_event_to_chat_windows(&self.app_handle, self.conversation_id, event);
     }
 
+    async fn mark_assistant_streaming(&self, message_id: i64) {
+        if let Some(activity_manager) = self.app_handle.try_state::<ConversationActivityManager>() {
+            activity_manager
+                .set_assistant_streaming(&self.app_handle, self.conversation_id, message_id)
+                .await;
+        }
+    }
+
+    async fn sync_tool_shine_status(&self, call_id: i64, status: &str) {
+        if let Some(activity_manager) = self.app_handle.try_state::<ConversationActivityManager>() {
+            if status == "pending" || status == "executing" {
+                activity_manager
+                    .set_mcp_executing(&self.app_handle, self.conversation_id, call_id)
+                    .await;
+            } else {
+                activity_manager.restore_after_mcp(&self.app_handle, self.conversation_id).await;
+            }
+        }
+    }
+
     async fn append_tool_call_ui_hint(
         &self,
         server_name: &str,
@@ -666,6 +687,7 @@ impl AcpTauriClient {
             .unwrap(),
         };
 
+        self.mark_assistant_streaming(message_id).await;
         self.emit_event(event).await;
     }
 
@@ -689,6 +711,11 @@ impl AcpTauriClient {
         };
 
         self.emit_event(event).await;
+        if let Some(activity_manager) = self.app_handle.try_state::<ConversationActivityManager>() {
+            activity_manager
+                .clear_message_focus_keep_mcp(&self.app_handle, self.conversation_id)
+                .await;
+        }
     }
 
     /// Send error event to frontend
@@ -714,6 +741,9 @@ impl AcpTauriClient {
         };
 
         self.emit_event(event).await;
+        if let Some(activity_manager) = self.app_handle.try_state::<ConversationActivityManager>() {
+            activity_manager.clear_focus(&self.app_handle, self.conversation_id).await;
+        }
     }
 }
 
@@ -761,6 +791,7 @@ impl AcpClient for AcpTauriClient {
 
                 // Emit full content to frontend (matching existing UI behavior)
                 let message_id = *self.message_id.lock().await;
+                self.mark_assistant_streaming(message_id).await;
                 let event = ConversationEvent {
                     r#type: "message_update".to_string(),
                     data: serde_json::to_value(MessageUpdateEvent {
@@ -799,6 +830,7 @@ impl AcpClient for AcpTauriClient {
 
                 // Emit full reasoning content to frontend
                 let message_id = *self.message_id.lock().await;
+                self.mark_assistant_streaming(message_id).await;
                 let event = ConversationEvent {
                     r#type: "message_update".to_string(),
                     data: serde_json::to_value(MessageUpdateEvent {
@@ -891,6 +923,7 @@ impl AcpClient for AcpTauriClient {
                         );
                     }
 
+                    let status_for_shine = status_str.clone();
                     let event = ConversationEvent {
                         r#type: "mcp_tool_call_update".to_string(),
                         data: serde_json::to_value(MCPToolCallUpdateEvent {
@@ -909,6 +942,7 @@ impl AcpClient for AcpTauriClient {
                     };
 
                     self.emit_event(event).await;
+                    self.sync_tool_shine_status(existing_call_id, &status_for_shine).await;
                     return Ok(());
                 }
 
@@ -971,6 +1005,7 @@ impl AcpClient for AcpTauriClient {
                             _ => (None, None, None),
                         };
 
+                        let status_for_shine = status_str.clone();
                         let event = ConversationEvent {
                             r#type: "mcp_tool_call_update".to_string(),
                             data: serde_json::to_value(MCPToolCallUpdateEvent {
@@ -989,6 +1024,7 @@ impl AcpClient for AcpTauriClient {
                         };
 
                         self.emit_event(event).await;
+                        self.sync_tool_shine_status(call_id, &status_for_shine).await;
                         return Ok(());
                     }
                 };
@@ -1030,6 +1066,7 @@ impl AcpClient for AcpTauriClient {
                             };
 
                             self.emit_event(event).await;
+                            self.sync_tool_shine_status(call_id, "pending").await;
                             return Ok(());
                         }
                     };
@@ -1077,6 +1114,7 @@ impl AcpClient for AcpTauriClient {
                     );
                 }
 
+                let status_for_shine = status_str.clone();
                 let event = ConversationEvent {
                     r#type: "mcp_tool_call_update".to_string(),
                     data: serde_json::to_value(MCPToolCallUpdateEvent {
@@ -1095,6 +1133,7 @@ impl AcpClient for AcpTauriClient {
                 };
 
                 self.emit_event(event).await;
+                self.sync_tool_shine_status(tool_call_record.id, &status_for_shine).await;
             }
 
             // Tool call status update - emit as MCP tool call update
@@ -1316,6 +1355,7 @@ impl AcpClient for AcpTauriClient {
                     );
                 }
 
+                let status_for_shine = status_str.clone();
                 let event = ConversationEvent {
                     r#type: "mcp_tool_call_update".to_string(),
                     data: serde_json::to_value(MCPToolCallUpdateEvent {
@@ -1334,6 +1374,7 @@ impl AcpClient for AcpTauriClient {
                 };
 
                 self.emit_event(event).await;
+                self.sync_tool_shine_status(call_id, &status_for_shine).await;
             }
 
             // Agent execution plan - log only, no UI support yet
@@ -1758,7 +1799,6 @@ async fn run_acp_session(
                 let _ = repo.update_content(message_id, msg);
             }
         }
-
         let event = ConversationEvent {
             r#type: "message_update".to_string(),
             data: serde_json::to_value(MessageUpdateEvent {

@@ -576,6 +576,75 @@ const ConversationExportRenderer: React.FC<ConversationExportRendererProps> = ({
     );
 };
 
+interface SingleMessageExportRendererProps {
+    content: string;
+    messageType: string;
+    isDarkMode?: boolean;
+}
+
+const SingleMessageExportRenderer: React.FC<SingleMessageExportRendererProps> = ({
+    content,
+    messageType,
+    isDarkMode = false,
+}) => {
+    const colors = isDarkMode ? exportColors.dark : exportColors.light;
+    const messageLabels: Record<string, string> = {
+        system: "系统提示",
+        user: "用户",
+        assistant: "助手",
+        reasoning: "推理过程",
+        response: "回复",
+        error: "错误",
+    };
+    const messageLabel = messageLabels[messageType] || messageType;
+
+    return (
+        <div
+            id="single-message-export-container"
+            style={{
+                width: "100%",
+                backgroundColor: colors.background,
+                color: colors.foreground,
+                padding: "24px",
+                fontFamily:
+                    '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif',
+                boxSizing: "border-box",
+            }}
+        >
+            <div
+                style={{
+                    border: `1px solid ${colors.border}`,
+                    borderRadius: "14px",
+                    backgroundColor: colors.card,
+                    padding: "18px",
+                    boxShadow: isDarkMode ? "none" : "0 1px 2px rgba(0, 0, 0, 0.06)",
+                }}
+            >
+                <div
+                    style={{
+                        display: "inline-block",
+                        fontSize: "12px",
+                        fontWeight: 500,
+                        color: colors.mutedForeground,
+                        backgroundColor: colors.muted,
+                        border: `1px solid ${colors.border}`,
+                        borderRadius: "999px",
+                        padding: "4px 10px",
+                        marginBottom: "10px",
+                    }}
+                >
+                    {messageLabel}
+                </div>
+                <div style={{ fontSize: "14px", lineHeight: 1.7, color: colors.foreground }}>
+                    <ExportMarkdown colors={colors}>
+                        {stripMcpToolCallMarkers(content || "")}
+                    </ExportMarkdown>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 /**
  * 渲染导出内容到指定的 DOM 容器（用于图片导出）
  */
@@ -595,6 +664,26 @@ export function renderExportContent(
             conversationName={data.conversation.conversation.name}
             assistantName={data.conversation.conversation.assistant_name}
             createdTime={new Date(data.conversation.conversation.created_time)}
+            isDarkMode={isDarkMode}
+        />
+    );
+}
+
+/**
+ * 渲染单条消息导出内容到指定 DOM 容器（用于图片导出）
+ */
+export function renderSingleMessageExportContent(
+    container: HTMLElement,
+    content: string,
+    messageType: string,
+): void {
+    const isDarkMode = document.documentElement.classList.contains("dark");
+
+    const root = createRoot(container);
+    root.render(
+        <SingleMessageExportRenderer
+            content={content}
+            messageType={messageType}
             isDarkMode={isDarkMode}
         />
     );

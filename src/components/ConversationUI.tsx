@@ -366,8 +366,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             setManualShineMessage,
             mcpToolCallStates,
             activeMcpCallIds,
+            shiningMcpCallId,
+            shineState,
             streamingAssistantMessageIds,
-            activityFocus,
             updateShiningMessages,
             updateFunctionMap,
             clearStreamingMessages,
@@ -376,15 +377,16 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         } = useConversationEvents(conversationEventsOptions);
 
         const effectiveAiIsResponsing = useMemo(() => {
+            const hasPrimaryShineTarget = !!shineState && shineState.primary_target.target_type !== "none";
             return (
                 aiIsResponsing ||
-                activityFocus.focus_type !== "none" ||
+                hasPrimaryShineTarget ||
                 activeMcpCallIds.size > 0 ||
                 streamingAssistantMessageIds.size > 0
             );
         }, [
             aiIsResponsing,
-            activityFocus.focus_type,
+            shineState,
             activeMcpCallIds.size,
             streamingAssistantMessageIds.size,
         ]);
@@ -826,6 +828,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             allDisplayMessages={allDisplayMessages}
                             streamingMessages={streamingMessages}
                             shiningMessageIds={shiningMessageIds}
+                            shiningMcpCallId={shiningMcpCallId}
                             reasoningExpandStates={reasoningExpandStates}
                             mcpToolCallStates={mcpToolCallStates}
                             generationGroups={messageGroupsData.generationGroups}

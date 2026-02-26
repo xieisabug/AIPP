@@ -19,6 +19,7 @@ interface McpToolCallProps {
     messageId?: number;
     callId?: number; // If provided, this is an existing call
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>; // Global MCP states
+    shiningMcpCallId?: number | null;
     isLastCall?: boolean; // 是否是消息中的最后一个工具调用
 }
 
@@ -92,9 +93,16 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     messageId,
     callId,
     mcpToolCallStates,
+    shiningMcpCallId = null,
     isLastCall = true, // 默认为 true，向后兼容
 }) => {
     const [toolCallId, setToolCallId] = useState<number | null>(callId || null);
+
+    useEffect(() => {
+        if (callId && callId !== toolCallId) {
+            setToolCallId(callId);
+        }
+    }, [callId, toolCallId]);
 
     const metaOverride = toolCallId && mcpToolCallStates ? mcpToolCallStates.get(toolCallId) : undefined;
     const effectiveServerName = metaOverride?.server_name ?? serverName;
@@ -176,6 +184,12 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     setExecutionResult(null);
                     setIsExpanded(true); // 失败的调用默认展开，方便查看错误
                     break;
+                case "unknown":
+                default:
+                    setExecutionState("failed");
+                    setExecutionResult(null);
+                    setExecutionError(globalState.error || "状态未知");
+                    break;
             }
         } else {
             console.log(`[MCP] McpToolCall ${toolCallId} no match in map`, {
@@ -188,7 +202,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const isFailed = executionState === "failed";
     const isExecuting = executionState === "executing";
     const canExecute = executionState === "idle" || executionState === "pending" || executionState === "failed"; // idle/pending/failed 状态都可以执行
-    const isRunning = executionState === "executing"; // 只有 executing 才显示闪亮边框
+    const isRunning = toolCallId !== null && shiningMcpCallId === toolCallId; // 闪亮由全局 shine snapshot 决定
 
     // 如果提供了 callId，尝试获取已有的执行结果
     useEffect(() => {

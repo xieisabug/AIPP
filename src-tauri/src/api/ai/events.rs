@@ -96,5 +96,32 @@ pub struct ActivityFocusChangeEvent {
     pub focus: ActivityFocus,
 }
 
+/// 闪亮边框主目标（后端单一真相源）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "target_type")]
+pub enum ShineTarget {
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "message")]
+    Message { message_id: i64, reason: String },
+    #[serde(rename = "mcp_call")]
+    McpCall { call_id: i64, reason: String },
+}
+
+/// 对话闪亮状态快照（带版本信息，便于前端防乱序）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationShineState {
+    pub conversation_id: i64,
+    pub epoch: u64,
+    pub revision: u64,
+    pub primary_target: ShineTarget,
+}
+
+/// 闪亮状态快照事件
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShineStateSnapshotEvent {
+    pub state: ConversationShineState,
+}
+
 pub const TITLE_CHANGE_EVENT: &str = "title_change";
 pub const ERROR_NOTIFICATION_EVENT: &str = "conversation-window-error-notification";

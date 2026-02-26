@@ -12,7 +12,7 @@ use crate::api::ai::conversation::{
     init_conversation, BranchSelection, ChatRequestBuildResult, ToolCallStrategy, ToolConfig,
 };
 use crate::api::ai::events::{
-    ActivityFocus, ConversationEvent, MessageAddEvent, MessageUpdateEvent,
+    ActivityFocus, ConversationEvent, ConversationShineState, MessageAddEvent, MessageUpdateEvent,
 };
 use crate::api::ai::title::generate_title;
 use crate::api::ai::types::{AiRequest, AiResponse, McpOverrideConfig};
@@ -1845,6 +1845,15 @@ pub async fn get_activity_focus(
     conversation_id: i64,
 ) -> Result<ActivityFocus, String> {
     Ok(activity_manager.get_focus(conversation_id).await)
+}
+
+/// 获取指定对话的当前闪亮状态快照（用于前端单一状态源同步）
+#[tauri::command]
+pub async fn get_shine_state(
+    activity_manager: State<'_, ConversationActivityManager>,
+    conversation_id: i64,
+) -> Result<ConversationShineState, String> {
+    Ok(activity_manager.get_shine_state(conversation_id).await)
 }
 
 /// 重新生成对话标题

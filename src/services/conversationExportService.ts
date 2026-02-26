@@ -17,6 +17,7 @@ import {
 } from "@/utils/exportFormatters";
 import {
     renderExportContent,
+    renderSingleMessageExportContent,
 } from "@/components/conversation/ConversationExportRenderer";
 
 /**
@@ -473,25 +474,12 @@ export const conversationExportService = {
         container.style.top = "0";
         container.style.width = `${width}px`;
         container.style.background = backgroundColor;
-        container.style.padding = "24px";
-        container.style.fontFamily =
-            '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif';
-        container.style.color = isDarkMode ? "#fafafa" : "#0a0a0b";
         document.body.appendChild(container);
 
         try {
-            const label = this.getMessageLabel(messageType);
-            const labelStyle = this.getMessageLabelStyle(messageType);
-            const sanitized = stripMcpToolCallMarkers(content);
-            const contentHtml = await this.markdownToHtml(sanitized, isDarkMode);
-            container.innerHTML = `
-                <div style="padding: 16px 0;">
-                    <div style="${labelStyle}">${this.escapeHtml(label)}</div>
-                    <div style="color: inherit; font-size: 14px; line-height: 1.7; margin-top: 12px;">${contentHtml}</div>
-                </div>
-            `;
+            renderSingleMessageExportContent(container, content, messageType);
 
-            await new Promise((resolve) => setTimeout(resolve, 200));
+            await new Promise((resolve) => setTimeout(resolve, 400));
             return await html2canvas(container, {
                 scale: 2,
                 useCORS: true,

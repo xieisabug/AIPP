@@ -13,6 +13,7 @@ export interface ConversationContentProps {
     allDisplayMessages: Message[];
     streamingMessages: Map<number, StreamEvent>;
     shiningMessageIds: Set<number>;
+    shiningMcpCallId: number | null;
     reasoningExpandStates: Map<number, boolean>;
     mcpToolCallStates: Map<number, any>;
     generationGroups: Map<string, any>;
@@ -38,6 +39,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     allDisplayMessages,
     streamingMessages,
     shiningMessageIds,
+    shiningMcpCallId,
     reasoningExpandStates,
     mcpToolCallStates,
     generationGroups,
@@ -90,6 +92,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
                         allDisplayMessages={allDisplayMessages}
                         streamingMessages={streamingMessages}
                         shiningMessageIds={shiningMessageIds}
+                        shiningMcpCallId={shiningMcpCallId}
                         reasoningExpandStates={reasoningExpandStates}
                         mcpToolCallStates={mcpToolCallStates}
                         generationGroups={generationGroups}

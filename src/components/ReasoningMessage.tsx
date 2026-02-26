@@ -14,6 +14,7 @@ interface ReasoningMessageProps {
     onToggleReasoningExpand?: () => void;
     conversationId?: number;
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>;
+    shiningMcpCallId?: number | null;
     inlineInteractionItems?: InlineInteractionItem[];
     useRawTextRenderer?: boolean; // 脱敏内容使用纯文本渲染，避免 Markdown 解析问题
 }
@@ -27,6 +28,7 @@ const ReasoningMessage = React.memo(
         onToggleReasoningExpand,
         conversationId,
         mcpToolCallStates,
+        shiningMcpCallId,
         inlineInteractionItems,
         useRawTextRenderer = false,
     }: ReasoningMessageProps) => {
@@ -53,6 +55,7 @@ const ReasoningMessage = React.memo(
             conversationId,
             messageId: message.id,
             mcpToolCallStates,
+            shiningMcpCallId,
             inlineInteractionItems,
         });
 

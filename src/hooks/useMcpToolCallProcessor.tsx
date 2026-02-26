@@ -19,6 +19,7 @@ interface ProcessorContext {
     conversationId?: number;
     messageId?: number;
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>;
+    shiningMcpCallId?: number | null;
     inlineInteractionItems?: InlineInteractionItem[];
 }
 
@@ -411,7 +412,7 @@ const McpToolCallResultsButton: React.FC<{
 
 export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: ProcessorContext) => {
     const { remarkPlugins, rehypePlugins, markdownComponents } = options;
-    const { conversationId, messageId, mcpToolCallStates, inlineInteractionItems } = context || {};
+    const { conversationId, messageId, mcpToolCallStates, shiningMcpCallId, inlineInteractionItems } = context || {};
 
     const processContent = useCallback((
         markdownContent: string,
@@ -490,7 +491,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             const isLastCall = index === mcpCalls.length - 1;
             parts.push(
                 <McpToolCall
-                    key={`mcp-${index}`}
+                    key={`mcp-${data.call_id ?? `tmp-${index}-${match.start}`}`}
                     serverName={data.server_name}
                     toolName={data.tool_name}
                     parameters={data.parameters ?? "{}"}
@@ -498,6 +499,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
                     messageId={messageId}
                     callId={data.call_id} // 传递 callId，如果存在的话
                     mcpToolCallStates={mcpToolCallStates} // 传递全局 MCP 状态
+                    shiningMcpCallId={shiningMcpCallId}
                     isLastCall={isLastCall} // 是否是最后一个工具调用
                 />
             );
@@ -569,6 +571,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         conversationId,
         messageId,
         mcpToolCallStates,
+        shiningMcpCallId,
         inlineInteractionItems,
     ]);
 

@@ -2,28 +2,43 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::RwLock;
-use tracing::debug;
+use tracing::{debug, warn};
 
-use crate::api::ai::events::{ActivityFocus, ActivityFocusChangeEvent, ConversationEvent};
+use crate::api::ai::events::{
+    ActivityFocus, ActivityFocusChangeEvent, ConversationEvent, ConversationShineState, ShineStateSnapshotEvent,
+    ShineTarget,
+};
+use crate::db::mcp_db::MCPDatabase;
 
-/// 对话活动状态，包含当前焦点和 MCP 执行前的备份状态
+/// 对话活动状态（后端单一真相源）
 #[derive(Clone, Debug)]
 struct ConversationActivity {
     current: ActivityFocus,
-    /// MCP 执行前的状态备份，用于 MCP 完成后恢复
-    pre_mcp_backup: Option<ActivityFocus>,
+    pending_user_message_id: Option<i64>,
+    streaming_message_id: Option<i64>,
+    active_mcp_call_ids: Vec<i64>,
+    epoch: u64,
+    revision: u64,
 }
 
 impl Default for ConversationActivity {
     fn default() -> Self {
-        Self { current: ActivityFocus::None, pre_mcp_backup: None }
+        Self {
+            current: ActivityFocus::None,
+            pending_user_message_id: None,
+            streaming_message_id: None,
+            active_mcp_call_ids: Vec::new(),
+            epoch: 0,
+            revision: 0,
+        }
     }
 }
 
 /// 对话活动状态管理器
 ///
-/// 统一管理每个对话的活动焦点状态，负责发送 activity_focus_change 事件。
-/// 这样前端只需要监听一个事件来控制闪亮边框的显示。
+/// 统一管理每个对话的活动焦点状态，负责发送：
+/// - 兼容事件 `activity_focus_change`
+/// - 新事件 `shine_state_snapshot`
 #[derive(Clone)]
 pub struct ConversationActivityManager {
     /// 每个对话的当前活动状态
@@ -35,43 +50,130 @@ impl ConversationActivityManager {
         Self { activities: Arc::new(RwLock::new(HashMap::new())) }
     }
 
-    /// 获取当前活动焦点
-    pub async fn get_focus(&self, conversation_id: i64) -> ActivityFocus {
-        let activities = self.activities.read().await;
-        activities.get(&conversation_id).map(|a| a.current.clone()).unwrap_or_default()
+    fn recompute_focus(activity: &ConversationActivity) -> ActivityFocus {
+        if let Some(call_id) = activity.active_mcp_call_ids.last() {
+            return ActivityFocus::McpExecuting { call_id: *call_id };
+        }
+
+        if let Some(message_id) = activity.streaming_message_id {
+            return ActivityFocus::AssistantStreaming { message_id };
+        }
+
+        if let Some(message_id) = activity.pending_user_message_id {
+            return ActivityFocus::UserPending { message_id };
+        }
+
+        ActivityFocus::None
     }
 
-    /// 更新活动焦点并发送事件
-    ///
-    /// 只有当状态真正变化时才发送事件，避免不必要的前端更新。
-    pub async fn set_focus(
-        &self,
+    fn focus_to_target(focus: &ActivityFocus) -> ShineTarget {
+        match focus {
+            ActivityFocus::None => ShineTarget::None,
+            ActivityFocus::UserPending { message_id } => {
+                ShineTarget::Message { message_id: *message_id, reason: "user_pending".to_string() }
+            }
+            ActivityFocus::AssistantStreaming { message_id } => ShineTarget::Message {
+                message_id: *message_id,
+                reason: "assistant_streaming".to_string(),
+            },
+            ActivityFocus::McpExecuting { call_id } => {
+                ShineTarget::McpCall { call_id: *call_id, reason: "mcp_executing".to_string() }
+            }
+        }
+    }
+
+    fn build_shine_state(conversation_id: i64, activity: &ConversationActivity) -> ConversationShineState {
+        ConversationShineState {
+            conversation_id,
+            epoch: activity.epoch,
+            revision: activity.revision,
+            primary_target: Self::focus_to_target(&activity.current),
+        }
+    }
+
+    fn emit_shine_state_snapshot(
         app_handle: &tauri::AppHandle,
         conversation_id: i64,
-        focus: ActivityFocus,
+        state: ConversationShineState,
     ) {
-        let should_emit = {
-            let mut activities = self.activities.write().await;
-            let activity = activities.entry(conversation_id).or_default();
+        let event = ShineStateSnapshotEvent { state };
+        let _ = app_handle.emit(
+            &format!("conversation_event_{}", conversation_id),
+            ConversationEvent {
+                r#type: "shine_state_snapshot".to_string(),
+                data: serde_json::to_value(event).unwrap(),
+            },
+        );
+    }
 
-            // 只有状态变化时才更新和发送事件
-            if activity.current != focus {
-                activity.current = focus.clone();
-                // 非 MCP 状态时清除备份
-                if !matches!(focus, ActivityFocus::McpExecuting { .. }) {
-                    activity.pre_mcp_backup = None;
-                }
-                true
-            } else {
-                false
+    fn fetch_active_mcp_call_ids(app_handle: &tauri::AppHandle, conversation_id: i64) -> Vec<i64> {
+        let db = match MCPDatabase::new(app_handle) {
+            Ok(db) => db,
+            Err(e) => {
+                warn!(conversation_id, error = %e, "failed to open mcp database while syncing active calls");
+                return Vec::new();
             }
         };
 
-        if should_emit {
-            debug!(conversation_id = conversation_id, ?focus, "Activity focus changed");
+        let calls = match db.get_mcp_tool_calls_by_conversation(conversation_id) {
+            Ok(calls) => calls,
+            Err(e) => {
+                warn!(conversation_id, error = %e, "failed to read mcp calls while syncing active calls");
+                return Vec::new();
+            }
+        };
 
+        let mut active: Vec<i64> = calls
+            .into_iter()
+            .filter(|call| call.status == "pending" || call.status == "executing")
+            .map(|call| call.id)
+            .collect();
+        active.sort_unstable();
+        active
+    }
+
+    async fn update_state<F>(
+        &self,
+        app_handle: &tauri::AppHandle,
+        conversation_id: i64,
+        updater: F,
+    ) where
+        F: FnOnce(&mut ConversationActivity),
+    {
+        let (state_changed, focus_changed, focus, snapshot) = {
+            let mut activities = self.activities.write().await;
+            let activity = activities.entry(conversation_id).or_default();
+            let before = activity.clone();
+
+            updater(activity);
+            activity.current = Self::recompute_focus(activity);
+
+            let state_changed = activity.current != before.current
+                || activity.pending_user_message_id != before.pending_user_message_id
+                || activity.streaming_message_id != before.streaming_message_id
+                || activity.active_mcp_call_ids != before.active_mcp_call_ids
+                || activity.epoch != before.epoch;
+
+            if state_changed {
+                activity.revision = activity.revision.saturating_add(1);
+            }
+
+            let focus_changed = activity.current != before.current;
+            (
+                state_changed,
+                focus_changed,
+                activity.current.clone(),
+                Self::build_shine_state(conversation_id, activity),
+            )
+        };
+
+        if !state_changed {
+            return;
+        }
+
+        if focus_changed {
+            debug!(conversation_id, ?focus, "Activity focus changed");
             let event = ActivityFocusChangeEvent { conversation_id, focus };
-
             let _ = app_handle.emit(
                 &format!("conversation_event_{}", conversation_id),
                 ConversationEvent {
@@ -80,11 +182,53 @@ impl ConversationActivityManager {
                 },
             );
         }
+
+        Self::emit_shine_state_snapshot(app_handle, conversation_id, snapshot);
     }
 
-    /// 清除活动焦点（设置为 None）
+    /// 获取当前活动焦点
+    pub async fn get_focus(&self, conversation_id: i64) -> ActivityFocus {
+        let activities = self.activities.read().await;
+        activities.get(&conversation_id).map(|a| a.current.clone()).unwrap_or_default()
+    }
+
+    /// 获取当前闪亮状态快照
+    pub async fn get_shine_state(&self, conversation_id: i64) -> ConversationShineState {
+        let activities = self.activities.read().await;
+        if let Some(activity) = activities.get(&conversation_id) {
+            return Self::build_shine_state(conversation_id, activity);
+        }
+        ConversationShineState {
+            conversation_id,
+            epoch: 0,
+            revision: 0,
+            primary_target: ShineTarget::None,
+        }
+    }
+
+    /// 清除所有活动焦点（设置为 None）
     pub async fn clear_focus(&self, app_handle: &tauri::AppHandle, conversation_id: i64) {
-        self.set_focus(app_handle, conversation_id, ActivityFocus::None).await;
+        self.update_state(app_handle, conversation_id, |activity| {
+            activity.pending_user_message_id = None;
+            activity.streaming_message_id = None;
+            activity.active_mcp_call_ids.clear();
+        })
+        .await;
+    }
+
+    /// 清除消息焦点但保留/同步 MCP 执行焦点（流式结束时使用）
+    pub async fn clear_message_focus_keep_mcp(
+        &self,
+        app_handle: &tauri::AppHandle,
+        conversation_id: i64,
+    ) {
+        let active_calls = Self::fetch_active_mcp_call_ids(app_handle, conversation_id);
+        self.update_state(app_handle, conversation_id, move |activity| {
+            activity.pending_user_message_id = None;
+            activity.streaming_message_id = None;
+            activity.active_mcp_call_ids = active_calls;
+        })
+        .await;
     }
 
     /// 设置用户消息等待响应状态
@@ -94,8 +238,14 @@ impl ConversationActivityManager {
         conversation_id: i64,
         message_id: i64,
     ) {
-        self.set_focus(app_handle, conversation_id, ActivityFocus::UserPending { message_id })
-            .await;
+        self.update_state(app_handle, conversation_id, |activity| {
+            // 新一轮请求开始，切换 epoch 并清理旧残留
+            activity.epoch = activity.epoch.saturating_add(1);
+            activity.pending_user_message_id = Some(message_id);
+            activity.streaming_message_id = None;
+            activity.active_mcp_call_ids.clear();
+        })
+        .await;
     }
 
     /// 设置 Assistant 消息流式输出状态
@@ -105,51 +255,36 @@ impl ConversationActivityManager {
         conversation_id: i64,
         message_id: i64,
     ) {
-        self.set_focus(
-            app_handle,
-            conversation_id,
-            ActivityFocus::AssistantStreaming { message_id },
-        )
+        self.update_state(app_handle, conversation_id, |activity| {
+            activity.pending_user_message_id = None;
+            activity.streaming_message_id = Some(message_id);
+        })
         .await;
     }
 
     /// 设置 MCP 工具调用执行状态
-    ///
-    /// 进入 MCP 状态前，会自动备份当前状态，以便 MCP 完成后恢复。
     pub async fn set_mcp_executing(
         &self,
         app_handle: &tauri::AppHandle,
         conversation_id: i64,
         call_id: i64,
     ) {
-        // 先备份当前状态（如果不是 MCP 状态）
-        {
-            let mut activities = self.activities.write().await;
-            let activity = activities.entry(conversation_id).or_default();
-            if !matches!(activity.current, ActivityFocus::McpExecuting { .. }) {
-                activity.pre_mcp_backup = Some(activity.current.clone());
+        self.update_state(app_handle, conversation_id, |activity| {
+            if let Some(idx) = activity.active_mcp_call_ids.iter().position(|id| *id == call_id) {
+                activity.active_mcp_call_ids.remove(idx);
             }
-        }
-
-        self.set_focus(app_handle, conversation_id, ActivityFocus::McpExecuting { call_id }).await;
+            activity.active_mcp_call_ids.push(call_id);
+        })
+        .await;
     }
 
-    /// MCP 完成后恢复到执行前的状态
+    /// MCP 完成后从数据库重同步活跃调用，再重新计算焦点
     pub async fn restore_after_mcp(&self, app_handle: &tauri::AppHandle, conversation_id: i64) {
-        let backup = {
-            let mut activities = self.activities.write().await;
-            if let Some(activity) = activities.get_mut(&conversation_id) {
-                activity.pre_mcp_backup.take()
-            } else {
-                None
-            }
-        };
-
-        if let Some(focus) = backup {
-            self.set_focus(app_handle, conversation_id, focus).await;
-        } else {
-            self.clear_focus(app_handle, conversation_id).await;
-        }
+        let active_calls = Self::fetch_active_mcp_call_ids(app_handle, conversation_id);
+        self.update_state(app_handle, conversation_id, move |activity| {
+            activity.active_mcp_call_ids = active_calls;
+        })
+        .await;
     }
 
     /// 移除对话的活动状态（对话删除时调用）

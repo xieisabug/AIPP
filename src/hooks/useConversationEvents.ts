@@ -12,6 +12,8 @@ import {
     StreamCompleteEvent,
     ActivityFocusChangeEvent,
     ActivityFocus,
+    ConversationShineState,
+    ShineStateSnapshotEvent,
 } from "../data/Conversation";
 import { MCPToolCall } from "@/data/MCPToolCall";
 
@@ -44,9 +46,6 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         new Set(),
     );
 
-    // 临时强制闪亮的消息 ID（用于重新生成/用户点击等），会被后端焦点或流式状态覆盖
-    const [manualShineMessageId, setManualShineMessageId] = useState<number | null>(null);
-
     // MCP工具调用状态管理
     const [mcpToolCallStates, setMCPToolCallStates] = useState<
         Map<number, MCPToolCallUpdateEvent>
@@ -67,11 +66,17 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
     // 活动焦点状态 - 由后端统一管理，优先使用这个状态来控制闪亮边框
     const [activityFocus, setActivityFocus] = useState<ActivityFocus>({ focus_type: 'none' });
+    const [shineState, setShineState] = useState<ConversationShineState | null>(null);
+    const [shiningMcpCallId, setShiningMcpCallId] = useState<number | null>(null);
 
     // 事件监听取消订阅引用
     const unsubscribeRef = useRef<Promise<() => void> | null>(null);
     const hasUnsubscribedRef = useRef<boolean>(false);
-    const focusSyncRequestIdRef = useRef<number>(0);
+    const shineSyncRequestIdRef = useRef<number>(0);
+    const shineVersionRef = useRef<{ epoch: number; revision: number }>({
+        epoch: -1,
+        revision: -1,
+    });
     const hasSyncedAfterMessageAddRef = useRef<boolean>(false);
     const mcpPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const mcpPollGenerationRef = useRef<number>(0);
@@ -106,111 +111,85 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         stopMcpCompensationPolling(reason);
     }, [stopMcpCompensationPolling]);
 
-    // 基于 activityFocus 计算闪亮边框状态
-    // 这是新的逻辑：优先使用后端发送的活动焦点状态，必要时回退本地/手动状态
-    const updateShiningMessagesFromFocus = useCallback(() => {
-        setShiningMessageIds(() => {
-            const newShining = new Set<number>();
-
-            switch (activityFocus.focus_type) {
-                case 'user_pending':
-                case 'assistant_streaming':
-                    newShining.add(activityFocus.message_id);
-                    console.log("✨ [ActivityFocus] Shining message:", activityFocus.message_id, "-", activityFocus.focus_type);
-                    return newShining;
-                case 'mcp_executing':
-                    // MCP 执行时不显示消息边框（MCP 组件自己控制）
-                    console.log("🔧 [ActivityFocus] MCP executing:", activityFocus.call_id);
-                    return newShining;
-                case 'none':
+    const deriveActivityFocusFromShine = useCallback(
+        (state: ConversationShineState): ActivityFocus => {
+            const target = state.primary_target;
+            switch (target.target_type) {
+                case "message":
+                    if (target.reason === "user_pending") {
+                        return { focus_type: "user_pending", message_id: target.message_id };
+                    }
+                    return { focus_type: "assistant_streaming", message_id: target.message_id };
+                case "mcp_call":
+                    return { focus_type: "mcp_executing", call_id: target.call_id };
+                case "none":
                 default:
+                    return { focus_type: "none" };
+            }
+        },
+        []
+    );
+
+    const applyShineState = useCallback(
+        (state: ConversationShineState) => {
+            const current = shineVersionRef.current;
+            const isStale =
+                state.epoch < current.epoch ||
+                (state.epoch === current.epoch && state.revision <= current.revision);
+            if (isStale) {
+                return;
+            }
+
+            shineVersionRef.current = { epoch: state.epoch, revision: state.revision };
+            setShineState(state);
+            setActivityFocus(deriveActivityFocusFromShine(state));
+
+            switch (state.primary_target.target_type) {
+                case "message":
+                    setShiningMessageIds(new Set([state.primary_target.message_id]));
+                    setShiningMcpCallId(null);
+                    break;
+                case "mcp_call":
+                    setShiningMessageIds(new Set());
+                    setShiningMcpCallId(state.primary_target.call_id);
+                    break;
+                case "none":
+                default:
+                    setShiningMessageIds(new Set());
+                    setShiningMcpCallId(null);
                     break;
             }
+        },
+        [deriveActivityFocusFromShine]
+    );
 
-            // 回退：activity_focus 丢失时，使用本地流式/等待状态（避免工具执行期间失去闪亮提示）
-            if (streamingAssistantMessageIds.size > 0) {
-                streamingAssistantMessageIds.forEach((id) => newShining.add(id));
-                return newShining;
-            }
-
-            if (pendingUserMessageId !== null) {
-                newShining.add(pendingUserMessageId);
-                return newShining;
-            }
-
-            // 最后回退到手动闪亮（例如重新生成点击）
-            if (manualShineMessageId !== null) {
-                newShining.add(manualShineMessageId);
-            }
-
-            return newShining;
-        });
-
-    }, [
-        activeMcpCallIds.size,
-        activityFocus,
-        manualShineMessageId,
-        pendingUserMessageId,
-        streamingAssistantMessageIds,
-    ]);
-
-    // 当 activityFocus 变化时，更新边框显示
-    useEffect(() => {
-        updateShiningMessagesFromFocus();
-    }, [updateShiningMessagesFromFocus]);
-
-    // 工具执行全部结束时，清理手动闪亮，交还给后端/流式状态
-    useEffect(() => {
-        if (activeMcpCallIds.size === 0 && manualShineMessageId !== null) {
-            setManualShineMessageId(null);
-        }
-    }, [activeMcpCallIds.size, manualShineMessageId]);
-
-    // activityFocus 变化时同步活跃 MCP 集合（避免循环）
-    useEffect(() => {
-        if (activityFocus.focus_type !== 'mcp_executing') {
-            return;
-        }
-
-        setActiveMcpCallIds((prev) => {
-            if (prev.size === 1 && prev.has(activityFocus.call_id)) {
-                return prev;
-            }
-            return new Set([activityFocus.call_id]);
-        });
-    }, [activityFocus]);
-
-    // 智能边框控制辅助函数 - 用于外部组件手动触发边框更新
-    // 注意：现在 shiningMessageIds 主要由 updateShiningMessagesFromFocus 根据 activityFocus 管理
-    // 这个函数保留用于兼容性，但不再自动触发
-    const updateShiningMessages = useCallback(() => {
-        updateShiningMessagesFromFocus();
-    }, [updateShiningMessagesFromFocus]);
+    // 兼容保留：边框由 shine_state_snapshot 驱动，此方法保持为无副作用接口
+    const updateShiningMessages = useCallback(() => { }, []);
 
     useEffect(() => {
         activeMcpCallIdsRef.current = activeMcpCallIds;
     }, [activeMcpCallIds]);
 
-    // 主动从后端同步当前活动焦点，避免在监听尚未建立时丢失状态
-    const syncActivityFocus = useCallback((conversationIdNum: number) => {
+    // 主动从后端同步当前闪亮状态，避免在监听尚未建立时丢失状态
+    const syncShineState = useCallback((conversationIdNum: number) => {
         if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
             return;
         }
 
-        const requestId = focusSyncRequestIdRef.current + 1;
-        focusSyncRequestIdRef.current = requestId;
+        const requestId = shineSyncRequestIdRef.current + 1;
+        shineSyncRequestIdRef.current = requestId;
 
-        invoke<ActivityFocus>("get_activity_focus", { conversationId: conversationIdNum })
-            .then((focus) => {
-                if (focusSyncRequestIdRef.current !== requestId) return;
-                console.log("[ActivityFocus] Synced initial focus from backend:", focus);
-                setActivityFocus(focus);
+        invoke<ConversationShineState>("get_shine_state", { conversationId: conversationIdNum })
+            .then((state) => {
+                if (shineSyncRequestIdRef.current !== requestId) return;
+                console.log("[ShineState] Synced state from backend:", state);
+                applyShineState(state);
             })
             .catch((error) => {
-                if (focusSyncRequestIdRef.current !== requestId) return;
-                console.warn("[ActivityFocus] Failed to sync focus state", error);
+                if (shineSyncRequestIdRef.current !== requestId) return;
+                console.warn("[ShineState] Failed to sync state", error);
             });
-    }, []);
+    }, [applyShineState]);
 
     const applyMcpToolCalls = useCallback((calls: MCPToolCall[]) => {
         const stateMap = new Map<number, MCPToolCallUpdateEvent>();
@@ -393,7 +372,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 if (!hasSyncedAfterMessageAddRef.current) {
                     const conversationIdNum = Number(callbacksRef.current.conversationId);
                     if (!Number.isNaN(conversationIdNum)) {
-                        syncActivityFocus(conversationIdNum);
+                        syncShineState(conversationIdNum);
                         hasSyncedAfterMessageAddRef.current = true;
                     }
                 }
@@ -597,7 +576,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     }
 
                     if (newSet.size === 0) {
-                        syncActivityFocus(mcpUpdateData.conversation_id);
+                        syncShineState(mcpUpdateData.conversation_id);
                     }
 
                     return newSet;
@@ -632,6 +611,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
                 // 从 DB 刷新 MCP 工具调用状态，确保取消后状态与 DB 一致
                 void refreshMcpToolCalls();
+                syncShineState(cancelData.conversation_id);
 
                 // 调用外部的取消处理函数
                 callbacksRef.current.onConversationCancel?.(cancelData);
@@ -648,10 +628,15 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 setStreamingAssistantMessageIds(new Set());
                 setPendingUserMessageId(null);
                 // 保持 MCP 工具调用状态，避免执行中的边框被清空
-                syncActivityFocus(completionData.conversation_id);
+                syncShineState(completionData.conversation_id);
 
                 // 通知外部响应已完成（即便没有 response chunk）
                 callbacksRef.current.onAiResponseComplete?.();
+            } else if (conversationEvent.type === "shine_state_snapshot") {
+                const snapshotEvent = conversationEvent.data as ShineStateSnapshotEvent;
+                if (snapshotEvent?.state) {
+                    applyShineState(snapshotEvent.state);
+                }
             } else if (conversationEvent.type === "activity_focus_change") {
                 // 处理活动焦点变化事件 - 由后端统一管理闪亮边框状态
                 const focusEvent = conversationEvent.data as ActivityFocusChangeEvent;
@@ -659,7 +644,13 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 setActivityFocus(focusEvent.focus);
             }
         },
-        [refreshMcpToolCalls, invalidateMcpCompensationPolling, stopMcpCompensationPolling],
+        [
+            applyShineState,
+            refreshMcpToolCalls,
+            invalidateMcpCompensationPolling,
+            stopMcpCompensationPolling,
+            syncShineState,
+        ],
     );
 
     // 设置和清理事件监听
@@ -668,21 +659,24 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
         if (!options.conversationId) {
             // 清理状态
-            focusSyncRequestIdRef.current += 1; // 使之前的同步请求失效
+            shineSyncRequestIdRef.current += 1; // 使之前的同步请求失效
             setStreamingMessages(new Map());
             setShiningMessageIds(new Set());
+            setShiningMcpCallId(null);
             setMCPToolCallStates(new Map());
             setActiveMcpCallIds(new Set());
             setStreamingAssistantMessageIds(new Set());
             setPendingUserMessageId(null);
             setActivityFocus({ focus_type: 'none' });
+            setShineState(null);
+            shineVersionRef.current = { epoch: -1, revision: -1 };
             hasSyncedAfterMessageAddRef.current = false;
             return;
         }
 
         const conversationIdNum = Number(options.conversationId);
         if (Number.isNaN(conversationIdNum)) {
-            focusSyncRequestIdRef.current += 1; // 避免旧同步影响
+            shineSyncRequestIdRef.current += 1; // 避免旧同步影响
             console.warn("[ActivityFocus] Invalid conversationId for event subscription:", options.conversationId);
             return;
         }
@@ -713,8 +707,8 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             handleConversationEvent,
         );
 
-        // 主动同步一次当前焦点，避免在订阅前发生的事件导致闪烁状态缺失
-        syncActivityFocus(conversationIdNum);
+        // 主动同步一次当前闪亮状态，避免在订阅前发生的事件导致闪烁状态缺失
+        syncShineState(conversationIdNum);
 
         return () => {
             if (unsubscribeRef.current && !hasUnsubscribedRef.current) {
@@ -763,6 +757,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         console.log("[DEBUG] Clearing shining/MCP state (manual reset)");
         invalidateMcpCompensationPolling("manual state clear");
         setShiningMessageIds(new Set());
+        setShiningMcpCallId(null);
         setStreamingAssistantMessageIds(new Set());
         setPendingUserMessageId(null);
         setActiveMcpCallIds(new Set());
@@ -777,16 +772,15 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             return kept;
         });
         setActivityFocus({ focus_type: 'none' });
-        setManualShineMessageId(null);
+        setShineState(null);
+        shineVersionRef.current = { epoch: -1, revision: -1 };
     }, [invalidateMcpCompensationPolling]);
 
     const setPendingUserMessage = useCallback((messageId: number | null) => {
         setPendingUserMessageId(messageId);
     }, []);
 
-    const setManualShineMessage = useCallback((messageId: number | null) => {
-        setManualShineMessageId(messageId);
-    }, []);
+    const setManualShineMessage = useCallback((_messageId: number | null) => { }, []);
 
     const handleError = useCallback((errorMessage: string) => {
         console.error("Global error handler called:", errorMessage);
@@ -795,6 +789,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         // 清理所有流式消息状态
         setStreamingMessages(new Map());
         setShiningMessageIds(new Set());
+        setShiningMcpCallId(null);
         // 保留已完成的 MCP 工具调用状态（搜索结果等），仅移除进行中的
         setMCPToolCallStates((prev) => {
             const kept = new Map<number, MCPToolCallUpdateEvent>();
@@ -809,6 +804,8 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         setStreamingAssistantMessageIds(new Set());
         setPendingUserMessageId(null); // 清理等待回复的用户消息
         setActivityFocus({ focus_type: 'none' });
+        setShineState(null);
+        shineVersionRef.current = { epoch: -1, revision: -1 };
 
         // 调用外部错误处理，确保状态重置
         callbacksRef.current.onError?.(errorMessage);
@@ -827,6 +824,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         setManualShineMessage,
         mcpToolCallStates,
         activeMcpCallIds, // 导出活跃的 MCP 调用状态
+        shiningMcpCallId,
+        shineState,
+        pendingUserMessageId,
         streamingAssistantMessageIds, // 导出正在流式输出的 assistant 消息状态
         activityFocus, // 导出活动焦点状态（后端驱动）
         clearStreamingMessages,
