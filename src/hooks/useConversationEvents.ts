@@ -579,6 +579,8 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                         syncShineState(mcpUpdateData.conversation_id);
                     }
 
+                    // 立即同步 ref，避免 stream_complete 紧随其后时读取到旧值
+                    activeMcpCallIdsRef.current = newSet;
                     return newSet;
                 });
 
@@ -619,12 +621,16 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 // 处理流式完成事件（包括空响应场景）
                 const completionData = conversationEvent.data as StreamCompleteEvent;
                 console.log("Received stream_complete event:", completionData);
-                if (activeMcpCallIdsRef.current.size === 0) {
+                const hasActiveMcpCall = activeMcpCallIdsRef.current.size > 0;
+                if (!hasActiveMcpCall) {
                     stopMcpCompensationPolling("stream completed with no active MCP calls");
+                    // 没有活跃 MCP 调用时，清理流式状态避免 UI 卡在接收中
+                    setStreamingMessages(new Map());
+                } else {
+                    console.log("[MCP] stream_complete received while MCP still active, keep tool-call placeholder visible");
                 }
 
-                // 清理流式与闪烁状态，避免 UI 长时间处于接收中
-                setStreamingMessages(new Map());
+                // 清理流式与闪烁状态（保留流式消息以承载进行中的 MCP 工具卡片）
                 setStreamingAssistantMessageIds(new Set());
                 setPendingUserMessageId(null);
                 // 保持 MCP 工具调用状态，避免执行中的边框被清空
