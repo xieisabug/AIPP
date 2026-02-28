@@ -60,13 +60,6 @@ use crate::api::skill_api::{
     open_skill_parent_folder, open_skills_folder, open_source_url, remove_assistant_skill,
     scan_skills, skill_exists, toggle_assistant_skill, update_assistant_skill_config,
 };
-use crate::api::sub_task_api::{
-    cancel_sub_task_execution, cancel_sub_task_execution_for_ui, create_sub_task_execution,
-    delete_sub_task_definition, get_sub_task_definition, get_sub_task_execution_detail,
-    get_sub_task_execution_detail_for_ui, get_sub_task_mcp_calls_for_ui, list_sub_task_definitions,
-    list_sub_task_executions, register_sub_task_definition, run_sub_task_sync,
-    run_sub_task_with_mcp_loop, sub_task_regist, update_sub_task_definition,
-};
 use crate::api::system_api::{
     copy_image_to_clipboard, get_all_feature_config, get_autostart_state, get_bang_list,
     get_selected_text_api, open_data_folder, open_image, resume_global_shortcut,
@@ -116,7 +109,6 @@ use crate::db::assistant_db::AssistantDatabase;
 use crate::db::llm_db::LLMDatabase;
 use crate::db::mcp_db::MCPDatabase;
 use crate::db::scheduled_task_db::ScheduledTaskDatabase;
-use crate::db::sub_task_db::SubTaskDatabase;
 use crate::db::system_db::SystemDatabase;
 use crate::mcp::builtin_mcp::{
     add_or_update_aipp_builtin_server, execute_aipp_builtin_tool,
@@ -460,7 +452,6 @@ pub fn run() {
             let conversation_db = ConversationDatabase::new(&app_handle)?;
             let plugin_db = PluginDatabase::new(&app_handle)?;
             let mcp_db = MCPDatabase::new(&app_handle)?;
-            let sub_task_db = SubTaskDatabase::new(&app_handle)?;
             let scheduled_task_db = ScheduledTaskDatabase::new(&app_handle)?;
             let artifacts_db = ArtifactsDatabase::new(&app_handle)?;
             let skill_db = db::skill_db::SkillDatabase::new(&app_handle)?;
@@ -471,7 +462,6 @@ pub fn run() {
             conversation_db.create_tables()?;
             plugin_db.create_tables()?;
             mcp_db.create_tables()?;
-            sub_task_db.create_tables()?;
             scheduled_task_db.create_tables()?;
             artifacts_db.create_tables()?;
             skill_db.create_tables()?;
@@ -775,21 +765,6 @@ pub fn run() {
             submit_ask_user_question_response,
             confirm_operation_permission,
             confirm_acp_permission,
-            register_sub_task_definition,
-            run_sub_task_sync,
-            run_sub_task_with_mcp_loop,
-            sub_task_regist,
-            list_sub_task_definitions,
-            get_sub_task_definition,
-            update_sub_task_definition,
-            delete_sub_task_definition,
-            create_sub_task_execution,
-            list_sub_task_executions,
-            get_sub_task_execution_detail,
-            get_sub_task_execution_detail_for_ui,
-            cancel_sub_task_execution,
-            get_sub_task_mcp_calls_for_ui,
-            cancel_sub_task_execution_for_ui,
             highlight_code,
             ensure_hidden_search_window,
             list_syntect_themes,

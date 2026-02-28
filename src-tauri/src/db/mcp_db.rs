@@ -1129,45 +1129,6 @@ impl MCPDatabase {
         self.get_mcp_tool_call(id)
     }
 
-    /// Create MCP tool call specifically for subtask execution
-    #[instrument(
-        level = "trace",
-        skip(self, parameters, llm_call_id),
-        fields(conversation_id, server_id, tool_name, subtask_id)
-    )]
-    pub fn create_mcp_tool_call_for_subtask(
-        &self,
-        conversation_id: i64,
-        subtask_id: i64,
-        server_id: i64,
-        server_name: &str,
-        tool_name: &str,
-        parameters: &str,
-        llm_call_id: Option<&str>,
-    ) -> rusqlite::Result<MCPToolCall> {
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO mcp_tool_call (conversation_id, message_id, server_id, server_name, tool_name, parameters, llm_call_id, assistant_message_id, subtask_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        )?;
-
-        stmt.execute(params![
-            conversation_id,
-            None::<i64>, // No specific message for subtask calls
-            server_id,
-            server_name,
-            tool_name,
-            parameters,
-            llm_call_id,
-            None::<i64>, // No assistant message for subtask calls
-            subtask_id
-        ])?;
-
-        let id = self.conn.last_insert_rowid();
-
-        // Return the created tool call
-        self.get_mcp_tool_call(id)
-    }
-
     pub fn get_mcp_tool_call(&self, id: i64) -> rusqlite::Result<MCPToolCall> {
         let mut stmt = self.conn.prepare(
             "SELECT id, conversation_id, message_id, server_id, server_name, tool_name, 
@@ -1285,46 +1246,6 @@ impl MCPDatabase {
                 conversation_id: row.get(1)?,
                 message_id: row.get(2)?,
                 subtask_id: row.get(15)?, // New field
-                server_id: row.get(3)?,
-                server_name: row.get(4)?,
-                tool_name: row.get(5)?,
-                parameters: row.get(6)?,
-                status: row.get(7)?,
-                result: row.get(8)?,
-                error: row.get(9)?,
-                created_time: row.get(10)?,
-                started_time: row.get(11)?,
-                finished_time: row.get(12)?,
-                llm_call_id: row.get(13)?,
-                assistant_message_id: row.get(14)?,
-            })
-        })?;
-
-        let mut result = Vec::new();
-        for call in calls {
-            result.push(call?);
-        }
-        Ok(result)
-    }
-
-    /// Fetch MCP tool calls linked to a specific subtask execution
-    pub fn get_mcp_tool_calls_by_subtask(
-        &self,
-        subtask_id: i64,
-    ) -> rusqlite::Result<Vec<MCPToolCall>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, conversation_id, message_id, server_id, server_name, tool_name,
-             parameters, status, result, error, created_time, started_time, finished_time,
-             llm_call_id, assistant_message_id, subtask_id
-             FROM mcp_tool_call WHERE subtask_id = ? ORDER BY created_time ASC",
-        )?;
-
-        let calls = stmt.query_map([subtask_id], |row| {
-            Ok(MCPToolCall {
-                id: row.get(0)?,
-                conversation_id: row.get(1)?,
-                message_id: row.get(2)?,
-                subtask_id: row.get(15)?,
                 server_id: row.get(3)?,
                 server_name: row.get(4)?,
                 tool_name: row.get(5)?,

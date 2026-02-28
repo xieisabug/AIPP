@@ -380,65 +380,12 @@ export function useAssistantRuntime({
             }
         },
 
-        runSubTask: async function (code: string, taskPrompt: string): Promise<SubTaskRunResult> {
-            console.log("Running sub task:", code, "with prompt:", taskPrompt);
-            try {
-                const effectiveConversation = getEffectiveConversation();
-                const assistantId = effectiveConversation?.assistant_id || selectedAssistant;
-                const conversationIdNumber = effectiveConversation?.id ? +effectiveConversation.id : 0;
-
-                if (!assistantId) {
-                    throw new Error("No assistant selected for running sub task");
-                }
-
-                if (!conversationIdNumber) {
-                    throw new Error("No conversation context available for running sub task");
-                }
-
-                const result = await invoke<SubTaskRunResult>("run_sub_task_sync", {
-                    code,
-                    taskPrompt,
-                    conversationId: conversationIdNumber,
-                    assistantId: +assistantId,
-                });
-
-                console.log("Sub task completed:", result);
-                return result;
-            } catch (error) {
-                console.error("Failed to run sub task:", error);
-                throw error;
-            }
+        runSubTask: async function (_code: string, _taskPrompt: string): Promise<SubTaskRunResult> {
+            throw new Error("SubTask feature has been removed");
         },
 
-        runSubTaskWithMcpLoop: async function (code: string, taskPrompt: string, options: McpLoopOptions): Promise<SubTaskRunWithMcpResult> {
-            console.log("Running sub task with MCP loop:", code, "with prompt:", taskPrompt, "options:", options);
-            try {
-                const effectiveConversation = getEffectiveConversation();
-                const assistantId = effectiveConversation?.assistant_id || selectedAssistant;
-                const conversationIdNumber = effectiveConversation?.id ? +effectiveConversation.id : 0;
-
-                if (!assistantId) {
-                    throw new Error("No assistant selected for running sub task with MCP loop");
-                }
-
-                if (!conversationIdNumber) {
-                    throw new Error("No conversation context available for running sub task with MCP loop");
-                }
-
-                const result = await invoke<SubTaskRunWithMcpResult>("run_sub_task_with_mcp_loop", {
-                    code,
-                    taskPrompt,
-                    conversationId: conversationIdNumber,
-                    assistantId: +assistantId,
-                    options,
-                });
-
-                console.log("Sub task with MCP loop completed:", result);
-                return result;
-            } catch (error) {
-                console.error("Failed to run sub task with MCP loop:", error);
-                throw error;
-            }
+        runSubTaskWithMcpLoop: async function (_code: string, _taskPrompt: string, _options: McpLoopOptions): Promise<SubTaskRunWithMcpResult> {
+            throw new Error("SubTask feature has been removed");
         },
     };
 
