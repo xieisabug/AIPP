@@ -175,37 +175,8 @@ npm run build          # 默认产物位于 dist/
 
 ---
 
-## 9. 子任务图标（iconComponent）
+## 9. 扩展阅读
 
-当前仅支持通过前端组件注册子任务图标，无需、也不会将图标持久化到后端数据库。
+更完整的插件系统设计文档请参阅 `tmp/plugin-kernel-*.md` 系列：
 
-- 在注册子任务（`subTaskRegist`）时可传入 `iconComponent`，类型兼容：
-  - `React.ReactNode`（直接渲染的节点）
-  - `React.ComponentType<{ className?: string; size?: number }>`（如 `lucide-react` 图标）
-- 框架会将图标按 `code` 注册到运行期前端的注册表，后续 UI 将在子任务选择/详情处显示。
-
-示例（lucide-react）：
-
-```tsx
-import { Wrench } from 'lucide-react';
-
-class MyPlugin {
-  onAssistantTypeInit(assistantTypeApi) {
-    assistantTypeApi.subTaskRegist({
-      code: 'fix-bug',
-      name: '修复Bug',
-      description: '自动定位并修复常见问题',
-      systemPrompt: 'You are a helpful bug fixer.',
-      iconComponent: Wrench, // 也可传 <Wrench className="h-4 w-4" />
-    });
-  }
-}
-
-// 将插件类挂到 window 以供主程序加载
-window.SamplePlugin = MyPlugin;
-```
-
-说明：
-
-- `lucide-react` 的组件支持 `size`、`className` 等属性，框架会在渲染时设置合适的 `size`，也可在节点模式自定义样式。
-- 仅前端注册，无需后端 API 或数据库调整；若后续需要持久化静态图片/emoji，可另行扩展。
+- **06-插件类型系统设计.md**：详细的插件类型定义，支持多类型插件，新增 ThemeType、MarkdownType 等
