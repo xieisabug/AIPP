@@ -18,6 +18,8 @@ import { Loader2, FileText, FileImage, File, FileType, Download } from "lucide-r
 
 interface ConversationExportDialogProps {
     conversationId: string;
+    externalOpen?: boolean;
+    onExternalOpenChange?: (open: boolean) => void;
 }
 
 const defaultOptions: ConversationExportOptions = {
@@ -29,8 +31,12 @@ const defaultOptions: ConversationExportOptions = {
 
 const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
     conversationId,
+    externalOpen,
+    onExternalOpenChange,
 }) => {
-    const [open, setOpen] = useState(false);
+    const [internalOpen, setInternalOpen] = useState(false);
+    const open = externalOpen !== undefined ? externalOpen : internalOpen;
+    const setOpen = onExternalOpenChange || setInternalOpen;
     const [loading, setLoading] = useState(false);
     const [exporting, setExporting] = useState<string | null>(null);
     const [exportData, setExportData] = useState<ExportData | null>(null);

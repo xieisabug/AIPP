@@ -57,6 +57,12 @@ import { useContextList } from "@/hooks/useContextList";
 export interface ConversationUIRef {
     focus: () => void;
     scrollToMessage: (messageId: number) => void;
+    openStats: () => void;
+    closeStats: () => void;
+    openExport: () => void;
+    closeExport: () => void;
+    openSidebarWindow: () => void;
+    openSettings: () => void;
 }
 
 export interface InlineInteractionItem {
@@ -148,6 +154,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         
         // Sidebar window state - when true, hide the inline sidebar
         const [sidebarWindowOpen, setSidebarWindowOpen] = useState(false);
+
+        // Dialog states for shortcut triggering
+        const [statsDialogOpen, setStatsDialogOpen] = useState(false);
+        const [exportDialogOpen, setExportDialogOpen] = useState(false);
         
         const handleSidebarExpandChange = useCallback((isExpanded: boolean, width: number) => {
             setSidebarExpanded(isExpanded);
@@ -561,8 +571,26 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 scrollToMessage: (messageId: number) => {
                     setPendingScrollMessageId(messageId);
                 },
+                openStats: () => {
+                    if (conversationId) setStatsDialogOpen(true);
+                },
+                closeStats: () => {
+                    setStatsDialogOpen(false);
+                },
+                openExport: () => {
+                    if (conversationId) setExportDialogOpen(true);
+                },
+                closeExport: () => {
+                    setExportDialogOpen(false);
+                },
+                openSidebarWindow: () => {
+                    handleOpenSidebarWindow();
+                },
+                openSettings: () => {
+                    invoke("open_config_window");
+                },
             }),
-            []
+            [conversationId, handleOpenSidebarWindow]
         );
 
         // 智能聚焦逻辑 - 无延迟版本
@@ -814,6 +842,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             conversation={conversation}
                             onEdit={openTitleEditDialog}
                             onDelete={handleDeleteConversationSuccess}
+                            statsOpen={statsDialogOpen}
+                            onStatsOpenChange={setStatsDialogOpen}
+                            exportOpen={exportDialogOpen}
+                            onExportOpenChange={setExportDialogOpen}
                         />
                     )}
 

@@ -17,6 +17,7 @@ import { useConversationEvents } from "../hooks/useConversationEvents";
 import { StreamEvent } from "../data/Conversation";
 import { ShineBorder } from "../components/magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
+import { useAppShortcuts } from "../hooks/useAppShortcuts";
 const appWindow = getCurrentWebviewWindow();
 
 interface AiResponse {
@@ -184,12 +185,8 @@ function AskWindow() {
     }, 200);
 
     useEffect(() => {
-        const handleShortcut = async (event: KeyboardEvent) => {
+        const handleEscape = async (event: KeyboardEvent) => {
             if (event.key === "Escape") {
-                console.log("Closing window");
-                await appWindow.hide();
-            } else if (event.key === "i" && event.ctrlKey) {
-                await openChatUI();
                 await appWindow.hide();
             }
         };
@@ -225,10 +222,10 @@ function AskWindow() {
             setCopySuccess(false);
         });
 
-        window.addEventListener("keydown", handleShortcut);
+        window.addEventListener("keydown", handleEscape);
 
         return () => {
-            window.removeEventListener("keydown", handleShortcut);
+            window.removeEventListener("keydown", handleEscape);
             // 清理窗口焦点监听
             unlisten.then((unlistenFn) => unlistenFn());
             // 清理窗口隐藏事件监听
@@ -292,6 +289,22 @@ function AskWindow() {
         }
         return response;
     }, [messageId, streamingMessages, response]);
+
+    // 应用内快捷键（放在所有 handler 定义之后）
+    const handleCopyResponse = useCallback(() => {
+        if (messageId !== -1 && !aiIsResponsing && displayResponse) {
+            writeText(displayResponse);
+            setCopySuccess(true);
+            setTimeout(() => setCopySuccess(false), 1500);
+        }
+    }, [messageId, aiIsResponsing, displayResponse]);
+
+    useAppShortcuts("ask", {
+        new: startNewConversation,
+        fullscreen: () => { openChatUI(); appWindow.hide(); },
+        copy: handleCopyResponse,
+        settings: openConfig,
+    });
 
     return (
         <div className="flex justify-center items-center h-screen">
