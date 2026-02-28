@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AssistantDetail, AssistantListItem } from "../../data/Assistant";
 import { useAssistantListListener } from "../../hooks/useAssistantListListener";
@@ -7,6 +7,7 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { useForm } from "react-hook-form";
 import { validateConfig } from "../../utils/validate";
+import { PinyinFilter } from "../../utils/pinyinFilter";
 import AddAssistantDialog from "./AddAssistantDialog";
 
 // 导入公共组件
@@ -27,6 +28,7 @@ interface AssistantConfigProps {
 }
 const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateTo }) => {
     const form = useForm();
+    const [searchQuery, setSearchQuery] = useState('');
 
     const {
         assistantTypes,
@@ -170,6 +172,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
 
                 // 更新表单值
                 form.setValue(key, parsedValue);
+
                 // 更新模型配置
                 setCurrentAssistant((prev) => {
                     if (!prev) return prev;
@@ -293,6 +296,10 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         return true;
                     }
 
+                    if (key === "use_native_toolcall") {
+                        return true;
+                    }
+
                     // 如果是插件自定义字段，直接允许保存
                     if (customField) {
                         return true;
@@ -320,6 +327,8 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         valueType = "string";
                     } else if (key === "dynamic_mcp_loading_enabled") {
                         valueType = "boolean";
+                    } else if (key === "use_native_toolcall") {
+                        valueType = "boolean";
                     } else if (customField) {
                         // 根据插件字段的类型映射到数据库的 value_type
                         const fieldType = customField.value.type;
@@ -337,7 +346,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
 
                     return {
                         name: key,
-                        value: value ? value.toString() : null,
+                        value: value != null ? value.toString() : null,
                         value_type: valueType,
                         id: config?.id ?? 0,
                         assistant_id: currentAssistant.assistant.id,
@@ -351,9 +360,12 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 },
             ],
         })
-            .then(() => toast.success("保存成功"))
+            .then(() => {
+                toast.success("保存成功");
+                loadAssistantDetail(currentAssistant.assistant.id);
+            })
             .catch((error) => toast.error("保存失败: " + error));
-    }, [currentAssistant, form, saveAssistant, assistantTypeCustomField]);
+    }, [currentAssistant, form, saveAssistant, assistantTypeCustomField, loadAssistantDetail]);
 
     // 删除助手
     const handleDelete = useCallback(() => {
@@ -452,10 +464,19 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         [assistantTypes, handleAssistantAdded, openImportDialog]
     );
 
+    // 按搜索词过滤助手（支持拼音）
+    const filteredAssistants = useMemo(() => {
+        if (!searchQuery.trim()) return assistants;
+        return assistants.filter(assistant =>
+            PinyinFilter.matches(assistant.name, searchQuery)
+        );
+    }, [assistants, searchQuery]);
+
     // 侧边栏内容 - 使用 useMemo 避免重复创建
     const sidebar = useMemo(() => (
-        <SidebarList title="助手列表" description="选择助手进行配置" icon={<Bot className="h-5 w-5" />} addButton={addButton}>
-            {assistants.map((assistant) => (
+        <SidebarList title="助手列表" description="选择助手进行配置" icon={<Bot className="h-5 w-5" />} addButton={addButton}
+            searchValue={searchQuery} onSearchChange={setSearchQuery} searchPlaceholder="搜索助手...">
+            {filteredAssistants.map((assistant) => (
                 <ListItemButton
                     key={assistant.id}
                     isSelected={currentAssistant?.assistant.id === assistant.id}
@@ -466,7 +487,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 </ListItemButton>
             ))}
         </SidebarList>
-    ), [assistants, currentAssistant?.assistant.id, handleChooseAssistant, addButton]);
+    ), [filteredAssistants, currentAssistant?.assistant.id, handleChooseAssistant, addButton, searchQuery]);
 
     // 右侧内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
     const content = useMemo(() => currentAssistant ? (

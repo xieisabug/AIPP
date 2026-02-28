@@ -819,6 +819,7 @@ const InputArea = React.memo(
                             ref={textareaRef}
                             className="input-area-textarea"
                             rows={1}
+                            autoCapitalize="none"
                             value={inputText}
                             onChange={handleTextareaChange}
                             onKeyDown={handleKeyDownWithBang}

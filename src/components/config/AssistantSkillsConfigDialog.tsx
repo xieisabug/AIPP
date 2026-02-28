@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useState, useMemo } from 'react';
 import { invoke } from "@tauri-apps/api/core";
 import { Switch } from "../ui/switch";
-import { Sparkles, RefreshCw } from "lucide-react";
+import { Input } from "../ui/input";
+import { Sparkles, RefreshCw, Search } from "lucide-react";
 import { toast } from 'sonner';
 import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
+import { PinyinFilter } from "../../utils/pinyinFilter";
 import {
     Dialog,
     DialogContent,
@@ -39,6 +41,7 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
     const [isScanning, setIsScanning] = useState(false);
     const [mcpEnableConfirmOpen, setMcpEnableConfirmOpen] = useState(false);
     const [pendingSkillEnable, setPendingSkillEnable] = useState<{ skill: ScannedSkill; enabled: boolean } | null>(null);
+    const [searchQuery, setSearchQuery] = useState('');
 
     const { checkOperationMcpForSkills, enableOperationMcpAndSkill, isAgentLoadSkillError } = useSkillsMcpValidation();
 
@@ -68,6 +71,8 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
     useEffect(() => {
         if (isOpen) {
             fetchSkillsData();
+        } else {
+            setSearchQuery('');
         }
     }, [isOpen, assistantId]);
 
@@ -159,6 +164,22 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
         return groupSkillsBySource(allSkills);
     }, [allSkills]);
 
+    // 按搜索词过滤（支持拼音）
+    const filteredGroupedSkills = useMemo(() => {
+        if (!searchQuery.trim()) return groupedSkills;
+        const filtered = new Map<SkillSourceType, ScannedSkill[]>();
+        for (const [sourceType, sourceSkills] of groupedSkills.entries()) {
+            const matched = sourceSkills.filter(skill =>
+                PinyinFilter.matches(skill.display_name, searchQuery) ||
+                PinyinFilter.matches(skill.identifier, searchQuery)
+            );
+            if (matched.length > 0) {
+                filtered.set(sourceType, matched);
+            }
+        }
+        return filtered;
+    }, [groupedSkills, searchQuery]);
+
     // Source order for display
     const sourceOrder: SkillSourceType[] = ['aipp', 'claude_code_agents', 'claude_code_rules', 'claude_code_memory', 'codex'];
 
@@ -200,8 +221,19 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
                             </div>
                         ) : (
                             <div className="space-y-4">
+                                {/* 搜索框 */}
+                                <div className="relative">
+                                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                                    <Input
+                                        value={searchQuery}
+                                        onChange={(e) => setSearchQuery(e.target.value)}
+                                        placeholder="搜索Skills..."
+                                        className="pl-8 h-8 text-sm"
+                                    />
+                                </div>
+
                                 {sourceOrder.map(sourceType => {
-                                    const sourceSkills = groupedSkills.get(sourceType);
+                                    const sourceSkills = filteredGroupedSkills.get(sourceType);
                                     if (!sourceSkills || sourceSkills.length === 0) return null;
 
                                     return (
@@ -258,7 +290,7 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
                                 })}
 
                                 {/* Custom sources */}
-                                {Array.from(groupedSkills.entries())
+                                {Array.from(filteredGroupedSkills.entries())
                                     .filter(([sourceType]) => !sourceOrder.includes(sourceType))
                                     .map(([sourceType, sourceSkills]) => (
                                         <div key={sourceType} className="space-y-2">

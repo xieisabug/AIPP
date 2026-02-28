@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 /// 单例浏览器池管理器
@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 #[derive(Clone)]
 pub struct BrowserPool {
     /// Browser 实例
-    browser: Arc<OnceCell<Arc<Mutex<Browser>>>>,
+    browser: Arc<Mutex<Option<Arc<Mutex<Browser>>>>>,
     /// 可用页面队列
     idle_pages: Arc<Mutex<Vec<chromiumoxide::page::Page>>>,
     /// 当前活跃页面计数
@@ -44,7 +44,7 @@ impl BrowserPool {
     /// 创建新的浏览器池（懒加载，首次使用时初始化）
     pub fn new(config: BrowserPoolConfig) -> Self {
         Self {
-            browser: Arc::new(OnceCell::new()),
+            browser: Arc::new(Mutex::new(None)),
             idle_pages: Arc::new(Mutex::new(Vec::new())),
             active_count: Arc::new(AtomicUsize::new(0)),
             config,
@@ -65,30 +65,75 @@ impl BrowserPool {
         // 增加活跃计数
         self.active_count.fetch_add(1, Ordering::AcqRel);
 
-        // 确保浏览器已初始化（使用 OnceCell 确保只初始化一次）
-        let browser = self.get_or_init_browser().await.map_err(|e| {
+        // 确保浏览器已初始化
+        let mut browser = self.get_or_init_browser().await.map_err(|e| {
             // 初始化失败，减少计数
             self.active_count.fetch_sub(1, Ordering::AcqRel);
             e
         })?;
 
         // 尝试从空闲队列获取页面
-        {
-            let mut idle = self.idle_pages.lock().await;
-            if let Some(page) = idle.pop() {
-                debug!("Reusing idle page");
-                return Ok(PooledPage { page: Some(page), pool: Some(self.clone()) });
+        loop {
+            let maybe_page = {
+                let mut idle = self.idle_pages.lock().await;
+                idle.pop()
+            };
+            let Some(page) = maybe_page else {
+                break;
+            };
+
+            match self.ensure_page_healthy(&page).await {
+                Ok(_) => {
+                    debug!("Reusing idle page");
+                    return Ok(PooledPage { page: Some(page), pool: Some(self.clone()) });
+                }
+                Err(error_message) => {
+                    warn!(error = %error_message, "Discarding unhealthy idle page from pool");
+                    if Self::is_connection_closed_error(&error_message) {
+                        browser = self.recreate_browser().await.map_err(|e| {
+                            self.active_count.fetch_sub(1, Ordering::AcqRel);
+                            e
+                        })?;
+                    }
+                }
             }
         }
 
         // 创建新页面
-        let page = {
+        let page_result = {
             let browser_guard = browser.lock().await;
-            browser_guard.new_page("about:blank").await.map_err(|e| {
-                // 创建失败，减少计数
-                self.active_count.fetch_sub(1, Ordering::AcqRel);
-                format!("Failed to create new page: {}", e)
-            })?
+            browser_guard.new_page("about:blank").await
+        };
+
+        let page = match page_result {
+            Ok(page) => page,
+            Err(e) => {
+                let error_message = e.to_string();
+                if Self::is_connection_closed_error(&error_message) {
+                    warn!(
+                        error = %error_message,
+                        "Browser connection appears closed when creating page, recreating browser"
+                    );
+                    browser = self.recreate_browser().await.map_err(|recreate_error| {
+                        self.active_count.fetch_sub(1, Ordering::AcqRel);
+                        recreate_error
+                    })?;
+                    let retry_result = {
+                        let browser_guard = browser.lock().await;
+                        browser_guard.new_page("about:blank").await
+                    };
+                    retry_result.map_err(|retry_error| {
+                        self.active_count.fetch_sub(1, Ordering::AcqRel);
+                        format!(
+                            "Failed to create new page after browser recreation: {}",
+                            retry_error
+                        )
+                    })?
+                } else {
+                    self.active_count.fetch_sub(1, Ordering::AcqRel);
+                    return Err(format!("Failed to create new page: {}", error_message));
+                }
+            }
         };
 
         debug!("Created new page");
@@ -97,16 +142,59 @@ impl BrowserPool {
 
     /// 获取或初始化浏览器
     async fn get_or_init_browser(&self) -> Result<Arc<Mutex<Browser>>, String> {
-        // OnceCell::get_or_try_init 确保初始化只执行一次
-        let browser = self
-            .browser
-            .get_or_try_init(|| async {
-                let browser = self.initialize_browser().await?;
-                Ok::<Arc<Mutex<Browser>>, String>(Arc::new(Mutex::new(browser)))
-            })
+        let mut browser_slot = self.browser.lock().await;
+        if let Some(existing) = browser_slot.as_ref() {
+            return Ok(existing.clone());
+        }
+
+        let browser = Arc::new(Mutex::new(self.initialize_browser().await?));
+        *browser_slot = Some(browser.clone());
+        Ok(browser)
+    }
+
+    async fn recreate_browser(&self) -> Result<Arc<Mutex<Browser>>, String> {
+        info!("Recreating Chromium BrowserPool browser instance");
+
+        {
+            let mut idle = self.idle_pages.lock().await;
+            idle.clear();
+        }
+
+        let old_browser = {
+            let mut browser_slot = self.browser.lock().await;
+            browser_slot.take()
+        };
+
+        if let Some(browser) = old_browser {
+            let mut guard = browser.lock().await;
+            if let Err(e) = guard.close().await {
+                warn!(error = %e, "Failed to close stale browser before recreation");
+            }
+            if let Err(e) = guard.wait().await {
+                warn!(error = %e, "Failed to wait for stale browser exit before recreation");
+            }
+        }
+
+        self.get_or_init_browser().await
+    }
+
+    async fn ensure_page_healthy(
+        &self,
+        page: &chromiumoxide::page::Page,
+    ) -> Result<(), String> {
+        page.evaluate("() => document.readyState")
             .await
-            .map_err(|e| e.to_string())?;
-        Ok(browser.clone())
+            .map(|_| ())
+            .map_err(|e| format!("Page health check failed: {}", e))
+    }
+
+    fn is_connection_closed_error(error: &str) -> bool {
+        let lower = error.to_lowercase();
+        lower.contains("alreadyclosed")
+            || lower.contains("ws(")
+            || lower.contains("connection closed")
+            || lower.contains("websocket")
+            || lower.contains("broken pipe")
     }
 
     /// 初始化浏览器（只在首次调用时执行）
@@ -185,12 +273,22 @@ impl BrowserPool {
     }
 
     pub async fn shutdown(&self) -> Result<(), String> {
-        if let Some(browser) = self.browser.get() {
+        let browser = {
+            let mut browser_slot = self.browser.lock().await;
+            browser_slot.take()
+        };
+
+        if let Some(browser) = browser {
             let mut guard = browser.lock().await;
             guard.close().await.map_err(|e| format!("Failed to close browser: {}", e))?;
             if let Err(e) = guard.wait().await {
                 warn!(error = %e, "Failed to wait for browser process exit");
             }
+        }
+
+        {
+            let mut idle = self.idle_pages.lock().await;
+            idle.clear();
         }
         Ok(())
     }

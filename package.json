@@ -65,7 +65,6 @@
     "highlightjs-vue": "^1.0.0",
     "html2canvas": "^1.4.1",
     "input-otp": "^1.4.2",
-    "jspdf": "^4.0.0",
     "katex": "^0.16.22",
     "lodash": "^4.17.21",
     "lowlight": "^3.3.0",

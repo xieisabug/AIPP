@@ -15,12 +15,18 @@ import { TokenUsageDisplay } from "./TokenUsageDisplay";
 
 interface ConversationStatsDialogProps {
     conversationId: string;
+    externalOpen?: boolean;
+    onExternalOpenChange?: (open: boolean) => void;
 }
 
 export function ConversationStatsDialog({
     conversationId,
+    externalOpen,
+    onExternalOpenChange,
 }: ConversationStatsDialogProps) {
-    const [open, setOpen] = useState(false);
+    const [internalOpen, setInternalOpen] = useState(false);
+    const open = externalOpen !== undefined ? externalOpen : internalOpen;
+    const setOpen = onExternalOpenChange || setInternalOpen;
     const [stats, setStats] = useState<ConversationTokenStats | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);

@@ -7,9 +7,13 @@ export interface ConversationHeaderProps {
     conversation?: Conversation;
     onEdit: () => void;
     onDelete: () => void;
+    statsOpen?: boolean;
+    onStatsOpenChange?: (open: boolean) => void;
+    exportOpen?: boolean;
+    onExportOpenChange?: (open: boolean) => void;
 }
 
-const ConversationHeader: React.FC<ConversationHeaderProps> = memo(({ conversationId, conversation, onEdit, onDelete }) => {
+const ConversationHeader: React.FC<ConversationHeaderProps> = memo(({ conversationId, conversation, onEdit, onDelete, statsOpen, onStatsOpenChange, exportOpen, onExportOpenChange }) => {
     if (!conversationId) {
         return null;
     }
@@ -19,6 +23,10 @@ const ConversationHeader: React.FC<ConversationHeaderProps> = memo(({ conversati
             onEdit={onEdit}
             onDelete={onDelete}
             conversation={conversation}
+            statsOpen={statsOpen}
+            onStatsOpenChange={onStatsOpenChange}
+            exportOpen={exportOpen}
+            onExportOpenChange={onExportOpenChange}
         />
     );
 });

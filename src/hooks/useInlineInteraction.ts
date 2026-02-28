@@ -328,12 +328,14 @@ function getLatestAskUserQuestionState(
             `persisted-ask-${call.id}`
         );
         if (!request) continue;
+        const normalizedStatus: "pending" | "executing" | "success" | "failed" =
+            call.status === "unknown" ? "failed" : call.status;
         return {
             callId: call.id,
             messageId: call.message_id ?? null,
             request,
-            status: call.status,
-            answers: call.status === "success" ? parseAskUserQuestionAnswers(call.result) : null,
+            status: normalizedStatus,
+            answers: normalizedStatus === "success" ? parseAskUserQuestionAnswers(call.result) : null,
         };
     }
 
@@ -358,11 +360,13 @@ function getLatestPreviewFileState(
             `persisted-preview-${call.id}`
         );
         if (!request) continue;
+        const normalizedStatus: "pending" | "executing" | "success" | "failed" =
+            call.status === "unknown" ? "failed" : call.status;
         return {
             callId: call.id,
             messageId: call.message_id ?? null,
             request,
-            status: call.status,
+            status: normalizedStatus,
             requestId: parsePreviewFileRequestId(call.result),
         };
     }

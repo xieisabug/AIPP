@@ -8,6 +8,7 @@ export interface MessageListProps {
     allDisplayMessages: Message[];
     streamingMessages: Map<number, StreamEvent>;
     shiningMessageIds: Set<number>;
+    shiningMcpCallId: number | null;
     reasoningExpandStates: Map<number, boolean>;
     mcpToolCallStates: Map<number, any>;
     generationGroups: Map<string, any>;
@@ -26,6 +27,7 @@ const MessageList: React.FC<MessageListProps> = ({
     allDisplayMessages,
     streamingMessages,
     shiningMessageIds,
+    shiningMcpCallId,
     reasoningExpandStates,
     mcpToolCallStates,
     generationGroups,
@@ -110,6 +112,7 @@ const MessageList: React.FC<MessageListProps> = ({
                         conversationId={message.conversation_id}
                         // 传递 MCP 工具调用状态
                         mcpToolCallStates={mcpToolCallStates}
+                        shiningMcpCallId={shiningMcpCallId}
                         // 防泄露模式：是否为最后一条消息
                         isLastMessage={isLastMessage}
                         inlineInteractionItems={messageInlineInteractionMap.get(message.id)}
@@ -127,6 +130,7 @@ const MessageList: React.FC<MessageListProps> = ({
         shiningMessageIds,
         reasoningExpandStates,
         mcpToolCallStates,
+        shiningMcpCallId,
         getGenerationGroupControl,
         onCodeRun,
         onMessageRegenerate,

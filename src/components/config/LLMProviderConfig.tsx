@@ -11,6 +11,7 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { Zap, Settings, ServerCrash, Download, Plus } from "lucide-react";
 import { toast } from 'sonner';
+import { PinyinFilter } from "../../utils/pinyinFilter";
 
 // 导入公共组件
 import {
@@ -33,6 +34,7 @@ interface LLMProvider {
 const LLMProviderConfig: React.FC = () => {
     const [LLMProviders, setLLMProviders] = useState<Array<LLMProvider>>([]);
     const [selectedProvider, setSelectedProvider] = useState<LLMProvider | null>(null);
+    const [searchQuery, setSearchQuery] = useState('');
 
     const handleToggle = useCallback((index: number) => {
         const newProviders = [...LLMProviders];
@@ -276,14 +278,25 @@ const LLMProviderConfig: React.FC = () => {
     ), [openNewProviderDialog]);
 
     // 侧边栏内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
+    const filteredProviders = useMemo(() => {
+        if (!searchQuery.trim()) return LLMProviders;
+        return LLMProviders.filter(provider =>
+            PinyinFilter.matches(provider.name, searchQuery) ||
+            PinyinFilter.matches(provider.api_type, searchQuery)
+        );
+    }, [LLMProviders, searchQuery]);
+
     const sidebar = useMemo(() => (
         <SidebarList
             title="模型提供商"
             description="选择提供商进行配置"
             icon={<ServerCrash className="h-5 w-5" />}
+            searchValue={searchQuery}
+            onSearchChange={setSearchQuery}
+            searchPlaceholder="搜索提供商..."
             addButton={addButton}
         >
-            {LLMProviders.map((provider) => (
+            {filteredProviders.map((provider) => (
                 <ListItemButton
                     key={provider.id}
                     isSelected={selectedProvider?.id === provider.id}
@@ -300,7 +313,7 @@ const LLMProviderConfig: React.FC = () => {
                 </ListItemButton>
             ))}
         </SidebarList>
-    ), [LLMProviders, selectedProvider?.id, handleSelectProvider, addButton]);
+    ), [filteredProviders, selectedProvider?.id, handleSelectProvider, addButton, searchQuery]);
 
     const selectedProviderApiType = selectedProvider ? apiTypes.find(type => type.value === selectedProvider.api_type)?.label || selectedProvider.api_type : "";
 
@@ -406,6 +419,7 @@ const LLMProviderConfig: React.FC = () => {
                         <input
                             className="w-full px-3 py-2 border border-input rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors bg-background text-foreground"
                             type="text"
+                            autoCapitalize="none"
                             placeholder="例如：我的 OpenAI"
                             value={providerName}
                             onChange={e => setProviderName(e.target.value)}

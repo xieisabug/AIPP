@@ -47,12 +47,14 @@ interface OperationPermissionDialogProps {
     request: OperationPermissionRequest | null;
     isOpen: boolean;
     onDecision: (requestId: string, decision: 'allow' | 'allow_and_save' | 'deny') => void;
+    errorMessage?: string | null;
 }
 
 interface AcpPermissionDialogProps {
     request: AcpPermissionRequest | null;
     isOpen: boolean;
     onDecision: (requestId: string, optionId?: string, cancelled?: boolean) => void;
+    errorMessage?: string | null;
 }
 
 const operationLabels: Record<string, string> = {
@@ -66,6 +68,7 @@ export function OperationPermissionDialog({
     request,
     isOpen,
     onDecision,
+    errorMessage,
 }: OperationPermissionDialogProps) {
     if (!request) return null;
 
@@ -109,6 +112,9 @@ export function OperationPermissionDialog({
                             <p className="text-xs text-muted-foreground">
                                 该路径不在允许访问的目录白名单中，请选择是否授权此操作。
                             </p>
+                            {errorMessage ? (
+                                <p className="text-xs text-destructive">{errorMessage}</p>
+                            ) : null}
                         </div>
                     </AlertDialogDescription>
                 </AlertDialogHeader>
@@ -160,6 +166,7 @@ export function AcpPermissionDialog({
     request,
     isOpen,
     onDecision,
+    errorMessage,
 }: AcpPermissionDialogProps) {
     if (!request) return null;
 
@@ -200,6 +207,9 @@ export function AcpPermissionDialog({
                                     </div>
                                 )}
                             </div>
+                            {errorMessage ? (
+                                <p className="text-xs text-destructive">{errorMessage}</p>
+                            ) : null}
                         </div>
                     </AlertDialogDescription>
                 </AlertDialogHeader>

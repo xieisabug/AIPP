@@ -191,6 +191,7 @@ impl PermissionManager {
         info!(request_id = %request_id, operation = %operation, path = %path, "Requesting permission from user");
 
         if let Err(e) = self.app_handle.emit("operation-permission-request", &event) {
+            operation_state.remove_permission_request(&request_id).await;
             warn!(error = %e, "Failed to emit permission request event");
             return Err("Failed to request permission".to_string());
         }

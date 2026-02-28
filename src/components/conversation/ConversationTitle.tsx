@@ -13,7 +13,11 @@ const ConversationTitle: React.FC<{
     conversation: Conversation | undefined;
     onEdit: () => void;
     onDelete: () => void;
-}> = React.memo(({ conversation, onEdit, onDelete }) => {
+    statsOpen?: boolean;
+    onStatsOpenChange?: (open: boolean) => void;
+    exportOpen?: boolean;
+    onExportOpenChange?: (open: boolean) => void;
+}> = React.memo(({ conversation, onEdit, onDelete, statsOpen, onStatsOpenChange, exportOpen, onExportOpenChange }) => {
     const [deleteDialogIsOpen, setDeleteDialogIsOpen] = useState<boolean>(false);
     const { deleteConversation } = useConversationManager();
     const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
@@ -56,8 +60,8 @@ const ConversationTitle: React.FC<{
                     <div className="text-xs text-muted-foreground overflow-hidden text-ellipsis whitespace-nowrap mt-0.5">{displayAssistantName}</div>
                 </div>
                 <div className="flex items-center flex-none w-64 justify-end gap-2">
-                    <ConversationStatsDialog conversationId={conversation?.id.toString() || ""} />
-                    <ConversationExportDialog conversationId={conversation?.id.toString() || ""} />
+                    <ConversationStatsDialog conversationId={conversation?.id.toString() || ""} externalOpen={statsOpen} onExternalOpenChange={onStatsOpenChange} />
+                    <ConversationExportDialog conversationId={conversation?.id.toString() || ""} externalOpen={exportOpen} onExternalOpenChange={onExportOpenChange} />
                     <IconButton icon={<Edit2 size={16} className="text-icon" />} onClick={onEdit} border />
                     <IconButton icon={<Trash2 size={16} className="text-icon" />} onClick={openDeleteDialog} border />
                 </div>

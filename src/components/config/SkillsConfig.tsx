@@ -7,6 +7,7 @@ import { Folder, Sparkles, RefreshCw, FolderOpen, FileText, Trash2 } from "lucid
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { toast } from 'sonner';
 import ConfirmDialog from "../ConfirmDialog";
+import { PinyinFilter } from "../../utils/pinyinFilter";
 
 import {
     ConfigPageLayout,
@@ -38,6 +39,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
     const [skillContent, setSkillContent] = useState<string>('');
     const [isLoading, setIsLoading] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
+    const [searchQuery, setSearchQuery] = useState('');
 
     // Assistant skill configs (only used when assistantId is provided)
     const [assistantSkills, setAssistantSkills] = useState<SkillWithConfig[]>([]);
@@ -256,6 +258,22 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
         return groupSkillsBySource(skills);
     }, [skills]);
 
+    // Filter grouped skills by search query（支持拼音）
+    const filteredGroupedSkills = useMemo(() => {
+        if (!searchQuery.trim()) return groupedSkills;
+        const filtered = new Map<SkillSourceType, ScannedSkill[]>();
+        for (const [sourceType, sourceSkills] of groupedSkills.entries()) {
+            const matched = sourceSkills.filter(skill =>
+                PinyinFilter.matches(skill.display_name, searchQuery) ||
+                PinyinFilter.matches(skill.identifier, searchQuery)
+            );
+            if (matched.length > 0) {
+                filtered.set(sourceType, matched);
+            }
+        }
+        return filtered;
+    }, [groupedSkills, searchQuery]);
+
     // Source order for display
     const sourceOrder: SkillSourceType[] = ['agents', 'claude_code_agents', 'claude_code_rules', 'claude_code_memory', 'codex'];
 
@@ -292,6 +310,9 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
             title="Skills"
             description="AI可用的技能和指令"
             icon={<Sparkles className="h-5 w-5" />}
+            searchValue={searchQuery}
+            onSearchChange={setSearchQuery}
+            searchPlaceholder="搜索Skills..."
             addButton={
                 <SkillActionDropdown
                     onScan={scanSkills}
@@ -306,7 +327,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
             }
         >
             {sourceOrder.map(sourceType => {
-                const sourceSkills = groupedSkills.get(sourceType);
+                const sourceSkills = filteredGroupedSkills.get(sourceType);
                 if (!sourceSkills || sourceSkills.length === 0) return null;
 
                 return (
@@ -341,7 +362,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
             })}
 
             {/* Custom sources */}
-            {Array.from(groupedSkills.entries())
+            {Array.from(filteredGroupedSkills.entries())
                 .filter(([sourceType]) => !sourceOrder.includes(sourceType))
                 .map(([sourceType, sourceSkills]) => (
                     <div key={sourceType} className="space-y-2">
@@ -360,7 +381,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
                     </div>
                 ))}
         </SidebarList>
-    ), [groupedSkills, selectedSkill, isRefreshing, assistantId, getSkillConfig, handleSelectSkill, scanSkills, handleOpenSkillsFolder, handleInstallOfficial]);
+    ), [filteredGroupedSkills, selectedSkill, isRefreshing, assistantId, getSkillConfig, handleSelectSkill, scanSkills, handleOpenSkillsFolder, handleInstallOfficial, searchQuery]);
 
     // Main content
     const content = useMemo(() => selectedSkill ? (

@@ -5,6 +5,7 @@ import {
     OperationPermissionRequest,
     AcpPermissionRequest,
 } from "@/components/OperationPermissionDialog";
+import { getErrorMessage } from "@/utils/error";
 
 interface UseOperationPermissionOptions {
     /** 当前会话 ID，用于过滤只处理当前会话的权限请求 */
@@ -14,7 +15,22 @@ interface UseOperationPermissionOptions {
 export function useOperationPermission(options: UseOperationPermissionOptions = {}) {
     const { conversationId } = options;
     const [pendingRequest, setPendingRequest] = useState<OperationPermissionRequest | null>(null);
+    const [, setRequestQueue] = useState<OperationPermissionRequest[]>([]);
     const [isDialogOpen, setIsDialogOpen] = useState(false);
+    const [decisionError, setDecisionError] = useState<string | null>(null);
+
+    const shiftNextRequest = useCallback(() => {
+        setRequestQueue((prev) => {
+            const [, ...rest] = prev;
+            const next = rest[0] ?? null;
+            setPendingRequest(next);
+            setIsDialogOpen(rest.length > 0);
+            if (rest.length > 0) {
+                setDecisionError(null);
+            }
+            return rest;
+        });
+    }, []);
 
     useEffect(() => {
         const unsubscribe = listen<OperationPermissionRequest>(
@@ -33,8 +49,15 @@ export function useOperationPermission(options: UseOperationPermissionOptions = 
                 }
 
                 console.log("Received operation permission request:", request);
-                setPendingRequest(request);
-                setIsDialogOpen(true);
+                setRequestQueue((prev) => {
+                    const next = [...prev, request];
+                    if (next.length === 1) {
+                        setPendingRequest(request);
+                        setIsDialogOpen(true);
+                        setDecisionError(null);
+                    }
+                    return next;
+                });
             }
         );
 
@@ -45,27 +68,30 @@ export function useOperationPermission(options: UseOperationPermissionOptions = 
 
     const handleDecision = useCallback(
         async (requestId: string, decision: "allow" | "allow_and_save" | "deny") => {
+            if (!pendingRequest || pendingRequest.request_id !== requestId) {
+                return;
+            }
             try {
                 console.log("Sending permission decision:", { requestId, decision });
                 await invoke("confirm_operation_permission", {
                     requestId,
                     decision,
                 });
-                setIsDialogOpen(false);
-                setPendingRequest(null);
+                setDecisionError(null);
+                shiftNextRequest();
             } catch (error) {
-                console.error("Failed to send permission decision:", error);
-                // 即使失败也关闭对话框，避免卡住
-                setIsDialogOpen(false);
-                setPendingRequest(null);
+                const message = getErrorMessage(error) || "提交权限决策失败";
+                console.error("Failed to send permission decision:", message);
+                setDecisionError(message);
             }
         },
-        []
+        [pendingRequest, shiftNextRequest]
     );
 
     return {
         pendingRequest,
         isDialogOpen,
+        decisionError,
         handleDecision,
     };
 }
@@ -77,7 +103,22 @@ interface UseAcpPermissionOptions {
 export function useAcpPermission(options: UseAcpPermissionOptions = {}) {
     const { conversationId } = options;
     const [pendingRequest, setPendingRequest] = useState<AcpPermissionRequest | null>(null);
+    const [, setRequestQueue] = useState<AcpPermissionRequest[]>([]);
     const [isDialogOpen, setIsDialogOpen] = useState(false);
+    const [decisionError, setDecisionError] = useState<string | null>(null);
+
+    const shiftNextRequest = useCallback(() => {
+        setRequestQueue((prev) => {
+            const [, ...rest] = prev;
+            const next = rest[0] ?? null;
+            setPendingRequest(next);
+            setIsDialogOpen(rest.length > 0);
+            if (rest.length > 0) {
+                setDecisionError(null);
+            }
+            return rest;
+        });
+    }, []);
 
     useEffect(() => {
         const unsubscribe = listen<AcpPermissionRequest>("acp-permission-request", (event) => {
@@ -92,8 +133,15 @@ export function useAcpPermission(options: UseAcpPermissionOptions = {}) {
             }
 
             console.log("Received ACP permission request:", request);
-            setPendingRequest(request);
-            setIsDialogOpen(true);
+            setRequestQueue((prev) => {
+                const next = [...prev, request];
+                if (next.length === 1) {
+                    setPendingRequest(request);
+                    setIsDialogOpen(true);
+                    setDecisionError(null);
+                }
+                return next;
+            });
         });
 
         return () => {
@@ -103,6 +151,9 @@ export function useAcpPermission(options: UseAcpPermissionOptions = {}) {
 
     const handleDecision = useCallback(
         async (requestId: string, optionId?: string, cancelled?: boolean) => {
+            if (!pendingRequest || pendingRequest.request_id !== requestId) {
+                return;
+            }
             try {
                 console.log("Sending ACP permission decision:", { requestId, optionId, cancelled });
                 await invoke("confirm_acp_permission", {
@@ -110,20 +161,21 @@ export function useAcpPermission(options: UseAcpPermissionOptions = {}) {
                     optionId: optionId ?? null,
                     cancelled: cancelled ?? false,
                 });
-                setIsDialogOpen(false);
-                setPendingRequest(null);
+                setDecisionError(null);
+                shiftNextRequest();
             } catch (error) {
-                console.error("Failed to send ACP permission decision:", error);
-                setIsDialogOpen(false);
-                setPendingRequest(null);
+                const message = getErrorMessage(error) || "提交 ACP 权限决策失败";
+                console.error("Failed to send ACP permission decision:", message);
+                setDecisionError(message);
             }
         },
-        []
+        [pendingRequest, shiftNextRequest]
     );
 
     return {
         pendingRequest,
         isDialogOpen,
+        decisionError,
         handleDecision,
     };
 }

@@ -106,6 +106,7 @@ const PasswordDialog: React.FC<PasswordDialogProps> = ({
                                     onChange={(e) => setPassword(e.target.value)}
                                     placeholder="至少6个字符"
                                     disabled={loading}
+                                    autoCapitalize="none"
                                     className="w-full px-3 py-2 pr-10 border border-input rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors bg-background text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
                                 />
                                 <button
@@ -138,6 +139,7 @@ const PasswordDialog: React.FC<PasswordDialogProps> = ({
                                     onChange={(e) => setConfirmPassword(e.target.value)}
                                     placeholder="再次输入密码"
                                     disabled={loading}
+                                    autoCapitalize="none"
                                     className="w-full px-3 py-2 pr-10 border border-input rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors bg-background text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
                                 />
                                 <button

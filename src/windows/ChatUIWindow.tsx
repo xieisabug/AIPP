@@ -26,6 +26,7 @@ import {
 } from "../hooks/useOperationPermission";
 import { useAskUserQuestion, usePreviewFile } from "../hooks/useInlineInteraction";
 import { useFeatureConfig } from "../hooks/feature/useFeatureConfig";
+import { useAppShortcuts } from "../hooks/useAppShortcuts";
 import { AntiLeakageProvider } from "../contexts/AntiLeakageContext";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
@@ -56,12 +57,13 @@ function ChatUIWindow() {
     const conversationUIRef = useRef<ConversationUIRef>(null);
 
     // 操作权限对话框
-    const { pendingRequest, isDialogOpen, handleDecision } = useOperationPermission({
+    const { pendingRequest, isDialogOpen, decisionError, handleDecision } = useOperationPermission({
         conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
     });
     const {
         pendingRequest: pendingAcpRequest,
         isDialogOpen: isAcpDialogOpen,
+        decisionError: acpDecisionError,
         handleDecision: handleAcpDecision,
     } = useAcpPermission({
         conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
@@ -153,6 +155,17 @@ function ChatUIWindow() {
         }
     }, []);
 
+    // 应用内快捷键
+    useAppShortcuts("chat", {
+        new: handleNewConversation,
+        search: () => setSearchOpen(true),
+        stats: () => conversationUIRef.current?.openStats(),
+        export: () => conversationUIRef.current?.openExport(),
+        settings: () => conversationUIRef.current?.openSettings(),
+        toggle_sidebar: () => conversationUIRef.current?.openSidebarWindow(),
+        open_sidebar_window: () => conversationUIRef.current?.openSidebarWindow(),
+    });
+
     useEffect(() => {
         if (!pendingScrollMessageId) {
             return;
@@ -206,19 +219,10 @@ function ChatUIWindow() {
             setSidebarOpen(false);
         });
 
-        const handleKeyDown = (event: KeyboardEvent) => {
-            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
-                event.preventDefault();
-                setSearchOpen(true);
-            }
-        };
-        window.addEventListener("keydown", handleKeyDown);
-
         return () => {
             unlisten.then((unlisten) => unlisten());
             windowFocusUnlisten.then((unlistenFn) => unlistenFn());
             unlistenHidden.then((unlistenFn) => unlistenFn());
-            window.removeEventListener("keydown", handleKeyDown);
         };
     }, []);
 
@@ -366,11 +370,13 @@ function ChatUIWindow() {
                     <OperationPermissionDialog
                         request={pendingRequest}
                         isOpen={isDialogOpen}
+                        errorMessage={decisionError}
                         onDecision={handleDecision}
                     />
                     <AcpPermissionDialog
                         request={pendingAcpRequest}
                         isOpen={isAcpDialogOpen}
+                        errorMessage={acpDecisionError}
                         onDecision={handleAcpDecision}
                     />
                 </div>
@@ -415,11 +421,13 @@ function ChatUIWindow() {
                 <OperationPermissionDialog
                     request={pendingRequest}
                     isOpen={isDialogOpen}
+                    errorMessage={decisionError}
                     onDecision={handleDecision}
                 />
                 <AcpPermissionDialog
                     request={pendingAcpRequest}
                     isOpen={isAcpDialogOpen}
+                    errorMessage={acpDecisionError}
                     onDecision={handleAcpDecision}
                 />
             </div>

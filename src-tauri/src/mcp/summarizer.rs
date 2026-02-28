@@ -17,19 +17,27 @@ use tracing::{debug, info, warn};
 static MCP_SUMMARY_RUNNING: AtomicBool = AtomicBool::new(false);
 
 const MCP_SUMMARIZER_SYSTEM_PROMPT: &str = r#"
-你是 MCP 工具目录摘要助手。请根据输入生成精简摘要并严格输出 JSON。
+你是 MCP 工具目录摘要助手。你的摘要将被 AI 助手用来判断"是否需要加载此工具集/工具"。
+
+核心原则：摘要必须让 AI 仅凭阅读就能判断该工具是否适合当前任务。
 
 要求：
-1. server_summary：一句话概括服务器能力，中文，<=40字。
+1. server_summary：用一到两句话概括该服务器覆盖的领域和核心能力，中文，50-80字。
+   - 说明服务器能做什么类别的事（如"文件系统操作""数据库管理""代码搜索"等）
+   - 列出最具代表性的 2-3 个能力关键词
 2. tool_summaries：数组，每项包含 tool_name 与 summary。
-3. 每个工具 summary 中文，<=30字，聚焦用途。
-4. 只输出 JSON，不要 Markdown，不要额外解释。
+   - 每个 summary 用中文描述工具的用途和关键行为，30-60字
+   - 必须包含：做什么操作、操作的对象是什么
+   - 如果工具有重要的输入/输出特征（如返回格式、是否支持批量），简要提及
+3. 工具名直接写原始名称，不要修改大小写
+4. 只输出 JSON，不要 Markdown 代码块，不要额外解释。
 
-输出格式：
+示例（仅供参考格式和详细程度）：
 {
-  "server_summary": "......",
+  "server_summary": "提供本地文件系统的读写和管理能力，支持文件搜索、目录遍历和内容编辑，适用于需要操作本地文件的任务",
   "tool_summaries": [
-    {"tool_name":"tool_a","summary":"......"}
+    {"tool_name":"read_file","summary":"读取指定路径的文件内容并返回文本，支持指定编码格式，适用于查看代码或配置文件"},
+    {"tool_name":"search_files","summary":"在指定目录下按文件名或内容关键词搜索文件，返回匹配的文件路径列表"}
   ]
 }
 "#;
@@ -115,6 +123,11 @@ fn extract_json_payload(raw: &str) -> Option<String> {
     Some(without_fence[start..=end].to_string())
 }
 
+/// 归一化工具名：转小写、去除非字母数字字符
+fn normalize_tool_name(name: &str) -> String {
+    name.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase()
+}
+
 fn parse_summary_response(raw: &str) -> Option<(Option<String>, HashMap<String, String>)> {
     let payload = extract_json_payload(raw)?;
     let value = serde_json::from_str::<serde_json::Value>(&payload).ok()?;
@@ -134,12 +147,18 @@ fn parse_summary_response(raw: &str) -> Option<(Option<String>, HashMap<String, 
                 .get("tool_name")
                 .or_else(|| item.get("name"))
                 .and_then(|v| v.as_str())
-                .map(|v| v.trim().to_lowercase());
+                .map(|v| v.trim().to_string());
             let summary =
                 item.get("summary").and_then(|v| v.as_str()).map(|v| v.trim().to_string());
             if let (Some(tool_name), Some(summary)) = (tool_name, summary) {
                 if !tool_name.is_empty() && !summary.is_empty() {
-                    tool_summaries.insert(tool_name, summary);
+                    // 同时存储原始名称（小写）和归一化名称，提高匹配成功率
+                    let lower = tool_name.to_lowercase();
+                    let normalized = normalize_tool_name(&tool_name);
+                    tool_summaries.insert(lower, summary.clone());
+                    if !normalized.is_empty() {
+                        tool_summaries.insert(normalized, summary);
+                    }
                 }
             }
         }
@@ -441,21 +460,44 @@ async fn generate_mcp_catalog_summary(
     };
 
     let (server_summary, tool_summaries) = parse_summary_response(&response_text)
-        .ok_or_else(|| AppError::ParseError("解析 MCP 摘要结果失败".to_string()))?;
+        .ok_or_else(|| {
+            warn!(server_id, response = %response_text, "Failed to parse MCP summary response");
+            AppError::ParseError("解析 MCP 摘要结果失败".to_string())
+        })?;
 
     let mut updated_tools = 0usize;
     if let Some(server_summary) = server_summary {
         mcp_db.update_server_catalog_summary(server_id, &server_summary)?;
     }
 
-    for tool in tools {
-        let key = tool.tool_name.to_lowercase();
-        if let Some(summary) = tool_summaries.get(&key) {
+    for tool in &tools {
+        // 先尝试精确匹配（小写），再尝试归一化匹配
+        let key_lower = tool.tool_name.to_lowercase();
+        let key_normalized = normalize_tool_name(&tool.tool_name);
+        let matched_summary = tool_summaries
+            .get(&key_lower)
+            .or_else(|| tool_summaries.get(&key_normalized));
+        if let Some(summary) = matched_summary {
             mcp_db.update_tool_catalog_summary(tool.id, summary)?;
             updated_tools += 1;
+        } else {
+            warn!(
+                server_id,
+                tool_name = %tool.tool_name,
+                "Tool name not found in AI summary response, skipping"
+            );
         }
     }
 
-    info!(server_id, updated_tools, "MCP catalog summaries updated");
+    if updated_tools == 0 && !tools.is_empty() {
+        warn!(
+            server_id,
+            tool_count = tools.len(),
+            ai_keys = ?tool_summaries.keys().collect::<Vec<_>>(),
+            "No tool summaries matched — AI may have returned wrong tool names"
+        );
+    }
+
+    info!(server_id, updated_tools, total_tools = tools.len(), "MCP catalog summaries updated");
     Ok(())
 }

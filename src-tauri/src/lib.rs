@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::api::ai::acp::AcpPermissionState;
 use crate::api::ai_api::{
-    ask_ai, cancel_ai, get_activity_focus, regenerate_ai, regenerate_conversation_title,
+    ask_ai, cancel_ai, get_activity_focus, get_shine_state, regenerate_ai,
+    regenerate_conversation_title,
     tool_result_continue_ask_ai,
 };
 use crate::api::assistant_api::{
@@ -34,6 +35,7 @@ use crate::api::conversation_api::{
     update_assistant_message, update_conversation, update_message_content,
 };
 use crate::api::copilot_api::{poll_github_copilot_token, start_github_copilot_device_flow};
+use crate::api::export_api::{markdown_to_docx, markdown_to_pdf};
 #[cfg(desktop)]
 use crate::api::copilot_lsp::{
     check_copilot_status, get_copilot_lsp_status, get_copilot_oauth_token_from_config,
@@ -595,6 +597,7 @@ pub fn run() {
             tool_result_continue_ask_ai,
             regenerate_ai,
             get_activity_focus,
+            get_shine_state,
             regenerate_conversation_title,
             generate_artifact_metadata,
             cancel_ai,
@@ -831,6 +834,9 @@ pub fn run() {
             list_scheduled_task_runs,
             // Todo commands
             get_todos,
+            // Export commands
+            markdown_to_docx,
+            markdown_to_pdf,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");

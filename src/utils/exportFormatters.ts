@@ -21,6 +21,16 @@ export interface ExportData {
     toolCalls: MCPToolCall[];
 }
 
+interface ExportAttachment {
+    attachment_type?: string;
+    attachment_url?: string;
+    attachment_content?: string;
+}
+
+export interface MarkdownFormatOptions {
+    includeImageAttachments?: boolean;
+}
+
 /**
  * 解析 tool_calls_json 为 ToolCallData 数组
  */
@@ -41,6 +51,21 @@ interface BranchMessage {
 }
 
 /**
+ * 通过替换链解析 group_id 的最终目标（与后端 resolve_group 一致）
+ */
+function resolveGroup(replacements: Map<string, string>, groupId: string): string {
+    let current = groupId;
+    const visited = new Set<string>();
+    while (replacements.has(current)) {
+        const next = replacements.get(current)!;
+        if (visited.has(next)) break;
+        visited.add(next);
+        current = next;
+    }
+    return current;
+}
+
+/**
  * 仅保留最新分支（与后端 get_latest_branch_messages 逻辑一致）
  */
 export function getLatestBranchMessages<T extends BranchMessage>(messages: T[]): T[] {
@@ -57,12 +82,20 @@ export function getLatestBranchMessages<T extends BranchMessage>(messages: T[]):
     });
 
     const result: T[] = [];
+    const groupReplacement = new Map<string, string>();
+
     for (const msg of ordered) {
         if (msg.parent_group_id) {
-            const parentGroupId = msg.parent_group_id;
-            const firstIndex = result.findIndex((item) => item.generation_group_id === parentGroupId);
+            const resolvedParent = resolveGroup(groupReplacement, msg.parent_group_id);
+            const firstIndex = result.findIndex(
+                (item) => item.generation_group_id === resolvedParent,
+            );
             if (firstIndex >= 0) {
+                const replacedGroup = resolvedParent;
                 result.splice(firstIndex);
+                if (msg.generation_group_id) {
+                    groupReplacement.set(replacedGroup, msg.generation_group_id);
+                }
             }
         }
         if (msg.generation_group_id) {
@@ -249,7 +282,9 @@ export function filterMessages(
 export function formatAsMarkdown(
     data: ExportData,
     options: ConversationExportOptions,
+    formatOptions: MarkdownFormatOptions = {},
 ): string {
+    const { includeImageAttachments = false } = formatOptions;
     const { conversation, toolCalls } = data;
     const { conversation: convInfo, messages } = conversation;
 
@@ -292,6 +327,26 @@ export function formatAsMarkdown(
         const content = sanitizedContent.trim() || '(无内容)';
         lines.push(content);
         lines.push('');
+
+        if (includeImageAttachments && Array.isArray(message.attachment_list)) {
+            const imageAttachments = (message.attachment_list as ExportAttachment[]).filter(
+                (att) => att?.attachment_type === "Image",
+            );
+            for (const imageAttachment of imageAttachments) {
+                const imageSrc =
+                    imageAttachment.attachment_content?.trim() ||
+                    imageAttachment.attachment_url?.trim() ||
+                    "";
+                if (!imageSrc) continue;
+                const imageName =
+                    imageAttachment.attachment_url
+                        ?.split(/[\\/]/)
+                        .pop()
+                        ?.trim() || "attachment-image";
+                lines.push(`![${imageName}](${imageSrc})`);
+                lines.push('');
+            }
+        }
 
         // 工具调用参数
         if (options.includeToolParams) {

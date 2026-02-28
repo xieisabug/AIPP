@@ -316,56 +316,62 @@ pub async fn format_mcp_prompt_with_filters(
         // 根据是否使用原生 toolcall 提供不同的 prompt
         let mcp_dynamic_prompt = if mcp_info.use_native_toolcall {
             r#"
-# MCP 动态加载规范（实验）
-
-作为 AI 助手，你可以使用系统提供的工具来执行任务。请严格遵守以下规则：
+# MCP 动态加载规范（严格遵守）
 
 ## 使用原则
-1. 你只能调用系统明确提供的工具，不得虚构或调用未提及的工具
-2. 仅在有助于完成任务时调用工具；能靠自身知识完成时不调用
-3. 信任工具的返回结果（除非工具明确报错、超时或返回无效数据）
-4. 一次只调用一个工具；如需多个步骤，请分多轮依次调用
+1. 只能调用系统已加载的工具，禁止虚构工具名或参数
+2. 仅在有助于完成任务时调用；能靠自身知识完成时不调用
+3. 每条消息最多调用一个工具；如需多步骤，分多轮依次调用
+4. **未加载的工具无法调用**——调用前必须先通过 `load_mcp_tool` 加载
 
-## 动态加载流程
-1. 先查看工具集摘要，再决定要深入哪个工具集；
-2. 使用 `load_mcp_server` 获取目标工具集下的工具列表与工具摘要；
-3. 使用 `load_mcp_tool` 将目标工具加载到当前会话（优先使用完整 `server::tool` 形式）；
-4. 当调用某工具失败提示"未加载"时，先调用 `load_mcp_tool` 再重试；
-5. 仅在工具已加载后再直接调用该工具。
+## 动态加载流程（必须按顺序执行）
+1. **浏览目录**：查看下方"工具集目录摘要"，确定目标工具集
+2. **查看工具列表**：调用 `load_mcp_server` 获取目标工具集的工具列表及摘要
+3. **加载工具**：调用 `load_mcp_tool` 将目标工具加载到当前会话（推荐 `server::tool` 格式）
+4. **调用工具**：工具加载成功后，在后续轮次直接调用该工具
+5. 当工具调用失败提示"未加载"时，先 `load_mcp_tool` 再重试
+
+⚠ 严禁跳过步骤直接调用未加载的工具——这样的调用会被系统忽略。
 "#
         } else {
             r#"
-# MCP 动态加载规范（实验）
-
-作为 AI 助手，你可以使用 MCP 工具来执行任务。请严格遵守以下规则：
+# MCP 动态加载规范（严格遵守）
 
 ## 使用原则
-1. 你只能调用系统明确提供的 MCP 工具，不得虚构或调用未提及的工具
-2. 仅在有助于完成任务时调用工具；能靠自身知识完成时不调用
-3. 信任工具的返回结果（除非工具明确报错、超时或返回无效数据）
-4. 一次只调用一个工具；如需多个步骤，请分多轮依次调用
-5. 工具调用必须放在本条消息的最后
+1. 只能调用系统已加载的工具，禁止虚构工具名或参数
+2. 仅在有助于完成任务时调用；能靠自身知识完成时不调用
+3. 每条消息最多调用一个工具；如需多步骤，分多轮依次调用
+4. 工具调用必须放在消息的最末尾，调用之后禁止再输出任何文字
+5. **未加载的工具无法调用**——调用前必须先通过 `load_mcp_tool` 加载
 
-## 输出格式
-当需要调用 MCP 工具时，请使用以下 XML 格式，注意不需要代码块包裹：
+## 输出格式（强制）
+调用工具时，必须使用下面的**裸 XML 格式**直接输出，禁止用 Markdown 代码块（```）包裹：
 
 <mcp_tool_call>
   <server_name>工具集名称</server_name>
   <tool_name>工具名称</tool_name>
-  <parameters>{"parameter1":"value1"}</parameters>
+  <parameters>{"key":"value"}</parameters>
 </mcp_tool_call>
 
-## 动态加载流程
-1. 先查看工具集摘要，再决定要深入哪个工具集；
-2. 使用 `load_mcp_server` 获取目标工具集下的工具列表与工具摘要；
-3. 使用 `load_mcp_tool` 将目标工具加载到当前会话（优先使用完整 `server::tool` 形式）；
-4. 当调用某工具失败提示"未加载"时，先调用 `load_mcp_tool` 再重试；
-5. 仅在工具已加载后再直接调用该工具。
+### 格式要求
+- `<mcp_tool_call>` 标签必须作为裸 XML 直接出现在消息中
+- 参数必须是有效 JSON；无参数时写 `{}`
+- 禁止伪造工具响应或猜测未返回的数据
 
-## 重要注意事项
-- 参数必须是有效的 JSON 格式
-- 如果工具不需要参数，parameters 标签内应该为空对象 {}
-- 不得伪造工具响应或猜测未返回的数据
+### 错误示例（以下写法均无效，系统无法识别）
+- ❌ 用代码块包裹：```xml <mcp_tool_call>...</mcp_tool_call> ```
+- ❌ 工具调用后继续输出文字
+- ❌ 调用未列出或未加载的工具名
+- ❌ 使用原生的工具调用格式
+
+## 动态加载流程（必须按顺序执行）
+1. **浏览目录**：查看下方"工具集目录摘要"，确定目标工具集
+2. **查看工具列表**：调用 `load_mcp_server` 获取目标工具集的工具列表及摘要
+3. **加载工具**：调用 `load_mcp_tool` 将目标工具加载到当前会话（推荐 `server::tool` 格式）
+4. **调用工具**：工具加载成功后，在后续轮次直接调用该工具
+5. 当工具调用失败提示"未加载"时，先 `load_mcp_tool` 再重试
+
+⚠ 严禁跳过步骤直接调用未加载的工具——这样的调用会被系统忽略。
 "#
         };
 
@@ -403,20 +409,20 @@ pub async fn format_mcp_prompt_with_filters(
             load_tools_info.push_str(
                 r#"### 使用范例
 
-加入需要使用Agent相关的工具，先加载对应的server：
+查看 Search 工具集的工具列表：
 <mcp_tool_call>
   <server_name>Agent</server_name>
   <tool_name>load_mcp_server</tool_name>
-  <parameters>{"name":"Agent"}</parameters>
+  <parameters>{"name":"Search"}</parameters>
 </mcp_tool_call>
 
-再获取对应的工具详情：
+加载指定工具到会话（推荐 `server::tool` 格式）：
 <mcp_tool_call>
   <server_name>Agent</server_name>
   <tool_name>load_mcp_tool</tool_name>
-  <parameters>{"names":["Agent::load_skill"]}</parameters>
+  <parameters>{"names":["Search::web_fetch"]}</parameters>
 </mcp_tool_call>
-            "#,
+"#,
             );
         }
 
@@ -462,30 +468,34 @@ pub async fn format_mcp_prompt_with_filters(
     }
 
     let mcp_constraint_prompt: &str = r#"
-# MCP (Model Context Protocol) 工具使用规范
-
-作为 AI 助手，你可以使用以下 MCP 工具来执行各种任务。请严格遵守以下规则：
+# MCP 工具使用规范（严格遵守）
 
 ## 使用原则
-1. 你只能调用系统明确提供的 MCP 工具，不得虚构或调用未提及的工具
-2. 仅在有助于完成任务时调用工具；能靠自身知识完成时不调用
-3. 信任工具的返回结果（除非工具明确报错、超时或返回无效数据）
-4. 一次只调用一个工具；如需多个步骤，请分多轮依次调用
-5. 工具调用必须放在本条消息的最后
+1. 只能调用下方明确列出的工具，禁止虚构工具名或参数
+2. 仅在有助于完成任务时调用；能靠自身知识完成时不调用
+3. 每条消息最多调用一个工具；如需多步骤，分多轮依次调用
+4. 工具调用必须放在消息的最末尾，调用之后禁止再输出任何文字
 
-## 输出格式
-当需要调用 MCP 工具时，请使用以下 XML 格式，注意不需要代码块包裹：
+## 输出格式（强制）
+调用工具时，必须使用下面的**裸 XML 格式**直接输出，禁止用 Markdown 代码块（```）包裹：
 
 <mcp_tool_call>
   <server_name>服务器名称</server_name>
   <tool_name>工具名称</tool_name>
-  <parameters>{"parameter1":"value1"}</parameters>
+  <parameters>{"key":"value"}</parameters>
 </mcp_tool_call>
 
-## 重要注意事项
-- 参数必须是有效的 JSON 格式
-- 如果工具不需要参数，parameters 标签内应该为空对象 {}
-- 不得伪造工具响应或猜测未返回的数据
+### 格式要求
+- `<mcp_tool_call>` 标签必须作为裸 XML 直接出现在消息中
+- 参数必须是有效 JSON；无参数时写 `{}`
+- 禁止伪造工具响应或猜测未返回的数据
+
+### 错误示例（以下写法均无效，系统无法识别）
+- ❌ 用代码块包裹：```xml <mcp_tool_call>...</mcp_tool_call> ```
+- ❌ 工具调用后继续输出文字
+- ❌ 一条消息中包含多个 `<mcp_tool_call>` 块
+- ❌ 调用未列出的工具名
+- ❌ 使用原生的工具调用格式
 "#;
 
     let mut tools_info = String::from("\n## 可用的 MCP 工具\n\n");

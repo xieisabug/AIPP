@@ -57,6 +57,12 @@ import { useContextList } from "@/hooks/useContextList";
 export interface ConversationUIRef {
     focus: () => void;
     scrollToMessage: (messageId: number) => void;
+    openStats: () => void;
+    closeStats: () => void;
+    openExport: () => void;
+    closeExport: () => void;
+    openSidebarWindow: () => void;
+    openSettings: () => void;
 }
 
 export interface InlineInteractionItem {
@@ -148,6 +154,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         
         // Sidebar window state - when true, hide the inline sidebar
         const [sidebarWindowOpen, setSidebarWindowOpen] = useState(false);
+
+        // Dialog states for shortcut triggering
+        const [statsDialogOpen, setStatsDialogOpen] = useState(false);
+        const [exportDialogOpen, setExportDialogOpen] = useState(false);
         
         const handleSidebarExpandChange = useCallback((isExpanded: boolean, width: number) => {
             setSidebarExpanded(isExpanded);
@@ -366,8 +376,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             setManualShineMessage,
             mcpToolCallStates,
             activeMcpCallIds,
+            shiningMcpCallId,
+            shineState,
             streamingAssistantMessageIds,
-            activityFocus,
             updateShiningMessages,
             updateFunctionMap,
             clearStreamingMessages,
@@ -376,15 +387,16 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         } = useConversationEvents(conversationEventsOptions);
 
         const effectiveAiIsResponsing = useMemo(() => {
+            const hasPrimaryShineTarget = !!shineState && shineState.primary_target.target_type !== "none";
             return (
                 aiIsResponsing ||
-                activityFocus.focus_type !== "none" ||
+                hasPrimaryShineTarget ||
                 activeMcpCallIds.size > 0 ||
                 streamingAssistantMessageIds.size > 0
             );
         }, [
             aiIsResponsing,
-            activityFocus.focus_type,
+            shineState,
             activeMcpCallIds.size,
             streamingAssistantMessageIds.size,
         ]);
@@ -559,8 +571,26 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 scrollToMessage: (messageId: number) => {
                     setPendingScrollMessageId(messageId);
                 },
+                openStats: () => {
+                    if (conversationId) setStatsDialogOpen(true);
+                },
+                closeStats: () => {
+                    setStatsDialogOpen(false);
+                },
+                openExport: () => {
+                    if (conversationId) setExportDialogOpen(true);
+                },
+                closeExport: () => {
+                    setExportDialogOpen(false);
+                },
+                openSidebarWindow: () => {
+                    handleOpenSidebarWindow();
+                },
+                openSettings: () => {
+                    invoke("open_config_window");
+                },
             }),
-            []
+            [conversationId, handleOpenSidebarWindow]
         );
 
         // 智能聚焦逻辑 - 无延迟版本
@@ -812,6 +842,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             conversation={conversation}
                             onEdit={openTitleEditDialog}
                             onDelete={handleDeleteConversationSuccess}
+                            statsOpen={statsDialogOpen}
+                            onStatsOpenChange={setStatsDialogOpen}
+                            exportOpen={exportDialogOpen}
+                            onExportOpenChange={setExportDialogOpen}
                         />
                     )}
 
@@ -826,6 +860,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             allDisplayMessages={allDisplayMessages}
                             streamingMessages={streamingMessages}
                             shiningMessageIds={shiningMessageIds}
+                            shiningMcpCallId={shiningMcpCallId}
                             reasoningExpandStates={reasoningExpandStates}
                             mcpToolCallStates={mcpToolCallStates}
                             generationGroups={messageGroupsData.generationGroups}

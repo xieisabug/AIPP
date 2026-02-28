@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Send, Loader2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import type { InlineInteractionItem } from '@/components/ConversationUI';
+import { getErrorMessage } from '@/utils/error';
 
 interface McpProcessorOptions {
     remarkPlugins: readonly any[];
@@ -18,6 +19,7 @@ interface ProcessorContext {
     conversationId?: number;
     messageId?: number;
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>;
+    shiningMcpCallId?: number | null;
     inlineInteractionItems?: InlineInteractionItem[];
 }
 
@@ -363,7 +365,7 @@ const McpToolCallResultsButton: React.FC<{
             await invoke('send_mcp_tool_results', { messageId });
         } catch (error) {
             console.error('Failed to send tool results:', error);
-            const errorMessage = error instanceof Error ? error.message : '发送结果失败';
+            const errorMessage = getErrorMessage(error) || '发送结果失败';
             console.error(errorMessage);
         } finally {
             setIsSending(false);
@@ -410,7 +412,7 @@ const McpToolCallResultsButton: React.FC<{
 
 export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: ProcessorContext) => {
     const { remarkPlugins, rehypePlugins, markdownComponents } = options;
-    const { conversationId, messageId, mcpToolCallStates, inlineInteractionItems } = context || {};
+    const { conversationId, messageId, mcpToolCallStates, shiningMcpCallId, inlineInteractionItems } = context || {};
 
     const processContent = useCallback((
         markdownContent: string,
@@ -489,7 +491,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             const isLastCall = index === mcpCalls.length - 1;
             parts.push(
                 <McpToolCall
-                    key={`mcp-${index}`}
+                    key={`mcp-${data.call_id ?? `tmp-${index}-${match.start}`}`}
                     serverName={data.server_name}
                     toolName={data.tool_name}
                     parameters={data.parameters ?? "{}"}
@@ -497,6 +499,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
                     messageId={messageId}
                     callId={data.call_id} // 传递 callId，如果存在的话
                     mcpToolCallStates={mcpToolCallStates} // 传递全局 MCP 状态
+                    shiningMcpCallId={shiningMcpCallId}
                     isLastCall={isLastCall} // 是否是最后一个工具调用
                 />
             );
@@ -568,6 +571,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         conversationId,
         messageId,
         mcpToolCallStates,
+        shiningMcpCallId,
         inlineInteractionItems,
     ]);
 

@@ -31,6 +31,7 @@ interface MessageItemProps {
     shouldShowShineBorder?: boolean;
     conversationId?: number; // Add conversation_id context
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>; // Add MCP states
+    shiningMcpCallId?: number | null;
     isLastMessage?: boolean; // 防泄露模式：是否为最后一条消息
     inlineInteractionItems?: InlineInteractionItem[];
 }
@@ -48,6 +49,7 @@ const MessageItem = React.memo<MessageItemProps>(
         shouldShowShineBorder = false,
         conversationId,
         mcpToolCallStates,
+        shiningMcpCallId,
         isLastMessage = false,
         inlineInteractionItems,
     }) => {
@@ -92,6 +94,7 @@ const MessageItem = React.memo<MessageItemProps>(
             conversationId,
             messageId: message.id,
             mcpToolCallStates,
+            shiningMcpCallId,
             inlineInteractionItems,
         });
 
@@ -259,6 +262,7 @@ const MessageItem = React.memo<MessageItemProps>(
                     onToggleReasoningExpand={onToggleReasoningExpand}
                     conversationId={conversationId}
                     mcpToolCallStates={mcpToolCallStates}
+                    shiningMcpCallId={shiningMcpCallId}
                     inlineInteractionItems={inlineInteractionItems}
                     useRawTextRenderer={shouldMaskContent}
                 />
@@ -316,6 +320,7 @@ const MessageItem = React.memo<MessageItemProps>(
                         outputTokenCount={message.output_token_count}
                         ttftMs={computedTtftMs}
                         tps={computedTps}
+                        messageContent={message.content}
                     />
                 </div>
 
@@ -362,6 +367,7 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
 
     // Re-render when MCP tool call state map updates so tool status can refresh
     if (prevProps.mcpToolCallStates !== nextProps.mcpToolCallStates) return false;
+    if (prevProps.shiningMcpCallId !== nextProps.shiningMcpCallId) return false;
 
     if (prevProps.inlineInteractionItems !== nextProps.inlineInteractionItems) return false;
 
