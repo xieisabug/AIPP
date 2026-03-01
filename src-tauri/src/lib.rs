@@ -18,8 +18,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use crate::api::ai::acp::AcpPermissionState;
 use crate::api::ai_api::{
     ask_ai, cancel_ai, get_activity_focus, get_shine_state, regenerate_ai,
-    regenerate_conversation_title,
-    tool_result_continue_ask_ai,
+    regenerate_conversation_title, tool_result_continue_ask_ai,
 };
 use crate::api::assistant_api::{
     add_assistant, bulk_update_assistant_mcp_tools, copy_assistant, delete_assistant,
@@ -35,12 +34,12 @@ use crate::api::conversation_api::{
     update_assistant_message, update_conversation, update_message_content,
 };
 use crate::api::copilot_api::{poll_github_copilot_token, start_github_copilot_device_flow};
-use crate::api::export_api::{markdown_to_docx, markdown_to_pdf};
 #[cfg(desktop)]
 use crate::api::copilot_lsp::{
     check_copilot_status, get_copilot_lsp_status, get_copilot_oauth_token_from_config,
     sign_in_confirm, sign_in_initiate, sign_out_copilot, stop_copilot_lsp, CopilotLspState,
 };
+use crate::api::export_api::{markdown_to_docx, markdown_to_pdf};
 use crate::api::highlight_api::{highlight_code, list_syntect_themes};
 use crate::api::llm_api::{
     add_llm_model, add_llm_provider, delete_llm_model, delete_llm_provider, export_llm_provider,
@@ -49,6 +48,11 @@ use crate::api::llm_api::{
     preview_model_list, update_llm_provider, update_llm_provider_config, update_selected_models,
 };
 use crate::api::operation_api::{confirm_acp_permission, confirm_operation_permission};
+use crate::api::plugin_api::{
+    disable_plugin, enable_plugin, get_enabled_plugins, get_plugin_config, get_plugin_data,
+    get_plugin_root_dir, install_plugin, list_plugins, set_plugin_config, set_plugin_data,
+    uninstall_plugin,
+};
 use crate::api::scheduled_task_api::{
     create_scheduled_task, delete_scheduled_task, list_scheduled_task_logs,
     list_scheduled_task_runs, list_scheduled_tasks, run_scheduled_task_now, update_scheduled_task,
@@ -74,7 +78,7 @@ use crate::api::updater_api::{
 use crate::artifacts::artifact_bridge_api::{
     artifact_ai_ask, artifact_db_batch_execute, artifact_db_delete, artifact_db_execute,
     artifact_db_exists, artifact_db_get_columns, artifact_db_get_tables, artifact_db_list,
-    artifact_db_query, artifact_get_assistants, artifact_get_config,
+    artifact_db_query, artifact_get_assistants, artifact_get_config, artifact_model_ask,
 };
 use crate::artifacts::artifacts_db::ArtifactsDatabase;
 use crate::artifacts::collection_api::{
@@ -368,10 +372,7 @@ pub fn run() {
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
     let app = tauri::Builder::default()
-        .register_uri_scheme_protocol(
-            PREVIEW_FILE_RELAY_SCHEME,
-            handle_preview_file_relay_request,
-        )
+        .register_uri_scheme_protocol(PREVIEW_FILE_RELAY_SCHEME, handle_preview_file_relay_request)
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_fs::init())
@@ -664,6 +665,7 @@ pub fn run() {
             artifact_db_delete,
             artifact_db_list,
             artifact_ai_ask,
+            artifact_model_ask,
             artifact_get_assistants,
             artifact_get_config,
             get_bang_list,
@@ -807,6 +809,18 @@ pub fn run() {
             run_scheduled_task_now,
             list_scheduled_task_logs,
             list_scheduled_task_runs,
+            // Plugin commands
+            list_plugins,
+            get_enabled_plugins,
+            install_plugin,
+            uninstall_plugin,
+            enable_plugin,
+            disable_plugin,
+            get_plugin_root_dir,
+            get_plugin_config,
+            set_plugin_config,
+            get_plugin_data,
+            set_plugin_data,
             // Todo commands
             get_todos,
             // Export commands

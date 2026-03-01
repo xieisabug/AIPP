@@ -1,4 +1,91 @@
-interface SystemApi { }
+interface SystemApiAssistantItem {
+    id: number;
+    name: string;
+    assistant_type: number;
+}
+
+interface SystemApiModelItem {
+    id: number;
+    name: string;
+    code: string;
+    llm_provider_id: number;
+}
+
+interface SystemApiRunTextUsage {
+    prompt_tokens?: number | null;
+    completion_tokens?: number | null;
+    total_tokens?: number | null;
+}
+
+interface SystemApiRunTextResult {
+    content: string;
+    model: string;
+    usage?: SystemApiRunTextUsage | null;
+}
+
+interface SystemApiRunAssistantTextOptions {
+    assistantId: number | string;
+    prompt: string;
+    systemPrompt?: string;
+    context?: string;
+}
+
+interface SystemApiRunModelTextOptions {
+    modelId: string;
+    prompt: string;
+    systemPrompt?: string;
+    context?: string;
+}
+
+interface SystemApiUiKit {
+    Alert?: React.ComponentType<any>;
+    AlertDescription?: React.ComponentType<any>;
+    AlertTitle?: React.ComponentType<any>;
+    Badge?: React.ComponentType<any>;
+    Button?: React.ComponentType<any>;
+    Card?: React.ComponentType<any>;
+    CardContent?: React.ComponentType<any>;
+    CardDescription?: React.ComponentType<any>;
+    CardFooter?: React.ComponentType<any>;
+    CardHeader?: React.ComponentType<any>;
+    CardTitle?: React.ComponentType<any>;
+    Dialog?: React.ComponentType<any>;
+    DialogContent?: React.ComponentType<any>;
+    DialogDescription?: React.ComponentType<any>;
+    DialogHeader?: React.ComponentType<any>;
+    DialogTitle?: React.ComponentType<any>;
+    Input?: React.ComponentType<any>;
+    Select?: React.ComponentType<any>;
+    SelectContent?: React.ComponentType<any>;
+    SelectItem?: React.ComponentType<any>;
+    SelectLabel?: React.ComponentType<any>;
+    SelectSeparator?: React.ComponentType<any>;
+    SelectTrigger?: React.ComponentType<any>;
+    SelectValue?: React.ComponentType<any>;
+    Separator?: React.ComponentType<any>;
+    Table?: React.ComponentType<any>;
+    TableBody?: React.ComponentType<any>;
+    TableCaption?: React.ComponentType<any>;
+    TableCell?: React.ComponentType<any>;
+    TableHead?: React.ComponentType<any>;
+    TableHeader?: React.ComponentType<any>;
+    TableRow?: React.ComponentType<any>;
+    Textarea?: React.ComponentType<any>;
+}
+
+interface SystemApi {
+    pluginId: number;
+    pluginCode: string;
+    listAssistants(): Promise<SystemApiAssistantItem[]>;
+    listModels(): Promise<SystemApiModelItem[]>;
+    getData(key: string, sessionId?: string): Promise<string | null>;
+    getAllData(sessionId?: string): Promise<Record<string, string | null>>;
+    setData(key: string, value: string | null, sessionId?: string): Promise<void>;
+    runAssistantText(options: SystemApiRunAssistantTextOptions): Promise<SystemApiRunTextResult>;
+    runModelText(options: SystemApiRunModelTextOptions): Promise<SystemApiRunTextResult>;
+    ui?: SystemApiUiKit;
+    invoke<T = unknown>(command: string, args?: Record<string, unknown>): Promise<T>;
+}
 
 enum PluginType {
     AssistantType = 1,
@@ -60,6 +147,7 @@ interface AskAssistantOptions {
         aiResponse: AiResponse,
         responseIsResponsingFunction: (isFinish: boolean) => void
     ) => void;
+    suppressConversationSwitch?: boolean;
 }
 
 interface SubTaskRunResult {
@@ -157,6 +245,7 @@ interface AssistantRunApi {
     getModelId(): string;
     getAssistantId(): string;
     getConversationId(): string;
+    getConversationWithMessages(conversationId: number): Promise<ConversationWithMessages>;
     getField(assistantId: string, fieldName: string): Promise<string>;
     appendAiResponse(messageId: number, response: string): void;
     setAiResponse(messageId: number, response: string): void;
@@ -169,6 +258,8 @@ interface AssistantRunApi {
     getMcpToolCall(callId: number): Promise<McpToolCall | null>;
 
     createConversation(systemPrompt: string, userPrompt: string): Promise<CreateConversationResponse>;
+    createDetachedConversation(options: CreateDetachedConversationOptions): Promise<CreateConversationResponse>;
+    askAssistantForText(options: AskAssistantForTextOptions): Promise<AskAssistantForTextResult>;
     runSubTask(code: string, taskPrompt: string): Promise<SubTaskRunResult>;
     runSubTaskWithMcpLoop(code: string, taskPrompt: string, options: McpLoopOptions): Promise<SubTaskRunWithMcpResult>;
 }
@@ -182,6 +273,45 @@ interface CreateConversationResponse {
     conversation_id: number;
     user_message_id: number | null;
     system_message_id: number | null;
+}
+
+interface ConversationSummary {
+    id: number;
+    name: string;
+    assistant_id: number | null;
+    assistant_name: string;
+    created_time: Date | string;
+}
+
+interface ConversationWithMessages {
+    conversation: ConversationSummary;
+    messages: Array<Message>;
+}
+
+interface CreateDetachedConversationOptions {
+    assistantId: string;
+    systemPrompt?: string;
+    userPrompt?: string;
+    conversationName?: string;
+}
+
+interface AskAssistantForTextOptions {
+    question: string;
+    assistantId: string;
+    overrideModelConfig?: Map<string, any>;
+    overrideSystemPrompt?: string;
+    overrideModelId?: string;
+    overrideMcpConfig?: McpOverrideConfig;
+    systemPrompt?: string;
+    conversationName?: string;
+    maxWaitMs?: number;
+    pollIntervalMs?: number;
+}
+
+interface AskAssistantForTextResult {
+    conversationId: number;
+    text: string;
+    responseMessageId?: number;
 }
 
 interface McpToolInfo {

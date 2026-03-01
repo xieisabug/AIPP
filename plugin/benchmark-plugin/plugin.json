@@ -1,0 +1,16 @@
+{
+  "id": "benchmark-plugin",
+  "code": "benchmark-plugin",
+  "name": "Benchmark Plugin",
+  "version": "0.1.0",
+  "entry": "dist/main.js",
+  "description": "QA benchmark plugin with dataset management, scoring, and leaderboards.",
+  "pluginTypes": [
+    "interfaceType",
+    "applicationType"
+  ],
+  "kinds": [
+    "ui",
+    "worker"
+  ]
+}

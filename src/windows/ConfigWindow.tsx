@@ -1,21 +1,21 @@
 import React, { ReactNode, useEffect, useState, useCallback, useMemo } from "react";
-import ReactDOM from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 import LLMProviderConfig from "../components/config/LLMProviderConfig";
 import AssistantConfig from "../components/config/AssistantConfig";
 import FeatureAssistantConfig from "../components/config/FeatureAssistantConfig";
 import MCPConfig from "../components/config/MCPConfig";
 import SkillsConfig from "../components/config/SkillsConfig";
-import { appDataDir } from "@tauri-apps/api/path";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import PluginCenterConfig from "../components/config/PluginCenterConfig";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { Bot, ServerCrash, Settings, Sparkles } from "lucide-react";
+import { Bot, Puzzle, ServerCrash, Settings, Sparkles } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
 import { Home, Menu } from "lucide-react";
 import MCP from "../assets/mcp.svg?react";
+import { pluginRuntime } from "../services/PluginRuntime";
 
 interface MenuItem {
     id: string;
@@ -31,6 +31,7 @@ const contentMap: Record<string, React.ComponentType<any>> = {
     "feature-assistant-config": FeatureAssistantConfig,
     "mcp-config": MCPConfig,
     "skills-config": SkillsConfig,
+    "plugins-config": PluginCenterConfig,
 };
 
 function ConfigWindow() {
@@ -70,6 +71,12 @@ function ConfigWindow() {
             icon: <Settings className="w-full h-full text-muted-foreground" />,
             iconSelected: <Settings className="w-full h-full text-foreground" />,
         },
+        {
+            id: "plugins-config",
+            name: "插件",
+            icon: <Puzzle className="w-full h-full text-muted-foreground" />,
+            iconSelected: <Puzzle className="w-full h-full text-foreground" />,
+        },
     ];
 
     const [selectedMenu, setSelectedMenu] = useState<string>("llm-provider-config");
@@ -90,66 +97,32 @@ function ConfigWindow() {
     }, []);
 
     useEffect(() => {
-        // 为可能使用 UMD 构建的插件提供全局 React/ReactDOM（与 PluginWindow 保持一致）
-        (window as any).React = React;
-        (window as any).ReactDOM = ReactDOM;
-
-        const toPascalCase = (str: string) =>
-            str
-                .replace(/(^|[-_\s]+)([a-zA-Z0-9])/g, (_, __, c) => (c ? String(c).toUpperCase() : ""))
-                .replace(/[^a-zA-Z0-9]/g, "");
-
-        const pluginLoadList = [
-            {
-                name: "代码生成",
-                code: "code-generate",
-                pluginType: ["assistantType"],
-                instance: null,
-            },
-            {
-                name: "DeepResearch",
-                code: "deepresearch",
-                pluginType: ["assistantType"],
-                instance: null,
+        let mounted = true;
+        const loadPlugins = async (forceReload = false) => {
+            try {
+                const plugins = forceReload
+                    ? await pluginRuntime.reloadPlugins()
+                    : await pluginRuntime.loadPlugins();
+                if (mounted) {
+                    setPluginList(plugins);
+                }
+            } catch (error) {
+                console.error("[ConfigWindow] Failed to load plugins:", error);
+                if (mounted) {
+                    setPluginList([]);
+                }
             }
-        ];
-
-        const initPlugin = async () => {
-            const dirPath = await appDataDir();
-            pluginLoadList.forEach(async (plugin) => {
-                const convertFilePath = dirPath + "/plugin/" + plugin.code + "/dist/main.js";
-
-                // 加载脚本
-                const script = document.createElement("script");
-                script.src = convertFileSrc(convertFilePath);
-                script.onload = () => {
-                    // 脚本加载完成后，插件应该可以在全局范围内使用
-                    const g: any = window as any;
-                    const candidates = [g.SamplePlugin, g[plugin.code], g[toPascalCase(plugin.code)]];
-                    const PluginCtor = candidates.find((c) => typeof c === "function");
-                    if (PluginCtor) {
-                        try {
-                            const instance = new PluginCtor();
-                            plugin.instance = instance;
-                            console.debug(`[PluginLoader][Config] '${plugin.code}' instance created`);
-                        } catch (e) {
-                            console.error(`[PluginLoader][Config] Failed to instantiate '${plugin.code}':`, e);
-                        }
-                    } else {
-                        console.warn(
-                            `[PluginLoader][Config] No global constructor for '${plugin.code}'. Checked: SamplePlugin, ${plugin.code}, ${toPascalCase(
-                                plugin.code
-                            )}`
-                        );
-                    }
-                };
-                document.body.appendChild(script);
-            });
-
-            setPluginList(pluginLoadList);
         };
+        loadPlugins(true);
 
-        initPlugin();
+        const unlistenRegistryChanged = listen("plugin_registry_changed", () => {
+            loadPlugins(true);
+        });
+
+        return () => {
+            mounted = false;
+            unlistenRegistryChanged.then((unlisten) => unlisten());
+        };
     }, []);
 
     // 获取选中的组件

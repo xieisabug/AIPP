@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useState, useEffect, useRef } from "react";
-import { Conversation, Message, FileInfo } from "../data/Conversation";
+import { Conversation, ConversationWithMessages, Message, FileInfo } from "../data/Conversation";
 import { AssistantDetail } from "../data/Assistant";
 
 export interface UseAssistantRuntimeProps {
@@ -98,6 +98,7 @@ export function useAssistantRuntime({
                 onCustomUserMessage,
                 onCustomUserMessageComing: _onCustomUserMessageComing,
                 onStreamMessageListener: _onStreamMessageListener,
+                suppressConversationSwitch,
             } = options;
 
             let userMessage: any;
@@ -134,7 +135,7 @@ export function useAssistantRuntime({
                 .then((res) => {
                     console.log("ask assistant response", res);
 
-                    if (conversationId != res.conversation_id + "") {
+                    if (!suppressConversationSwitch && conversationId != res.conversation_id + "") {
                         onChangeConversationId(res.conversation_id + "");
                     }
 
@@ -208,6 +209,13 @@ export function useAssistantRuntime({
             } else {
                 return effectiveConversation.id + "";
             }
+        },
+        getConversationWithMessages: async function (
+            conversationId: number
+        ): Promise<ConversationWithMessages> {
+            return await invoke<ConversationWithMessages>("get_conversation_with_messages", {
+                conversationId,
+            });
         },
         getMcpProvider: async function (providerId: string): Promise<McpProviderInfo | null> {
             console.log("get mcp provider", providerId);
@@ -378,6 +386,100 @@ export function useAssistantRuntime({
                 console.error("Failed to create conversation:", error);
                 throw error;
             }
+        },
+        createDetachedConversation: async function (
+            options: CreateDetachedConversationOptions
+        ): Promise<CreateConversationResponse> {
+            const assistantId = +(options.assistantId || selectedAssistant);
+            if (!assistantId) {
+                throw new Error("No assistant selected for detached conversation");
+            }
+            return await invoke<CreateConversationResponse>("create_conversation_with_messages", {
+                assistantId,
+                systemPrompt: options.systemPrompt?.trim() || undefined,
+                userMessage: options.userPrompt?.trim() || undefined,
+                conversationName: options.conversationName?.trim() || undefined,
+            });
+        },
+        askAssistantForText: async function (
+            options: AskAssistantForTextOptions
+        ): Promise<AskAssistantForTextResult> {
+            const {
+                question,
+                assistantId,
+                overrideModelConfig,
+                overrideSystemPrompt,
+                overrideModelId,
+                overrideMcpConfig,
+                systemPrompt,
+                conversationName,
+                maxWaitMs = 120000,
+                pollIntervalMs = 600,
+            } = options;
+
+            const conversation = await assistantRunApi.createDetachedConversation({
+                assistantId,
+                systemPrompt,
+                userPrompt: "",
+                conversationName,
+            });
+            const detachedConversationId = String(conversation.conversation_id);
+
+            const mergedOverrideConfig = new Map<string, any>([["stream", false]]);
+            if (overrideModelConfig instanceof Map) {
+                overrideModelConfig.forEach((value, key) => {
+                    mergedOverrideConfig.set(key, value);
+                });
+            }
+
+            await assistantRunApi.askAssistant({
+                question,
+                assistantId,
+                conversationId: detachedConversationId,
+                overrideModelConfig: mergedOverrideConfig,
+                overrideSystemPrompt,
+                overrideModelId,
+                overrideMcpConfig,
+                onCustomUserMessage: () => null,
+                suppressConversationSwitch: true,
+            });
+
+            const start = Date.now();
+            let latestContent = "";
+            while (Date.now() - start <= maxWaitMs) {
+                const detail = await assistantRunApi.getConversationWithMessages(
+                    Number(detachedConversationId)
+                );
+                const candidates = detail.messages.filter(
+                    (message) =>
+                        (message.message_type === "response" ||
+                            message.message_type === "assistant") &&
+                        typeof message.content === "string"
+                );
+                const latestMessage = candidates.sort((a, b) => b.id - a.id)[0];
+
+                if (latestMessage?.content) {
+                    latestContent = latestMessage.content;
+                }
+                if (latestMessage?.finish_time && latestMessage.content?.trim()) {
+                    return {
+                        conversationId: Number(detachedConversationId),
+                        responseMessageId: latestMessage.id,
+                        text: latestMessage.content,
+                    };
+                }
+
+                await new Promise((resolve) => window.setTimeout(resolve, pollIntervalMs));
+            }
+
+            if (latestContent.trim()) {
+                return {
+                    conversationId: Number(detachedConversationId),
+                    text: latestContent,
+                };
+            }
+
+            throw new Error("Timed out waiting for assistant response");
         },
 
         runSubTask: async function (_code: string, _taskPrompt: string): Promise<SubTaskRunResult> {

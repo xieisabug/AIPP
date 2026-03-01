@@ -11,6 +11,7 @@ pub mod genai_client;
 pub mod highlight_api;
 pub mod llm_api;
 pub mod operation_api;
+pub mod plugin_api;
 pub mod scheduled_task_api;
 pub mod skill_api;
 pub mod system_api;

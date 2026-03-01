@@ -1,0 +1,8 @@
+{
+  "id": "hello-assistant-plugin",
+  "name": "Hello Assistant Plugin",
+  "version": "0.1.0",
+  "entry": "dist/main.js",
+  "kinds": ["assistant"],
+  "pluginTypes": ["assistantType"]
+}

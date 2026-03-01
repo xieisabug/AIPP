@@ -132,6 +132,39 @@ pub struct AiUsage {
     pub total_tokens: Option<i64>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ModelAskRequest {
+    pub model_id: String, // format: model_code%%provider_id
+    pub prompt: String,
+    #[serde(default)]
+    pub context: Option<String>,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+}
+
+fn parse_model_id(raw: &str) -> Result<(String, i64), String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("model_id is empty".to_string());
+    }
+    let parts: Vec<&str> = trimmed.split("%%").collect();
+    if parts.len() != 2 {
+        return Err("model_id format invalid, expected model_code%%provider_id".to_string());
+    }
+    let model_code = parts[0].trim();
+    if model_code.is_empty() {
+        return Err("model_code is empty".to_string());
+    }
+    let provider_id = parts[1]
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| "provider_id must be a valid integer".to_string())?;
+    if provider_id <= 0 {
+        return Err("provider_id must be greater than 0".to_string());
+    }
+    Ok((model_code.to_string(), provider_id))
+}
+
 /// 获取可用的助手列表（用于 artifact 选择）
 #[tauri::command]
 pub fn artifact_get_assistants(
@@ -232,6 +265,69 @@ pub async fn artifact_ai_ask(
     let content = response.first_text().unwrap_or("").to_string();
 
     // 提取 usage 信息
+    let u = response.usage;
+    let usage = Some(AiUsage {
+        prompt_tokens: u.prompt_tokens.map(|t| t as i64),
+        completion_tokens: u.completion_tokens.map(|t| t as i64),
+        total_tokens: u.total_tokens.map(|t| t as i64),
+    });
+
+    Ok(AiAskResponse { content, model: model_detail.model.code, usage })
+}
+
+/// Artifact 直接调用模型（非流式，不依赖会话）
+#[tauri::command]
+pub async fn artifact_model_ask(
+    app_handle: tauri::AppHandle,
+    feature_config_state: State<'_, FeatureConfigState>,
+    request: ModelAskRequest,
+) -> Result<AiAskResponse, String> {
+    let (model_code, provider_id) = parse_model_id(&request.model_id)?;
+    let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let model_detail = llm_db
+        .get_llm_model_detail(&provider_id, &model_code)
+        .map_err(|e| format!("Failed to get model detail: {}", e))?;
+
+    let config_feature_map = feature_config_state.config_feature_map.lock().await;
+    let network_proxy = get_network_proxy_from_config(&config_feature_map);
+    let request_timeout = get_request_timeout_from_config(&config_feature_map);
+    let proxy_enabled = false;
+
+    let client = genai_client::create_client_with_config(
+        &model_detail.configs,
+        &model_detail.model.code,
+        &model_detail.provider.api_type,
+        network_proxy.as_deref(),
+        proxy_enabled,
+        Some(request_timeout),
+        &config_feature_map,
+    )
+    .map_err(|e| format!("Failed to create AI client: {}", e))?;
+
+    let system_prompt =
+        request.system_prompt.unwrap_or_else(|| "You are a helpful assistant.".to_string());
+    let user_content = if let Some(ctx) = &request.context {
+        format!("{}\n\nContext:\n{}", request.prompt, ctx)
+    } else {
+        request.prompt.clone()
+    };
+
+    let chat_request = crate::api::ai::conversation::build_chat_request_from_messages(
+        &[
+            ("system".to_string(), system_prompt, Vec::new()),
+            ("user".to_string(), user_content, Vec::new()),
+        ],
+        crate::api::ai::conversation::ToolCallStrategy::NonNative,
+        None,
+    )
+    .chat_request;
+
+    let response = client
+        .exec_chat(&model_detail.model.code, chat_request, None)
+        .await
+        .map_err(|e| format!("AI request failed: {}", e))?;
+
+    let content = response.first_text().unwrap_or("").to_string();
     let u = response.usage;
     let usage = Some(AiUsage {
         prompt_tokens: u.prompt_tokens.map(|t| t as i64),
