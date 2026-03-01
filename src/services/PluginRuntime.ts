@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { appDataDir } from "@tauri-apps/api/path";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
@@ -81,6 +82,45 @@ interface RunModelTextOptions {
     context?: string;
 }
 
+type PluginThemeMode = "light" | "dark" | "both";
+
+interface PluginThemeDefinition {
+    id: string;
+    label: string;
+    mode?: PluginThemeMode;
+    variables: Record<string, string>;
+    description?: string;
+}
+
+interface RegisteredPluginTheme extends PluginThemeDefinition {
+    ownerCode: string;
+}
+
+interface FeatureConfigListItem {
+    id: number;
+    feature_code: string;
+    key: string;
+    value: string;
+}
+
+interface DisplayConfigSnapshot {
+    theme: string;
+    color_mode: string;
+    user_message_markdown_render: string;
+    code_theme_light: string;
+    code_theme_dark: string;
+}
+
+const BUILTIN_THEME_IDS = new Set<string>(["default", "newyear"]);
+const PLUGIN_THEME_REGISTRY_STORAGE_KEY = "aipp-plugin-theme-registry";
+
+interface StoredPluginThemeDefinition {
+    label: string;
+    mode: PluginThemeMode;
+    variables: Record<string, string>;
+    description?: string;
+}
+
 export interface LoadedPlugin {
     pluginId: number;
     name: string;
@@ -94,6 +134,7 @@ class PluginRuntime {
     private plugins: LoadedPlugin[] = [];
     private loadPromise: Promise<LoadedPlugin[]> | null = null;
     private loadedScripts = new Set<string>();
+    private pluginThemes = new Map<string, RegisteredPluginTheme>();
 
     async loadPlugins(forceReload = false): Promise<LoadedPlugin[]> {
         if (!forceReload && this.plugins.length > 0) {
@@ -117,13 +158,16 @@ class PluginRuntime {
         this.exposeReactGlobals();
         const pluginItems = await invoke<BackendPluginItem[]>("get_enabled_plugins");
         const activeItems = pluginItems.filter((plugin) => plugin.isActive);
+        const activeCodes = new Set(activeItems.map((plugin) => plugin.code));
         const baseDir = await appDataDir();
         const normalizedBaseDir = baseDir.endsWith("/") ? baseDir.slice(0, -1) : baseDir;
         const loaded: LoadedPlugin[] = [];
 
         if (forceReload) {
+            this.plugins.forEach((loadedPlugin) => this.clearPluginThemesForPlugin(loadedPlugin.code));
             this.plugins = [];
         }
+        this.clearStalePluginThemes(activeCodes);
 
         for (const plugin of activeItems) {
             try {
@@ -312,6 +356,15 @@ class PluginRuntime {
                     },
                 });
             },
+            registerTheme: (theme: PluginThemeDefinition) => {
+                this.registerPluginTheme(plugin, theme);
+            },
+            unregisterTheme: (themeId: string) => {
+                this.unregisterPluginThemeForOwner(plugin.code, themeId);
+            },
+            listThemes: async () => this.listDisplayThemes(),
+            getDisplayConfig: async () => this.getDisplayConfig(),
+            applyTheme: async (themeId: string) => this.applyDisplayTheme(themeId),
             ui: {
                 Alert,
                 AlertDescription,
@@ -352,6 +405,253 @@ class PluginRuntime {
                 args?: Record<string, unknown>
             ): Promise<T> => invoke<T>(command, args ?? {}),
         };
+    }
+
+    async listDisplayThemes(): Promise<PluginThemeDefinition[]> {
+        return [...this.pluginThemes.values()]
+            .map((theme) => ({
+                id: theme.id,
+                label: theme.label,
+                mode: theme.mode,
+                variables: { ...theme.variables },
+                description: theme.description,
+            }))
+            .sort((a, b) => a.label.localeCompare(b.label));
+    }
+
+    private registerPluginTheme(plugin: BackendPluginItem, theme: PluginThemeDefinition): void {
+        const themeId = this.normalizeThemeId(theme.id);
+        if (!themeId) {
+            throw new Error("theme.id is required");
+        }
+        const existing = this.pluginThemes.get(themeId);
+        if (existing && existing.ownerCode !== plugin.code) {
+            throw new Error(`theme.id '${themeId}' is already registered by plugin '${existing.ownerCode}'`);
+        }
+        const registeredTheme: RegisteredPluginTheme = {
+            id: themeId,
+            label: String(theme.label || "").trim() || themeId,
+            mode: this.normalizeThemeMode(theme.mode),
+            variables: this.normalizeThemeVariables(theme.variables),
+            description: theme.description ? String(theme.description).trim() : undefined,
+            ownerCode: plugin.code,
+        };
+        this.pluginThemes.set(themeId, registeredTheme);
+        this.upsertThemeStyleElement(registeredTheme);
+        this.persistPluginThemeRegistryToStorage();
+    }
+
+    private unregisterPluginThemeForOwner(pluginCode: string, themeId: string): void {
+        const normalizedId = this.normalizeThemeId(themeId);
+        const existing = this.pluginThemes.get(normalizedId);
+        if (!existing || existing.ownerCode !== pluginCode) {
+            return;
+        }
+        this.pluginThemes.delete(normalizedId);
+        this.removeThemeStyleElement(normalizedId);
+        this.persistPluginThemeRegistryToStorage();
+    }
+
+    private clearPluginThemesForPlugin(pluginCode: string): void {
+        const themeIds = [...this.pluginThemes.entries()]
+            .filter(([, theme]) => theme.ownerCode === pluginCode)
+            .map(([themeId]) => themeId);
+        themeIds.forEach((themeId) => {
+            this.pluginThemes.delete(themeId);
+            this.removeThemeStyleElement(themeId);
+        });
+        if (themeIds.length > 0) {
+            this.persistPluginThemeRegistryToStorage();
+        }
+    }
+
+    private clearStalePluginThemes(activePluginCodes: Set<string>): void {
+        const staleThemeIds = [...this.pluginThemes.entries()]
+            .filter(([, theme]) => !activePluginCodes.has(theme.ownerCode))
+            .map(([themeId]) => themeId);
+        staleThemeIds.forEach((themeId) => {
+            this.pluginThemes.delete(themeId);
+            this.removeThemeStyleElement(themeId);
+        });
+        if (staleThemeIds.length > 0) {
+            this.persistPluginThemeRegistryToStorage();
+        }
+    }
+
+    private upsertThemeStyleElement(theme: RegisteredPluginTheme): void {
+        const styleId = this.getThemeStyleElementId(theme.id);
+        let styleElement = document.getElementById(styleId) as HTMLStyleElement | null;
+        if (!styleElement) {
+            styleElement = document.createElement("style");
+            styleElement.id = styleId;
+            styleElement.dataset.pluginTheme = theme.id;
+            document.head.appendChild(styleElement);
+        }
+        styleElement.textContent = this.buildThemeCss(theme);
+    }
+
+    private removeThemeStyleElement(themeId: string): void {
+        const styleElement = document.getElementById(this.getThemeStyleElementId(themeId));
+        styleElement?.remove();
+    }
+
+    private getThemeStyleElementId(themeId: string): string {
+        return `aipp-plugin-theme-${themeId}`;
+    }
+
+    private buildThemeCss(theme: RegisteredPluginTheme): string {
+        const selector = this.getThemeSelector(theme);
+        const declarations = Object.entries(theme.variables)
+            .map(([name, value]) => `    ${name}: ${value};`)
+            .join("\n");
+        return `${selector} {\n${declarations}\n}`;
+    }
+
+    private getThemeSelector(theme: RegisteredPluginTheme): string {
+        const rootClass = `.theme-${theme.id}`;
+        if (theme.mode === "dark") {
+            return `${rootClass}.dark`;
+        }
+        if (theme.mode === "both") {
+            return rootClass;
+        }
+        return `${rootClass}:not(.dark)`;
+    }
+
+    private normalizeThemeMode(mode?: string): PluginThemeMode {
+        if (mode === "dark" || mode === "both") {
+            return mode;
+        }
+        return "light";
+    }
+
+    private normalizeThemeVariables(variables: Record<string, string>): Record<string, string> {
+        if (!variables || typeof variables !== "object") {
+            throw new Error("theme.variables is required");
+        }
+        const normalized: Record<string, string> = {};
+        Object.entries(variables).forEach(([rawName, rawValue]) => {
+            const name = String(rawName || "").trim();
+            const value = String(rawValue ?? "").trim();
+            if (!name || !value) {
+                return;
+            }
+            const cssVarName = name.startsWith("--") ? name : `--${name}`;
+            normalized[cssVarName] = value;
+        });
+        if (Object.keys(normalized).length === 0) {
+            throw new Error("theme.variables must contain at least one CSS variable");
+        }
+        return normalized;
+    }
+
+    private normalizeThemeId(rawThemeId: string): string {
+        return String(rawThemeId || "")
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9_-]+/g, "-")
+            .replace(/-{2,}/g, "-")
+            .replace(/^[-_]+|[-_]+$/g, "");
+    }
+
+    private persistPluginThemeRegistryToStorage(): void {
+        if (typeof window === "undefined") {
+            return;
+        }
+        try {
+            const storedRegistry: Record<string, StoredPluginThemeDefinition> = {};
+            this.pluginThemes.forEach((theme) => {
+                storedRegistry[theme.id] = {
+                    label: theme.label,
+                    mode: theme.mode || "light",
+                    variables: { ...theme.variables },
+                    description: theme.description,
+                };
+            });
+            window.localStorage.setItem(PLUGIN_THEME_REGISTRY_STORAGE_KEY, JSON.stringify(storedRegistry));
+        } catch (error) {
+            console.warn("[PluginRuntime] Failed to persist plugin theme registry:", error);
+        }
+    }
+
+    private resolveIsDarkMode(colorMode: string): boolean {
+        if (colorMode === "dark") {
+            return true;
+        }
+        if (colorMode === "light") {
+            return false;
+        }
+        if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
+            return window.matchMedia("(prefers-color-scheme: dark)").matches;
+        }
+        return false;
+    }
+
+    private applyThemeClassImmediate(themeName: string, colorMode: string): void {
+        if (typeof document === "undefined") {
+            return;
+        }
+        const root = document.documentElement;
+        if (this.resolveIsDarkMode(colorMode)) {
+            root.classList.add("dark");
+        } else {
+            root.classList.remove("dark");
+        }
+
+        [...root.classList].forEach((cls) => {
+            if (cls.startsWith("theme-")) {
+                root.classList.remove(cls);
+            }
+        });
+        if (themeName && themeName !== "default") {
+            root.classList.add(`theme-${themeName}`);
+        }
+    }
+
+    private async getDisplayConfig(): Promise<DisplayConfigSnapshot> {
+        const featureConfigList = await invoke<FeatureConfigListItem[]>("get_all_feature_config");
+        const displayConfigMap = new Map<string, string>();
+        featureConfigList
+            .filter((item) => item.feature_code === "display")
+            .forEach((item) => {
+                displayConfigMap.set(item.key, item.value);
+            });
+
+        return {
+            theme: displayConfigMap.get("theme") || "default",
+            color_mode: displayConfigMap.get("color_mode") || "system",
+            user_message_markdown_render: displayConfigMap.get("user_message_markdown_render") || "enabled",
+            code_theme_light: displayConfigMap.get("code_theme_light") || "github",
+            code_theme_dark: displayConfigMap.get("code_theme_dark") || "github-dark",
+        };
+    }
+
+    private async applyDisplayTheme(themeId: string): Promise<void> {
+        const normalizedThemeId = this.normalizeThemeId(themeId);
+        const nextTheme = normalizedThemeId || "default";
+        if (!BUILTIN_THEME_IDS.has(nextTheme) && !this.pluginThemes.has(nextTheme)) {
+            throw new Error(`Theme '${nextTheme}' is not registered`);
+        }
+        const currentConfig = await this.getDisplayConfig();
+        const nextConfig: DisplayConfigSnapshot = {
+            ...currentConfig,
+            theme: nextTheme,
+        };
+        await invoke("save_feature_config", {
+            featureCode: "display",
+            config: nextConfig,
+        });
+        if (typeof window !== "undefined") {
+            window.localStorage.setItem("theme-mode", nextConfig.color_mode);
+            window.localStorage.setItem("theme-name", nextTheme);
+        }
+        this.applyThemeClassImmediate(nextTheme, nextConfig.color_mode);
+        await emit("theme-changed", {
+            mode: nextConfig.color_mode,
+            theme: nextTheme,
+            code_theme_light: nextConfig.code_theme_light,
+            code_theme_dark: nextConfig.code_theme_dark,
+        });
     }
 
     private async getPluginDataMap(

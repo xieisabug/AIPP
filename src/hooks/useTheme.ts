@@ -117,9 +117,13 @@ export const useTheme = () => {
         const unlistenThemeChange = listen('theme-changed', () => {
             refreshConfig();
         });
+        const unlistenFeatureConfigChanged = listen('feature_config_changed', () => {
+            refreshConfig();
+        });
 
         return () => {
             unlistenThemeChange.then(f => f());
+            unlistenFeatureConfigChanged.then(f => f());
         };
     }, [refreshConfig]);
 

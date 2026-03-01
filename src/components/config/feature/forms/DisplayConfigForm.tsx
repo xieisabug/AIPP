@@ -1,11 +1,12 @@
-import React, { useCallback, useMemo, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { UseFormReturn } from "react-hook-form";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import ConfigForm from "@/components/ConfigForm";
 import { toast } from "sonner";
 import { AVAILABLE_CODE_THEMES } from "@/hooks/useCodeTheme";
 import { useSyntectThemes } from "@/hooks/highlight/useSyntectThemes";
+import { pluginRuntime } from "@/services/PluginRuntime";
 
 interface DisplayConfigFormProps {
     form: UseFormReturn<any>;
@@ -15,11 +16,51 @@ interface DisplayConfigFormProps {
 export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({ form, onSave }) => {
     const previousNotificationValue = useRef<boolean | undefined>(undefined);
     const { themes, themeInfo } = useSyntectThemes();
-    
-    const themeOptions = [
-        { value: "default", label: "默认主题" },
-        { value: "newyear", label: "新年主题" },
-    ];
+    const [pluginThemeOptions, setPluginThemeOptions] = useState<Array<{ value: string; label: string }>>([]);
+
+    useEffect(() => {
+        let disposed = false;
+        const loadPluginThemes = async () => {
+            try {
+                await pluginRuntime.loadPlugins();
+                const registeredThemes = await pluginRuntime.listDisplayThemes();
+                if (disposed) {
+                    return;
+                }
+                setPluginThemeOptions(
+                    registeredThemes.map((theme) => ({
+                        value: theme.id,
+                        label: theme.label,
+                    }))
+                );
+            } catch (error) {
+                console.error("[DisplayConfigForm] Failed to load plugin themes:", error);
+                if (!disposed) {
+                    setPluginThemeOptions([]);
+                }
+            }
+        };
+
+        loadPluginThemes();
+        const unlistenRegistryChanged = listen("plugin_registry_changed", () => {
+            loadPluginThemes();
+        });
+        return () => {
+            disposed = true;
+            unlistenRegistryChanged.then((unlisten) => unlisten());
+        };
+    }, []);
+
+    const themeOptions = useMemo(() => {
+        const optionMap = new Map<string, { value: string; label: string }>([
+            ["default", { value: "default", label: "默认主题" }],
+            ["newyear", { value: "newyear", label: "新年主题" }],
+        ]);
+        pluginThemeOptions.forEach((option) => {
+            optionMap.set(option.value, option);
+        });
+        return [...optionMap.values()];
+    }, [pluginThemeOptions]);
 
     const colorModeOptions = [
         { value: "light", label: "浅色" },

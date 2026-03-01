@@ -1,0 +1,17 @@
+{
+  "id": "guofeng-theme-plugin",
+  "code": "guofeng-theme-plugin",
+  "name": "国风主题插件",
+  "version": "0.1.0",
+  "entry": "dist/main.js",
+  "description": "以朱砂红与象牙白为主色的一键国风主题插件。",
+  "pluginTypes": [
+    "themeType",
+    "interfaceType",
+    "applicationType"
+  ],
+  "kinds": [
+    "ui",
+    "worker"
+  ]
+}

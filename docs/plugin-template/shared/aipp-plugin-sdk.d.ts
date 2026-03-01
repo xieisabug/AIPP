@@ -49,6 +49,24 @@ interface AippSystemApiRunModelTextOptions {
   context?: string;
 }
 
+type AippSystemApiThemeMode = "light" | "dark" | "both";
+
+interface AippSystemApiThemeDefinition {
+  id: string;
+  label: string;
+  mode?: AippSystemApiThemeMode;
+  variables: Record<string, string>;
+  description?: string;
+}
+
+interface AippSystemApiDisplayConfig {
+  theme: string;
+  color_mode: string;
+  user_message_markdown_render: string;
+  code_theme_light: string;
+  code_theme_dark: string;
+}
+
 /**
  * Host-provided UI kit components exposed to plugins.
  * This allows IDE autocomplete for available components + core props.
@@ -108,6 +126,11 @@ interface SystemApi {
   runModelText(
     options: AippSystemApiRunModelTextOptions
   ): Promise<AippSystemApiRunTextResult>;
+  registerTheme(theme: AippSystemApiThemeDefinition): void;
+  unregisterTheme(themeId: string): void;
+  listThemes(): Promise<AippSystemApiThemeDefinition[]>;
+  getDisplayConfig(): Promise<AippSystemApiDisplayConfig>;
+  applyTheme(themeId: string): Promise<void>;
   ui?: AippSystemApiUiKit;
   invoke<T = unknown>(command: string, args?: Record<string, unknown>): Promise<T>;
 }

@@ -13,6 +13,15 @@
                 // 从localStorage读取用户的主题设置（由React应用同步）
                 const savedThemeMode = localStorage.getItem('theme-mode');
                 const savedThemeName = localStorage.getItem('theme-name');
+                const pluginThemeRegistryRaw = localStorage.getItem('aipp-plugin-theme-registry');
+                let pluginThemeRegistry = {};
+                if (pluginThemeRegistryRaw) {
+                    try {
+                        pluginThemeRegistry = JSON.parse(pluginThemeRegistryRaw) || {};
+                    } catch {
+                        pluginThemeRegistry = {};
+                    }
+                }
 
                 // 检测系统偏好
                 const systemPrefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -34,8 +43,46 @@
                     document.documentElement.classList.add('dark');
                 }
 
+                const injectPluginThemeStyle = (themeName) => {
+                    const registryItem = pluginThemeRegistry && pluginThemeRegistry[themeName];
+                    if (!registryItem || !registryItem.variables || typeof registryItem.variables !== 'object') {
+                        return;
+                    }
+
+                    const declarations = Object.entries(registryItem.variables)
+                        .map(([name, value]) => {
+                            const cssVarName = String(name || '').trim();
+                            const cssValue = String(value ?? '').trim();
+                            if (!cssVarName || !cssValue) return '';
+                            return `${cssVarName.startsWith('--') ? cssVarName : `--${cssVarName}`}: ${cssValue};`;
+                        })
+                        .filter(Boolean)
+                        .join('');
+                    if (!declarations) {
+                        return;
+                    }
+
+                    const selectorBase = `.theme-${themeName}`;
+                    const mode = registryItem.mode || 'light';
+                    const selector = mode === 'dark'
+                        ? `${selectorBase}.dark`
+                        : mode === 'both'
+                            ? selectorBase
+                            : `${selectorBase}:not(.dark)`;
+
+                    const styleId = `aipp-plugin-theme-preload-${themeName}`;
+                    if (document.getElementById(styleId)) {
+                        return;
+                    }
+                    const style = document.createElement('style');
+                    style.id = styleId;
+                    style.textContent = `${selector} {${declarations}}`;
+                    document.head?.appendChild(style);
+                };
+
                 // 应用外观主题（如新年主题）
                 if (savedThemeName && savedThemeName !== 'default') {
+                    injectPluginThemeStyle(savedThemeName);
                     document.documentElement.classList.add('theme-' + savedThemeName);
                 }
             } catch (error) {

@@ -37,6 +37,24 @@ interface SystemApiRunModelTextOptions {
     context?: string;
 }
 
+type SystemApiThemeMode = "light" | "dark" | "both";
+
+interface SystemApiThemeDefinition {
+    id: string;
+    label: string;
+    mode?: SystemApiThemeMode;
+    variables: Record<string, string>;
+    description?: string;
+}
+
+interface SystemApiDisplayConfig {
+    theme: string;
+    color_mode: string;
+    user_message_markdown_render: string;
+    code_theme_light: string;
+    code_theme_dark: string;
+}
+
 interface SystemApiUiKit {
     Alert?: React.ComponentType<any>;
     AlertDescription?: React.ComponentType<any>;
@@ -83,6 +101,11 @@ interface SystemApi {
     setData(key: string, value: string | null, sessionId?: string): Promise<void>;
     runAssistantText(options: SystemApiRunAssistantTextOptions): Promise<SystemApiRunTextResult>;
     runModelText(options: SystemApiRunModelTextOptions): Promise<SystemApiRunTextResult>;
+    registerTheme(theme: SystemApiThemeDefinition): void;
+    unregisterTheme(themeId: string): void;
+    listThemes(): Promise<SystemApiThemeDefinition[]>;
+    getDisplayConfig(): Promise<SystemApiDisplayConfig>;
+    applyTheme(themeId: string): Promise<void>;
     ui?: SystemApiUiKit;
     invoke<T = unknown>(command: string, args?: Record<string, unknown>): Promise<T>;
 }
