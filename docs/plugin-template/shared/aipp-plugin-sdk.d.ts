@@ -57,6 +57,7 @@ interface AippSystemApiThemeDefinition {
   mode?: AippSystemApiThemeMode;
   variables: Record<string, string>;
   description?: string;
+  extraCss?: string;
 }
 
 interface AippSystemApiDisplayConfig {

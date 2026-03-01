@@ -76,7 +76,11 @@
                     }
                     const style = document.createElement('style');
                     style.id = styleId;
-                    style.textContent = `${selector} {${declarations}}`;
+                    const extraCssRaw = typeof registryItem.extraCss === 'string' ? registryItem.extraCss.trim() : '';
+                    const extraCss = extraCssRaw
+                        ? (extraCssRaw.includes(':scope') ? extraCssRaw.replace(/:scope/g, selector) : extraCssRaw)
+                        : '';
+                    style.textContent = `${selector} {${declarations}}${extraCss ? '\n' + extraCss : ''}`;
                     document.head?.appendChild(style);
                 };
 

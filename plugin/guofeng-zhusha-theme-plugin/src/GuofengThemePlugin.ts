@@ -3,6 +3,7 @@ var GUOFENG_THEME_NAME = "国风·朱砂";
 var GUOFENG_THEME_VARIABLES: Record<string, string> = {
   "--background": "60 100% 97%",
   "--foreground": "357 45% 20%",
+  "--radius": "1rem",
   "--card": "60 100% 97%",
   "--card-foreground": "357 45% 20%",
   "--popover": "60 100% 98%",
@@ -38,6 +39,70 @@ var GUOFENG_THEME_VARIABLES: Record<string, string> = {
   "--sidebar-ring": "357 73% 44%",
 };
 
+var GUOFENG_THEME_EXTRA_CSS = `
+:scope body {
+  background-image:
+    radial-gradient(circle at 12% 16%, rgba(192, 30, 37, 0.05), transparent 35%),
+    radial-gradient(circle at 88% 84%, rgba(192, 30, 37, 0.04), transparent 32%);
+}
+
+:scope .rounded-sm {
+  border-radius: calc(var(--radius) * 0.45);
+}
+
+:scope .rounded-md {
+  border-radius: calc(var(--radius) * 0.72);
+}
+
+:scope .rounded-lg {
+  border-radius: calc(var(--radius) + 0.12rem);
+}
+
+:scope .rounded-xl {
+  border-radius: calc(var(--radius) + 0.34rem);
+}
+
+:scope .rounded-2xl {
+  border-radius: calc(var(--radius) + 0.64rem);
+}
+
+:scope .border {
+  border-color: hsl(var(--border) / 0.88);
+}
+
+:scope .shadow-sm {
+  box-shadow:
+    0 6px 16px -12px rgba(192, 30, 37, 0.4),
+    0 1px 0 rgba(255, 255, 240, 0.65) inset !important;
+}
+
+:scope .shadow,
+:scope .shadow-md,
+:scope .shadow-lg,
+:scope .shadow-xl {
+  box-shadow:
+    0 14px 28px -18px rgba(192, 30, 37, 0.42),
+    0 2px 0 rgba(255, 255, 240, 0.72) inset !important;
+}
+
+:scope .bg-card,
+:scope .bg-popover {
+  backdrop-filter: saturate(108%);
+}
+
+:scope .bg-secondary {
+  background-color: hsl(48 35% 92% / 0.9);
+}
+
+:scope .bg-muted {
+  background-color: hsl(48 35% 93% / 0.82);
+}
+
+:scope .bg-primary {
+  box-shadow: 0 8px 18px -12px rgba(192, 30, 37, 0.75);
+}
+`;
+
 var GuofengThemePlugin = class GuofengThemePlugin {
   systemApi: SystemApi | null;
 
@@ -63,6 +128,7 @@ var GuofengThemePlugin = class GuofengThemePlugin {
       mode: "light",
       variables: GUOFENG_THEME_VARIABLES,
       description: "以朱砂红与象牙白构建的国风浅色主题",
+      extraCss: GUOFENG_THEME_EXTRA_CSS,
     });
   }
 

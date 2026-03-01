@@ -22,6 +22,7 @@ pub struct PluginListItem {
     pub author: Option<String>,
     pub plugin_type: Vec<String>,
     pub is_active: bool,
+    pub is_installed: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -331,18 +332,24 @@ fn sync_registry(db: &PluginDatabase, app_handle: &tauri::AppHandle) -> Result<(
     sync_discovered_plugins(db, app_handle)
 }
 
-fn plugin_to_item(db: &PluginDatabase, plugin: Plugin) -> Result<PluginListItem, String> {
+fn plugin_to_item(
+    db: &PluginDatabase,
+    app_handle: &tauri::AppHandle,
+    plugin: Plugin,
+) -> Result<PluginListItem, String> {
     let status = db.get_plugin_status(plugin.plugin_id).map_err(|e| e.to_string())?;
     let plugin_type = get_plugin_types(db, plugin.plugin_id)?;
+    let code = plugin.folder_name.clone();
     Ok(PluginListItem {
         plugin_id: plugin.plugin_id,
         name: plugin.name,
         version: plugin.version,
-        code: plugin.folder_name,
+        code: code.clone(),
         description: plugin.description,
         author: plugin.author,
         plugin_type,
         is_active: status.map(|value| value.is_active).unwrap_or(true),
+        is_installed: plugin_entry_exists(app_handle, &code),
     })
 }
 
@@ -357,7 +364,10 @@ pub async fn list_plugins(app_handle: tauri::AppHandle) -> Result<Vec<PluginList
     let db = PluginDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     sync_registry(&db, &app_handle)?;
     let plugins = db.get_plugins().map_err(|e| e.to_string())?;
-    plugins.into_iter().map(|plugin| plugin_to_item(&db, plugin)).collect()
+    plugins
+        .into_iter()
+        .map(|plugin| plugin_to_item(&db, &app_handle, plugin))
+        .collect()
 }
 
 #[tauri::command]
@@ -416,6 +426,20 @@ pub async fn install_plugin(
 #[tauri::command]
 pub async fn uninstall_plugin(app_handle: tauri::AppHandle, plugin_id: i64) -> Result<(), String> {
     let db = PluginDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let plugin = db
+        .get_plugin(plugin_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Plugin not found: {}", plugin_id))?;
+
+    let plugin_dir = get_plugin_root_path(&app_handle)?.join(&plugin.folder_name);
+    if plugin_dir.exists() {
+        fs::remove_dir_all(&plugin_dir).map_err(|e| {
+            format!(
+                "Failed to remove plugin folder '{}': {}",
+                plugin.folder_name, e
+            )
+        })?;
+    }
 
     db.conn
         .execute("DELETE FROM PluginData WHERE plugin_id = ?", params![plugin_id])

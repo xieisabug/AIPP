@@ -90,6 +90,7 @@ interface PluginThemeDefinition {
     mode?: PluginThemeMode;
     variables: Record<string, string>;
     description?: string;
+    extraCss?: string;
 }
 
 interface RegisteredPluginTheme extends PluginThemeDefinition {
@@ -119,6 +120,7 @@ interface StoredPluginThemeDefinition {
     mode: PluginThemeMode;
     variables: Record<string, string>;
     description?: string;
+    extraCss?: string;
 }
 
 export interface LoadedPlugin {
@@ -415,6 +417,7 @@ class PluginRuntime {
                 mode: theme.mode,
                 variables: { ...theme.variables },
                 description: theme.description,
+                extraCss: theme.extraCss,
             }))
             .sort((a, b) => a.label.localeCompare(b.label));
     }
@@ -434,6 +437,7 @@ class PluginRuntime {
             mode: this.normalizeThemeMode(theme.mode),
             variables: this.normalizeThemeVariables(theme.variables),
             description: theme.description ? String(theme.description).trim() : undefined,
+            extraCss: this.normalizeThemeExtraCss(theme.extraCss),
             ownerCode: plugin.code,
         };
         this.pluginThemes.set(themeId, registeredTheme);
@@ -504,7 +508,9 @@ class PluginRuntime {
         const declarations = Object.entries(theme.variables)
             .map(([name, value]) => `    ${name}: ${value};`)
             .join("\n");
-        return `${selector} {\n${declarations}\n}`;
+        const baseRule = `${selector} {\n${declarations}\n}`;
+        const extraCss = this.resolveThemeExtraCss(theme.extraCss, selector);
+        return extraCss ? `${baseRule}\n${extraCss}` : baseRule;
     }
 
     private getThemeSelector(theme: RegisteredPluginTheme): string {
@@ -523,6 +529,25 @@ class PluginRuntime {
             return mode;
         }
         return "light";
+    }
+
+    private normalizeThemeExtraCss(extraCss?: string): string | undefined {
+        if (typeof extraCss !== "string") {
+            return undefined;
+        }
+        const normalized = extraCss.trim();
+        return normalized || undefined;
+    }
+
+    private resolveThemeExtraCss(extraCss: string | undefined, selector: string): string {
+        const normalized = this.normalizeThemeExtraCss(extraCss);
+        if (!normalized) {
+            return "";
+        }
+        if (normalized.includes(":scope")) {
+            return normalized.replace(/:scope/g, selector);
+        }
+        return normalized;
     }
 
     private normalizeThemeVariables(variables: Record<string, string>): Record<string, string> {
@@ -566,6 +591,7 @@ class PluginRuntime {
                     mode: theme.mode || "light",
                     variables: { ...theme.variables },
                     description: theme.description,
+                    extraCss: theme.extraCss,
                 };
             });
             window.localStorage.setItem(PLUGIN_THEME_REGISTRY_STORAGE_KEY, JSON.stringify(storedRegistry));

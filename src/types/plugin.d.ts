@@ -45,6 +45,7 @@ interface SystemApiThemeDefinition {
     mode?: SystemApiThemeMode;
     variables: Record<string, string>;
     description?: string;
+    extraCss?: string;
 }
 
 interface SystemApiDisplayConfig {

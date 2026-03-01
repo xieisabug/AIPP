@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import { Puzzle, RefreshCcw, Power, PowerOff } from "lucide-react";
 import { Badge } from "../ui/badge";
@@ -25,6 +26,7 @@ interface PluginRegistryItem {
     author?: string | null;
     pluginType: string[];
     isActive: boolean;
+    isInstalled: boolean;
 }
 
 interface PluginConfigItem {
@@ -46,6 +48,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     const [newConfigKey, setNewConfigKey] = useState("");
     const [newConfigValue, setNewConfigValue] = useState("");
     const [actionBusy, setActionBusy] = useState(false);
+    const missingReminderKeyRef = useRef("");
 
     useEffect(() => {
         setRuntimePlugins(pluginList);
@@ -81,6 +84,20 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         try {
             const items = await invoke<PluginRegistryItem[]>("list_plugins");
             setPlugins(items);
+            const missingPlugins = items.filter((item) => !item.isInstalled);
+            const reminderKey = missingPlugins
+                .map((item) => item.code)
+                .sort()
+                .join(",");
+            if (missingPlugins.length > 0 && reminderKey !== missingReminderKeyRef.current) {
+                const preview = missingPlugins
+                    .map((item) => item.name)
+                    .slice(0, 3)
+                    .join("、");
+                const suffix = missingPlugins.length > 3 ? ` 等${missingPlugins.length}个` : "";
+                toast.warning(`发现插件目录缺失，请在插件中心手动卸载：${preview}${suffix}`);
+            }
+            missingReminderKeyRef.current = reminderKey;
             setSelectedPluginId((prev) => {
                 if (prev && items.some((item) => item.pluginId === prev)) {
                     return prev;
@@ -149,8 +166,12 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         () =>
             filteredPlugins.map((plugin) => ({
                 id: String(plugin.pluginId),
-                label: plugin.name,
-                icon: plugin.isActive ? <Power className="h-4 w-4 text-emerald-500" /> : <PowerOff className="h-4 w-4 text-muted-foreground" />,
+                label: plugin.isInstalled ? plugin.name : `${plugin.name}（目录缺失）`,
+                icon: !plugin.isInstalled
+                    ? <PowerOff className="h-4 w-4 text-destructive" />
+                    : plugin.isActive
+                        ? <Power className="h-4 w-4 text-emerald-500" />
+                        : <PowerOff className="h-4 w-4 text-muted-foreground" />,
             })),
         [filteredPlugins]
     );
@@ -159,6 +180,9 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     const pluginUiBlockedReason = useMemo(() => {
         if (!selectedPlugin) {
             return "请选择一个插件。";
+        }
+        if (!selectedPlugin.isInstalled) {
+            return "插件目录缺失，请先卸载该记录。";
         }
         if (!selectedPlugin.isActive) {
             return "插件已禁用，启用后可使用插件界面。";
@@ -225,6 +249,48 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         }
     }, [selectedPlugin, newConfigKey, newConfigValue, loadConfigs]);
 
+    const handleUninstallPlugin = useCallback(async () => {
+        const plugin = selectedPlugin;
+        if (!plugin || actionBusy) {
+            return;
+        }
+        const confirmed = await confirm(
+            `确认卸载插件「${plugin.name}」吗？`,
+            {
+                title: "确认卸载插件",
+                kind: "warning",
+                okLabel: "下一步",
+                cancelLabel: "取消",
+            }
+        );
+        if (!confirmed) {
+            return;
+        }
+        const confirmedFinal = await confirm(
+            `该操作会删除插件文件夹和数据库记录，且不可恢复。确定继续卸载「${plugin.name}」吗？`,
+            {
+                title: "最终确认",
+                kind: "warning",
+                okLabel: "确认卸载",
+                cancelLabel: "取消",
+            }
+        );
+        if (!confirmedFinal) {
+            return;
+        }
+        setActionBusy(true);
+        try {
+            await invoke("uninstall_plugin", { pluginId: plugin.pluginId });
+            toast.success(`已卸载插件：${plugin.name}`);
+            await loadPlugins();
+        } catch (error) {
+            console.error("[PluginCenterConfig] Failed to uninstall plugin:", error);
+            toast.error("卸载插件失败");
+        } finally {
+            setActionBusy(false);
+        }
+    }, [selectedPlugin, actionBusy, loadPlugins]);
+
     const pluginUiNode = useMemo(() => {
         if (!canRenderPluginUI) {
             return null;
@@ -265,6 +331,9 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                     <div className="flex flex-col items-start gap-1">
                         <span className="font-medium">{plugin.name}</span>
                         <span className="text-xs opacity-80">{plugin.code}</span>
+                        {!plugin.isInstalled && (
+                            <span className="text-xs text-destructive">目录缺失，请卸载</span>
+                        )}
                     </div>
                 </ListItemButton>
             ))}
@@ -290,6 +359,9 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                             <Badge variant={selectedPlugin.isActive ? "default" : "secondary"}>
                                 {selectedPlugin.isActive ? "已启用" : "已禁用"}
                             </Badge>
+                            {!selectedPlugin.isInstalled && (
+                                <Badge variant="destructive">目录缺失</Badge>
+                            )}
                             <Badge variant="outline">v{selectedPlugin.version}</Badge>
                             {selectedPlugin.pluginType.map((type) => (
                                 <Badge key={type} variant="outline">
@@ -298,9 +370,14 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                             ))}
                         </div>
                     </div>
-                    <Button onClick={handleTogglePlugin} disabled={actionBusy}>
-                        {selectedPlugin.isActive ? "禁用插件" : "启用插件"}
-                    </Button>
+                    <div className="flex flex-wrap gap-2">
+                        <Button onClick={handleTogglePlugin} disabled={actionBusy || !selectedPlugin.isInstalled}>
+                            {selectedPlugin.isActive ? "禁用插件" : "启用插件"}
+                        </Button>
+                        <Button variant="destructive" onClick={handleUninstallPlugin} disabled={actionBusy}>
+                            卸载插件
+                        </Button>
+                    </div>
                 </div>
             </CardHeader>
             <CardContent>
@@ -319,7 +396,8 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                                 </div>
                             )}
                         </div>
-                        {selectedPlugin.isActive &&
+                        {selectedPlugin.isInstalled &&
+                            selectedPlugin.isActive &&
                             selectedPlugin.pluginType.includes("interfaceType") && (
                                 <Button
                                     variant="outline"
