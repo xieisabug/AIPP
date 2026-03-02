@@ -117,7 +117,7 @@ const toServerDatetime = (value: string) => {
 };
 
 export default function ScheduleWindow() {
-    useTheme();
+    useTheme("schedule");
     const { toast } = useToast();
 
     const [tasks, setTasks] = useState<ScheduledTask[]>([]);

@@ -36,7 +36,7 @@ const contentMap: Record<string, React.ComponentType<any>> = {
 
 function ConfigWindow() {
     // 集成主题系统
-    useTheme();
+    useTheme("config");
     const isMobile = useIsMobile();
     const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -212,7 +212,10 @@ function ConfigWindow() {
                             hideCloseButton
                         >
                             <SheetTitle className="sr-only">设置导航</SheetTitle>
-                            <div className="bg-muted/30 border-border border-b px-3 py-4 overflow-y-auto">
+                            <div
+                                className="aipp-settings-menu-container bg-muted/30 border-border border-b px-3 py-4 overflow-y-auto"
+                                data-theme-slot="settings-menu-container"
+                            >
                                 {renderMenuItems((id) => {
                                     setSelectedMenu(id);
                                     setSidebarOpen(false);
@@ -243,7 +246,10 @@ function ConfigWindow() {
                 data-tauri-drag-region
             >
                 {/* 侧边栏 */}
-                <div className="bg-muted/30 border-r border-border px-3 md:px-4 py-6 overflow-y-auto">
+                <div
+                    className="aipp-settings-menu-container bg-muted/30 border-r border-border px-3 md:px-4 py-6 overflow-y-auto"
+                    data-theme-slot="settings-menu-container"
+                >
                     {renderMenuItems(setSelectedMenu)}
                 </div>
 

@@ -3,6 +3,8 @@
 本文档对应当前实现：后端 `plugin_api` + 前端 `PluginRuntime`。  
 目标是让你可以自己写一个插件并在 AIPP 中跑起来。
 
+> Theme Plugin 详细开发文档：`docs/theme-plugin-development.md`
+
 ---
 
 ## 1. 当前可用能力
@@ -167,6 +169,7 @@ window.HelloAssistantPlugin = HelloAssistantPlugin;
 - `systemApi.setData(key, value, sessionId?)`
 - `systemApi.runAssistantText({ assistantId, prompt, systemPrompt?, context? })`
 - `systemApi.runModelText({ modelId, prompt, systemPrompt?, context? })`
+- `systemApi.registerTheme({ id, label, mode?, variables, extraCss?, windowCss? })`
 - `systemApi.ui`（宿主 UI 组件集：Button/Input/Textarea/Card/Badge/Alert/...）
 - `systemApi.invoke(command, args?)`
 
@@ -175,6 +178,7 @@ window.HelloAssistantPlugin = HelloAssistantPlugin;
 - `runAssistantText` / `runModelText` 走无会话持久化路径，默认不会写入对话列表；
 - 需要对话能力时，可继续通过 `systemApi.invoke(...)` 调用现有会话相关命令；
 - `systemApi.ui` 让插件可复用宿主 shadcn 风格组件，避免“原生 UI 风格割裂”。
+- `registerTheme.windowCss` 支持按窗口 label 精细覆写样式（例如 `chat_ui`、`config`），建议在 CSS 里使用 `:scope` 做作用域替换。
 
 ---
 

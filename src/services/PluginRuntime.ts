@@ -91,6 +91,7 @@ interface PluginThemeDefinition {
     variables: Record<string, string>;
     description?: string;
     extraCss?: string;
+    windowCss?: Record<string, string>;
 }
 
 interface RegisteredPluginTheme extends PluginThemeDefinition {
@@ -121,6 +122,7 @@ interface StoredPluginThemeDefinition {
     variables: Record<string, string>;
     description?: string;
     extraCss?: string;
+    windowCss?: Record<string, string>;
 }
 
 export interface LoadedPlugin {
@@ -418,6 +420,7 @@ class PluginRuntime {
                 variables: { ...theme.variables },
                 description: theme.description,
                 extraCss: theme.extraCss,
+                windowCss: theme.windowCss ? { ...theme.windowCss } : undefined,
             }))
             .sort((a, b) => a.label.localeCompare(b.label));
     }
@@ -438,6 +441,7 @@ class PluginRuntime {
             variables: this.normalizeThemeVariables(theme.variables),
             description: theme.description ? String(theme.description).trim() : undefined,
             extraCss: this.normalizeThemeExtraCss(theme.extraCss),
+            windowCss: this.normalizeThemeWindowCss(theme.windowCss),
             ownerCode: plugin.code,
         };
         this.pluginThemes.set(themeId, registeredTheme);
@@ -510,7 +514,8 @@ class PluginRuntime {
             .join("\n");
         const baseRule = `${selector} {\n${declarations}\n}`;
         const extraCss = this.resolveThemeExtraCss(theme.extraCss, selector);
-        return extraCss ? `${baseRule}\n${extraCss}` : baseRule;
+        const windowCss = this.resolveThemeWindowCss(theme.windowCss, selector);
+        return [baseRule, extraCss, windowCss].filter(Boolean).join("\n");
     }
 
     private getThemeSelector(theme: RegisteredPluginTheme): string {
@@ -550,6 +555,30 @@ class PluginRuntime {
         return normalized;
     }
 
+    private resolveThemeWindowCss(
+        windowCss: Record<string, string> | undefined,
+        selector: string
+    ): string {
+        if (!windowCss || typeof windowCss !== "object") {
+            return "";
+        }
+        const scopedRules: string[] = [];
+        Object.entries(windowCss).forEach(([rawWindowLabel, rawCss]) => {
+            const windowLabel = this.normalizeWindowLabel(rawWindowLabel);
+            const css = this.normalizeThemeExtraCss(rawCss);
+            if (!windowLabel || !css) {
+                return;
+            }
+            const windowScopeSelector = `${selector}.aipp-window-${windowLabel}`;
+            if (css.includes(":scope")) {
+                scopedRules.push(css.replace(/:scope/g, windowScopeSelector));
+                return;
+            }
+            scopedRules.push(`${windowScopeSelector} ${css}`);
+        });
+        return scopedRules.join("\n");
+    }
+
     private normalizeThemeVariables(variables: Record<string, string>): Record<string, string> {
         if (!variables || typeof variables !== "object") {
             throw new Error("theme.variables is required");
@@ -568,6 +597,31 @@ class PluginRuntime {
             throw new Error("theme.variables must contain at least one CSS variable");
         }
         return normalized;
+    }
+
+    private normalizeThemeWindowCss(windowCss?: Record<string, string>): Record<string, string> | undefined {
+        if (!windowCss || typeof windowCss !== "object") {
+            return undefined;
+        }
+        const normalized: Record<string, string> = {};
+        Object.entries(windowCss).forEach(([rawWindowLabel, rawCss]) => {
+            const windowLabel = this.normalizeWindowLabel(rawWindowLabel);
+            const css = this.normalizeThemeExtraCss(rawCss);
+            if (!windowLabel || !css) {
+                return;
+            }
+            normalized[windowLabel] = css;
+        });
+        return Object.keys(normalized).length > 0 ? normalized : undefined;
+    }
+
+    private normalizeWindowLabel(rawWindowLabel: string): string {
+        return String(rawWindowLabel || "")
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9_-]+/g, "-")
+            .replace(/-{2,}/g, "-")
+            .replace(/^[-_]+|[-_]+$/g, "");
     }
 
     private normalizeThemeId(rawThemeId: string): string {
@@ -592,6 +646,7 @@ class PluginRuntime {
                     variables: { ...theme.variables },
                     description: theme.description,
                     extraCss: theme.extraCss,
+                    windowCss: theme.windowCss ? { ...theme.windowCss } : undefined,
                 };
             });
             window.localStorage.setItem(PLUGIN_THEME_REGISTRY_STORAGE_KEY, JSON.stringify(storedRegistry));

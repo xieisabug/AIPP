@@ -43,7 +43,7 @@ interface ArtifactInfo {
  */
 export default function ArtifactWindow() {
     // 集成主题系统
-    useTheme();
+    useTheme("artifact");
 
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [isPreviewReady, setIsPreviewReady] = useState(false);

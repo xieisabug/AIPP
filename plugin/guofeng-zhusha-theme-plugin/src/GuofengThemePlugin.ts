@@ -103,6 +103,25 @@ var GUOFENG_THEME_EXTRA_CSS = `
 }
 `;
 
+var GUOFENG_THEME_WINDOW_CSS: Record<string, string> = {
+  chat_ui: `
+:scope .input-area-send-button {
+  box-shadow:
+    0 12px 24px -14px rgba(192, 30, 37, 0.72),
+    0 0 0 1px rgba(255, 255, 240, 0.65) inset;
+}
+
+:scope [data-theme-slot="input-area-container"] {
+  border-color: hsl(357 54% 52% / 0.62);
+}
+`,
+  config: `
+:scope [data-theme-slot="settings-menu-container"] {
+  background: linear-gradient(180deg, hsl(48 45% 94% / 0.95), hsl(48 38% 91% / 0.9));
+}
+`,
+};
+
 var GuofengThemePlugin = class GuofengThemePlugin {
   systemApi: SystemApi | null;
 
@@ -129,6 +148,7 @@ var GuofengThemePlugin = class GuofengThemePlugin {
       variables: GUOFENG_THEME_VARIABLES,
       description: "以朱砂红与象牙白构建的国风浅色主题",
       extraCss: GUOFENG_THEME_EXTRA_CSS,
+      windowCss: GUOFENG_THEME_WINDOW_CSS,
     });
   }
 

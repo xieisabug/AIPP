@@ -38,7 +38,7 @@ interface ArtifactCollection {
 }
 
 export default function ArtifactCollectionsWindow() {
-    useTheme();
+    useTheme("artifact_collections");
 
     const [artifacts, setArtifacts] = useState<ArtifactCollection[]>([]);
     const [filteredArtifacts, setFilteredArtifacts] = useState<ArtifactCollection[]>([]);

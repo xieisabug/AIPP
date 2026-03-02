@@ -43,6 +43,35 @@
                     document.documentElement.classList.add('dark');
                 }
 
+                const normalizeWindowLabel = (rawWindowLabel) =>
+                    String(rawWindowLabel || '')
+                        .trim()
+                        .toLowerCase()
+                        .replace(/[^a-z0-9_-]+/g, '-')
+                        .replace(/-{2,}/g, '-')
+                        .replace(/^[-_]+|[-_]+$/g, '');
+
+                const resolveThemeWindowCss = (windowCss, selector) => {
+                    if (!windowCss || typeof windowCss !== 'object') {
+                        return '';
+                    }
+                    return Object.entries(windowCss)
+                        .map(([rawWindowLabel, rawCss]) => {
+                            const windowLabel = normalizeWindowLabel(rawWindowLabel);
+                            const css = typeof rawCss === 'string' ? rawCss.trim() : '';
+                            if (!windowLabel || !css) {
+                                return '';
+                            }
+                            const windowScopeSelector = `${selector}.aipp-window-${windowLabel}`;
+                            if (css.includes(':scope')) {
+                                return css.replace(/:scope/g, windowScopeSelector);
+                            }
+                            return `${windowScopeSelector} ${css}`;
+                        })
+                        .filter(Boolean)
+                        .join('\n');
+                };
+
                 const injectPluginThemeStyle = (themeName) => {
                     const registryItem = pluginThemeRegistry && pluginThemeRegistry[themeName];
                     if (!registryItem || !registryItem.variables || typeof registryItem.variables !== 'object') {
@@ -80,7 +109,8 @@
                     const extraCss = extraCssRaw
                         ? (extraCssRaw.includes(':scope') ? extraCssRaw.replace(/:scope/g, selector) : extraCssRaw)
                         : '';
-                    style.textContent = `${selector} {${declarations}}${extraCss ? '\n' + extraCss : ''}`;
+                    const windowCss = resolveThemeWindowCss(registryItem.windowCss, selector);
+                    style.textContent = `${selector} {${declarations}}${extraCss ? '\n' + extraCss : ''}${windowCss ? '\n' + windowCss : ''}`;
                     document.head?.appendChild(style);
                 };
 

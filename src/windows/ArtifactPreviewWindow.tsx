@@ -48,7 +48,7 @@ const ARTIFACT_CACHE_KEY = 'artifact_preview_cache';
  */
 export default function ArtifactPreviewWindow() {
     // 集成主题系统
-    useTheme();
+    useTheme("artifact_preview");
 
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [isPreviewReady, setIsPreviewReady] = useState(false);

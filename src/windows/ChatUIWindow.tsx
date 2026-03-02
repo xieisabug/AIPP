@@ -36,7 +36,7 @@ import { pluginRuntime } from "../services/PluginRuntime";
 
 function ChatUIWindow() {
     // 集成主题系统
-    useTheme();
+    useTheme("chat_ui");
 
     // 防泄露模式配置
     const { getConfigValue, loadFeatureConfig } = useFeatureConfig();

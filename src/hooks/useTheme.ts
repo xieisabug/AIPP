@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useDisplayConfig } from './useDisplayConfig';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 
 export type ThemeMode = 'light' | 'dark' | 'system';
 export type ResolvedTheme = 'light' | 'dark';
@@ -18,17 +19,40 @@ interface StoredPluginThemeDefinition {
     mode?: PluginThemeMode;
     variables?: Record<string, string>;
     extraCss?: string;
+    windowCss?: Record<string, string>;
 }
 
 const PLUGIN_THEME_REGISTRY_STORAGE_KEY = 'aipp-plugin-theme-registry';
+const WINDOW_SCOPE_CLASS_PREFIX = 'aipp-window-';
 
-export const useTheme = () => {
+export const useTheme = (windowLabel?: string) => {
     const { config, isLoading, refreshConfig } = useDisplayConfig();
     const [themeState, setThemeState] = useState<ThemeState>({
         mode: 'system',
         resolvedTheme: 'light',
         systemTheme: 'light'
     });
+
+    const normalizeWindowLabel = useCallback((rawWindowLabel: string): string => {
+        return String(rawWindowLabel || '')
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9_-]+/g, '-')
+            .replace(/-{2,}/g, '-')
+            .replace(/^[-_]+|[-_]+$/g, '');
+    }, []);
+
+    const resolveWindowLabel = useCallback((): string => {
+        if (windowLabel && windowLabel.trim()) {
+            return normalizeWindowLabel(windowLabel);
+        }
+        try {
+            const currentLabel = getCurrentWebviewWindow().label;
+            return normalizeWindowLabel(currentLabel || '');
+        } catch {
+            return '';
+        }
+    }, [windowLabel, normalizeWindowLabel]);
 
     // 检测系统主题
     const detectSystemTheme = useCallback((): ResolvedTheme => {
@@ -38,7 +62,36 @@ export const useTheme = () => {
         return 'light';
     }, []);
 
-    const ensurePluginThemeStyle = useCallback((themeName?: string) => {
+    const resolveThemeWindowCss = useCallback((
+        windowCss: Record<string, string> | undefined,
+        selector: string,
+        activeWindowLabel: string
+    ): string => {
+        if (!windowCss || typeof windowCss !== 'object') {
+            return '';
+        }
+        const normalizedActiveWindow = normalizeWindowLabel(activeWindowLabel);
+        return Object.entries(windowCss)
+            .map(([rawWindowLabel, rawCss]) => {
+                const normalizedWindowLabel = normalizeWindowLabel(rawWindowLabel);
+                const css = String(rawCss || '').trim();
+                if (!normalizedWindowLabel || !css) {
+                    return '';
+                }
+                if (normalizedActiveWindow && normalizedActiveWindow !== normalizedWindowLabel) {
+                    return '';
+                }
+                const windowScopeSelector = `${selector}.${WINDOW_SCOPE_CLASS_PREFIX}${normalizedWindowLabel}`;
+                if (css.includes(':scope')) {
+                    return css.replace(/:scope/g, windowScopeSelector);
+                }
+                return `${windowScopeSelector} ${css}`;
+            })
+            .filter(Boolean)
+            .join('\n');
+    }, [normalizeWindowLabel]);
+
+    const ensurePluginThemeStyle = useCallback((themeName?: string, activeWindowLabel?: string) => {
         if (!themeName || themeName === 'default') return;
         if (typeof window === 'undefined') return;
 
@@ -97,12 +150,29 @@ export const useTheme = () => {
         const extraCss = extraCssRaw
             ? (extraCssRaw.includes(':scope') ? extraCssRaw.replace(/:scope/g, selector) : extraCssRaw)
             : '';
-        styleElement.textContent = `${selector} {\n${declarations}\n}${extraCss ? `\n${extraCss}` : ''}`;
-    }, []);
+        const windowCss = resolveThemeWindowCss(registryItem.windowCss, selector, activeWindowLabel || '');
+        styleElement.textContent = [ `${selector} {\n${declarations}\n}`, extraCss, windowCss ].filter(Boolean).join('\n');
+    }, [resolveThemeWindowCss]);
+
+    const applyWindowScopeClass = useCallback((activeWindowLabel?: string) => {
+        const normalizedLabel = normalizeWindowLabel(activeWindowLabel || resolveWindowLabel() || '');
+        if (!normalizedLabel || typeof document === 'undefined') {
+            return;
+        }
+        const root = document.documentElement;
+        [...root.classList].forEach((cls) => {
+            if (cls.startsWith(WINDOW_SCOPE_CLASS_PREFIX)) {
+                root.classList.remove(cls);
+            }
+        });
+        root.classList.add(`${WINDOW_SCOPE_CLASS_PREFIX}${normalizedLabel}`);
+    }, [normalizeWindowLabel, resolveWindowLabel]);
 
     // 应用主题到DOM
     const applyTheme = useCallback((theme: ResolvedTheme, themeName?: string) => {
-        ensurePluginThemeStyle(themeName);
+        const activeWindowLabel = resolveWindowLabel();
+        applyWindowScopeClass(activeWindowLabel);
+        ensurePluginThemeStyle(themeName, activeWindowLabel);
         const root = document.documentElement;
         if (theme === 'dark') {
             root.classList.add('dark');
@@ -116,7 +186,7 @@ export const useTheme = () => {
         if (themeName && themeName !== 'default') {
             root.classList.add(`theme-${themeName}`);
         }
-    }, [ensurePluginThemeStyle]);
+    }, [applyWindowScopeClass, ensurePluginThemeStyle, resolveWindowLabel]);
 
     // 计算最终主题
     const resolveTheme = useCallback((mode: ThemeMode, systemTheme: ResolvedTheme): ResolvedTheme => {
@@ -181,6 +251,10 @@ export const useTheme = () => {
 
         applyTheme(resolvedTheme, config.theme);
     }, [config, isLoading, detectSystemTheme, resolveTheme, applyTheme]);
+
+    useEffect(() => {
+        applyWindowScopeClass();
+    }, [applyWindowScopeClass]);
 
     // 注意：不在初始化时强制设置主题，避免在子组件挂载时反复切换 .dark 导致白屏闪烁。
     // 初始主题已在 index.html 里通过内联脚本应用；当配置或系统主题变化时再更新。

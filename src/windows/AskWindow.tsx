@@ -26,7 +26,7 @@ interface AiResponse {
 
 function AskWindow() {
     // 集成主题系统
-    useTheme();
+    useTheme("ask");
 
     const [query, setQuery] = useState<string>("");
     const [response, setResponse] = useState<string>("");

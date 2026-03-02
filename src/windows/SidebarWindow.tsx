@@ -31,7 +31,7 @@ const MIN_SIDEBAR_WIDTH = 200;
 const MAX_SIDEBAR_WIDTH = 500;
 
 function SidebarWindow() {
-    useTheme();
+    useTheme("sidebar");
     
     const [sidebarData, setSidebarData] = useState<SidebarData>({
         todos: [],
