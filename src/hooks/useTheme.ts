@@ -12,6 +12,16 @@ interface ThemeState {
     systemTheme: ResolvedTheme;
 }
 
+type PluginThemeMode = 'light' | 'dark' | 'both';
+
+interface StoredPluginThemeDefinition {
+    mode?: PluginThemeMode;
+    variables?: Record<string, string>;
+    extraCss?: string;
+}
+
+const PLUGIN_THEME_REGISTRY_STORAGE_KEY = 'aipp-plugin-theme-registry';
+
 export const useTheme = () => {
     const { config, isLoading, refreshConfig } = useDisplayConfig();
     const [themeState, setThemeState] = useState<ThemeState>({
@@ -28,8 +38,71 @@ export const useTheme = () => {
         return 'light';
     }, []);
 
+    const ensurePluginThemeStyle = useCallback((themeName?: string) => {
+        if (!themeName || themeName === 'default') return;
+        if (typeof window === 'undefined') return;
+
+        const runtimeStyleId = `aipp-plugin-theme-${themeName}`;
+        if (document.getElementById(runtimeStyleId)) {
+            return;
+        }
+
+        const registryRaw = localStorage.getItem(PLUGIN_THEME_REGISTRY_STORAGE_KEY);
+        if (!registryRaw) {
+            return;
+        }
+
+        let registry: Record<string, StoredPluginThemeDefinition> = {};
+        try {
+            registry = JSON.parse(registryRaw) || {};
+        } catch (error) {
+            console.warn('[useTheme] Failed to parse plugin theme registry:', error);
+            return;
+        }
+
+        const registryItem = registry[themeName];
+        if (!registryItem || !registryItem.variables || typeof registryItem.variables !== 'object') {
+            return;
+        }
+
+        const declarations = Object.entries(registryItem.variables)
+            .map(([name, value]) => {
+                const cssVarName = String(name || '').trim();
+                const cssValue = String(value ?? '').trim();
+                if (!cssVarName || !cssValue) return '';
+                return `  ${cssVarName.startsWith('--') ? cssVarName : `--${cssVarName}`}: ${cssValue};`;
+            })
+            .filter(Boolean)
+            .join('\n');
+        if (!declarations) {
+            return;
+        }
+
+        const selectorBase = `.theme-${themeName}`;
+        const mode = registryItem.mode || 'light';
+        const selector = mode === 'dark'
+            ? `${selectorBase}.dark`
+            : mode === 'both'
+                ? selectorBase
+                : `${selectorBase}:not(.dark)`;
+
+        const styleId = `aipp-plugin-theme-preload-${themeName}`;
+        let styleElement = document.getElementById(styleId) as HTMLStyleElement | null;
+        if (!styleElement) {
+            styleElement = document.createElement('style');
+            styleElement.id = styleId;
+            document.head.appendChild(styleElement);
+        }
+        const extraCssRaw = typeof registryItem.extraCss === 'string' ? registryItem.extraCss.trim() : '';
+        const extraCss = extraCssRaw
+            ? (extraCssRaw.includes(':scope') ? extraCssRaw.replace(/:scope/g, selector) : extraCssRaw)
+            : '';
+        styleElement.textContent = `${selector} {\n${declarations}\n}${extraCss ? `\n${extraCss}` : ''}`;
+    }, []);
+
     // 应用主题到DOM
     const applyTheme = useCallback((theme: ResolvedTheme, themeName?: string) => {
+        ensurePluginThemeStyle(themeName);
         const root = document.documentElement;
         if (theme === 'dark') {
             root.classList.add('dark');
@@ -43,7 +116,7 @@ export const useTheme = () => {
         if (themeName && themeName !== 'default') {
             root.classList.add(`theme-${themeName}`);
         }
-    }, []);
+    }, [ensurePluginThemeStyle]);
 
     // 计算最终主题
     const resolveTheme = useCallback((mode: ThemeMode, systemTheme: ResolvedTheme): ResolvedTheme => {

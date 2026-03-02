@@ -332,6 +332,14 @@ fn sync_registry(db: &PluginDatabase, app_handle: &tauri::AppHandle) -> Result<(
     sync_discovered_plugins(db, app_handle)
 }
 
+fn dedupe_plugins_by_code(plugins: Vec<Plugin>) -> Vec<Plugin> {
+    let mut seen_codes = HashSet::new();
+    plugins
+        .into_iter()
+        .filter(|plugin| seen_codes.insert(plugin.folder_name.clone()))
+        .collect()
+}
+
 fn plugin_to_item(
     db: &PluginDatabase,
     app_handle: &tauri::AppHandle,
@@ -363,7 +371,7 @@ pub async fn get_plugin_root_dir(app_handle: tauri::AppHandle) -> Result<String,
 pub async fn list_plugins(app_handle: tauri::AppHandle) -> Result<Vec<PluginListItem>, String> {
     let db = PluginDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     sync_registry(&db, &app_handle)?;
-    let plugins = db.get_plugins().map_err(|e| e.to_string())?;
+    let plugins = dedupe_plugins_by_code(db.get_plugins().map_err(|e| e.to_string())?);
     plugins
         .into_iter()
         .map(|plugin| plugin_to_item(&db, &app_handle, plugin))
