@@ -369,6 +369,39 @@ pub fn create_artifact_preview_window(app: &AppHandle) {
             "artifact_preview",
             WebviewUrl::App("index.html".into()),
         )
+        .on_download(|webview, event| {
+            let download_path = webview.app_handle().path().download_dir().unwrap_or_default();
+
+            match event {
+                DownloadEvent::Requested { url, destination } => {
+                    debug!(
+                        "downloading {} to {}",
+                        url,
+                        download_path.clone().to_string_lossy()
+                    );
+                    *destination = download_path.join(&mut *destination);
+                }
+                DownloadEvent::Finished { url, path, success } => {
+                    debug!("downloaded {} to {:?}, success: {}", url, path, success);
+                    if success {
+                        let title = "下载完成";
+                        let body = format!("文件已保存到：{:?}", download_path);
+                        if let Err(e) = webview
+                            .app_handle()
+                            .notification()
+                            .builder()
+                            .title(title)
+                            .body(&body)
+                            .show()
+                        {
+                            warn!(error = %e, "failed to show download notification");
+                        }
+                    }
+                }
+                _ => {}
+            }
+            true
+        })
         .title("Artifact Preview - Aipp")
         .inner_size(window_size.width, window_size.height)
         .fullscreen(false)
@@ -917,6 +950,39 @@ fn create_sidebar_window(app_handle: &AppHandle) {
 
         let mut builder =
             WebviewWindowBuilder::new(app_handle, "sidebar", WebviewUrl::App("index.html".into()))
+                .on_download(|webview, event| {
+                    let download_path = webview.app_handle().path().download_dir().unwrap_or_default();
+
+                    match event {
+                        DownloadEvent::Requested { url, destination } => {
+                            debug!(
+                                "downloading {} to {}",
+                                url,
+                                download_path.clone().to_string_lossy()
+                            );
+                            *destination = download_path.join(&mut *destination);
+                        }
+                        DownloadEvent::Finished { url, path, success } => {
+                            debug!("downloaded {} to {:?}, success: {}", url, path, success);
+                            if success {
+                                let title = "下载完成";
+                                let body = format!("文件已保存到：{:?}", download_path);
+                                if let Err(e) = webview
+                                    .app_handle()
+                                    .notification()
+                                    .builder()
+                                    .title(title)
+                                    .body(&body)
+                                    .show()
+                                {
+                                    warn!(error = %e, "failed to show download notification");
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    true
+                })
                 .title("详情 - Aipp")
                 .inner_size(window_size.width, window_size.height)
                 .resizable(true)
