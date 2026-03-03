@@ -440,7 +440,7 @@ fn simplify_tool_result_for_summary(content: &str) -> String {
 /// 2. Markdown 代码块包裹的 JSON (```json ... ```)
 /// 3. 包含前后缀文本的 JSON
 /// 4. 嵌套的 JSON 结构（查找最外层的 {}）
-fn extract_json_from_response(response: &str) -> Option<serde_json::Value> {
+pub(crate) fn extract_json_from_response(response: &str) -> Option<serde_json::Value> {
     let trimmed = response.trim();
 
     // 1. 直接尝试解析

@@ -2753,6 +2753,7 @@ pub async fn handle_non_stream_chat(
                 conversation_id,
                 response_message_id,
                 &content,
+                mcp_override_config.as_ref(),
             )
             .await
             {

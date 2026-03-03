@@ -1,4 +1,5 @@
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
+use crate::api::ai::types::McpOverrideConfig;
 use crate::api::ai_api::sanitize_tool_name;
 use crate::db::conversation_db::Repository;
 use crate::db::mcp_db::MCPToolCall;
@@ -45,6 +46,31 @@ fn broadcast_mcp_tool_call_update(app_handle: &tauri::AppHandle, tool_call: &MCP
 
 const MAX_MCP_RECURSION_DEPTH: u32 = 3;
 
+fn should_auto_run_tool(
+    mcp_override_config: Option<&McpOverrideConfig>,
+    server_name: &str,
+    tool_name: &str,
+    default_auto_run: bool,
+) -> bool {
+    if let Some(all_auto_run) = mcp_override_config.and_then(|cfg| cfg.all_tool_auto_run) {
+        return all_auto_run;
+    }
+    let Some(tool_overrides) = mcp_override_config.and_then(|cfg| cfg.tool_auto_run.as_ref()) else {
+        return default_auto_run;
+    };
+
+    let exact_key = format!("{}/{}", server_name, tool_name);
+    if let Some(value) = tool_overrides.get(&exact_key) {
+        return *value;
+    }
+    let normalized_key = format!("{}/{}", sanitize_tool_name(server_name), tool_name);
+    if let Some(value) = tool_overrides.get(&normalized_key) {
+        return *value;
+    }
+
+    default_auto_run
+}
+
 #[instrument(level = "debug", skip(app_handle, window, content), fields(conversation_id, message_id, content_len = content.len()))]
 pub async fn detect_and_process_mcp_calls(
     app_handle: &tauri::AppHandle,
@@ -52,6 +78,7 @@ pub async fn detect_and_process_mcp_calls(
     conversation_id: i64,
     message_id: i64,
     content: &str,
+    mcp_override_config: Option<&McpOverrideConfig>,
 ) -> Result<Option<String>, anyhow::Error> {
     // Check conversation-level recursion depth to prevent infinite loops
     let depth_state = CONVERSATION_MCP_DEPTH.get_or_init(|| Arc::new(Mutex::new(HashMap::new())));
@@ -151,7 +178,13 @@ pub async fn detect_and_process_mcp_calls(
                                                     || sanitize_tool_name(&s.name) == server_name;
                                                 if name_matches && s.is_enabled {
                                                     if let Some(tool) = s.tools.iter().find(|t| t.name == tool_name && t.is_enabled) {
-                                                        if tool.is_auto_run {
+                                                        let auto_run = should_auto_run_tool(
+                                                            mcp_override_config,
+                                                            &server_name,
+                                                            &tool_name,
+                                                            tool.is_auto_run,
+                                                        );
+                                                        if auto_run {
                                                             should_auto_run = true;
                                                         }
                                                     }

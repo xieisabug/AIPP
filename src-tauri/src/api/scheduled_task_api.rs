@@ -1,7 +1,10 @@
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::time::{Duration, Instant};
 use tauri::{Emitter, State};
 use tracing::{error, instrument};
 
@@ -12,6 +15,9 @@ use crate::api::ai::config::{
 use crate::api::ai::conversation::{
     build_chat_request_from_messages, ToolCallStrategy, ToolConfig,
 };
+use crate::api::ai::events::ActivityFocus;
+use crate::api::ai::summary::extract_json_from_response;
+use crate::api::ai::types::McpOverrideConfig;
 use crate::api::ai_api::build_tools_with_mapping;
 use crate::api::assistant_api::get_assistant;
 use crate::api::genai_client::create_client_with_config;
@@ -24,6 +30,7 @@ use crate::db::scheduled_task_db::{
 };
 use crate::db::system_db::FeatureConfig;
 use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt, MCPInfoForAssistant};
+use crate::state::activity_state::ConversationActivityManager;
 use crate::skills::{collect_skills_info_for_assistant, format_skills_prompt};
 use crate::template_engine::TemplateEngine;
 use crate::{AppState, FeatureConfigState, NameCacheState};
@@ -136,6 +143,28 @@ pub struct ListScheduledTaskRunsResponse {
     pub runs: Vec<ScheduledTaskRunDTO>,
 }
 
+const TASK_SETTLE_POLL_INTERVAL_MS: u64 = 350;
+const TASK_SETTLE_REQUIRED_STABLE_ROUNDS: usize = 4;
+const TASK_SETTLE_TIMEOUT_SECS: u64 = 90;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskConversationSnapshot {
+    total_tool_calls: usize,
+    pending_tool_calls: usize,
+    executing_tool_calls: usize,
+    latest_response_id: Option<i64>,
+    latest_response_hash: u64,
+    focus: ActivityFocus,
+}
+
+#[derive(Debug, Clone)]
+struct NotifyDecision {
+    task_state: Option<String>,
+    notify: bool,
+    summary: Option<String>,
+    reason: Option<String>,
+}
+
 fn format_dt(dt: Option<DateTime<Utc>>) -> Option<String> {
     dt.map(|v| v.to_rfc3339())
 }
@@ -156,6 +185,194 @@ fn parse_local_datetime(input: &str) -> Result<DateTime<Utc>, String> {
         }
     }
     Err("无法解析时间，请使用 YYYY-MM-DD HH:MM:SS 格式".to_string())
+}
+
+fn hash_text_for_snapshot(content: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn is_focus_busy(focus: &ActivityFocus) -> bool {
+    matches!(
+        focus,
+        ActivityFocus::UserPending { .. }
+            | ActivityFocus::AssistantStreaming { .. }
+            | ActivityFocus::McpExecuting { .. }
+    )
+}
+
+async fn capture_task_conversation_snapshot(
+    app_handle: &tauri::AppHandle,
+    conversation_db: &ConversationDatabase,
+    conversation_id: i64,
+) -> Result<TaskConversationSnapshot, String> {
+    let all_messages = conversation_db
+        .message_repo()
+        .map_err(|e| e.to_string())?
+        .list_by_conversation_id(conversation_id)
+        .map_err(|e| e.to_string())?;
+    let latest_response = all_messages
+        .iter()
+        .filter(|(msg, _)| msg.message_type == "response")
+        .max_by_key(|(msg, _)| msg.id);
+    let (latest_response_id, latest_response_hash) = if let Some((msg, _)) = latest_response {
+        (Some(msg.id), hash_text_for_snapshot(&msg.content))
+    } else {
+        (None, 0)
+    };
+
+    let mcp_db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let tool_calls = mcp_db
+        .get_mcp_tool_calls_by_conversation(conversation_id)
+        .map_err(|e| e.to_string())?;
+    let pending_tool_calls = tool_calls.iter().filter(|call| call.status == "pending").count();
+    let executing_tool_calls = tool_calls.iter().filter(|call| call.status == "executing").count();
+
+    let focus = if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>()
+    {
+        activity_manager.get_focus(conversation_id).await
+    } else {
+        ActivityFocus::None
+    };
+
+    Ok(TaskConversationSnapshot {
+        total_tool_calls: tool_calls.len(),
+        pending_tool_calls,
+        executing_tool_calls,
+        latest_response_id,
+        latest_response_hash,
+        focus,
+    })
+}
+
+async fn wait_for_task_conversation_settled(
+    app_handle: &tauri::AppHandle,
+    conversation_db: &ConversationDatabase,
+    conversation_id: i64,
+    task_id: i64,
+    run_id: &str,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(TASK_SETTLE_TIMEOUT_SECS);
+    let mut stable_rounds: usize = 0;
+    let mut last_snapshot: Option<TaskConversationSnapshot> = None;
+
+    loop {
+        let snapshot =
+            capture_task_conversation_snapshot(app_handle, conversation_db, conversation_id).await?;
+        let has_running_tools = snapshot.pending_tool_calls > 0 || snapshot.executing_tool_calls > 0;
+        let busy_focus = is_focus_busy(&snapshot.focus);
+
+        if !has_running_tools && !busy_focus {
+            if last_snapshot.as_ref() == Some(&snapshot) {
+                stable_rounds += 1;
+            } else {
+                stable_rounds = 1;
+            }
+        } else {
+            stable_rounds = 0;
+        }
+
+        if stable_rounds >= TASK_SETTLE_REQUIRED_STABLE_ROUNDS {
+            log_task_message(
+                app_handle,
+                task_id,
+                run_id,
+                "settled",
+                format!(
+                    "会话已收敛，tool_calls={}, latest_response_id={:?}",
+                    snapshot.total_tool_calls, snapshot.latest_response_id
+                ),
+            );
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            let timeout_message = format!(
+                "等待任务会话收敛超时（{}秒），pending_tools={}, executing_tools={}, focus={:?}",
+                TASK_SETTLE_TIMEOUT_SECS,
+                snapshot.pending_tool_calls,
+                snapshot.executing_tool_calls,
+                snapshot.focus
+            );
+            log_task_message(app_handle, task_id, run_id, "settle_timeout", timeout_message.clone());
+            return Err(timeout_message);
+        }
+
+        last_snapshot = Some(snapshot);
+        tokio::time::sleep(Duration::from_millis(TASK_SETTLE_POLL_INTERVAL_MS)).await;
+    }
+}
+
+fn parse_notify_bool_value(value: &serde_json::Value) -> Option<bool> {
+    if let Some(v) = value.as_bool() {
+        return Some(v);
+    }
+    if let Some(v) = value.as_i64() {
+        return Some(v != 0);
+    }
+    let s = value.as_str()?.trim().to_lowercase();
+    match s.as_str() {
+        "true" | "1" | "yes" | "notify" | "需要通知" | "是" => Some(true),
+        "false" | "0" | "no" | "skip" | "不通知" | "否" => Some(false),
+        _ => None,
+    }
+}
+
+fn normalize_task_state_value(value: &str) -> Option<String> {
+    let normalized = value.trim().to_lowercase();
+    let mapped = match normalized.as_str() {
+        "completed" | "complete" | "done" | "finished" | "success" | "succeeded" | "结束"
+        | "已结束" | "已完成" => "completed",
+        "running" | "in_progress" | "pending" | "processing" | "进行中" | "未结束" => "running",
+        "failed" | "error" | "失败" | "异常" => "failed",
+        _ => return None,
+    };
+    Some(mapped.to_string())
+}
+
+fn parse_notify_decision(raw: &str) -> Result<NotifyDecision, String> {
+    let value = extract_json_from_response(raw)
+        .ok_or_else(|| "通知判定返回格式不正确，无法提取 JSON 对象".to_string())?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "通知判定返回必须是 JSON 对象".to_string())?;
+
+    let task_state = object
+        .get("task_state")
+        .or_else(|| object.get("status"))
+        .or_else(|| object.get("state"))
+        .and_then(|v| v.as_str())
+        .and_then(normalize_task_state_value);
+
+    if matches!(task_state.as_deref(), Some("running")) {
+        return Err("通知判定返回 task_state=running，表示任务尚未结束".to_string());
+    }
+
+    let notify = object
+        .get("notify")
+        .or_else(|| object.get("should_notify"))
+        .and_then(parse_notify_bool_value)
+        .unwrap_or(false);
+
+    let summary = object
+        .get("summary")
+        .or_else(|| object.get("message"))
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+
+    let reason = object
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+
+    if notify && summary.is_none() {
+        return Err("通知判定返回 notify=true 时必须提供 summary".to_string());
+    }
+
+    Ok(NotifyDecision { task_state, notify, summary, reason })
 }
 
 fn validate_assistant_type(app_handle: &tauri::AppHandle, assistant_id: i64) -> Result<(), String> {
@@ -937,6 +1154,12 @@ pub async fn execute_scheduled_task(
         let conversation_db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
         let task_request_result =
             build_chat_request_from_messages(&init_messages, tool_call_strategy, tool_config);
+        let mcp_override_config = Some(McpOverrideConfig {
+            all_tool_auto_run: Some(true),
+            tool_auto_run: None,
+            use_native_toolcall: None,
+            tool_call_timeout: None,
+        });
 
         if let Err(e) = ai_handle_non_stream_chat(
             &client,
@@ -954,7 +1177,7 @@ pub async fn execute_scheduled_task(
             None,
             model_detail.model.id,
             model_detail.model.code.clone(),
-            None,
+            mcp_override_config,
             task_request_result.tool_name_mapping,
         )
         .await
@@ -977,6 +1200,41 @@ pub async fn execute_scheduled_task(
             );
             let _ = cleanup_conversation(app_handle, conversation_id);
             return Err(format!("任务执行失败: {}", e));
+        }
+
+        log_task_message(
+            app_handle,
+            task.id,
+            &run_id,
+            "settle_wait_start",
+            "等待任务会话收敛，确认多轮工具调用已结束",
+        );
+        if let Err(e) = wait_for_task_conversation_settled(
+            app_handle,
+            &conversation_db,
+            conversation_id,
+            task.id,
+            &run_id,
+        )
+        .await
+        {
+            log_task_message(
+                app_handle,
+                task.id,
+                &run_id,
+                "error",
+                format!("任务结束判定失败: {}", e),
+            );
+            update_task_run(
+                app_handle,
+                &run_id,
+                "failed",
+                false,
+                None,
+                Some(&format!("任务结束判定失败: {}", e)),
+                Some(Utc::now()),
+            );
+            return Err(format!("任务结束判定失败: {}", e));
         }
 
         let all_messages = conversation_db
@@ -1004,7 +1262,7 @@ pub async fn execute_scheduled_task(
 
         // Build the full notify prompt by combining default template with user's custom logic
         let notify_prompt_full = format!(
-            "请判断以下任务结果是否需要通知用户，根据以下判定规则:\n{}\n\n请返回 JSON 格式：\n{{\"notify\": true|false, \"summary\": \"需要通知时的摘要\"}}\n如果 notify 为 true，请在 summary 中给出简要结论。",
+            "请判断任务是否已经结束，以及是否需要通知用户。判定规则如下：\n{}\n\n请严格返回 JSON 对象（可放在```json代码块中，不要返回其他解释文本）：\n{{\"task_state\":\"completed|running|failed\",\"notify\":true|false,\"summary\":\"notify=true时必填\",\"reason\":\"判定依据\"}}\n约束：\n1) task_state=running 时 notify 必须为 false 且 summary 置空；\n2) task_state=completed 或 failed 时，再决定 notify；\n3) notify=true 时 summary 必须是简洁结论。",
             if task.notify_prompt.trim().is_empty() {
                 "如果任务结果包含重要信息或需要用户关注的内容则通知".to_string()
             } else {
@@ -1049,14 +1307,14 @@ pub async fn execute_scheduled_task(
         let notify_text = notify_response.content.into_joined_texts().unwrap_or_default();
         log_task_message(app_handle, task.id, &run_id, "notify_raw", notify_text.clone());
 
-        let notify_json: serde_json::Value = serde_json::from_str(&notify_text).map_err(|e| {
-            error!(error = %e, raw = %notify_text, "invalid notify JSON");
+        let notify_decision = parse_notify_decision(&notify_text).map_err(|e| {
+            error!(error = %e, raw = %notify_text, "invalid notify decision payload");
             log_task_message(
                 app_handle,
                 task.id,
                 &run_id,
                 "error",
-                format!("通知判定返回格式不正确: {}", e),
+                format!("通知判定返回不合法: {}", e),
             );
             update_task_run(
                 app_handle,
@@ -1064,28 +1322,24 @@ pub async fn execute_scheduled_task(
                 "failed",
                 false,
                 None,
-                Some(&format!("通知判定返回格式不正确: {}", e)),
+                Some(&format!("通知判定返回不合法: {}", e)),
                 Some(Utc::now()),
             );
-            "通知判定返回格式不正确，需为 JSON".to_string()
+            format!("通知判定返回不合法: {}", e)
         })?;
-        let notify = notify_json
-            .get("notify")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let summary = notify_json
-            .get("summary")
-            .and_then(|v| v.as_str())
-            .map(|v| v.to_string());
+        let notify = notify_decision.notify;
+        let summary = notify_decision.summary.clone();
         log_task_message(
             app_handle,
             task.id,
             &run_id,
             "notify_result",
             format!(
-                "notify={}, summary={}",
+                "task_state={}, notify={}, summary={}, reason={}",
+                notify_decision.task_state.unwrap_or_else(|| "unknown".to_string()),
                 notify,
-                summary.clone().unwrap_or_default()
+                summary.clone().unwrap_or_default(),
+                notify_decision.reason.unwrap_or_default()
             ),
         );
 

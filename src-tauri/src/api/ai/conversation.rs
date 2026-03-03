@@ -731,6 +731,7 @@ pub async fn handle_message_type_end(
             conversation_id,
             message_id,
             &final_content,
+            None,
         )
         .await
         {

@@ -13,6 +13,8 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Calendar as DateCalendar } from "@/components/ui/calendar";
 import { ConfigPageLayout, SidebarList, ListItemButton, EmptyState } from "@/components/common";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { AssistantListItem } from "@/data/Assistant";
@@ -75,6 +77,21 @@ interface ScheduledTaskFormValues {
     notify_prompt: string;
 }
 
+interface ScheduledTaskSavePayload {
+    name: string;
+    isEnabled: boolean;
+    scheduleType: "once" | "interval";
+    intervalValue: number | null;
+    intervalUnit: string | null;
+    startTime: string | null;
+    weekDays: number[] | null;
+    monthDays: number[] | null;
+    runAt: string | null;
+    assistantId: number;
+    taskPrompt: string;
+    notifyPrompt: string;
+}
+
 const intervalUnitLabels: Record<string, string> = {
     minute: "分钟",
     hour: "小时",
@@ -111,9 +128,169 @@ const toLocalDatetimeInput = (value?: string | null) => {
     return format(date, "yyyy-MM-dd'T'HH:mm");
 };
 
-const toServerDatetime = (value: string) => {
-    if (!value) return "";
-    return format(new Date(value), "yyyy-MM-dd HH:mm:ss");
+const DEFAULT_ONCE_TIME = "09:00";
+
+const pad2 = (value: number) => String(value).padStart(2, "0");
+
+const parseRunAtParts = (value: string): { date: string; time: string } | null => {
+    const raw = value.trim();
+    if (!raw) return null;
+    const normalized = raw
+        .replace(/[年月]/g, "-")
+        .replace(/日/g, "")
+        .replace(/\//g, "-")
+        .replace(/T/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    const match = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{1,2})/);
+    if (!match) {
+        return null;
+    }
+    const [, y, m, d, hh, mm] = match;
+    const year = Number(y);
+    const month = Number(m);
+    const day = Number(d);
+    const hour = Number(hh);
+    const minute = Number(mm);
+    if (
+        month < 1 || month > 12 ||
+        day < 1 || day > 31 ||
+        hour < 0 || hour > 23 ||
+        minute < 0 || minute > 59
+    ) {
+        return null;
+    }
+    return {
+        date: `${year}-${pad2(month)}-${pad2(day)}`,
+        time: `${pad2(hour)}:${pad2(minute)}`,
+    };
+};
+
+const parseDatePartToLocalDate = (datePart: string): Date | undefined => {
+    const match = datePart.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) {
+        return undefined;
+    }
+    const [, y, m, d] = match;
+    const year = Number(y);
+    const month = Number(m);
+    const day = Number(d);
+    const date = new Date(year, month - 1, day, 0, 0, 0);
+    if (
+        Number.isNaN(date.getTime()) ||
+        date.getFullYear() !== year ||
+        date.getMonth() !== month - 1 ||
+        date.getDate() !== day
+    ) {
+        return undefined;
+    }
+    return date;
+};
+
+const composeRunAtValue = (datePart: string, timePart: string): string => {
+    const date = datePart.trim();
+    const time = timePart.trim();
+    if (!date || !time) {
+        return "";
+    }
+    return `${date}T${time}`;
+};
+
+const toServerDatetime = (value: string): string | null => {
+    const raw = value.trim();
+    if (!raw) return null;
+
+    const normalized = raw
+        .replace(/[年月]/g, "-")
+        .replace(/日/g, "")
+        .replace(/\//g, "-")
+        .replace(/T/g, " ")
+        .replace(/\s+/g, " ");
+    const match = normalized.match(
+        /^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:\.\d+)?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?$/i
+    );
+    if (!match) {
+        const fallbackDate = new Date(raw);
+        if (!Number.isNaN(fallbackDate.getTime())) {
+            return format(fallbackDate, "yyyy-MM-dd HH:mm:ss");
+        }
+        const normalizedFallbackDate = new Date(normalized);
+        if (!Number.isNaN(normalizedFallbackDate.getTime())) {
+            return format(normalizedFallbackDate, "yyyy-MM-dd HH:mm:ss");
+        }
+        return null;
+    }
+
+    const [, y, m, d, hh, mm, ss = "0"] = match;
+    const year = Number(y);
+    const month = Number(m);
+    const day = Number(d);
+    const hour = Number(hh);
+    const minute = Number(mm);
+    const second = Number(ss);
+    if (
+        month < 1 || month > 12 ||
+        day < 1 || day > 31 ||
+        hour < 0 || hour > 23 ||
+        minute < 0 || minute > 59 ||
+        second < 0 || second > 59
+    ) {
+        return null;
+    }
+
+    const date = new Date(year, month - 1, day, hour, minute, second);
+    if (
+        Number.isNaN(date.getTime()) ||
+        date.getFullYear() !== year ||
+        date.getMonth() !== month - 1 ||
+        date.getDate() !== day ||
+        date.getHours() !== hour ||
+        date.getMinutes() !== minute ||
+        date.getSeconds() !== second
+    ) {
+        return null;
+    }
+
+    return format(date, "yyyy-MM-dd HH:mm:ss");
+};
+
+const getErrorMessage = (error: unknown): string => {
+    if (typeof error === "string") {
+        return error;
+    }
+    if (error instanceof Error) {
+        return error.message || String(error);
+    }
+    if (error && typeof error === "object") {
+        const candidate = error as Record<string, unknown>;
+        const messageCandidates = [candidate.message, candidate.error, candidate.reason, candidate.details];
+        const text = messageCandidates.find((item) => typeof item === "string" && item.trim()) as string | undefined;
+        if (text) {
+            return text;
+        }
+        try {
+            return JSON.stringify(candidate);
+        } catch {
+            return String(error);
+        }
+    }
+    return String(error);
+};
+
+const humanizeSaveError = (message: string): string => {
+    if (!message.trim()) {
+        return "保存失败：未知错误，请查看控制台日志。";
+    }
+    if (message.includes("无法解析时间") || message.includes("一次性任务需要设置执行时间")) {
+        return "保存失败：执行时间格式无效，请重新选择“指定时间执行一次”的时间。";
+    }
+    if (message.includes("只能选择普通对话助手")) {
+        return "保存失败：当前助手类型不支持定时任务，请选择普通对话助手。";
+    }
+    if (message.includes("任务不存在")) {
+        return "保存失败：任务不存在，可能已被删除，请刷新后重试。";
+    }
+    return message;
 };
 
 export default function ScheduleWindow() {
@@ -124,6 +301,7 @@ export default function ScheduleWindow() {
     const [assistants, setAssistants] = useState<AssistantListItem[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [activeTaskId, setActiveTaskId] = useState<number | null>(null);
+    const [editingTaskId, setEditingTaskId] = useState<number | null>(null);
     const [isDialogOpen, setIsDialogOpen] = useState(false);
     const [isHelpDialogOpen, setIsHelpDialogOpen] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
@@ -158,6 +336,32 @@ export default function ScheduleWindow() {
         () => assistants.filter((assistant) => assistant.assistant_type === 0),
         [assistants]
     );
+
+    const onceRunAtParts = useMemo(() => parseRunAtParts(formValues.run_at), [formValues.run_at]);
+    const onceDatePart = onceRunAtParts?.date ?? "";
+    const onceTimePart = onceRunAtParts?.time ?? "";
+    const onceSelectedDate = useMemo(() => parseDatePartToLocalDate(onceDatePart), [onceDatePart]);
+
+    const handleOnceDateChange = useCallback((date?: Date) => {
+        setFormValues((prev) => {
+            if (!date) {
+                return { ...prev, run_at: "" };
+            }
+            const currentParts = parseRunAtParts(prev.run_at);
+            const nextDate = format(date, "yyyy-MM-dd");
+            return { ...prev, run_at: composeRunAtValue(nextDate, currentParts?.time ?? DEFAULT_ONCE_TIME) };
+        });
+    }, []);
+
+    const handleOnceTimeChange = useCallback((timeValue: string) => {
+        setFormValues((prev) => {
+            const currentParts = parseRunAtParts(prev.run_at);
+            if (!currentParts?.date) {
+                return { ...prev, run_at: "" };
+            }
+            return { ...prev, run_at: composeRunAtValue(currentParts.date, timeValue) };
+        });
+    }, []);
 
     const loadTasks = useCallback(async () => {
         try {
@@ -283,6 +487,7 @@ export default function ScheduleWindow() {
             task_prompt: "",
             notify_prompt: "",
         });
+        setEditingTaskId(null);
         setIsDialogOpen(true);
     }, [assistantOptions]);
 
@@ -302,6 +507,7 @@ export default function ScheduleWindow() {
                 task_prompt: task.taskPrompt,
                 notify_prompt: task.notifyPrompt || "",
             });
+            setEditingTaskId(task.id);
             setActiveTaskId(task.id);
             setIsDialogOpen(true);
         },
@@ -309,10 +515,12 @@ export default function ScheduleWindow() {
     );
 
     const handleSave = useCallback(async () => {
+        let payload: ScheduledTaskSavePayload | null = null;
         setIsSaving(true);
         try {
             const needsStartTime = ["day", "week", "month"].includes(formValues.interval_unit);
-            const payload = {
+            const onceRunAtRaw = formValues.schedule_type === "once" ? formValues.run_at.trim() : "";
+            payload = {
                 name: formValues.name.trim(),
                 isEnabled: formValues.is_enabled,
                 scheduleType: formValues.schedule_type,
@@ -321,7 +529,7 @@ export default function ScheduleWindow() {
                 startTime: formValues.schedule_type === "interval" && needsStartTime ? formValues.start_time : null,
                 weekDays: formValues.schedule_type === "interval" && formValues.interval_unit === "week" ? formValues.week_days : null,
                 monthDays: formValues.schedule_type === "interval" && formValues.interval_unit === "month" ? formValues.month_days : null,
-                runAt: formValues.schedule_type === "once" ? toServerDatetime(formValues.run_at) : null,
+                runAt: formValues.schedule_type === "once" ? toServerDatetime(onceRunAtRaw) : null,
                 assistantId: Number(formValues.assistant_id),
                 taskPrompt: formValues.task_prompt.trim(),
                 notifyPrompt: formValues.notify_prompt.trim(),
@@ -335,8 +543,17 @@ export default function ScheduleWindow() {
             if (!payload.taskPrompt) {
                 throw new Error("请输入任务指令");
             }
+            if (payload.scheduleType === "once" && !onceRunAtRaw) {
+                throw new Error("请先选择执行日期和时间");
+            }
             if (payload.scheduleType === "once" && !payload.runAt) {
-                throw new Error("请设置执行时间");
+                console.error("[ScheduleWindow] Invalid once runAt when saving task", {
+                    rawRunAt: onceRunAtRaw,
+                    stateRunAt: formValues.run_at,
+                    runAtParts: parseRunAtParts(formValues.run_at),
+                    parsedRunAt: payload.runAt,
+                });
+                throw new Error(`执行时间格式无效：${onceRunAtRaw || "空值"}，请重新选择时间`);
             }
             if (payload.scheduleType === "interval" && (!payload.intervalValue || payload.intervalValue <= 0)) {
                 throw new Error("请设置有效的执行周期");
@@ -348,9 +565,9 @@ export default function ScheduleWindow() {
                 throw new Error("请至少选择一天");
             }
 
-            if (selectedTask && selectedTask.id === activeTaskId) {
+            if (editingTaskId !== null) {
                 const updated = await invoke<ScheduledTask>("update_scheduled_task", {
-                    request: { id: selectedTask.id, ...payload },
+                    request: { id: editingTaskId, ...payload },
                 });
                 setActiveTaskId(updated.id);
             } else {
@@ -362,18 +579,29 @@ export default function ScheduleWindow() {
                 title: "保存成功",
                 description: "定时任务已更新",
             });
+            setEditingTaskId(null);
             setIsDialogOpen(false);
             loadTasks();
         } catch (error) {
+            const rawMessage = getErrorMessage(error);
+            const userMessage = humanizeSaveError(rawMessage);
+            console.error("[ScheduleWindow] Failed to save scheduled task", {
+                error,
+                rawMessage,
+                userMessage,
+                editingTaskId,
+                formValues,
+                payload,
+            });
             toast({
                 title: "保存失败",
-                description: error as string,
+                description: userMessage,
                 variant: "destructive",
             });
         } finally {
             setIsSaving(false);
         }
-    }, [activeTaskId, formValues, loadTasks, selectedTask, toast]);
+    }, [editingTaskId, formValues, loadTasks, toast]);
 
     const handleToggleEnabled = useCallback(
         async (task: ScheduledTask, value: boolean) => {
@@ -847,10 +1075,18 @@ export default function ScheduleWindow() {
                 />
             </div>
 
-            <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+            <Dialog
+                open={isDialogOpen}
+                onOpenChange={(open) => {
+                    setIsDialogOpen(open);
+                    if (!open) {
+                        setEditingTaskId(null);
+                    }
+                }}
+            >
                 <DialogContent className="sm:max-w-[640px] max-h-[85vh] overflow-y-auto">
                     <DialogHeader>
-                        <DialogTitle className="text-base">{selectedTask && selectedTask.id === activeTaskId ? "编辑任务" : "新建任务"}</DialogTitle>
+                        <DialogTitle className="text-base">{editingTaskId !== null ? "编辑任务" : "新建任务"}</DialogTitle>
                     </DialogHeader>
                     <div className="space-y-4 py-2">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -904,13 +1140,38 @@ export default function ScheduleWindow() {
                                     <RadioGroupItem value="once" id="schedule-once" className="mt-0.5" />
                                     <div className="flex-1 space-y-1.5">
                                         <Label htmlFor="schedule-once" className="text-xs">指定时间执行一次</Label>
-                                        <Input
-                                            type="datetime-local"
-                                            value={formValues.run_at}
-                                            onChange={(e) => setFormValues((prev) => ({ ...prev, run_at: e.target.value }))}
-                                            disabled={formValues.schedule_type !== "once"}
-                                            className="h-8 text-sm"
-                                        />
+                                        <div className="flex gap-2">
+                                            <Popover>
+                                                <PopoverTrigger asChild>
+                                                    <Button
+                                                        type="button"
+                                                        variant="outline"
+                                                        disabled={formValues.schedule_type !== "once"}
+                                                        className="h-8 text-sm justify-start min-w-[180px]"
+                                                    >
+                                                        {onceSelectedDate ? format(onceSelectedDate, "yyyy/MM/dd") : "选择日期"}
+                                                    </Button>
+                                                </PopoverTrigger>
+                                                <PopoverContent className="w-auto p-0" align="start">
+                                                    <DateCalendar
+                                                        mode="single"
+                                                        selected={onceSelectedDate}
+                                                        onSelect={handleOnceDateChange}
+                                                    />
+                                                </PopoverContent>
+                                            </Popover>
+                                            <Input
+                                                type="time"
+                                                step={60}
+                                                value={onceTimePart}
+                                                onChange={(e) => handleOnceTimeChange(e.target.value)}
+                                                disabled={formValues.schedule_type !== "once" || !onceDatePart}
+                                                className="h-8 text-sm w-28"
+                                            />
+                                        </div>
+                                        <div className="text-[11px] text-muted-foreground">
+                                            {onceRunAtParts ? `已选择: ${onceRunAtParts.date} ${onceRunAtParts.time}` : "请先选择日期和时间"}
+                                        </div>
                                     </div>
                                 </div>
                                 <div className="flex items-start gap-2">
@@ -1068,7 +1329,14 @@ export default function ScheduleWindow() {
                         </div>
                     </div>
                     <DialogFooter className="gap-2">
-                        <Button variant="outline" size="sm" onClick={() => setIsDialogOpen(false)}>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                                setEditingTaskId(null);
+                                setIsDialogOpen(false);
+                            }}
+                        >
                             取消
                         </Button>
                         <Button size="sm" onClick={handleSave} disabled={isSaving}>
