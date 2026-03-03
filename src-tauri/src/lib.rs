@@ -55,7 +55,8 @@ use crate::api::plugin_api::{
 };
 use crate::api::scheduled_task_api::{
     create_scheduled_task, delete_scheduled_task, list_scheduled_task_logs,
-    list_scheduled_task_runs, list_scheduled_tasks, run_scheduled_task_now, update_scheduled_task,
+    list_scheduled_task_runs, list_scheduled_tasks, run_scheduled_task_now, stop_scheduled_task_run,
+    update_scheduled_task,
 };
 use crate::api::skill_api::{
     bulk_update_assistant_skills, cleanup_orphaned_skill_configs, delete_skill,
@@ -807,6 +808,7 @@ pub fn run() {
             update_scheduled_task,
             delete_scheduled_task,
             run_scheduled_task_now,
+            stop_scheduled_task_run,
             list_scheduled_task_logs,
             list_scheduled_task_runs,
             // Plugin commands

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { format } from "date-fns";
 import { useTheme } from "@/hooks/useTheme";
@@ -19,7 +19,7 @@ import { ConfigPageLayout, SidebarList, ListItemButton, EmptyState } from "@/com
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { AssistantListItem } from "@/data/Assistant";
 import { useAssistantListListener } from "@/hooks/useAssistantListListener";
-import { Calendar, Clock, Plus, RefreshCw, Trash2, Pencil, Play, Bell, HelpCircle } from "lucide-react";
+import { Calendar, Clock, Plus, RefreshCw, Trash2, Pencil, Play, Bell, HelpCircle, Square } from "lucide-react";
 
 interface ScheduledTask {
     id: number;
@@ -60,6 +60,15 @@ interface ScheduledTaskRun {
     errorMessage?: string | null;
     startedTime: string;
     finishedTime?: string | null;
+}
+
+interface ScheduledTaskToolLogPayload {
+    callId?: string;
+    serverName?: string;
+    toolName?: string;
+    success?: boolean;
+    parameters?: unknown;
+    result?: unknown;
 }
 
 interface ScheduledTaskFormValues {
@@ -114,6 +123,15 @@ const logTypeLabels: Record<string, string> = {
     start: "开始",
     task_prompt: "任务指令",
     assistant: "助手信息",
+    tool_round: "工具轮次",
+    tool_call: "工具调用",
+    tool_result: "工具结果",
+    loop_done: "执行完成",
+    llm_retry: "重试",
+    timeout: "超时",
+    max_rounds: "达到轮次上限",
+    cancel_request: "停止请求",
+    cancel: "已停止",
     response: "任务输出",
     notify_raw: "通知判定原文",
     notify_result: "通知判定结果",
@@ -129,6 +147,17 @@ const toLocalDatetimeInput = (value?: string | null) => {
 };
 
 const DEFAULT_ONCE_TIME = "09:00";
+
+const formatToolLogValue = (value: unknown): string => {
+    if (typeof value === "string") {
+        return value;
+    }
+    try {
+        return JSON.stringify(value, null, 2);
+    } catch {
+        return String(value ?? "");
+    }
+};
 
 const pad2 = (value: number) => String(value).padStart(2, "0");
 
@@ -306,12 +335,15 @@ export default function ScheduleWindow() {
     const [isHelpDialogOpen, setIsHelpDialogOpen] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
     const [isRunning, setIsRunning] = useState(false);
+    const [isStopping, setIsStopping] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [runEntries, setRunEntries] = useState<ScheduledTaskRun[]>([]);
     const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
     const [logEntries, setLogEntries] = useState<ScheduledTaskLog[]>([]);
     const [isLogLoading, setIsLogLoading] = useState(false);
+    const [selectedToolLog, setSelectedToolLog] = useState<ScheduledTaskLog | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<ScheduledTask | null>(null);
+    const autoRefreshBusyRef = useRef(false);
     const [formValues, setFormValues] = useState<ScheduledTaskFormValues>({
         name: "",
         is_enabled: true,
@@ -409,38 +441,51 @@ export default function ScheduleWindow() {
     }, [loadTasks, loadAssistants]);
 
     const loadRuns = useCallback(
-        async (taskId?: number | null) => {
+        async (taskId?: number | null, options?: { silent?: boolean }) => {
             if (!taskId) {
                 setRunEntries([]);
                 setSelectedRunId(null);
                 return;
             }
-            setIsLogLoading(true);
+            const silent = options?.silent ?? false;
+            if (!silent) {
+                setIsLogLoading(true);
+            }
             try {
                 const result = await invoke<{ runs: ScheduledTaskRun[] }>("list_scheduled_task_runs", {
                     taskId,
                     limit: 50,
                 });
                 setRunEntries(result.runs);
-                setSelectedRunId(result.runs[0]?.runId ?? null);
+                setSelectedRunId((prev) => {
+                    if (prev && result.runs.some((run) => run.runId === prev)) {
+                        return prev;
+                    }
+                    return result.runs[0]?.runId ?? null;
+                });
             } catch (error) {
                 console.error("加载定时任务运行记录失败:", error);
                 setRunEntries([]);
                 setSelectedRunId(null);
             } finally {
-                setIsLogLoading(false);
+                if (!silent) {
+                    setIsLogLoading(false);
+                }
             }
         },
         []
     );
 
     const loadLogs = useCallback(
-        async (taskId?: number | null, runId?: string | null) => {
+        async (taskId?: number | null, runId?: string | null, options?: { silent?: boolean }) => {
             if (!taskId || !runId) {
                 setLogEntries([]);
                 return;
             }
-            setIsLogLoading(true);
+            const silent = options?.silent ?? false;
+            if (!silent) {
+                setIsLogLoading(true);
+            }
             try {
                 const result = await invoke<{ logs: ScheduledTaskLog[] }>("list_scheduled_task_logs", {
                     taskId,
@@ -452,7 +497,9 @@ export default function ScheduleWindow() {
                 console.error("加载定时任务日志失败:", error);
                 setLogEntries([]);
             } finally {
-                setIsLogLoading(false);
+                if (!silent) {
+                    setIsLogLoading(false);
+                }
             }
         },
         []
@@ -465,6 +512,36 @@ export default function ScheduleWindow() {
     useEffect(() => {
         loadLogs(selectedTask?.id ?? null, selectedRunId);
     }, [loadLogs, selectedTask?.id, selectedRunId]);
+
+    useEffect(() => {
+        if (!selectedTask?.id) {
+            return;
+        }
+
+        const refreshNow = async () => {
+            if (autoRefreshBusyRef.current) {
+                return;
+            }
+            autoRefreshBusyRef.current = true;
+            try {
+                await loadRuns(selectedTask.id, { silent: true });
+                const runId = selectedRunId ?? runEntries[0]?.runId ?? null;
+                if (runId) {
+                    await loadLogs(selectedTask.id, runId, { silent: true });
+                }
+            } finally {
+                autoRefreshBusyRef.current = false;
+            }
+        };
+
+        const timer = window.setInterval(() => {
+            void refreshNow();
+        }, 2000);
+
+        return () => {
+            window.clearInterval(timer);
+        };
+    }, [loadLogs, loadRuns, runEntries, selectedRunId, selectedTask?.id]);
 
     const handleRefresh = useCallback(async () => {
         setIsRefreshing(true);
@@ -641,6 +718,7 @@ export default function ScheduleWindow() {
         async (task: ScheduledTask) => {
             setIsRunning(true);
             try {
+                void loadRuns(task.id, { silent: true });
                 const result = await invoke<{ success: boolean; notify: boolean; summary?: string; error?: string }>(
                     "run_scheduled_task_now",
                     { taskId: task.id }
@@ -653,7 +731,7 @@ export default function ScheduleWindow() {
                     description: result.summary ?? "已完成执行",
                 });
                 await loadTasks();
-                await loadRuns(task.id);
+                await loadRuns(task.id, { silent: true });
             } catch (error) {
                 toast({
                     title: "执行失败",
@@ -664,8 +742,62 @@ export default function ScheduleWindow() {
                 setIsRunning(false);
             }
         },
-        [loadTasks, toast]
+        [loadRuns, loadTasks, toast]
     );
+
+    const runningRun = useMemo(
+        () => runEntries.find((run) => run.status === "running") ?? null,
+        [runEntries]
+    );
+
+    const handleStopRun = useCallback(async () => {
+        if (!selectedTask || !runningRun) {
+            return;
+        }
+        setIsStopping(true);
+        try {
+            await invoke<boolean>("stop_scheduled_task_run", {
+                taskId: selectedTask.id,
+                runId: runningRun.runId,
+            });
+            toast({
+                title: "已发送停止请求",
+                description: `正在停止运行 ${runningRun.runId.slice(0, 8)}...`,
+            });
+            await loadRuns(selectedTask.id, { silent: true });
+            await loadLogs(selectedTask.id, runningRun.runId, { silent: true });
+        } catch (error) {
+            toast({
+                title: "停止失败",
+                description: getErrorMessage(error),
+                variant: "destructive",
+            });
+        } finally {
+            setIsStopping(false);
+        }
+    }, [loadLogs, loadRuns, runningRun, selectedTask, toast]);
+
+    const parseToolLogPayload = useCallback((log: ScheduledTaskLog): ScheduledTaskToolLogPayload | null => {
+        if (log.messageType !== "tool_call" && log.messageType !== "tool_result") {
+            return null;
+        }
+        try {
+            const parsed = JSON.parse(log.content) as ScheduledTaskToolLogPayload;
+            if (!parsed || typeof parsed !== "object") {
+                return null;
+            }
+            return parsed;
+        } catch {
+            return null;
+        }
+    }, []);
+
+    const selectedToolPayload = useMemo(() => {
+        if (!selectedToolLog) {
+            return null;
+        }
+        return parseToolLogPayload(selectedToolLog);
+    }, [parseToolLogPayload, selectedToolLog]);
 
     const scheduleDescription = useMemo(() => {
         if (!selectedTask) return "";
@@ -870,6 +1002,17 @@ export default function ScheduleWindow() {
                                 >
                                     <Play className="h-4 w-4" />
                                 </Button>
+                                {runningRun && (
+                                    <Button
+                                        variant="outline"
+                                        size="icon"
+                                        onClick={handleStopRun}
+                                        disabled={isStopping}
+                                        title="停止当前执行"
+                                    >
+                                        <Square className="h-4 w-4" />
+                                    </Button>
+                                )}
                                 <Button
                                     variant="destructive"
                                     size="icon"
@@ -1015,9 +1158,36 @@ export default function ScheduleWindow() {
                                                         {log.runId.slice(0, 8)}
                                                     </span>
                                                 </div>
-                                                <div className="text-[11px] whitespace-pre-wrap break-words">
-                                                    {log.content}
-                                                </div>
+                                                {(() => {
+                                                    const toolPayload = parseToolLogPayload(log);
+                                                    if (!toolPayload) {
+                                                        return (
+                                                            <div className="text-[11px] whitespace-pre-wrap break-words">
+                                                                {log.content}
+                                                            </div>
+                                                        );
+                                                    }
+                                                    const toolText = `${toolPayload.serverName ?? "-"} / ${toolPayload.toolName ?? "-"}`;
+                                                    const statusText =
+                                                        log.messageType === "tool_result"
+                                                            ? (toolPayload.success ? "执行成功" : "执行失败")
+                                                            : "准备执行";
+                                                    return (
+                                                        <div className="space-y-1">
+                                                            <div className="text-[11px] whitespace-pre-wrap break-words">
+                                                                {statusText}：{toolText}
+                                                            </div>
+                                                            <Button
+                                                                type="button"
+                                                                variant="link"
+                                                                className="h-auto p-0 text-[11px]"
+                                                                onClick={() => setSelectedToolLog(log)}
+                                                            >
+                                                                查看工具详情（参数/返回）
+                                                            </Button>
+                                                        </div>
+                                                    );
+                                                })()}
                                             </div>
                                         ))
                                     )
@@ -1043,15 +1213,19 @@ export default function ScheduleWindow() {
         [
             assistantName,
             handleRunNow,
+            handleStopRun,
             hasDetailPrompts,
             isLogLoading,
             isRunning,
+            isStopping,
             loadRuns,
             logEntries,
             openCreateDialog,
             openEditDialog,
+            parseToolLogPayload,
             renderLogTag,
             renderRunStatus,
+            runningRun,
             runEntries,
             scheduleDescription,
             selectedRunId,
@@ -1343,6 +1517,46 @@ export default function ScheduleWindow() {
                             {isSaving ? "保存中..." : "保存任务"}
                         </Button>
                     </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            <Dialog open={!!selectedToolLog} onOpenChange={(open) => !open && setSelectedToolLog(null)}>
+                <DialogContent className="sm:max-w-[680px] max-h-[80vh] overflow-y-auto">
+                    <DialogHeader>
+                        <DialogTitle className="text-base">工具调用详情</DialogTitle>
+                    </DialogHeader>
+                    {selectedToolPayload ? (
+                        <div className="space-y-3 text-xs">
+                            <div className="rounded border bg-muted/20 p-2">
+                                <div><span className="text-muted-foreground">工具：</span>{selectedToolPayload.serverName ?? "-"} / {selectedToolPayload.toolName ?? "-"}</div>
+                                <div><span className="text-muted-foreground">Call ID：</span>{selectedToolPayload.callId ?? "-"}</div>
+                                {"success" in selectedToolPayload && (
+                                    <div>
+                                        <span className="text-muted-foreground">状态：</span>
+                                        {selectedToolPayload.success ? "成功" : "失败"}
+                                    </div>
+                                )}
+                            </div>
+                            <div className="space-y-1">
+                                <div className="font-medium">参数</div>
+                                <pre className="rounded border bg-muted/20 p-2 whitespace-pre-wrap break-all max-h-44 overflow-auto">
+                                    {formatToolLogValue(selectedToolPayload.parameters)}
+                                </pre>
+                            </div>
+                            {"result" in selectedToolPayload && (
+                                <div className="space-y-1">
+                                    <div className="font-medium">返回结果</div>
+                                    <pre className="rounded border bg-muted/20 p-2 whitespace-pre-wrap break-all max-h-56 overflow-auto">
+                                        {formatToolLogValue(selectedToolPayload.result)}
+                                    </pre>
+                                </div>
+                            )}
+                        </div>
+                    ) : (
+                        <pre className="rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-all max-h-[60vh] overflow-auto">
+                            {selectedToolLog?.content ?? ""}
+                        </pre>
+                    )}
                 </DialogContent>
             </Dialog>
 
