@@ -27,6 +27,65 @@ mod tests {
         assert_eq!(normalize_tool_arguments(&val), "{}");
     }
 
+    #[test]
+    fn test_build_mcp_tool_call_ui_hint_with_call_id() {
+        let hint = build_mcp_tool_call_ui_hint(
+            "zentao",
+            "get_product_bugs",
+            r#"{"product_id":4}"#,
+            Some(123),
+            "llm-call-1",
+        );
+        assert!(hint.contains("\"call_id\":123"));
+        assert!(hint.contains("\"llm_call_id\":\"llm-call-1\""));
+    }
+
+    #[test]
+    fn test_build_mcp_tool_call_ui_hint_without_call_id() {
+        let hint = build_mcp_tool_call_ui_hint(
+            "zentao",
+            "get_product_bugs",
+            r#"{"product_id":4}"#,
+            None,
+            "llm-call-2",
+        );
+        assert!(!hint.contains("\"call_id\""));
+        assert!(hint.contains("\"llm_call_id\":\"llm-call-2\""));
+    }
+
+    #[test]
+    fn test_extract_prompt_tool_calls_basic() {
+        let raw = r#"我来帮你查看项目 bug。
+<mcp_tool_call>
+  <server_name>zentao</server_name>
+  <tool_name>get_product_bugs</tool_name>
+  <parameters>{"product_id":4,"limit":100}</parameters>
+</mcp_tool_call>"#;
+
+        let (calls, sanitized) = extract_prompt_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].fn_name, "zentao__get_product_bugs");
+        assert_eq!(calls[0].fn_arguments["product_id"], 4);
+        assert_eq!(calls[0].fn_arguments["limit"], 100);
+        assert!(!calls[0].call_id.is_empty());
+        assert!(!sanitized.contains("<mcp_tool_call>"));
+        assert!(!sanitized.contains("</mcp_tool_call>"));
+    }
+
+    #[test]
+    fn test_extract_prompt_tool_calls_invalid_parameters_fallback_to_empty_object() {
+        let raw = r#"<mcp_tool_call>
+  <server_name>zentao</server_name>
+  <tool_name>get_product_bugs</tool_name>
+  <parameters>not-json</parameters>
+</mcp_tool_call>"#;
+
+        let (calls, sanitized) = extract_prompt_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].fn_arguments, serde_json::json!({}));
+        assert!(!sanitized.contains("<mcp_tool_call>"));
+    }
+
     // ── parse_notify_bool_value ──────────────────────────────────────
 
     #[test]

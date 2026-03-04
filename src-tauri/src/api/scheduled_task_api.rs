@@ -269,64 +269,161 @@ pub(crate) fn normalize_tool_arguments(arguments: &serde_json::Value) -> String 
     }
 }
 
+/// 从 prompt 模式的 `<mcp_tool_call>` 标签中提取工具调用。
+///
+/// 返回值：
+/// - `Vec<ToolCall>`: 解析出的工具调用（用于后续统一执行）
+/// - `String`: 去除 `<mcp_tool_call>` 标签后的文本
+pub(crate) fn extract_prompt_tool_calls(content: &str) -> (Vec<ToolCall>, String) {
+    let mcp_regex = regex::Regex::new(r"<mcp_tool_call>\s*<server_name>([^<]*)</server_name>\s*<tool_name>([^<]*)</tool_name>\s*<parameters>([\s\S]*?)</parameters>\s*</mcp_tool_call>")
+        .expect("valid mcp tool call regex");
+
+    let mut tool_calls = Vec::new();
+    for cap in mcp_regex.captures_iter(content) {
+        let Some(server_name) = cap.get(1).map(|m| m.as_str().trim()).filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let Some(tool_name) = cap.get(2).map(|m| m.as_str().trim()).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let parameters_raw = cap.get(3).map(|m| m.as_str().trim()).unwrap_or("{}");
+        let fn_arguments = serde_json::from_str::<serde_json::Value>(parameters_raw)
+            .ok()
+            .filter(|value| value.is_object())
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        tool_calls.push(ToolCall {
+            call_id: Uuid::new_v4().to_string(),
+            fn_name: crate::api::ai_api::build_tool_name(server_name, tool_name),
+            fn_arguments,
+            thought_signatures: None,
+        });
+    }
+
+    if tool_calls.is_empty() {
+        (tool_calls, content.to_string())
+    } else {
+        let sanitized_content = mcp_regex.replace_all(content, "").to_string();
+        (tool_calls, sanitized_content)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreparedAgenticToolCall {
+    llm_call_id: String,
+    call_db_id: Option<i64>,
+    call_record_error: Option<String>,
+    server_name: String,
+    tool_name: String,
+    params_str: String,
+    params_json: serde_json::Value,
+}
+
+pub(crate) fn build_mcp_tool_call_ui_hint(
+    server_name: &str,
+    tool_name: &str,
+    parameters: &str,
+    call_db_id: Option<i64>,
+    llm_call_id: &str,
+) -> String {
+    let payload = match call_db_id {
+        Some(call_id) => serde_json::json!({
+            "server_name": server_name,
+            "tool_name": tool_name,
+            "parameters": parameters,
+            "call_id": call_id,
+            "llm_call_id": llm_call_id,
+        }),
+        None => serde_json::json!({
+            "server_name": server_name,
+            "tool_name": tool_name,
+            "parameters": parameters,
+            "llm_call_id": llm_call_id,
+        }),
+    };
+    format!("\n\n<!-- MCP_TOOL_CALL:{} -->\n", payload)
+}
+
+async fn create_scheduled_tool_call_record(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    response_message_id: Option<i64>,
+    server_name: &str,
+    tool_name: &str,
+    parameters: &str,
+    llm_call_id: &str,
+) -> Result<i64, String> {
+    crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
+        app_handle.clone(),
+        conversation_id,
+        response_message_id,
+        server_name.to_string(),
+        tool_name.to_string(),
+        parameters.to_string(),
+        Some(llm_call_id),
+        response_message_id,
+    )
+    .await
+    .map(|record| record.id)
+}
+
 /// 执行单个工具调用，直接调用底层 execute_tool_by_transport
 ///
 /// 返回 (is_success, result_or_error_text)
 async fn execute_single_tool(
     app_handle: &tauri::AppHandle,
-    server_name: &str,
-    tool_name: &str,
-    parameters: &str,
-    conversation_id: i64,
-    response_message_id: i64,
-    llm_call_id: &str,
+    call_db_id: i64,
     timeout: Duration,
     cancel_token: Option<CancellationToken>,
-) -> (bool, String, Option<i64>) {
-    // 1. 创建 tool_call 记录（保持 DB 一致性）
-    let tool_call_record = crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
-        app_handle.clone(),
-        conversation_id,
-        Some(response_message_id),
-        server_name.to_string(),
-        tool_name.to_string(),
-        parameters.to_string(),
-        Some(llm_call_id),
-        Some(response_message_id),
-    )
-    .await;
-
-    let _record_id = match &tool_call_record {
-        Ok(r) => Some(r.id),
-        Err(_) => None,
-    };
-
-    if let Err(e) = &tool_call_record {
-        warn!(error = %e, "failed to create mcp_tool_call record for agentic loop");
-        return (false, format!("Error: failed to create tool call record: {}", e), None);
-    }
-    let record = tool_call_record.unwrap();
-    let call_db_id = record.id;
-
-    // 2. Mark executing
-    if let Ok(mcp_db) = MCPDatabase::new(app_handle) {
-        let _ = mcp_db.update_mcp_tool_call_status(call_db_id, "executing", None, None);
-    }
-
-    // 3. 获取 MCPServer 并执行工具
+) -> (bool, String) {
     let mcp_db = match MCPDatabase::new(app_handle) {
         Ok(db) => db,
         Err(e) => {
             let err = format!("Error: 初始化 MCP 数据库失败: {}", e);
-            return (false, err, Some(call_db_id));
+            return (false, err);
         }
     };
+
+    let mut record = match mcp_db.get_mcp_tool_call(call_db_id) {
+        Ok(record) => record,
+        Err(e) => {
+            let err = format!("Error: 获取工具调用记录失败: {}", e);
+            return (false, err);
+        }
+    };
+
+    // 2. Mark executing
+    match mcp_db.mark_mcp_tool_call_executing_if_pending(call_db_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            if record.status == "success" {
+                return (true, record.result.unwrap_or_default());
+            }
+            if record.status == "failed" {
+                let err = record.error.unwrap_or_else(|| "工具执行失败".to_string());
+                return (false, format!("Error: {}", err));
+            }
+            let _ = mcp_db.update_mcp_tool_call_status(call_db_id, "executing", None, None);
+        }
+        Err(e) => {
+            let err = format!("Error: 更新工具状态失败: {}", e);
+            let _ = mcp_db.update_mcp_tool_call_status(call_db_id, "failed", None, Some(&err));
+            return (false, err);
+        }
+    }
+
+    if let Ok(latest_record) = mcp_db.get_mcp_tool_call(call_db_id) {
+        record = latest_record;
+    }
+
+    // 3. 获取 MCPServer 并执行工具
     let server = match mcp_db.get_mcp_server(record.server_id) {
         Ok(s) => s,
         Err(e) => {
             let err = format!("Error: 获取 MCP 服务器失败: {}", e);
             let _ = mcp_db.update_mcp_tool_call_status(call_db_id, "failed", None, Some(&err));
-            return (false, err, Some(call_db_id));
+            return (false, err);
         }
     };
 
@@ -335,7 +432,7 @@ async fn execute_single_tool(
         if token.is_cancelled() {
             let err = "Error: 工具执行已取消".to_string();
             let _ = mcp_db.update_mcp_tool_call_status(call_db_id, "failed", None, Some(&err));
-            return (false, err, Some(call_db_id));
+            return (false, err);
         }
     }
     let exec_result = tokio::time::timeout(
@@ -344,9 +441,9 @@ async fn execute_single_tool(
             app_handle,
             &feature_config_state,
             &server,
-            tool_name,
-            parameters,
-            Some(conversation_id),
+            &record.tool_name,
+            &record.parameters,
+            Some(record.conversation_id),
             cancel_token,
         ),
     )
@@ -356,17 +453,17 @@ async fn execute_single_tool(
     match exec_result {
         Ok(Ok(result)) => {
             let _ = mcp_db.update_mcp_tool_call_status(call_db_id, "success", Some(&result), None);
-            (true, result, Some(call_db_id))
+            (true, result)
         }
         Ok(Err(e)) => {
             let err_str = format!("Error: {}", e);
             let _ = mcp_db.update_mcp_tool_call_status(call_db_id, "failed", None, Some(&err_str));
-            (false, err_str, Some(call_db_id))
+            (false, err_str)
         }
         Err(_) => {
             let err_str = format!("Error: 工具执行超时 ({}s)", timeout.as_secs());
             let _ = mcp_db.update_mcp_tool_call_status(call_db_id, "failed", None, Some(&err_str));
-            (false, err_str, Some(call_db_id))
+            (false, err_str)
         }
     }
 }
@@ -517,9 +614,22 @@ async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResul
         };
 
         // 提取文本和 tool_calls
-        let response_text = chat_response.first_text().unwrap_or("").to_string();
-        let captured_tool_calls: Vec<ToolCall> =
+        let mut response_text = chat_response.first_text().unwrap_or("").to_string();
+        let mut captured_tool_calls: Vec<ToolCall> =
             chat_response.tool_calls().into_iter().cloned().collect();
+        if captured_tool_calls.is_empty() {
+            let (prompt_tool_calls, sanitized_text) = extract_prompt_tool_calls(&response_text);
+            if !prompt_tool_calls.is_empty() {
+                debug!(
+                    task_id = ctx.task_id,
+                    round,
+                    prompt_tool_calls_count = prompt_tool_calls.len(),
+                    "agentic loop parsed prompt mode mcp calls"
+                );
+                captured_tool_calls = prompt_tool_calls;
+                response_text = sanitized_text;
+            }
+        }
 
         debug!(
             task_id = ctx.task_id,
@@ -576,20 +686,61 @@ async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResul
             format!("第 {} 轮：{} 个工具调用", round, captured_tool_calls.len()),
         );
 
-        // 为每个 tool_call 插入 MCP_TOOL_CALL 注释到 response content
+        // 先创建 tool_call 记录并写入带 call_id 的 MCP_TOOL_CALL 注释，保证后续可追踪完整状态
+        let mut prepared_tool_calls: Vec<PreparedAgenticToolCall> = Vec::new();
         for tc in &captured_tool_calls {
             let (server_name, tool_name) = resolve_tool_name(&tc.fn_name, ctx.tool_name_mapping);
             let params_str = normalize_tool_arguments(&tc.fn_arguments);
-            let ui_hint = format!(
-                "\n\n<!-- MCP_TOOL_CALL:{} -->\n",
-                serde_json::json!({
-                    "server_name": server_name,
-                    "tool_name": tool_name,
-                    "parameters": params_str,
-                    "llm_call_id": tc.call_id,
-                })
-            );
-            response_content.push_str(&ui_hint);
+            let params_json = serde_json::from_str::<serde_json::Value>(&params_str)
+                .unwrap_or_else(|_| serde_json::Value::String(params_str.clone()));
+
+            let response_message_id_opt = if response_message_id > 0 {
+                Some(response_message_id)
+            } else {
+                None
+            };
+            let (call_db_id, call_record_error) = match create_scheduled_tool_call_record(
+                ctx.app_handle,
+                ctx.conversation_id,
+                response_message_id_opt,
+                &server_name,
+                &tool_name,
+                &params_str,
+                &tc.call_id,
+            )
+            .await
+            {
+                Ok(call_id) => (Some(call_id), None),
+                Err(e) => {
+                    warn!(
+                        task_id = ctx.task_id,
+                        round,
+                        llm_call_id = %tc.call_id,
+                        server = %server_name,
+                        tool = %tool_name,
+                        error = %e,
+                        "failed to create mcp tool call record for scheduled task round"
+                    );
+                    (None, Some(format!("Error: failed to create tool call record: {}", e)))
+                }
+            };
+
+            response_content.push_str(&build_mcp_tool_call_ui_hint(
+                &server_name,
+                &tool_name,
+                &params_str,
+                call_db_id,
+                &tc.call_id,
+            ));
+            prepared_tool_calls.push(PreparedAgenticToolCall {
+                llm_call_id: tc.call_id.clone(),
+                call_db_id,
+                call_record_error,
+                server_name,
+                tool_name,
+                params_str,
+                params_json,
+            });
         }
 
         // 保存含 tool_calls 注释的完整 response 内容和 tool_calls_json
@@ -607,7 +758,7 @@ async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResul
         messages.push(("response".to_string(), response_content.clone(), Vec::new()));
 
         // 执行每个工具并收集结果
-        for tc in &captured_tool_calls {
+        for tool_call in &prepared_tool_calls {
             if ctx.cancel_token.is_cancelled() {
                 info!(task_id = ctx.task_id, round, "agentic loop cancelled before tool execution");
                 log_task_message(ctx.app_handle, ctx.task_id, ctx.run_id, "cancel", "任务已停止");
@@ -621,16 +772,12 @@ async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResul
                 };
             }
 
-            let (server_name, tool_name) = resolve_tool_name(&tc.fn_name, ctx.tool_name_mapping);
-            let params_str = normalize_tool_arguments(&tc.fn_arguments);
-            let params_json = serde_json::from_str::<serde_json::Value>(&params_str)
-                .unwrap_or_else(|_| serde_json::Value::String(params_str.clone()));
-
             tool_calls_total += 1;
             info!(
                 task_id = ctx.task_id, round,
-                server = %server_name, tool = %tool_name,
-                call_id = %tc.call_id,
+                server = %tool_call.server_name, tool = %tool_call.tool_name,
+                llm_call_id = %tool_call.llm_call_id,
+                call_db_id = ?tool_call.call_db_id,
                 "agentic loop executing tool"
             );
             log_task_message(
@@ -639,26 +786,32 @@ async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResul
                 ctx.run_id,
                 "tool_call",
                 serde_json::json!({
-                    "callId": tc.call_id,
-                    "serverName": server_name,
-                    "toolName": tool_name,
-                    "parameters": params_json.clone(),
+                    "callId": tool_call.llm_call_id.clone(),
+                    "callDbId": tool_call.call_db_id,
+                    "serverName": tool_call.server_name.clone(),
+                    "toolName": tool_call.tool_name.clone(),
+                    "parameters": tool_call.params_json.clone(),
                 })
                 .to_string(),
             );
 
-            let (success, result_text, _call_db_id) = execute_single_tool(
-                ctx.app_handle,
-                &server_name,
-                &tool_name,
-                &params_str,
-                ctx.conversation_id,
-                response_message_id,
-                &tc.call_id,
-                Duration::from_secs(AGENTIC_LOOP_PER_TOOL_TIMEOUT_SECS),
-                Some(ctx.cancel_token.clone()),
-            )
-            .await;
+            let (success, result_text) = match tool_call.call_db_id {
+                Some(call_db_id) => {
+                    execute_single_tool(
+                        ctx.app_handle,
+                        call_db_id,
+                        Duration::from_secs(AGENTIC_LOOP_PER_TOOL_TIMEOUT_SECS),
+                        Some(ctx.cancel_token.clone()),
+                    )
+                    .await
+                }
+                None => (
+                    false,
+                    tool_call.call_record_error.clone().unwrap_or_else(|| {
+                        "Error: failed to create tool call record before execution".to_string()
+                    }),
+                ),
+            };
 
             if success {
                 tool_calls_success += 1;
@@ -666,10 +819,22 @@ async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResul
                 tool_calls_failed += 1;
             }
 
+            let tool_result_call_id = if tool_call.llm_call_id.trim().is_empty() {
+                tool_call
+                    .call_db_id
+                    .map(|id| format!("mcp_tool_call_{}", id))
+                    .unwrap_or_else(|| Uuid::new_v4().to_string())
+            } else {
+                tool_call.llm_call_id.clone()
+            };
             // 构建 tool_result 消息内容（与 trigger_conversation_continuation_batch 格式一致）
             let tool_result_content = format!(
                 "Tool execution completed:\n\nTool Call ID: {}\nTool: {}\nServer: {}\nParameters: {}\nResult:\n{}",
-                tc.call_id, tool_name, server_name, params_str, result_text
+                tool_result_call_id.as_str(),
+                tool_call.tool_name.as_str(),
+                tool_call.server_name.as_str(),
+                tool_call.params_str.as_str(),
+                result_text
             );
 
             // 保存 tool_result 到 DB
@@ -696,11 +861,12 @@ async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResul
                 ctx.run_id,
                 "tool_result",
                 serde_json::json!({
-                    "callId": tc.call_id,
-                    "serverName": server_name,
-                    "toolName": tool_name,
+                    "callId": tool_result_call_id,
+                    "callDbId": tool_call.call_db_id,
+                    "serverName": tool_call.server_name.clone(),
+                    "toolName": tool_call.tool_name.clone(),
                     "success": success,
-                    "parameters": params_json,
+                    "parameters": tool_call.params_json.clone(),
                     "result": result_text,
                 })
                 .to_string(),
