@@ -604,21 +604,29 @@ pub fn awaken_aipp(app_handle: &AppHandle) {
         }
     }
 
-    // 都不可见时，显示 ask 窗口
-    if let Some(window) = ask_window {
-        debug!(ts=%Local::now().to_string(), "Showing hidden ask window");
+    // 都不可见时，显示/创建 chat_ui 窗口
+    if let Some(window) = chat_ui_window {
+        debug!(ts=%Local::now().to_string(), "Showing hidden chat_ui window");
         #[cfg(desktop)]
         {
             if window.is_minimized().unwrap_or(false) {
-                window.unminimize().unwrap();
+                let _ = window.unminimize();
             }
-            window.show().unwrap();
-            window.set_focus().unwrap();
+            // 首次显示时最大化
+            if !window.is_visible().unwrap_or(false) {
+                let _ = window.maximize();
+            }
+            let _ = window.show();
+            let _ = window.set_focus();
+            // 显示聊天窗口时隐藏 Ask 窗口
+            if let Some(ask_win) = ask_window {
+                let _ = ask_win.hide();
+            }
         }
     } else {
-        // 窗口不存在时创建（正常情况下不应该发生）
-        info!(ts=%Local::now().to_string(), "Creating ask window (fallback)");
-        create_ask_window(app_handle);
+        // 窗口不存在时创建 chat_ui 窗口
+        info!(ts=%Local::now().to_string(), "Creating chat_ui window (fallback)");
+        create_chat_ui_window(app_handle);
     }
 }
 

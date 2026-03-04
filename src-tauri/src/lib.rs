@@ -402,7 +402,7 @@ pub fn run() {
                 let tray = app.tray_by_id("aipp").unwrap();
                 tray.set_menu(Some(tray_menu))?;
 
-                // 左键点击直接打开 Ask 窗口
+                // 左键点击直接打开 Chat 窗口
                 let app_handle_for_click = app_handle.clone();
                 tray.on_tray_icon_event(move |_app, event| {
                     if let TrayIconEvent::Click {
@@ -411,7 +411,11 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        handle_open_ask_window(&app_handle_for_click);
+                        if let Some(chat_window) = app_handle_for_click.get_webview_window("chat_ui") {
+                            open_chat_ui_window_inner(&app_handle_for_click, &chat_window);
+                        } else {
+                            crate::window::create_chat_ui_window(&app_handle_for_click);
+                        }
                     }
                 });
 
