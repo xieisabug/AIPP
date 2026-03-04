@@ -96,6 +96,32 @@ pub struct ActivityFocusChangeEvent {
     pub focus: ActivityFocus,
 }
 
+/// 对话运行阶段（用于驱动发送按钮等运行态 UI）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationRuntimePhase {
+    Idle,
+    UserPending,
+    AssistantStreaming,
+    McpExecuting,
+}
+
+/// 对话运行状态快照（语义化运行态，不依赖边框目标）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationRuntimeState {
+    pub conversation_id: i64,
+    pub is_running: bool,
+    pub phase: ConversationRuntimePhase,
+    pub epoch: u64,
+    pub revision: u64,
+}
+
+/// 运行状态快照事件
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeStateSnapshotEvent {
+    pub state: ConversationRuntimeState,
+}
+
 /// 闪亮边框主目标（后端单一真相源）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "target_type")]

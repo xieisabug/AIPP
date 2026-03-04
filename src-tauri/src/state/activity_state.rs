@@ -5,7 +5,8 @@ use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
 use crate::api::ai::events::{
-    ActivityFocus, ActivityFocusChangeEvent, ConversationEvent, ConversationShineState, ShineStateSnapshotEvent,
+    ActivityFocus, ActivityFocusChangeEvent, ConversationEvent, ConversationRuntimePhase,
+    ConversationRuntimeState, ConversationShineState, RuntimeStateSnapshotEvent, ShineStateSnapshotEvent,
     ShineTarget,
 };
 use crate::db::mcp_db::MCPDatabase;
@@ -38,6 +39,7 @@ impl Default for ConversationActivity {
 ///
 /// 统一管理每个对话的活动焦点状态，负责发送：
 /// - 兼容事件 `activity_focus_change`
+/// - 语义运行态事件 `runtime_state_snapshot`
 /// - 新事件 `shine_state_snapshot`
 #[derive(Clone)]
 pub struct ConversationActivityManager {
@@ -82,6 +84,29 @@ impl ConversationActivityManager {
         }
     }
 
+    fn focus_to_runtime_phase(focus: &ActivityFocus) -> ConversationRuntimePhase {
+        match focus {
+            ActivityFocus::None => ConversationRuntimePhase::Idle,
+            ActivityFocus::UserPending { .. } => ConversationRuntimePhase::UserPending,
+            ActivityFocus::AssistantStreaming { .. } => ConversationRuntimePhase::AssistantStreaming,
+            ActivityFocus::McpExecuting { .. } => ConversationRuntimePhase::McpExecuting,
+        }
+    }
+
+    fn build_runtime_state(
+        conversation_id: i64,
+        activity: &ConversationActivity,
+    ) -> ConversationRuntimeState {
+        let phase = Self::focus_to_runtime_phase(&activity.current);
+        ConversationRuntimeState {
+            conversation_id,
+            is_running: phase != ConversationRuntimePhase::Idle,
+            phase,
+            epoch: activity.epoch,
+            revision: activity.revision,
+        }
+    }
+
     fn build_shine_state(conversation_id: i64, activity: &ConversationActivity) -> ConversationShineState {
         ConversationShineState {
             conversation_id,
@@ -89,6 +114,21 @@ impl ConversationActivityManager {
             revision: activity.revision,
             primary_target: Self::focus_to_target(&activity.current),
         }
+    }
+
+    fn emit_runtime_state_snapshot(
+        app_handle: &tauri::AppHandle,
+        conversation_id: i64,
+        state: ConversationRuntimeState,
+    ) {
+        let event = RuntimeStateSnapshotEvent { state };
+        let _ = app_handle.emit(
+            &format!("conversation_event_{}", conversation_id),
+            ConversationEvent {
+                r#type: "runtime_state_snapshot".to_string(),
+                data: serde_json::to_value(event).unwrap(),
+            },
+        );
     }
 
     fn emit_shine_state_snapshot(
@@ -140,7 +180,7 @@ impl ConversationActivityManager {
     ) where
         F: FnOnce(&mut ConversationActivity),
     {
-        let (state_changed, focus_changed, focus, snapshot) = {
+        let (state_changed, focus_changed, focus, runtime_state, shine_snapshot) = {
             let mut activities = self.activities.write().await;
             let activity = activities.entry(conversation_id).or_default();
             let before = activity.clone();
@@ -163,6 +203,7 @@ impl ConversationActivityManager {
                 state_changed,
                 focus_changed,
                 activity.current.clone(),
+                Self::build_runtime_state(conversation_id, activity),
                 Self::build_shine_state(conversation_id, activity),
             )
         };
@@ -183,7 +224,8 @@ impl ConversationActivityManager {
             );
         }
 
-        Self::emit_shine_state_snapshot(app_handle, conversation_id, snapshot);
+        Self::emit_runtime_state_snapshot(app_handle, conversation_id, runtime_state);
+        Self::emit_shine_state_snapshot(app_handle, conversation_id, shine_snapshot);
     }
 
     /// 获取当前活动焦点
@@ -203,6 +245,21 @@ impl ConversationActivityManager {
             epoch: 0,
             revision: 0,
             primary_target: ShineTarget::None,
+        }
+    }
+
+    /// 获取当前语义化运行状态（用于发送按钮等运行态 UI）
+    pub async fn get_runtime_state(&self, conversation_id: i64) -> ConversationRuntimeState {
+        let activities = self.activities.read().await;
+        if let Some(activity) = activities.get(&conversation_id) {
+            return Self::build_runtime_state(conversation_id, activity);
+        }
+        ConversationRuntimeState {
+            conversation_id,
+            is_running: false,
+            phase: ConversationRuntimePhase::Idle,
+            epoch: 0,
+            revision: 0,
         }
     }
 

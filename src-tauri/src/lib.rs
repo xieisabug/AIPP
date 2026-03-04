@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::api::ai::acp::AcpPermissionState;
 use crate::api::ai_api::{
-    ask_ai, cancel_ai, get_activity_focus, get_shine_state, regenerate_ai,
+    ask_ai, cancel_ai, get_activity_focus, get_conversation_runtime_state, get_shine_state, regenerate_ai,
     regenerate_conversation_title, tool_result_continue_ask_ai,
 };
 use crate::api::assistant_api::{
@@ -593,6 +593,7 @@ pub fn run() {
             tool_result_continue_ask_ai,
             regenerate_ai,
             get_activity_focus,
+            get_conversation_runtime_state,
             get_shine_state,
             regenerate_conversation_title,
             generate_artifact_metadata,

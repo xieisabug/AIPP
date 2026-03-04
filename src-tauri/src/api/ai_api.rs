@@ -12,7 +12,8 @@ use crate::api::ai::conversation::{
     init_conversation, BranchSelection, ChatRequestBuildResult, ToolCallStrategy, ToolConfig,
 };
 use crate::api::ai::events::{
-    ActivityFocus, ConversationEvent, ConversationShineState, MessageAddEvent, MessageUpdateEvent,
+    ActivityFocus, ConversationEvent, ConversationRuntimeState, ConversationShineState,
+    MessageAddEvent, MessageUpdateEvent,
 };
 use crate::api::ai::title::generate_title;
 use crate::api::ai::types::{AiRequest, AiResponse, McpOverrideConfig};
@@ -1854,6 +1855,15 @@ pub async fn get_shine_state(
     conversation_id: i64,
 ) -> Result<ConversationShineState, String> {
     Ok(activity_manager.get_shine_state(conversation_id).await)
+}
+
+/// 获取指定对话的运行状态快照（用于发送按钮运行态判断）
+#[tauri::command]
+pub async fn get_conversation_runtime_state(
+    activity_manager: State<'_, ConversationActivityManager>,
+    conversation_id: i64,
+) -> Result<ConversationRuntimeState, String> {
+    Ok(activity_manager.get_runtime_state(conversation_id).await)
 }
 
 /// 重新生成对话标题

@@ -375,10 +375,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             setShiningMessageIds,
             setManualShineMessage,
             mcpToolCallStates,
-            activeMcpCallIds,
             shiningMcpCallId,
-            shineState,
-            streamingAssistantMessageIds,
+            runtimeState,
             updateShiningMessages,
             updateFunctionMap,
             clearStreamingMessages,
@@ -387,18 +385,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         } = useConversationEvents(conversationEventsOptions);
 
         const effectiveAiIsResponsing = useMemo(() => {
-            const hasPrimaryShineTarget = !!shineState && shineState.primary_target.target_type !== "none";
-            return (
-                aiIsResponsing ||
-                hasPrimaryShineTarget ||
-                activeMcpCallIds.size > 0 ||
-                streamingAssistantMessageIds.size > 0
-            );
+            if (runtimeState && runtimeState.conversation_id === Number(conversationId || 0)) {
+                return runtimeState.is_running;
+            }
+            return aiIsResponsing;
         }, [
             aiIsResponsing,
-            shineState,
-            activeMcpCallIds.size,
-            streamingAssistantMessageIds.size,
+            runtimeState?.conversation_id,
+            runtimeState?.is_running,
+            conversationId,
         ]);
 
         // 当 functionMap 变化时更新事件处理器
