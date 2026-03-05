@@ -35,7 +35,12 @@ function PluginWindow() {
     }, []);
 
     return (
-        <div style={{ backgroundColor: "white", width: "100vw", height: "100vh" }} data-tauri-drag-region>
+        <div
+            style={{ backgroundColor: "white", width: "100vw", height: "100vh" }}
+            data-tauri-drag-region
+            data-aipp-window="plugin"
+            data-aipp-slot="window-root"
+        >
             {
                 pluginNode === null ?
                     <h1>正在加载插件...</h1> :

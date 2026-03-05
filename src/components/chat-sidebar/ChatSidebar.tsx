@@ -119,12 +119,14 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
                 className
             )}
             style={{ width: isExpanded ? sidebarWidth : COLLAPSED_WIDTH }}
+            data-aipp-slot="chat-inline-sidebar"
         >
             {/* Collapsed state - show toggle tab */}
             {!isExpanded && (
                 <div 
                     className="absolute inset-0 flex items-center justify-center cursor-pointer hover:bg-muted/50 transition-colors rounded-l-lg border-l border-border"
                     onClick={handleToggle}
+                    data-aipp-slot="chat-inline-sidebar-collapsed-toggle"
                 >
                     <div className="flex flex-col items-center gap-2">
                         <ChevronLeft className="h-4 w-4 text-muted-foreground" />
@@ -139,7 +141,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
 
             {/* Expanded state */}
             {isExpanded && (
-                <div className="h-full flex flex-col bg-background border-l border-border rounded-l-lg overflow-hidden">
+                <div className="h-full flex flex-col bg-background border-l border-border rounded-l-lg overflow-hidden" data-aipp-slot="chat-inline-sidebar-expanded">
                     {/* Resize handle */}
                     <div
                         className={cn(
@@ -148,10 +150,11 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
                             isResizing && "bg-primary/50"
                         )}
                         onMouseDown={handleResizeStart}
+                        data-aipp-slot="chat-inline-sidebar-resize-handle"
                     />
 
                     {/* Header */}
-                    <div className="flex items-center justify-between p-2 border-b border-border">
+                    <div className="flex items-center justify-between p-2 border-b border-border" data-aipp-slot="chat-inline-sidebar-header">
                         <span className="text-sm font-medium">详情</span>
                         <div className="flex items-center gap-1">
                             <Button
@@ -160,6 +163,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
                                 className="h-7 w-7"
                                 onClick={handleOpenWindow}
                                 title="在新窗口打开"
+                                data-aipp-slot="chat-inline-sidebar-open-window"
                             >
                                 <ExternalLink className="h-4 w-4" />
                             </Button>
@@ -169,6 +173,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
                                 className="h-7 w-7"
                                 onClick={handleToggle}
                                 title="收起"
+                                data-aipp-slot="chat-inline-sidebar-collapse"
                             >
                                 <PanelRightClose className="h-4 w-4" />
                             </Button>
@@ -176,7 +181,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
                     </div>
 
                     {/* Content */}
-                    <div className="flex-1 min-h-0 overflow-hidden">
+                    <div className="flex-1 min-h-0 overflow-hidden" data-aipp-slot="chat-inline-sidebar-content">
                         <ChatSidebarContent
                             className="h-full"
                             todos={todos}

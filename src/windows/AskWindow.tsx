@@ -307,8 +307,12 @@ function AskWindow() {
     });
 
     return (
-        <div className="flex justify-center items-center h-screen">
-            <div className="bg-background shadow-lg w-full h-screen flex flex-col" data-tauri-drag-region>
+        <div className="flex justify-center items-center h-screen" data-aipp-window="ask" data-aipp-slot="window-root">
+            <div
+                className="bg-background shadow-lg w-full h-screen flex flex-col"
+                data-tauri-drag-region
+                data-aipp-slot="ask-main-panel"
+            >
                 {shouldShowShineBorder && (
                     <ShineBorder
                         shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}
@@ -328,10 +332,13 @@ function AskWindow() {
                     aiIsResponsing={aiIsResponsing}
                     placement="top"
                 />
-                <div className="p-5 pb-16 bg-background flex-1 overflow-auto">
+                <div className="p-5 pb-16 bg-background flex-1 overflow-auto" data-aipp-slot="ask-content">
                     {/* 错误信息显示区域 */}
                     {errorMessage && (
-                        <div className="mb-4 bg-destructive/10 border border-destructive/20 rounded-lg p-4">
+                        <div
+                            className="mb-4 bg-destructive/10 border border-destructive/20 rounded-lg p-4"
+                            data-aipp-slot="ask-error-alert"
+                        >
                             <div className="flex items-start space-x-3">
                                 <div className="flex-shrink-0 w-5 h-5 mt-0.5">
                                     <svg className="w-5 h-5 text-red-500" fill="currentColor" viewBox="0 0 20 20">
@@ -378,15 +385,17 @@ function AskWindow() {
                 <div
                     className="w-full h-8 fixed bottom-0 left-0 flex items-center justify-end pr-2.5 bg-muted"
                     data-tauri-drag-region
+                    data-aipp-slot="ask-footer-bar"
                 >
                     {messageId !== -1 && !aiIsResponsing && (
-                        <IconButton icon={<Plus size={16} className="text-icon" />} onClick={startNewConversation} />
+                        <IconButton icon={<Plus size={16} className="text-icon" />} onClick={startNewConversation} dataAippSlot="ask-footer-new-conversation" />
                     )}
                     {messageId !== -1 && !aiIsResponsing ? (
                         <IconButton
                             icon={
                                 copySuccess ? <Check size={16} className="text-icon" /> : <Copy size={16} className="text-icon" />
                             }
+                            dataAippSlot="ask-footer-copy-response"
                             onClick={() => {
                                 writeText(displayResponse);
                                 setCopySuccess(true);
@@ -397,8 +406,8 @@ function AskWindow() {
                         />
                     ) : null}
 
-                    <IconButton icon={<Expand size={16} className="text-icon" />} onClick={openChatUI} />
-                    <IconButton icon={<Settings size={16} className="text-icon" />} onClick={openConfig} />
+                    <IconButton icon={<Expand size={16} className="text-icon" />} onClick={openChatUI} dataAippSlot="ask-footer-open-chat-ui" />
+                    <IconButton icon={<Settings size={16} className="text-icon" />} onClick={openConfig} dataAippSlot="ask-footer-open-config" />
                 </div>
             </div>
         </div>

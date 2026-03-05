@@ -161,8 +161,8 @@ export default function ArtifactCollectionsWindow() {
     };
 
     return (
-        <div className="flex flex-col h-screen bg-background p-6">
-            <div className="flex flex-col gap-4 mb-6">
+        <div className="flex flex-col h-screen bg-background p-6" data-aipp-window="artifact_collections" data-aipp-slot="window-root">
+            <div className="flex flex-col gap-4 mb-6" data-aipp-slot="artifact-collections-header">
                 <div className="flex items-center justify-between">
                     <div>
                         <h1 className="text-2xl font-bold">Artifacts 合集</h1>
@@ -172,7 +172,7 @@ export default function ArtifactCollectionsWindow() {
                     </div>
                 </div>
 
-                <div className="relative">
+                <div className="relative" data-aipp-slot="artifact-collections-search">
                     <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                     <Input
                         placeholder="搜索 artifacts..."
@@ -183,7 +183,7 @@ export default function ArtifactCollectionsWindow() {
                 </div>
             </div>
 
-            <div className="flex-1 overflow-auto">
+            <div className="flex-1 overflow-auto" data-aipp-slot="artifact-collections-content">
                 {isLoading ? (
                     <div className="flex items-center justify-center h-full">
                         <div className="text-center">
@@ -201,7 +201,10 @@ export default function ArtifactCollectionsWindow() {
                         </div>
                     </div>
                 ) : (
-                    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10 gap-3">
+                    <div
+                        className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10 gap-3"
+                        data-aipp-slot="artifact-collections-grid"
+                    >
                         {filteredArtifacts.map((artifact) => (
                             <ContextMenu key={artifact.id}>
                                 <ContextMenuTrigger asChild>

@@ -70,31 +70,32 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
     };
 
     return (
-        <div className="flex justify-between py-4 px-5 border-border bg-secondary ">
-            <div className="flex items-center gap-2 bg-secondary">
+        <div className="flex justify-between py-4 px-5 border-border bg-secondary " data-aipp-slot="chat-info-bar">
+            <div className="flex items-center gap-2 bg-secondary" data-aipp-slot="chat-info-logo">
                 <AnimatedLogo state={logoState} size={32} onClick={showNormal} />
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2" data-aipp-slot="chat-info-actions">
                 {/* 防泄露模式眼睛图标按钮 */}
                 {antiLeakageEnabled && (
                     <Button
                         onClick={toggleReveal}
                         variant={"ghost"}
                         title={isRevealed ? "隐藏原文" : "显示原文"}
+                        data-aipp-slot="chat-info-toggle-anti-leakage"
                     >
                         {isRevealed ? <EyeOff /> : <Eye />}
                     </Button>
                 )}
-                <Button onClick={openConfig} variant={"ghost"}>
+                <Button onClick={openConfig} variant={"ghost"} data-aipp-slot="chat-info-open-config">
                     <Settings />
                 </Button>
                 {showArtifacts && (
-                    <Button onClick={openArtifactsCollections} variant={"ghost"}>
+                    <Button onClick={openArtifactsCollections} variant={"ghost"} data-aipp-slot="chat-info-open-artifacts">
                         <PackageOpen />
                     </Button>
                 )}
                 {showSchedule && (
-                    <Button onClick={openScheduleWindow} variant={"ghost"}>
+                    <Button onClick={openScheduleWindow} variant={"ghost"} data-aipp-slot="chat-info-open-schedule">
                         <CalendarClock />
                     </Button>
                 )}

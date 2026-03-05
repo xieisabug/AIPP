@@ -810,15 +810,25 @@ const InputArea = React.memo(
             const baseRight = sidebarVisible ? 130 : 170;
 
             return (
-                <div className={`input-area ${placement} ${isMobile ? 'mobile' : ''}`} data-theme-slot="input-area">
-                    <div className="input-area-textarea-container" style={{ right: baseRight}} data-theme-slot="input-area-container">
-                        <div className="input-area-img-container" onClick={handleImageContainerClick}>
+                <div
+                    className={`input-area ${placement} ${isMobile ? 'mobile' : ''}`}
+                    data-theme-slot="input-area"
+                    data-aipp-slot="chat-input-area"
+                >
+                    <div
+                        className="input-area-textarea-container"
+                        style={{ right: baseRight}}
+                        data-theme-slot="input-area-container"
+                        data-aipp-slot="chat-input-area-container"
+                    >
+                        <div className="input-area-img-container" onClick={handleImageContainerClick} data-aipp-slot="chat-input-attachments">
                             {renderFiles()}
                         </div>
                         <textarea
                             ref={textareaRef}
                             className="input-area-textarea"
                             data-theme-slot="input-area-textarea"
+                            data-aipp-slot="chat-input-textarea"
                             rows={1}
                             autoCapitalize="none"
                             value={inputText}
@@ -853,6 +863,7 @@ const InputArea = React.memo(
                         icon={<Plus size={16} className="text-icon" />}
                         className={`input-area-add-button ${placement}`}
                         dataThemeSlot="input-area-add-button"
+                        dataAippSlot="chat-input-add-button"
                         style={
                             placement === "bottom" && !isMobile
                                 ? { right: (sidebarVisible ? 150 : 190) + sidebarWidth }
@@ -872,6 +883,7 @@ const InputArea = React.memo(
                         primary
                         className={`input-area-send-button ${placement}`}
                         dataThemeSlot="input-area-send-button"
+                        dataAippSlot="chat-input-send-button"
                         style={
                             placement === "bottom" && !isMobile
                                 ? { right: (sidebarVisible ? 70 : 107) + sidebarWidth }

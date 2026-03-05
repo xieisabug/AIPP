@@ -194,10 +194,11 @@ function ConfigWindow() {
     // 移动端布局：顶部栏 + 侧滑菜单
     if (isMobile) {
         return (
-            <div className="flex flex-col h-screen bg-background">
+            <div className="flex flex-col h-screen bg-background" data-aipp-window="config" data-aipp-slot="window-root">
                 <div
                     className="flex items-center justify-between px-4 py-3 bg-secondary border-b border-border"
                     data-tauri-drag-region
+                    data-aipp-slot="config-mobile-header"
                 >
                     <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
                         <SheetTrigger asChild>
@@ -210,11 +211,13 @@ function ConfigWindow() {
                             className="w-[280px] p-0 flex flex-col"
                             aria-describedby={undefined}
                             hideCloseButton
+                            data-aipp-slot="config-mobile-sidebar"
                         >
                             <SheetTitle className="sr-only">设置导航</SheetTitle>
                             <div
                                 className="aipp-settings-menu-container bg-muted/30 border-border border-b px-3 py-4 overflow-y-auto"
                                 data-theme-slot="settings-menu-container"
+                                data-aipp-slot="config-menu"
                             >
                                 {renderMenuItems((id) => {
                                     setSelectedMenu(id);
@@ -229,7 +232,7 @@ function ConfigWindow() {
                     </Button>
                 </div>
 
-                <div className="flex-1 overflow-auto bg-card px-4 py-4">
+                <div className="flex-1 overflow-auto bg-card px-4 py-4" data-aipp-slot="config-content">
                     <SelectedComponent
                         pluginList={stablePluginList}
                         navigateTo={navigateTo}
@@ -240,21 +243,23 @@ function ConfigWindow() {
     }
 
     return (
-        <div className="flex justify-center items-center h-screen bg-background">
+        <div className="flex justify-center items-center h-screen bg-background" data-aipp-window="config" data-aipp-slot="window-root">
             <div
                 className="bg-card shadow-none w-full h-screen grid grid-cols-[1fr_3fr] md:grid-cols-[1fr_4fr] lg:grid-cols-[1fr_5fr]"
                 data-tauri-drag-region
+                data-aipp-slot="config-layout"
             >
                 {/* 侧边栏 */}
                 <div
                     className="aipp-settings-menu-container bg-muted/30 border-r border-border px-3 md:px-4 py-6 overflow-y-auto"
                     data-theme-slot="settings-menu-container"
+                    data-aipp-slot="config-menu"
                 >
                     {renderMenuItems(setSelectedMenu)}
                 </div>
 
                 {/* 内容区域 */}
-                <div className="bg-card px-4 md:px-6 lg:px-8 py-6 overflow-y-auto max-h-screen">
+                <div className="bg-card px-4 md:px-6 lg:px-8 py-6 overflow-y-auto max-h-screen" data-aipp-slot="config-content">
                     {/* 配置组件内容 */}
                     <SelectedComponent pluginList={stablePluginList} navigateTo={navigateTo} />
                 </div>

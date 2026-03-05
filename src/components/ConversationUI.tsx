@@ -874,9 +874,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // ============= 组件渲染 =============
 
         return (
-            <div ref={dropRef} className={`h-full relative flex bg-background ${isMobile ? '' : 'rounded-xl'}`}>
+            <div
+                ref={dropRef}
+                className={`h-full relative flex bg-background ${isMobile ? '' : 'rounded-xl'}`}
+                data-aipp-slot="chat-conversation-root"
+            >
                 {/* Main content area */}
-                <div className="flex-1 flex flex-col min-w-0">
+                <div className="flex-1 flex flex-col min-w-0" data-aipp-slot="chat-conversation-main">
                     {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}
                     {!isMobile && (
                         <ConversationHeader
@@ -895,6 +899,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         ref={scrollContainerRef}
                         onScroll={handleScroll}
                         className={`h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
+                        data-aipp-slot="chat-conversation-scroll"
                     >
                         <ConversationContent
                             conversationId={conversationId}
@@ -922,26 +927,26 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             assistants={assistants}
                             setSelectedAssistant={setSelectedAssistant}
                         />
-                        <div ref={messagesEndRef} />
+                        <div ref={messagesEndRef} data-aipp-slot="chat-messages-end-anchor" />
                     </div>
 
                     {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleDropFiles} /> : null}
 
-                        <InputArea
-                            ref={inputAreaRef}
-                            inputText={inputText}
-                            setInputText={setInputText}
-                            fileInfoList={fileInfoList}
-                            handleChooseFile={handleChooseFile}
-                            handleDeleteFile={handleDeleteFile}
-                            handlePaste={handlePaste}
-                            handleSend={handleSend}
-                            aiIsResponsing={effectiveAiIsResponsing}
-                            placement="bottom"
-                            isMobile={isMobile}
-                            sidebarWidth={sidebarWidth}
-                            sidebarVisible={!isMobile && Boolean(conversationId)}
-                        />
+                    <InputArea
+                        ref={inputAreaRef}
+                        inputText={inputText}
+                        setInputText={setInputText}
+                        fileInfoList={fileInfoList}
+                        handleChooseFile={handleChooseFile}
+                        handleDeleteFile={handleDeleteFile}
+                        handlePaste={handlePaste}
+                        handleSend={handleSend}
+                        aiIsResponsing={effectiveAiIsResponsing}
+                        placement="bottom"
+                        isMobile={isMobile}
+                        sidebarWidth={sidebarWidth}
+                        sidebarVisible={!isMobile && Boolean(conversationId)}
+                    />
                 </div>
 
                 {/* Right sidebar - only show on desktop when sidebar window is not open */}
@@ -974,7 +979,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 />
 
                 {isLoadingShow ? (
-                    <div className="bg-background/95 w-full h-full absolute flex items-center justify-center backdrop-blur rounded-xl">
+                    <div
+                        className="bg-background/95 w-full h-full absolute flex items-center justify-center backdrop-blur rounded-xl"
+                        data-aipp-slot="chat-loading-overlay"
+                    >
                         <div className="loading-icon"></div>
                         <div className="text-primary text-base font-medium">加载中...</div>
                     </div>

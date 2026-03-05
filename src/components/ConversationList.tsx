@@ -40,14 +40,15 @@ const ConversationItem = memo(function ConversationItem({
     return (
         <li
             className={`group h-16 w-full mx-0 mb-2 text-sm border-0 rounded-xl cursor-pointer select-none flex flex-col justify-center p-3 box-border relative transition-all duration-200 ${isSelected ? "font-bold text-primary bg-primary-foreground" : "bg-transparent hover:bg-muted hover:translate-x-0.5"}`}
+            data-aipp-slot="chat-conversation-list-item"
             onClick={() => {
                 onSelect(conversation.id.toString());
             }}
         >
-            <div className="overflow-hidden text-ellipsis whitespace-nowrap font-medium">
+            <div className="overflow-hidden text-ellipsis whitespace-nowrap font-medium" data-aipp-slot="chat-conversation-item-title">
                 {displayName}
             </div>
-            <div className="text-xs overflow-hidden text-ellipsis whitespace-nowrap text-muted-foreground">
+            <div className="text-xs overflow-hidden text-ellipsis whitespace-nowrap text-muted-foreground" data-aipp-slot="chat-conversation-item-subtitle">
                 {displayAssistantName}
             </div>
 
@@ -56,6 +57,7 @@ const ConversationItem = memo(function ConversationItem({
                     <Button
                         variant="link"
                         className="invisible absolute right-2 top-4 group-hover:visible transition-opacity duration-200"
+                        data-aipp-slot="chat-conversation-item-menu-trigger"
                         onClick={(e) => {
                             // 避免点击菜单按钮时触发列表项选择
                             e.stopPropagation();
@@ -65,12 +67,14 @@ const ConversationItem = memo(function ConversationItem({
                     </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent
+                    data-aipp-slot="chat-conversation-item-menu"
                     onClick={(e) => {
                         // 阻止菜单内部点击冒泡到列表项
                         e.stopPropagation();
                     }}
                 >
                     <DropdownMenuItem
+                        data-aipp-slot="chat-conversation-item-menu-edit"
                         onClick={(e) => {
                             e.stopPropagation();
                             onOpenTitleEdit(conversation.id, conversation.name);
@@ -79,6 +83,7 @@ const ConversationItem = memo(function ConversationItem({
                         修改标题
                     </DropdownMenuItem>
                     <DropdownMenuItem
+                        data-aipp-slot="chat-conversation-item-menu-delete"
                         onClick={(e) => {
                             e.stopPropagation();
                             onOpenDelete(
@@ -353,8 +358,9 @@ const ConversationList = memo(function ConversationList({
         <div
             className="flex-1 overflow-y-auto overflow-x-hidden px-3 bg-background"
             ref={scrollContainerRef}
+            data-aipp-slot="chat-conversation-list"
         >
-            <ul className="list-none p-0 m-0">
+            <ul className="list-none p-0 m-0" data-aipp-slot="chat-conversation-list-items">
                 {conversations.map((conversation) => (
                     <ConversationItem
                         key={conversation.id}
@@ -369,19 +375,19 @@ const ConversationList = memo(function ConversationList({
 
             {/* 加载指示器 */}
             {isLoading && conversations.length === 0 && (
-                <div className="flex justify-center items-center py-8">
+                <div className="flex justify-center items-center py-8" data-aipp-slot="chat-conversation-list-loading">
                     <div className="text-sm text-muted-foreground">加载中...</div>
                 </div>
             )}
 
             {isLoadingMore && (
-                <div className="flex justify-center items-center py-4">
+                <div className="flex justify-center items-center py-4" data-aipp-slot="chat-conversation-list-loading-more">
                     <div className="text-sm text-muted-foreground">加载更多...</div>
                 </div>
             )}
 
             {!hasMoreData && conversations.length > 0 && (
-                <div className="flex justify-center items-center py-4">
+                <div className="flex justify-center items-center py-4" data-aipp-slot="chat-conversation-list-end">
                     <div className="text-xs text-muted-foreground">已加载全部对话</div>
                 </div>
             )}

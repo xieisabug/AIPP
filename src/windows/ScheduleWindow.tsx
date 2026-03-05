@@ -1278,8 +1278,8 @@ export default function ScheduleWindow() {
     );
 
     return (
-        <div className="flex justify-center items-center h-screen bg-background">
-            <div className="bg-card shadow-none w-full h-screen overflow-y-auto">
+        <div className="flex justify-center items-center h-screen bg-background" data-aipp-window="schedule" data-aipp-slot="window-root">
+            <div className="bg-card shadow-none w-full h-screen overflow-y-auto" data-aipp-slot="schedule-main-panel">
                 <ConfigPageLayout
                     sidebar={sidebar}
                     content={content}
@@ -1302,7 +1302,7 @@ export default function ScheduleWindow() {
                     }
                 }}
             >
-                <DialogContent className="sm:max-w-[640px] max-h-[85vh] overflow-y-auto">
+                <DialogContent className="sm:max-w-[640px] max-h-[85vh] overflow-y-auto" data-aipp-slot="schedule-editor-dialog">
                     <DialogHeader>
                         <DialogTitle className="text-base">{editingTaskId !== null ? "编辑任务" : "新建任务"}</DialogTitle>
                     </DialogHeader>

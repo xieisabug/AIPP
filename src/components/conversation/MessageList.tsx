@@ -249,6 +249,7 @@ const MessageList: React.FC<MessageListProps> = ({
                     id="last-reply-container"
                     style={{ minHeight: 'calc(100dvh - 130px)' }}
                     className="flex flex-col gap-4"
+                    data-aipp-slot="chat-last-reply-container"
                 >
                     {last.map((item, idx) => (
                         <React.Fragment key={`last-group-${messageElements[lastUserMessageIndex + idx].messageId}`}>

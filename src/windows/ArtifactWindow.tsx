@@ -491,9 +491,9 @@ export default function ArtifactWindow() {
     };
 
     return (
-        <div className="flex h-screen bg-background">
-            <div className="flex flex-1 flex-col">
-                <div className="flex-1 flex flex-col">
+        <div className="flex h-screen bg-background" data-aipp-window="artifact" data-aipp-slot="window-root">
+            <div className="flex flex-1 flex-col" data-aipp-slot="artifact-main">
+                <div className="flex-1 flex flex-col" data-aipp-slot="artifact-body">
                     {currentView === "loading" ? (
                         /* Loading 视图 - 美观的加载界面 */
                         <div className="flex-1 flex flex-col items-center justify-center p-8 bg-gradient-to-br from-background to-muted/20">
@@ -598,7 +598,7 @@ export default function ArtifactWindow() {
                         </div>
                     ) : (
                         /* 预览视图 - 根据类型显示不同内容 */
-                        <div className="flex-1 flex flex-col relative">
+                        <div className="flex-1 flex flex-col relative" data-aipp-slot="artifact-preview-content">
                             {/* 悬浮刷新按钮 - 仅在支持刷新的类型中显示 */}
                             {previewType !== "mermaid" &&
                                 previewType !== "html" &&

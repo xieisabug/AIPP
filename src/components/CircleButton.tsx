@@ -9,9 +9,10 @@ interface CircleButtonProps {
     type?: 'submit' | 'button';
     style?: CSSProperties;
     dataThemeSlot?: string;
+    dataAippSlot?: string;
 }
 
-const CircleButton: React.FC<CircleButtonProps> = ({ primary, icon, type, onClick, className, size, style, dataThemeSlot }) => {
+const CircleButton: React.FC<CircleButtonProps> = ({ primary, icon, type, onClick, className, size, style, dataThemeSlot, dataAippSlot }) => {
     const sizeClasses = {
         mini: 'h-6 w-6 rounded-[12px]',
         small: 'h-8 w-8 rounded-2xl',
@@ -25,6 +26,7 @@ const CircleButton: React.FC<CircleButtonProps> = ({ primary, icon, type, onClic
         type={type || 'button'}
         style={style}
         data-theme-slot={dataThemeSlot}
+        data-aipp-slot={dataAippSlot}
     >
         {icon}
     </button>

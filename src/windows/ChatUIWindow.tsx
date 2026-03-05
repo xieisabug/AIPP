@@ -270,9 +270,12 @@ function ChatUIWindow() {
 
         return (
             <AntiLeakageProvider enabled={antiLeakageEnabled}>
-                <div className="flex flex-col h-screen bg-background">
+                <div className="flex flex-col h-screen bg-background" data-aipp-window="chat_ui" data-aipp-slot="window-root">
                     {/* 移动端顶部栏 */}
-                    <div className="flex-none flex items-center justify-between px-4 py-3 bg-secondary border-b border-border">
+                    <div
+                        className="flex-none flex items-center justify-between px-4 py-3 bg-secondary border-b border-border"
+                        data-aipp-slot="chat-mobile-header"
+                    >
                         <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
                             <SheetTrigger asChild>
                                 <Button variant="ghost" size="icon">
@@ -284,6 +287,7 @@ function ChatUIWindow() {
                                 className="w-[280px] p-0 flex flex-col"
                                 aria-describedby={undefined}
                                 hideCloseButton
+                                data-aipp-slot="chat-mobile-sidebar"
                             >
                                 <SheetTitle className="sr-only">导航菜单</SheetTitle>
                                 <ChatUIInfomation showArtifacts={false} showSchedule={false} isMobile={true} />
@@ -297,14 +301,16 @@ function ChatUIWindow() {
                                 />
                             </SheetContent>
                         </Sheet>
-                        <span className="font-medium text-sm truncate flex-1 text-center mx-3">{mobileTitle}</span>
+                        <span className="font-medium text-sm truncate flex-1 text-center mx-3" data-aipp-slot="chat-mobile-title">
+                            {mobileTitle}
+                        </span>
                         <Button variant="ghost" size="icon" onClick={handleNewConversation} aria-label="新建对话">
                             <Plus className="h-5 w-5" />
                         </Button>
                     </div>
 
                     {/* 主内容区域 */}
-                    <div className="flex-1 overflow-hidden">
+                    <div className="flex-1 overflow-hidden" data-aipp-slot="chat-main-content">
                         <ConversationUI
                             ref={conversationUIRef}
                             pluginList={pluginList}
@@ -343,8 +349,8 @@ function ChatUIWindow() {
     // 桌面端布局
     return (
         <AntiLeakageProvider enabled={antiLeakageEnabled}>
-            <div className="flex h-screen bg-background">
-                <div className="flex-none w-[280px] flex flex-col shadow-lg box-border rounded-r-xl mb-2 mr-2">
+            <div className="flex h-screen bg-background" data-aipp-window="chat_ui" data-aipp-slot="window-root">
+                <div className="flex-none w-[280px] flex flex-col shadow-lg box-border rounded-r-xl mb-2 mr-2" data-aipp-slot="chat-sidebar">
                     <ChatUIInfomation />
                     <ChatUIToolbar
                         onNewConversation={handleNewConversation}
@@ -356,7 +362,7 @@ function ChatUIWindow() {
                     />
                 </div>
 
-                <div className="flex-1 bg-background overflow-auto rounded-xl m-2 ml-0 shadow-lg">
+                <div className="flex-1 bg-background overflow-auto rounded-xl m-2 ml-0 shadow-lg" data-aipp-slot="chat-main-content">
                     <ConversationUI
                         ref={conversationUIRef}
                         pluginList={pluginList}

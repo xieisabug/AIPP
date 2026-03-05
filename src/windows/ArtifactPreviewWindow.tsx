@@ -834,11 +834,14 @@ export default function ArtifactPreviewWindow() {
                             : 'text';
 
     return (
-        <div className="flex h-screen bg-background overflow-hidden">
-            <div className="flex flex-col flex-1 bg-background rounded-xl m-2 shadow-lg border border-border min-h-0 overflow-hidden">
+        <div className="flex h-screen bg-background overflow-hidden" data-aipp-window="artifact_preview" data-aipp-slot="window-root">
+            <div
+                className="flex flex-col flex-1 bg-background rounded-xl m-2 shadow-lg border border-border min-h-0 overflow-hidden"
+                data-aipp-slot="artifact-preview-main"
+            >
                 {/* 顶部工具栏 */}
                 {isPreviewReady && (previewUrl || previewType === 'mermaid' || previewType === 'html' || previewType === 'svg' || previewType === 'xml' || previewType === 'markdown' || previewType === 'md' || previewType === 'drawio') && (
-                    <div className="flex-shrink-0 p-4 border-b border-border flex items-center justify-between">
+                    <div className="flex-shrink-0 p-4 border-b border-border flex items-center justify-between" data-aipp-slot="artifact-preview-toolbar">
                         <div className="text-sm text-muted-foreground">
                             {currentView === 'logs' ? '日志视图' : currentView === 'code' ? '代码视图' :
                                 previewType === 'mermaid' ? 'Mermaid 图表预览' :
