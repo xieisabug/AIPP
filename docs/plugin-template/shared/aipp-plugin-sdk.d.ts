@@ -57,7 +57,17 @@ interface AippSystemApiThemeDefinition {
   mode?: AippSystemApiThemeMode;
   variables: Record<string, string>;
   description?: string;
+  /**
+   * Optional global CSS snippet.
+   * Use `:scope` as theme root placeholder; for precise targeting prefer
+   * `[data-aipp-slot="..."]` selectors.
+   */
   extraCss?: string;
+  /**
+   * Optional per-window CSS snippets.
+   * Key is window label (`chat_ui`, `ask`, etc). In snippet, `:scope` maps to
+   * `.theme-<id>.aipp-window-<label>`.
+   */
   windowCss?: Record<string, string>;
 }
 
