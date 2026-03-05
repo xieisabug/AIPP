@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { format } from "date-fns";
 import { useTheme } from "@/hooks/useTheme";
 import { useToast } from "@/hooks/use-toast";
@@ -59,6 +60,15 @@ interface ScheduledTaskRun {
     summary?: string | null;
     errorMessage?: string | null;
     startedTime: string;
+    finishedTime?: string | null;
+}
+
+interface ScheduledTaskRunUpdateEvent {
+    runId: string;
+    status: "running" | "success" | "failed";
+    notify: boolean;
+    summary?: string | null;
+    errorMessage?: string | null;
     finishedTime?: string | null;
 }
 
@@ -343,7 +353,6 @@ export default function ScheduleWindow() {
     const [isLogLoading, setIsLogLoading] = useState(false);
     const [selectedToolLog, setSelectedToolLog] = useState<ScheduledTaskLog | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<ScheduledTask | null>(null);
-    const autoRefreshBusyRef = useRef(false);
     const [formValues, setFormValues] = useState<ScheduledTaskFormValues>({
         name: "",
         is_enabled: true,
@@ -514,34 +523,69 @@ export default function ScheduleWindow() {
     }, [loadLogs, selectedTask?.id, selectedRunId]);
 
     useEffect(() => {
-        if (!selectedTask?.id) {
-            return;
-        }
-
-        const refreshNow = async () => {
-            if (autoRefreshBusyRef.current) {
+        const runCreatedUnlisten = listen<ScheduledTaskRun>("scheduled_task_run_created", (event) => {
+            const run = event.payload;
+            if (selectedTask?.id !== run.taskId) {
                 return;
             }
-            autoRefreshBusyRef.current = true;
-            try {
-                await loadRuns(selectedTask.id, { silent: true });
-                const runId = selectedRunId ?? runEntries[0]?.runId ?? null;
-                if (runId) {
-                    await loadLogs(selectedTask.id, runId, { silent: true });
+            setRunEntries((prev) => {
+                const idx = prev.findIndex((item) => item.runId === run.runId);
+                if (idx >= 0) {
+                    const next = [...prev];
+                    next[idx] = run;
+                    return next;
                 }
-            } finally {
-                autoRefreshBusyRef.current = false;
-            }
-        };
+                return [run, ...prev];
+            });
+            setSelectedRunId((prev) => prev ?? run.runId);
+        });
 
-        const timer = window.setInterval(() => {
-            void refreshNow();
-        }, 2000);
+        const runUpdatedUnlisten = listen<ScheduledTaskRunUpdateEvent>(
+            "scheduled_task_run_updated",
+            (event) => {
+                const update = event.payload;
+                setRunEntries((prev) => {
+                    const idx = prev.findIndex((run) => run.runId === update.runId);
+                    if (idx < 0) {
+                        return prev;
+                    }
+                    const next = [...prev];
+                    next[idx] = {
+                        ...next[idx],
+                        status: update.status,
+                        notify: update.notify,
+                        summary: update.summary ?? null,
+                        errorMessage: update.errorMessage ?? null,
+                        finishedTime: update.finishedTime ?? null,
+                    };
+                    return next;
+                });
+            }
+        );
+
+        const logAddedUnlisten = listen<ScheduledTaskLog>("scheduled_task_log_added", (event) => {
+            const log = event.payload;
+            if (selectedTask?.id !== log.taskId) {
+                return;
+            }
+            if (selectedRunId && log.runId !== selectedRunId) {
+                return;
+            }
+            setLogEntries((prev) => {
+                if (prev.some((item) => item.id === log.id)) {
+                    return prev;
+                }
+                const next = [...prev, log];
+                return next.length > 200 ? next.slice(next.length - 200) : next;
+            });
+        });
 
         return () => {
-            window.clearInterval(timer);
+            runCreatedUnlisten.then((unlisten) => unlisten());
+            runUpdatedUnlisten.then((unlisten) => unlisten());
+            logAddedUnlisten.then((unlisten) => unlisten());
         };
-    }, [loadLogs, loadRuns, runEntries, selectedRunId, selectedTask?.id]);
+    }, [selectedRunId, selectedTask?.id]);
 
     const handleRefresh = useCallback(async () => {
         setIsRefreshing(true);

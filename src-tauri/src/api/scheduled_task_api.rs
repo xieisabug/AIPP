@@ -143,9 +143,23 @@ pub struct ListScheduledTaskRunsResponse {
     pub runs: Vec<ScheduledTaskRunDTO>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ScheduledTaskRunUpdateEvent {
+    pub run_id: String,
+    pub status: String,
+    pub notify: bool,
+    pub summary: Option<String>,
+    pub error_message: Option<String>,
+    pub finished_time: Option<String>,
+}
+
 const AGENTIC_LOOP_MAX_ROUNDS: usize = 50;
 const AGENTIC_LOOP_PER_TOOL_TIMEOUT_SECS: u64 = 120;
 const AGENTIC_LOOP_TOTAL_TIMEOUT_SECS: u64 = 3000;
+const SCHEDULED_TASK_LOG_ADDED_EVENT: &str = "scheduled_task_log_added";
+const SCHEDULED_TASK_RUN_CREATED_EVENT: &str = "scheduled_task_run_created";
+const SCHEDULED_TASK_RUN_UPDATED_EVENT: &str = "scheduled_task_run_updated";
 type ScheduledRunCancelRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
 static SCHEDULED_RUN_CANCEL_REGISTRY: OnceLock<ScheduledRunCancelRegistry> = OnceLock::new();
 
@@ -1012,7 +1026,9 @@ fn write_task_log(
         content: content.into(),
         created_time: Utc::now(),
     };
-    db.add_log(&log).map(|_| ()).map_err(|e| e.to_string())
+    let created = db.add_log(&log).map_err(|e| e.to_string())?;
+    let _ = app_handle.emit(SCHEDULED_TASK_LOG_ADDED_EVENT, log_to_dto(created));
+    Ok(())
 }
 
 fn log_task_message(
@@ -1035,10 +1051,23 @@ fn update_task_run(
     error_message: Option<&str>,
     finished_time: Option<DateTime<Utc>>,
 ) {
-    let _ = ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string()).and_then(|db| {
+    let finished_time_for_event = finished_time.clone();
+    let result =
+        ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string()).and_then(|db| {
         db.update_run_result(run_id, status, notify, summary, error_message, finished_time)
             .map_err(|e| e.to_string())
     });
+    if result.is_ok() {
+        let event_payload = ScheduledTaskRunUpdateEvent {
+            run_id: run_id.to_string(),
+            status: status.to_string(),
+            notify,
+            summary: summary.map(|v| v.to_string()),
+            error_message: error_message.map(|v| v.to_string()),
+            finished_time: finished_time_for_event.map(|v| v.to_rfc3339()),
+        };
+        let _ = app_handle.emit(SCHEDULED_TASK_RUN_UPDATED_EVENT, event_payload);
+    }
 }
 
 fn cleanup_conversation(app_handle: &tauri::AppHandle, conversation_id: i64) -> Result<(), String> {
@@ -1587,7 +1616,7 @@ pub async fn execute_scheduled_task(
     let run_started_at = Utc::now();
     {
         let log_db = ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string())?;
-        let _ = log_db.create_run(&ScheduledTaskRun {
+        let running = ScheduledTaskRun {
             id: 0,
             task_id: task.id,
             run_id: run_id.clone(),
@@ -1597,7 +1626,10 @@ pub async fn execute_scheduled_task(
             error_message: None,
             started_time: run_started_at,
             finished_time: None,
-        });
+        };
+        if let Ok(created_run) = log_db.create_run(&running) {
+            let _ = app_handle.emit(SCHEDULED_TASK_RUN_CREATED_EVENT, run_to_dto(created_run));
+        }
     }
     log_task_message(app_handle, task.id, &run_id, "start", "开始执行定时任务");
     let run_result = execute_scheduled_task_inner(
