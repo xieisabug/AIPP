@@ -34,32 +34,29 @@ pub struct ConversationSearchHit {
 pub fn process_message_versions(message_details: Vec<MessageDetail>) -> Vec<MessageDetail> {
     let mut final_messages = message_details;
 
-    // 按创建时间排序，使用复合排序键确保 reasoning 排在 response 之前
-    // 对于同一 generation_group_id 的 reasoning 和 response，使用 group_id 作为次要排序键
+    // 按消息时间顺序排序。只有在同一 generation_group_id 且时间完全相同的情况下，
+    // 才用 reasoning -> response 作为兜底 tie-break，避免跨轮次按类型扎堆。
     final_messages.sort_by(|a, b| {
-        // 先按 created_time 排序
-        match a.created_time.cmp(&b.created_time) {
-            std::cmp::Ordering::Equal => {
-                // 时间相同，按 message_type 优先级排序
-                get_message_type_priority(&a.message_type)
-                    .cmp(&get_message_type_priority(&b.message_type))
-            }
-            std::cmp::Ordering::Less => {
-                // a 比 b 早，a 排在前面
-                std::cmp::Ordering::Less
-            }
-            std::cmp::Ordering::Greater => {
-                // a 比 b 晚，但检查是否是同一个 generation_group_id 中的 reasoning/response
-                // 如果 a 是 reasoning，b 是 response，且属于同一组，则 a 应该排在 b 前面
-                if belongs_to_same_group(a, b) && is_reasoning_before_response(a, b) {
-                    std::cmp::Ordering::Less
-                } else {
-                    std::cmp::Ordering::Greater
-                }
+        let time_order = message_order_value(a).cmp(&message_order_value(b));
+        if time_order != std::cmp::Ordering::Equal {
+            return time_order;
+        }
+
+        if belongs_to_same_group(a, b) {
+            match (a.message_type.as_str(), b.message_type.as_str()) {
+                ("reasoning", "response") => return std::cmp::Ordering::Less,
+                ("response", "reasoning") => return std::cmp::Ordering::Greater,
+                _ => {}
             }
         }
+
+        a.id.cmp(&b.id)
     });
     final_messages
+}
+
+fn message_order_value(message: &MessageDetail) -> i64 {
+    message.created_time.timestamp_millis()
 }
 
 /// 检查两条消息是否属于同一个 generation_group_id
@@ -67,23 +64,6 @@ fn belongs_to_same_group(a: &MessageDetail, b: &MessageDetail) -> bool {
     match (&a.generation_group_id, &b.generation_group_id) {
         (Some(group_a), Some(group_b)) => group_a == group_b,
         _ => false,
-    }
-}
-
-/// 检查 a 是否是 reasoning，b 是否是 response（即 a 应该排在 b 前面）
-fn is_reasoning_before_response(a: &MessageDetail, b: &MessageDetail) -> bool {
-    a.message_type == "reasoning" && b.message_type == "response"
-}
-
-/// 获取消息类型的优先级（用于时间相同时的排序）
-fn get_message_type_priority(message_type: &str) -> i32 {
-    match message_type {
-        "system" => 0,
-        "user" => 1,
-        "reasoning" => 2,
-        "response" => 3,
-        "assistant" => 4,
-        _ => 5,
     }
 }
 

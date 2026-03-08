@@ -32,6 +32,7 @@ interface MessageItemProps {
     shiningMcpCallId?: number | null;
     isLastMessage?: boolean; // 防泄露模式：是否为最后一条消息
     inlineInteractionItems?: InlineInteractionItem[];
+    sentBatchToolResultMessageIds?: ReadonlySet<number>;
 }
 
 const MessageItem = React.memo<MessageItemProps>(
@@ -50,6 +51,7 @@ const MessageItem = React.memo<MessageItemProps>(
         shiningMcpCallId,
         isLastMessage = false,
         inlineInteractionItems,
+        sentBatchToolResultMessageIds,
     }) => {
         // 防泄露模式
         const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
@@ -79,6 +81,7 @@ const MessageItem = React.memo<MessageItemProps>(
             mcpToolCallStates,
             shiningMcpCallId,
             inlineInteractionItems,
+            sentBatchToolResultMessageIds,
         });
 
         // 处理自定义标签解析
@@ -247,6 +250,7 @@ const MessageItem = React.memo<MessageItemProps>(
                     mcpToolCallStates={mcpToolCallStates}
                     shiningMcpCallId={shiningMcpCallId}
                     inlineInteractionItems={inlineInteractionItems}
+                    sentBatchToolResultMessageIds={sentBatchToolResultMessageIds}
                     useRawTextRenderer={shouldMaskContent}
                 />
             );

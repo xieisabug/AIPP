@@ -141,6 +141,21 @@ fn has_missing_required_parameter_tool_error_in_message_list(
     })
 }
 
+fn find_existing_tool_result_message(
+    messages: &[(Message, Option<MessageAttachment>)],
+    tool_call_id: &str,
+) -> Option<Message> {
+    messages
+        .iter()
+        .filter(|(message, _)| message.message_type == "tool_result")
+        .filter_map(|(message, _)| {
+            crate::api::ai::conversation::extract_tool_call_id(&message.content)
+                .filter(|existing_tool_call_id| existing_tool_call_id == tool_call_id)
+                .map(|_| message.clone())
+        })
+        .max_by_key(|message| message.id)
+}
+
 /// 从 MCP 服务器列表构建 genai 工具列表和名称映射表
 /// 返回 (工具列表, 映射表)
 pub fn build_tools_with_mapping(
@@ -723,6 +738,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         "Tool execution completed:\n\nTool Call ID: {}\nResult:\n{}",
         tool_call_id, tool_result
     );
+    let now = chrono::Utc::now();
 
     // 查找对应的 response 消息的 generation_group_id，使 tool_result 与 response 同组
     let all_msgs_for_group =
@@ -732,33 +748,44 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         .filter(|(m, _)| m.message_type == "response")
         .max_by_key(|(m, _)| m.id)
         .and_then(|(m, _)| m.generation_group_id.clone());
+    let existing_tool_result_message =
+        find_existing_tool_result_message(&all_msgs_for_group, &tool_call_id);
+    let tool_result_message = if let Some(mut existing_message) = existing_tool_result_message {
+        existing_message.content = tool_result_content.clone();
+        existing_message.finish_time = Some(now);
+        if existing_message.start_time.is_none() {
+            existing_message.start_time = Some(now);
+        }
+        db.message_repo().unwrap().update(&existing_message)?;
+        existing_message
+    } else {
+        let tool_result_message = add_message(
+            &app_handle,
+            None,
+            conversation_id_i64,
+            "tool_result".to_string(),
+            tool_result_content.clone(),
+            Some(assistant_detail.model[0].id),
+            Some(assistant_detail.model[0].model_code.clone()),
+            Some(now),
+            Some(now),
+            0,
+            tool_result_group_id,
+            None,
+        )?;
 
-    let tool_result_message = add_message(
-        &app_handle,
-        None,
-        conversation_id_i64,
-        "tool_result".to_string(),
-        tool_result_content,
-        Some(assistant_detail.model[0].id),
-        Some(assistant_detail.model[0].model_code.clone()),
-        Some(chrono::Utc::now()),
-        Some(chrono::Utc::now()),
-        0,
-        tool_result_group_id,
-        None,
-    )?;
-
-    // Emit events so UI can render the tool_result immediately without manual refresh
-    // 1) message_add
-    let add_event = ConversationEvent {
-        r#type: "message_add".to_string(),
-        data: serde_json::to_value(MessageAddEvent {
-            message_id: tool_result_message.id,
-            message_type: "tool_result".to_string(),
-        })
-        .unwrap(),
+        let add_event = ConversationEvent {
+            r#type: "message_add".to_string(),
+            data: serde_json::to_value(MessageAddEvent {
+                message_id: tool_result_message.id,
+                message_type: "tool_result".to_string(),
+            })
+            .unwrap(),
+        };
+        let _ =
+            window.emit(format!("conversation_event_{}", conversation_id_i64).as_str(), add_event);
+        tool_result_message
     };
-    let _ = window.emit(format!("conversation_event_{}", conversation_id_i64).as_str(), add_event);
 
     // 2) message_update (is_done = true)
     let update_event = ConversationEvent {
@@ -790,17 +817,13 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         "filtered messages to latest branch for tool_result_continue"
     );
 
-    // 尝试复用上一次包含工具调用的 assistant 响应的 generation_group_id，
-    // 这样 tooluse 的"请求消息(assistant)"与"分析消息(assistant)"会处于同一分组
-    let reuse_generation_group_id: Option<String> = {
-        // 找到刚插入的 tool_result 之前最近的一条 response 消息
-        let current_tool_result_id = tool_result_message.id;
-        latest_branch
-            .iter()
-            .filter(|msg| msg.id < current_tool_result_id && msg.message_type == "response")
-            .max_by_key(|msg| msg.id)
-            .and_then(|m| m.generation_group_id.clone())
-    };
+    // 复用当前分支中最近一条 assistant response 的 generation_group_id，
+    // 这样工具调用、工具结果和续写响应仍然归属于同一个逻辑 generation。
+    let reuse_generation_group_id: Option<String> = latest_branch
+        .iter()
+        .filter(|msg| msg.message_type == "response")
+        .max_by_key(|msg| msg.id)
+        .and_then(|m| m.generation_group_id.clone());
 
     let init_message_list =
         build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);

@@ -250,6 +250,12 @@ cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
+### Validation runner note
+
+- In this environment, long `powershell` **sync-mode** validation chains can lose child-process completion/output and leave the shell looking hung even after `cargo`/`npm` has already exited.
+- For builds/tests, prefer **one command at a time** and use **async mode with explicit output reads** instead of chaining many commands in a single sync invocation.
+- If a validation shell appears stuck, check whether only the parent `pwsh` process remains; if so, stop that shell and rerun the command in async mode.
+
 ## Common Development Tasks
 
 ### Adding a New API Endpoint

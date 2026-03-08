@@ -21,6 +21,7 @@ export interface MessageListProps {
     onMessageFork: (messageId: number) => void;
     onToggleReasoningExpand: (messageId: number) => void;
     inlineInteractionItems?: InlineInteractionItem[];
+    sentBatchToolResultMessageIds?: ReadonlySet<number>;
 }
 
 const MessageList: React.FC<MessageListProps> = ({
@@ -40,6 +41,7 @@ const MessageList: React.FC<MessageListProps> = ({
     onMessageFork,
     onToggleReasoningExpand,
     inlineInteractionItems,
+    sentBatchToolResultMessageIds,
 }) => {
     const messageInlineInteractionMap = useMemo(() => {
         const map = new Map<number, InlineInteractionItem[]>();
@@ -116,6 +118,7 @@ const MessageList: React.FC<MessageListProps> = ({
                         // 防泄露模式：是否为最后一条消息
                         isLastMessage={isLastMessage}
                         inlineInteractionItems={messageInlineInteractionMap.get(message.id)}
+                        sentBatchToolResultMessageIds={sentBatchToolResultMessageIds}
                     />
                 ),
                 groupControl,
@@ -138,6 +141,7 @@ const MessageList: React.FC<MessageListProps> = ({
         onToggleReasoningExpand,
         onMessageFork,
         messageInlineInteractionMap,
+        sentBatchToolResultMessageIds,
     ]);
 
     // 优化版本控制组件的渲染
