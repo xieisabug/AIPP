@@ -298,7 +298,8 @@ pub(crate) fn extract_prompt_tool_calls(content: &str) -> (Vec<ToolCall>, String
         else {
             continue;
         };
-        let Some(tool_name) = cap.get(2).map(|m| m.as_str().trim()).filter(|s| !s.is_empty()) else {
+        let Some(tool_name) = cap.get(2).map(|m| m.as_str().trim()).filter(|s| !s.is_empty())
+        else {
             continue;
         };
         let parameters_raw = cap.get(3).map(|m| m.as_str().trim()).unwrap_or("{}");
@@ -708,11 +709,8 @@ async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResul
             let params_json = serde_json::from_str::<serde_json::Value>(&params_str)
                 .unwrap_or_else(|_| serde_json::Value::String(params_str.clone()));
 
-            let response_message_id_opt = if response_message_id > 0 {
-                Some(response_message_id)
-            } else {
-                None
-            };
+            let response_message_id_opt =
+                if response_message_id > 0 { Some(response_message_id) } else { None };
             let (call_db_id, call_record_error) = match create_scheduled_tool_call_record(
                 ctx.app_handle,
                 ctx.conversation_id,
@@ -1052,8 +1050,7 @@ fn update_task_run(
     finished_time: Option<DateTime<Utc>>,
 ) {
     let finished_time_for_event = finished_time.clone();
-    let result =
-        ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string()).and_then(|db| {
+    let result = ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string()).and_then(|db| {
         db.update_run_result(run_id, status, notify, summary, error_message, finished_time)
             .map_err(|e| e.to_string())
     });
@@ -1583,9 +1580,9 @@ pub async fn stop_scheduled_task_run(
     let runs = db.list_runs_by_task(task_id, 50).map_err(|e| e.to_string())?;
 
     let target_run = match run_id {
-        Some(target_run_id) => runs
-            .into_iter()
-            .find(|run| run.run_id == target_run_id && run.status == "running"),
+        Some(target_run_id) => {
+            runs.into_iter().find(|run| run.run_id == target_run_id && run.status == "running")
+        }
         None => runs.into_iter().find(|run| run.status == "running"),
     }
     .ok_or_else(|| "当前任务没有正在运行的执行记录".to_string())?;
@@ -1744,6 +1741,7 @@ async fn execute_scheduled_task_inner(
         network_proxy.as_deref(),
         proxy_enabled,
         Some(request_timeout),
+        false,
         &config_feature_map,
     )
     .map_err(|e| format!("Failed to create AI client: {}", e))?;

@@ -123,22 +123,47 @@ mod tests {
 
     #[test]
     fn test_normalize_task_state_completed_variants() {
-        for v in ["completed", "complete", "done", "finished", "success", "succeeded", "结束", "已结束", "已完成"] {
-            assert_eq!(normalize_task_state_value(v), Some("completed".to_string()), "failed for '{}'", v);
+        for v in [
+            "completed",
+            "complete",
+            "done",
+            "finished",
+            "success",
+            "succeeded",
+            "结束",
+            "已结束",
+            "已完成",
+        ] {
+            assert_eq!(
+                normalize_task_state_value(v),
+                Some("completed".to_string()),
+                "failed for '{}'",
+                v
+            );
         }
     }
 
     #[test]
     fn test_normalize_task_state_running_variants() {
         for v in ["running", "in_progress", "pending", "processing", "进行中", "未结束"] {
-            assert_eq!(normalize_task_state_value(v), Some("running".to_string()), "failed for '{}'", v);
+            assert_eq!(
+                normalize_task_state_value(v),
+                Some("running".to_string()),
+                "failed for '{}'",
+                v
+            );
         }
     }
 
     #[test]
     fn test_normalize_task_state_failed_variants() {
         for v in ["failed", "error", "失败", "异常"] {
-            assert_eq!(normalize_task_state_value(v), Some("failed".to_string()), "failed for '{}'", v);
+            assert_eq!(
+                normalize_task_state_value(v),
+                Some("failed".to_string()),
+                "failed for '{}'",
+                v
+            );
         }
     }
 

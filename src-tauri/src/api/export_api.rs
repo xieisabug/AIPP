@@ -1,9 +1,15 @@
-use crate::errors::AppError;
 #[cfg(desktop)]
 use crate::api::highlight_api::highlight_code_for_export;
+use crate::errors::AppError;
 #[cfg(desktop)]
 use crate::mcp::builtin_mcp::search::browser::BrowserManager;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+#[cfg(desktop)]
+use chromiumoxide::browser::{Browser, BrowserConfig};
+#[cfg(desktop)]
+use chromiumoxide::cdp::browser_protocol::page::PrintToPdfParams;
+#[cfg(desktop)]
+use chromiumoxide::page::MediaTypeParams;
 use docx_rs::*;
 #[cfg(desktop)]
 use futures::StreamExt;
@@ -13,12 +19,6 @@ use regex::Regex;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::Duration;
-#[cfg(desktop)]
-use chromiumoxide::browser::{Browser, BrowserConfig};
-#[cfg(desktop)]
-use chromiumoxide::cdp::browser_protocol::page::PrintToPdfParams;
-#[cfg(desktop)]
-use chromiumoxide::page::MediaTypeParams;
 
 /// Markdown 转 Word (.docx) 字节流
 #[tauri::command]
@@ -39,9 +39,7 @@ pub async fn markdown_to_pdf(markdown: String) -> Result<Vec<u8>, AppError> {
 #[cfg(not(desktop))]
 #[tauri::command]
 pub async fn markdown_to_pdf(_markdown: String) -> Result<Vec<u8>, AppError> {
-    Err(AppError::InternalError(
-        "PDF 导出暂不支持移动端".to_string(),
-    ))
+    Err(AppError::InternalError("PDF 导出暂不支持移动端".to_string()))
 }
 
 #[cfg(desktop)]
@@ -53,9 +51,8 @@ async fn convert_markdown_to_pdf(markdown: &str) -> Result<Vec<u8>, AppError> {
         .get_browser_path()
         .map_err(|e| AppError::InternalError(format!("无法找到浏览器: {e}")))?;
 
-    let mut config_builder = BrowserConfig::builder()
-        .no_sandbox()
-        .launch_timeout(Duration::from_secs(45));
+    let mut config_builder =
+        BrowserConfig::builder().no_sandbox().launch_timeout(Duration::from_secs(45));
     if browser_path.exists() {
         config_builder = config_builder.chrome_executable(&browser_path);
     }
@@ -68,9 +65,7 @@ async fn convert_markdown_to_pdf(markdown: &str) -> Result<Vec<u8>, AppError> {
         .await
         .map_err(|e| AppError::InternalError(format!("启动浏览器失败: {e}")))?;
 
-    let handler_task = tokio::spawn(async move {
-        while handler.next().await.is_some() {}
-    });
+    let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
     let page = browser
         .new_page("about:blank")
@@ -247,7 +242,8 @@ fn build_pdf_html(markdown: &str) -> String {
 
 #[cfg(desktop)]
 fn render_pdf_markdown_html(markdown: &str) -> String {
-    let parser_options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let parser_options =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let events: Vec<_> = Parser::new_ext(markdown, parser_options).collect();
     let mut body_html = String::new();
     let mut index = 0usize;
@@ -301,8 +297,8 @@ fn escape_pdf_html(raw: &str) -> String {
 
 #[cfg(desktop)]
 fn inline_html_images_as_data_uri(html: &str) -> String {
-    let img_regex = Regex::new(r#"(?is)<img([^>]*?)src="([^"]+)"([^>]*)>"#)
-        .expect("invalid image regex");
+    let img_regex =
+        Regex::new(r#"(?is)<img([^>]*?)src="([^"]+)"([^>]*)>"#).expect("invalid image regex");
     img_regex
         .replace_all(html, |caps: &regex::Captures| {
             let before = caps.get(1).map_or("", |m| m.as_str());
@@ -338,26 +334,15 @@ const DOCX_IMAGE_MAX_WIDTH_PX: u32 = 640;
 const DOCX_EMU_PER_PX: u32 = 9525;
 
 fn body_fonts() -> RunFonts {
-    RunFonts::new()
-        .ascii("Calibri")
-        .hi_ansi("Calibri")
-        .east_asia("Microsoft YaHei")
-        .cs("Calibri")
+    RunFonts::new().ascii("Calibri").hi_ansi("Calibri").east_asia("Microsoft YaHei").cs("Calibri")
 }
 
 fn code_fonts() -> RunFonts {
-    RunFonts::new()
-        .ascii("Consolas")
-        .hi_ansi("Consolas")
-        .east_asia("Consolas")
-        .cs("Consolas")
+    RunFonts::new().ascii("Consolas").hi_ansi("Consolas").east_asia("Consolas").cs("Consolas")
 }
 
 fn body_run(text: &str) -> Run {
-    Run::new()
-        .add_text(text)
-        .fonts(body_fonts())
-        .size(DOCX_BODY_FONT_SIZE)
+    Run::new().add_text(text).fonts(body_fonts()).size(DOCX_BODY_FONT_SIZE)
 }
 
 fn create_styled_doc() -> Docx {
@@ -421,9 +406,8 @@ fn create_styled_doc() -> Docx {
 }
 
 fn convert_markdown_to_docx(markdown: &str) -> Result<Vec<u8>, AppError> {
-    let options = Options::ENABLE_TABLES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS;
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
 
     let parser = Parser::new_ext(markdown, options);
     let events: Vec<Event> = parser.collect();
@@ -454,9 +438,8 @@ fn process_event(events: &[Event], start: usize, doc: &mut Docx) -> Result<usize
                 pulldown_cmark::HeadingLevel::H5 => "Heading5",
                 pulldown_cmark::HeadingLevel::H6 => "Heading6",
             };
-            let mut para = Paragraph::new()
-                .style(style_name)
-                .line_spacing(LineSpacing::new().after(120));
+            let mut para =
+                Paragraph::new().style(style_name).line_spacing(LineSpacing::new().after(120));
             for run in runs {
                 para = para.add_run(run);
             }
@@ -494,28 +477,22 @@ fn process_event(events: &[Event], start: usize, doc: &mut Docx) -> Result<usize
             let code_text = code_text.trim_end_matches('\n');
 
             if !lang.is_empty() {
-                let lang_para = Paragraph::new().add_run(
-                    body_run(&lang).size(18).color("888888").italic(),
-                );
+                let lang_para =
+                    Paragraph::new().add_run(body_run(&lang).size(18).color("888888").italic());
                 *doc = std::mem::take(doc).add_paragraph(lang_para);
             }
 
             for line in code_text.split('\n') {
                 let para = Paragraph::new()
                     .add_run(
-                        Run::new()
-                            .add_text(line)
-                            .size(DOCX_CODE_FONT_SIZE)
-                            .fonts(code_fonts()),
+                        Run::new().add_text(line).size(DOCX_CODE_FONT_SIZE).fonts(code_fonts()),
                     )
                     .indent(Some(280), None, None, None)
                     .line_spacing(LineSpacing::new().line(280).after(80));
                 *doc = std::mem::take(doc).add_paragraph(para);
             }
             *doc = std::mem::take(doc).add_paragraph(
-                Paragraph::new()
-                    .style("Normal")
-                    .line_spacing(LineSpacing::new().after(120)),
+                Paragraph::new().style("Normal").line_spacing(LineSpacing::new().after(120)),
             );
             Ok(j + 1)
         }
@@ -533,11 +510,7 @@ fn process_event(events: &[Event], start: usize, doc: &mut Docx) -> Result<usize
             let ordered = start_num.is_some();
             let (items, end) = collect_list_items(events, start + 1)?;
             for (idx, item_runs) in items.into_iter().enumerate() {
-                let bullet = if ordered {
-                    format!("{}. ", idx + 1)
-                } else {
-                    "• ".to_string()
-                };
+                let bullet = if ordered { format!("{}. ", idx + 1) } else { "• ".to_string() };
                 let mut para = Paragraph::new()
                     .style("Normal")
                     .line_spacing(LineSpacing::new().line(320).after(80))
@@ -553,11 +526,8 @@ fn process_event(events: &[Event], start: usize, doc: &mut Docx) -> Result<usize
 
         Event::Start(Tag::BlockQuote(_)) => {
             let (runs, end) = collect_blockquote_runs(events, start + 1);
-            let borders = ParagraphBorders::with_empty().set(
-                ParagraphBorder::new(ParagraphBorderPosition::Left)
-                    .size(12)
-                    .color("CCCCCC"),
-            );
+            let borders = ParagraphBorders::with_empty()
+                .set(ParagraphBorder::new(ParagraphBorderPosition::Left).size(12).color("CCCCCC"));
             let mut para = Paragraph::new()
                 .style("Normal")
                 .line_spacing(LineSpacing::new().line(300).after(120))
@@ -580,11 +550,8 @@ fn process_event(events: &[Event], start: usize, doc: &mut Docx) -> Result<usize
         }
 
         Event::Rule => {
-            let borders = ParagraphBorders::with_empty().set(
-                ParagraphBorder::new(ParagraphBorderPosition::Bottom)
-                    .size(6)
-                    .color("999999"),
-            );
+            let borders = ParagraphBorders::with_empty()
+                .set(ParagraphBorder::new(ParagraphBorderPosition::Bottom).size(6).color("999999"));
             let mut para = Paragraph::new();
             para.property = para.property.set_borders(borders);
             *doc = std::mem::take(doc).add_paragraph(para);
@@ -622,11 +589,7 @@ fn collect_inline_runs(events: &[Event], start: usize, end_tag: TagEnd) -> (Vec<
                     }
                     k += 1;
                 }
-                let display = if link_text.is_empty() {
-                    dest_url.to_string()
-                } else {
-                    link_text
-                };
+                let display = if link_text.is_empty() { dest_url.to_string() } else { link_text };
                 let mut run = body_run(&display).color("2563EB").underline("single");
                 if bold {
                     run = run.bold();
@@ -702,14 +665,12 @@ fn build_image_run(image_src: &str, alt_text: &str) -> Option<Run> {
     let (width_px, height_px) = dynamic_image.dimensions();
 
     let mut png_bytes = Cursor::new(Vec::new());
-    dynamic_image
-        .write_to(&mut png_bytes, image::ImageFormat::Png)
-        .ok()?;
+    dynamic_image.write_to(&mut png_bytes, image::ImageFormat::Png).ok()?;
 
     let (target_width_px, target_height_px) =
         fit_image_size(width_px.max(1), height_px.max(1), DOCX_IMAGE_MAX_WIDTH_PX);
-    let pic =
-        Pic::new_with_dimensions(png_bytes.into_inner(), target_width_px, target_height_px).size(
+    let pic = Pic::new_with_dimensions(png_bytes.into_inner(), target_width_px, target_height_px)
+        .size(
             target_width_px.saturating_mul(DOCX_EMU_PER_PX),
             target_height_px.saturating_mul(DOCX_EMU_PER_PX),
         );
@@ -767,10 +728,8 @@ fn decode_data_uri_image(image_src: &str) -> Option<Vec<u8>> {
 }
 
 fn fetch_remote_image(image_src: &str) -> Option<Vec<u8>> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(8))
-        .build()
-        .ok()?;
+    let client =
+        reqwest::blocking::Client::builder().timeout(Duration::from_secs(8)).build().ok()?;
     let response = client.get(image_src).send().ok()?;
     if !response.status().is_success() {
         return None;

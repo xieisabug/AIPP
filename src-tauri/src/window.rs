@@ -374,11 +374,7 @@ pub fn create_artifact_preview_window(app: &AppHandle) {
 
             match event {
                 DownloadEvent::Requested { url, destination } => {
-                    debug!(
-                        "downloading {} to {}",
-                        url,
-                        download_path.clone().to_string_lossy()
-                    );
+                    debug!("downloading {} to {}", url, download_path.clone().to_string_lossy());
                     *destination = download_path.join(&mut *destination);
                 }
                 DownloadEvent::Finished { url, path, success } => {
@@ -959,7 +955,8 @@ fn create_sidebar_window(app_handle: &AppHandle) {
         let mut builder =
             WebviewWindowBuilder::new(app_handle, "sidebar", WebviewUrl::App("index.html".into()))
                 .on_download(|webview, event| {
-                    let download_path = webview.app_handle().path().download_dir().unwrap_or_default();
+                    let download_path =
+                        webview.app_handle().path().download_dir().unwrap_or_default();
 
                     match event {
                         DownloadEvent::Requested { url, destination } => {

@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::api::ai::acp::AcpPermissionState;
 use crate::api::ai_api::{
-    ask_ai, cancel_ai, get_activity_focus, get_conversation_runtime_state, get_shine_state, regenerate_ai,
-    regenerate_conversation_title, tool_result_continue_ask_ai,
+    ask_ai, cancel_ai, get_activity_focus, get_conversation_runtime_state, get_shine_state,
+    regenerate_ai, regenerate_conversation_title, tool_result_continue_ask_ai,
 };
 use crate::api::assistant_api::{
     add_assistant, bulk_update_assistant_mcp_tools, copy_assistant, delete_assistant,
@@ -55,8 +55,8 @@ use crate::api::plugin_api::{
 };
 use crate::api::scheduled_task_api::{
     create_scheduled_task, delete_scheduled_task, list_scheduled_task_logs,
-    list_scheduled_task_runs, list_scheduled_tasks, run_scheduled_task_now, stop_scheduled_task_run,
-    update_scheduled_task,
+    list_scheduled_task_runs, list_scheduled_tasks, run_scheduled_task_now,
+    stop_scheduled_task_run, update_scheduled_task,
 };
 use crate::api::skill_api::{
     bulk_update_assistant_skills, cleanup_orphaned_skill_configs, delete_skill,
@@ -411,7 +411,9 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        if let Some(chat_window) = app_handle_for_click.get_webview_window("chat_ui") {
+                        if let Some(chat_window) =
+                            app_handle_for_click.get_webview_window("chat_ui")
+                        {
                             open_chat_ui_window_inner(&app_handle_for_click, &chat_window);
                         } else {
                             crate::window::create_chat_ui_window(&app_handle_for_click);

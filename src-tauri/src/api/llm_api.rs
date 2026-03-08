@@ -193,6 +193,7 @@ pub async fn fetch_model_list(
         network_proxy.as_deref(),
         proxy_enabled,
         None,
+        false,
         &config_feature_map,
     )
     .map_err(|e| e.to_string())?;
@@ -324,6 +325,7 @@ pub async fn preview_model_list(
         network_proxy.as_deref(),
         proxy_enabled,
         None,
+        false,
         &config_feature_map,
     )
     .map_err(|e| e.to_string())?;

@@ -302,9 +302,7 @@ pub fn highlight_code_for_export(
     let raw_token = normalize_lang_token(lang);
     let mapped = map_lang_alias(raw_token);
     let token_lower = mapped.to_lowercase();
-    let scope_match = Scope::new(&mapped)
-        .ok()
-        .and_then(|scope| ss.find_syntax_by_scope(scope));
+    let scope_match = Scope::new(&mapped).ok().and_then(|scope| ss.find_syntax_by_scope(scope));
     let syntax = scope_match
         .or_else(|| ss.find_syntax_by_token(&mapped))
         .or_else(|| ss.find_syntax_by_token(&token_lower))

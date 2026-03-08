@@ -198,9 +198,7 @@ impl MCPDatabase {
         loop {
             match operation() {
                 Ok(value) => return Ok(value),
-                Err(err)
-                    if attempt < SQLITE_BUSY_RETRY_LIMIT && Self::is_sqlite_busy(&err) =>
-                {
+                Err(err) if attempt < SQLITE_BUSY_RETRY_LIMIT && Self::is_sqlite_busy(&err) => {
                     let backoff_ms = SQLITE_BUSY_RETRY_BASE_DELAY_MS * (1u64 << attempt);
                     attempt += 1;
                     std::thread::sleep(Duration::from_millis(backoff_ms));

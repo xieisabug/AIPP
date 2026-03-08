@@ -55,7 +55,8 @@ fn should_auto_run_tool(
     if let Some(all_auto_run) = mcp_override_config.and_then(|cfg| cfg.all_tool_auto_run) {
         return all_auto_run;
     }
-    let Some(tool_overrides) = mcp_override_config.and_then(|cfg| cfg.tool_auto_run.as_ref()) else {
+    let Some(tool_overrides) = mcp_override_config.and_then(|cfg| cfg.tool_auto_run.as_ref())
+    else {
         return default_auto_run;
     };
 

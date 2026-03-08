@@ -5,7 +5,9 @@ use crate::db::conversation_db::Repository;
 use crate::db::conversation_db::{Conversation, ConversationDatabase, Message, MessageAttachment};
 use crate::errors::AppError;
 use base64::Engine;
-use genai::chat::{ChatMessage, ChatRequest, Tool, ToolCall, ToolResponse};
+use genai::chat::{
+    ChatMessage, ChatRequest, ContentPart, MessageContent, Tool, ToolCall, ToolResponse,
+};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -296,13 +298,22 @@ pub fn build_chat_messages_with_context(
     }
 
     let mut chat_messages = Vec::new();
+    let mut pending_reasoning_content: Option<String> = None;
     for (message_type, content, attachment_list) in init_message_list.iter() {
         debug!(message_type, preview = %content.chars().take(50).collect::<String>(), "processing message");
+
+        if message_type != "reasoning" && message_type != "response" && message_type != "assistant"
+        {
+            flush_pending_reasoning_message(&mut chat_messages, &mut pending_reasoning_content);
+        }
 
         match message_type.as_str() {
             "system" => chat_messages.push(ChatMessage::system(content)),
             "user" => {
                 chat_messages.push(build_user_message_with_attachments(content, attachment_list));
+            }
+            "reasoning" => {
+                append_reasoning_content(&mut pending_reasoning_content, content);
             }
             "tool_result" => {
                 debug!("processing tool_result message");
@@ -334,18 +345,15 @@ pub fn build_chat_messages_with_context(
                     chat_messages.push(ChatMessage::user(content));
                 }
             }
+            "response" | "assistant" => {
+                let reasoning_content = pending_reasoning_content.take();
+                chat_messages.push(build_assistant_message_from_content(
+                    content,
+                    reasoning_content.as_deref(),
+                ));
+            }
             other => {
-                // 将 response 统一视为 assistant 历史
-                if other == "response" {
-                    // 检查是否包含 MCP_TOOL_CALL 注释，如果有则需要重建包含工具调用的 assistant 消息
-                    if let Some(assistant_with_calls) =
-                        reconstruct_assistant_with_tool_calls_from_content(content)
-                    {
-                        chat_messages.push(assistant_with_calls);
-                    } else {
-                        chat_messages.push(ChatMessage::assistant(content));
-                    }
-                } else if other == "system" {
+                if other == "system" {
                     chat_messages.push(ChatMessage::system(content));
                 } else {
                     chat_messages.push(ChatMessage::assistant(content));
@@ -353,6 +361,7 @@ pub fn build_chat_messages_with_context(
             }
         }
     }
+    flush_pending_reasoning_message(&mut chat_messages, &mut pending_reasoning_content);
     chat_messages
 }
 
@@ -427,6 +436,7 @@ fn build_native_toolcall_paired_messages(
     let mut chat_messages = Vec::new();
     let mut tool_call_to_response: HashMap<String, String> = HashMap::new();
     let mut message_trace: Vec<String> = Vec::new();
+    let mut pending_reasoning_content: Option<String> = None;
 
     for (message_type, content, _) in init_message_list.iter() {
         if message_type == "tool_result" {
@@ -439,6 +449,11 @@ fn build_native_toolcall_paired_messages(
     }
 
     for (message_type, content, attachment_list) in init_message_list.iter() {
+        if message_type != "reasoning" && message_type != "response" && message_type != "assistant"
+        {
+            flush_pending_reasoning_message(&mut chat_messages, &mut pending_reasoning_content);
+        }
+
         match message_type.as_str() {
             "system" => {
                 chat_messages.push(ChatMessage::system(content));
@@ -448,34 +463,34 @@ fn build_native_toolcall_paired_messages(
                 chat_messages.push(build_user_message_with_attachments(content, attachment_list));
                 message_trace.push("user".to_string());
             }
-            "response" => {
-                if let Some(assistant_with_calls) =
-                    reconstruct_assistant_with_tool_calls_from_content(content)
-                {
-                    let tool_call_ids = assistant_with_calls
-                        .content
-                        .tool_calls()
-                        .iter()
-                        .map(|tc| tc.call_id.clone())
-                        .collect::<Vec<_>>();
-                    chat_messages.push(assistant_with_calls.clone());
-                    message_trace.push(format!("assistant:tool_calls={:?}", tool_call_ids));
+            "reasoning" => {
+                append_reasoning_content(&mut pending_reasoning_content, content);
+            }
+            "response" | "assistant" => {
+                let reasoning_content = pending_reasoning_content.take();
+                let assistant_message =
+                    build_assistant_message_from_content(content, reasoning_content.as_deref());
+                let tool_call_ids = assistant_message
+                    .content
+                    .tool_calls()
+                    .iter()
+                    .map(|tc| tc.call_id.clone())
+                    .collect::<Vec<_>>();
 
-                    for tool_call in assistant_with_calls.content.tool_calls() {
-                        if let Some(response_content) =
-                            tool_call_to_response.get(&tool_call.call_id)
-                        {
-                            let tool_response = ToolResponse::new(
-                                tool_call.call_id.clone(),
-                                response_content.clone(),
-                            );
-                            chat_messages.push(ChatMessage::from(tool_response));
-                            message_trace.push(format!("tool:call_id={}", tool_call.call_id));
-                        }
-                    }
-                } else {
-                    chat_messages.push(ChatMessage::assistant(content));
+                chat_messages.push(assistant_message.clone());
+                if tool_call_ids.is_empty() {
                     message_trace.push("assistant".to_string());
+                } else {
+                    message_trace.push(format!("assistant:tool_calls={:?}", tool_call_ids));
+                }
+
+                for tool_call in assistant_message.content.tool_calls() {
+                    if let Some(response_content) = tool_call_to_response.get(&tool_call.call_id) {
+                        let tool_response =
+                            ToolResponse::new(tool_call.call_id.clone(), response_content.clone());
+                        chat_messages.push(ChatMessage::from(tool_response));
+                        message_trace.push(format!("tool:call_id={}", tool_call.call_id));
+                    }
                 }
             }
             "tool_result" => {}
@@ -485,6 +500,8 @@ fn build_native_toolcall_paired_messages(
             }
         }
     }
+
+    flush_pending_reasoning_message(&mut chat_messages, &mut pending_reasoning_content);
 
     debug!(?message_trace, "toolcall paired message order");
 
@@ -615,6 +632,50 @@ pub fn extract_tool_result(content: &str) -> Option<String> {
 
 // Helper function to reconstruct assistant message with tool calls from MCP_TOOL_CALL comments
 pub fn reconstruct_assistant_with_tool_calls_from_content(content: &str) -> Option<ChatMessage> {
+    reconstruct_assistant_with_tool_calls_and_reasoning(content, None)
+}
+
+fn build_assistant_message_from_content(
+    content: &str,
+    reasoning_content: Option<&str>,
+) -> ChatMessage {
+    reconstruct_assistant_with_tool_calls_and_reasoning(content, reasoning_content).unwrap_or_else(
+        || {
+            let mut message = ChatMessage::assistant(content);
+            if let Some(reasoning_content) =
+                reasoning_content.filter(|reasoning_content| !reasoning_content.trim().is_empty())
+            {
+                message = message.with_reasoning_content(Some(reasoning_content.to_string()));
+            }
+            message
+        },
+    )
+}
+
+fn append_reasoning_content(pending_reasoning_content: &mut Option<String>, content: &str) {
+    match pending_reasoning_content {
+        Some(existing) if !existing.is_empty() && !content.is_empty() => {
+            existing.push_str("\n\n");
+            existing.push_str(content);
+        }
+        Some(existing) => existing.push_str(content),
+        None => *pending_reasoning_content = Some(content.to_string()),
+    }
+}
+
+fn flush_pending_reasoning_message(
+    chat_messages: &mut Vec<ChatMessage>,
+    pending_reasoning_content: &mut Option<String>,
+) {
+    if let Some(reasoning_content) = pending_reasoning_content.take() {
+        chat_messages.push(ChatMessage::assistant(reasoning_content));
+    }
+}
+
+fn reconstruct_assistant_with_tool_calls_and_reasoning(
+    content: &str,
+    reasoning_content: Option<&str>,
+) -> Option<ChatMessage> {
     // 查找所有 MCP_TOOL_CALL 注释
     let mcp_call_regex = Regex::new(r"<!-- MCP_TOOL_CALL:(.*?) -->").ok()?;
     let mut tool_calls = Vec::new();
@@ -652,8 +713,20 @@ pub fn reconstruct_assistant_with_tool_calls_from_content(content: &str) -> Opti
     }
 
     if !tool_calls.is_empty() {
-        // 创建包含工具调用的 assistant 消息（忽略文本内容以避免混合消息类型的复杂性）
-        return Some(ChatMessage::from(tool_calls));
+        let assistant_text = mcp_call_regex.replace_all(content, "").trim().to_string();
+        let mut parts = Vec::new();
+        if !assistant_text.is_empty() {
+            parts.push(ContentPart::from_text(assistant_text));
+        }
+        parts.extend(tool_calls.into_iter().map(ContentPart::ToolCall));
+
+        let mut message = ChatMessage::assistant(MessageContent::from_parts(parts));
+        if let Some(reasoning_content) =
+            reasoning_content.filter(|reasoning_content| !reasoning_content.trim().is_empty())
+        {
+            message = message.with_reasoning_content(Some(reasoning_content.to_string()));
+        }
+        return Some(message);
     }
 
     None

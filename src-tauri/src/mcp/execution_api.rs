@@ -245,7 +245,8 @@ async fn handle_tool_execution_result(
         Ok(result) => {
             info!(tool_call_id=tool_call.id, tool_name=%tool_call.tool_name, server=%tool_call.server_name, "工具执行成功");
 
-            if let Err(e) = db.update_mcp_tool_call_status(call_id, "success", Some(&result), None) {
+            if let Err(e) = db.update_mcp_tool_call_status(call_id, "success", Some(&result), None)
+            {
                 warn!(
                     call_id,
                     error = %e,
@@ -350,9 +351,12 @@ async fn handle_tool_execution_result(
             }
 
             if !continuation_dispatched {
-                if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>()
+                if let Some(activity_manager) =
+                    app_handle.try_state::<ConversationActivityManager>()
                 {
-                    activity_manager.restore_after_mcp(&app_handle, tool_call.conversation_id).await;
+                    activity_manager
+                        .restore_after_mcp(&app_handle, tool_call.conversation_id)
+                        .await;
                 }
             }
         }
@@ -1289,7 +1293,8 @@ async fn trigger_conversation_continuation(
                     );
                 }
             }
-            if let Some(activity_manager) = app_handle_clone.try_state::<ConversationActivityManager>()
+            if let Some(activity_manager) =
+                app_handle_clone.try_state::<ConversationActivityManager>()
             {
                 activity_manager
                     .restore_after_mcp(&app_handle_clone, continuation_conversation_id)
@@ -1392,7 +1397,8 @@ async fn trigger_conversation_continuation_with_error(
                     );
                 }
             }
-            if let Some(activity_manager) = app_handle_clone.try_state::<ConversationActivityManager>()
+            if let Some(activity_manager) =
+                app_handle_clone.try_state::<ConversationActivityManager>()
             {
                 activity_manager
                     .restore_after_mcp(&app_handle_clone, continuation_conversation_id)
@@ -1862,8 +1868,7 @@ async fn execute_builtin_tool(
     // 获取超时配置，使用服务器配置的超时或默认值
     let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
     // AskUserQuestion 需要等待用户交互，不应受超时限制。
-    let wait_indefinitely =
-        command == "aipp:ui_interaction" && tool_name == "ask_user_question";
+    let wait_indefinitely = command == "aipp:ui_interaction" && tool_name == "ask_user_question";
     let start = std::time::Instant::now();
 
     // 验证是否为内置工具调用

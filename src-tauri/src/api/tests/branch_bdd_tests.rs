@@ -184,11 +184,7 @@ fn given_tool_call_with_null_parameters_when_build_chat_request_then_normalizes_
     let init_message_list = vec![
         ("system".to_string(), "system".to_string(), vec![]),
         ("user".to_string(), "question".to_string(), vec![]),
-        (
-            "response".to_string(),
-            response_with_tool_call_null_params(1, "call tool"),
-            vec![],
-        ),
+        ("response".to_string(), response_with_tool_call_null_params(1, "call tool"), vec![]),
         ("tool_result".to_string(), tool_result_content("call_1", "tool error"), vec![]),
     ];
 
@@ -200,6 +196,27 @@ fn given_tool_call_with_null_parameters_when_build_chat_request_then_normalizes_
     let tool_calls = messages[2].content.tool_calls();
     assert_eq!(tool_calls.len(), 1);
     assert!(tool_calls[0].fn_arguments.is_object());
+    assert!(matches!(&messages[3].role, ChatRole::Tool));
+}
+
+#[test]
+fn given_reasoning_before_tool_call_when_build_chat_request_then_merges_reasoning_into_assistant() {
+    let init_message_list = vec![
+        ("system".to_string(), "system".to_string(), vec![]),
+        ("user".to_string(), "question".to_string(), vec![]),
+        ("reasoning".to_string(), "先思考工具用途".to_string(), vec![]),
+        ("response".to_string(), response_with_tool_call(1, "call tool"), vec![]),
+        ("tool_result".to_string(), tool_result_content("call_1", "ok"), vec![]),
+    ];
+
+    let result =
+        build_chat_request_from_messages(&init_message_list, ToolCallStrategy::Native, None);
+    let messages = result.chat_request.messages;
+    assert_eq!(messages.len(), 4);
+    assert!(matches!(&messages[2].role, ChatRole::Assistant));
+    assert_eq!(messages[2].content.tool_calls().len(), 1);
+    assert_eq!(messages[2].content.joined_reasoning_content().as_deref(), Some("先思考工具用途"));
+    assert_eq!(messages[2].content.first_text(), Some("call tool"));
     assert!(matches!(&messages[3].role, ChatRole::Tool));
 }
 

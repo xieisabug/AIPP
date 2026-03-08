@@ -202,9 +202,8 @@ fn build_tool_config(
             let mut tools = Vec::new();
             let is_dynamic_builtin = server.command.as_deref() == Some("aipp:dynamic_mcp");
             for tool in &server.tools {
-                let is_agent_loader_tool =
-                    server.command.as_deref() == Some("aipp:agent")
-                        && (tool.name == "load_mcp_server" || tool.name == "load_mcp_tool");
+                let is_agent_loader_tool = server.command.as_deref() == Some("aipp:agent")
+                    && (tool.name == "load_mcp_server" || tool.name == "load_mcp_tool");
                 if is_dynamic_builtin
                     || is_agent_loader_tool
                     || allowed.contains(&(server.id, tool.name.clone()))
@@ -514,16 +513,6 @@ pub async fn ask_ai(
             .and_then(|config| config.value.parse::<bool>().ok())
             .unwrap_or(false);
 
-        let client = genai_client::create_client_with_config(
-            &model_configs,
-            &model_code,
-            &provider_api_type,
-            network_proxy.as_deref(),
-            proxy_enabled,
-            Some(request_timeout),
-            &_config_feature_map,
-        )?;
-
         // 创建一个临时的 ModelDetail 用于配置合并
         let temp_model_detail = crate::db::llm_db::ModelDetail {
             model: crate::db::llm_db::LLMModel {
@@ -565,7 +554,6 @@ pub async fn ask_ai(
         let model_name = config_map.get("model").cloned().unwrap_or_else(|| model_code.clone());
 
         let chat_options = ConfigBuilder::build_chat_options(&config_map);
-
         let force_non_native_for_invalid_tool_args =
             has_missing_required_parameter_tool_error_in_message_list(&init_message_list);
         if force_non_native_for_invalid_tool_args {
@@ -574,6 +562,17 @@ pub async fn ask_ai(
                 "detected missing required parameter tool error in history; forcing non-native ask_ai"
             );
         }
+
+        let client = genai_client::create_client_with_config(
+            &model_configs,
+            &model_code,
+            &provider_api_type,
+            network_proxy.as_deref(),
+            proxy_enabled,
+            Some(request_timeout),
+            stream,
+            &_config_feature_map,
+        )?;
 
         // 动态判断是否有可用的工具
         let has_available_tools = is_native_toolcall
@@ -830,20 +829,6 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
 
     let conversation_db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
     // Build chat configuration (same as ask_ai)
-    let client = genai_client::create_client_with_config(
-        &model_configs,
-        &model_code,
-        &provider_api_type,
-        None,
-        false,
-        None,
-        &config_feature_map,
-    )
-    .map_err(|e| {
-        error!(error = %e, "failed to create client in tool_result_continue_ask_ai");
-        e
-    })?;
-
     let temp_model_detail = crate::db::llm_db::ModelDetail {
         model: crate::db::llm_db::LLMModel {
             id: model_id,
@@ -883,7 +868,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let chat_options = ConfigBuilder::build_chat_options(&config_map);
 
     // 先计算强制降级条件
-    let force_non_native_for_toolresult =
+    let force_non_native_for_gemini_toolresult =
         provider_api_type == "openai" && model_code.to_lowercase().contains("gemini");
     let force_non_native_for_invalid_tool_args =
         has_missing_required_parameter_tool_error(&latest_branch);
@@ -894,10 +879,25 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         );
     }
 
+    let client = genai_client::create_client_with_config(
+        &model_configs,
+        &model_code,
+        &provider_api_type,
+        None,
+        false,
+        None,
+        stream,
+        &config_feature_map,
+    )
+    .map_err(|e| {
+        error!(error = %e, "failed to create client in tool_result_continue_ask_ai");
+        e
+    })?;
+
     // 动态判断是否有可用的工具（考虑强制降级的情况）
     let has_available_tools = is_native_toolcall
         && !mcp_info.enabled_servers.is_empty()
-        && !force_non_native_for_toolresult
+        && !force_non_native_for_gemini_toolresult
         && !force_non_native_for_invalid_tool_args;
 
     // 同 ask_ai：避免 OpenAI 兼容通道 + Gemini 模型导致的 usage 反序列化报错日志
@@ -925,6 +925,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         capture_usage = capture_usage,
         is_openai_like = is_openai_like,
         is_gemini = is_gemini,
+        force_non_native_for_gemini_toolresult,
         force_non_native_for_invalid_tool_args,
         "chat configuration (tool_result_continue)"
     );
@@ -1073,20 +1074,6 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
 
     let conversation_db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
     // Build chat configuration
-    let client = genai_client::create_client_with_config(
-        &model_configs,
-        &model_code,
-        &provider_api_type,
-        None,
-        false,
-        None,
-        &config_feature_map,
-    )
-    .map_err(|e| {
-        error!(error = %e, "failed to create client in batch_tool_result_continue_ask_ai");
-        e
-    })?;
-
     let temp_model_detail = crate::db::llm_db::ModelDetail {
         model: crate::db::llm_db::LLMModel {
             id: model_id,
@@ -1126,7 +1113,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let chat_options = ConfigBuilder::build_chat_options(&config_map);
 
     // 先计算强制降级条件
-    let force_non_native_for_toolresult =
+    let force_non_native_for_gemini_toolresult =
         provider_api_type == "openai" && model_code.to_lowercase().contains("gemini");
     let force_non_native_for_invalid_tool_args =
         has_missing_required_parameter_tool_error(&latest_branch);
@@ -1137,10 +1124,25 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         );
     }
 
+    let client = genai_client::create_client_with_config(
+        &model_configs,
+        &model_code,
+        &provider_api_type,
+        None,
+        false,
+        None,
+        stream,
+        &config_feature_map,
+    )
+    .map_err(|e| {
+        error!(error = %e, "failed to create client in batch_tool_result_continue_ask_ai");
+        e
+    })?;
+
     // 动态判断是否有可用的工具（考虑强制降级的情况）
     let has_available_tools = is_native_toolcall
         && !mcp_info.enabled_servers.is_empty()
-        && !force_non_native_for_toolresult
+        && !force_non_native_for_gemini_toolresult
         && !force_non_native_for_invalid_tool_args;
 
     let provider_api_type_lc = provider_api_type.to_lowercase();
@@ -1164,6 +1166,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         stream = chat_config.stream,
         has_tools = has_available_tools,
         provider_api_type = %provider_api_type,
+        force_non_native_for_gemini_toolresult,
         force_non_native_for_invalid_tool_args,
         "chat configuration (batch_tool_result_continue)"
     );
@@ -1438,16 +1441,6 @@ pub async fn regenerate_ai(
             .and_then(|config| config.value.parse::<bool>().ok())
             .unwrap_or(false);
 
-        let client = genai_client::create_client_with_config(
-            &regenerate_model_configs,
-            &regenerate_model_code,
-            &regenerate_provider_api_type,
-            network_proxy.as_deref(),
-            proxy_enabled,
-            Some(request_timeout),
-            &_config_feature_map,
-        )?;
-
         // 创建一个临时的 ModelDetail 用于配置合并
         let temp_model_detail = crate::db::llm_db::ModelDetail {
             model: crate::db::llm_db::LLMModel {
@@ -1499,6 +1492,17 @@ pub async fn regenerate_ai(
                 "detected missing required parameter tool error in history; forcing non-native regenerate"
             );
         }
+
+        let client = genai_client::create_client_with_config(
+            &regenerate_model_configs,
+            &regenerate_model_code,
+            &regenerate_provider_api_type,
+            network_proxy.as_deref(),
+            proxy_enabled,
+            Some(request_timeout),
+            stream,
+            &_config_feature_map,
+        )?;
 
         // 动态判断是否有可用的工具
         let has_available_tools = is_native_toolcall

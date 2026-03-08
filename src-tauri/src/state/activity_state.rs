@@ -6,8 +6,8 @@ use tracing::{debug, warn};
 
 use crate::api::ai::events::{
     ActivityFocus, ActivityFocusChangeEvent, ConversationEvent, ConversationRuntimePhase,
-    ConversationRuntimeState, ConversationShineState, RuntimeStateSnapshotEvent, ShineStateSnapshotEvent,
-    ShineTarget,
+    ConversationRuntimeState, ConversationShineState, RuntimeStateSnapshotEvent,
+    ShineStateSnapshotEvent, ShineTarget,
 };
 use crate::db::mcp_db::MCPDatabase;
 
@@ -88,7 +88,9 @@ impl ConversationActivityManager {
         match focus {
             ActivityFocus::None => ConversationRuntimePhase::Idle,
             ActivityFocus::UserPending { .. } => ConversationRuntimePhase::UserPending,
-            ActivityFocus::AssistantStreaming { .. } => ConversationRuntimePhase::AssistantStreaming,
+            ActivityFocus::AssistantStreaming { .. } => {
+                ConversationRuntimePhase::AssistantStreaming
+            }
             ActivityFocus::McpExecuting { .. } => ConversationRuntimePhase::McpExecuting,
         }
     }
@@ -107,7 +109,10 @@ impl ConversationActivityManager {
         }
     }
 
-    fn build_shine_state(conversation_id: i64, activity: &ConversationActivity) -> ConversationShineState {
+    fn build_shine_state(
+        conversation_id: i64,
+        activity: &ConversationActivity,
+    ) -> ConversationShineState {
         ConversationShineState {
             conversation_id,
             epoch: activity.epoch,
@@ -172,12 +177,8 @@ impl ConversationActivityManager {
         active
     }
 
-    async fn update_state<F>(
-        &self,
-        app_handle: &tauri::AppHandle,
-        conversation_id: i64,
-        updater: F,
-    ) where
+    async fn update_state<F>(&self, app_handle: &tauri::AppHandle, conversation_id: i64, updater: F)
+    where
         F: FnOnce(&mut ConversationActivity),
     {
         let (state_changed, focus_changed, focus, runtime_state, shine_snapshot) = {

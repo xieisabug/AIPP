@@ -169,11 +169,7 @@ fn execute_dynamic_mcp_tool(
         }
         "load_mcp_tool" => {
             let names = if let Some(values) = args.get("names").and_then(|v| v.as_array()) {
-                values
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .map(|v| v.to_string())
-                    .collect::<Vec<_>>()
+                values.iter().filter_map(|v| v.as_str()).map(|v| v.to_string()).collect::<Vec<_>>()
             } else if let Some(single) = args.get("name").and_then(|v| v.as_str()) {
                 vec![single.to_string()]
             } else {
@@ -182,8 +178,8 @@ fn execute_dynamic_mcp_tool(
             if names.is_empty() {
                 return Err("Missing required parameter: names".to_string());
             }
-            let conversation_id =
-                conversation_id.ok_or_else(|| "load_mcp_tool requires conversation context".to_string())?;
+            let conversation_id = conversation_id
+                .ok_or_else(|| "load_mcp_tool requires conversation context".to_string())?;
             let server_filter =
                 args.get("server_name").and_then(|v| v.as_str()).map(|v| v.to_lowercase());
             let tool_catalog = db
@@ -249,8 +245,10 @@ fn execute_dynamic_mcp_tool(
                         server_ids.push(tool.server_id);
                     }
                 }
-                let mut tool_definition_map: std::collections::HashMap<i64, (String, String, bool)> =
-                    std::collections::HashMap::new();
+                let mut tool_definition_map: std::collections::HashMap<
+                    i64,
+                    (String, String, bool),
+                > = std::collections::HashMap::new();
                 if !server_ids.is_empty() {
                     let server_tool_pairs = db
                         .get_mcp_servers_with_tools_by_ids(&server_ids)
@@ -272,10 +270,14 @@ fn execute_dynamic_mcp_tool(
                 }
                 let mut loaded = Vec::new();
                 for tool in &selected {
-                    db.upsert_conversation_loaded_tool(conversation_id, tool.tool_id, Some("manual"))
-                        .map_err(|e| {
-                            format!("Failed to persist loaded tool {}: {}", tool.tool_name, e)
-                        })?;
+                    db.upsert_conversation_loaded_tool(
+                        conversation_id,
+                        tool.tool_id,
+                        Some("manual"),
+                    )
+                    .map_err(|e| {
+                        format!("Failed to persist loaded tool {}: {}", tool.tool_name, e)
+                    })?;
                     let (description, parameters_json, is_auto_run) = tool_definition_map
                         .get(&tool.tool_id)
                         .cloned()
@@ -285,13 +287,15 @@ fn execute_dynamic_mcp_tool(
                     } else {
                         description
                     };
-                    let parameters_schema = serde_json::from_str::<serde_json::Value>(&parameters_json)
-                        .unwrap_or_else(|_| {
-                            serde_json::json!({
-                                "type": "object",
-                                "additionalProperties": true
-                            })
-                        });
+                    let parameters_schema = serde_json::from_str::<serde_json::Value>(
+                        &parameters_json,
+                    )
+                    .unwrap_or_else(|_| {
+                        serde_json::json!({
+                            "type": "object",
+                            "additionalProperties": true
+                        })
+                    });
                     loaded.push(serde_json::json!({
                         "tool_id": tool.tool_id,
                         "toolset_name": tool.server_name,

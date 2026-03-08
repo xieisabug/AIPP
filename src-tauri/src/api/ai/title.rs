@@ -204,6 +204,7 @@ pub async fn generate_title(
         network_proxy.as_deref(),
         proxy_enabled,
         Some(request_timeout),
+        false,
         &config_feature_map,
     )?;
 

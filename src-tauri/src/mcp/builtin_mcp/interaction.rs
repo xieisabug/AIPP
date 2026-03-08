@@ -65,7 +65,10 @@ impl AskUserQuestionRequest {
                     return Err(format!("Question #{} option label cannot be empty", index + 1));
                 }
                 if option.description.trim().is_empty() {
-                    return Err(format!("Question #{} option description cannot be empty", index + 1));
+                    return Err(format!(
+                        "Question #{} option description cannot be empty",
+                        index + 1
+                    ));
                 }
                 let normalized = option.label.trim().to_lowercase();
                 if !seen_labels.insert(normalized) {
@@ -127,10 +130,8 @@ impl PreviewFileRequest {
                 return Err(format!("File #{} title cannot be empty", index + 1));
             }
 
-            let supported = matches!(
-                file.file_type.as_str(),
-                "markdown" | "text" | "image" | "pdf" | "html"
-            );
+            let supported =
+                matches!(file.file_type.as_str(), "markdown" | "text" | "image" | "pdf" | "html");
             if !supported {
                 return Err(format!(
                     "Unsupported file type '{}' for file '{}'",
@@ -169,9 +170,7 @@ pub struct PreviewFileRelayState {
 
 impl PreviewFileRelayState {
     pub fn new() -> Self {
-        Self {
-            entries: Arc::new(StdMutex::new(HashMap::new())),
-        }
+        Self { entries: Arc::new(StdMutex::new(HashMap::new())) }
     }
 
     fn prune_expired_locked(entries: &mut HashMap<String, PreviewFileRelayEntry>) {
@@ -186,10 +185,8 @@ impl PreviewFileRelayState {
         conversation_id: Option<i64>,
     ) -> Result<String, String> {
         let token = uuid::Uuid::new_v4().to_string();
-        let mut entries = self
-            .entries
-            .lock()
-            .map_err(|_| "Preview relay state poisoned".to_string())?;
+        let mut entries =
+            self.entries.lock().map_err(|_| "Preview relay state poisoned".to_string())?;
         Self::prune_expired_locked(&mut entries);
         entries.insert(
             token.clone(),
@@ -204,10 +201,8 @@ impl PreviewFileRelayState {
     }
 
     fn get_entry(&self, token: &str) -> Result<Option<PreviewFileRelayEntry>, String> {
-        let mut entries = self
-            .entries
-            .lock()
-            .map_err(|_| "Preview relay state poisoned".to_string())?;
+        let mut entries =
+            self.entries.lock().map_err(|_| "Preview relay state poisoned".to_string())?;
         Self::prune_expired_locked(&mut entries);
         Ok(entries.get(token).cloned())
     }
@@ -245,10 +240,7 @@ fn detect_relay_content_type(file_type: &str, file_path: &Path) -> String {
                 "application/octet-stream".to_string()
             }
         }
-        _ => mime_guess::from_path(file_path)
-            .first_or_octet_stream()
-            .essence_str()
-            .to_string(),
+        _ => mime_guess::from_path(file_path).first_or_octet_stream().essence_str().to_string(),
     }
 }
 
@@ -310,8 +302,9 @@ fn inline_text_file_content(file: &mut PreviewFileItem, local_path: &Path) -> Re
             local_path.display()
         ));
     }
-    let content = std::fs::read_to_string(local_path)
-        .map_err(|e| format!("Failed to read text preview file '{}': {}", local_path.display(), e))?;
+    let content = std::fs::read_to_string(local_path).map_err(|e| {
+        format!("Failed to read text preview file '{}': {}", local_path.display(), e)
+    })?;
     file.content = Some(content);
     file.url = None;
     Ok(())
@@ -355,8 +348,9 @@ fn rewrite_local_preview_urls(
                 );
             }
             "image" | "pdf" | "html" => {
-                let metadata = std::fs::metadata(&local_path)
-                    .map_err(|e| format!("Failed to read metadata for '{}': {}", local_path.display(), e))?;
+                let metadata = std::fs::metadata(&local_path).map_err(|e| {
+                    format!("Failed to read metadata for '{}': {}", local_path.display(), e)
+                })?;
                 if metadata.len() > PREVIEW_FILE_RELAY_MAX_BYTES {
                     return Err(format!(
                         "Local preview file is too large ({} bytes): {}",
@@ -388,14 +382,8 @@ pub fn handle_preview_file_relay_request<R: tauri::Runtime>(
     ctx: tauri::UriSchemeContext<'_, R>,
     request: Request<Vec<u8>>,
 ) -> Response<Vec<u8>> {
-    let token = request
-        .uri()
-        .path()
-        .trim_start_matches('/')
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .trim();
+    let token =
+        request.uri().path().trim_start_matches('/').split('/').next().unwrap_or_default().trim();
     if token.is_empty() {
         return build_relay_error_response(StatusCode::BAD_REQUEST, "Missing preview relay token");
     }
@@ -453,15 +441,12 @@ pub fn handle_preview_file_relay_request<R: tauri::Runtime>(
 
 #[derive(Clone)]
 pub struct InteractionState {
-    pending_ask_user:
-        Arc<Mutex<HashMap<String, oneshot::Sender<AskUserQuestionDecision>>>>,
+    pending_ask_user: Arc<Mutex<HashMap<String, oneshot::Sender<AskUserQuestionDecision>>>>,
 }
 
 impl InteractionState {
     pub fn new() -> Self {
-        Self {
-            pending_ask_user: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self { pending_ask_user: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     pub async fn store_ask_user_request(
@@ -515,9 +500,7 @@ pub async fn request_ask_user_question(
     };
 
     let (tx, rx) = oneshot::channel::<AskUserQuestionDecision>();
-    interaction_state
-        .store_ask_user_request(request_id.clone(), tx)
-        .await;
+    interaction_state.store_ask_user_request(request_id.clone(), tx).await;
 
     info!(
         request_id = %request_id,
@@ -604,9 +587,7 @@ pub async fn submit_ask_user_question_response(
         Ok(value)
     };
 
-    let resolved = state
-        .resolve_ask_user_request(&request_id, decision)
-        .await;
+    let resolved = state.resolve_ask_user_request(&request_id, decision).await;
 
     if resolved {
         Ok(true)

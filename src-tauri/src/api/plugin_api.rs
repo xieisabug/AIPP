@@ -334,10 +334,7 @@ fn sync_registry(db: &PluginDatabase, app_handle: &tauri::AppHandle) -> Result<(
 
 fn dedupe_plugins_by_code(plugins: Vec<Plugin>) -> Vec<Plugin> {
     let mut seen_codes = HashSet::new();
-    plugins
-        .into_iter()
-        .filter(|plugin| seen_codes.insert(plugin.folder_name.clone()))
-        .collect()
+    plugins.into_iter().filter(|plugin| seen_codes.insert(plugin.folder_name.clone())).collect()
 }
 
 fn plugin_to_item(
@@ -372,10 +369,7 @@ pub async fn list_plugins(app_handle: tauri::AppHandle) -> Result<Vec<PluginList
     let db = PluginDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     sync_registry(&db, &app_handle)?;
     let plugins = dedupe_plugins_by_code(db.get_plugins().map_err(|e| e.to_string())?);
-    plugins
-        .into_iter()
-        .map(|plugin| plugin_to_item(&db, &app_handle, plugin))
-        .collect()
+    plugins.into_iter().map(|plugin| plugin_to_item(&db, &app_handle, plugin)).collect()
 }
 
 #[tauri::command]
@@ -442,10 +436,7 @@ pub async fn uninstall_plugin(app_handle: tauri::AppHandle, plugin_id: i64) -> R
     let plugin_dir = get_plugin_root_path(&app_handle)?.join(&plugin.folder_name);
     if plugin_dir.exists() {
         fs::remove_dir_all(&plugin_dir).map_err(|e| {
-            format!(
-                "Failed to remove plugin folder '{}': {}",
-                plugin.folder_name, e
-            )
+            format!("Failed to remove plugin folder '{}': {}", plugin.folder_name, e)
         })?;
     }
 
