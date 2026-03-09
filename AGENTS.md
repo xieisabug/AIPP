@@ -257,9 +257,11 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ### Validation runner note
 
-- In this environment, long `powershell` **sync-mode** validation chains can lose child-process completion/output and leave the shell looking hung even after `cargo`/`npm` has already exited.
-- For builds/tests, prefer **one command at a time** and use **async mode with explicit output reads** instead of chaining many commands in a single sync invocation.
-- If a validation shell appears stuck, check whether only the parent `pwsh` process remains; if so, stop that shell and rerun the command in async mode.
+- In this environment, `powershell` **sync-mode** is unreliable for long-running validation commands: even a single `cargo`/`npm` build or test can finish in the child process while the parent `pwsh` stays open, making the shell look hung and hiding completion/output.
+- For repository validation (`cargo build`, `cargo test`, `npm run build`, `npm run test`), treat **async mode with explicit `read_powershell` output reads as mandatory**. Do not use sync mode for these commands.
+- Run **exactly one validation command per shell**. Do not chain validation commands with `&&` or start the next validation before the previous shell has been fully read/stopped.
+- When launching async validation, append an explicit completion marker such as `; Write-Host "__AIPP_DONE__:$LASTEXITCODE"` and keep reading until that marker appears. Do not infer completion from the `pwsh` process state alone, because async sessions stay alive after the child process exits.
+- If a validation shell appears stuck and no `cargo`/`npm` child process remains, stop that shell and rerun with an explicit completion marker.
 
 ## Common Development Tasks
 
