@@ -87,6 +87,39 @@ fn parse_builtin_parameters(parameters: &str) -> Result<serde_json::Value, Strin
     }
 }
 
+fn build_dynamic_mcp_server_tool_item(tool_name: &str, summary: &str) -> serde_json::Value {
+    serde_json::json!({
+        "tool": tool_name,
+        "summary": summary,
+    })
+}
+
+fn build_dynamic_mcp_server_item(
+    server_name: &str,
+    summary: &str,
+    tools: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "server": server_name,
+        "summary": summary,
+        "tools": tools,
+    })
+}
+
+fn build_dynamic_mcp_loaded_tool_item(
+    server_name: &str,
+    tool_name: &str,
+    description: String,
+    parameters: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "server": server_name,
+        "tool": tool_name,
+        "description": description,
+        "parameters": parameters,
+    })
+}
+
 fn execute_dynamic_mcp_tool(
     app_handle: &AppHandle,
     tool_name: &str,
@@ -128,22 +161,13 @@ fn execute_dynamic_mcp_tool(
                             && tool.summary_generated_at.is_some()
                             && tool.server_name != "MCP 动态加载工具"
                     })
-                    .map(|tool| {
-                        serde_json::json!({
-                            "tool_name": tool.tool_name,
-                            "summary": tool.summary,
-                        })
-                    })
+                    .map(|tool| build_dynamic_mcp_server_tool_item(&tool.tool_name, &tool.summary))
                     .collect();
-                matched_servers.push(serde_json::json!({
-                    "toolset_id": server.server_id,
-                    "toolset_name": server.server_name,
-                    "server_id": server.server_id,
-                    "server_name": server.server_name,
-                    "summary": server.summary,
-                    "epoch": server.epoch,
-                    "tools": tools,
-                }));
+                matched_servers.push(build_dynamic_mcp_server_item(
+                    &server.server_name,
+                    &server.summary,
+                    tools,
+                ));
             }
 
             if matched_servers.is_empty() {
@@ -159,7 +183,6 @@ fn execute_dynamic_mcp_tool(
                     "content": [{
                         "type": "json",
                         "json": {
-                            "toolsets": matched_servers.clone(),
                             "servers": matched_servers
                         }
                     }],
@@ -245,10 +268,8 @@ fn execute_dynamic_mcp_tool(
                         server_ids.push(tool.server_id);
                     }
                 }
-                let mut tool_definition_map: std::collections::HashMap<
-                    i64,
-                    (String, String, bool),
-                > = std::collections::HashMap::new();
+                let mut tool_definition_map: std::collections::HashMap<i64, (String, String)> =
+                    std::collections::HashMap::new();
                 if !server_ids.is_empty() {
                     let server_tool_pairs = db
                         .get_mcp_servers_with_tools_by_ids(&server_ids)
@@ -261,7 +282,6 @@ fn execute_dynamic_mcp_tool(
                                     (
                                         actual_tool.tool_description.unwrap_or_default(),
                                         actual_tool.parameters.unwrap_or_else(|| "{}".to_string()),
-                                        actual_tool.is_auto_run,
                                     ),
                                 );
                             }
@@ -278,10 +298,10 @@ fn execute_dynamic_mcp_tool(
                     .map_err(|e| {
                         format!("Failed to persist loaded tool {}: {}", tool.tool_name, e)
                     })?;
-                    let (description, parameters_json, is_auto_run) = tool_definition_map
+                    let (description, parameters_json) = tool_definition_map
                         .get(&tool.tool_id)
                         .cloned()
-                        .unwrap_or_else(|| (String::new(), "{}".to_string(), false));
+                        .unwrap_or_else(|| (String::new(), "{}".to_string()));
                     let resolved_description = if description.trim().is_empty() {
                         tool.summary.clone()
                     } else {
@@ -296,30 +316,18 @@ fn execute_dynamic_mcp_tool(
                             "additionalProperties": true
                         })
                     });
-                    loaded.push(serde_json::json!({
-                        "tool_id": tool.tool_id,
-                        "toolset_name": tool.server_name,
-                        "server_name": tool.server_name,
-                        "tool_name": tool.tool_name,
-                        "summary": tool.summary,
-                        "description": resolved_description.clone(),
-                        "parameters": parameters_schema.clone(),
-                        "parameters_json": parameters_json,
-                        "is_auto_run": is_auto_run,
-                        "tool_definition": {
-                            "server_name": tool.server_name,
-                            "tool_name": tool.tool_name,
-                            "description": resolved_description,
-                            "parameters": parameters_schema
-                        }
-                    }));
+                    loaded.push(build_dynamic_mcp_loaded_tool_item(
+                        &tool.server_name,
+                        &tool.tool_name,
+                        resolved_description,
+                        parameters_schema,
+                    ));
                 }
                 Ok(serde_json::json!({
                     "content": [{
                         "type": "json",
                         "json": {
-                            "loaded_count": loaded.len(),
-                            "loaded_tools": loaded
+                            "tools": loaded
                         }
                     }],
                     "isError": false
@@ -961,4 +969,57 @@ pub async fn execute_aipp_builtin_tool(
     };
 
     Ok(serde_json::to_string(&result_value).unwrap_or_else(|_| "{}".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_mcp_server_payload_is_compact() {
+        let payload = build_dynamic_mcp_server_item(
+            "Search",
+            "Web search and fetch tools",
+            vec![build_dynamic_mcp_server_tool_item("web_fetch", "Fetch a URL as markdown")],
+        );
+
+        let object = payload.as_object().expect("server payload should be an object");
+        assert_eq!(object.len(), 3);
+        assert_eq!(payload["server"], "Search");
+        assert_eq!(payload["summary"], "Web search and fetch tools");
+        assert_eq!(payload["tools"][0]["tool"], "web_fetch");
+        assert_eq!(payload["tools"][0]["summary"], "Fetch a URL as markdown");
+        assert!(payload.get("server_id").is_none());
+        assert!(payload.get("toolset_id").is_none());
+        assert!(payload.get("toolset_name").is_none());
+        assert!(payload.get("epoch").is_none());
+    }
+
+    #[test]
+    fn dynamic_mcp_loaded_tool_payload_is_compact() {
+        let payload = build_dynamic_mcp_loaded_tool_item(
+            "Search",
+            "web_fetch",
+            "Fetch a URL as markdown".to_string(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string" }
+                },
+                "required": ["url"]
+            }),
+        );
+
+        let object = payload.as_object().expect("loaded tool payload should be an object");
+        assert_eq!(object.len(), 4);
+        assert_eq!(payload["server"], "Search");
+        assert_eq!(payload["tool"], "web_fetch");
+        assert_eq!(payload["description"], "Fetch a URL as markdown");
+        assert_eq!(payload["parameters"]["required"][0], "url");
+        assert!(payload.get("tool_id").is_none());
+        assert!(payload.get("summary").is_none());
+        assert!(payload.get("parameters_json").is_none());
+        assert!(payload.get("is_auto_run").is_none());
+        assert!(payload.get("tool_definition").is_none());
+    }
 }
