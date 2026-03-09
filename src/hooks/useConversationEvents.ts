@@ -25,7 +25,10 @@ export interface UseConversationEventsOptions {
     onMessageUpdate?: (streamEvent: StreamEvent) => void;
     onGroupMerge?: (groupMergeData: GroupMergeEvent) => void;
     onMCPToolCallUpdate?: (mcpUpdateData: MCPToolCallUpdateEvent) => void;
-    onConversationCancel?: (cancelData: ConversationCancelEvent) => void;
+    onConversationCancel?: (
+        cancelData: ConversationCancelEvent,
+        streamingSnapshot: ReadonlyMap<number, StreamEvent>
+    ) => void;
     onAiResponseStart?: () => void;
     onAiResponseComplete?: () => void;
     onError?: (errorMessage: string) => void;
@@ -71,6 +74,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     const [runtimeState, setRuntimeState] = useState<ConversationRuntimeState | null>(null);
     const [shineState, setShineState] = useState<ConversationShineState | null>(null);
     const [shiningMcpCallId, setShiningMcpCallId] = useState<number | null>(null);
+    const streamingMessagesRef = useRef<Map<number, StreamEvent>>(new Map());
 
     // 事件监听取消订阅引用
     const unsubscribeRef = useRef<Promise<() => void> | null>(null);
@@ -104,6 +108,24 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     useEffect(() => {
         callbacksRef.current = options;
     }, [options]);
+
+    const updateStreamingMessagesState = useCallback(
+        (
+            nextState:
+                | Map<number, StreamEvent>
+                | ((prev: Map<number, StreamEvent>) => Map<number, StreamEvent>)
+        ) => {
+            setStreamingMessages((prev) => {
+                const resolvedState =
+                    typeof nextState === "function"
+                        ? nextState(prev)
+                        : nextState;
+                streamingMessagesRef.current = resolvedState;
+                return resolvedState;
+            });
+        },
+        []
+    );
 
     const stopMcpCompensationPolling = useCallback((reason: string) => {
         if (mcpPollTimerRef.current) {
@@ -497,7 +519,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
                     // 对于错误消息，处理完成状态并延长显示时间
                     if (messageUpdateData.is_done) {
-                        setStreamingMessages((prev) => {
+                        updateStreamingMessagesState((prev) => {
                             const newMap = new Map(prev);
                             const completedEvent = {
                                 ...streamEvent,
@@ -509,7 +531,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
                         // 错误消息保留更长时间，让用户能看到完整的错误信息
                         setTimeout(() => {
-                            setStreamingMessages((prev) => {
+                            updateStreamingMessagesState((prev) => {
                                 const newMap = new Map(prev);
                                 newMap.delete(streamEvent.message_id);
                                 return newMap;
@@ -558,7 +580,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                         }
 
                         // 标记流式消息为完成状态，但不立即删除，让消息能正常显示
-                        setStreamingMessages((prev) => {
+                        updateStreamingMessagesState((prev) => {
                             const newMap = new Map(prev);
                             const completedEvent = {
                                 ...streamEvent,
@@ -570,7 +592,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
                         // 延迟清理已完成的流式消息，给足够时间让消息保存到 messages 中
                         setTimeout(() => {
-                            setStreamingMessages((prev) => {
+                            updateStreamingMessagesState((prev) => {
                                 const newMap = new Map(prev);
                                 newMap.delete(streamEvent.message_id);
                                 return newMap;
@@ -579,7 +601,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     } else {
                         // 使用 startTransition 将流式消息更新标记为低优先级，保持界面响应性
                         startTransition(() => {
-                            setStreamingMessages((prev) => {
+                            updateStreamingMessagesState((prev) => {
                                 const newMap = new Map(prev);
                                 newMap.set(streamEvent.message_id, streamEvent);
                                 return newMap;
@@ -676,9 +698,13 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 const cancelData = conversationEvent.data as ConversationCancelEvent;
                 console.log("Received conversation_cancel event:", cancelData);
                 invalidateMcpCompensationPolling("conversation cancelled");
+                const streamingSnapshot = new Map(streamingMessagesRef.current);
+
+                // 在清理流式状态前，将最后一帧内容交给外部物化到持久消息状态
+                callbacksRef.current.onConversationCancel?.(cancelData, streamingSnapshot);
 
                 // 立即清理所有流式状态，停止显示闪亮边框和思考计时器
-                setStreamingMessages(new Map());
+                updateStreamingMessagesState(new Map());
                 setPendingUserMessageId(null);
                 setStreamingAssistantMessageIds(new Set());
                 setActiveMcpCallIds(new Set());
@@ -700,9 +726,6 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 void refreshMcpToolCalls();
                 syncRuntimeState(cancelData.conversation_id);
                 syncShineState(cancelData.conversation_id);
-
-                // 调用外部的取消处理函数
-                callbacksRef.current.onConversationCancel?.(cancelData);
             } else if (conversationEvent.type === "stream_complete") {
                 // 处理流式完成事件（包括空响应场景）
                 const completionData = conversationEvent.data as StreamCompleteEvent;
@@ -711,7 +734,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 if (!hasActiveMcpCall) {
                     stopMcpCompensationPolling("stream completed with no active MCP calls");
                     // 没有活跃 MCP 调用时，清理流式状态避免 UI 卡在接收中
-                    setStreamingMessages(new Map());
+                    updateStreamingMessagesState(new Map());
                 } else {
                     console.log("[MCP] stream_complete received while MCP still active, keep tool-call placeholder visible");
                 }
@@ -750,6 +773,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             stopMcpCompensationPolling,
             syncRuntimeState,
             syncShineState,
+            updateStreamingMessagesState,
         ],
     );
 
@@ -762,7 +786,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             // 清理状态
             runtimeSyncRequestIdRef.current += 1;
             shineSyncRequestIdRef.current += 1; // 使之前的同步请求失效
-            setStreamingMessages(new Map());
+            updateStreamingMessagesState(new Map());
             setShiningMessageIds(new Set());
             setShiningMcpCallId(null);
             setMCPToolCallStates(new Map());
@@ -832,7 +856,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             }
             stopMcpCompensationPolling("conversation listener cleanup");
         };
-    }, [options.conversationId]); // 只依赖 conversationId
+    }, [options.conversationId, syncRuntimeState, syncShineState, handleConversationEvent, stopMcpCompensationPolling, updateStreamingMessagesState]); // 只依赖 conversationId
 
     // 初始化获取已存在的 MCP 调用状态
     useEffect(() => {
@@ -861,8 +885,8 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
     // 清理函数
     const clearStreamingMessages = useCallback(() => {
-        setStreamingMessages(new Map());
-    }, []);
+        updateStreamingMessagesState(new Map());
+    }, [updateStreamingMessagesState]);
 
     const clearShiningMessages = useCallback(() => {
         console.log("[DEBUG] Clearing shining/MCP state (manual reset)");
@@ -900,7 +924,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         invalidateMcpCompensationPolling("global error");
 
         // 清理所有流式消息状态
-        setStreamingMessages(new Map());
+        updateStreamingMessagesState(new Map());
         setShiningMessageIds(new Set());
         setShiningMcpCallId(null);
         // 保留已完成的 MCP 工具调用状态（搜索结果等），仅移除进行中的
@@ -923,7 +947,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         // 调用外部错误处理，确保状态重置
         callbacksRef.current.onError?.(errorMessage);
         callbacksRef.current.onAiResponseComplete?.();
-    }, [cancelIdleTransientReset, invalidateMcpCompensationPolling]);
+    }, [cancelIdleTransientReset, invalidateMcpCompensationPolling, updateStreamingMessagesState]);
 
     // 提供稳定的 functionMap 更新接口
     const updateFunctionMap = useCallback((functionMap: Map<number, any>) => {

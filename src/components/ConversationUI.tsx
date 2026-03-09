@@ -13,6 +13,7 @@ import {
 
 import {
     Conversation,
+    ConversationCancelEvent,
     Message,
     StreamEvent,
     ConversationWithMessages,
@@ -52,6 +53,7 @@ import { useTodoList } from "@/hooks/useTodoList";
 import { useArtifactExtractor } from "@/hooks/useArtifactExtractor";
 import { useExplicitArtifacts } from "@/hooks/useExplicitArtifacts";
 import { useContextList } from "@/hooks/useContextList";
+import { mergeMessagesWithStreamingState } from "@/utils/streamingMessageState";
 
 // 暴露给外部的方法接口
 export interface ConversationUIRef {
@@ -153,6 +155,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 常规消息列表
         const [messages, setMessages] = useState<Array<Message>>([]);
+        const streamingMessagesRef = useRef<Map<number, StreamEvent>>(new Map());
 
         // AI响应状态管理
         const [aiIsResponsing, setAiIsResponsing] = useState<boolean>(false);
@@ -229,7 +232,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     conversationId: +conversationId,
                 })
                     .then((updatedConversation) => {
-                        setMessages(updatedConversation.messages);
+                        setMessages((prevMessages) =>
+                            mergeMessagesWithStreamingState(updatedConversation.messages, {
+                                conversationId: updatedConversation.conversation.id,
+                                currentMessages: prevMessages,
+                                streamingSnapshot: streamingMessagesRef.current,
+                            })
+                        );
                     })
                     .catch((error) => {
                         console.error("Failed to reload conversation after message_add:", error);
@@ -255,7 +264,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         setMessages((prevMessages) => [...prevMessages, newMessage]);
                     });
             },
-            [conversationId, setFunctionMapForMessage, resetReveal]
+            [conversationId, resetReveal, setFunctionMapForMessage]
         );
 
         const handleGroupMerge = useCallback((groupMergeData: GroupMergeEvent) => {
@@ -292,71 +301,17 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 处理消息完成时的状态更新，确保消息在streamingMessages清理后仍能显示
         const handleMessageCompletion = useCallback(
             (streamEvent: StreamEvent) => {
-                // 检查messages中是否已存在该消息
-                setMessages((prevMessages) => {
-                    const existingIndex = prevMessages.findIndex((msg) => msg.id === streamEvent.message_id);
-                    const lastUserMessage = [...prevMessages].reverse().find((msg) => msg.message_type === "user");
-                    const baseTime = lastUserMessage ? new Date(lastUserMessage.created_time) : new Date();
-
-                    if (existingIndex !== -1) {
-                        // 消息已存在，更新其内容和完成状态
-                        const updatedMessages = [...prevMessages];
-                        const existingMessage = updatedMessages[existingIndex];
-
-                        // 如果事件中包含 Token 计数，则更新
-                        const tokenUpdates = (streamEvent.token_count !== undefined ||
-                                            streamEvent.input_token_count !== undefined ||
-                                            streamEvent.output_token_count !== undefined)
-                            ? {
-                                token_count: streamEvent.token_count ?? existingMessage.token_count,
-                                input_token_count: streamEvent.input_token_count ?? existingMessage.input_token_count,
-                                output_token_count: streamEvent.output_token_count ?? existingMessage.output_token_count,
-                              }
-                            : {};
-
-                        // 如果事件中包含性能指标，则更新
-                        const performanceUpdates = (streamEvent.ttft_ms !== undefined ||
-                                                    streamEvent.tps !== undefined)
-                            ? {
-                                ttft_ms: streamEvent.ttft_ms ?? existingMessage.ttft_ms,
-                                tps: streamEvent.tps ?? existingMessage.tps,
-                              }
-                            : {};
-
-                        updatedMessages[existingIndex] = {
-                            ...existingMessage,
-                            content: streamEvent.content,
-                            message_type: streamEvent.message_type,
-                            finish_time: new Date(), // 标记为完成
-                            ...tokenUpdates, // 如果有 Token 计数，则更新
-                            ...performanceUpdates, // 如果有性能指标，则更新
-                        };
-                        return updatedMessages;
-                    } else {
-                        // 消息不存在，添加新消息
-                        const offsetMs = streamEvent.message_type === "reasoning" ? 500 : 1000;
-                        const newMessage: Message = {
-                            id: streamEvent.message_id,
-                            conversation_id: conversation?.id || 0,
-                            message_type: streamEvent.message_type,
-                            content: streamEvent.content,
-                            llm_model_id: null,
-                            created_time: new Date(baseTime.getTime() + offsetMs),
-                            start_time: streamEvent.message_type === "reasoning" ? baseTime : null,
-                            finish_time: new Date(), // 标记为完成
-                            // 如果事件中包含 Token 计数，则使用，否则默认为 0
-                            token_count: streamEvent.token_count ?? 0,
-                            input_token_count: streamEvent.input_token_count ?? 0,
-                            output_token_count: streamEvent.output_token_count ?? 0,
-                            generation_group_id: null, // 流式消息暂时不设置generation_group_id
-                            parent_group_id: null, // 流式消息暂时不设置parent_group_id
-                            regenerate: null,
-                        };
-                        return [...prevMessages, newMessage];
-                    }
-                });
+                const effectiveConversationId = conversation?.id ?? Number(conversationId || 0);
+                setMessages((prevMessages) =>
+                    mergeMessagesWithStreamingState(prevMessages, {
+                        conversationId: effectiveConversationId,
+                        currentMessages: prevMessages,
+                        streamingSnapshot: new Map([[streamEvent.message_id, streamEvent]]),
+                        finalizeStreaming: true,
+                    })
+                );
             },
-            [conversation?.id]
+            [conversation?.id, conversationId]
         );
 
         // 滚动管理 - 移除依赖项，改为手动调用
@@ -392,6 +347,26 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 conversationId: conversationId,
                 onMessageAdd: handleMessageAdd,
                 onMessageUpdate: handleMessageUpdate,
+                onConversationCancel: (
+                    cancelData: ConversationCancelEvent,
+                    streamingSnapshot: ReadonlyMap<number, StreamEvent>
+                ) => {
+                    if (streamingSnapshot.size === 0) {
+                        return;
+                    }
+
+                    const effectiveConversationId =
+                        conversation?.id ?? Number(conversationId || 0);
+                    setMessages((prevMessages) =>
+                        mergeMessagesWithStreamingState(prevMessages, {
+                            conversationId: effectiveConversationId,
+                            currentMessages: prevMessages,
+                            streamingSnapshot,
+                            finalizeStreaming: true,
+                            finalizedAt: new Date(cancelData.cancelled_at),
+                        })
+                    );
+                },
                 onGroupMerge: handleGroupMerge,
                 onMCPToolCallUpdate: handleMCPToolCallUpdate,
                 onAiResponseStart: handleAiResponseStart,
@@ -407,6 +382,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             handleAiResponseComplete,
             handleError,
             handleMessageCompletion,
+            conversation?.id,
             smartScroll,
             // 移除 functionMap 依赖，改为在回调内部访问
         ]);
@@ -426,6 +402,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             clearShiningMessages,
             setPendingUserMessage,
         } = useConversationEvents(conversationEventsOptions);
+
+        useEffect(() => {
+            streamingMessagesRef.current = streamingMessages;
+        }, [streamingMessages]);
 
         const effectiveAiIsResponsing = useMemo(() => {
             if (runtimeState && runtimeState.conversation_id === Number(conversationId || 0)) {
