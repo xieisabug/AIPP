@@ -1,0 +1,47 @@
+{
+  "id": "directory-bang-plugin",
+  "code": "directory-bang-plugin",
+  "name": "Directory Bang Plugin",
+  "version": "0.1.0",
+  "entry": "dist/main.js",
+  "description": "Adds !directory and !dir bangs backed by the built-in list_directory tool.",
+  "pluginTypes": [
+    "toolType",
+    "applicationType"
+  ],
+  "permissions": [
+    "bang.register"
+  ],
+  "contributions": {
+    "bangs": [
+      {
+        "name": "directory",
+        "aliases": [
+          "dir"
+        ],
+        "complete": "directory(|)",
+        "description": "列出指定目录中的文件和子目录，可额外传 recursive=true 与 pattern=*.rs 之类的参数。",
+        "executor": {
+          "type": "builtinTool",
+          "command": "aipp:operation",
+          "toolName": "list_directory",
+          "arguments": {
+            "path": {
+              "source": "firstArg",
+              "required": true
+            },
+            "pattern": {
+              "source": "named",
+              "name": "pattern"
+            },
+            "recursive": {
+              "source": "named",
+              "name": "recursive",
+              "valueType": "boolean"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

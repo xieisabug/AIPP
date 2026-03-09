@@ -405,19 +405,13 @@ async fn test_deep_version_chain() {
 // reasoning + response 排序测试
 // ============================================================================
 
-/// 测试 reasoning 和 response 消息的时间戳排序
-///
-/// 验证内容：
-/// - reasoning 消息的 created_time 应该早于 response 消息
-/// - 即使 reasoning 消息的 created_time 设置较晚，也能正确排序
+/// 测试 reasoning 和 response 消息遵循真实时间顺序
 #[tokio::test]
-async fn test_reasoning_before_response_same_group() {
+async fn test_reasoning_response_same_group_respects_time_order() {
     let group_id = Uuid::new_v4().to_string();
     let base_time =
         chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
 
-    // 注意：这里模拟真实场景，response 先创建（时间较早），reasoning 后创建（时间较晚）
-    // 但按 created_time 排序时，response 应该排在 reasoning 之后
     let messages = vec![
         create_message_detail(
             1,
@@ -455,11 +449,127 @@ async fn test_reasoning_before_response_same_group() {
 
     let result = process_message_versions(messages);
 
-    // 最终显示的消息
     assert_eq!(result.len(), 3);
     assert_eq!(result[0].message_type, "user");
-    assert_eq!(result[1].message_type, "reasoning");
-    assert_eq!(result[2].message_type, "response");
+    assert_eq!(result[1].message_type, "response");
+    assert_eq!(result[2].message_type, "reasoning");
+}
+
+#[tokio::test]
+async fn test_equal_timestamps_do_not_cluster_by_message_type() {
+    let base_time =
+        chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
+
+    let messages = vec![
+        create_message_detail(1, 1, "user", "Question 1", None, None, None, base_time),
+        create_message_detail(2, 1, "response", "Response 1", None, Some("g1".to_string()), None, base_time),
+        create_message_detail(3, 1, "reasoning", "Reasoning 2", None, Some("g2".to_string()), None, base_time),
+        create_message_detail(4, 1, "response", "Response 3", None, Some("g3".to_string()), None, base_time),
+        create_message_detail(5, 1, "reasoning", "Reasoning 4", None, Some("g4".to_string()), None, base_time),
+    ];
+
+    let result = process_message_versions(messages);
+    let ids: Vec<i64> = result.iter().map(|message| message.id).collect();
+    assert_eq!(ids, vec![1, 2, 3, 4, 5]);
+}
+
+#[tokio::test]
+async fn test_equal_timestamps_same_group_still_put_reasoning_before_response() {
+    let base_time =
+        chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
+    let group_id = Uuid::new_v4().to_string();
+
+    let messages = vec![
+        create_message_detail(1, 1, "user", "Question 1", None, None, None, base_time),
+        create_message_detail(
+            2,
+            1,
+            "response",
+            "Response 1",
+            None,
+            Some(group_id.clone()),
+            None,
+            base_time + chrono::Duration::seconds(1),
+        ),
+        create_message_detail(
+            3,
+            1,
+            "reasoning",
+            "Reasoning 1",
+            None,
+            Some(group_id),
+            None,
+            base_time + chrono::Duration::seconds(1),
+        ),
+    ];
+
+    let result = process_message_versions(messages);
+    let ids: Vec<i64> = result.iter().map(|message| message.id).collect();
+    assert_eq!(ids, vec![1, 3, 2]);
+}
+
+#[tokio::test]
+async fn test_local_reasoning_response_tie_break_does_not_reorder_other_groups() {
+    let base_time =
+        chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
+
+    let messages = vec![
+        create_message_detail(1, 1, "user", "Question 1", None, None, None, base_time),
+        create_message_detail(
+            2,
+            1,
+            "response",
+            "Response 1",
+            None,
+            Some("g1".to_string()),
+            None,
+            base_time + chrono::Duration::seconds(1),
+        ),
+        create_message_detail(
+            3,
+            1,
+            "response",
+            "Response 2",
+            None,
+            Some("g2".to_string()),
+            None,
+            base_time + chrono::Duration::seconds(2),
+        ),
+        create_message_detail(
+            4,
+            1,
+            "reasoning",
+            "Reasoning 2",
+            None,
+            Some("g2".to_string()),
+            None,
+            base_time + chrono::Duration::seconds(2),
+        ),
+        create_message_detail(
+            5,
+            1,
+            "response",
+            "Response 3",
+            None,
+            Some("g3".to_string()),
+            None,
+            base_time + chrono::Duration::seconds(2),
+        ),
+        create_message_detail(
+            6,
+            1,
+            "reasoning",
+            "Reasoning 4",
+            None,
+            Some("g4".to_string()),
+            None,
+            base_time + chrono::Duration::seconds(2),
+        ),
+    ];
+
+    let result = process_message_versions(messages);
+    let ids: Vec<i64> = result.iter().map(|message| message.id).collect();
+    assert_eq!(ids, vec![1, 2, 4, 3, 5, 6]);
 }
 
 /// 测试多个 reasoning+response 组的排序

@@ -1,6 +1,6 @@
 ## Project Overview
 
-AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 2.0 that serves as a comprehensive AI assistant platform. The application enables users to interact with multiple large language models, execute scripts, preview components, manage conversations, and extend functionality through MCP (Model Context Protocol).
+AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 2.0 that serves as a comprehensive AI assistant platform. The application enables users to interact with multiple large language models, execute scripts, manage conversations/artifacts, run scheduled AI tasks, and extend functionality through MCP/Skills/Plugins.
 
 **Core Technologies:**
 
@@ -44,9 +44,12 @@ The application uses multiple Tauri windows for different features:
 -   **Ask Window**: Quick AI query interface
 -   **Config Window**: Settings and configuration
 -   **ChatUI Window**: Main chat interface
+-   **Schedule Window**: Scheduled task management and run logs
+-   **Sidebar Window**: Conversation side panel for todo/context/artifact preview
 -   **ArtifactPreview Window**: Content preview (HTML, SVG, components)
+-   **Artifact Window**: Standalone artifact rendering window
 -   **ArtifactCollections Window**: Manage artifact collections
--   **Plugin Windows**: For plugin management and store
+-   **Plugin Window**: Plugin UI host window
 
 ### Frontend Structure
 
@@ -66,7 +69,8 @@ src/
 │   └── feature/     # Feature configuration hooks
 ├── data/            # TypeScript types and data models
 ├── lib/             # Utility functions
-├── windows/         # Window-specific entry points
+├── services/        # Runtime services (PluginRuntime, search/export, token stats)
+├── windows/         # Window entry points (ask/chat/config/schedule/sidebar/artifacts)
 └── artifacts/       # React/Vue artifact templates
 ```
 
@@ -82,44 +86,41 @@ Key patterns:
 ```
 src-tauri/
 ├── src/
-│   ├── api/         # Tauri command handlers
-│   │   ├── ai/      # AI functionality (modularized)
-│   │   │   ├── chat.rs          # Stream/non-stream chat handling
-│   │   │   ├── config.rs        # Model configuration management
-│   │   │   ├── conversation.rs  # Message processing utilities
-│   │   │   ├── events.rs        # Event definitions
-│   │   │   ├── mcp.rs          # MCP integration
-│   │   │   ├── title.rs        # Title generation
-│   │   │   └── types.rs        # AI request/response types
-│   │   ├── builtin_mcp/         # Built-in MCP tools
-│   │   │   ├── search/          # Web search functionality
-│   │   │   │   ├── engines/     # Search engine implementations
-│   │   │   │   ├── fetcher.rs   # Content fetching with fallback strategies
-│   │   │   │   ├── browser.rs   # Browser management
-│   │   │   │   └── handler.rs   # Main search handler
-│   │   │   └── templates.rs     # MCP template management
-│   │   ├── tests/               # Comprehensive test suite
+│   ├── api/                 # Tauri command handlers
+│   │   ├── ai/              # AI modules (chat/acp/config/summary/title/types)
+│   │   ├── scheduled_task_api.rs  # 定时任务（创建/执行/日志/停止）
+│   │   ├── skill_api.rs     # Skills 扫描、安装、助手绑定
+│   │   ├── plugin_api.rs    # 插件安装、启停、配置与数据
+│   │   ├── token_statistics_api.rs # Token 统计
+│   │   ├── copilot_api.rs & copilot_lsp.rs # GitHub Copilot 集成
 │   │   └── [other apis]...
-│   ├── artifacts/   # Content rendering (HTML, React, Vue, AppleScript, PowerShell)
-│   ├── db/          # Database operations (SQLite)
-│   ├── errors.rs    # Error handling
-│   ├── state/       # Application state management
-│   ├── template_engine/  # Prompt templating with bang commands
-│   ├── utils/       # Helper functions (bun_utils, uv_utils, etc.)
-│   └── window.rs    # Window management
+│   ├── mcp/                 # MCP 核心（注册/执行/检测/总结）
+│   │   ├── builtin_mcp/     # 内置 MCP 工具（agent/ui/search/operation/artifact）
+│   │   ├── registry_api.rs  # MCP server 管理
+│   │   ├── execution_api.rs # MCP tool call 执行与状态
+│   │   └── detection.rs     # AI 响应中的 tool call 检测
+│   ├── artifacts/           # Artifact 渲染、运行与集合管理
+│   ├── scheduler/           # 定时任务调度运行时
+│   ├── skills/              # Skills 扫描、解析、提示词拼装
+│   ├── db/                  # Database operations (SQLite)
+│   ├── state/               # Application state management
+│   ├── template_engine/     # Prompt templating with bang commands
+│   └── window.rs            # Window management
 ```
 
 **Key API modules:**
 
--   `ai_api.rs`: Main AI interaction entry points (ask_ai, regenerate_ai)
--   `ai/chat.rs`: Streaming and non-streaming chat implementation
--   `ai/mcp.rs`: Model Context Protocol integration and tool detection
--   `ai/config.rs`: Configuration merging and chat options building
--   `assistant_api.rs`: Assistant management
--   `conversation_api.rs`: Chat conversations with versioning support
--   `mcp_api.rs`: MCP server management
--   `builtin_mcp_api.rs`: Built-in tools (web search, URL fetching)
--   `artifacts_api.rs` & `artifacts_collection_api.rs`: Artifact management
+-   `ai_api.rs`: Main AI entry points (ask/regenerate/cancel/runtime state/title generation)
+-   `assistant_api.rs`: Assistant CRUD + model/MCP binding
+-   `conversation_api.rs`: Conversation/message management with versioning
+-   `llm_api.rs`: Provider/model management and model list sync
+-   `scheduled_task_api.rs`: Scheduled task CRUD, run, logs, cancellation
+-   `skill_api.rs`: Skill scanning/installing and assistant skill configuration
+-   `plugin_api.rs`: Plugin registry, lifecycle, config and data storage
+-   `token_statistics_api.rs`: Conversation/message token statistics
+-   `copilot_api.rs` & `copilot_lsp.rs`: GitHub Copilot auth and LSP lifecycle
+-   `mcp/registry_api.rs`, `mcp/execution_api.rs`, `mcp/detection.rs`: MCP server/tool orchestration
+-   `artifacts/collection_api.rs` & `artifacts/artifact_bridge_api.rs`: Artifact collections + plugin bridge calls
 
 ## Key Development Patterns
 
@@ -189,14 +190,18 @@ let config = state.configs.lock().await;
 1. **Multi-Model Support**: Integration with various LLM providers through genai client
 2. **Local Data Storage**: All user data stored locally via SQLite, no cloud sync
 3. **Bang Commands**: Input starting with `!` for quick actions via template engine
-4. **Content Preview**: Rendering HTML, SVG, React/Vue components in ArtifactPreview window
-5. **Script Execution**: Running AI-generated code in configured environments
-6. **System Tray**: Global shortcuts (Ctrl+Shift+I/O)
-7. **MCP Integration**: Model Context Protocol for extensible tool calling
-8. **Message Versioning**: Support for regenerating responses with parent/child relationships
-9. **Built-in Tools**: Web search with multiple engines, URL fetching, fingerprint management
-10. **Artifact Collections**: Managing and organizing generated artifacts
-11. **Assistant Types**: Different assistant configurations with custom forms
+4. **Message Versioning & Runtime State**: Response regeneration, parent/child chains, runtime state snapshots
+5. **Content Preview & Artifact Workspace**: Rendering HTML/SVG/React/Vue and managing artifact collections
+6. **Script Execution**: Running AI-generated code in configured environments
+7. **System Tray + Multi-Window UX**: Global shortcuts and coordinated Ask/Chat/Config/Schedule/Sidebar windows
+8. **MCP Integration**: MCP server registry, tool-call execution state, and built-in MCP tool suites
+9. **Built-in MCP Tool Suites**: agent, ui_interaction, search, operation, artifact
+10. **Scheduled Tasks**: Agentic loop execution, run logs, run status updates, and stop support
+11. **Skills System**: Skills scanning, official skills install, assistant-skill binding
+12. **Plugin Runtime**: Plugin loading/config/data + theme registration (`extraCss`/`windowCss`)
+13. **GitHub Copilot Integration**: Device flow auth and optional Copilot LSP integration
+14. **Token Statistics & Export**: Message/conversation token stats and markdown export (PDF/DOCX)
+15. **Assistant Types**: Different assistant configurations with custom forms
 
 ## ACP Integration Notes
 
@@ -243,12 +248,18 @@ Always verify both frontend and backend changes:
 # Check TypeScript
 npm run build
 
-# Check Rust (includes clippy lints)
+# Check Rust
 cargo check --manifest-path src-tauri/Cargo.toml
 
 # Run Rust tests，When running Rust tests, please run them with precise, minimal scope—for example, by method or by file.
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
+
+### Validation runner note
+
+- In this environment, long `powershell` **sync-mode** validation chains can lose child-process completion/output and leave the shell looking hung even after `cargo`/`npm` has already exited.
+- For builds/tests, prefer **one command at a time** and use **async mode with explicit output reads** instead of chaining many commands in a single sync invocation.
+- If a validation shell appears stuck, check whether only the parent `pwsh` process remains; if so, stop that shell and rerun the command in async mode.
 
 ## Common Development Tasks
 
@@ -256,7 +267,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 1. Create Tauri command in `src-tauri/src/api/[module].rs`
 2. Export command in `src-tauri/src/api/mod.rs`
-3. Register in `src-tauri/src/main.rs` builder
+3. Register in `src-tauri/src/lib.rs` `invoke_handler` list
 4. Create TypeScript types in `src/data/`
 5. Call from frontend using `invoke()`
 6. Add tests in `src-tauri/src/api/tests/`
@@ -265,9 +276,9 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 -   Core AI logic is in `ai_api.rs` with modular implementations in `ai/` subdirectory
 -   Stream processing uses genai client with event emission for real-time UI updates
--   MCP tools are automatically detected and can be called natively or through prompt formatting
+-   MCP tools are automatically detected via `mcp/detection.rs` and can be called natively
 -   All AI responses support versioning through `generation_group_id` and `parent_group_id`
--   Built-in tools available through `builtin_mcp/` module
+-   Built-in MCP tools are organized under `mcp/builtin_mcp/`
 
 ### Adding a New UI Component
 
@@ -294,20 +305,22 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ### MCP Integration Guidelines
 
--   MCP servers are managed through `mcp_api.rs` and stored in SQLite
--   Tool detection happens automatically via `ai/mcp.rs::detect_and_process_mcp_calls`
--   Native tool calls are preferred when `use_native_toolcall` is true
--   Prompt formatting fallback when native calls are disabled
--   Built-in MCP tools available: web search (Google, Bing, DuckDuckGo, Kagi), URL fetching
+-   MCP servers are managed through `mcp/registry_api.rs` and stored in SQLite
+-   Tool detection happens automatically via `mcp/detection.rs::detect_and_process_mcp_calls`
+-   Tool call creation/execution/state sync is handled in `mcp/execution_api.rs`
+-   Built-in MCP command suites: `aipp:agent`, `aipp:ui_interaction`, `aipp:search`, `aipp:operation`, `aipp:artifact`
+-   MCP auto-run should respect assistant/server/tool config (`is_auto_run` + overrides)
 
 ### Built-in MCP Tools
 
-The application includes built-in MCP tools in `builtin_mcp/`:
+The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 
--   **Web Search**: Multi-engine search with intelligent fallback (Google → Bing)
--   **Content Fetching**: Playwright-based with headless browser and HTTP fallbacks
--   **Fingerprint Management**: Anti-detection for web scraping
--   **Template Management**: Dynamic MCP server configuration
+-   **Agent Tools**: `load_skill`, `todo_write`, dynamic MCP catalog loading (`load_mcp_server`, `load_mcp_tool`)
+-   **UI Interaction Tools**: `ask_user_question`, `preview_file`
+-   **Search Tools**: `search_web`, `fetch_url` with browser profile/fingerprint support
+-   **Operation Tools**: `read_file`, `write_file`, `edit_file`, `list_directory`, `execute_bash`, `get_bash_output`
+-   **Artifact Tools**: `get_artifact_workspace`, `show_artifact`
+-   **Template Management**: Built-in MCP template registration and sync
 
 ### Artifact Management
 

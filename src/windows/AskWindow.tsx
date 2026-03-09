@@ -18,6 +18,9 @@ import { StreamEvent } from "../data/Conversation";
 import { ShineBorder } from "../components/magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { useAppShortcuts } from "../hooks/useAppShortcuts";
+import { useOperationPermission } from "../hooks/useOperationPermission";
+import { OperationPermissionDialog } from "../components/OperationPermissionDialog";
+import { pluginRuntime } from "../services/PluginRuntime";
 const appWindow = getCurrentWebviewWindow();
 
 interface AiResponse {
@@ -26,7 +29,7 @@ interface AiResponse {
 
 function AskWindow() {
     // 集成主题系统
-    useTheme();
+    useTheme("ask");
 
     const [query, setQuery] = useState<string>("");
     const [response, setResponse] = useState<string>("");
@@ -42,6 +45,9 @@ function AskWindow() {
     const [errorMessage, setErrorMessage] = useState<string>("");
     // 闪亮边框状态管理
     const [shouldShowShineBorder, setShouldShowShineBorder] = useState<boolean>(false);
+    const { pendingRequest, isDialogOpen, decisionError, handleDecision } = useOperationPermission({
+        conversationId: conversationId ? parseInt(conversationId, 10) : undefined,
+    });
 
     // 清除错误信息
     const clearError = useCallback(() => {
@@ -92,6 +98,29 @@ function AskWindow() {
             console.log("get_selected_text_event", event.payload);
             setSelectedText(event.payload);
         });
+    }, []);
+
+    useEffect(() => {
+        const loadPlugins = async (forceReload = false) => {
+            try {
+                if (forceReload) {
+                    await pluginRuntime.reloadPlugins();
+                } else {
+                    await pluginRuntime.loadPlugins();
+                }
+            } catch (error) {
+                console.error("Failed to load plugins in AskWindow:", error);
+            }
+        };
+
+        loadPlugins();
+        const unlistenPromise = listen("plugin_registry_changed", () => {
+            loadPlugins(true);
+        });
+
+        return () => {
+            unlistenPromise.then((unlisten) => unlisten()).catch(console.warn);
+        };
     }, []);
 
     // 单独监听错误通知事件，依赖 conversationId
@@ -307,8 +336,12 @@ function AskWindow() {
     });
 
     return (
-        <div className="flex justify-center items-center h-screen">
-            <div className="bg-background shadow-lg w-full h-screen flex flex-col" data-tauri-drag-region>
+        <div className="flex justify-center items-center h-screen" data-aipp-window="ask" data-aipp-slot="window-root">
+            <div
+                className="bg-background shadow-lg w-full h-screen flex flex-col"
+                data-tauri-drag-region
+                data-aipp-slot="ask-main-panel"
+            >
                 {shouldShowShineBorder && (
                     <ShineBorder
                         shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}
@@ -328,10 +361,13 @@ function AskWindow() {
                     aiIsResponsing={aiIsResponsing}
                     placement="top"
                 />
-                <div className="p-5 pb-16 bg-background flex-1 overflow-auto">
+                <div className="p-5 pb-16 bg-background flex-1 overflow-auto" data-aipp-slot="ask-content">
                     {/* 错误信息显示区域 */}
                     {errorMessage && (
-                        <div className="mb-4 bg-destructive/10 border border-destructive/20 rounded-lg p-4">
+                        <div
+                            className="mb-4 bg-destructive/10 border border-destructive/20 rounded-lg p-4"
+                            data-aipp-slot="ask-error-alert"
+                        >
                             <div className="flex items-start space-x-3">
                                 <div className="flex-shrink-0 w-5 h-5 mt-0.5">
                                     <svg className="w-5 h-5 text-red-500" fill="currentColor" viewBox="0 0 20 20">
@@ -378,15 +414,17 @@ function AskWindow() {
                 <div
                     className="w-full h-8 fixed bottom-0 left-0 flex items-center justify-end pr-2.5 bg-muted"
                     data-tauri-drag-region
+                    data-aipp-slot="ask-footer-bar"
                 >
                     {messageId !== -1 && !aiIsResponsing && (
-                        <IconButton icon={<Plus size={16} className="text-icon" />} onClick={startNewConversation} />
+                        <IconButton icon={<Plus size={16} className="text-icon" />} onClick={startNewConversation} dataAippSlot="ask-footer-new-conversation" />
                     )}
                     {messageId !== -1 && !aiIsResponsing ? (
                         <IconButton
                             icon={
                                 copySuccess ? <Check size={16} className="text-icon" /> : <Copy size={16} className="text-icon" />
                             }
+                            dataAippSlot="ask-footer-copy-response"
                             onClick={() => {
                                 writeText(displayResponse);
                                 setCopySuccess(true);
@@ -397,9 +435,15 @@ function AskWindow() {
                         />
                     ) : null}
 
-                    <IconButton icon={<Expand size={16} className="text-icon" />} onClick={openChatUI} />
-                    <IconButton icon={<Settings size={16} className="text-icon" />} onClick={openConfig} />
+                    <IconButton icon={<Expand size={16} className="text-icon" />} onClick={openChatUI} dataAippSlot="ask-footer-open-chat-ui" />
+                    <IconButton icon={<Settings size={16} className="text-icon" />} onClick={openConfig} dataAippSlot="ask-footer-open-config" />
                 </div>
+                <OperationPermissionDialog
+                    request={pendingRequest}
+                    isOpen={isDialogOpen}
+                    onDecision={handleDecision}
+                    errorMessage={decisionError}
+                />
             </div>
         </div>
     );

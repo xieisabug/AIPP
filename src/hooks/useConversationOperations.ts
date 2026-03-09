@@ -285,7 +285,17 @@ export function useConversationOperations({
 
             const assistantData = assistants.find((a) => a.id === parsedAssistantId);
             // ACP 助手 (assistant_type === 4) 走后端 ask_ai 路径，不作为插件处理
-            const isPluginAssistant = assistantData?.assistant_type !== 0 && assistantData?.assistant_type !== 4;
+            // 注意：如果 assistantData 为 undefined（助手不在列表中），应该走普通 ask_ai 路径
+            const assistantType = assistantData?.assistant_type;
+            const isPluginAssistant = assistantType !== undefined && assistantType !== 0 && assistantType !== 4;
+            
+            console.log("[SEND DEBUG] Assistant info:", {
+                parsedAssistantId,
+                assistantData: assistantData ? { id: assistantData.id, name: assistantData.name, type: assistantData.assistant_type } : undefined,
+                assistantType,
+                isPluginAssistant,
+                assistantsCount: assistants.length,
+            });
 
             if (isPluginAssistant) {
                 // 如果是通过 @ 指定的插件助手，但当前选中的助手与其不同，

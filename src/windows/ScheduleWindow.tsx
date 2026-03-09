@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { format } from "date-fns";
 import { useTheme } from "@/hooks/useTheme";
 import { useToast } from "@/hooks/use-toast";
@@ -13,11 +14,13 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Calendar as DateCalendar } from "@/components/ui/calendar";
 import { ConfigPageLayout, SidebarList, ListItemButton, EmptyState } from "@/components/common";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { AssistantListItem } from "@/data/Assistant";
 import { useAssistantListListener } from "@/hooks/useAssistantListListener";
-import { Calendar, Clock, Plus, RefreshCw, Trash2, Pencil, Play, Bell, HelpCircle } from "lucide-react";
+import { Calendar, Clock, Plus, RefreshCw, Trash2, Pencil, Play, Bell, HelpCircle, Square } from "lucide-react";
 
 interface ScheduledTask {
     id: number;
@@ -60,6 +63,24 @@ interface ScheduledTaskRun {
     finishedTime?: string | null;
 }
 
+interface ScheduledTaskRunUpdateEvent {
+    runId: string;
+    status: "running" | "success" | "failed";
+    notify: boolean;
+    summary?: string | null;
+    errorMessage?: string | null;
+    finishedTime?: string | null;
+}
+
+interface ScheduledTaskToolLogPayload {
+    callId?: string;
+    serverName?: string;
+    toolName?: string;
+    success?: boolean;
+    parameters?: unknown;
+    result?: unknown;
+}
+
 interface ScheduledTaskFormValues {
     name: string;
     is_enabled: boolean;
@@ -73,6 +94,21 @@ interface ScheduledTaskFormValues {
     assistant_id: string;
     task_prompt: string;
     notify_prompt: string;
+}
+
+interface ScheduledTaskSavePayload {
+    name: string;
+    isEnabled: boolean;
+    scheduleType: "once" | "interval";
+    intervalValue: number | null;
+    intervalUnit: string | null;
+    startTime: string | null;
+    weekDays: number[] | null;
+    monthDays: number[] | null;
+    runAt: string | null;
+    assistantId: number;
+    taskPrompt: string;
+    notifyPrompt: string;
 }
 
 const intervalUnitLabels: Record<string, string> = {
@@ -97,6 +133,15 @@ const logTypeLabels: Record<string, string> = {
     start: "开始",
     task_prompt: "任务指令",
     assistant: "助手信息",
+    tool_round: "工具轮次",
+    tool_call: "工具调用",
+    tool_result: "工具结果",
+    loop_done: "执行完成",
+    llm_retry: "重试",
+    timeout: "超时",
+    max_rounds: "达到轮次上限",
+    cancel_request: "停止请求",
+    cancel: "已停止",
     response: "任务输出",
     notify_raw: "通知判定原文",
     notify_result: "通知判定结果",
@@ -111,28 +156,202 @@ const toLocalDatetimeInput = (value?: string | null) => {
     return format(date, "yyyy-MM-dd'T'HH:mm");
 };
 
-const toServerDatetime = (value: string) => {
-    if (!value) return "";
-    return format(new Date(value), "yyyy-MM-dd HH:mm:ss");
+const DEFAULT_ONCE_TIME = "09:00";
+
+const formatToolLogValue = (value: unknown): string => {
+    if (typeof value === "string") {
+        return value;
+    }
+    try {
+        return JSON.stringify(value, null, 2);
+    } catch {
+        return String(value ?? "");
+    }
+};
+
+const pad2 = (value: number) => String(value).padStart(2, "0");
+
+const parseRunAtParts = (value: string): { date: string; time: string } | null => {
+    const raw = value.trim();
+    if (!raw) return null;
+    const normalized = raw
+        .replace(/[年月]/g, "-")
+        .replace(/日/g, "")
+        .replace(/\//g, "-")
+        .replace(/T/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    const match = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{1,2})/);
+    if (!match) {
+        return null;
+    }
+    const [, y, m, d, hh, mm] = match;
+    const year = Number(y);
+    const month = Number(m);
+    const day = Number(d);
+    const hour = Number(hh);
+    const minute = Number(mm);
+    if (
+        month < 1 || month > 12 ||
+        day < 1 || day > 31 ||
+        hour < 0 || hour > 23 ||
+        minute < 0 || minute > 59
+    ) {
+        return null;
+    }
+    return {
+        date: `${year}-${pad2(month)}-${pad2(day)}`,
+        time: `${pad2(hour)}:${pad2(minute)}`,
+    };
+};
+
+const parseDatePartToLocalDate = (datePart: string): Date | undefined => {
+    const match = datePart.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) {
+        return undefined;
+    }
+    const [, y, m, d] = match;
+    const year = Number(y);
+    const month = Number(m);
+    const day = Number(d);
+    const date = new Date(year, month - 1, day, 0, 0, 0);
+    if (
+        Number.isNaN(date.getTime()) ||
+        date.getFullYear() !== year ||
+        date.getMonth() !== month - 1 ||
+        date.getDate() !== day
+    ) {
+        return undefined;
+    }
+    return date;
+};
+
+const composeRunAtValue = (datePart: string, timePart: string): string => {
+    const date = datePart.trim();
+    const time = timePart.trim();
+    if (!date || !time) {
+        return "";
+    }
+    return `${date}T${time}`;
+};
+
+const toServerDatetime = (value: string): string | null => {
+    const raw = value.trim();
+    if (!raw) return null;
+
+    const normalized = raw
+        .replace(/[年月]/g, "-")
+        .replace(/日/g, "")
+        .replace(/\//g, "-")
+        .replace(/T/g, " ")
+        .replace(/\s+/g, " ");
+    const match = normalized.match(
+        /^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:\.\d+)?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?$/i
+    );
+    if (!match) {
+        const fallbackDate = new Date(raw);
+        if (!Number.isNaN(fallbackDate.getTime())) {
+            return format(fallbackDate, "yyyy-MM-dd HH:mm:ss");
+        }
+        const normalizedFallbackDate = new Date(normalized);
+        if (!Number.isNaN(normalizedFallbackDate.getTime())) {
+            return format(normalizedFallbackDate, "yyyy-MM-dd HH:mm:ss");
+        }
+        return null;
+    }
+
+    const [, y, m, d, hh, mm, ss = "0"] = match;
+    const year = Number(y);
+    const month = Number(m);
+    const day = Number(d);
+    const hour = Number(hh);
+    const minute = Number(mm);
+    const second = Number(ss);
+    if (
+        month < 1 || month > 12 ||
+        day < 1 || day > 31 ||
+        hour < 0 || hour > 23 ||
+        minute < 0 || minute > 59 ||
+        second < 0 || second > 59
+    ) {
+        return null;
+    }
+
+    const date = new Date(year, month - 1, day, hour, minute, second);
+    if (
+        Number.isNaN(date.getTime()) ||
+        date.getFullYear() !== year ||
+        date.getMonth() !== month - 1 ||
+        date.getDate() !== day ||
+        date.getHours() !== hour ||
+        date.getMinutes() !== minute ||
+        date.getSeconds() !== second
+    ) {
+        return null;
+    }
+
+    return format(date, "yyyy-MM-dd HH:mm:ss");
+};
+
+const getErrorMessage = (error: unknown): string => {
+    if (typeof error === "string") {
+        return error;
+    }
+    if (error instanceof Error) {
+        return error.message || String(error);
+    }
+    if (error && typeof error === "object") {
+        const candidate = error as Record<string, unknown>;
+        const messageCandidates = [candidate.message, candidate.error, candidate.reason, candidate.details];
+        const text = messageCandidates.find((item) => typeof item === "string" && item.trim()) as string | undefined;
+        if (text) {
+            return text;
+        }
+        try {
+            return JSON.stringify(candidate);
+        } catch {
+            return String(error);
+        }
+    }
+    return String(error);
+};
+
+const humanizeSaveError = (message: string): string => {
+    if (!message.trim()) {
+        return "保存失败：未知错误，请查看控制台日志。";
+    }
+    if (message.includes("无法解析时间") || message.includes("一次性任务需要设置执行时间")) {
+        return "保存失败：执行时间格式无效，请重新选择“指定时间执行一次”的时间。";
+    }
+    if (message.includes("只能选择普通对话助手")) {
+        return "保存失败：当前助手类型不支持定时任务，请选择普通对话助手。";
+    }
+    if (message.includes("任务不存在")) {
+        return "保存失败：任务不存在，可能已被删除，请刷新后重试。";
+    }
+    return message;
 };
 
 export default function ScheduleWindow() {
-    useTheme();
+    useTheme("schedule");
     const { toast } = useToast();
 
     const [tasks, setTasks] = useState<ScheduledTask[]>([]);
     const [assistants, setAssistants] = useState<AssistantListItem[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [activeTaskId, setActiveTaskId] = useState<number | null>(null);
+    const [editingTaskId, setEditingTaskId] = useState<number | null>(null);
     const [isDialogOpen, setIsDialogOpen] = useState(false);
     const [isHelpDialogOpen, setIsHelpDialogOpen] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
     const [isRunning, setIsRunning] = useState(false);
+    const [isStopping, setIsStopping] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [runEntries, setRunEntries] = useState<ScheduledTaskRun[]>([]);
     const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
     const [logEntries, setLogEntries] = useState<ScheduledTaskLog[]>([]);
     const [isLogLoading, setIsLogLoading] = useState(false);
+    const [selectedToolLog, setSelectedToolLog] = useState<ScheduledTaskLog | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<ScheduledTask | null>(null);
     const [formValues, setFormValues] = useState<ScheduledTaskFormValues>({
         name: "",
@@ -158,6 +377,32 @@ export default function ScheduleWindow() {
         () => assistants.filter((assistant) => assistant.assistant_type === 0),
         [assistants]
     );
+
+    const onceRunAtParts = useMemo(() => parseRunAtParts(formValues.run_at), [formValues.run_at]);
+    const onceDatePart = onceRunAtParts?.date ?? "";
+    const onceTimePart = onceRunAtParts?.time ?? "";
+    const onceSelectedDate = useMemo(() => parseDatePartToLocalDate(onceDatePart), [onceDatePart]);
+
+    const handleOnceDateChange = useCallback((date?: Date) => {
+        setFormValues((prev) => {
+            if (!date) {
+                return { ...prev, run_at: "" };
+            }
+            const currentParts = parseRunAtParts(prev.run_at);
+            const nextDate = format(date, "yyyy-MM-dd");
+            return { ...prev, run_at: composeRunAtValue(nextDate, currentParts?.time ?? DEFAULT_ONCE_TIME) };
+        });
+    }, []);
+
+    const handleOnceTimeChange = useCallback((timeValue: string) => {
+        setFormValues((prev) => {
+            const currentParts = parseRunAtParts(prev.run_at);
+            if (!currentParts?.date) {
+                return { ...prev, run_at: "" };
+            }
+            return { ...prev, run_at: composeRunAtValue(currentParts.date, timeValue) };
+        });
+    }, []);
 
     const loadTasks = useCallback(async () => {
         try {
@@ -205,38 +450,51 @@ export default function ScheduleWindow() {
     }, [loadTasks, loadAssistants]);
 
     const loadRuns = useCallback(
-        async (taskId?: number | null) => {
+        async (taskId?: number | null, options?: { silent?: boolean }) => {
             if (!taskId) {
                 setRunEntries([]);
                 setSelectedRunId(null);
                 return;
             }
-            setIsLogLoading(true);
+            const silent = options?.silent ?? false;
+            if (!silent) {
+                setIsLogLoading(true);
+            }
             try {
                 const result = await invoke<{ runs: ScheduledTaskRun[] }>("list_scheduled_task_runs", {
                     taskId,
                     limit: 50,
                 });
                 setRunEntries(result.runs);
-                setSelectedRunId(result.runs[0]?.runId ?? null);
+                setSelectedRunId((prev) => {
+                    if (prev && result.runs.some((run) => run.runId === prev)) {
+                        return prev;
+                    }
+                    return result.runs[0]?.runId ?? null;
+                });
             } catch (error) {
                 console.error("加载定时任务运行记录失败:", error);
                 setRunEntries([]);
                 setSelectedRunId(null);
             } finally {
-                setIsLogLoading(false);
+                if (!silent) {
+                    setIsLogLoading(false);
+                }
             }
         },
         []
     );
 
     const loadLogs = useCallback(
-        async (taskId?: number | null, runId?: string | null) => {
+        async (taskId?: number | null, runId?: string | null, options?: { silent?: boolean }) => {
             if (!taskId || !runId) {
                 setLogEntries([]);
                 return;
             }
-            setIsLogLoading(true);
+            const silent = options?.silent ?? false;
+            if (!silent) {
+                setIsLogLoading(true);
+            }
             try {
                 const result = await invoke<{ logs: ScheduledTaskLog[] }>("list_scheduled_task_logs", {
                     taskId,
@@ -248,7 +506,9 @@ export default function ScheduleWindow() {
                 console.error("加载定时任务日志失败:", error);
                 setLogEntries([]);
             } finally {
-                setIsLogLoading(false);
+                if (!silent) {
+                    setIsLogLoading(false);
+                }
             }
         },
         []
@@ -261,6 +521,71 @@ export default function ScheduleWindow() {
     useEffect(() => {
         loadLogs(selectedTask?.id ?? null, selectedRunId);
     }, [loadLogs, selectedTask?.id, selectedRunId]);
+
+    useEffect(() => {
+        const runCreatedUnlisten = listen<ScheduledTaskRun>("scheduled_task_run_created", (event) => {
+            const run = event.payload;
+            if (selectedTask?.id !== run.taskId) {
+                return;
+            }
+            setRunEntries((prev) => {
+                const idx = prev.findIndex((item) => item.runId === run.runId);
+                if (idx >= 0) {
+                    const next = [...prev];
+                    next[idx] = run;
+                    return next;
+                }
+                return [run, ...prev];
+            });
+            setSelectedRunId((prev) => prev ?? run.runId);
+        });
+
+        const runUpdatedUnlisten = listen<ScheduledTaskRunUpdateEvent>(
+            "scheduled_task_run_updated",
+            (event) => {
+                const update = event.payload;
+                setRunEntries((prev) => {
+                    const idx = prev.findIndex((run) => run.runId === update.runId);
+                    if (idx < 0) {
+                        return prev;
+                    }
+                    const next = [...prev];
+                    next[idx] = {
+                        ...next[idx],
+                        status: update.status,
+                        notify: update.notify,
+                        summary: update.summary ?? null,
+                        errorMessage: update.errorMessage ?? null,
+                        finishedTime: update.finishedTime ?? null,
+                    };
+                    return next;
+                });
+            }
+        );
+
+        const logAddedUnlisten = listen<ScheduledTaskLog>("scheduled_task_log_added", (event) => {
+            const log = event.payload;
+            if (selectedTask?.id !== log.taskId) {
+                return;
+            }
+            if (selectedRunId && log.runId !== selectedRunId) {
+                return;
+            }
+            setLogEntries((prev) => {
+                if (prev.some((item) => item.id === log.id)) {
+                    return prev;
+                }
+                const next = [...prev, log];
+                return next.length > 200 ? next.slice(next.length - 200) : next;
+            });
+        });
+
+        return () => {
+            runCreatedUnlisten.then((unlisten) => unlisten());
+            runUpdatedUnlisten.then((unlisten) => unlisten());
+            logAddedUnlisten.then((unlisten) => unlisten());
+        };
+    }, [selectedRunId, selectedTask?.id]);
 
     const handleRefresh = useCallback(async () => {
         setIsRefreshing(true);
@@ -283,6 +608,7 @@ export default function ScheduleWindow() {
             task_prompt: "",
             notify_prompt: "",
         });
+        setEditingTaskId(null);
         setIsDialogOpen(true);
     }, [assistantOptions]);
 
@@ -302,6 +628,7 @@ export default function ScheduleWindow() {
                 task_prompt: task.taskPrompt,
                 notify_prompt: task.notifyPrompt || "",
             });
+            setEditingTaskId(task.id);
             setActiveTaskId(task.id);
             setIsDialogOpen(true);
         },
@@ -309,10 +636,12 @@ export default function ScheduleWindow() {
     );
 
     const handleSave = useCallback(async () => {
+        let payload: ScheduledTaskSavePayload | null = null;
         setIsSaving(true);
         try {
             const needsStartTime = ["day", "week", "month"].includes(formValues.interval_unit);
-            const payload = {
+            const onceRunAtRaw = formValues.schedule_type === "once" ? formValues.run_at.trim() : "";
+            payload = {
                 name: formValues.name.trim(),
                 isEnabled: formValues.is_enabled,
                 scheduleType: formValues.schedule_type,
@@ -321,7 +650,7 @@ export default function ScheduleWindow() {
                 startTime: formValues.schedule_type === "interval" && needsStartTime ? formValues.start_time : null,
                 weekDays: formValues.schedule_type === "interval" && formValues.interval_unit === "week" ? formValues.week_days : null,
                 monthDays: formValues.schedule_type === "interval" && formValues.interval_unit === "month" ? formValues.month_days : null,
-                runAt: formValues.schedule_type === "once" ? toServerDatetime(formValues.run_at) : null,
+                runAt: formValues.schedule_type === "once" ? toServerDatetime(onceRunAtRaw) : null,
                 assistantId: Number(formValues.assistant_id),
                 taskPrompt: formValues.task_prompt.trim(),
                 notifyPrompt: formValues.notify_prompt.trim(),
@@ -335,8 +664,17 @@ export default function ScheduleWindow() {
             if (!payload.taskPrompt) {
                 throw new Error("请输入任务指令");
             }
+            if (payload.scheduleType === "once" && !onceRunAtRaw) {
+                throw new Error("请先选择执行日期和时间");
+            }
             if (payload.scheduleType === "once" && !payload.runAt) {
-                throw new Error("请设置执行时间");
+                console.error("[ScheduleWindow] Invalid once runAt when saving task", {
+                    rawRunAt: onceRunAtRaw,
+                    stateRunAt: formValues.run_at,
+                    runAtParts: parseRunAtParts(formValues.run_at),
+                    parsedRunAt: payload.runAt,
+                });
+                throw new Error(`执行时间格式无效：${onceRunAtRaw || "空值"}，请重新选择时间`);
             }
             if (payload.scheduleType === "interval" && (!payload.intervalValue || payload.intervalValue <= 0)) {
                 throw new Error("请设置有效的执行周期");
@@ -348,9 +686,9 @@ export default function ScheduleWindow() {
                 throw new Error("请至少选择一天");
             }
 
-            if (selectedTask && selectedTask.id === activeTaskId) {
+            if (editingTaskId !== null) {
                 const updated = await invoke<ScheduledTask>("update_scheduled_task", {
-                    request: { id: selectedTask.id, ...payload },
+                    request: { id: editingTaskId, ...payload },
                 });
                 setActiveTaskId(updated.id);
             } else {
@@ -362,18 +700,29 @@ export default function ScheduleWindow() {
                 title: "保存成功",
                 description: "定时任务已更新",
             });
+            setEditingTaskId(null);
             setIsDialogOpen(false);
             loadTasks();
         } catch (error) {
+            const rawMessage = getErrorMessage(error);
+            const userMessage = humanizeSaveError(rawMessage);
+            console.error("[ScheduleWindow] Failed to save scheduled task", {
+                error,
+                rawMessage,
+                userMessage,
+                editingTaskId,
+                formValues,
+                payload,
+            });
             toast({
                 title: "保存失败",
-                description: error as string,
+                description: userMessage,
                 variant: "destructive",
             });
         } finally {
             setIsSaving(false);
         }
-    }, [activeTaskId, formValues, loadTasks, selectedTask, toast]);
+    }, [editingTaskId, formValues, loadTasks, toast]);
 
     const handleToggleEnabled = useCallback(
         async (task: ScheduledTask, value: boolean) => {
@@ -413,6 +762,7 @@ export default function ScheduleWindow() {
         async (task: ScheduledTask) => {
             setIsRunning(true);
             try {
+                void loadRuns(task.id, { silent: true });
                 const result = await invoke<{ success: boolean; notify: boolean; summary?: string; error?: string }>(
                     "run_scheduled_task_now",
                     { taskId: task.id }
@@ -425,7 +775,7 @@ export default function ScheduleWindow() {
                     description: result.summary ?? "已完成执行",
                 });
                 await loadTasks();
-                await loadRuns(task.id);
+                await loadRuns(task.id, { silent: true });
             } catch (error) {
                 toast({
                     title: "执行失败",
@@ -436,8 +786,62 @@ export default function ScheduleWindow() {
                 setIsRunning(false);
             }
         },
-        [loadTasks, toast]
+        [loadRuns, loadTasks, toast]
     );
+
+    const runningRun = useMemo(
+        () => runEntries.find((run) => run.status === "running") ?? null,
+        [runEntries]
+    );
+
+    const handleStopRun = useCallback(async () => {
+        if (!selectedTask || !runningRun) {
+            return;
+        }
+        setIsStopping(true);
+        try {
+            await invoke<boolean>("stop_scheduled_task_run", {
+                taskId: selectedTask.id,
+                runId: runningRun.runId,
+            });
+            toast({
+                title: "已发送停止请求",
+                description: `正在停止运行 ${runningRun.runId.slice(0, 8)}...`,
+            });
+            await loadRuns(selectedTask.id, { silent: true });
+            await loadLogs(selectedTask.id, runningRun.runId, { silent: true });
+        } catch (error) {
+            toast({
+                title: "停止失败",
+                description: getErrorMessage(error),
+                variant: "destructive",
+            });
+        } finally {
+            setIsStopping(false);
+        }
+    }, [loadLogs, loadRuns, runningRun, selectedTask, toast]);
+
+    const parseToolLogPayload = useCallback((log: ScheduledTaskLog): ScheduledTaskToolLogPayload | null => {
+        if (log.messageType !== "tool_call" && log.messageType !== "tool_result") {
+            return null;
+        }
+        try {
+            const parsed = JSON.parse(log.content) as ScheduledTaskToolLogPayload;
+            if (!parsed || typeof parsed !== "object") {
+                return null;
+            }
+            return parsed;
+        } catch {
+            return null;
+        }
+    }, []);
+
+    const selectedToolPayload = useMemo(() => {
+        if (!selectedToolLog) {
+            return null;
+        }
+        return parseToolLogPayload(selectedToolLog);
+    }, [parseToolLogPayload, selectedToolLog]);
 
     const scheduleDescription = useMemo(() => {
         if (!selectedTask) return "";
@@ -642,6 +1046,17 @@ export default function ScheduleWindow() {
                                 >
                                     <Play className="h-4 w-4" />
                                 </Button>
+                                {runningRun && (
+                                    <Button
+                                        variant="outline"
+                                        size="icon"
+                                        onClick={handleStopRun}
+                                        disabled={isStopping}
+                                        title="停止当前执行"
+                                    >
+                                        <Square className="h-4 w-4" />
+                                    </Button>
+                                )}
                                 <Button
                                     variant="destructive"
                                     size="icon"
@@ -787,9 +1202,36 @@ export default function ScheduleWindow() {
                                                         {log.runId.slice(0, 8)}
                                                     </span>
                                                 </div>
-                                                <div className="text-[11px] whitespace-pre-wrap break-words">
-                                                    {log.content}
-                                                </div>
+                                                {(() => {
+                                                    const toolPayload = parseToolLogPayload(log);
+                                                    if (!toolPayload) {
+                                                        return (
+                                                            <div className="text-[11px] whitespace-pre-wrap break-words">
+                                                                {log.content}
+                                                            </div>
+                                                        );
+                                                    }
+                                                    const toolText = `${toolPayload.serverName ?? "-"} / ${toolPayload.toolName ?? "-"}`;
+                                                    const statusText =
+                                                        log.messageType === "tool_result"
+                                                            ? (toolPayload.success ? "执行成功" : "执行失败")
+                                                            : "准备执行";
+                                                    return (
+                                                        <div className="space-y-1">
+                                                            <div className="text-[11px] whitespace-pre-wrap break-words">
+                                                                {statusText}：{toolText}
+                                                            </div>
+                                                            <Button
+                                                                type="button"
+                                                                variant="link"
+                                                                className="h-auto p-0 text-[11px]"
+                                                                onClick={() => setSelectedToolLog(log)}
+                                                            >
+                                                                查看工具详情（参数/返回）
+                                                            </Button>
+                                                        </div>
+                                                    );
+                                                })()}
                                             </div>
                                         ))
                                     )
@@ -815,15 +1257,19 @@ export default function ScheduleWindow() {
         [
             assistantName,
             handleRunNow,
+            handleStopRun,
             hasDetailPrompts,
             isLogLoading,
             isRunning,
+            isStopping,
             loadRuns,
             logEntries,
             openCreateDialog,
             openEditDialog,
+            parseToolLogPayload,
             renderLogTag,
             renderRunStatus,
+            runningRun,
             runEntries,
             scheduleDescription,
             selectedRunId,
@@ -832,8 +1278,8 @@ export default function ScheduleWindow() {
     );
 
     return (
-        <div className="flex justify-center items-center h-screen bg-background">
-            <div className="bg-card shadow-none w-full h-screen overflow-y-auto">
+        <div className="flex justify-center items-center h-screen bg-background" data-aipp-window="schedule" data-aipp-slot="window-root">
+            <div className="bg-card shadow-none w-full h-screen overflow-y-auto" data-aipp-slot="schedule-main-panel">
                 <ConfigPageLayout
                     sidebar={sidebar}
                     content={content}
@@ -847,10 +1293,18 @@ export default function ScheduleWindow() {
                 />
             </div>
 
-            <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-                <DialogContent className="sm:max-w-[640px] max-h-[85vh] overflow-y-auto">
+            <Dialog
+                open={isDialogOpen}
+                onOpenChange={(open) => {
+                    setIsDialogOpen(open);
+                    if (!open) {
+                        setEditingTaskId(null);
+                    }
+                }}
+            >
+                <DialogContent className="sm:max-w-[640px] max-h-[85vh] overflow-y-auto" data-aipp-slot="schedule-editor-dialog">
                     <DialogHeader>
-                        <DialogTitle className="text-base">{selectedTask && selectedTask.id === activeTaskId ? "编辑任务" : "新建任务"}</DialogTitle>
+                        <DialogTitle className="text-base">{editingTaskId !== null ? "编辑任务" : "新建任务"}</DialogTitle>
                     </DialogHeader>
                     <div className="space-y-4 py-2">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -904,13 +1358,38 @@ export default function ScheduleWindow() {
                                     <RadioGroupItem value="once" id="schedule-once" className="mt-0.5" />
                                     <div className="flex-1 space-y-1.5">
                                         <Label htmlFor="schedule-once" className="text-xs">指定时间执行一次</Label>
-                                        <Input
-                                            type="datetime-local"
-                                            value={formValues.run_at}
-                                            onChange={(e) => setFormValues((prev) => ({ ...prev, run_at: e.target.value }))}
-                                            disabled={formValues.schedule_type !== "once"}
-                                            className="h-8 text-sm"
-                                        />
+                                        <div className="flex gap-2">
+                                            <Popover>
+                                                <PopoverTrigger asChild>
+                                                    <Button
+                                                        type="button"
+                                                        variant="outline"
+                                                        disabled={formValues.schedule_type !== "once"}
+                                                        className="h-8 text-sm justify-start min-w-[180px]"
+                                                    >
+                                                        {onceSelectedDate ? format(onceSelectedDate, "yyyy/MM/dd") : "选择日期"}
+                                                    </Button>
+                                                </PopoverTrigger>
+                                                <PopoverContent className="w-auto p-0" align="start">
+                                                    <DateCalendar
+                                                        mode="single"
+                                                        selected={onceSelectedDate}
+                                                        onSelect={handleOnceDateChange}
+                                                    />
+                                                </PopoverContent>
+                                            </Popover>
+                                            <Input
+                                                type="time"
+                                                step={60}
+                                                value={onceTimePart}
+                                                onChange={(e) => handleOnceTimeChange(e.target.value)}
+                                                disabled={formValues.schedule_type !== "once" || !onceDatePart}
+                                                className="h-8 text-sm w-28"
+                                            />
+                                        </div>
+                                        <div className="text-[11px] text-muted-foreground">
+                                            {onceRunAtParts ? `已选择: ${onceRunAtParts.date} ${onceRunAtParts.time}` : "请先选择日期和时间"}
+                                        </div>
                                     </div>
                                 </div>
                                 <div className="flex items-start gap-2">
@@ -1068,13 +1547,60 @@ export default function ScheduleWindow() {
                         </div>
                     </div>
                     <DialogFooter className="gap-2">
-                        <Button variant="outline" size="sm" onClick={() => setIsDialogOpen(false)}>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                                setEditingTaskId(null);
+                                setIsDialogOpen(false);
+                            }}
+                        >
                             取消
                         </Button>
                         <Button size="sm" onClick={handleSave} disabled={isSaving}>
                             {isSaving ? "保存中..." : "保存任务"}
                         </Button>
                     </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            <Dialog open={!!selectedToolLog} onOpenChange={(open) => !open && setSelectedToolLog(null)}>
+                <DialogContent className="sm:max-w-[680px] max-h-[80vh] overflow-y-auto">
+                    <DialogHeader>
+                        <DialogTitle className="text-base">工具调用详情</DialogTitle>
+                    </DialogHeader>
+                    {selectedToolPayload ? (
+                        <div className="space-y-3 text-xs">
+                            <div className="rounded border bg-muted/20 p-2">
+                                <div><span className="text-muted-foreground">工具：</span>{selectedToolPayload.serverName ?? "-"} / {selectedToolPayload.toolName ?? "-"}</div>
+                                <div><span className="text-muted-foreground">Call ID：</span>{selectedToolPayload.callId ?? "-"}</div>
+                                {"success" in selectedToolPayload && (
+                                    <div>
+                                        <span className="text-muted-foreground">状态：</span>
+                                        {selectedToolPayload.success ? "成功" : "失败"}
+                                    </div>
+                                )}
+                            </div>
+                            <div className="space-y-1">
+                                <div className="font-medium">参数</div>
+                                <pre className="rounded border bg-muted/20 p-2 whitespace-pre-wrap break-all max-h-44 overflow-auto">
+                                    {formatToolLogValue(selectedToolPayload.parameters)}
+                                </pre>
+                            </div>
+                            {"result" in selectedToolPayload && (
+                                <div className="space-y-1">
+                                    <div className="font-medium">返回结果</div>
+                                    <pre className="rounded border bg-muted/20 p-2 whitespace-pre-wrap break-all max-h-56 overflow-auto">
+                                        {formatToolLogValue(selectedToolPayload.result)}
+                                    </pre>
+                                </div>
+                            )}
+                        </div>
+                    ) : (
+                        <pre className="rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-all max-h-[60vh] overflow-auto">
+                            {selectedToolLog?.content ?? ""}
+                        </pre>
+                    )}
                 </DialogContent>
             </Dialog>
 

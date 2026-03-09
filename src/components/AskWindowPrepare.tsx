@@ -37,14 +37,14 @@ const AskWindowPrepare: React.FC<AskWindowPrepareProps> = ({
     const dragProps = isMobile ? {} : { "data-tauri-drag-region": true };
 
     return (
-        <div className="text-xs text-foreground select-none" {...dragProps}>
+        <div className="text-xs text-foreground select-none" data-aipp-slot="ask-prepare-content" {...dragProps}>
             <p {...dragProps}>输入文本后回车，与快捷对话助手进行交流</p>
             <p {...dragProps}>
                 拖拽或者粘贴文件/图片后，可与快捷对话助手根据文件进行交流
             </p>
             <p {...dragProps}>对话中可以使用以下!bang命令：</p>
-            <div className="mt-2.5" {...dragProps}>
-                <div className="mt-2.5 flex items-center" {...dragProps}>
+            <div className="mt-2.5" data-aipp-slot="ask-prepare-bang-list" {...dragProps}>
+                <div className="mt-2.5 flex items-center" data-aipp-slot="ask-prepare-bang-item" {...dragProps}>
                     <Badge className="mr-2 py-1.25 px-2.5 bg-primary rounded-lg text-primary-foreground flex-none cursor-pointer">!s</Badge>
                     <span className="text-foreground" {...dragProps}>插入选择的文字</span>
                     {selectedText && (
@@ -53,31 +53,31 @@ const AskWindowPrepare: React.FC<AskWindowPrepareProps> = ({
                         </span>
                     )}
                 </div>
-                <div className="mt-2.5 flex items-center" {...dragProps}>
+                <div className="mt-2.5 flex items-center" data-aipp-slot="ask-prepare-bang-item" {...dragProps}>
                     <Badge className="mr-2 py-1.25 px-2.5 bg-primary rounded-lg text-primary-foreground flex-none cursor-pointer">!cd</Badge>
                     <span className="text-foreground" {...dragProps}>插入当前日期文本</span>
                     <span className="ml-2.5 bg-muted text-muted-foreground px-1 py-0.5 rounded max-w-96 overflow-hidden text-ellipsis whitespace-nowrap" {...dragProps}>
                         {currentDate}
                     </span>
                 </div>
-                <div className="mt-2.5 flex items-center" {...dragProps}>
+                <div className="mt-2.5 flex items-center" data-aipp-slot="ask-prepare-bang-item" {...dragProps}>
                     <Badge className="mr-2 py-1.25 px-2.5 bg-primary rounded-lg text-primary-foreground flex-none cursor-pointer">!ct</Badge>
                     <span className="text-foreground" {...dragProps}>插入当前时间文字</span>
                     <span className="ml-2.5 bg-muted text-muted-foreground px-1 py-0.5 rounded max-w-96 overflow-hidden text-ellipsis whitespace-nowrap" {...dragProps}>
                         {currentTime}
                     </span>
                 </div>
-                <div className="mt-2.5 flex items-center" {...dragProps}>
+                <div className="mt-2.5 flex items-center" data-aipp-slot="ask-prepare-bang-item" {...dragProps}>
                     <Badge className="mr-2 py-1.25 px-2.5 bg-primary rounded-lg text-primary-foreground flex-none cursor-pointer">!w(url)</Badge>
                     <span className="text-foreground" {...dragProps}>插入网页内容</span>
                 </div>
-                <div className="mt-2.5 flex items-center" {...dragProps}>
+                <div className="mt-2.5 flex items-center" data-aipp-slot="ask-prepare-bang-item" {...dragProps}>
                     <Badge className="mr-2 py-1.25 px-2.5 bg-primary rounded-lg text-primary-foreground flex-none cursor-pointer">!wm(url)</Badge>
                     <span className="text-foreground" {...dragProps}>
                         插入网页内容并转换为Markdown
                     </span>
                 </div>
-                <div className="mt-2.5 flex items-center" {...dragProps}>
+                <div className="mt-2.5 flex items-center" data-aipp-slot="ask-prepare-bang-item" {...dragProps}>
                     <Badge className="mr-2 py-1.25 px-2.5 bg-primary rounded-lg text-primary-foreground flex-none cursor-pointer">!file(path)</Badge>
                     <span className="text-foreground" {...dragProps}>
                         读取文本文件内容

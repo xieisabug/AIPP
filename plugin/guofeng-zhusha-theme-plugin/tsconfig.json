@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "none",
+    "jsx": "react",
+    "jsxFactory": "ReactRuntime.createElement",
+    "jsxFragmentFactory": "ReactRuntime.Fragment",
+    "lib": ["ES2020", "DOM"],
+    "outFile": "dist/main.js",
+    "strict": false,
+    "noEmitOnError": true,
+    "skipLibCheck": true,
+    "sourceMap": false,
+    "types": ["react"]
+  },
+  "files": [
+    "../../docs/plugin-template/shared/aipp-plugin-sdk.d.ts",
+    "src/GuofengThemePanel.tsx",
+    "src/GuofengThemePlugin.ts",
+    "src/main.ts"
+  ]
+}

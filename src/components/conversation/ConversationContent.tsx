@@ -1,10 +1,8 @@
-import React, { useState, memo } from "react";
+import React, { memo } from "react";
 import MessageList from "./MessageList";
 import NewChatComponent from "../NewChatComponent";
 import { Message, StreamEvent } from "../../data/Conversation";
 import { AssistantListItem } from "../../data/Assistant";
-import { SubTaskList, SubTaskDetailDialog } from "../sub-task";
-import { SubTaskExecutionSummary } from "../../data/SubTask";
 import type { InlineInteractionItem } from "../ConversationUI";
 
 export interface ConversationContentProps {
@@ -26,6 +24,7 @@ export interface ConversationContentProps {
     onMessageFork: (messageId: number) => void;
     onToggleReasoningExpand: (messageId: number) => void;
     inlineInteractionItems?: InlineInteractionItem[];
+    sentBatchToolResultMessageIds?: ReadonlySet<number>;
     // NewChatComponent props
     selectedText: string;
     selectedAssistant: number;
@@ -52,41 +51,16 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     onMessageFork,
     onToggleReasoningExpand,
     inlineInteractionItems,
+    sentBatchToolResultMessageIds,
     // NewChatComponent props
     selectedText,
     selectedAssistant,
     assistants,
     setSelectedAssistant,
 }) => {
-    // State for sub-task detail dialog
-    const [selectedSubTask, setSelectedSubTask] = useState<SubTaskExecutionSummary | null>(null);
-    const [isDetailDialogOpen, setIsDetailDialogOpen] = useState(false);
-
-    // Handle sub-task detail view
-    const handleSubTaskDetailView = (execution: SubTaskExecutionSummary) => {
-        setSelectedSubTask(execution);
-        setIsDetailDialogOpen(true);
-    };
-
-    const handleCloseDetailDialog = () => {
-        setIsDetailDialogOpen(false);
-        setSelectedSubTask(null);
-    };
-
-    const conversationIdNum = parseInt(conversationId);
-    const isValidConversationId = !isNaN(conversationIdNum);
-
     if (conversationId) {
         return (
             <>
-                {/* Conversation-level sub-tasks - shown between header and messages */}
-                {isValidConversationId && (
-                    <SubTaskList
-                        conversation_id={conversationIdNum}
-                        onTaskDetailView={handleSubTaskDetailView}
-                    />
-                )}
-
                 <>
                     <MessageList
                         allDisplayMessages={allDisplayMessages}
@@ -105,18 +79,9 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
                         onMessageFork={onMessageFork}
                         onToggleReasoningExpand={onToggleReasoningExpand}
                         inlineInteractionItems={inlineInteractionItems}
+                        sentBatchToolResultMessageIds={sentBatchToolResultMessageIds}
                     />
                 </>
-
-                {/* Sub-task detail dialog */}
-                {selectedSubTask && (
-                    <SubTaskDetailDialog
-                        isOpen={isDetailDialogOpen}
-                        onClose={handleCloseDetailDialog}
-                        execution={selectedSubTask}
-                        // 不再需要传递source_id，使用UI专用的详情接口
-                    />
-                )}
             </>
         );
     }

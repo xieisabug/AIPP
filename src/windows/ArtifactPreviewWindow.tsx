@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { save } from '@tauri-apps/plugin-dialog';
+import { writeFile } from '@tauri-apps/plugin-fs';
 import mermaid from 'mermaid';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -48,7 +50,7 @@ const ARTIFACT_CACHE_KEY = 'artifact_preview_cache';
  */
 export default function ArtifactPreviewWindow() {
     // 集成主题系统
-    useTheme();
+    useTheme("artifact_preview");
 
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [isPreviewReady, setIsPreviewReady] = useState(false);
@@ -677,6 +679,41 @@ export default function ArtifactPreviewWindow() {
         }
     };
 
+    const postDrawioLoad = useCallback((xml: string) => {
+        drawioIframeRef.current?.contentWindow?.postMessage(
+            JSON.stringify({
+                action: 'load',
+                xml,
+                autosave: 1,
+            }),
+            '*'
+        );
+    }, []);
+
+    const handleDrawioExport = useCallback(async (xmlOverride?: string) => {
+        if (previewTypeRef.current !== 'drawio') return;
+        const xml = (xmlOverride ?? drawioXmlContent).trim();
+        if (!xml) {
+            artifactEvents.addLog('error', '保存 Draw.io 文件失败：当前没有可保存的图表内容');
+            return;
+        }
+
+        try {
+            const filePath = await save({
+                defaultPath: 'diagram.drawio',
+                filters: [{ name: 'Draw.io', extensions: ['drawio', 'xml'] }],
+            });
+            if (!filePath || Array.isArray(filePath)) {
+                return;
+            }
+
+            await writeFile(filePath, new TextEncoder().encode(xml));
+            artifactEvents.addLog('success', `Draw.io 文件已保存到: ${filePath}`);
+        } catch (error) {
+            artifactEvents.addLog('error', `保存 Draw.io 文件失败: ${error}`);
+        }
+    }, [artifactEvents, drawioXmlContent]);
+
     // 检查是否可以保存（仅支持 vue, react, html）
     const canSave = previewTypeRef.current && ['vue', 'react', 'html'].includes(previewTypeRef.current);
 
@@ -741,14 +778,7 @@ export default function ArtifactPreviewWindow() {
                     else if (msg.event === 'init' && !loaded) {
                         loaded = true;
                         console.log('[Draw.io] 发送 XML 数据...');
-                        drawioIframeRef.current?.contentWindow?.postMessage(
-                            JSON.stringify({
-                                action: 'load',
-                                xml: drawioXmlContent,
-                                autosave: 0  // 禁用自动保存
-                            }),
-                            '*'
-                        );
+                        postDrawioLoad(drawioXmlContent);
                         artifactEvents.addLog('success', 'Draw.io 图表已加载');
                     }
 
@@ -757,10 +787,17 @@ export default function ArtifactPreviewWindow() {
                         console.log('[Draw.io] 图表加载完成，尺寸:', msg.bounds);
                     }
 
+                    else if (msg.event === 'autosave' && typeof msg.xml === 'string') {
+                        setDrawioXmlContent(msg.xml);
+                        setOriginalCode(msg.xml);
+                    }
+
                     // save 事件 - 用户保存时
-                    else if (msg.event === 'save') {
-                        console.log('[Draw.io] 用户保存，XML 长度:', msg.xml?.length);
-                        // 可以在这里处理保存逻辑
+                    else if (msg.event === 'save' && typeof msg.xml === 'string') {
+                        console.log('[Draw.io] 用户保存，XML 长度:', msg.xml.length);
+                        setDrawioXmlContent(msg.xml);
+                        setOriginalCode(msg.xml);
+                        void handleDrawioExport(msg.xml);
                     }
 
                     // exit 事件 - 用户退出
@@ -779,7 +816,7 @@ export default function ArtifactPreviewWindow() {
                 window.removeEventListener('message', handleMessage);
             };
         }
-    }, [previewType, drawioXmlContent, artifactEvents]);
+    }, [previewType, drawioXmlContent, artifactEvents, handleDrawioExport, postDrawioLoad]);
 
     const codeContent = originalCode || htmlContent || mermaidContent || markdownContent || '';
     const codeLanguage = previewType === 'react'
@@ -797,11 +834,14 @@ export default function ArtifactPreviewWindow() {
                             : 'text';
 
     return (
-        <div className="flex h-screen bg-background overflow-hidden">
-            <div className="flex flex-col flex-1 bg-background rounded-xl m-2 shadow-lg border border-border min-h-0 overflow-hidden">
+        <div className="flex h-screen bg-background overflow-hidden" data-aipp-window="artifact_preview" data-aipp-slot="window-root">
+            <div
+                className="flex flex-col flex-1 bg-background rounded-xl m-2 shadow-lg border border-border min-h-0 overflow-hidden"
+                data-aipp-slot="artifact-preview-main"
+            >
                 {/* 顶部工具栏 */}
                 {isPreviewReady && (previewUrl || previewType === 'mermaid' || previewType === 'html' || previewType === 'svg' || previewType === 'xml' || previewType === 'markdown' || previewType === 'md' || previewType === 'drawio') && (
-                    <div className="flex-shrink-0 p-4 border-b border-border flex items-center justify-between">
+                    <div className="flex-shrink-0 p-4 border-b border-border flex items-center justify-between" data-aipp-slot="artifact-preview-toolbar">
                         <div className="text-sm text-muted-foreground">
                             {currentView === 'logs' ? '日志视图' : currentView === 'code' ? '代码视图' :
                                 previewType === 'mermaid' ? 'Mermaid 图表预览' :
@@ -877,6 +917,20 @@ export default function ArtifactPreviewWindow() {
                                 >
                                     保存
                                 </Button>
+                            )}
+                            {currentView === 'preview' && previewType === 'drawio' && (
+                                <>
+                                    <Button
+                                        onClick={() => {
+                                            void handleDrawioExport();
+                                        }}
+                                        variant="outline"
+                                        size="sm"
+                                        title="保存 Draw.io 文件"
+                                    >
+                                        保存文件
+                                    </Button>
+                                </>
                             )}
                             {previewType !== 'mermaid' && previewType !== 'html' && previewType !== 'svg' && previewType !== 'xml' && previewType !== 'markdown' && previewType !== 'md' && previewType !== 'drawio' && (
                                 <>
@@ -1073,7 +1127,7 @@ export default function ArtifactPreviewWindow() {
                                     ref={drawioIframeRef}
                                     src="https://embed.diagrams.net/?embed=1&ui=min&spin=1&proto=json&noSaveBtn=1&noExitBtn=1"
                                     className="flex-1 w-full border-0 bg-background"
-                                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"
                                     style={{
                                         minHeight: '400px'
                                     }}

@@ -106,7 +106,7 @@ fn given_missing_parent_group_when_latest_branch_then_keeps_messages() {
 }
 
 #[test]
-fn given_same_generation_group_when_latest_branch_then_keeps_latest_only() {
+fn given_same_generation_group_when_latest_branch_then_keeps_all_messages_in_group() {
     let t1 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let t2 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 1).unwrap();
     let t3 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 2).unwrap();
@@ -121,7 +121,68 @@ fn given_same_generation_group_when_latest_branch_then_keeps_latest_only() {
 
     let result = get_latest_branch_messages(&messages);
     let ids: Vec<i64> = result.iter().map(|msg| msg.id).collect();
-    assert_eq!(ids, vec![1, 2, 4]);
+    assert_eq!(ids, vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn given_reasoning_and_response_in_same_generation_when_latest_branch_then_keeps_both() {
+    let t1 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let t2 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 1).unwrap();
+    let t3 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 2).unwrap();
+    let t4 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 3).unwrap();
+
+    let messages = vec![
+        wrap(make_message(1, "system", t1, None, None, "system")),
+        wrap(make_message(2, "user", t2, None, None, "q1")),
+        wrap(make_message(3, "reasoning", t3, Some("g1"), None, "think first")),
+        wrap(make_message(4, "response", t4, Some("g1"), None, "final answer")),
+    ];
+
+    let result = get_latest_branch_messages(&messages);
+    let ids: Vec<i64> = result.iter().map(|msg| msg.id).collect();
+    assert_eq!(ids, vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn given_multiple_tool_results_in_same_generation_when_latest_branch_then_keeps_all_results() {
+    let t1 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let t2 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 1).unwrap();
+    let t3 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 2).unwrap();
+    let t4 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 3).unwrap();
+    let t5 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 4).unwrap();
+
+    let messages = vec![
+        wrap(make_message(1, "user", t1, None, None, "q1")),
+        wrap(make_message(
+            2,
+            "response",
+            t2,
+            Some("g1"),
+            None,
+            &response_with_tool_call(1, "call tool"),
+        )),
+        wrap(make_message(
+            3,
+            "tool_result",
+            t3,
+            Some("g1"),
+            None,
+            &tool_result_content("call_1", "ok"),
+        )),
+        wrap(make_message(
+            4,
+            "tool_result",
+            t4,
+            Some("g1"),
+            None,
+            &tool_result_content("call_2", "also ok"),
+        )),
+        wrap(make_message(5, "response", t5, Some("g1"), None, "final answer")),
+    ];
+
+    let result = get_latest_branch_messages(&messages);
+    let ids: Vec<i64> = result.iter().map(|msg| msg.id).collect();
+    assert_eq!(ids, vec![1, 2, 3, 4, 5]);
 }
 
 #[test]
@@ -184,11 +245,7 @@ fn given_tool_call_with_null_parameters_when_build_chat_request_then_normalizes_
     let init_message_list = vec![
         ("system".to_string(), "system".to_string(), vec![]),
         ("user".to_string(), "question".to_string(), vec![]),
-        (
-            "response".to_string(),
-            response_with_tool_call_null_params(1, "call tool"),
-            vec![],
-        ),
+        ("response".to_string(), response_with_tool_call_null_params(1, "call tool"), vec![]),
         ("tool_result".to_string(), tool_result_content("call_1", "tool error"), vec![]),
     ];
 
@@ -200,6 +257,27 @@ fn given_tool_call_with_null_parameters_when_build_chat_request_then_normalizes_
     let tool_calls = messages[2].content.tool_calls();
     assert_eq!(tool_calls.len(), 1);
     assert!(tool_calls[0].fn_arguments.is_object());
+    assert!(matches!(&messages[3].role, ChatRole::Tool));
+}
+
+#[test]
+fn given_reasoning_before_tool_call_when_build_chat_request_then_merges_reasoning_into_assistant() {
+    let init_message_list = vec![
+        ("system".to_string(), "system".to_string(), vec![]),
+        ("user".to_string(), "question".to_string(), vec![]),
+        ("reasoning".to_string(), "先思考工具用途".to_string(), vec![]),
+        ("response".to_string(), response_with_tool_call(1, "call tool"), vec![]),
+        ("tool_result".to_string(), tool_result_content("call_1", "ok"), vec![]),
+    ];
+
+    let result =
+        build_chat_request_from_messages(&init_message_list, ToolCallStrategy::Native, None);
+    let messages = result.chat_request.messages;
+    assert_eq!(messages.len(), 4);
+    assert!(matches!(&messages[2].role, ChatRole::Assistant));
+    assert_eq!(messages[2].content.tool_calls().len(), 1);
+    assert_eq!(messages[2].content.joined_reasoning_content().as_deref(), Some("先思考工具用途"));
+    assert_eq!(messages[2].content.first_text(), Some("call tool"));
     assert!(matches!(&messages[3].role, ChatRole::Tool));
 }
 

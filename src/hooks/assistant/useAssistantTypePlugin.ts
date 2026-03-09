@@ -1,6 +1,4 @@
 import { useState, useEffect, useMemo } from "react";
-import { registerSubTaskIconComponent } from "../../data/SubTask";
-import { invoke } from "@tauri-apps/api/core";
 import { AssistantType } from "@/types/assistant";
 
 export const useAssistantTypePlugin = (pluginList: any[]) => {
@@ -61,8 +59,7 @@ export const useAssistantTypePlugin = (pluginList: any[]) => {
                 });
             },
             subTaskRegist: async (_options: SubTaskRegistOptions) => {
-                // 这个实现会被插件特定的实现覆盖
-                console.warn("subTaskRegist called without plugin context");
+                // Feature removed
             },
             markdownRemarkRegist: (_: any) => { },
             changeFieldLabel: (fieldName: string, label: string) => {
@@ -130,26 +127,8 @@ export const useAssistantTypePlugin = (pluginList: any[]) => {
                 // 为每个插件创建一个包含插件ID的assistantTypeApi
                 const pluginAwareApi = {
                     ...assistantTypeApi,
-                    subTaskRegist: async (options: SubTaskRegistOptions) => {
-                        // 先注册图标，保证 UI 立即可见；后端失败也不影响图标展示
-                        if (options.iconComponent) {
-                            try {
-                                registerSubTaskIconComponent(options.code, options.iconComponent);
-                            } catch { /* noop */ }
-                        }
-
-                        try {
-                            await invoke("sub_task_regist", {
-                                code: options.code,
-                                name: options.name,
-                                description: options.description,
-                                systemPrompt: options.systemPrompt,
-                                pluginSource: "plugin",
-                                sourceId: plugin.id || 0,
-                            });
-                        } catch (error) {
-                            console.error(`Failed to register sub task '${options.code}':`, error);
-                        }
+                    subTaskRegist: async (_options: SubTaskRegistOptions) => {
+                        // Feature removed
                     }
                 };
                 plugin?.instance?.onAssistantTypeInit(pluginAwareApi);

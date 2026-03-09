@@ -31,7 +31,7 @@ const MIN_SIDEBAR_WIDTH = 200;
 const MAX_SIDEBAR_WIDTH = 500;
 
 function SidebarWindow() {
-    useTheme();
+    useTheme("sidebar");
     
     const [sidebarData, setSidebarData] = useState<SidebarData>({
         todos: [],
@@ -387,9 +387,13 @@ function SidebarWindow() {
     };
 
     return (
-        <div className={cn("flex h-screen bg-background", isResizing && "select-none")}>
+        <div
+            className={cn("flex h-screen bg-background", isResizing && "select-none")}
+            data-aipp-window="sidebar"
+            data-aipp-slot="window-root"
+        >
             {/* Left side - Preview area */}
-            <div className="relative flex-1 flex flex-col border-r border-border min-w-0">
+            <div className="relative flex-1 flex flex-col border-r border-border min-w-0" data-aipp-slot="sidebar-preview-pane">
                 {renderPreview()}
                 {canOpenInPreviewWindow && (
                     <Button
@@ -409,6 +413,7 @@ function SidebarWindow() {
             <div 
                 className="relative flex-shrink-0 flex flex-col bg-background"
                 style={{ width: sidebarWidth }}
+                data-aipp-slot="sidebar-panel"
             >
                 {/* Resize handle */}
                 <div
@@ -418,10 +423,11 @@ function SidebarWindow() {
                         isResizing && "bg-primary/50"
                     )}
                     onMouseDown={handleResizeStart}
+                    data-aipp-slot="sidebar-resize-handle"
                 />
 
                 {/* Header */}
-                <div className="flex items-center justify-between p-3 border-b border-border">
+                <div className="flex items-center justify-between p-3 border-b border-border" data-aipp-slot="sidebar-header">
                     <span className="text-sm font-medium">详情</span>
                     <Button
                         variant="ghost"
@@ -435,7 +441,7 @@ function SidebarWindow() {
                 </div>
 
                 {/* Content */}
-                <div className="flex-1 min-h-0 overflow-hidden">
+                <div className="flex-1 min-h-0 overflow-hidden" data-aipp-slot="sidebar-content">
                     {sidebarData.conversationId ? (
                         <ChatSidebarContent
                             className="h-full p-2"

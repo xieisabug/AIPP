@@ -1,0 +1,43 @@
+{
+  "id": "run-script-bang-plugin",
+  "code": "run-script-bang-plugin",
+  "name": "Run Script Bang Plugin",
+  "version": "0.1.0",
+  "entry": "dist/main.js",
+  "description": "Adds !run_script, !rs and !bash bangs backed by the built-in execute_bash tool.",
+  "pluginTypes": [
+    "toolType",
+    "applicationType"
+  ],
+  "permissions": [
+    "bang.register"
+  ],
+  "contributions": {
+    "bangs": [
+      {
+        "name": "run_script",
+        "aliases": [
+          "rs",
+          "bash"
+        ],
+        "complete": "run_script(|)",
+        "description": "执行一段 shell 命令，并将输出直接注入到提示词上下文。",
+        "executor": {
+          "type": "builtinTool",
+          "command": "aipp:operation",
+          "toolName": "execute_bash",
+          "arguments": {
+            "command": {
+              "source": "raw",
+              "required": true
+            },
+            "description": {
+              "source": "const",
+              "value": "Bang plugin: run_script"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

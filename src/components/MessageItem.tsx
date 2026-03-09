@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo } from "react";
 import UnifiedMarkdown from "./UnifiedMarkdown";
 import ReasoningMessage from "./ReasoningMessage";
 import ErrorMessage from "./message-item/ErrorMessage";
@@ -15,8 +15,6 @@ import { useMcpToolCallProcessor } from "../hooks/useMcpToolCallProcessor";
 import { useDisplayConfig } from "../hooks/useDisplayConfig";
 import { useAntiLeakage } from "../contexts/AntiLeakageContext";
 import { maskContent } from "../utils/antiLeakage";
-import { SubTaskList, SubTaskDetailDialog } from "./sub-task";
-import { SubTaskExecutionSummary } from "../data/SubTask";
 import type { InlineInteractionItem } from "./ConversationUI";
 
 interface MessageItemProps {
@@ -34,6 +32,7 @@ interface MessageItemProps {
     shiningMcpCallId?: number | null;
     isLastMessage?: boolean; // 防泄露模式：是否为最后一条消息
     inlineInteractionItems?: InlineInteractionItem[];
+    sentBatchToolResultMessageIds?: ReadonlySet<number>;
 }
 
 const MessageItem = React.memo<MessageItemProps>(
@@ -52,25 +51,11 @@ const MessageItem = React.memo<MessageItemProps>(
         shiningMcpCallId,
         isLastMessage = false,
         inlineInteractionItems,
+        sentBatchToolResultMessageIds,
     }) => {
         // 防泄露模式
         const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
         const shouldMaskContent = antiLeakageEnabled && !isRevealed && !isLastMessage;
-
-        // Sub-task detail dialog state
-        const [selectedSubTask, setSelectedSubTask] = useState<SubTaskExecutionSummary | null>(null);
-        const [isDetailDialogOpen, setIsDetailDialogOpen] = useState(false);
-
-        // Handle sub-task detail view
-        const handleSubTaskDetailView = (execution: SubTaskExecutionSummary) => {
-            setSelectedSubTask(execution);
-            setIsDetailDialogOpen(true);
-        };
-
-        const handleCloseDetailDialog = () => {
-            setIsDetailDialogOpen(false);
-            setSelectedSubTask(null);
-        };
 
         // 防泄露模式：获取实际显示的内容
         const displayContent = useMemo(() => {
@@ -96,6 +81,7 @@ const MessageItem = React.memo<MessageItemProps>(
             mcpToolCallStates,
             shiningMcpCallId,
             inlineInteractionItems,
+            sentBatchToolResultMessageIds,
         });
 
         // 处理自定义标签解析
@@ -264,6 +250,7 @@ const MessageItem = React.memo<MessageItemProps>(
                     mcpToolCallStates={mcpToolCallStates}
                     shiningMcpCallId={shiningMcpCallId}
                     inlineInteractionItems={inlineInteractionItems}
+                    sentBatchToolResultMessageIds={sentBatchToolResultMessageIds}
                     useRawTextRenderer={shouldMaskContent}
                 />
             );
@@ -277,17 +264,6 @@ const MessageItem = React.memo<MessageItemProps>(
         // 常规消息渲染
         return (
             <div className="flex flex-col" data-message-item data-message-id={message.id} data-message-type={message.message_type}>
-                {/* Message-level sub-tasks - shown at the top of each message */}
-                {conversationId && (
-                    <SubTaskList
-                        conversation_id={conversationId}
-                        message_id={message.id}
-                        autoLoad={false}
-                        onTaskDetailView={handleSubTaskDetailView}
-                        className="mb-2"
-                    />
-                )}
-
                 <div
                     className={`group relative py-4 px-5 rounded-2xl inline-block max-w-[65%] transition-all duration-200 bg-background text-foreground border border-border ${isUserMessage ? "self-end" : "self-start"
                         }`}
@@ -323,16 +299,6 @@ const MessageItem = React.memo<MessageItemProps>(
                         messageContent={message.content}
                     />
                 </div>
-
-                {/* Sub-task detail dialog */}
-                {selectedSubTask && (
-                    <SubTaskDetailDialog
-                        isOpen={isDetailDialogOpen}
-                        onClose={handleCloseDetailDialog}
-                        execution={selectedSubTask}
-                    // 不再需要传递source_id，使用UI专用的详情接口
-                    />
-                )}
             </div>
         );
     }

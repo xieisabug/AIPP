@@ -2,6 +2,10 @@
 
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { Message } from "../data/Conversation";
+import {
+    compareMessagesChronologically,
+    getMessageOrderValue,
+} from "@/utils/messageOrdering";
 
 // 钩子的输入参数
 interface UseMessageGroupsProps {
@@ -48,31 +52,6 @@ export function useMessageGroups({
         Map<string, number>
     >(new Map());
     const userSwitchRef = useRef(false);
-
-    const compareReasoningBeforeResponse = useCallback((a: Message, b: Message): number => {
-        const aIsReasoning = a.message_type === "reasoning";
-        const bIsReasoning = b.message_type === "reasoning";
-        const aIsResponse = a.message_type === "response";
-        const bIsResponse = b.message_type === "response";
-
-        if ((aIsReasoning && bIsResponse) || (aIsResponse && bIsReasoning)) {
-            return aIsReasoning ? -1 : 1;
-        }
-        return 0;
-    }, []);
-    const getOrderValue = useCallback((msg: Message): number => {
-        const tryParse = (value: any) => {
-            const ts = value ? new Date(value as any).getTime() : NaN;
-            return Number.isFinite(ts) ? ts : null;
-        };
-        // 优先 created_time，其次 start/finish_time，最后退回 id，避免时间解析失败导致排序回退到极小的 id
-        return (
-            tryParse(msg.created_time) ??
-            tryParse(msg.start_time) ??
-            tryParse(msg.finish_time) ??
-            msg.id
-        );
-    }, []);
 
     // =================================================================================
     // 优化点 1: 核心计算逻辑重构
@@ -150,7 +129,7 @@ export function useMessageGroups({
                 // 使用顶层父分组的最小消息 ID
                 for (const version of topLevelVersions) {
                     const minOrder = Math.min(
-                        ...version.messages.map(getOrderValue),
+                        ...version.messages.map(getMessageOrderValue),
                     );
                     if (Number.isFinite(minOrder) && minOrder < groupBaseId) {
                         groupBaseId = minOrder;
@@ -160,7 +139,7 @@ export function useMessageGroups({
                 // 如果没有顶层版本（理论上不应该发生），使用所有版本的最小 ID
                 for (const version of allVersionsInGroup) {
                     const minOrder = Math.min(
-                        ...version.messages.map(getOrderValue),
+                        ...version.messages.map(getMessageOrderValue),
                     );
                     if (Number.isFinite(minOrder) && minOrder < groupBaseId) {
                         groupBaseId = minOrder;
@@ -197,30 +176,24 @@ export function useMessageGroups({
                 
                 // 都是根版本或都是子版本时，按消息的最小 ID 排序（ID 是自增的，更可靠）
                 const aMinId = Math.min(
-                    ...a.messages.map(getOrderValue),
+                    ...a.messages.map(getMessageOrderValue),
                 );
                 const bMinId = Math.min(
-                    ...b.messages.map(getOrderValue),
+                    ...b.messages.map(getMessageOrderValue),
                 );
                 
                 return aMinId - bMinId;
             });
             
             group.versions.forEach(version => {
-                version.messages.sort(
-                    (a, b) => {
-                        const orderDelta = getOrderValue(a) - getOrderValue(b);
-                        if (orderDelta !== 0) return orderDelta;
-                        const reasoningOrder = compareReasoningBeforeResponse(a, b);
-                        if (reasoningOrder !== 0) return reasoningOrder;
-                        return a.id - b.id;
-                    },
+                        version.messages.sort(
+                    (a, b) => compareMessagesChronologically(a, b),
                 );
             });
         });
 
         return { groups, groupRootMessageIds };
-    }, [allDisplayMessages, groupMergeMap, getOrderValue, compareReasoningBeforeResponse]);
+    }, [allDisplayMessages, groupMergeMap]);
 
     const pureGenerationGroups = pureGenerationGroupsAndTimestamps.groups;
     const groupRootMessageIds = pureGenerationGroupsAndTimestamps.groupRootMessageIds;

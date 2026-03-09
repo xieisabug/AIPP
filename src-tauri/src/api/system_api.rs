@@ -3,7 +3,7 @@ use std::cmp::Ord;
 use std::collections::HashMap;
 use tauri::{Emitter, Manager, State};
 
-use crate::template_engine::{BangType, TemplateEngine};
+use crate::template_engine::{build_template_engine, BangType};
 use crate::AppState;
 use crate::FeatureConfigState;
 
@@ -88,8 +88,10 @@ pub async fn open_data_folder(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn get_bang_list() -> Result<Vec<(String, String, String, BangType)>, String> {
-    let engine = TemplateEngine::new();
+pub async fn get_bang_list(
+    app_handle: tauri::AppHandle,
+) -> Result<Vec<(String, String, String, BangType)>, String> {
+    let engine = build_template_engine(&app_handle)?;
     let mut list = vec![];
     for bang in engine.get_commands().iter() {
         list.push((

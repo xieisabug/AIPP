@@ -18,7 +18,10 @@ use tracing::{debug, error, info, warn};
 /// 1. Sort messages by created_time then id.
 /// 2. When a parent_group_id appears, resolve it through the replacement chain,
 ///    then truncate before the resolved group (replace it).
-/// 3. For messages with the same generation_group_id, only keep the latest one.
+/// 3. Keep all messages that belong to the surviving branch, even when they
+///    share a generation_group_id. A single generation can legitimately contain
+///    reasoning, tool-call request/response, tool_result messages, and a final
+///    assistant answer.
 /// 4. Append current message to form the latest branch.
 ///
 /// The replacement chain tracks "who replaced whom": when group G1 is truncated
@@ -61,13 +64,6 @@ pub(crate) fn get_latest_branch_messages(
                     group_replacement.insert(replaced_group, new_group.clone());
                 }
             }
-        }
-
-        // 处理同一 generation_group_id 的多个消息：只保留最新的
-        if let Some(current_group_id) = &msg.generation_group_id {
-            result.retain(|m| {
-                m.generation_group_id.as_ref().map(|id| id != current_group_id).unwrap_or(true)
-            });
         }
 
         result.push(msg.clone());
@@ -274,6 +270,7 @@ pub async fn generate_conversation_summary(
         network_proxy.as_deref(),
         proxy_enabled,
         Some(request_timeout),
+        false,
         &config_feature_map,
     )?;
 
@@ -440,7 +437,7 @@ fn simplify_tool_result_for_summary(content: &str) -> String {
 /// 2. Markdown 代码块包裹的 JSON (```json ... ```)
 /// 3. 包含前后缀文本的 JSON
 /// 4. 嵌套的 JSON 结构（查找最外层的 {}）
-fn extract_json_from_response(response: &str) -> Option<serde_json::Value> {
+pub(crate) fn extract_json_from_response(response: &str) -> Option<serde_json::Value> {
     let trimmed = response.trim();
 
     // 1. 直接尝试解析

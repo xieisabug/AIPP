@@ -1,21 +1,21 @@
 import React, { ReactNode, useEffect, useState, useCallback, useMemo } from "react";
-import ReactDOM from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 import LLMProviderConfig from "../components/config/LLMProviderConfig";
 import AssistantConfig from "../components/config/AssistantConfig";
 import FeatureAssistantConfig from "../components/config/FeatureAssistantConfig";
 import MCPConfig from "../components/config/MCPConfig";
 import SkillsConfig from "../components/config/SkillsConfig";
-import { appDataDir } from "@tauri-apps/api/path";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import PluginCenterConfig from "../components/config/PluginCenterConfig";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { Bot, ServerCrash, Settings, Sparkles } from "lucide-react";
+import { Bot, Puzzle, ServerCrash, Settings, Sparkles } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
 import { Home, Menu } from "lucide-react";
 import MCP from "../assets/mcp.svg?react";
+import { pluginRuntime } from "../services/PluginRuntime";
 
 interface MenuItem {
     id: string;
@@ -31,11 +31,12 @@ const contentMap: Record<string, React.ComponentType<any>> = {
     "feature-assistant-config": FeatureAssistantConfig,
     "mcp-config": MCPConfig,
     "skills-config": SkillsConfig,
+    "plugins-config": PluginCenterConfig,
 };
 
 function ConfigWindow() {
     // 集成主题系统
-    useTheme();
+    useTheme("config");
     const isMobile = useIsMobile();
     const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -70,6 +71,12 @@ function ConfigWindow() {
             icon: <Settings className="w-full h-full text-muted-foreground" />,
             iconSelected: <Settings className="w-full h-full text-foreground" />,
         },
+        {
+            id: "plugins-config",
+            name: "插件",
+            icon: <Puzzle className="w-full h-full text-muted-foreground" />,
+            iconSelected: <Puzzle className="w-full h-full text-foreground" />,
+        },
     ];
 
     const [selectedMenu, setSelectedMenu] = useState<string>("llm-provider-config");
@@ -90,66 +97,32 @@ function ConfigWindow() {
     }, []);
 
     useEffect(() => {
-        // 为可能使用 UMD 构建的插件提供全局 React/ReactDOM（与 PluginWindow 保持一致）
-        (window as any).React = React;
-        (window as any).ReactDOM = ReactDOM;
-
-        const toPascalCase = (str: string) =>
-            str
-                .replace(/(^|[-_\s]+)([a-zA-Z0-9])/g, (_, __, c) => (c ? String(c).toUpperCase() : ""))
-                .replace(/[^a-zA-Z0-9]/g, "");
-
-        const pluginLoadList = [
-            {
-                name: "代码生成",
-                code: "code-generate",
-                pluginType: ["assistantType"],
-                instance: null,
-            },
-            {
-                name: "DeepResearch",
-                code: "deepresearch",
-                pluginType: ["assistantType"],
-                instance: null,
+        let mounted = true;
+        const loadPlugins = async (forceReload = false) => {
+            try {
+                const plugins = forceReload
+                    ? await pluginRuntime.reloadPlugins()
+                    : await pluginRuntime.loadPlugins();
+                if (mounted) {
+                    setPluginList(plugins);
+                }
+            } catch (error) {
+                console.error("[ConfigWindow] Failed to load plugins:", error);
+                if (mounted) {
+                    setPluginList([]);
+                }
             }
-        ];
-
-        const initPlugin = async () => {
-            const dirPath = await appDataDir();
-            pluginLoadList.forEach(async (plugin) => {
-                const convertFilePath = dirPath + "/plugin/" + plugin.code + "/dist/main.js";
-
-                // 加载脚本
-                const script = document.createElement("script");
-                script.src = convertFileSrc(convertFilePath);
-                script.onload = () => {
-                    // 脚本加载完成后，插件应该可以在全局范围内使用
-                    const g: any = window as any;
-                    const candidates = [g.SamplePlugin, g[plugin.code], g[toPascalCase(plugin.code)]];
-                    const PluginCtor = candidates.find((c) => typeof c === "function");
-                    if (PluginCtor) {
-                        try {
-                            const instance = new PluginCtor();
-                            plugin.instance = instance;
-                            console.debug(`[PluginLoader][Config] '${plugin.code}' instance created`);
-                        } catch (e) {
-                            console.error(`[PluginLoader][Config] Failed to instantiate '${plugin.code}':`, e);
-                        }
-                    } else {
-                        console.warn(
-                            `[PluginLoader][Config] No global constructor for '${plugin.code}'. Checked: SamplePlugin, ${plugin.code}, ${toPascalCase(
-                                plugin.code
-                            )}`
-                        );
-                    }
-                };
-                document.body.appendChild(script);
-            });
-
-            setPluginList(pluginLoadList);
         };
+        loadPlugins(true);
 
-        initPlugin();
+        const unlistenRegistryChanged = listen("plugin_registry_changed", () => {
+            loadPlugins(true);
+        });
+
+        return () => {
+            mounted = false;
+            unlistenRegistryChanged.then((unlisten) => unlisten());
+        };
     }, []);
 
     // 获取选中的组件
@@ -221,10 +194,11 @@ function ConfigWindow() {
     // 移动端布局：顶部栏 + 侧滑菜单
     if (isMobile) {
         return (
-            <div className="flex flex-col h-screen bg-background">
+            <div className="flex flex-col h-screen bg-background" data-aipp-window="config" data-aipp-slot="window-root">
                 <div
                     className="flex items-center justify-between px-4 py-3 bg-secondary border-b border-border"
                     data-tauri-drag-region
+                    data-aipp-slot="config-mobile-header"
                 >
                     <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
                         <SheetTrigger asChild>
@@ -237,9 +211,14 @@ function ConfigWindow() {
                             className="w-[280px] p-0 flex flex-col"
                             aria-describedby={undefined}
                             hideCloseButton
+                            data-aipp-slot="config-mobile-sidebar"
                         >
                             <SheetTitle className="sr-only">设置导航</SheetTitle>
-                            <div className="bg-muted/30 border-border border-b px-3 py-4 overflow-y-auto">
+                            <div
+                                className="aipp-settings-menu-container bg-muted/30 border-border border-b px-3 py-4 overflow-y-auto"
+                                data-theme-slot="settings-menu-container"
+                                data-aipp-slot="config-menu"
+                            >
                                 {renderMenuItems((id) => {
                                     setSelectedMenu(id);
                                     setSidebarOpen(false);
@@ -253,7 +232,7 @@ function ConfigWindow() {
                     </Button>
                 </div>
 
-                <div className="flex-1 overflow-auto bg-card px-4 py-4">
+                <div className="flex-1 overflow-auto bg-card px-4 py-4" data-aipp-slot="config-content">
                     <SelectedComponent
                         pluginList={stablePluginList}
                         navigateTo={navigateTo}
@@ -264,18 +243,23 @@ function ConfigWindow() {
     }
 
     return (
-        <div className="flex justify-center items-center h-screen bg-background">
+        <div className="flex justify-center items-center h-screen bg-background" data-aipp-window="config" data-aipp-slot="window-root">
             <div
                 className="bg-card shadow-none w-full h-screen grid grid-cols-[1fr_3fr] md:grid-cols-[1fr_4fr] lg:grid-cols-[1fr_5fr]"
                 data-tauri-drag-region
+                data-aipp-slot="config-layout"
             >
                 {/* 侧边栏 */}
-                <div className="bg-muted/30 border-r border-border px-3 md:px-4 py-6 overflow-y-auto">
+                <div
+                    className="aipp-settings-menu-container bg-muted/30 border-r border-border px-3 md:px-4 py-6 overflow-y-auto"
+                    data-theme-slot="settings-menu-container"
+                    data-aipp-slot="config-menu"
+                >
                     {renderMenuItems(setSelectedMenu)}
                 </div>
 
                 {/* 内容区域 */}
-                <div className="bg-card px-4 md:px-6 lg:px-8 py-6 overflow-y-auto max-h-screen">
+                <div className="bg-card px-4 md:px-6 lg:px-8 py-6 overflow-y-auto max-h-screen" data-aipp-slot="config-content">
                     {/* 配置组件内容 */}
                     <SelectedComponent pluginList={stablePluginList} navigateTo={navigateTo} />
                 </div>

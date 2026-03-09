@@ -12,7 +12,8 @@ use crate::api::ai::conversation::{
     init_conversation, BranchSelection, ChatRequestBuildResult, ToolCallStrategy, ToolConfig,
 };
 use crate::api::ai::events::{
-    ActivityFocus, ConversationEvent, ConversationShineState, MessageAddEvent, MessageUpdateEvent,
+    ActivityFocus, ConversationEvent, ConversationRuntimeState, ConversationShineState,
+    MessageAddEvent, MessageUpdateEvent,
 };
 use crate::api::ai::title::generate_title;
 use crate::api::ai::types::{AiRequest, AiResponse, McpOverrideConfig};
@@ -29,7 +30,7 @@ use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt};
 use crate::skills::{collect_skills_info_for_assistant, format_skills_prompt};
 use crate::state::activity_state::ConversationActivityManager;
 use crate::state::message_token::MessageTokenManager;
-use crate::template_engine::TemplateEngine;
+use crate::template_engine::build_template_engine;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use crate::{AcpSessionState, AppState, FeatureConfigState};
 use anyhow::Context;
@@ -140,6 +141,21 @@ fn has_missing_required_parameter_tool_error_in_message_list(
     })
 }
 
+fn find_existing_tool_result_message(
+    messages: &[(Message, Option<MessageAttachment>)],
+    tool_call_id: &str,
+) -> Option<Message> {
+    messages
+        .iter()
+        .filter(|(message, _)| message.message_type == "tool_result")
+        .filter_map(|(message, _)| {
+            crate::api::ai::conversation::extract_tool_call_id(&message.content)
+                .filter(|existing_tool_call_id| existing_tool_call_id == tool_call_id)
+                .map(|_| message.clone())
+        })
+        .max_by_key(|message| message.id)
+}
+
 /// 从 MCP 服务器列表构建 genai 工具列表和名称映射表
 /// 返回 (工具列表, 映射表)
 pub fn build_tools_with_mapping(
@@ -201,9 +217,8 @@ fn build_tool_config(
             let mut tools = Vec::new();
             let is_dynamic_builtin = server.command.as_deref() == Some("aipp:dynamic_mcp");
             for tool in &server.tools {
-                let is_agent_loader_tool =
-                    server.command.as_deref() == Some("aipp:agent")
-                        && (tool.name == "load_mcp_server" || tool.name == "load_mcp_tool");
+                let is_agent_loader_tool = server.command.as_deref() == Some("aipp:agent")
+                    && (tool.name == "load_mcp_server" || tool.name == "load_mcp_tool");
                 if is_dynamic_builtin
                     || is_agent_loader_tool
                     || allowed.contains(&(server.id, tool.name.clone()))
@@ -265,11 +280,16 @@ pub async fn ask_ai(
     processed_request.assistant_id = actual_assistant_id;
     processed_request.prompt = cleaned_prompt;
 
-    let template_engine = TemplateEngine::new();
+    let template_engine = build_template_engine(&app_handle)
+        .map_err(|e| AppError::UnknownError(format!("Failed to build template engine: {}", e)))?;
     let mut template_context = HashMap::new();
 
     let selected_text = state.inner().selected_text.lock().await.clone();
     template_context.insert("selected_text".to_string(), selected_text);
+    if !processed_request.conversation_id.trim().is_empty() {
+        template_context
+            .insert("conversation_id".to_string(), processed_request.conversation_id.trim().to_string());
+    }
 
     let app_handle_clone = app_handle.clone();
     let assistant_detail = get_assistant(app_handle_clone, processed_request.assistant_id).unwrap();
@@ -513,16 +533,6 @@ pub async fn ask_ai(
             .and_then(|config| config.value.parse::<bool>().ok())
             .unwrap_or(false);
 
-        let client = genai_client::create_client_with_config(
-            &model_configs,
-            &model_code,
-            &provider_api_type,
-            network_proxy.as_deref(),
-            proxy_enabled,
-            Some(request_timeout),
-            &_config_feature_map,
-        )?;
-
         // 创建一个临时的 ModelDetail 用于配置合并
         let temp_model_detail = crate::db::llm_db::ModelDetail {
             model: crate::db::llm_db::LLMModel {
@@ -564,7 +574,6 @@ pub async fn ask_ai(
         let model_name = config_map.get("model").cloned().unwrap_or_else(|| model_code.clone());
 
         let chat_options = ConfigBuilder::build_chat_options(&config_map);
-
         let force_non_native_for_invalid_tool_args =
             has_missing_required_parameter_tool_error_in_message_list(&init_message_list);
         if force_non_native_for_invalid_tool_args {
@@ -573,6 +582,17 @@ pub async fn ask_ai(
                 "detected missing required parameter tool error in history; forcing non-native ask_ai"
             );
         }
+
+        let client = genai_client::create_client_with_config(
+            &model_configs,
+            &model_code,
+            &provider_api_type,
+            network_proxy.as_deref(),
+            proxy_enabled,
+            Some(request_timeout),
+            stream,
+            &_config_feature_map,
+        )?;
 
         // 动态判断是否有可用的工具
         let has_available_tools = is_native_toolcall
@@ -723,6 +743,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         "Tool execution completed:\n\nTool Call ID: {}\nResult:\n{}",
         tool_call_id, tool_result
     );
+    let now = chrono::Utc::now();
 
     // 查找对应的 response 消息的 generation_group_id，使 tool_result 与 response 同组
     let all_msgs_for_group =
@@ -732,33 +753,44 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         .filter(|(m, _)| m.message_type == "response")
         .max_by_key(|(m, _)| m.id)
         .and_then(|(m, _)| m.generation_group_id.clone());
+    let existing_tool_result_message =
+        find_existing_tool_result_message(&all_msgs_for_group, &tool_call_id);
+    let tool_result_message = if let Some(mut existing_message) = existing_tool_result_message {
+        existing_message.content = tool_result_content.clone();
+        existing_message.finish_time = Some(now);
+        if existing_message.start_time.is_none() {
+            existing_message.start_time = Some(now);
+        }
+        db.message_repo().unwrap().update(&existing_message)?;
+        existing_message
+    } else {
+        let tool_result_message = add_message(
+            &app_handle,
+            None,
+            conversation_id_i64,
+            "tool_result".to_string(),
+            tool_result_content.clone(),
+            Some(assistant_detail.model[0].id),
+            Some(assistant_detail.model[0].model_code.clone()),
+            Some(now),
+            Some(now),
+            0,
+            tool_result_group_id,
+            None,
+        )?;
 
-    let tool_result_message = add_message(
-        &app_handle,
-        None,
-        conversation_id_i64,
-        "tool_result".to_string(),
-        tool_result_content,
-        Some(assistant_detail.model[0].id),
-        Some(assistant_detail.model[0].model_code.clone()),
-        Some(chrono::Utc::now()),
-        Some(chrono::Utc::now()),
-        0,
-        tool_result_group_id,
-        None,
-    )?;
-
-    // Emit events so UI can render the tool_result immediately without manual refresh
-    // 1) message_add
-    let add_event = ConversationEvent {
-        r#type: "message_add".to_string(),
-        data: serde_json::to_value(MessageAddEvent {
-            message_id: tool_result_message.id,
-            message_type: "tool_result".to_string(),
-        })
-        .unwrap(),
+        let add_event = ConversationEvent {
+            r#type: "message_add".to_string(),
+            data: serde_json::to_value(MessageAddEvent {
+                message_id: tool_result_message.id,
+                message_type: "tool_result".to_string(),
+            })
+            .unwrap(),
+        };
+        let _ =
+            window.emit(format!("conversation_event_{}", conversation_id_i64).as_str(), add_event);
+        tool_result_message
     };
-    let _ = window.emit(format!("conversation_event_{}", conversation_id_i64).as_str(), add_event);
 
     // 2) message_update (is_done = true)
     let update_event = ConversationEvent {
@@ -790,17 +822,13 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         "filtered messages to latest branch for tool_result_continue"
     );
 
-    // 尝试复用上一次包含工具调用的 assistant 响应的 generation_group_id，
-    // 这样 tooluse 的"请求消息(assistant)"与"分析消息(assistant)"会处于同一分组
-    let reuse_generation_group_id: Option<String> = {
-        // 找到刚插入的 tool_result 之前最近的一条 response 消息
-        let current_tool_result_id = tool_result_message.id;
-        latest_branch
-            .iter()
-            .filter(|msg| msg.id < current_tool_result_id && msg.message_type == "response")
-            .max_by_key(|msg| msg.id)
-            .and_then(|m| m.generation_group_id.clone())
-    };
+    // 复用当前分支中最近一条 assistant response 的 generation_group_id，
+    // 这样工具调用、工具结果和续写响应仍然归属于同一个逻辑 generation。
+    let reuse_generation_group_id: Option<String> = latest_branch
+        .iter()
+        .filter(|msg| msg.message_type == "response")
+        .max_by_key(|msg| msg.id)
+        .and_then(|m| m.generation_group_id.clone());
 
     let init_message_list =
         build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
@@ -829,20 +857,6 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
 
     let conversation_db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
     // Build chat configuration (same as ask_ai)
-    let client = genai_client::create_client_with_config(
-        &model_configs,
-        &model_code,
-        &provider_api_type,
-        None,
-        false,
-        None,
-        &config_feature_map,
-    )
-    .map_err(|e| {
-        error!(error = %e, "failed to create client in tool_result_continue_ask_ai");
-        e
-    })?;
-
     let temp_model_detail = crate::db::llm_db::ModelDetail {
         model: crate::db::llm_db::LLMModel {
             id: model_id,
@@ -882,7 +896,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let chat_options = ConfigBuilder::build_chat_options(&config_map);
 
     // 先计算强制降级条件
-    let force_non_native_for_toolresult =
+    let force_non_native_for_gemini_toolresult =
         provider_api_type == "openai" && model_code.to_lowercase().contains("gemini");
     let force_non_native_for_invalid_tool_args =
         has_missing_required_parameter_tool_error(&latest_branch);
@@ -893,10 +907,25 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         );
     }
 
+    let client = genai_client::create_client_with_config(
+        &model_configs,
+        &model_code,
+        &provider_api_type,
+        None,
+        false,
+        None,
+        stream,
+        &config_feature_map,
+    )
+    .map_err(|e| {
+        error!(error = %e, "failed to create client in tool_result_continue_ask_ai");
+        e
+    })?;
+
     // 动态判断是否有可用的工具（考虑强制降级的情况）
     let has_available_tools = is_native_toolcall
         && !mcp_info.enabled_servers.is_empty()
-        && !force_non_native_for_toolresult
+        && !force_non_native_for_gemini_toolresult
         && !force_non_native_for_invalid_tool_args;
 
     // 同 ask_ai：避免 OpenAI 兼容通道 + Gemini 模型导致的 usage 反序列化报错日志
@@ -924,6 +953,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         capture_usage = capture_usage,
         is_openai_like = is_openai_like,
         is_gemini = is_gemini,
+        force_non_native_for_gemini_toolresult,
         force_non_native_for_invalid_tool_args,
         "chat configuration (tool_result_continue)"
     );
@@ -1072,20 +1102,6 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
 
     let conversation_db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
     // Build chat configuration
-    let client = genai_client::create_client_with_config(
-        &model_configs,
-        &model_code,
-        &provider_api_type,
-        None,
-        false,
-        None,
-        &config_feature_map,
-    )
-    .map_err(|e| {
-        error!(error = %e, "failed to create client in batch_tool_result_continue_ask_ai");
-        e
-    })?;
-
     let temp_model_detail = crate::db::llm_db::ModelDetail {
         model: crate::db::llm_db::LLMModel {
             id: model_id,
@@ -1125,7 +1141,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let chat_options = ConfigBuilder::build_chat_options(&config_map);
 
     // 先计算强制降级条件
-    let force_non_native_for_toolresult =
+    let force_non_native_for_gemini_toolresult =
         provider_api_type == "openai" && model_code.to_lowercase().contains("gemini");
     let force_non_native_for_invalid_tool_args =
         has_missing_required_parameter_tool_error(&latest_branch);
@@ -1136,10 +1152,25 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         );
     }
 
+    let client = genai_client::create_client_with_config(
+        &model_configs,
+        &model_code,
+        &provider_api_type,
+        None,
+        false,
+        None,
+        stream,
+        &config_feature_map,
+    )
+    .map_err(|e| {
+        error!(error = %e, "failed to create client in batch_tool_result_continue_ask_ai");
+        e
+    })?;
+
     // 动态判断是否有可用的工具（考虑强制降级的情况）
     let has_available_tools = is_native_toolcall
         && !mcp_info.enabled_servers.is_empty()
-        && !force_non_native_for_toolresult
+        && !force_non_native_for_gemini_toolresult
         && !force_non_native_for_invalid_tool_args;
 
     let provider_api_type_lc = provider_api_type.to_lowercase();
@@ -1163,6 +1194,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         stream = chat_config.stream,
         has_tools = has_available_tools,
         provider_api_type = %provider_api_type,
+        force_non_native_for_gemini_toolresult,
         force_non_native_for_invalid_tool_args,
         "chat configuration (batch_tool_result_continue)"
     );
@@ -1437,16 +1469,6 @@ pub async fn regenerate_ai(
             .and_then(|config| config.value.parse::<bool>().ok())
             .unwrap_or(false);
 
-        let client = genai_client::create_client_with_config(
-            &regenerate_model_configs,
-            &regenerate_model_code,
-            &regenerate_provider_api_type,
-            network_proxy.as_deref(),
-            proxy_enabled,
-            Some(request_timeout),
-            &_config_feature_map,
-        )?;
-
         // 创建一个临时的 ModelDetail 用于配置合并
         let temp_model_detail = crate::db::llm_db::ModelDetail {
             model: crate::db::llm_db::LLMModel {
@@ -1498,6 +1520,17 @@ pub async fn regenerate_ai(
                 "detected missing required parameter tool error in history; forcing non-native regenerate"
             );
         }
+
+        let client = genai_client::create_client_with_config(
+            &regenerate_model_configs,
+            &regenerate_model_code,
+            &regenerate_provider_api_type,
+            network_proxy.as_deref(),
+            proxy_enabled,
+            Some(request_timeout),
+            stream,
+            &_config_feature_map,
+        )?;
 
         // 动态判断是否有可用的工具
         let has_available_tools = is_native_toolcall
@@ -1854,6 +1887,15 @@ pub async fn get_shine_state(
     conversation_id: i64,
 ) -> Result<ConversationShineState, String> {
     Ok(activity_manager.get_shine_state(conversation_id).await)
+}
+
+/// 获取指定对话的运行状态快照（用于发送按钮运行态判断）
+#[tauri::command]
+pub async fn get_conversation_runtime_state(
+    activity_manager: State<'_, ConversationActivityManager>,
+    conversation_id: i64,
+) -> Result<ConversationRuntimeState, String> {
+    Ok(activity_manager.get_runtime_state(conversation_id).await)
 }
 
 /// 重新生成对话标题

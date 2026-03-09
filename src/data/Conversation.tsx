@@ -135,6 +135,24 @@ export interface ActivityFocusChangeEvent {
     focus: ActivityFocus;
 }
 
+export type ConversationRuntimePhase =
+    | "idle"
+    | "user_pending"
+    | "assistant_streaming"
+    | "mcp_executing";
+
+export interface ConversationRuntimeState {
+    conversation_id: number;
+    is_running: boolean;
+    phase: ConversationRuntimePhase;
+    epoch: number;
+    revision: number;
+}
+
+export interface RuntimeStateSnapshotEvent {
+    state: ConversationRuntimeState;
+}
+
 export type ShineTarget =
     | { target_type: 'none' }
     | { target_type: 'message'; message_id: number; reason: string }

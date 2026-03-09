@@ -18,7 +18,8 @@
     "artifact_preview",
     "artifact_collections",
     "artifact",
-    "sidebar"
+    "sidebar",
+    "schedule"
   ],
   "permissions": [
     "core:default",

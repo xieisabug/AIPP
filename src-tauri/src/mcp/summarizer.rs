@@ -429,6 +429,7 @@ async fn generate_mcp_catalog_summary(
         network_proxy.as_deref(),
         false,
         Some(request_timeout),
+        false,
         &config_map,
     )?;
 
@@ -459,8 +460,8 @@ async fn generate_mcp_catalog_summary(
         }
     };
 
-    let (server_summary, tool_summaries) = parse_summary_response(&response_text)
-        .ok_or_else(|| {
+    let (server_summary, tool_summaries) =
+        parse_summary_response(&response_text).ok_or_else(|| {
             warn!(server_id, response = %response_text, "Failed to parse MCP summary response");
             AppError::ParseError("解析 MCP 摘要结果失败".to_string())
         })?;
@@ -474,9 +475,8 @@ async fn generate_mcp_catalog_summary(
         // 先尝试精确匹配（小写），再尝试归一化匹配
         let key_lower = tool.tool_name.to_lowercase();
         let key_normalized = normalize_tool_name(&tool.tool_name);
-        let matched_summary = tool_summaries
-            .get(&key_lower)
-            .or_else(|| tool_summaries.get(&key_normalized));
+        let matched_summary =
+            tool_summaries.get(&key_lower).or_else(|| tool_summaries.get(&key_normalized));
         if let Some(summary) = matched_summary {
             mcp_db.update_tool_catalog_summary(tool.id, summary)?;
             updated_tools += 1;

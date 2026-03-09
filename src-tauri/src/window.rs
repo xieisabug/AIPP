@@ -369,6 +369,35 @@ pub fn create_artifact_preview_window(app: &AppHandle) {
             "artifact_preview",
             WebviewUrl::App("index.html".into()),
         )
+        .on_download(|webview, event| {
+            let download_path = webview.app_handle().path().download_dir().unwrap_or_default();
+
+            match event {
+                DownloadEvent::Requested { url, destination } => {
+                    debug!("downloading {} to {}", url, download_path.clone().to_string_lossy());
+                    *destination = download_path.join(&mut *destination);
+                }
+                DownloadEvent::Finished { url, path, success } => {
+                    debug!("downloaded {} to {:?}, success: {}", url, path, success);
+                    if success {
+                        let title = "下载完成";
+                        let body = format!("文件已保存到：{:?}", download_path);
+                        if let Err(e) = webview
+                            .app_handle()
+                            .notification()
+                            .builder()
+                            .title(title)
+                            .body(&body)
+                            .show()
+                        {
+                            warn!(error = %e, "failed to show download notification");
+                        }
+                    }
+                }
+                _ => {}
+            }
+            true
+        })
         .title("Artifact Preview - Aipp")
         .inner_size(window_size.width, window_size.height)
         .fullscreen(false)
@@ -571,21 +600,29 @@ pub fn awaken_aipp(app_handle: &AppHandle) {
         }
     }
 
-    // 都不可见时，显示 ask 窗口
-    if let Some(window) = ask_window {
-        debug!(ts=%Local::now().to_string(), "Showing hidden ask window");
+    // 都不可见时，显示/创建 chat_ui 窗口
+    if let Some(window) = chat_ui_window {
+        debug!(ts=%Local::now().to_string(), "Showing hidden chat_ui window");
         #[cfg(desktop)]
         {
             if window.is_minimized().unwrap_or(false) {
-                window.unminimize().unwrap();
+                let _ = window.unminimize();
             }
-            window.show().unwrap();
-            window.set_focus().unwrap();
+            // 首次显示时最大化
+            if !window.is_visible().unwrap_or(false) {
+                let _ = window.maximize();
+            }
+            let _ = window.show();
+            let _ = window.set_focus();
+            // 显示聊天窗口时隐藏 Ask 窗口
+            if let Some(ask_win) = ask_window {
+                let _ = ask_win.hide();
+            }
         }
     } else {
-        // 窗口不存在时创建（正常情况下不应该发生）
-        info!(ts=%Local::now().to_string(), "Creating ask window (fallback)");
-        create_ask_window(app_handle);
+        // 窗口不存在时创建 chat_ui 窗口
+        info!(ts=%Local::now().to_string(), "Creating chat_ui window (fallback)");
+        create_chat_ui_window(app_handle);
     }
 }
 
@@ -917,6 +954,40 @@ fn create_sidebar_window(app_handle: &AppHandle) {
 
         let mut builder =
             WebviewWindowBuilder::new(app_handle, "sidebar", WebviewUrl::App("index.html".into()))
+                .on_download(|webview, event| {
+                    let download_path =
+                        webview.app_handle().path().download_dir().unwrap_or_default();
+
+                    match event {
+                        DownloadEvent::Requested { url, destination } => {
+                            debug!(
+                                "downloading {} to {}",
+                                url,
+                                download_path.clone().to_string_lossy()
+                            );
+                            *destination = download_path.join(&mut *destination);
+                        }
+                        DownloadEvent::Finished { url, path, success } => {
+                            debug!("downloaded {} to {:?}, success: {}", url, path, success);
+                            if success {
+                                let title = "下载完成";
+                                let body = format!("文件已保存到：{:?}", download_path);
+                                if let Err(e) = webview
+                                    .app_handle()
+                                    .notification()
+                                    .builder()
+                                    .title(title)
+                                    .body(&body)
+                                    .show()
+                                {
+                                    warn!(error = %e, "failed to show download notification");
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    true
+                })
                 .title("详情 - Aipp")
                 .inner_size(window_size.width, window_size.height)
                 .resizable(true)

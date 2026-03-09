@@ -1,10 +1,8 @@
-import React, { useMemo, useEffect } from 'react';
-import ReactMarkdown, { Components } from 'react-markdown';
-import CodeBlock from './RustCodeBlock';
+import React, { useEffect, useMemo } from 'react';
+import ReactMarkdown from 'react-markdown';
 import { useMarkdownConfig } from '../hooks/useMarkdownConfig';
 import { customUrlTransform } from '@/constants/markdown';
 import { transformInlineImages, releaseInlineImages } from '@/lib/inlineImageStore';
-import { resolveCodeBlockMeta } from '@/react-markdown/remarkCodeBlockMeta';
 
 interface UnifiedMarkdownProps {
     children: string;
@@ -15,10 +13,6 @@ interface UnifiedMarkdownProps {
     noProseWrapper?: boolean;
     // 是否处于流式输出中，用于代码块自动折叠的首次触发
     isStreaming?: boolean;
-}
-
-interface CustomComponents extends Components {
-    antthinking: React.ElementType;
 }
 
 /**
@@ -40,63 +34,6 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
         isStreaming,
     });
 
-    // 自定义组件配置，包含antthinking组件
-    const customComponents = useMemo((): CustomComponents => ({
-        ...markdownConfig.markdownComponents,
-        // 重写code组件以支持CodeBlock
-        code({ className, children, node, ...props }) {
-            const match = /language-(\w+)/.exec(className || '');
-            const meta = resolveCodeBlockMeta(props as Record<string, unknown>, node);
-            const dataLanguage = typeof (props as Record<string, unknown>)["data-language"] === "string"
-                ? (props as Record<string, unknown>)["data-language"] as string
-                : undefined;
-            const language = match?.[1] ?? dataLanguage ?? "text";
-            const isBlock = Boolean(match || meta || dataLanguage);
-
-            // 如果禁用markdown语法，使用原始文本
-            if (disableMarkdownSyntax) {
-                return isBlock ? (
-                    <span>```{language}{'\n'}{children}{'\n'}```</span>
-                ) : (
-                    <span>`{children}`</span>
-                );
-            }
-
-            // 正常模式下使用CodeBlock
-            return isBlock ? (
-                <CodeBlock
-                    language={language}
-                    meta={meta}
-                    onCodeRun={onCodeRun || (() => { })}
-                    isStreaming={isStreaming}
-                >
-                    {String(children).replace(/\n$/, '')}
-                </CodeBlock>
-            ) : (
-                <code
-                    {...props}
-                    className={className}
-                >
-                    {children}
-                </code>
-            );
-        },
-        // antthinking自定义组件
-        antthinking({ children }) {
-            return (
-                <div>
-                    <div
-                        className="bg-primary/10 text-primary px-2 py-1 rounded text-sm font-medium inline-block"
-                        title={children}
-                        data-thinking={children}
-                    >
-                        思考...
-                    </div>
-                </div>
-            );
-        },
-    }), [markdownConfig.markdownComponents, onCodeRun, disableMarkdownSyntax]);
-
     const { content: optimizedContent, inlineImageIds } = useMemo(() => transformInlineImages(children), [children]);
 
     useEffect(() => {
@@ -113,7 +50,7 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
             // 交由 useMarkdownConfig 统一管理插件，避免重复添加
             remarkPlugins={[...markdownConfig.remarkPlugins] as any}
             rehypePlugins={[...markdownConfig.rehypePlugins] as any}
-            components={customComponents}
+            components={markdownConfig.markdownComponents}
             urlTransform={customUrlTransform}
         />
     );
@@ -136,6 +73,7 @@ export default React.memo(UnifiedMarkdown, (prev, next) => {
         prev.className === next.className &&
         prev.disableMarkdownSyntax === next.disableMarkdownSyntax &&
         prev.noProseWrapper === next.noProseWrapper &&
+        prev.isStreaming === next.isStreaming &&
         prev.onCodeRun === next.onCodeRun
     );
 });

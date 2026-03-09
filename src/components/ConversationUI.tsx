@@ -72,6 +72,49 @@ export interface InlineInteractionItem {
     content: ReactNode;
 }
 
+function collectSentBatchToolResultMessageIds(messages: Message[]): Set<number> {
+    const messagesByGenerationGroup = new Map<string, Message[]>();
+    [...messages]
+        .sort((a, b) => a.id - b.id)
+        .forEach((message) => {
+            const generationGroupId = message.generation_group_id;
+            if (!generationGroupId) {
+                return;
+            }
+            const existing = messagesByGenerationGroup.get(generationGroupId) ?? [];
+            existing.push(message);
+            messagesByGenerationGroup.set(generationGroupId, existing);
+        });
+
+    const sentMessageIds = new Set<number>();
+    messagesByGenerationGroup.forEach((groupMessages) => {
+        const toolResults = groupMessages.filter(
+            (message) => message.message_type === "tool_result"
+        );
+        if (toolResults.length === 0) {
+            return;
+        }
+
+        const lastToolResultId = toolResults[toolResults.length - 1].id;
+        const hasFollowupResponse = groupMessages.some(
+            (message) =>
+                message.message_type === "response" && message.id > lastToolResultId
+        );
+        if (!hasFollowupResponse) {
+            return;
+        }
+
+        groupMessages
+            .filter(
+                (message) =>
+                    message.message_type === "response" && message.id < lastToolResultId
+            )
+            .forEach((message) => sentMessageIds.add(message.id));
+    });
+
+    return sentMessageIds;
+}
+
 interface ConversationUIProps {
     conversationId: string;
     onChangeConversationId: (conversationId: string) => void;
@@ -375,10 +418,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             setShiningMessageIds,
             setManualShineMessage,
             mcpToolCallStates,
-            activeMcpCallIds,
             shiningMcpCallId,
-            shineState,
-            streamingAssistantMessageIds,
+            runtimeState,
             updateShiningMessages,
             updateFunctionMap,
             clearStreamingMessages,
@@ -387,18 +428,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         } = useConversationEvents(conversationEventsOptions);
 
         const effectiveAiIsResponsing = useMemo(() => {
-            const hasPrimaryShineTarget = !!shineState && shineState.primary_target.target_type !== "none";
-            return (
-                aiIsResponsing ||
-                hasPrimaryShineTarget ||
-                activeMcpCallIds.size > 0 ||
-                streamingAssistantMessageIds.size > 0
-            );
+            if (runtimeState && runtimeState.conversation_id === Number(conversationId || 0)) {
+                return runtimeState.is_running;
+            }
+            return aiIsResponsing;
         }, [
             aiIsResponsing,
-            shineState,
-            activeMcpCallIds.size,
-            streamingAssistantMessageIds.size,
+            runtimeState?.conversation_id,
+            runtimeState?.is_running,
+            conversationId,
         ]);
 
         // 当 functionMap 变化时更新事件处理器
@@ -434,6 +472,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             groupRootMessageIds: messageGroupsData.groupRootMessageIds,
             getMessageVersionInfo: messageGroupsData.getMessageVersionInfo,
         });
+        const sentBatchToolResultMessageIds = useMemo(
+            () => collectSentBatchToolResultMessageIds(messages),
+            [messages],
+        );
 
         // ============= Chat Sidebar 数据提取 =============
         
@@ -832,9 +874,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // ============= 组件渲染 =============
 
         return (
-            <div ref={dropRef} className={`h-full relative flex bg-background ${isMobile ? '' : 'rounded-xl'}`}>
+            <div
+                ref={dropRef}
+                className={`h-full relative flex bg-background ${isMobile ? '' : 'rounded-xl'}`}
+                data-aipp-slot="chat-conversation-root"
+            >
                 {/* Main content area */}
-                <div className="flex-1 flex flex-col min-w-0">
+                <div className="flex-1 flex flex-col min-w-0" data-aipp-slot="chat-conversation-main">
                     {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}
                     {!isMobile && (
                         <ConversationHeader
@@ -853,6 +899,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         ref={scrollContainerRef}
                         onScroll={handleScroll}
                         className={`h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
+                        data-aipp-slot="chat-conversation-scroll"
                     >
                         <ConversationContent
                             conversationId={conversationId}
@@ -873,32 +920,33 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onMessageFork={handleMessageFork}
                             onToggleReasoningExpand={toggleReasoningExpand}
                             inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
+                            sentBatchToolResultMessageIds={sentBatchToolResultMessageIds}
                             // NewChatComponent props
                             selectedText={selectedText}
                             selectedAssistant={selectedAssistant}
                             assistants={assistants}
                             setSelectedAssistant={setSelectedAssistant}
                         />
-                        <div ref={messagesEndRef} />
+                        <div ref={messagesEndRef} data-aipp-slot="chat-messages-end-anchor" />
                     </div>
 
                     {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleDropFiles} /> : null}
 
-                        <InputArea
-                            ref={inputAreaRef}
-                            inputText={inputText}
-                            setInputText={setInputText}
-                            fileInfoList={fileInfoList}
-                            handleChooseFile={handleChooseFile}
-                            handleDeleteFile={handleDeleteFile}
-                            handlePaste={handlePaste}
-                            handleSend={handleSend}
-                            aiIsResponsing={effectiveAiIsResponsing}
-                            placement="bottom"
-                            isMobile={isMobile}
-                            sidebarWidth={sidebarWidth}
-                            sidebarVisible={!isMobile && Boolean(conversationId)}
-                        />
+                    <InputArea
+                        ref={inputAreaRef}
+                        inputText={inputText}
+                        setInputText={setInputText}
+                        fileInfoList={fileInfoList}
+                        handleChooseFile={handleChooseFile}
+                        handleDeleteFile={handleDeleteFile}
+                        handlePaste={handlePaste}
+                        handleSend={handleSend}
+                        aiIsResponsing={effectiveAiIsResponsing}
+                        placement="bottom"
+                        isMobile={isMobile}
+                        sidebarWidth={sidebarWidth}
+                        sidebarVisible={!isMobile && Boolean(conversationId)}
+                    />
                 </div>
 
                 {/* Right sidebar - only show on desktop when sidebar window is not open */}
@@ -931,7 +979,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 />
 
                 {isLoadingShow ? (
-                    <div className="bg-background/95 w-full h-full absolute flex items-center justify-center backdrop-blur rounded-xl">
+                    <div
+                        className="bg-background/95 w-full h-full absolute flex items-center justify-center backdrop-blur rounded-xl"
+                        data-aipp-slot="chat-loading-overlay"
+                    >
                         <div className="loading-icon"></div>
                         <div className="text-primary text-base font-medium">加载中...</div>
                     </div>

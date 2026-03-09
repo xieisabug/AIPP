@@ -1,7 +1,5 @@
 use crate::api::ai::config::{calculate_retry_delay, get_retry_attempts_from_config};
-use crate::api::ai::events::{
-    ConversationEvent, MessageAddEvent, MessageUpdateEvent,
-};
+use crate::api::ai::events::{ConversationEvent, MessageAddEvent, MessageUpdateEvent};
 use crate::api::ai::types::McpOverrideConfig;
 use crate::api::ai_api::{resolve_tool_name, sanitize_tool_name, ToolNameMapping};
 use crate::db::assistant_db::Assistant;
@@ -418,7 +416,11 @@ fn persist_and_emit_update(
 }
 
 fn normalize_tool_arguments_json(arguments: &serde_json::Value) -> String {
-    if arguments.is_object() { arguments.to_string() } else { "{}".to_string() }
+    if arguments.is_object() {
+        arguments.to_string()
+    } else {
+        "{}".to_string()
+    }
 }
 
 /// 统一处理捕获到的工具调用：创建DB记录、插入UI注释、更新消息、可选自动执行、可选向UI发事件
@@ -2753,6 +2755,7 @@ pub async fn handle_non_stream_chat(
                 conversation_id,
                 response_message_id,
                 &content,
+                mcp_override_config.as_ref(),
             )
             .await
             {

@@ -17,9 +17,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::api::ai::acp::AcpPermissionState;
 use crate::api::ai_api::{
-    ask_ai, cancel_ai, get_activity_focus, get_shine_state, regenerate_ai,
-    regenerate_conversation_title,
-    tool_result_continue_ask_ai,
+    ask_ai, cancel_ai, get_activity_focus, get_conversation_runtime_state, get_shine_state,
+    regenerate_ai, regenerate_conversation_title, tool_result_continue_ask_ai,
 };
 use crate::api::assistant_api::{
     add_assistant, bulk_update_assistant_mcp_tools, copy_assistant, delete_assistant,
@@ -35,12 +34,12 @@ use crate::api::conversation_api::{
     update_assistant_message, update_conversation, update_message_content,
 };
 use crate::api::copilot_api::{poll_github_copilot_token, start_github_copilot_device_flow};
-use crate::api::export_api::{markdown_to_docx, markdown_to_pdf};
 #[cfg(desktop)]
 use crate::api::copilot_lsp::{
     check_copilot_status, get_copilot_lsp_status, get_copilot_oauth_token_from_config,
     sign_in_confirm, sign_in_initiate, sign_out_copilot, stop_copilot_lsp, CopilotLspState,
 };
+use crate::api::export_api::{markdown_to_docx, markdown_to_pdf};
 use crate::api::highlight_api::{highlight_code, list_syntect_themes};
 use crate::api::llm_api::{
     add_llm_model, add_llm_provider, delete_llm_model, delete_llm_provider, export_llm_provider,
@@ -49,9 +48,15 @@ use crate::api::llm_api::{
     preview_model_list, update_llm_provider, update_llm_provider_config, update_selected_models,
 };
 use crate::api::operation_api::{confirm_acp_permission, confirm_operation_permission};
+use crate::api::plugin_api::{
+    disable_plugin, enable_plugin, get_enabled_plugins, get_plugin_config, get_plugin_data,
+    get_plugin_root_dir, install_plugin, list_plugins, set_plugin_config, set_plugin_data,
+    uninstall_plugin,
+};
 use crate::api::scheduled_task_api::{
     create_scheduled_task, delete_scheduled_task, list_scheduled_task_logs,
-    list_scheduled_task_runs, list_scheduled_tasks, run_scheduled_task_now, update_scheduled_task,
+    list_scheduled_task_runs, list_scheduled_tasks, run_scheduled_task_now,
+    stop_scheduled_task_run, update_scheduled_task,
 };
 use crate::api::skill_api::{
     bulk_update_assistant_skills, cleanup_orphaned_skill_configs, delete_skill,
@@ -59,13 +64,6 @@ use crate::api::skill_api::{
     get_skill_content, get_skill_sources, get_skills_directory, install_official_skill,
     open_skill_parent_folder, open_skills_folder, open_source_url, remove_assistant_skill,
     scan_skills, skill_exists, toggle_assistant_skill, update_assistant_skill_config,
-};
-use crate::api::sub_task_api::{
-    cancel_sub_task_execution, cancel_sub_task_execution_for_ui, create_sub_task_execution,
-    delete_sub_task_definition, get_sub_task_definition, get_sub_task_execution_detail,
-    get_sub_task_execution_detail_for_ui, get_sub_task_mcp_calls_for_ui, list_sub_task_definitions,
-    list_sub_task_executions, register_sub_task_definition, run_sub_task_sync,
-    run_sub_task_with_mcp_loop, sub_task_regist, update_sub_task_definition,
 };
 use crate::api::system_api::{
     copy_image_to_clipboard, get_all_feature_config, get_autostart_state, get_bang_list,
@@ -81,7 +79,7 @@ use crate::api::updater_api::{
 use crate::artifacts::artifact_bridge_api::{
     artifact_ai_ask, artifact_db_batch_execute, artifact_db_delete, artifact_db_execute,
     artifact_db_exists, artifact_db_get_columns, artifact_db_get_tables, artifact_db_list,
-    artifact_db_query, artifact_get_assistants, artifact_get_config,
+    artifact_db_query, artifact_get_assistants, artifact_get_config, artifact_model_ask,
 };
 use crate::artifacts::artifacts_db::ArtifactsDatabase;
 use crate::artifacts::collection_api::{
@@ -116,7 +114,6 @@ use crate::db::assistant_db::AssistantDatabase;
 use crate::db::llm_db::LLMDatabase;
 use crate::db::mcp_db::MCPDatabase;
 use crate::db::scheduled_task_db::ScheduledTaskDatabase;
-use crate::db::sub_task_db::SubTaskDatabase;
 use crate::db::system_db::SystemDatabase;
 use crate::mcp::builtin_mcp::{
     add_or_update_aipp_builtin_server, execute_aipp_builtin_tool,
@@ -376,10 +373,7 @@ pub fn run() {
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
     let app = tauri::Builder::default()
-        .register_uri_scheme_protocol(
-            PREVIEW_FILE_RELAY_SCHEME,
-            handle_preview_file_relay_request,
-        )
+        .register_uri_scheme_protocol(PREVIEW_FILE_RELAY_SCHEME, handle_preview_file_relay_request)
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_fs::init())
@@ -408,7 +402,7 @@ pub fn run() {
                 let tray = app.tray_by_id("aipp").unwrap();
                 tray.set_menu(Some(tray_menu))?;
 
-                // 左键点击直接打开 Ask 窗口
+                // 左键点击直接打开 Chat 窗口
                 let app_handle_for_click = app_handle.clone();
                 tray.on_tray_icon_event(move |_app, event| {
                     if let TrayIconEvent::Click {
@@ -417,7 +411,13 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        handle_open_ask_window(&app_handle_for_click);
+                        if let Some(chat_window) =
+                            app_handle_for_click.get_webview_window("chat_ui")
+                        {
+                            open_chat_ui_window_inner(&app_handle_for_click, &chat_window);
+                        } else {
+                            crate::window::create_chat_ui_window(&app_handle_for_click);
+                        }
                     }
                 });
 
@@ -460,7 +460,6 @@ pub fn run() {
             let conversation_db = ConversationDatabase::new(&app_handle)?;
             let plugin_db = PluginDatabase::new(&app_handle)?;
             let mcp_db = MCPDatabase::new(&app_handle)?;
-            let sub_task_db = SubTaskDatabase::new(&app_handle)?;
             let scheduled_task_db = ScheduledTaskDatabase::new(&app_handle)?;
             let artifacts_db = ArtifactsDatabase::new(&app_handle)?;
             let skill_db = db::skill_db::SkillDatabase::new(&app_handle)?;
@@ -471,7 +470,6 @@ pub fn run() {
             conversation_db.create_tables()?;
             plugin_db.create_tables()?;
             mcp_db.create_tables()?;
-            sub_task_db.create_tables()?;
             scheduled_task_db.create_tables()?;
             artifacts_db.create_tables()?;
             skill_db.create_tables()?;
@@ -597,6 +595,7 @@ pub fn run() {
             tool_result_continue_ask_ai,
             regenerate_ai,
             get_activity_focus,
+            get_conversation_runtime_state,
             get_shine_state,
             regenerate_conversation_title,
             generate_artifact_metadata,
@@ -674,6 +673,7 @@ pub fn run() {
             artifact_db_delete,
             artifact_db_list,
             artifact_ai_ask,
+            artifact_model_ask,
             artifact_get_assistants,
             artifact_get_config,
             get_bang_list,
@@ -775,21 +775,6 @@ pub fn run() {
             submit_ask_user_question_response,
             confirm_operation_permission,
             confirm_acp_permission,
-            register_sub_task_definition,
-            run_sub_task_sync,
-            run_sub_task_with_mcp_loop,
-            sub_task_regist,
-            list_sub_task_definitions,
-            get_sub_task_definition,
-            update_sub_task_definition,
-            delete_sub_task_definition,
-            create_sub_task_execution,
-            list_sub_task_executions,
-            get_sub_task_execution_detail,
-            get_sub_task_execution_detail_for_ui,
-            cancel_sub_task_execution,
-            get_sub_task_mcp_calls_for_ui,
-            cancel_sub_task_execution_for_ui,
             highlight_code,
             ensure_hidden_search_window,
             list_syntect_themes,
@@ -830,8 +815,21 @@ pub fn run() {
             update_scheduled_task,
             delete_scheduled_task,
             run_scheduled_task_now,
+            stop_scheduled_task_run,
             list_scheduled_task_logs,
             list_scheduled_task_runs,
+            // Plugin commands
+            list_plugins,
+            get_enabled_plugins,
+            install_plugin,
+            uninstall_plugin,
+            enable_plugin,
+            disable_plugin,
+            get_plugin_root_dir,
+            get_plugin_config,
+            set_plugin_config,
+            get_plugin_data,
+            set_plugin_data,
             // Todo commands
             get_todos,
             // Export commands

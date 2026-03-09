@@ -178,10 +178,7 @@ impl BrowserPool {
         self.get_or_init_browser().await
     }
 
-    async fn ensure_page_healthy(
-        &self,
-        page: &chromiumoxide::page::Page,
-    ) -> Result<(), String> {
+    async fn ensure_page_healthy(&self, page: &chromiumoxide::page::Page) -> Result<(), String> {
         page.evaluate("() => document.readyState")
             .await
             .map(|_| ())

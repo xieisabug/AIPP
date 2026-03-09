@@ -1,5 +1,7 @@
 import React from "react";
 
+export type BangCompletionItem = [string, string, string, unknown?];
+
 interface BangCompletionListProps {
     bangListVisible: boolean;
     placement: "top" | "bottom";
@@ -8,7 +10,7 @@ interface BangCompletionListProps {
         left: number;
         top: number;
     };
-    bangList: string[];
+    bangList: BangCompletionItem[];
     selectedBangIndex: number;
     textareaRef: React.RefObject<HTMLTextAreaElement | null>;
     setInputText: (value: string) => void;

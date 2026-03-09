@@ -1,5 +1,4 @@
-import React, { useCallback, useEffect, useState, useRef } from "react";
-import ReactDOM from "react-dom";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import ChatUIToolbar from "../components/ChatUIToolbar";
 import ConversationList from "../components/ConversationList";
@@ -32,13 +31,12 @@ import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/
 import { Button } from "../components/ui/button";
 import { Menu, Plus } from "lucide-react";
 
-import { appDataDir } from "@tauri-apps/api/path";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { pluginRuntime } from "../services/PluginRuntime";
 
 function ChatUIWindow() {
     // 集成主题系统
-    useTheme();
+    useTheme("chat_ui");
 
     // 防泄露模式配置
     const { getConfigValue, loadFeatureConfig } = useFeatureConfig();
@@ -227,74 +225,32 @@ function ChatUIWindow() {
     }, []);
 
     useEffect(() => {
-        // 为可能使用 UMD 构建的插件提供全局 React/ReactDOM（与 PluginWindow 保持一致）
-        (window as any).React = React;
-        (window as any).ReactDOM = ReactDOM;
-
-        const toPascalCase = (str: string) =>
-            str
-                .replace(/(^|[-_\s]+)([a-zA-Z0-9])/g, (_, __, c) => (c ? String(c).toUpperCase() : ""))
-                .replace(/[^a-zA-Z0-9]/g, "");
-
-        const pluginLoadList = [
-            {
-                name: "代码生成",
-                code: "code-generate",
-                pluginType: ["assistantType"],
-                instance: null,
-            },
-            {
-                name: "DeepResearch",
-                code: "deepresearch",
-                pluginType: ["assistantType"],
-                instance: null,
-            },
-        ];
-
-        const initPlugin = async () => {
-            const dirPath = await appDataDir();
-            const loadPromises = pluginLoadList.map(async (plugin) => {
-                const convertFilePath = dirPath + "/plugin/" + plugin.code + "/dist/main.js";
-
-                return new Promise<void>((resolve) => {
-                    const script = document.createElement("script");
-                    script.src = convertFileSrc(convertFilePath);
-                    script.onload = () => {
-                        const g: any = window as any;
-                        const candidates = [g.SamplePlugin, g[plugin.code], g[toPascalCase(plugin.code)]];
-                        const PluginCtor = candidates.find((c) => typeof c === "function");
-                        if (PluginCtor) {
-                            try {
-                                plugin.instance = new PluginCtor();
-                                console.debug(`[PluginLoader] '${plugin.code}' instance created via global constructor`);
-                            } catch (e) {
-                                console.error(`[PluginLoader] Failed to instantiate '${plugin.code}' SamplePlugin:`, e);
-                            }
-                        } else {
-                            console.warn(
-                                `[PluginLoader] No global plugin constructor found for '${plugin.code}'. Checked: SamplePlugin, ${plugin.code}, ${toPascalCase(
-                                    plugin.code
-                                )}. Check plugin UMD global name.`
-                            );
-                        }
-                        resolve();
-                    };
-                    script.onerror = (error) => {
-                        console.error("Failed to load plugin script", plugin.name, error);
-                        resolve();
-                    };
-                    document.body.appendChild(script);
-                });
-            });
-
-            // 等待所有插件加载完成
-            await Promise.all(loadPromises);
-
-            // 所有插件实例都准备好后再更新状态
-            setPluginList([...pluginLoadList]);
+        let mounted = true;
+        const loadPlugins = async (forceReload = false) => {
+            try {
+                const plugins = forceReload
+                    ? await pluginRuntime.reloadPlugins()
+                    : await pluginRuntime.loadPlugins();
+                if (mounted) {
+                    setPluginList(plugins);
+                }
+            } catch (error) {
+                console.error("[ChatUIWindow] Failed to load plugins:", error);
+                if (mounted) {
+                    setPluginList([]);
+                }
+            }
         };
+        loadPlugins();
 
-        initPlugin();
+        const unlistenRegistryChanged = listen("plugin_registry_changed", () => {
+            loadPlugins(true);
+        });
+
+        return () => {
+            mounted = false;
+            unlistenRegistryChanged.then((unlisten) => unlisten());
+        };
     }, []);
 
     // 监听配置变更事件，当 Settings 窗口修改配置后重新加载
@@ -314,9 +270,12 @@ function ChatUIWindow() {
 
         return (
             <AntiLeakageProvider enabled={antiLeakageEnabled}>
-                <div className="flex flex-col h-screen bg-background">
+                <div className="flex flex-col h-screen bg-background" data-aipp-window="chat_ui" data-aipp-slot="window-root">
                     {/* 移动端顶部栏 */}
-                    <div className="flex-none flex items-center justify-between px-4 py-3 bg-secondary border-b border-border">
+                    <div
+                        className="flex-none flex items-center justify-between px-4 py-3 bg-secondary border-b border-border"
+                        data-aipp-slot="chat-mobile-header"
+                    >
                         <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
                             <SheetTrigger asChild>
                                 <Button variant="ghost" size="icon">
@@ -328,6 +287,7 @@ function ChatUIWindow() {
                                 className="w-[280px] p-0 flex flex-col"
                                 aria-describedby={undefined}
                                 hideCloseButton
+                                data-aipp-slot="chat-mobile-sidebar"
                             >
                                 <SheetTitle className="sr-only">导航菜单</SheetTitle>
                                 <ChatUIInfomation showArtifacts={false} showSchedule={false} isMobile={true} />
@@ -341,14 +301,16 @@ function ChatUIWindow() {
                                 />
                             </SheetContent>
                         </Sheet>
-                        <span className="font-medium text-sm truncate flex-1 text-center mx-3">{mobileTitle}</span>
+                        <span className="font-medium text-sm truncate flex-1 text-center mx-3" data-aipp-slot="chat-mobile-title">
+                            {mobileTitle}
+                        </span>
                         <Button variant="ghost" size="icon" onClick={handleNewConversation} aria-label="新建对话">
                             <Plus className="h-5 w-5" />
                         </Button>
                     </div>
 
                     {/* 主内容区域 */}
-                    <div className="flex-1 overflow-hidden">
+                    <div className="flex-1 overflow-hidden" data-aipp-slot="chat-main-content">
                         <ConversationUI
                             ref={conversationUIRef}
                             pluginList={pluginList}
@@ -387,8 +349,8 @@ function ChatUIWindow() {
     // 桌面端布局
     return (
         <AntiLeakageProvider enabled={antiLeakageEnabled}>
-            <div className="flex h-screen bg-background">
-                <div className="flex-none w-[280px] flex flex-col shadow-lg box-border rounded-r-xl mb-2 mr-2">
+            <div className="flex h-screen bg-background" data-aipp-window="chat_ui" data-aipp-slot="window-root">
+                <div className="flex-none w-[280px] flex flex-col shadow-lg box-border rounded-r-xl mb-2 mr-2" data-aipp-slot="chat-sidebar">
                     <ChatUIInfomation />
                     <ChatUIToolbar
                         onNewConversation={handleNewConversation}
@@ -400,7 +362,7 @@ function ChatUIWindow() {
                     />
                 </div>
 
-                <div className="flex-1 bg-background overflow-auto rounded-xl m-2 ml-0 shadow-lg">
+                <div className="flex-1 bg-background overflow-auto rounded-xl m-2 ml-0 shadow-lg" data-aipp-slot="chat-main-content">
                     <ConversationUI
                         ref={conversationUIRef}
                         pluginList={pluginList}

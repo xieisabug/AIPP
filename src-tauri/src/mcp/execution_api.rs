@@ -29,7 +29,7 @@ use rmcp::{
     ServiceExt,
 };
 use serde_json::Map as JsonMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use tauri::Manager;
 use tokio::process::Command;
@@ -84,6 +84,162 @@ async fn cancel_tool_call_execution(call_id: i64) -> bool {
     }
 }
 
+fn tool_call_history_id(tool_call: &MCPToolCall) -> String {
+    tool_call
+        .llm_call_id
+        .clone()
+        .unwrap_or_else(|| format!("mcp_tool_call_{}", tool_call.id))
+}
+
+fn build_tool_result_message_content(tool_call: &MCPToolCall) -> Option<String> {
+    let result_content = match tool_call.status.as_str() {
+        "success" => tool_call.result.clone().unwrap_or_else(|| "(空)".to_string()),
+        "failed" => format!("Error: {}", tool_call.error.as_deref().unwrap_or("未知错误")),
+        _ => return None,
+    };
+
+    Some(format!(
+        "Tool execution completed:\n\nTool Call ID: {}\nTool: {}\nServer: {}\nParameters: {}\nResult:\n{}",
+        tool_call_history_id(tool_call),
+        tool_call.tool_name,
+        tool_call.server_name,
+        tool_call.parameters,
+        result_content
+    ))
+}
+
+fn collect_existing_tool_result_messages(
+    messages: &[(crate::db::conversation_db::Message, Option<crate::db::conversation_db::MessageAttachment>)],
+) -> HashMap<String, crate::db::conversation_db::Message> {
+    messages
+        .iter()
+        .filter(|(message, _)| message.message_type == "tool_result")
+        .filter_map(|(message, _)| {
+            crate::api::ai::conversation::extract_tool_call_id(&message.content)
+                .map(|tool_call_id| (tool_call_id, message.clone()))
+        })
+        .collect()
+}
+
+fn has_followup_response_after_tool_results(
+    latest_branch: &[crate::db::conversation_db::Message],
+    tool_result_ids: &HashSet<String>,
+) -> bool {
+    let latest_tool_result_id = latest_branch
+        .iter()
+        .filter(|message| message.message_type == "tool_result")
+        .filter_map(|message| {
+            crate::api::ai::conversation::extract_tool_call_id(&message.content)
+                .filter(|tool_result_id| tool_result_ids.contains(tool_result_id))
+                .map(|_| message.id)
+        })
+        .max();
+
+    latest_tool_result_id.is_some_and(|tool_result_id| {
+        latest_branch
+            .iter()
+            .any(|message| message.id > tool_result_id && message.message_type == "response")
+    })
+}
+
+fn ensure_tool_result_messages(
+    app_handle: &tauri::AppHandle,
+    window: &tauri::Window,
+    conversation_db: &ConversationDatabase,
+    conversation_id: i64,
+    model_id: i64,
+    model_code: &str,
+    tool_calls: &[MCPToolCall],
+) -> Result<usize> {
+    use crate::api::ai::events::{ConversationEvent, MessageAddEvent, MessageUpdateEvent};
+    use tauri::Emitter;
+
+    let existing_messages = conversation_db
+        .message_repo()
+        .context("failed to get message_repo")?
+        .list_by_conversation_id(conversation_id)
+        .map_err(|e| anyhow!("获取对话消息列表失败: {}", e))?;
+    let mut existing_tool_result_messages = collect_existing_tool_result_messages(&existing_messages);
+    let tool_result_group_id = existing_messages
+        .iter()
+        .filter(|(message, _)| message.message_type == "response")
+        .max_by_key(|(message, _)| message.id)
+        .and_then(|(message, _)| message.generation_group_id.clone());
+
+    let mut created_count = 0usize;
+    for tool_call in tool_calls {
+        let tool_result_id = tool_call_history_id(tool_call);
+        let Some(tool_result_content) = build_tool_result_message_content(tool_call) else {
+            continue;
+        };
+        let now = chrono::Utc::now();
+        let tool_result_message = if let Some(mut existing_message) =
+            existing_tool_result_messages.get(&tool_result_id).cloned()
+        {
+            existing_message.content = tool_result_content.clone();
+            existing_message.finish_time = Some(now);
+            if existing_message.start_time.is_none() {
+                existing_message.start_time = Some(now);
+            }
+            conversation_db
+                .message_repo()
+                .context("failed to get message_repo")?
+                .update(&existing_message)?;
+            existing_message
+        } else {
+            let tool_result_message = crate::api::ai_api::add_message(
+                app_handle,
+                None,
+                conversation_id,
+                "tool_result".to_string(),
+                tool_result_content.clone(),
+                Some(model_id),
+                Some(model_code.to_string()),
+                Some(now),
+                Some(now),
+                0,
+                tool_result_group_id.clone(),
+                None,
+            )
+            .map_err(|e| anyhow!("创建工具结果消息失败: {}", e))?;
+
+            let add_event = ConversationEvent {
+                r#type: "message_add".to_string(),
+                data: serde_json::to_value(MessageAddEvent {
+                    message_id: tool_result_message.id,
+                    message_type: "tool_result".to_string(),
+                })
+                .unwrap(),
+            };
+            let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
+
+            created_count += 1;
+            tool_result_message
+        };
+
+        let update_event = ConversationEvent {
+            r#type: "message_update".to_string(),
+            data: serde_json::to_value(MessageUpdateEvent {
+                message_id: tool_result_message.id,
+                message_type: "tool_result".to_string(),
+                content: tool_result_content,
+                is_done: true,
+                token_count: None,
+                input_token_count: None,
+                output_token_count: None,
+                ttft_ms: None,
+                tps: None,
+            })
+            .unwrap(),
+        };
+        let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+
+        existing_tool_result_messages.insert(tool_result_id, tool_result_message);
+    }
+
+    Ok(created_count)
+}
+
 // =============================
 // 公共辅助函数 (参数解析 / 请求构建 / 结果提取)
 // =============================
@@ -97,6 +253,44 @@ fn parse_tool_arguments(parameters: &str) -> Result<JsonMap<String, serde_json::
         serde_json::Value::Object(map) => Ok(map),
         _ => bail!("参数必须是 JSON 对象"),
     }
+}
+
+/// 简单命令行解析，支持单双引号与反斜杠转义。
+fn split_command_line(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut buf = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escape = false;
+    for c in input.chars() {
+        if escape {
+            buf.push(c);
+            escape = false;
+            continue;
+        }
+        match c {
+            '\\' => {
+                escape = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            ' ' | '\t' | '\n' if !in_single && !in_double => {
+                if !buf.is_empty() {
+                    parts.push(buf.clone());
+                    buf.clear();
+                }
+            }
+            _ => buf.push(c),
+        }
+    }
+    if !buf.is_empty() {
+        parts.push(buf);
+    }
+    parts
 }
 
 /// 构建 `CallToolRequestParam` 结构。
@@ -245,7 +439,8 @@ async fn handle_tool_execution_result(
         Ok(result) => {
             info!(tool_call_id=tool_call.id, tool_name=%tool_call.tool_name, server=%tool_call.server_name, "工具执行成功");
 
-            if let Err(e) = db.update_mcp_tool_call_status(call_id, "success", Some(&result), None) {
+            if let Err(e) = db.update_mcp_tool_call_status(call_id, "success", Some(&result), None)
+            {
                 warn!(
                     call_id,
                     error = %e,
@@ -350,9 +545,12 @@ async fn handle_tool_execution_result(
             }
 
             if !continuation_dispatched {
-                if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>()
+                if let Some(activity_manager) =
+                    app_handle.try_state::<ConversationActivityManager>()
                 {
-                    activity_manager.restore_after_mcp(&app_handle, tool_call.conversation_id).await;
+                    activity_manager
+                        .restore_after_mcp(&app_handle, tool_call.conversation_id)
+                        .await;
                 }
             }
         }
@@ -938,9 +1136,7 @@ pub async fn send_mcp_tool_results(
     window: tauri::Window,
     message_id: i64,
 ) -> std::result::Result<(), String> {
-    use crate::api::ai::events::{ConversationEvent, MessageAddEvent, MessageUpdateEvent};
     use crate::db::conversation_db::Repository;
-    use tauri::Emitter;
 
     let mcp_db =
         MCPDatabase::new(&app_handle).map_err(|e| format!("初始化 MCP 数据库失败: {}", e))?;
@@ -984,91 +1180,34 @@ pub async fn send_mcp_tool_results(
     }
     let model_id = assistant_detail.model[0].id;
     let model_code = assistant_detail.model[0].model_code.clone();
+    let created_tool_result_count = ensure_tool_result_messages(
+        &app_handle,
+        &window,
+        &conversation_db,
+        conversation_id,
+        model_id,
+        &model_code,
+        &tool_calls,
+    )
+    .map_err(|e| e.to_string())?;
 
-    // 查找触发工具调用的 response 消息的 generation_group_id，使 tool_result 与 response 同组
-    let tool_result_group_id = conversation_db
-        .message_repo()
-        .ok()
-        .and_then(|repo| repo.read(message_id).ok().flatten())
-        .and_then(|m| m.generation_group_id);
-
-    // 为每个工具调用创建独立的 tool_result 消息
-    // 使用与 tool_result_continue_ask_ai_impl 相同的格式
-    for tc in &tool_calls {
-        // 使用 llm_call_id（如果存在），否则使用数据库 id 作为 fallback
-        let tool_call_id =
-            tc.llm_call_id.clone().unwrap_or_else(|| format!("mcp_tool_call_{}", tc.id));
-
-        // 构建工具结果内容
-        let result_content = match tc.status.as_str() {
-            "success" => tc.result.clone().unwrap_or_else(|| "(空)".to_string()),
-            "failed" => {
-                format!("Error: {}", tc.error.as_deref().unwrap_or("未知错误"))
-            }
-            _ => continue,
-        };
-
-        // 使用与 tool_result_continue_ask_ai_impl 相同的格式
-        let tool_result_content = format!(
-            "Tool execution completed:\n\nTool Call ID: {}\nTool: {}\nServer: {}\nParameters: {}\nResult:\n{}",
-            tool_call_id,
-            tc.tool_name,
-            tc.server_name,
-            tc.parameters,
-            result_content
-        );
-
-        // 创建 tool_result 消息
-        let tool_result_message = crate::api::ai_api::add_message(
-            &app_handle,
-            None,
-            conversation_id,
-            "tool_result".to_string(),
-            tool_result_content.clone(),
-            Some(model_id),
-            Some(model_code.clone()),
-            Some(chrono::Utc::now()),
-            Some(chrono::Utc::now()),
-            0,
-            tool_result_group_id.clone(),
-            None,
-        )
-        .map_err(|e| format!("创建工具结果消息失败: {}", e))?;
-
-        // 发送 UI 事件
-        let add_event = ConversationEvent {
-            r#type: "message_add".to_string(),
-            data: serde_json::to_value(MessageAddEvent {
-                message_id: tool_result_message.id,
-                message_type: "tool_result".to_string(),
-            })
-            .unwrap(),
-        };
-        let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
-
-        let update_event = ConversationEvent {
-            r#type: "message_update".to_string(),
-            data: serde_json::to_value(MessageUpdateEvent {
-                message_id: tool_result_message.id,
-                message_type: "tool_result".to_string(),
-                content: tool_result_content,
-                is_done: true,
-                token_count: None,
-                input_token_count: None,
-                output_token_count: None,
-                ttft_ms: None,
-                tps: None,
-            })
-            .unwrap(),
-        };
-        let _ =
-            window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
-
-        debug!(
-            tool_call_id = %tool_call_id,
-            message_id = tool_result_message.id,
-            "Created tool_result message"
-        );
+    let target_tool_result_ids =
+        tool_calls.iter().map(tool_call_history_id).collect::<HashSet<_>>();
+    if created_tool_result_count == 0 {
+        let all_messages = conversation_db
+            .message_repo()
+            .map_err(|e| format!("获取消息仓库失败: {}", e))?
+            .list_by_conversation_id(conversation_id)
+            .map_err(|e| format!("获取对话消息列表失败: {}", e))?;
+        let latest_branch = crate::api::ai::summary::get_latest_branch_messages(&all_messages);
+        if has_followup_response_after_tool_results(&latest_branch, &target_tool_result_ids) {
+            info!(
+                conversation_id,
+                message_id,
+                "tool results already consumed by a later assistant response; skipping duplicate send"
+            );
+            return Ok(());
+        }
     }
 
     // 使用会话级锁保证续写串行
@@ -1116,7 +1255,7 @@ pub async fn send_mcp_tool_results(
     continuation_result
 }
 
-/// 工具成功后的续写逻辑调度：区分首次与重试。
+/// 工具成功后的续写逻辑调度。
 #[instrument(skip(app_handle,state,feature_config_state,window,result), fields(call_id=tool_call.id, conversation_id=tool_call.conversation_id, retry=?is_retry))]
 async fn handle_tool_success_continuation(
     app_handle: &tauri::AppHandle,
@@ -1127,83 +1266,7 @@ async fn handle_tool_success_continuation(
     result: &str,
     is_retry: bool,
 ) -> Result<()> {
-    info!("进入 handle_tool_success_continuation，is_retry={}, call_id={}", is_retry, tool_call.id);
-    if is_retry {
-        // For retries, we need to update the existing tool_result message instead of creating a new one
-        handle_retry_success_continuation(
-            app_handle,
-            state,
-            feature_config_state,
-            window,
-            tool_call,
-            result,
-        )
-        .await
-    } else {
-        // For first-time execution, use the original logic
-        trigger_conversation_continuation(
-            app_handle,
-            state,
-            feature_config_state,
-            window,
-            tool_call,
-            result,
-        )
-        .await
-    }
-}
-
-/// 处理重试成功的情况：更新现有工具结果消息并触发新的AI响应
-/// 重试成功：若存在旧的 tool_result 消息则更新其内容，然后统一触发续写。
-#[instrument(skip(app_handle,state,feature_config_state,window,result), fields(call_id=tool_call.id))]
-async fn handle_retry_success_continuation(
-    app_handle: &tauri::AppHandle,
-    state: &tauri::State<'_, crate::AppState>,
-    feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
-    window: &tauri::Window,
-    tool_call: &MCPToolCall,
-    result: &str,
-) -> Result<()> {
-    let conversation_db = ConversationDatabase::new(app_handle).context("初始化对话数据库失败")?;
-
-    // 更新现有的 tool_result 消消息在数据库中（用于记录保存）
-    let messages = conversation_db
-        .message_repo()
-        .unwrap()
-        .list_by_conversation_id(tool_call.conversation_id)
-        .map_err(|e| anyhow!("获取对话消息列表失败: {}", e))?;
-
-    // 查找与此工具调用匹配的现有 tool_result 消息
-    let existing_tool_message = messages.into_iter().find(|(msg, _)| {
-        msg.message_type == "tool_result"
-            && msg.content.contains(&format!("Tool Call ID: {}", tool_call.id))
-    });
-
-    let updated_tool_result_content = format!(
-        "Tool execution completed:\n\nTool Call ID: {}\nTool: {}\nServer: {}\nParameters: {}\nResult:\n{}",
-        tool_call.id,
-        tool_call.tool_name,
-        tool_call.server_name,
-        tool_call.parameters,
-        result
-    );
-
-    match existing_tool_message {
-        Some((mut existing_msg, _)) => {
-            // 更新现有的 tool_result 消息在数据库中
-            existing_msg.content = updated_tool_result_content;
-            conversation_db
-                .message_repo()
-                .unwrap()
-                .update(&existing_msg)
-                .map_err(|e| anyhow!("更新工具结果消息失败: {}", e))?;
-            debug!(call_id = tool_call.id, "updated existing tool_result message on retry");
-        }
-        None => {
-            debug!(call_id = tool_call.id, "no existing tool_result message found on retry");
-        }
-    }
-    // 统一在末尾触发对话继续
+    let _ = is_retry;
     trigger_conversation_continuation(
         app_handle,
         state,
@@ -1289,7 +1352,8 @@ async fn trigger_conversation_continuation(
                     );
                 }
             }
-            if let Some(activity_manager) = app_handle_clone.try_state::<ConversationActivityManager>()
+            if let Some(activity_manager) =
+                app_handle_clone.try_state::<ConversationActivityManager>()
             {
                 activity_manager
                     .restore_after_mcp(&app_handle_clone, continuation_conversation_id)
@@ -1392,7 +1456,8 @@ async fn trigger_conversation_continuation_with_error(
                     );
                 }
             }
-            if let Some(activity_manager) = app_handle_clone.try_state::<ConversationActivityManager>()
+            if let Some(activity_manager) =
+                app_handle_clone.try_state::<ConversationActivityManager>()
             {
                 activity_manager
                     .restore_after_mcp(&app_handle_clone, continuation_conversation_id)
@@ -1447,9 +1512,7 @@ pub async fn trigger_conversation_continuation_batch(
     conversation_id: i64,
     tool_call_ids: Vec<i64>,
 ) -> Result<()> {
-    use crate::api::ai::events::{ConversationEvent, MessageAddEvent, MessageUpdateEvent};
     use crate::db::conversation_db::Repository;
-    use tauri::Emitter;
 
     if tool_call_ids.is_empty() {
         debug!("No tool calls to continue, skipping batch continuation");
@@ -1526,92 +1589,31 @@ pub async fn trigger_conversation_continuation_batch(
     let model_id = assistant_detail.model[0].id;
     let model_code = assistant_detail.model[0].model_code.clone();
 
-    // 查找最近的 response 消息的 generation_group_id，使 tool_result 与 response 同组
-    let tool_result_group_id = conversation_db
-        .message_repo()
-        .ok()
-        .and_then(|repo| repo.list_by_conversation_id(conversation_id).ok())
-        .and_then(|msgs| {
-            msgs.iter()
-                .filter(|(m, _)| m.message_type == "response")
-                .max_by_key(|(m, _)| m.id)
-                .and_then(|(m, _)| m.generation_group_id.clone())
-        });
-
-    // 为每个工具调用创建独立的 tool_result 消息
-    for tc in &tool_calls {
-        // 使用 llm_call_id（如果存在），否则使用数据库 id 作为 fallback
-        let tool_call_id =
-            tc.llm_call_id.clone().unwrap_or_else(|| format!("mcp_tool_call_{}", tc.id));
-
-        // 构建工具结果内容
-        let result_content = match tc.status.as_str() {
-            "success" => tc.result.clone().unwrap_or_else(|| "(空)".to_string()),
-            "failed" => format!("Error: {}", tc.error.as_deref().unwrap_or("未知错误")),
-            _ => continue,
-        };
-
-        // 使用正确的格式
-        let tool_result_content = format!(
-            "Tool execution completed:\n\nTool Call ID: {}\nTool: {}\nServer: {}\nParameters: {}\nResult:\n{}",
-            tool_call_id,
-            tc.tool_name,
-            tc.server_name,
-            tc.parameters,
-            result_content
-        );
-
-        // 创建 tool_result 消息
-        let tool_result_message = crate::api::ai_api::add_message(
-            app_handle,
-            None,
-            conversation_id,
-            "tool_result".to_string(),
-            tool_result_content.clone(),
-            Some(model_id),
-            Some(model_code.clone()),
-            Some(chrono::Utc::now()),
-            Some(chrono::Utc::now()),
-            0,
-            tool_result_group_id.clone(),
-            None,
-        )
-        .map_err(|e| anyhow!("创建工具结果消息失败: {}", e))?;
-
-        // 发送 UI 事件
-        let add_event = ConversationEvent {
-            r#type: "message_add".to_string(),
-            data: serde_json::to_value(MessageAddEvent {
-                message_id: tool_result_message.id,
-                message_type: "tool_result".to_string(),
-            })
-            .unwrap(),
-        };
-        let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
-
-        let update_event = ConversationEvent {
-            r#type: "message_update".to_string(),
-            data: serde_json::to_value(MessageUpdateEvent {
-                message_id: tool_result_message.id,
-                message_type: "tool_result".to_string(),
-                content: tool_result_content,
-                is_done: true,
-                token_count: None,
-                input_token_count: None,
-                output_token_count: None,
-                ttft_ms: None,
-                tps: None,
-            })
-            .unwrap(),
-        };
-        let _ =
-            window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
-
-        debug!(
-            tool_call_id = %tool_call_id,
-            message_id = tool_result_message.id,
-            "Created tool_result message for batch continuation"
-        );
+    let created_tool_result_count = ensure_tool_result_messages(
+        app_handle,
+        &window,
+        &conversation_db,
+        conversation_id,
+        model_id,
+        &model_code,
+        &tool_calls,
+    )?;
+    let target_tool_result_ids =
+        tool_calls.iter().map(tool_call_history_id).collect::<HashSet<_>>();
+    if created_tool_result_count == 0 {
+        let all_messages = conversation_db
+            .message_repo()
+            .context("failed to get message_repo")?
+            .list_by_conversation_id(conversation_id)
+            .map_err(|e| anyhow!("获取对话消息列表失败: {}", e))?;
+        let latest_branch = crate::api::ai::summary::get_latest_branch_messages(&all_messages);
+        if has_followup_response_after_tool_results(&latest_branch, &target_tool_result_ids) {
+            info!(
+                conversation_id,
+                "tool results already consumed by a later assistant response; skipping duplicate batch continuation"
+            );
+            return Ok(());
+        }
     }
 
     // 使用会话级锁保证续写串行
@@ -1769,7 +1771,7 @@ async fn execute_stdio_tool(
 ) -> Result<String> {
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
     let command = server.command.as_ref().ok_or_else(|| anyhow!("未为 stdio 传输指定命令"))?;
-    let parts: Vec<&str> = command.split_whitespace().collect();
+    let parts = split_command_line(command);
     if parts.is_empty() {
         bail!("命令为空");
     }
@@ -1781,7 +1783,7 @@ async fn execute_stdio_tool(
     let execution = async {
         let client = (())
             .serve(
-                TokioChildProcess::new(Command::new(parts[0]).configure(|cmd| {
+                TokioChildProcess::new(Command::new(&parts[0]).configure(|cmd| {
                     if parts.len() > 1 {
                         cmd.args(&parts[1..]);
                     }
@@ -1862,8 +1864,7 @@ async fn execute_builtin_tool(
     // 获取超时配置，使用服务器配置的超时或默认值
     let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
     // AskUserQuestion 需要等待用户交互，不应受超时限制。
-    let wait_indefinitely =
-        command == "aipp:ui_interaction" && tool_name == "ask_user_question";
+    let wait_indefinitely = command == "aipp:ui_interaction" && tool_name == "ask_user_question";
     let start = std::time::Instant::now();
 
     // 验证是否为内置工具调用

@@ -12,7 +12,6 @@
 //! - assistant_db_tests.rs: Assistant 及其关联表测试
 //! - llm_db_tests.rs: LLM Provider 和 Model 测试
 //! - mcp_db_tests.rs: MCP Server 和 Tool 测试
-//! - sub_task_db_tests.rs: SubTask Definition 和 Execution 测试
 //! - system_db_tests.rs: SystemConfig 和 FeatureConfig 测试
 //! - plugin_db_tests.rs: Plugin, PluginStatus, PluginConfiguration, PluginData 测试
 //!
@@ -29,5 +28,4 @@ mod llm_db_tests;
 mod mcp_db_tests;
 mod message_db_tests;
 mod plugin_db_tests;
-mod sub_task_db_tests;
 mod system_db_tests;

@@ -21,6 +21,7 @@ interface ProcessorContext {
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>;
     shiningMcpCallId?: number | null;
     inlineInteractionItems?: InlineInteractionItem[];
+    sentBatchToolResultMessageIds?: ReadonlySet<number>;
 }
 
 interface ToolCallData {
@@ -412,7 +413,14 @@ const McpToolCallResultsButton: React.FC<{
 
 export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: ProcessorContext) => {
     const { remarkPlugins, rehypePlugins, markdownComponents } = options;
-    const { conversationId, messageId, mcpToolCallStates, shiningMcpCallId, inlineInteractionItems } = context || {};
+    const {
+        conversationId,
+        messageId,
+        mcpToolCallStates,
+        shiningMcpCallId,
+        inlineInteractionItems,
+        sentBatchToolResultMessageIds,
+    } = context || {};
 
     const processContent = useCallback((
         markdownContent: string,
@@ -552,7 +560,10 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         }
 
         // 添加"发送结果"按钮（如果有多工具调用且都已完成）
-        if (toolCallIds.length >= 2) {
+        if (
+            toolCallIds.length >= 2 &&
+            !(typeof messageId === "number" && sentBatchToolResultMessageIds?.has(messageId))
+        ) {
             parts.push(
                 <McpToolCallResultsButton
                     key="send-results-button"
@@ -573,6 +584,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         mcpToolCallStates,
         shiningMcpCallId,
         inlineInteractionItems,
+        sentBatchToolResultMessageIds,
     ]);
 
     return { processContent };

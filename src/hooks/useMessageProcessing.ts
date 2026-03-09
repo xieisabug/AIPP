@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { Message, Conversation, StreamEvent } from "../data/Conversation";
+import { compareMessagesChronologically } from "@/utils/messageOrdering";
 
 export interface UseMessageProcessingProps {
     messages: Message[];
@@ -25,47 +26,6 @@ export function useMessageProcessing({
     groupRootMessageIds,
     getMessageVersionInfo,
 }: UseMessageProcessingProps): UseMessageProcessingReturn {
-    const compareReasoningBeforeResponse = (a: Message, b: Message): number => {
-        const aIsReasoning = a.message_type === "reasoning";
-        const bIsReasoning = b.message_type === "reasoning";
-        const aIsResponse = a.message_type === "response";
-        const bIsResponse = b.message_type === "response";
-
-        if ((aIsReasoning && bIsResponse) || (aIsResponse && bIsReasoning)) {
-            return aIsReasoning ? -1 : 1;
-        }
-        return 0;
-    };
-
-    const getOrderValue = (msg: Message): number => {
-        const tryParse = (value: any) => {
-            const ts = value ? new Date(value as any).getTime() : NaN;
-            return Number.isFinite(ts) ? ts : null;
-        };
-
-        return (
-            tryParse(msg.created_time) ??
-            tryParse(msg.start_time) ??
-            tryParse(msg.finish_time) ??
-            msg.id
-        );
-    };
-
-    const compareMessageOrder = (a: Message, b: Message): number => {
-        if (a.generation_group_id && a.generation_group_id === b.generation_group_id) {
-            const reasoningOrder = compareReasoningBeforeResponse(a, b);
-            if (reasoningOrder !== 0) return reasoningOrder;
-        }
-
-        const orderDelta = getOrderValue(a) - getOrderValue(b);
-        if (orderDelta !== 0) return orderDelta;
-
-        const reasoningOrder = compareReasoningBeforeResponse(a, b);
-        if (reasoningOrder !== 0) return reasoningOrder;
-
-        return a.id - b.id;
-    };
-
     // 管理组合并关系：new_group_id -> original_group_id
     const [groupMergeMap, setGroupMergeMap] = useState<Map<string, string>>(
         new Map(),
@@ -148,7 +108,7 @@ export function useMessageProcessing({
         // 如果没有分组信息，直接按时间/ID排序返回
         if (generationGroups.size === 0) {
             return visibleMessages.sort(
-                (a, b) => compareMessageOrder(a, b),
+                (a, b) => compareMessagesChronologically(a, b),
             );
         }
 
@@ -182,7 +142,7 @@ export function useMessageProcessing({
 
         // 然后对可见消息进行排序
         const sorted = visibleMessages.sort((a, b) => {
-            return compareMessageOrder(a, b);
+            return compareMessagesChronologically(a, b);
         });
 
         return sorted;

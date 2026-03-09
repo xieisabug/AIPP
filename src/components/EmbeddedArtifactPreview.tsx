@@ -4,6 +4,8 @@
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { save } from '@tauri-apps/plugin-dialog';
+import { writeFile } from '@tauri-apps/plugin-fs';
 import mermaid from 'mermaid';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -17,6 +19,7 @@ import rehypeRaw from 'rehype-raw';
 import TipsComponent from '@/react-markdown/components/TipsComponent';
 import { resolveCodeBlockMeta } from '@/react-markdown/remarkCodeBlockMeta';
 import { useArtifactEvents, ArtifactData, EnvironmentCheckData } from '@/hooks/useArtifactEvents';
+import { Button } from '@/components/ui/button';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Loader2 } from 'lucide-react';
 import EnvironmentInstallDialog from '@/components/EnvironmentInstallDialog';
@@ -218,6 +221,41 @@ export default function EmbeddedArtifactPreview({ className, previewOnly = false
         onReset: resetPreviewState,
     });
 
+    const postDrawioLoad = useCallback((xml: string) => {
+        drawioIframeRef.current?.contentWindow?.postMessage(
+            JSON.stringify({
+                action: 'load',
+                xml,
+                autosave: 1,
+            }),
+            '*'
+        );
+    }, []);
+
+    const handleDrawioExport = useCallback(async (xmlOverride?: string) => {
+        if (previewTypeRef.current !== 'drawio') return;
+        const xml = (xmlOverride ?? drawioXmlContent).trim();
+        if (!xml) {
+            artifactEvents.addLog('error', '保存 Draw.io 文件失败：当前没有可保存的图表内容');
+            return;
+        }
+
+        try {
+            const filePath = await save({
+                defaultPath: 'diagram.drawio',
+                filters: [{ name: 'Draw.io', extensions: ['drawio', 'xml'] }],
+            });
+            if (!filePath || Array.isArray(filePath)) {
+                return;
+            }
+
+            await writeFile(filePath, new TextEncoder().encode(xml));
+            artifactEvents.addLog('success', `Draw.io 文件已保存到: ${filePath}`);
+        } catch (error) {
+            artifactEvents.addLog('error', `保存 Draw.io 文件失败: ${error}`);
+        }
+    }, [artifactEvents, drawioXmlContent]);
+
     // 初始化 mermaid
     useEffect(() => {
         const isDark = document.documentElement.classList.contains('dark');
@@ -289,10 +327,14 @@ export default function EmbeddedArtifactPreview({ className, previewOnly = false
                         );
                     } else if (msg.event === 'init' && !loaded) {
                         loaded = true;
-                        drawioIframeRef.current?.contentWindow?.postMessage(
-                            JSON.stringify({ action: 'load', xml: drawioXmlContent, autosave: 0 }),
-                            '*'
-                        );
+                        postDrawioLoad(drawioXmlContent);
+                    } else if (msg.event === 'autosave' && typeof msg.xml === 'string') {
+                        setDrawioXmlContent(msg.xml);
+                        setOriginalCode(msg.xml);
+                    } else if (msg.event === 'save' && typeof msg.xml === 'string') {
+                        setDrawioXmlContent(msg.xml);
+                        setOriginalCode(msg.xml);
+                        void handleDrawioExport(msg.xml);
                     }
                 } catch {
                     // ignore
@@ -302,7 +344,7 @@ export default function EmbeddedArtifactPreview({ className, previewOnly = false
             window.addEventListener('message', handleMessage);
             return () => window.removeEventListener('message', handleMessage);
         }
-    }, [previewType, drawioXmlContent]);
+    }, [previewType, drawioXmlContent, handleDrawioExport, postDrawioLoad]);
 
 
     const handleEnvironmentInstallConfirm = async () => {
@@ -456,12 +498,26 @@ export default function EmbeddedArtifactPreview({ className, previewOnly = false
                                 sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                             />
                         ) : previewType === 'drawio' ? (
-                            <iframe
-                                ref={drawioIframeRef}
-                                src="https://embed.diagrams.net/?embed=1&ui=min&spin=1&proto=json&noSaveBtn=1&noExitBtn=1"
-                                className="w-full h-full border-0 bg-background"
-                                sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-                            />
+                            <div className="relative w-full h-full">
+                                <div className="absolute top-2 right-2 z-10 flex items-center gap-2">
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={() => {
+                                            void handleDrawioExport();
+                                        }}
+                                        title="保存 Draw.io 文件"
+                                    >
+                                        保存文件
+                                    </Button>
+                                </div>
+                                <iframe
+                                    ref={drawioIframeRef}
+                                    src="https://embed.diagrams.net/?embed=1&ui=min&spin=1&proto=json&noSaveBtn=1&noExitBtn=1"
+                                    className="w-full h-full border-0 bg-background"
+                                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"
+                                />
+                            </div>
                         ) : (previewType === 'react' || previewType === 'vue') && !previewUrl ? (
                             <div className="h-full flex items-center justify-center text-muted-foreground">
                                 <div className="text-center">

@@ -7,7 +7,6 @@ use mcp_db::MCPDatabase;
 use rusqlite::params;
 use scheduled_task_db::ScheduledTaskDatabase;
 use semver::Version;
-use sub_task_db::SubTaskDatabase;
 use system_db::SystemDatabase;
 use tauri::Manager;
 use tracing::{debug, error, info, instrument, warn};
@@ -19,7 +18,6 @@ pub mod mcp_db;
 pub mod plugin_db;
 pub mod scheduled_task_db;
 pub mod skill_db;
-pub mod sub_task_db;
 pub mod system_db;
 
 #[cfg(test)]
@@ -464,18 +462,9 @@ fn special_logic_0_0_5(
     _llm_db: &LLMDatabase,
     _assistant_db: &AssistantDatabase,
     _conversation_db: &ConversationDatabase,
-    app_handle: &tauri::AppHandle,
+    _app_handle: &tauri::AppHandle,
 ) -> Result<(), String> {
-    info!("special_logic_0_0_5: 创建 sub task 相关表");
-
-    // 创建 SubTaskDatabase 实例
-    let sub_task_db = SubTaskDatabase::new(app_handle)
-        .map_err(|e| format!("创建 SubTaskDatabase 失败: {}", e.to_string()))?;
-
-    // 创建 sub task 相关表
-    sub_task_db.create_tables().map_err(|e| format!("创建 sub task 表失败: {}", e.to_string()))?;
-
-    info!("special_logic_0_0_5 done: sub task 表创建完成");
+    info!("special_logic_0_0_5: sub task feature removed, skipping");
     Ok(())
 }
 

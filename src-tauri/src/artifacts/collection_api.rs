@@ -488,6 +488,7 @@ pub async fn generate_artifact_metadata(
             network_proxy.as_deref(),
             proxy_enabled,
             Some(request_timeout),
+            false,
             &config_feature_map,
         )
         .map_err(|e| format!("AI客户端创建失败: {}", e))?;

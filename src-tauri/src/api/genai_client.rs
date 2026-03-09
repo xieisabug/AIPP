@@ -86,6 +86,7 @@ pub fn create_client_with_config(
     network_proxy: Option<&str>,
     proxy_enabled: bool,
     request_timeout: Option<u64>, // 超时时间（秒）
+    is_stream: bool,
     config_feature_map: &std::collections::HashMap<
         String,
         std::collections::HashMap<String, crate::db::system_db::FeatureConfig>,
@@ -117,8 +118,14 @@ pub fn create_client_with_config(
     // 配置超时
     if let Some(timeout_secs) = request_timeout {
         if timeout_secs > 0 {
-            web_config = web_config.with_timeout(Duration::from_secs(timeout_secs));
-            info!(timeout_secs, "request timeout configured");
+            let timeout = Duration::from_secs(timeout_secs);
+            if is_stream {
+                web_config = web_config.with_read_timeout(timeout);
+                info!(timeout_secs, "stream read timeout configured");
+            } else {
+                web_config = web_config.with_timeout(timeout);
+                info!(timeout_secs, "request timeout configured");
+            }
         }
     }
 

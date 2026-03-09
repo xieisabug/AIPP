@@ -54,16 +54,16 @@ const ConversationTitle: React.FC<{
 
     return (
         <>
-            <div className="flex justify-between flex-none h-[68px] items-center px-6 box-border border-b border-border bg-background rounded-t-xl z-20">
-                <div className="flex-1 overflow-hidden">
-                    <div className="text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap text-icon cursor-pointer" onClick={onEdit}>{displayName}</div>
-                    <div className="text-xs text-muted-foreground overflow-hidden text-ellipsis whitespace-nowrap mt-0.5">{displayAssistantName}</div>
+            <div className="flex justify-between flex-none h-[68px] items-center px-6 box-border border-b border-border bg-background rounded-t-xl z-20" data-aipp-slot="chat-conversation-title-bar">
+                <div className="flex-1 overflow-hidden" data-aipp-slot="chat-conversation-title">
+                    <div className="text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap text-icon cursor-pointer" onClick={onEdit} data-aipp-slot="chat-conversation-title-text">{displayName}</div>
+                    <div className="text-xs text-muted-foreground overflow-hidden text-ellipsis whitespace-nowrap mt-0.5" data-aipp-slot="chat-conversation-title-subtext">{displayAssistantName}</div>
                 </div>
-                <div className="flex items-center flex-none w-64 justify-end gap-2">
+                <div className="flex items-center flex-none w-64 justify-end gap-2" data-aipp-slot="chat-conversation-title-actions">
                     <ConversationStatsDialog conversationId={conversation?.id.toString() || ""} externalOpen={statsOpen} onExternalOpenChange={onStatsOpenChange} />
                     <ConversationExportDialog conversationId={conversation?.id.toString() || ""} externalOpen={exportOpen} onExternalOpenChange={onExportOpenChange} />
-                    <IconButton icon={<Edit2 size={16} className="text-icon" />} onClick={onEdit} border />
-                    <IconButton icon={<Trash2 size={16} className="text-icon" />} onClick={openDeleteDialog} border />
+                    <IconButton icon={<Edit2 size={16} className="text-icon" />} onClick={onEdit} border dataAippSlot="chat-conversation-title-edit" />
+                    <IconButton icon={<Trash2 size={16} className="text-icon" />} onClick={openDeleteDialog} border dataAippSlot="chat-conversation-title-delete" />
                 </div>
             </div>
 
