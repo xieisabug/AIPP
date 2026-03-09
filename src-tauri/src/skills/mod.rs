@@ -7,6 +7,7 @@
 //! - Codex CLI
 //! - Custom user-defined sources
 
+pub mod installer;
 pub mod parser;
 pub mod prompt;
 pub mod scanner;

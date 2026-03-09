@@ -1,11 +1,17 @@
 //! Skill API - Tauri commands for skill management
 
 use crate::db::skill_db::SkillDatabase;
+use crate::skills::installer::{
+    copy_dir_recursive, extract_zip_bytes_to_dir,
+    inspect_skill_install_recipe as inspect_recipe_internal,
+    install_skill_install_recipe as install_recipe_internal, load_skill_install_recipe_from_file,
+    SkillInstallPlan, SkillInstallRecipe, SkillInstallResult,
+};
 use crate::skills::parser::SkillParser;
 use crate::skills::scanner::SkillScanner;
 use crate::skills::types::{ScannedSkill, SkillContent, SkillSourceConfig, SkillWithConfig};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::Manager;
 use tracing::{debug, error, info, warn};
 
@@ -550,6 +556,58 @@ pub async fn fetch_official_skills(
     fetch_future.await
 }
 
+/// Load a JSON skill install recipe from disk.
+#[tauri::command]
+pub async fn load_skill_install_recipe_file(
+    recipe_path: String,
+) -> Result<SkillInstallRecipe, String> {
+    load_skill_install_recipe_from_file(Path::new(&recipe_path))
+}
+
+/// Inspect a skill install recipe and return the resolved installation plan.
+#[tauri::command]
+pub async fn inspect_skill_install_recipe(
+    recipe: SkillInstallRecipe,
+) -> Result<SkillInstallPlan, String> {
+    let skills_dir = get_home_dir().join(".agents/skills");
+    inspect_recipe_internal(&recipe, &skills_dir).await
+}
+
+/// Load a JSON skill install recipe from disk and inspect it.
+#[tauri::command]
+pub async fn inspect_skill_install_recipe_file(
+    recipe_path: String,
+) -> Result<SkillInstallPlan, String> {
+    let recipe = load_skill_install_recipe_from_file(Path::new(&recipe_path))?;
+    let skills_dir = get_home_dir().join(".agents/skills");
+    inspect_recipe_internal(&recipe, &skills_dir).await
+}
+
+/// Install skills from a structured recipe and refresh the scanned skills list.
+#[tauri::command]
+pub async fn install_skill_install_recipe(
+    app_handle: tauri::AppHandle,
+    recipe: SkillInstallRecipe,
+) -> Result<SkillInstallResult, String> {
+    let skills_dir = get_home_dir().join(".agents/skills");
+    let result = install_recipe_internal(&recipe, &skills_dir).await?;
+    let _ = scan_skills(app_handle).await?;
+    Ok(result)
+}
+
+/// Load a JSON skill install recipe from disk, install it, and refresh the scanned skills list.
+#[tauri::command]
+pub async fn install_skill_install_recipe_file(
+    app_handle: tauri::AppHandle,
+    recipe_path: String,
+) -> Result<SkillInstallResult, String> {
+    let recipe = load_skill_install_recipe_from_file(Path::new(&recipe_path))?;
+    let skills_dir = get_home_dir().join(".agents/skills");
+    let result = install_recipe_internal(&recipe, &skills_dir).await?;
+    let _ = scan_skills(app_handle).await?;
+    Ok(result)
+}
+
 /// Install an official skill by downloading and extracting the zip file
 #[tauri::command]
 pub async fn install_official_skill(
@@ -585,49 +643,7 @@ pub async fn install_official_skill(
 
     info!("Extracting zip file to: {}", temp_extract_dir.display());
 
-    // Use zip crate to extract and preserve directory structure
-    {
-        use std::io::Cursor;
-
-        let cursor = Cursor::new(bytes.as_ref());
-        let mut zip = zip::ZipArchive::new(cursor)
-            .map_err(|e| format!("Failed to open zip archive: {}", e))?;
-
-        for i in 0..zip.len() {
-            let mut file =
-                zip.by_index(i).map_err(|e| format!("Failed to get file from zip: {}", e))?;
-            let file_path = temp_extract_dir.join(file.mangled_name());
-
-            // Create parent directories if needed
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create directory: {}", e))?;
-            }
-
-            // Skip directories (they will be created when extracting files)
-            if file.name().ends_with('/') {
-                continue;
-            }
-
-            let mut output = std::fs::File::create(&file_path)
-                .map_err(|e| format!("Failed to create file: {}", e))?;
-            std::io::copy(&mut file, &mut output)
-                .map_err(|e| format!("Failed to write file: {}", e))?;
-
-            // Set file permissions if available
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Some(mode) = file.unix_mode() {
-                    let mut perms = std::fs::Permissions::from_mode(0o644);
-                    perms.set_mode(mode);
-                    output
-                        .set_permissions(perms)
-                        .map_err(|e| format!("Failed to set permissions: {}", e))?;
-                }
-            }
-        }
-    }
+    extract_zip_bytes_to_dir(bytes.as_ref(), &temp_extract_dir)?;
 
     // Now move the extracted content to skills directory
     // Check what's in the temp_extract_dir
@@ -664,25 +680,6 @@ pub async fn install_official_skill(
     Ok(())
 }
 
-/// Recursively copy a directory
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
-    std::fs::create_dir_all(dst).map_err(|e| format!("Failed to create directory: {}", e))?;
-
-    for entry in std::fs::read_dir(src).map_err(|e| format!("Failed to read directory: {}", e))? {
-        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)
-                .map_err(|e| format!("Failed to copy file: {}", e))?;
-        }
-    }
-    Ok(())
-}
-
 /// Open a URL in the default browser
 #[tauri::command]
 pub async fn open_source_url(url: String) -> Result<(), String> {
@@ -698,8 +695,6 @@ pub async fn open_source_url(url: String) -> Result<(), String> {
 /// Only AIPP-sourced skills can be deleted (not system directories like Claude Code, Codex, etc.)
 #[tauri::command]
 pub async fn delete_skill(app_handle: tauri::AppHandle, identifier: String) -> Result<(), String> {
-    use crate::skills::types::SkillSourceType;
-
     let scanner = create_scanner(&app_handle);
 
     // Find the skill

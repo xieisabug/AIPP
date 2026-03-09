@@ -85,10 +85,7 @@ async fn cancel_tool_call_execution(call_id: i64) -> bool {
 }
 
 fn tool_call_history_id(tool_call: &MCPToolCall) -> String {
-    tool_call
-        .llm_call_id
-        .clone()
-        .unwrap_or_else(|| format!("mcp_tool_call_{}", tool_call.id))
+    tool_call.llm_call_id.clone().unwrap_or_else(|| format!("mcp_tool_call_{}", tool_call.id))
 }
 
 fn build_tool_result_message_content(tool_call: &MCPToolCall) -> Option<String> {
@@ -109,7 +106,10 @@ fn build_tool_result_message_content(tool_call: &MCPToolCall) -> Option<String> 
 }
 
 fn collect_existing_tool_result_messages(
-    messages: &[(crate::db::conversation_db::Message, Option<crate::db::conversation_db::MessageAttachment>)],
+    messages: &[(
+        crate::db::conversation_db::Message,
+        Option<crate::db::conversation_db::MessageAttachment>,
+    )],
 ) -> HashMap<String, crate::db::conversation_db::Message> {
     messages
         .iter()
@@ -159,7 +159,8 @@ fn ensure_tool_result_messages(
         .context("failed to get message_repo")?
         .list_by_conversation_id(conversation_id)
         .map_err(|e| anyhow!("获取对话消息列表失败: {}", e))?;
-    let mut existing_tool_result_messages = collect_existing_tool_result_messages(&existing_messages);
+    let mut existing_tool_result_messages =
+        collect_existing_tool_result_messages(&existing_messages);
     let tool_result_group_id = existing_messages
         .iter()
         .filter(|(message, _)| message.message_type == "response")
@@ -211,7 +212,8 @@ fn ensure_tool_result_messages(
                 })
                 .unwrap(),
             };
-            let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
+            let _ =
+                window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
 
             created_count += 1;
             tool_result_message
@@ -232,7 +234,8 @@ fn ensure_tool_result_messages(
             })
             .unwrap(),
         };
-        let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+        let _ =
+            window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
 
         existing_tool_result_messages.insert(tool_result_id, tool_result_message);
     }

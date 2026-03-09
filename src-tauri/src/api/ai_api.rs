@@ -287,8 +287,10 @@ pub async fn ask_ai(
     let selected_text = state.inner().selected_text.lock().await.clone();
     template_context.insert("selected_text".to_string(), selected_text);
     if !processed_request.conversation_id.trim().is_empty() {
-        template_context
-            .insert("conversation_id".to_string(), processed_request.conversation_id.trim().to_string());
+        template_context.insert(
+            "conversation_id".to_string(),
+            processed_request.conversation_id.trim().to_string(),
+        );
     }
 
     let app_handle_clone = app_handle.clone();

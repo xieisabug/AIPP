@@ -61,9 +61,11 @@ use crate::api::scheduled_task_api::{
 use crate::api::skill_api::{
     bulk_update_assistant_skills, cleanup_orphaned_skill_configs, delete_skill,
     fetch_official_skills, get_assistant_skills, get_enabled_assistant_skills, get_skill,
-    get_skill_content, get_skill_sources, get_skills_directory, install_official_skill,
-    open_skill_parent_folder, open_skills_folder, open_source_url, remove_assistant_skill,
-    scan_skills, skill_exists, toggle_assistant_skill, update_assistant_skill_config,
+    get_skill_content, get_skill_sources, get_skills_directory, inspect_skill_install_recipe,
+    inspect_skill_install_recipe_file, install_official_skill, install_skill_install_recipe,
+    install_skill_install_recipe_file, load_skill_install_recipe_file, open_skill_parent_folder,
+    open_skills_folder, open_source_url, remove_assistant_skill, scan_skills, skill_exists,
+    toggle_assistant_skill, update_assistant_skill_config,
 };
 use crate::api::system_api::{
     copy_image_to_clipboard, get_all_feature_config, get_autostart_state, get_bang_list,
@@ -795,6 +797,11 @@ pub fn run() {
             open_skill_parent_folder,
             get_skills_directory,
             fetch_official_skills,
+            load_skill_install_recipe_file,
+            inspect_skill_install_recipe,
+            inspect_skill_install_recipe_file,
+            install_skill_install_recipe,
+            install_skill_install_recipe_file,
             install_official_skill,
             open_source_url,
             delete_skill,

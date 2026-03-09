@@ -15,8 +15,11 @@ mod plugin_bangs;
 pub use plugin_bangs::build_template_engine;
 
 // 定义命令处理函数类型
-pub type CommandFn =
-    Arc<dyn Fn(TemplateEngine, String, HashMap<String, String>) -> BoxFuture<'static, String> + Send + Sync>;
+pub type CommandFn = Arc<
+    dyn Fn(TemplateEngine, String, HashMap<String, String>) -> BoxFuture<'static, String>
+        + Send
+        + Sync,
+>;
 
 fn wrap_command(
     handler: fn(TemplateEngine, String, HashMap<String, String>) -> BoxFuture<'static, String>,
@@ -294,7 +297,13 @@ impl TemplateEngine {
 
         commands.insert(
             "file".to_string(),
-            Bang::new("file", "file(|)", "读取文本文件内容", BangType::Text, wrap_command(file_command)),
+            Bang::new(
+                "file",
+                "file(|)",
+                "读取文本文件内容",
+                BangType::Text,
+                wrap_command(file_command),
+            ),
         );
 
         TemplateEngine { commands }
@@ -320,10 +329,7 @@ impl TemplateEngine {
     }
 
     pub fn register_bang(&mut self, bang: Bang) {
-        self.commands.insert(
-            bang.name.clone(),
-            bang,
-        );
+        self.commands.insert(bang.name.clone(), bang);
     }
 
     pub fn has_command(&self, name: &str) -> bool {
