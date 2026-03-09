@@ -79,6 +79,23 @@ interface AippSystemApiDisplayConfig {
   code_theme_dark: string;
 }
 
+interface AippSystemApiMarkdownTagRendererProps {
+  node?: unknown;
+  children?: React.ReactNode;
+  attributes: Record<string, string>;
+  props: Record<string, unknown>;
+}
+
+type AippSystemApiMarkdownTagRenderer = (
+  props: AippSystemApiMarkdownTagRendererProps
+) => React.ReactNode;
+
+interface AippSystemApiMarkdownTagRegistration {
+  tagName: string;
+  attributes?: string[];
+  render: AippSystemApiMarkdownTagRenderer;
+}
+
 /**
  * Host-provided UI kit components exposed to plugins.
  * This allows IDE autocomplete for available components + core props.
@@ -141,6 +158,9 @@ interface SystemApi {
   registerTheme(theme: AippSystemApiThemeDefinition): void;
   unregisterTheme(themeId: string): void;
   listThemes(): Promise<AippSystemApiThemeDefinition[]>;
+  registerMarkdownTag(registration: AippSystemApiMarkdownTagRegistration): void;
+  unregisterMarkdownTag(tagName: string): void;
+  listMarkdownTags(): Promise<AippSystemApiMarkdownTagRegistration[]>;
   getDisplayConfig(): Promise<AippSystemApiDisplayConfig>;
   applyTheme(themeId: string): Promise<void>;
   ui?: AippSystemApiUiKit;

@@ -57,7 +57,7 @@ import { FileInfo } from "../../data/Conversation";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCaretCoordinates } from "../../utils/caretCoordinates";
-import BangCompletionList from "./BangCompletionList";
+import BangCompletionList, { type BangCompletionItem } from "./BangCompletionList";
 import AssistantCompletionList from "./AssistantCompletionList";
 import ArtifactCompletionList from "./ArtifactCompletionList";
 import { useFileList } from "../../hooks/useFileList";
@@ -125,8 +125,8 @@ const InputArea = React.memo(
             const [initialHeight, setInitialHeight] = useState<number | null>(null);
             const [isFocused, setIsFocused] = useState<boolean>(false);
             const [bangListVisible, setBangListVisible] = useState<boolean>(false);
-            const [bangList, setBangList] = useState<string[]>([]);
-            const [originalBangList, setOriginalBangList] = useState<string[]>([]);
+            const [bangList, setBangList] = useState<BangCompletionItem[]>([]);
+            const [originalBangList, setOriginalBangList] = useState<BangCompletionItem[]>([]);
             const [cursorPosition, setCursorPosition] = useState<{
                 bottom: number;
                 left: number;
@@ -162,7 +162,7 @@ const InputArea = React.memo(
             }, [inputText, initialHeight, fileInfoList, isFocused]);
 
             useEffect(() => {
-                invoke<string[]>("get_bang_list").then((bangList) => {
+                invoke<BangCompletionItem[]>("get_bang_list").then((bangList) => {
                     setBangList(bangList);
                     setOriginalBangList(bangList);
                 });

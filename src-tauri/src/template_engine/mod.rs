@@ -6,13 +6,23 @@ use regex::Regex;
 use reqwest;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::debug;
 
 // 用于 HTML 内容清理
 use crate::mcp::builtin_mcp::search::engines::base::SearchEngineBase;
+mod plugin_bangs;
+pub use plugin_bangs::build_template_engine;
 
 // 定义命令处理函数类型
-type CommandFn = fn(TemplateEngine, String, HashMap<String, String>) -> BoxFuture<'static, String>;
+pub type CommandFn =
+    Arc<dyn Fn(TemplateEngine, String, HashMap<String, String>) -> BoxFuture<'static, String> + Send + Sync>;
+
+fn wrap_command(
+    handler: fn(TemplateEngine, String, HashMap<String, String>) -> BoxFuture<'static, String>,
+) -> CommandFn {
+    Arc::new(move |engine, input, context| handler(engine, input, context))
+}
 
 // 获取当前日期的命令处理函数
 fn current_date(
@@ -167,6 +177,24 @@ pub enum BangType {
     Audio,
 }
 
+impl Bang {
+    pub fn new(
+        name: impl Into<String>,
+        complete: impl Into<String>,
+        description: impl Into<String>,
+        bang_type: BangType,
+        command: CommandFn,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            complete: complete.into(),
+            description: description.into(),
+            bang_type,
+            command,
+        }
+    }
+}
+
 impl TemplateEngine {
     // 初始化模板解析器
     pub fn new() -> Self {
@@ -174,129 +202,99 @@ impl TemplateEngine {
 
         commands.insert(
             "current_date".to_string(),
-            Bang {
-                name: "current_date".to_string(),
-                complete: "current_date".to_string(),
-                description: "获取当前日期".to_string(),
-                bang_type: BangType::Text,
-                command: current_date as CommandFn,
-            },
+            Bang::new(
+                "current_date",
+                "current_date",
+                "获取当前日期",
+                BangType::Text,
+                wrap_command(current_date),
+            ),
         );
         commands.insert(
             "cd".to_string(),
-            Bang {
-                name: "cd".to_string(),
-                complete: "cd".to_string(),
-                description: "获取当前日期".to_string(),
-                bang_type: BangType::Text,
-                command: current_date as CommandFn,
-            },
+            Bang::new("cd", "cd", "获取当前日期", BangType::Text, wrap_command(current_date)),
         );
 
         commands.insert(
             "current_time".to_string(),
-            Bang {
-                name: "current_time".to_string(),
-                complete: "current_time".to_string(),
-                description: "获取当前时间".to_string(),
-                bang_type: BangType::Text,
-                command: current_time as CommandFn,
-            },
+            Bang::new(
+                "current_time",
+                "current_time",
+                "获取当前时间",
+                BangType::Text,
+                wrap_command(current_time),
+            ),
         );
         commands.insert(
             "ct".to_string(),
-            Bang {
-                name: "ct".to_string(),
-                complete: "ct".to_string(),
-                description: "获取当前时间".to_string(),
-                bang_type: BangType::Text,
-                command: current_time as CommandFn,
-            },
+            Bang::new("ct", "ct", "获取当前时间", BangType::Text, wrap_command(current_time)),
         );
 
         commands.insert(
             "sub_start".to_string(),
-            Bang {
-                name: "sub_start".to_string(),
-                complete: "sub_start(|)".to_string(),
-                description: "截取文本的前多少个字符".to_string(),
-                bang_type: BangType::Text,
-                command: sub_start as CommandFn,
-            },
+            Bang::new(
+                "sub_start",
+                "sub_start(|)",
+                "截取文本的前多少个字符",
+                BangType::Text,
+                wrap_command(sub_start),
+            ),
         );
 
         commands.insert(
             "selected_text".to_string(),
-            Bang {
-                name: "selected_text".to_string(),
-                complete: "selected_text".to_string(),
-                description: "获取当前选中的文本".to_string(),
-                bang_type: BangType::Text,
-                command: selected_text as CommandFn,
-            },
+            Bang::new(
+                "selected_text",
+                "selected_text",
+                "获取当前选中的文本",
+                BangType::Text,
+                wrap_command(selected_text),
+            ),
         );
         commands.insert(
             "s".to_string(),
-            Bang {
-                name: "s".to_string(),
-                complete: "s".to_string(),
-                description: "获取当前选中的文本".to_string(),
-                bang_type: BangType::Text,
-                command: selected_text as CommandFn,
-            },
+            Bang::new("s", "s", "获取当前选中的文本", BangType::Text, wrap_command(selected_text)),
         );
 
         commands.insert(
             "web".to_string(),
-            Bang {
-                name: "web".to_string(),
-                complete: "web(|)".to_string(),
-                description: "通过网络获取URL的网页信息".to_string(),
-                bang_type: BangType::Text,
-                command: web as CommandFn,
-            },
+            Bang::new(
+                "web",
+                "web(|)",
+                "通过网络获取URL的网页信息",
+                BangType::Text,
+                wrap_command(web),
+            ),
         );
         commands.insert(
             "w".to_string(),
-            Bang {
-                name: "w".to_string(),
-                complete: "w(|)".to_string(),
-                description: "通过网络获取URL的网页信息".to_string(),
-                bang_type: BangType::Text,
-                command: web as CommandFn,
-            },
+            Bang::new("w", "w(|)", "通过网络获取URL的网页信息", BangType::Text, wrap_command(web)),
         );
 
         commands.insert(
             "web_to_markdown".to_string(),
-            Bang {
-                name: "web_to_markdown".to_string(),
-                complete: "web_to_markdown(|)".to_string(),
-                description: "通过网络获取URL的网页信息并且转换为markdown格式".to_string(),
-                bang_type: BangType::Text,
-                command: web_to_markdown as CommandFn,
-            },
+            Bang::new(
+                "web_to_markdown",
+                "web_to_markdown(|)",
+                "通过网络获取URL的网页信息并且转换为markdown格式",
+                BangType::Text,
+                wrap_command(web_to_markdown),
+            ),
         );
         commands.insert(
             "wm".to_string(),
-            Bang {
-                name: "wm".to_string(),
-                complete: "wm(|)".to_string(),
-                description: "通过网络获取URL的网页信息并且转换为markdown格式".to_string(),
-                bang_type: BangType::Text,
-                command: web_to_markdown as CommandFn,
-            },
+            Bang::new(
+                "wm",
+                "wm(|)",
+                "通过网络获取URL的网页信息并且转换为markdown格式",
+                BangType::Text,
+                wrap_command(web_to_markdown),
+            ),
         );
 
         commands.insert(
             "file".to_string(),
-            Bang {
-                name: "file".to_string(),
-                complete: "file(|)".to_string(),
-                description: "读取文本文件内容".to_string(),
-                bang_type: BangType::Text,
-                command: file_command as CommandFn,
-            },
+            Bang::new("file", "file(|)", "读取文本文件内容", BangType::Text, wrap_command(file_command)),
         );
 
         TemplateEngine { commands }
@@ -304,16 +302,32 @@ impl TemplateEngine {
 
     // 注册命令
     pub fn register_command(&mut self, name: &str, handler: CommandFn) {
+        self.register_bang(Bang {
+            name: name.to_string(),
+            complete: name.to_string(),
+            description: "Custom command".to_string(),
+            bang_type: BangType::Text,
+            command: handler,
+        });
+    }
+
+    pub fn register_builtin_command(
+        &mut self,
+        name: &str,
+        handler: fn(TemplateEngine, String, HashMap<String, String>) -> BoxFuture<'static, String>,
+    ) {
+        self.register_command(name, wrap_command(handler));
+    }
+
+    pub fn register_bang(&mut self, bang: Bang) {
         self.commands.insert(
-            name.to_string(),
-            Bang {
-                name: name.to_string(),
-                complete: name.to_string(),
-                description: "Custom command".to_string(),
-                bang_type: BangType::Text,
-                command: handler,
-            },
+            bang.name.clone(),
+            bang,
         );
+    }
+
+    pub fn has_command(&self, name: &str) -> bool {
+        self.commands.contains_key(name)
     }
 
     // 解析并替换模板字符串

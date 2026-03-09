@@ -67,6 +67,23 @@ interface SystemApiDisplayConfig {
     code_theme_dark: string;
 }
 
+interface SystemApiMarkdownTagRendererProps {
+    node?: unknown;
+    children?: React.ReactNode;
+    attributes: Record<string, string>;
+    props: Record<string, unknown>;
+}
+
+type SystemApiMarkdownTagRenderer = (
+    props: SystemApiMarkdownTagRendererProps,
+) => React.ReactNode;
+
+interface SystemApiMarkdownTagRegistration {
+    tagName: string;
+    attributes?: string[];
+    render: SystemApiMarkdownTagRenderer;
+}
+
 interface SystemApiUiKit {
     Alert?: React.ComponentType<any>;
     AlertDescription?: React.ComponentType<any>;
@@ -116,6 +133,9 @@ interface SystemApi {
     registerTheme(theme: SystemApiThemeDefinition): void;
     unregisterTheme(themeId: string): void;
     listThemes(): Promise<SystemApiThemeDefinition[]>;
+    registerMarkdownTag(registration: SystemApiMarkdownTagRegistration): void;
+    unregisterMarkdownTag(tagName: string): void;
+    listMarkdownTags(): Promise<SystemApiMarkdownTagRegistration[]>;
     getDisplayConfig(): Promise<SystemApiDisplayConfig>;
     applyTheme(themeId: string): Promise<void>;
     ui?: SystemApiUiKit;

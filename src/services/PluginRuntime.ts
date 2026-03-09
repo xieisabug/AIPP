@@ -21,6 +21,7 @@ import {
 import { Separator } from "../components/ui/separator";
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Textarea } from "../components/ui/textarea";
+import { markdownRegistry, type MarkdownTagRegistration } from "./markdownRegistry";
 
 type PluginConstructor = new () => AippPlugin | AippAssistantTypePlugin;
 
@@ -30,6 +31,7 @@ interface BackendPluginItem {
     version: string;
     code: string;
     pluginType: string[];
+    permissions: string[];
     isActive: boolean;
 }
 
@@ -169,9 +171,11 @@ class PluginRuntime {
 
         if (forceReload) {
             this.plugins.forEach((loadedPlugin) => this.clearPluginThemesForPlugin(loadedPlugin.code));
+            this.plugins.forEach((loadedPlugin) => this.clearMarkdownTagsForPlugin(loadedPlugin.code));
             this.plugins = [];
         }
         this.clearStalePluginThemes(activeCodes);
+        this.clearStaleMarkdownTags(activeCodes);
 
         for (const plugin of activeItems) {
             try {
@@ -367,6 +371,22 @@ class PluginRuntime {
                 this.unregisterPluginThemeForOwner(plugin.code, themeId);
             },
             listThemes: async () => this.listDisplayThemes(),
+            registerMarkdownTag: (registration: MarkdownTagRegistration) => {
+                this.assertPluginPermission(plugin, "markdown.register");
+                markdownRegistry.registerTag(plugin.code, registration);
+            },
+            unregisterMarkdownTag: (tagName: string) => {
+                markdownRegistry.unregisterTag(plugin.code, tagName);
+            },
+            listMarkdownTags: async () =>
+                markdownRegistry
+                    .listTags()
+                    .filter((tag) => tag.ownerCode === plugin.code)
+                    .map((tag) => ({
+                        tagName: tag.tagName,
+                        attributes: [...tag.attributes],
+                        render: tag.render,
+                    })),
             getDisplayConfig: async () => this.getDisplayConfig(),
             applyTheme: async (themeId: string) => this.applyDisplayTheme(themeId),
             ui: {
@@ -473,6 +493,10 @@ class PluginRuntime {
         }
     }
 
+    private clearMarkdownTagsForPlugin(pluginCode: string): void {
+        markdownRegistry.clearTagsForPlugin(pluginCode);
+    }
+
     private clearStalePluginThemes(activePluginCodes: Set<string>): void {
         const staleThemeIds = [...this.pluginThemes.entries()]
             .filter(([, theme]) => !activePluginCodes.has(theme.ownerCode))
@@ -484,6 +508,18 @@ class PluginRuntime {
         if (staleThemeIds.length > 0) {
             this.persistPluginThemeRegistryToStorage();
         }
+    }
+
+    private clearStaleMarkdownTags(activePluginCodes: Set<string>): void {
+        markdownRegistry.clearStaleTags(activePluginCodes);
+    }
+
+    private assertPluginPermission(plugin: BackendPluginItem, permission: string): void {
+        const permissions = Array.isArray(plugin.permissions) ? plugin.permissions : [];
+        if (permissions.includes(permission)) {
+            return;
+        }
+        throw new Error(`plugin '${plugin.code}' lacks required permission '${permission}'`);
     }
 
     private upsertThemeStyleElement(theme: RegisteredPluginTheme): void {

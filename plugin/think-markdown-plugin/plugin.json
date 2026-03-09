@@ -1,0 +1,15 @@
+{
+  "id": "think-markdown-plugin",
+  "code": "think-markdown-plugin",
+  "name": "Think Markdown Plugin",
+  "version": "0.1.0",
+  "entry": "dist/main.js",
+  "description": "Registers a renderer for <think> markdown blocks.",
+  "pluginTypes": [
+    "markdownType",
+    "interfaceType"
+  ],
+  "permissions": [
+    "markdown.register"
+  ]
+}

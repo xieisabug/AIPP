@@ -30,7 +30,7 @@ use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt};
 use crate::skills::{collect_skills_info_for_assistant, format_skills_prompt};
 use crate::state::activity_state::ConversationActivityManager;
 use crate::state::message_token::MessageTokenManager;
-use crate::template_engine::TemplateEngine;
+use crate::template_engine::build_template_engine;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use crate::{AcpSessionState, AppState, FeatureConfigState};
 use anyhow::Context;
@@ -280,11 +280,16 @@ pub async fn ask_ai(
     processed_request.assistant_id = actual_assistant_id;
     processed_request.prompt = cleaned_prompt;
 
-    let template_engine = TemplateEngine::new();
+    let template_engine = build_template_engine(&app_handle)
+        .map_err(|e| AppError::UnknownError(format!("Failed to build template engine: {}", e)))?;
     let mut template_context = HashMap::new();
 
     let selected_text = state.inner().selected_text.lock().await.clone();
     template_context.insert("selected_text".to_string(), selected_text);
+    if !processed_request.conversation_id.trim().is_empty() {
+        template_context
+            .insert("conversation_id".to_string(), processed_request.conversation_id.trim().to_string());
+    }
 
     let app_handle_clone = app_handle.clone();
     let assistant_detail = get_assistant(app_handle_clone, processed_request.assistant_id).unwrap();

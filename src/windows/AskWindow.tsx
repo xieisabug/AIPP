@@ -18,6 +18,9 @@ import { StreamEvent } from "../data/Conversation";
 import { ShineBorder } from "../components/magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { useAppShortcuts } from "../hooks/useAppShortcuts";
+import { useOperationPermission } from "../hooks/useOperationPermission";
+import { OperationPermissionDialog } from "../components/OperationPermissionDialog";
+import { pluginRuntime } from "../services/PluginRuntime";
 const appWindow = getCurrentWebviewWindow();
 
 interface AiResponse {
@@ -42,6 +45,9 @@ function AskWindow() {
     const [errorMessage, setErrorMessage] = useState<string>("");
     // 闪亮边框状态管理
     const [shouldShowShineBorder, setShouldShowShineBorder] = useState<boolean>(false);
+    const { pendingRequest, isDialogOpen, decisionError, handleDecision } = useOperationPermission({
+        conversationId: conversationId ? parseInt(conversationId, 10) : undefined,
+    });
 
     // 清除错误信息
     const clearError = useCallback(() => {
@@ -92,6 +98,29 @@ function AskWindow() {
             console.log("get_selected_text_event", event.payload);
             setSelectedText(event.payload);
         });
+    }, []);
+
+    useEffect(() => {
+        const loadPlugins = async (forceReload = false) => {
+            try {
+                if (forceReload) {
+                    await pluginRuntime.reloadPlugins();
+                } else {
+                    await pluginRuntime.loadPlugins();
+                }
+            } catch (error) {
+                console.error("Failed to load plugins in AskWindow:", error);
+            }
+        };
+
+        loadPlugins();
+        const unlistenPromise = listen("plugin_registry_changed", () => {
+            loadPlugins(true);
+        });
+
+        return () => {
+            unlistenPromise.then((unlisten) => unlisten()).catch(console.warn);
+        };
     }, []);
 
     // 单独监听错误通知事件，依赖 conversationId
@@ -409,6 +438,12 @@ function AskWindow() {
                     <IconButton icon={<Expand size={16} className="text-icon" />} onClick={openChatUI} dataAippSlot="ask-footer-open-chat-ui" />
                     <IconButton icon={<Settings size={16} className="text-icon" />} onClick={openConfig} dataAippSlot="ask-footer-open-config" />
                 </div>
+                <OperationPermissionDialog
+                    request={pendingRequest}
+                    isOpen={isDialogOpen}
+                    onDecision={handleDecision}
+                    errorMessage={decisionError}
+                />
             </div>
         </div>
     );

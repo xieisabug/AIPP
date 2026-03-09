@@ -1,0 +1,11 @@
+{
+  "name": "@aipp/run-script-bang-plugin",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Run script bang plugin source project (builds to dist/main.js)",
+  "scripts": {
+    "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
+    "watch": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json --watch",
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\""
+  }
+}

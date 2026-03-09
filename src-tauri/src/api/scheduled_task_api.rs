@@ -32,7 +32,7 @@ use crate::db::scheduled_task_db::{
 use crate::db::system_db::FeatureConfig;
 use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt, MCPInfoForAssistant};
 use crate::skills::{collect_skills_info_for_assistant, format_skills_prompt};
-use crate::template_engine::TemplateEngine;
+use crate::template_engine::build_template_engine;
 use crate::{AppState, FeatureConfigState, NameCacheState};
 use genai::chat::{ChatOptions, ToolCall};
 use tauri::Manager;
@@ -1688,7 +1688,7 @@ async fn execute_scheduled_task_inner(
         .ok_or_else(|| "助手未配置系统提示词".to_string())?;
 
     // ── 2. 渲染提示词 ──────────────────────────────────────────────
-    let template_engine = TemplateEngine::new();
+    let template_engine = build_template_engine(app_handle).map_err(|e| e.to_string())?;
     let mut template_context = HashMap::new();
     if let Some(state) = app_handle.try_state::<AppState>() {
         let selected_text = state.selected_text.lock().await.clone();

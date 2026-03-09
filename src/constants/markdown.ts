@@ -33,7 +33,7 @@ export const customUrlTransform = (url: string): string => {
 };
 
 // 简化的清理配置 - 移除无用的 mcp_tool_call 相关配置
-export const SANITIZE_SCHEMA = {
+export const BASE_SANITIZE_SCHEMA = {
     ...defaultSchema,
     tagNames: [
         ...(defaultSchema.tagNames || []),
@@ -99,9 +99,44 @@ export const SANITIZE_SCHEMA = {
     },
 };
 
+export const buildSanitizeSchema = (
+    dynamicTags: Array<{ tagName: string; attributes: string[] }>,
+) => {
+    const tagNames = new Set(BASE_SANITIZE_SCHEMA.tagNames || []);
+    const attributes = {
+        ...(BASE_SANITIZE_SCHEMA.attributes || {}),
+    } as Record<string, string[]>;
+
+    dynamicTags.forEach((tag) => {
+        const tagName = String(tag.tagName || "").trim().toLowerCase();
+        if (!tagName) {
+            return;
+        }
+        tagNames.add(tagName);
+        if (!Array.isArray(tag.attributes) || tag.attributes.length === 0) {
+            return;
+        }
+        const existing = new Set(attributes[tagName] || []);
+        tag.attributes.forEach((attribute) => {
+            const normalized = String(attribute || "").trim().toLowerCase();
+            if (!normalized) {
+                return;
+            }
+            existing.add(normalized);
+        });
+        attributes[tagName] = [...existing];
+    });
+
+    return {
+        ...BASE_SANITIZE_SCHEMA,
+        tagNames: [...tagNames],
+        attributes,
+    };
+};
+
 export const REHYPE_PLUGINS = [
     rehypeRaw,
-    [rehypeSanitize, SANITIZE_SCHEMA] as const,
+    [rehypeSanitize, BASE_SANITIZE_SCHEMA] as const,
     rehypeKatex,
 ] as const;
 

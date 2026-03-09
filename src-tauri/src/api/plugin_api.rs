@@ -21,6 +21,10 @@ pub struct PluginListItem {
     pub description: Option<String>,
     pub author: Option<String>,
     pub plugin_type: Vec<String>,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    #[serde(default)]
+    pub contributions: PluginContributions,
     pub is_active: bool,
     pub is_installed: bool,
 }
@@ -65,6 +69,10 @@ struct PluginManifest {
     plugin_types: Vec<String>,
     #[serde(default)]
     kinds: Vec<String>,
+    #[serde(default)]
+    permissions: Vec<String>,
+    #[serde(default)]
+    contributions: PluginContributions,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +83,129 @@ struct DiscoveredPlugin {
     description: Option<String>,
     author: Option<String>,
     plugin_type: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginContributions {
+    #[serde(default)]
+    pub bangs: Vec<PluginBangContribution>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginBangContribution {
+    pub name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub complete: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub bang_type: Option<String>,
+    pub executor: PluginBangExecutor,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum PluginBangExecutor {
+    #[serde(rename_all = "camelCase")]
+    BuiltinTool {
+        #[serde(default)]
+        command: Option<String>,
+        tool_name: String,
+        #[serde(default)]
+        arguments: HashMap<String, PluginBangArgumentSpec>,
+    },
+    #[serde(rename_all = "camelCase")]
+    McpTool {
+        server: String,
+        tool_name: String,
+        #[serde(default)]
+        arguments: HashMap<String, PluginBangArgumentSpec>,
+    },
+    #[serde(rename_all = "camelCase")]
+    PluginMcpTool {
+        server: PluginBangServerDefinition,
+        tool_name: String,
+        #[serde(default)]
+        arguments: HashMap<String, PluginBangArgumentSpec>,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginBangServerDefinition {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub transport_type: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub environment_variables: HashMap<String, String>,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub timeout: Option<i32>,
+    #[serde(default)]
+    pub is_long_running: bool,
+    #[serde(default)]
+    pub proxy_enabled: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginBangArgumentSpec {
+    pub source: PluginBangArgumentSource,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub index: Option<usize>,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
+    #[serde(default)]
+    pub value_type: Option<PluginBangArgumentValueType>,
+    #[serde(default)]
+    pub value: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginBangArgumentSource {
+    Raw,
+    Arg,
+    FirstArg,
+    Named,
+    Context,
+    Const,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginBangArgumentValueType {
+    String,
+    Number,
+    Boolean,
+    Json,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedPluginManifest {
+    pub code: String,
+    pub name: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub plugin_type: Vec<String>,
+    pub permissions: Vec<String>,
+    pub contributions: PluginContributions,
+    pub plugin_dir: PathBuf,
 }
 
 fn emit_plugin_registry_changed(app_handle: &tauri::AppHandle, reason: &str) {
@@ -136,6 +267,21 @@ fn normalize_plugin_types(raw_values: &[String]) -> Vec<String> {
     }
 }
 
+fn normalize_permissions(raw_values: &[String]) -> Vec<String> {
+    let mut unique = HashSet::new();
+    let mut normalized = Vec::new();
+    for value in raw_values {
+        let permission = value.trim().to_ascii_lowercase();
+        if permission.is_empty() {
+            continue;
+        }
+        if unique.insert(permission.clone()) {
+            normalized.push(permission);
+        }
+    }
+    normalized
+}
+
 fn parse_plugin_types(raw: Option<&str>) -> Vec<String> {
     let Some(raw_value) = raw else {
         return vec!["assistantType".to_string()];
@@ -184,6 +330,78 @@ fn read_plugin_manifest(path: &Path) -> Option<PluginManifest> {
     }
 }
 
+fn resolve_plugin_manifest_from_dir(dir_path: &Path, code: &str) -> Option<ResolvedPluginManifest> {
+    let main_js_path = dir_path.join("dist").join("main.js");
+    if !main_js_path.is_file() {
+        return None;
+    }
+
+    let manifest = read_plugin_manifest(&dir_path.join("plugin.json"));
+    let (
+        name,
+        version,
+        description,
+        author,
+        plugin_type,
+        permissions,
+        contributions,
+    ) = if let Some(manifest_data) = manifest {
+        let mut raw_types = manifest_data.plugin_types;
+        raw_types.extend(manifest_data.kinds);
+
+        let declared_code =
+            manifest_data.code.or(manifest_data.id).unwrap_or_else(|| code.to_string());
+        if declared_code != code {
+            warn!(
+                folder = %code,
+                manifest_code = %declared_code,
+                "Plugin folder code and manifest code mismatch, using folder code"
+            );
+        }
+
+        (
+            manifest_data.name.unwrap_or_else(|| code.to_string()),
+            manifest_data.version.unwrap_or_else(|| "0.0.0".to_string()),
+            manifest_data.description,
+            manifest_data.author,
+            normalize_plugin_types(&raw_types),
+            normalize_permissions(&manifest_data.permissions),
+            manifest_data.contributions,
+        )
+    } else {
+        (
+            code.to_string(),
+            "0.0.0".to_string(),
+            None,
+            None,
+            vec!["assistantType".to_string()],
+            Vec::new(),
+            PluginContributions::default(),
+        )
+    };
+
+    Some(ResolvedPluginManifest {
+        code: code.to_string(),
+        name,
+        version,
+        description,
+        author,
+        plugin_type,
+        permissions,
+        contributions,
+        plugin_dir: dir_path.to_path_buf(),
+    })
+}
+
+fn resolve_plugin_manifest_for_code(
+    app_handle: &tauri::AppHandle,
+    code: &str,
+) -> Option<ResolvedPluginManifest> {
+    get_plugin_root_path(app_handle)
+        .ok()
+        .and_then(|root| resolve_plugin_manifest_from_dir(&root.join(code), code))
+}
+
 fn discover_plugins(app_handle: &tauri::AppHandle) -> Result<Vec<DiscoveredPlugin>, String> {
     let plugin_root = get_plugin_root_path(app_handle)?;
     let mut discovered = Vec::new();
@@ -202,39 +420,18 @@ fn discover_plugins(app_handle: &tauri::AppHandle) -> Result<Vec<DiscoveredPlugi
             continue;
         }
 
-        let main_js_path = dir_path.join("dist").join("main.js");
-        if !main_js_path.is_file() {
+        let Some(manifest) = resolve_plugin_manifest_from_dir(&dir_path, &code) else {
             continue;
-        }
+        };
 
-        let manifest = read_plugin_manifest(&dir_path.join("plugin.json"));
-        let (name, version, description, author, plugin_type) =
-            if let Some(manifest_data) = manifest {
-                let mut raw_types = manifest_data.plugin_types;
-                raw_types.extend(manifest_data.kinds);
-
-                let declared_code =
-                    manifest_data.code.or(manifest_data.id).unwrap_or_else(|| code.clone());
-                if declared_code != code {
-                    warn!(
-                        folder = %code,
-                        manifest_code = %declared_code,
-                        "Plugin folder code and manifest code mismatch, using folder code"
-                    );
-                }
-
-                (
-                    manifest_data.name.unwrap_or_else(|| code.clone()),
-                    manifest_data.version.unwrap_or_else(|| "0.0.0".to_string()),
-                    manifest_data.description,
-                    manifest_data.author,
-                    normalize_plugin_types(&raw_types),
-                )
-            } else {
-                (code.clone(), "0.0.0".to_string(), None, None, vec!["assistantType".to_string()])
-            };
-
-        discovered.push(DiscoveredPlugin { code, name, version, description, author, plugin_type });
+        discovered.push(DiscoveredPlugin {
+            code,
+            name: manifest.name,
+            version: manifest.version,
+            description: manifest.description,
+            author: manifest.author,
+            plugin_type: manifest.plugin_type,
+        });
     }
 
     discovered.sort_by(|a, b| a.code.cmp(&b.code));
@@ -345,6 +542,7 @@ fn plugin_to_item(
     let status = db.get_plugin_status(plugin.plugin_id).map_err(|e| e.to_string())?;
     let plugin_type = get_plugin_types(db, plugin.plugin_id)?;
     let code = plugin.folder_name.clone();
+    let manifest = resolve_plugin_manifest_for_code(app_handle, &code);
     Ok(PluginListItem {
         plugin_id: plugin.plugin_id,
         name: plugin.name,
@@ -353,9 +551,41 @@ fn plugin_to_item(
         description: plugin.description,
         author: plugin.author,
         plugin_type,
+        permissions: manifest
+            .as_ref()
+            .map(|item| item.permissions.clone())
+            .unwrap_or_default(),
+        contributions: manifest
+            .map(|item| item.contributions)
+            .unwrap_or_default(),
         is_active: status.map(|value| value.is_active).unwrap_or(true),
         is_installed: plugin_entry_exists(app_handle, &code),
     })
+}
+
+pub fn get_enabled_plugin_manifests(
+    app_handle: &tauri::AppHandle,
+) -> Result<Vec<ResolvedPluginManifest>, String> {
+    let db = PluginDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    sync_registry(&db, app_handle)?;
+    let plugins = dedupe_plugins_by_code(db.get_plugins().map_err(|e| e.to_string())?);
+    let mut manifests = Vec::new();
+
+    for plugin in plugins {
+        let is_active = db
+            .get_plugin_status(plugin.plugin_id)
+            .map_err(|e| e.to_string())?
+            .map(|status| status.is_active)
+            .unwrap_or(true);
+        if !is_active || !plugin_entry_exists(app_handle, &plugin.folder_name) {
+            continue;
+        }
+        if let Some(manifest) = resolve_plugin_manifest_for_code(app_handle, &plugin.folder_name) {
+            manifests.push(manifest);
+        }
+    }
+
+    Ok(manifests)
 }
 
 #[tauri::command]
@@ -554,4 +784,74 @@ pub async fn set_plugin_data(
         updated_at: now,
     };
     db.add_plugin_data(&data).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn resolve_manifest_reads_permissions_and_bangs() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plugin_dir = temp_dir.path().join("demo-plugin");
+        fs::create_dir_all(plugin_dir.join("dist")).unwrap();
+        fs::write(plugin_dir.join("dist").join("main.js"), "// plugin").unwrap();
+        fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"
+            {
+              "id": "demo-plugin",
+              "code": "demo-plugin",
+              "name": "Demo Plugin",
+              "version": "0.1.0",
+              "pluginTypes": ["toolType"],
+              "permissions": ["bang.register", "markdown.register", "bang.register"],
+              "contributions": {
+                "bangs": [
+                  {
+                    "name": "directory",
+                    "aliases": ["dir"],
+                    "executor": {
+                      "type": "builtinTool",
+                      "command": "aipp:operation",
+                      "toolName": "list_directory",
+                      "arguments": {
+                        "path": {
+                          "source": "firstArg",
+                          "required": true
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+            "#,
+        )
+        .unwrap();
+
+        let raw_manifest = fs::read_to_string(plugin_dir.join("plugin.json")).unwrap();
+        let parsed_manifest: PluginManifest = serde_json::from_str(&raw_manifest).unwrap();
+        assert_eq!(
+            normalize_permissions(&parsed_manifest.permissions),
+            vec!["bang.register", "markdown.register"]
+        );
+
+        let manifest = resolve_plugin_manifest_from_dir(&plugin_dir, "demo-plugin").unwrap();
+        assert_eq!(manifest.code, "demo-plugin");
+        assert_eq!(manifest.permissions, vec!["bang.register", "markdown.register"]);
+        assert_eq!(manifest.contributions.bangs.len(), 1);
+        assert_eq!(manifest.contributions.bangs[0].aliases, vec!["dir"]);
+    }
+
+    #[test]
+    fn normalize_permissions_dedupes_and_lowers() {
+        let permissions = normalize_permissions(&[
+            " Bang.Register ".to_string(),
+            "markdown.register".to_string(),
+            "bang.register".to_string(),
+        ]);
+        assert_eq!(permissions, vec!["bang.register", "markdown.register"]);
+    }
 }

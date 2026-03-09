@@ -255,6 +255,44 @@ fn parse_tool_arguments(parameters: &str) -> Result<JsonMap<String, serde_json::
     }
 }
 
+/// 简单命令行解析，支持单双引号与反斜杠转义。
+fn split_command_line(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut buf = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escape = false;
+    for c in input.chars() {
+        if escape {
+            buf.push(c);
+            escape = false;
+            continue;
+        }
+        match c {
+            '\\' => {
+                escape = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            ' ' | '\t' | '\n' if !in_single && !in_double => {
+                if !buf.is_empty() {
+                    parts.push(buf.clone());
+                    buf.clear();
+                }
+            }
+            _ => buf.push(c),
+        }
+    }
+    if !buf.is_empty() {
+        parts.push(buf);
+    }
+    parts
+}
+
 /// 构建 `CallToolRequestParam` 结构。
 fn build_call_tool_request(
     tool_name: &str,
@@ -1733,7 +1771,7 @@ async fn execute_stdio_tool(
 ) -> Result<String> {
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
     let command = server.command.as_ref().ok_or_else(|| anyhow!("未为 stdio 传输指定命令"))?;
-    let parts: Vec<&str> = command.split_whitespace().collect();
+    let parts = split_command_line(command);
     if parts.is_empty() {
         bail!("命令为空");
     }
@@ -1745,7 +1783,7 @@ async fn execute_stdio_tool(
     let execution = async {
         let client = (())
             .serve(
-                TokioChildProcess::new(Command::new(parts[0]).configure(|cmd| {
+                TokioChildProcess::new(Command::new(&parts[0]).configure(|cmd| {
                     if parts.len() > 1 {
                         cmd.args(&parts[1..]);
                     }
