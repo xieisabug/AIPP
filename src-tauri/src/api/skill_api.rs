@@ -1,17 +1,22 @@
 //! Skill API - Tauri commands for skill management
 
+use crate::api::ai::config::get_network_proxy_from_config;
 use crate::db::skill_db::SkillDatabase;
 use crate::skills::installer::{
-    copy_dir_recursive, extract_zip_bytes_to_dir,
+    copy_dir_recursive, inspect_skill_archive as inspect_archive_internal,
     inspect_skill_install_recipe as inspect_recipe_internal,
+    install_skill_archive as install_archive_internal,
     install_skill_install_recipe as install_recipe_internal, load_skill_install_recipe_from_file,
-    SkillInstallPlan, SkillInstallRecipe, SkillInstallResult,
+    validate_skill_install_dirs, SkillArchiveInstallResult, SkillArchiveInspection, SkillInstallPlan,
+    SkillInstallRecipe, SkillInstallRecipeDir, SkillInstallRecipeSource, SkillInstallRecipeSourceType,
+    SkillInstallResult,
 };
 use crate::skills::parser::SkillParser;
 use crate::skills::scanner::SkillScanner;
 use crate::skills::types::{ScannedSkill, SkillContent, SkillSourceConfig, SkillWithConfig};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tauri::Manager;
 use tracing::{debug, error, info, warn};
 
@@ -20,14 +25,60 @@ use tracing::{debug, error, info, warn};
 pub struct OfficialSkill {
     pub id: String,
     pub name: String,
+    #[serde(default)]
     pub description: String,
-    pub version: String,
-    pub download_url: String,
-    pub source_url: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub source: Option<SkillInstallRecipeSource>,
+    #[serde(default)]
+    pub dirs: Vec<SkillInstallRecipeDir>,
+    #[serde(default)]
+    pub download_url: Option<String>,
+    #[serde(default)]
+    pub source_url: Option<String>,
 }
 
 /// Official skills API endpoint
-const OFFICIAL_SKILLS_API: &str = "https://aipp-helper.xieisabug.workers.dev/api/skills";
+const OFFICIAL_SKILLS_API: &str = "https://aipp-helper.xiejingyang.com/api/skills";
+
+const OFFICIAL_SKILLS_TIMEOUT_SECS: u64 = 5;
+
+impl OfficialSkill {
+    fn normalize(mut self) -> Result<Self, String> {
+        let resolved_source = self.resolve_source()?;
+        resolved_source.validate()?;
+        validate_skill_install_dirs(&self.dirs, false)?;
+        if self.source_url.is_none() {
+            self.source_url = Some(official_skill_source_url(&resolved_source));
+        }
+        self.source = Some(resolved_source);
+        Ok(self)
+    }
+
+    pub fn resolve_source(&self) -> Result<SkillInstallRecipeSource, String> {
+        if let Some(source) = &self.source {
+            source.validate()?;
+            return Ok(source.clone());
+        }
+
+        if let Some(download_url) = &self.download_url {
+            let source = SkillInstallRecipeSource {
+                source_type: SkillInstallRecipeSourceType::Zip,
+                repo: None,
+                git_ref: "main".to_string(),
+                url: Some(download_url.clone()),
+            };
+            source.validate()?;
+            return Ok(source);
+        }
+
+        Err(format!(
+            "Official skill {} is missing source information and download_url",
+            self.id
+        ))
+    }
+}
 
 /// Get the home directory path
 fn get_home_dir() -> PathBuf {
@@ -42,6 +93,44 @@ fn get_app_data_dir(app_handle: &tauri::AppHandle) -> PathBuf {
 /// Create a skill scanner with proper paths
 fn create_scanner(app_handle: &tauri::AppHandle) -> SkillScanner {
     SkillScanner::new(get_home_dir(), get_app_data_dir(app_handle))
+}
+
+async fn resolve_proxy_url(
+    app_handle: &tauri::AppHandle,
+    use_proxy: bool,
+) -> Result<Option<String>, String> {
+    if !use_proxy {
+        return Ok(None);
+    }
+
+    let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+    let config_feature_map = feature_config_state.config_feature_map.lock().await;
+    let proxy_url = get_network_proxy_from_config(&config_feature_map);
+
+    if proxy_url.is_none() {
+        return Err("当前未配置网络代理，请先在网络设置中填写代理地址".to_string());
+    }
+
+    Ok(proxy_url)
+}
+
+fn official_skill_source_url(source: &SkillInstallRecipeSource) -> String {
+    match source.source_type {
+        SkillInstallRecipeSourceType::GitHub => format!(
+            "https://github.com/{}/tree/{}",
+            source.repo.as_deref().unwrap_or_default(),
+            source.git_ref
+        ),
+        SkillInstallRecipeSourceType::Zip => source.url.clone().unwrap_or_default(),
+    }
+}
+
+fn inspection_to_selections(inspection: &SkillArchiveInspection) -> Vec<SkillInstallRecipeDir> {
+    inspection
+        .skills
+        .iter()
+        .map(|skill| SkillInstallRecipeDir { from: skill.from.clone(), to: skill.to.clone() })
+        .collect()
 }
 
 /// Migrate skills from old {app_data}/skills to new ~/.agents/skills
@@ -496,20 +585,7 @@ pub async fn fetch_official_skills(
     app_handle: tauri::AppHandle,
     use_proxy: bool,
 ) -> Result<Vec<OfficialSkill>, String> {
-    use crate::api::ai::config::get_network_proxy_from_config;
-    use std::time::Duration;
-
-    // 5 second timeout
-    const TIMEOUT_SECS: u64 = 5;
-
-    // Get proxy configuration if requested
-    let proxy_url = if use_proxy {
-        let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
-        let config_feature_map = feature_config_state.config_feature_map.lock().await;
-        get_network_proxy_from_config(&config_feature_map)
-    } else {
-        None
-    };
+    let proxy_url = resolve_proxy_url(&app_handle, use_proxy).await?;
 
     // Build client with optional proxy
     let client = if let Some(ref proxy) = proxy_url {
@@ -527,12 +603,15 @@ pub async fn fetch_official_skills(
     let fetch_future = async {
         let response = client
             .get(OFFICIAL_SKILLS_API)
-            .timeout(Duration::from_secs(TIMEOUT_SECS))
+            .timeout(Duration::from_secs(OFFICIAL_SKILLS_TIMEOUT_SECS))
             .send()
             .await
             .map_err(|e| {
                 if e.is_timeout() {
-                    format!("请求超时（超过{}秒），请尝试使用代理访问", TIMEOUT_SECS)
+                    format!(
+                        "请求超时（超过{}秒），请尝试使用代理访问",
+                        OFFICIAL_SKILLS_TIMEOUT_SECS
+                    )
                 } else if e.is_connect() {
                     format!("网络连接失败，请检查网络或尝试使用代理")
                 } else {
@@ -548,9 +627,13 @@ pub async fn fetch_official_skills(
             .json::<Vec<OfficialSkill>>()
             .await
             .map_err(|e| format!("Failed to parse skills response: {}", e))?;
+        let normalized_skills = skills
+            .into_iter()
+            .map(OfficialSkill::normalize)
+            .collect::<Result<Vec<_>, _>>()?;
 
-        info!("Fetched {} official skills", skills.len());
-        Ok::<Vec<OfficialSkill>, String>(skills)
+        info!("Fetched {} official skills", normalized_skills.len());
+        Ok::<Vec<OfficialSkill>, String>(normalized_skills)
     };
 
     fetch_future.await
@@ -567,20 +650,26 @@ pub async fn load_skill_install_recipe_file(
 /// Inspect a skill install recipe and return the resolved installation plan.
 #[tauri::command]
 pub async fn inspect_skill_install_recipe(
+    app_handle: tauri::AppHandle,
     recipe: SkillInstallRecipe,
+    use_proxy: bool,
 ) -> Result<SkillInstallPlan, String> {
     let skills_dir = get_home_dir().join(".agents/skills");
-    inspect_recipe_internal(&recipe, &skills_dir).await
+    let proxy_url = resolve_proxy_url(&app_handle, use_proxy).await?;
+    inspect_recipe_internal(&recipe, &skills_dir, proxy_url.as_deref()).await
 }
 
 /// Load a JSON skill install recipe from disk and inspect it.
 #[tauri::command]
 pub async fn inspect_skill_install_recipe_file(
+    app_handle: tauri::AppHandle,
     recipe_path: String,
+    use_proxy: bool,
 ) -> Result<SkillInstallPlan, String> {
     let recipe = load_skill_install_recipe_from_file(Path::new(&recipe_path))?;
     let skills_dir = get_home_dir().join(".agents/skills");
-    inspect_recipe_internal(&recipe, &skills_dir).await
+    let proxy_url = resolve_proxy_url(&app_handle, use_proxy).await?;
+    inspect_recipe_internal(&recipe, &skills_dir, proxy_url.as_deref()).await
 }
 
 /// Install skills from a structured recipe and refresh the scanned skills list.
@@ -588,9 +677,11 @@ pub async fn inspect_skill_install_recipe_file(
 pub async fn install_skill_install_recipe(
     app_handle: tauri::AppHandle,
     recipe: SkillInstallRecipe,
+    use_proxy: bool,
 ) -> Result<SkillInstallResult, String> {
     let skills_dir = get_home_dir().join(".agents/skills");
-    let result = install_recipe_internal(&recipe, &skills_dir).await?;
+    let proxy_url = resolve_proxy_url(&app_handle, use_proxy).await?;
+    let result = install_recipe_internal(&recipe, &skills_dir, proxy_url.as_deref()).await?;
     let _ = scan_skills(app_handle).await?;
     Ok(result)
 }
@@ -600,83 +691,62 @@ pub async fn install_skill_install_recipe(
 pub async fn install_skill_install_recipe_file(
     app_handle: tauri::AppHandle,
     recipe_path: String,
+    use_proxy: bool,
 ) -> Result<SkillInstallResult, String> {
     let recipe = load_skill_install_recipe_from_file(Path::new(&recipe_path))?;
     let skills_dir = get_home_dir().join(".agents/skills");
-    let result = install_recipe_internal(&recipe, &skills_dir).await?;
+    let proxy_url = resolve_proxy_url(&app_handle, use_proxy).await?;
+    let result = install_recipe_internal(&recipe, &skills_dir, proxy_url.as_deref()).await?;
     let _ = scan_skills(app_handle).await?;
     Ok(result)
 }
 
-/// Install an official skill by downloading and extracting the zip file
+/// Inspect a GitHub repository or zip source and return installable skills.
+#[tauri::command]
+pub async fn inspect_skill_archive_source(
+    app_handle: tauri::AppHandle,
+    source: SkillInstallRecipeSource,
+    dirs: Option<Vec<SkillInstallRecipeDir>>,
+    use_proxy: bool,
+) -> Result<SkillArchiveInspection, String> {
+    let skills_dir = get_home_dir().join(".agents/skills");
+    let proxy_url = resolve_proxy_url(&app_handle, use_proxy).await?;
+    inspect_archive_internal(&source, dirs.as_deref(), &skills_dir, proxy_url.as_deref()).await
+}
+
+/// Install selected skills from a GitHub repository or zip source.
+#[tauri::command]
+pub async fn install_skill_archive_source(
+    app_handle: tauri::AppHandle,
+    source: SkillInstallRecipeSource,
+    selections: Vec<SkillInstallRecipeDir>,
+    use_proxy: bool,
+) -> Result<SkillArchiveInstallResult, String> {
+    let skills_dir = get_home_dir().join(".agents/skills");
+    let proxy_url = resolve_proxy_url(&app_handle, use_proxy).await?;
+    let result =
+        install_archive_internal(&source, &selections, &skills_dir, proxy_url.as_deref()).await?;
+    let _ = scan_skills(app_handle).await?;
+    Ok(result)
+}
+
+/// Backward-compatible wrapper that installs every discovered skill from a zip URL.
 #[tauri::command]
 pub async fn install_official_skill(
     app_handle: tauri::AppHandle,
     download_url: String,
 ) -> Result<(), String> {
-    info!("Downloading skill from: {}", download_url);
-
-    // Create skills directory if it doesn't exist
+    let source = SkillInstallRecipeSource {
+        source_type: SkillInstallRecipeSourceType::Zip,
+        repo: None,
+        git_ref: "main".to_string(),
+        url: Some(download_url),
+    };
     let skills_dir = get_home_dir().join(".agents/skills");
-    std::fs::create_dir_all(&skills_dir)
-        .map_err(|e| format!("Failed to create skills directory: {}", e))?;
-
-    // Download zip file to a temporary location
-    let client = reqwest::Client::new();
-    let response = client
-        .get(&download_url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to download skill: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!("Download failed with status: {}", response.status()));
-    }
-
-    let bytes = response.bytes().await.map_err(|e| format!("Failed to read download: {}", e))?;
-
-    // Create a unique temporary extraction directory
-    let temp_extract_dir =
-        std::env::temp_dir().join(format!("skill_extract_{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&temp_extract_dir)
-        .map_err(|e| format!("Failed to create temp directory: {}", e))?;
-
-    info!("Extracting zip file to: {}", temp_extract_dir.display());
-
-    extract_zip_bytes_to_dir(bytes.as_ref(), &temp_extract_dir)?;
-
-    // Now move the extracted content to skills directory
-    // Check what's in the temp_extract_dir
-    let entries = std::fs::read_dir(&temp_extract_dir)
-        .map_err(|e| format!("Failed to read temp directory: {}", e))?;
-
-    let entries: Vec<_> = entries
-        .collect::<Result<_, _>>()
-        .map_err(|e| format!("Failed to collect directory entries: {}", e))?;
-
-    info!("Found {} entries in extracted zip", entries.len());
-
-    // Move each entry to the skills directory
-    for entry in entries {
-        let entry_path = entry.path();
-        let dest_path = skills_dir.join(entry.file_name());
-
-        // Use rename for efficiency (works if on same filesystem)
-        if std::fs::rename(&entry_path, &dest_path).is_err() {
-            // If rename fails (cross-device), fall back to copy
-            if entry_path.is_dir() {
-                copy_dir_recursive(&entry_path, &dest_path)?;
-            } else {
-                std::fs::copy(&entry_path, &dest_path)
-                    .map_err(|e| format!("Failed to copy file: {}", e))?;
-            }
-        }
-    }
-
-    // Clean up the temporary extraction directory
-    let _ = std::fs::remove_dir_all(&temp_extract_dir);
-
-    info!("Skill installed successfully to {}", skills_dir.display());
+    let inspection = inspect_archive_internal(&source, None, &skills_dir, None).await?;
+    let selections = inspection_to_selections(&inspection);
+    let _ = install_archive_internal(&source, &selections, &skills_dir, None).await?;
+    let _ = scan_skills(app_handle).await?;
     Ok(())
 }
 

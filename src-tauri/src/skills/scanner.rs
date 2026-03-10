@@ -217,9 +217,12 @@ impl SkillScanner {
         &self,
         file_path: &Path,
         source: &SkillSourceConfig,
-        base_path: &str,
+        _base_path: &str,
     ) -> Option<ScannedSkill> {
         let file_name = file_path.file_name()?.to_str()?;
+        if file_name != "SKILL.md" {
+            return None;
+        }
 
         // For single file sources, use filename as relative path
         let relative_path = file_name.to_string();
@@ -280,12 +283,11 @@ impl SkillScanner {
                 }
 
                 // Check if this folder is a skill
-                if let Some(skill) = self.scan_skill_folder_any_md(&entry_path, source) {
+                if let Some(skill) = self.scan_skill_folder_with_skill_md(&entry_path, source) {
                     skills.push(skill);
                 }
             }
-            // Also support single md files at root level for backward compatibility
-            // (e.g., Claude Code agents where each file is a separate "skill")
+            // Also support direct SKILL.md files at the source root when configured that way.
             else if entry_path.is_file()
                 && self.matches_pattern(&entry_path, &source.file_pattern)
             {
@@ -298,38 +300,17 @@ impl SkillScanner {
         skills
     }
 
-    /// Scan a skill folder - looks for SKILL.md first, then any .md file
-    fn scan_skill_folder_any_md(
+    /// Scan a skill folder - requires SKILL.md.
+    fn scan_skill_folder_with_skill_md(
         &self,
         folder_path: &Path,
         source: &SkillSourceConfig,
     ) -> Option<ScannedSkill> {
         let folder_name = folder_path.file_name()?.to_str()?;
 
-        // Priority 1: Look for SKILL.md (standard skill definition)
         let skill_md = folder_path.join("SKILL.md");
         if skill_md.exists() {
             return self.scan_skill_folder(&skill_md, source, folder_name);
-        }
-
-        // Priority 2: Look for README.md
-        let readme_md = folder_path.join("README.md");
-        if readme_md.exists() {
-            return self.scan_skill_folder(&readme_md, source, folder_name);
-        }
-
-        // Priority 3: Find any .md file in the folder
-        if let Ok(entries) = fs::read_dir(folder_path) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(ext) = path.extension() {
-                        if ext == "md" {
-                            return self.scan_skill_folder(&path, source, folder_name);
-                        }
-                    }
-                }
-            }
         }
 
         None
@@ -343,35 +324,9 @@ impl SkillScanner {
         plugin_name: &str,
         skill_name: &str,
     ) -> Option<ScannedSkill> {
-        // Priority 1: Look for SKILL.md (standard skill definition)
         let skill_md = folder_path.join("SKILL.md");
         if skill_md.exists() {
             return self.create_skill_from_file(&skill_md, source, plugin_name, skill_name);
-        }
-
-        // Priority 2: Look for README.md
-        let readme_md = folder_path.join("README.md");
-        if readme_md.exists() {
-            return self.create_skill_from_file(&readme_md, source, plugin_name, skill_name);
-        }
-
-        // Priority 3: Find any .md file in the folder
-        if let Ok(entries) = fs::read_dir(folder_path) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(ext) = path.extension() {
-                        if ext == "md" {
-                            return self.create_skill_from_file(
-                                &path,
-                                source,
-                                plugin_name,
-                                skill_name,
-                            );
-                        }
-                    }
-                }
-            }
         }
 
         None
@@ -527,10 +482,7 @@ impl SkillScanner {
                                         let skill_folder = skills_dir.join(skill_name);
 
                                         if skill_folder.is_dir() {
-                                            // Check if folder contains any .md file
-                                            return skill_folder.join("SKILL.md").exists()
-                                                || skill_folder.join("README.md").exists()
-                                                || self.has_any_md_file(&skill_folder);
+                                            return skill_folder.join("SKILL.md").exists();
                                         }
                                     }
                                 }
@@ -552,37 +504,19 @@ impl SkillScanner {
                                 // Directory source - check for skill folder
                                 let skill_folder = expanded_path.join(&relative_path);
                                 if skill_folder.is_dir() {
-                                    // Check if folder contains any .md file
-                                    if skill_folder.join("SKILL.md").exists()
-                                        || skill_folder.join("README.md").exists()
-                                        || self.has_any_md_file(&skill_folder)
-                                    {
+                                    if skill_folder.join("SKILL.md").exists() {
                                         return true;
                                     }
                                 }
                                 // Also check for direct file (backward compatibility)
                                 let direct_file = expanded_path.join(&relative_path);
-                                if direct_file.is_file() && direct_file.exists() {
+                                if direct_file.is_file()
+                                    && direct_file.exists()
+                                    && direct_file.file_name().and_then(|s| s.to_str()) == Some("SKILL.md")
+                                {
                                     return true;
                                 }
                             }
-                        }
-                    }
-                }
-            }
-        }
-        false
-    }
-
-    /// Check if a directory contains any .md file
-    fn has_any_md_file(&self, dir: &Path) -> bool {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(ext) = path.extension() {
-                        if ext == "md" {
-                            return true;
                         }
                     }
                 }
@@ -650,7 +584,7 @@ impl SkillScanner {
                                 // Check for skill folder first
                                 let skill_folder = expanded_path.join(&relative_path);
                                 if skill_folder.is_dir() {
-                                    return self.scan_skill_folder_any_md(&skill_folder, source);
+                                    return self.scan_skill_folder_with_skill_md(&skill_folder, source);
                                 }
                                 // Also check for direct file (backward compatibility)
                                 let direct_file = expanded_path.join(&relative_path);
@@ -701,10 +635,10 @@ mod tests {
 
     #[test]
     fn test_scan_skill_folder_with_skill_md() {
-        let (scanner, _, app_data_dir) = create_test_scanner();
+        let (scanner, home_dir, _) = create_test_scanner();
 
         // Create a skill folder with SKILL.md
-        let skills_dir = app_data_dir.path().join("skills");
+        let skills_dir = home_dir.path().join(".agents/skills");
         fs::create_dir_all(&skills_dir).unwrap();
 
         let skill_folder = skills_dir.join("test_skill");
@@ -737,11 +671,10 @@ description: A test skill for unit testing
     }
 
     #[test]
-    fn test_scan_skill_folder_with_any_md() {
-        let (scanner, _, app_data_dir) = create_test_scanner();
+    fn test_scan_skill_folder_without_skill_md_is_ignored() {
+        let (scanner, home_dir, _) = create_test_scanner();
 
-        // Create a skill folder with just a random .md file (no SKILL.md)
-        let skills_dir = app_data_dir.path().join("skills");
+        let skills_dir = home_dir.path().join(".agents/skills");
         fs::create_dir_all(&skills_dir).unwrap();
 
         let skill_folder = skills_dir.join("my_custom_skill");
@@ -764,16 +697,12 @@ description: A skill with non-standard filename
         // Scan
         let skills = scanner.scan_all();
 
-        // Should find the skill by folder name
         let custom_skill = skills.iter().find(|s| s.relative_path == "my_custom_skill");
-        assert!(custom_skill.is_some());
-
-        let skill = custom_skill.unwrap();
-        assert_eq!(skill.display_name, "Custom Skill");
+        assert!(custom_skill.is_none());
     }
 
     #[test]
-    fn test_scan_skill_folder_with_skills_md_without_frontmatter_uses_folder_name() {
+    fn test_scan_skill_folder_with_non_standard_md_name_is_ignored() {
         let (scanner, home_dir, _) = create_test_scanner();
 
         let skills_dir = home_dir.path().join(".agents/skills");
@@ -795,11 +724,7 @@ description: A skill with non-standard filename
 
         let skills = scanner.scan_all();
         let scanned = skills.iter().find(|s| s.relative_path == "AIPP-artifact");
-        assert!(scanned.is_some());
-
-        let skill = scanned.unwrap();
-        assert_eq!(skill.metadata.name, Some("SKILLS".to_string()));
-        assert_eq!(skill.display_name, "AIPP-artifact");
+        assert!(scanned.is_none());
     }
 
     #[test]
@@ -810,23 +735,6 @@ description: A skill with non-standard filename
         assert!(!scanner.matches_pattern(Path::new("test.txt"), "*.md"));
         assert!(scanner.matches_pattern(Path::new("SKILL.md"), "SKILL.md"));
         assert!(!scanner.matches_pattern(Path::new("skill.md"), "SKILL.md"));
-    }
-
-    #[test]
-    fn test_has_any_md_file() {
-        let (scanner, _, app_data_dir) = create_test_scanner();
-
-        let test_dir = app_data_dir.path().join("test_dir");
-        fs::create_dir_all(&test_dir).unwrap();
-
-        // Initially no md file
-        assert!(!scanner.has_any_md_file(&test_dir));
-
-        // Add an md file
-        let md_file = test_dir.join("readme.md");
-        fs::File::create(&md_file).unwrap();
-
-        assert!(scanner.has_any_md_file(&test_dir));
     }
 
     #[test]
