@@ -78,7 +78,6 @@ interface SkillArchiveInspection {
     download_url: string;
     target_directory: string;
     skills: SkillInstallPlanSkill[];
-    steps: string[];
 }
 
 interface SkillArchiveInstallResult {
@@ -984,20 +983,12 @@ const SkillInstallGuideDialog: React.FC<SkillInstallGuideDialogProps> = ({
                 </div>
             </div>
 
-            <div className="rounded-lg border p-3 text-xs text-muted-foreground space-y-2">
-                <div className="font-medium text-foreground">安装流程</div>
-                <ol className="space-y-1 list-decimal pl-4">
-                    {inspection.steps.slice(0, 6).map((step) => (
-                        <li key={step}>{step}</li>
-                    ))}
-                </ol>
-            </div>
         </div>
     ) : null;
 
     return (
         <Dialog open={isOpen} onOpenChange={(open) => !open && handleCloseDialog()}>
-            <DialogContent className="w-[50vw] max-w-[50vw] max-h-[85vh] overflow-hidden flex flex-col">
+            <DialogContent className="!w-[50vw] !max-w-[50vw] max-h-[85vh] overflow-hidden flex flex-col">
                 <DialogHeader>
                     <DialogTitle className="flex items-center gap-2">
                         <BookOpen className="h-5 w-5" />

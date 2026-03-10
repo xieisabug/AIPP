@@ -63,7 +63,6 @@ pub struct SkillInstallPlan {
     pub download_url: String,
     pub target_directory: String,
     pub skills: Vec<SkillInstallPlanSkill>,
-    pub steps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,7 +83,6 @@ pub struct SkillArchiveInspection {
     pub download_url: String,
     pub target_directory: String,
     pub skills: Vec<SkillInstallPlanSkill>,
-    pub steps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,21 +301,7 @@ pub async fn inspect_skill_archive(
     proxy_url: Option<&str>,
 ) -> Result<SkillArchiveInspection, String> {
     let archive = download_and_extract_source(source, proxy_url).await?;
-    let uses_configured_dirs = configured_dirs.is_some_and(|dirs| !dirs.is_empty());
     let skills = build_archive_plan_skills(source, configured_dirs, &archive.repo_root, skills_dir)?;
-    let resolve_step = if uses_configured_dirs {
-        format!("Resolved {} configured skill directories", skills.len())
-    } else {
-        format!("Discovered {} installable skill directories", skills.len())
-    };
-
-    let steps = vec![
-        format!("Download archive: {}", archive.download_url),
-        "Extract archive to a temporary directory".to_string(),
-        "Resolve the repository root inside the extracted archive".to_string(),
-        resolve_step,
-        "Choose which skills to install into ~/.agents/skills".to_string(),
-    ];
 
     Ok(SkillArchiveInspection {
         source: source.clone(),
@@ -325,7 +309,6 @@ pub async fn inspect_skill_archive(
         download_url: archive.download_url,
         target_directory: skills_dir.to_string_lossy().to_string(),
         skills,
-        steps,
     })
 }
 
@@ -532,29 +515,6 @@ fn build_install_plan(
     let skills = build_plan_skills_from_dir_mappings(&recipe.dirs, repo_root, skills_dir)?;
 
     let source_label = recipe.source.source_label();
-    let mut steps = vec![
-        format!("Download archive for {}: {}", source_label, download_url),
-        "Extract archive to a temporary directory".to_string(),
-        "Resolve the repository root inside the extracted archive".to_string(),
-    ];
-
-    for skill in &skills {
-        let target_path = skills_dir.join(&skill.to);
-        steps.push(if skill.will_replace {
-            format!("Replace {} with {}", skill.from, target_path.display())
-        } else {
-            format!("Copy {} to {}", skill.from, target_path.display())
-        });
-
-        if skill.detected_entry_file != skill.normalized_entry_file {
-            steps.push(format!(
-                "Normalize entry file {} to {} inside {}",
-                skill.detected_entry_file, skill.normalized_entry_file, skill.to
-            ));
-        }
-    }
-
-    steps.push("Refresh installed skills with scan_skills".to_string());
 
     Ok(SkillInstallPlan {
         recipe_id: recipe.id.clone(),
@@ -564,7 +524,6 @@ fn build_install_plan(
         download_url: download_url.to_string(),
         target_directory: skills_dir.to_string_lossy().to_string(),
         skills,
-        steps,
     })
 }
 
