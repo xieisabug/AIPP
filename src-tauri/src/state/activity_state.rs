@@ -11,13 +11,25 @@ use crate::api::ai::events::{
 };
 use crate::db::mcp_db::MCPDatabase;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActiveMcpStatus {
+    Pending,
+    Executing,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActiveMcpCall {
+    call_id: i64,
+    status: ActiveMcpStatus,
+}
+
 /// 对话活动状态（后端单一真相源）
 #[derive(Clone, Debug)]
 struct ConversationActivity {
     current: ActivityFocus,
     pending_user_message_id: Option<i64>,
     streaming_message_id: Option<i64>,
-    active_mcp_call_ids: Vec<i64>,
+    active_mcp_calls: Vec<ActiveMcpCall>,
     epoch: u64,
     revision: u64,
 }
@@ -28,11 +40,37 @@ impl Default for ConversationActivity {
             current: ActivityFocus::None,
             pending_user_message_id: None,
             streaming_message_id: None,
-            active_mcp_call_ids: Vec::new(),
+            active_mcp_calls: Vec::new(),
             epoch: 0,
             revision: 0,
         }
     }
+}
+
+impl ConversationActivity {
+    fn upsert_mcp_call(&mut self, call_id: i64, status: ActiveMcpStatus) {
+        self.finish_mcp_call(call_id);
+
+        let active_call = ActiveMcpCall { call_id, status };
+        match status {
+            ActiveMcpStatus::Pending => {
+                let insert_at = self
+                    .active_mcp_calls
+                    .iter()
+                    .position(|call| call.status == ActiveMcpStatus::Executing)
+                    .unwrap_or(self.active_mcp_calls.len());
+                self.active_mcp_calls.insert(insert_at, active_call);
+            }
+            ActiveMcpStatus::Executing => {
+                self.active_mcp_calls.push(active_call);
+            }
+        }
+    }
+
+    fn finish_mcp_call(&mut self, call_id: i64) {
+        self.active_mcp_calls.retain(|call| call.call_id != call_id);
+    }
+
 }
 
 /// 对话活动状态管理器
@@ -53,8 +91,13 @@ impl ConversationActivityManager {
     }
 
     fn recompute_focus(activity: &ConversationActivity) -> ActivityFocus {
-        if let Some(call_id) = activity.active_mcp_call_ids.last() {
-            return ActivityFocus::McpExecuting { call_id: *call_id };
+        if let Some(call) = activity
+            .active_mcp_calls
+            .iter()
+            .rev()
+            .find(|call| call.status == ActiveMcpStatus::Executing)
+        {
+            return ActivityFocus::McpExecuting { call_id: call.call_id };
         }
 
         if let Some(message_id) = activity.streaming_message_id {
@@ -66,22 +109,6 @@ impl ConversationActivityManager {
         }
 
         ActivityFocus::None
-    }
-
-    fn focus_to_target(focus: &ActivityFocus) -> ShineTarget {
-        match focus {
-            ActivityFocus::None => ShineTarget::None,
-            ActivityFocus::UserPending { message_id } => {
-                ShineTarget::Message { message_id: *message_id, reason: "user_pending".to_string() }
-            }
-            ActivityFocus::AssistantStreaming { message_id } => ShineTarget::Message {
-                message_id: *message_id,
-                reason: "assistant_streaming".to_string(),
-            },
-            ActivityFocus::McpExecuting { call_id } => {
-                ShineTarget::McpCall { call_id: *call_id, reason: "mcp_executing".to_string() }
-            }
-        }
     }
 
     fn focus_to_runtime_phase(focus: &ActivityFocus) -> ConversationRuntimePhase {
@@ -113,11 +140,27 @@ impl ConversationActivityManager {
         conversation_id: i64,
         activity: &ConversationActivity,
     ) -> ConversationShineState {
+        let primary_target = match &activity.current {
+            ActivityFocus::None => ShineTarget::None,
+            ActivityFocus::UserPending { message_id } => ShineTarget::Message {
+                message_id: *message_id,
+                reason: "user_pending".to_string(),
+            },
+            ActivityFocus::AssistantStreaming { message_id } => ShineTarget::Message {
+                message_id: *message_id,
+                reason: "assistant_streaming".to_string(),
+            },
+            ActivityFocus::McpExecuting { call_id } => ShineTarget::McpCall {
+                call_id: *call_id,
+                reason: "mcp_executing".to_string(),
+            },
+        };
+
         ConversationShineState {
             conversation_id,
             epoch: activity.epoch,
             revision: activity.revision,
-            primary_target: Self::focus_to_target(&activity.current),
+            primary_target,
         }
     }
 
@@ -151,7 +194,10 @@ impl ConversationActivityManager {
         );
     }
 
-    fn fetch_active_mcp_call_ids(app_handle: &tauri::AppHandle, conversation_id: i64) -> Vec<i64> {
+    fn fetch_active_mcp_calls(
+        app_handle: &tauri::AppHandle,
+        conversation_id: i64,
+    ) -> Vec<ActiveMcpCall> {
         let db = match MCPDatabase::new(app_handle) {
             Ok(db) => db,
             Err(e) => {
@@ -168,13 +214,33 @@ impl ConversationActivityManager {
             }
         };
 
-        let mut active: Vec<i64> = calls
-            .into_iter()
-            .filter(|call| call.status == "pending" || call.status == "executing")
-            .map(|call| call.id)
+        let mut pending: Vec<(String, i64)> = calls
+            .iter()
+            .filter(|call| call.status == "pending")
+            .map(|call| (call.created_time.clone(), call.id))
             .collect();
-        active.sort_unstable();
-        active
+        pending.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+
+        let mut executing: Vec<(String, i64)> = calls
+            .iter()
+            .filter(|call| call.status == "executing")
+            .map(|call| {
+                (
+                    call.started_time.clone().unwrap_or_else(|| call.created_time.clone()),
+                    call.id,
+                )
+            })
+            .collect();
+        executing.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+
+        pending
+            .into_iter()
+            .map(|(_, call_id)| ActiveMcpCall { call_id, status: ActiveMcpStatus::Pending })
+            .chain(executing.into_iter().map(|(_, call_id)| ActiveMcpCall {
+                call_id,
+                status: ActiveMcpStatus::Executing,
+            }))
+            .collect()
     }
 
     async fn update_state<F>(&self, app_handle: &tauri::AppHandle, conversation_id: i64, updater: F)
@@ -192,7 +258,7 @@ impl ConversationActivityManager {
             let state_changed = activity.current != before.current
                 || activity.pending_user_message_id != before.pending_user_message_id
                 || activity.streaming_message_id != before.streaming_message_id
-                || activity.active_mcp_call_ids != before.active_mcp_call_ids
+                || activity.active_mcp_calls != before.active_mcp_calls
                 || activity.epoch != before.epoch;
 
             if state_changed {
@@ -269,7 +335,7 @@ impl ConversationActivityManager {
         self.update_state(app_handle, conversation_id, |activity| {
             activity.pending_user_message_id = None;
             activity.streaming_message_id = None;
-            activity.active_mcp_call_ids.clear();
+            activity.active_mcp_calls.clear();
         })
         .await;
     }
@@ -280,11 +346,11 @@ impl ConversationActivityManager {
         app_handle: &tauri::AppHandle,
         conversation_id: i64,
     ) {
-        let active_calls = Self::fetch_active_mcp_call_ids(app_handle, conversation_id);
+        let active_calls = Self::fetch_active_mcp_calls(app_handle, conversation_id);
         self.update_state(app_handle, conversation_id, move |activity| {
             activity.pending_user_message_id = None;
             activity.streaming_message_id = None;
-            activity.active_mcp_call_ids = active_calls;
+            activity.active_mcp_calls = active_calls;
         })
         .await;
     }
@@ -301,7 +367,7 @@ impl ConversationActivityManager {
             activity.epoch = activity.epoch.saturating_add(1);
             activity.pending_user_message_id = Some(message_id);
             activity.streaming_message_id = None;
-            activity.active_mcp_call_ids.clear();
+            activity.active_mcp_calls.clear();
         })
         .await;
     }
@@ -320,6 +386,19 @@ impl ConversationActivityManager {
         .await;
     }
 
+    /// 设置 MCP 工具调用待执行状态
+    pub async fn set_mcp_pending(
+        &self,
+        app_handle: &tauri::AppHandle,
+        conversation_id: i64,
+        call_id: i64,
+    ) {
+        self.update_state(app_handle, conversation_id, |activity| {
+            activity.upsert_mcp_call(call_id, ActiveMcpStatus::Pending);
+        })
+        .await;
+    }
+
     /// 设置 MCP 工具调用执行状态
     pub async fn set_mcp_executing(
         &self,
@@ -328,19 +407,29 @@ impl ConversationActivityManager {
         call_id: i64,
     ) {
         self.update_state(app_handle, conversation_id, |activity| {
-            if let Some(idx) = activity.active_mcp_call_ids.iter().position(|id| *id == call_id) {
-                activity.active_mcp_call_ids.remove(idx);
-            }
-            activity.active_mcp_call_ids.push(call_id);
+            activity.upsert_mcp_call(call_id, ActiveMcpStatus::Executing);
+        })
+        .await;
+    }
+
+    /// 移除已经完成的 MCP 调用，让消息流式状态及时接管
+    pub async fn finish_mcp_call(
+        &self,
+        app_handle: &tauri::AppHandle,
+        conversation_id: i64,
+        call_id: i64,
+    ) {
+        self.update_state(app_handle, conversation_id, |activity| {
+            activity.finish_mcp_call(call_id);
         })
         .await;
     }
 
     /// MCP 完成后从数据库重同步活跃调用，再重新计算焦点
     pub async fn restore_after_mcp(&self, app_handle: &tauri::AppHandle, conversation_id: i64) {
-        let active_calls = Self::fetch_active_mcp_call_ids(app_handle, conversation_id);
+        let active_calls = Self::fetch_active_mcp_calls(app_handle, conversation_id);
         self.update_state(app_handle, conversation_id, move |activity| {
-            activity.active_mcp_call_ids = active_calls;
+            activity.active_mcp_calls = active_calls;
         })
         .await;
     }
@@ -355,5 +444,59 @@ impl ConversationActivityManager {
 impl Default for ConversationActivityManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recompute_focus_prefers_newest_executing_call() {
+        let mut activity = ConversationActivity::default();
+        activity.upsert_mcp_call(11, ActiveMcpStatus::Pending);
+        activity.upsert_mcp_call(12, ActiveMcpStatus::Pending);
+        activity.upsert_mcp_call(11, ActiveMcpStatus::Executing);
+        activity.upsert_mcp_call(13, ActiveMcpStatus::Executing);
+
+        assert_eq!(
+            ConversationActivityManager::recompute_focus(&activity),
+            ActivityFocus::McpExecuting { call_id: 13 }
+        );
+    }
+
+    #[test]
+    fn recompute_focus_ignores_pending_calls_when_waiting_for_user() {
+        let mut activity = ConversationActivity::default();
+        activity.upsert_mcp_call(21, ActiveMcpStatus::Pending);
+        activity.upsert_mcp_call(22, ActiveMcpStatus::Pending);
+
+        assert_eq!(
+            ConversationActivityManager::recompute_focus(&activity),
+            ActivityFocus::None
+        );
+    }
+
+    #[test]
+    fn pending_mcp_does_not_override_streaming_message_focus() {
+        let mut activity = ConversationActivity::default();
+        activity.streaming_message_id = Some(99);
+        activity.upsert_mcp_call(31, ActiveMcpStatus::Pending);
+        assert_eq!(
+            ConversationActivityManager::recompute_focus(&activity),
+            ActivityFocus::AssistantStreaming { message_id: 99 }
+        );
+    }
+
+    #[test]
+    fn finish_mcp_call_hands_off_to_streaming_message() {
+        let mut activity = ConversationActivity::default();
+        activity.streaming_message_id = Some(99);
+        activity.upsert_mcp_call(31, ActiveMcpStatus::Executing);
+        activity.finish_mcp_call(31);
+        assert_eq!(
+            ConversationActivityManager::recompute_focus(&activity),
+            ActivityFocus::AssistantStreaming { message_id: 99 }
+        );
     }
 }

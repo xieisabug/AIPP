@@ -630,12 +630,23 @@ impl AcpTauriClient {
 
     async fn sync_tool_shine_status(&self, call_id: i64, status: &str) {
         if let Some(activity_manager) = self.app_handle.try_state::<ConversationActivityManager>() {
-            if status == "pending" || status == "executing" {
-                activity_manager
-                    .set_mcp_executing(&self.app_handle, self.conversation_id, call_id)
-                    .await;
-            } else {
-                activity_manager.restore_after_mcp(&self.app_handle, self.conversation_id).await;
+            match status {
+                "pending" => {
+                    activity_manager
+                        .set_mcp_pending(&self.app_handle, self.conversation_id, call_id)
+                        .await;
+                }
+                "executing" => {
+                    activity_manager
+                        .set_mcp_executing(&self.app_handle, self.conversation_id, call_id)
+                        .await;
+                }
+                "success" | "failed" => {
+                    activity_manager
+                        .finish_mcp_call(&self.app_handle, self.conversation_id, call_id)
+                        .await;
+                }
+                _ => {}
             }
         }
     }

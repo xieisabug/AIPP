@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState, startTransition } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, startTransition } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -47,7 +48,10 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     >(new Map());
 
     // ShineBorder 动画状态管理
-    const [shiningMessageIds, setShiningMessageIds] = useState<Set<number>>(
+    const [activityShiningMessageIds, setActivityShiningMessageIds] = useState<Set<number>>(
+        new Set(),
+    );
+    const [manualShiningMessageIds, setManualShiningMessageIds] = useState<Set<number>>(
         new Set(),
     );
 
@@ -76,6 +80,16 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     const [shiningMcpCallId, setShiningMcpCallId] = useState<number | null>(null);
     const streamingMessagesRef = useRef<Map<number, StreamEvent>>(new Map());
 
+    const shiningMessageIds = useMemo(() => {
+        if (manualShiningMessageIds.size === 0) {
+            return activityShiningMessageIds;
+        }
+        if (activityShiningMessageIds.size === 0) {
+            return manualShiningMessageIds;
+        }
+        return new Set([...activityShiningMessageIds, ...manualShiningMessageIds]);
+    }, [activityShiningMessageIds, manualShiningMessageIds]);
+
     // 事件监听取消订阅引用
     const unsubscribeRef = useRef<Promise<() => void> | null>(null);
     const hasUnsubscribedRef = useRef<boolean>(false);
@@ -95,6 +109,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     const mcpPollInFlightRef = useRef<boolean>(false);
     const mcpPollBackoffMsRef = useRef<number>(MCP_POLL_BASE_INTERVAL_MS);
     const activeMcpCallIdsRef = useRef<Set<number>>(new Set());
+    const mcpCompletionSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const idleStateCleanupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const isUnmountedRef = useRef<boolean>(false);
 
@@ -137,10 +152,19 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         console.log(`[MCP] stop compensation polling: ${reason}`);
     }, []);
 
+    const stopMcpCompletionSync = useCallback((reason: string) => {
+        if (mcpCompletionSyncTimerRef.current) {
+            clearTimeout(mcpCompletionSyncTimerRef.current);
+            mcpCompletionSyncTimerRef.current = null;
+        }
+        console.log(`[MCP] stop completion sync: ${reason}`);
+    }, []);
+
     const invalidateMcpCompensationPolling = useCallback((reason: string) => {
         mcpPollGenerationRef.current += 1;
         stopMcpCompensationPolling(reason);
-    }, [stopMcpCompensationPolling]);
+        stopMcpCompletionSync(reason);
+    }, [stopMcpCompensationPolling, stopMcpCompletionSync]);
 
     const cancelIdleTransientReset = useCallback(() => {
         if (idleStateCleanupTimerRef.current) {
@@ -226,17 +250,17 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             switch (state.primary_target.target_type) {
                 case "message":
                     cancelIdleTransientReset();
-                    setShiningMessageIds(new Set([state.primary_target.message_id]));
+                    setActivityShiningMessageIds(new Set([state.primary_target.message_id]));
                     setShiningMcpCallId(null);
                     break;
                 case "mcp_call":
                     cancelIdleTransientReset();
-                    setShiningMessageIds(new Set());
+                    setActivityShiningMessageIds(new Set());
                     setShiningMcpCallId(state.primary_target.call_id);
                     break;
                 case "none":
                 default:
-                    setShiningMessageIds(new Set());
+                    setActivityShiningMessageIds(new Set());
                     setShiningMcpCallId(null);
                     resetIdleTransientState("shine state is none", {
                         epoch: state.epoch,
@@ -250,6 +274,19 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
     // 兼容保留：边框由 shine_state_snapshot 驱动，此方法保持为无副作用接口
     const updateShiningMessages = useCallback(() => { }, []);
+
+    const setShiningMessageIds = useCallback<Dispatch<SetStateAction<Set<number>>>>(
+        (nextState) => {
+            setManualShiningMessageIds((prev) => {
+                const resolvedState =
+                    typeof nextState === "function"
+                        ? nextState(prev)
+                        : nextState;
+                return new Set(resolvedState);
+            });
+        },
+        []
+    );
 
     useEffect(() => {
         activeMcpCallIdsRef.current = activeMcpCallIds;
@@ -324,6 +361,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             `[MCP] applyMcpToolCalls -> total=${calls.length}, active=${activeSet.size}`,
             { ids: calls.map((c) => c.id) },
         );
+        activeMcpCallIdsRef.current = activeSet;
         setMCPToolCallStates(stateMap);
         setActiveMcpCallIds(activeSet);
     }, []);
@@ -375,6 +413,43 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         [options.conversationId, applyMcpToolCalls],
     );
 
+    const scheduleMcpCompletionSync = useCallback(
+        (conversationIdNum: number, attempt = 0, generation = mcpPollGenerationRef.current) => {
+            if (
+                !conversationIdNum ||
+                Number.isNaN(conversationIdNum) ||
+                isUnmountedRef.current ||
+                generation !== mcpPollGenerationRef.current
+            ) {
+                return;
+            }
+
+            if (mcpCompletionSyncTimerRef.current) {
+                clearTimeout(mcpCompletionSyncTimerRef.current);
+            }
+
+            const delayMs = attempt === 0 ? 180 : attempt === 1 ? 500 : 1200;
+            mcpCompletionSyncTimerRef.current = setTimeout(() => {
+                mcpCompletionSyncTimerRef.current = null;
+
+                if (
+                    isUnmountedRef.current ||
+                    generation !== mcpPollGenerationRef.current
+                ) {
+                    return;
+                }
+
+                syncRuntimeState(conversationIdNum);
+                syncShineState(conversationIdNum);
+
+                if (attempt < 2) {
+                    scheduleMcpCompletionSync(conversationIdNum, attempt + 1, generation);
+                }
+            }, delayMs);
+        },
+        [syncRuntimeState, syncShineState],
+    );
+
     const scheduleMcpCompensationPoll = useCallback(
         (delayMs: number, conversationIdNum: number, generation: number) => {
             if (isUnmountedRef.current || generation !== mcpPollGenerationRef.current) {
@@ -414,6 +489,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     }
 
                     if (activeMcpCallIdsRef.current.size === 0) {
+                        scheduleMcpCompletionSync(conversationIdNum, 0, generation);
                         stopMcpCompensationPolling("all active calls completed");
                         return;
                     }
@@ -428,7 +504,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 })();
             }, delayMs);
         },
-        [refreshMcpToolCalls, stopMcpCompensationPolling],
+        [refreshMcpToolCalls, scheduleMcpCompletionSync, stopMcpCompensationPolling],
     );
 
     useEffect(() => {
@@ -674,6 +750,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     const mergedStatus = mcpUpdateData.status;
 
                     if (mergedStatus === "executing" || mergedStatus === "pending") {
+                        stopMcpCompletionSync("MCP call became active");
                         newSet.add(mcpUpdateData.call_id);
                     } else if (mergedStatus === "success" || mergedStatus === "failed") {
                         newSet.delete(mcpUpdateData.call_id);
@@ -683,7 +760,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     }
 
                     if (newSet.size === 0) {
+                        syncRuntimeState(mcpUpdateData.conversation_id);
                         syncShineState(mcpUpdateData.conversation_id);
+                        scheduleMcpCompletionSync(mcpUpdateData.conversation_id);
                     }
 
                     // 立即同步 ref，避免 stream_complete 紧随其后时读取到旧值
@@ -707,7 +786,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 updateStreamingMessagesState(new Map());
                 setPendingUserMessageId(null);
                 setStreamingAssistantMessageIds(new Set());
-                setActiveMcpCallIds(new Set());
+                const clearedActiveSet = new Set<number>();
+                activeMcpCallIdsRef.current = clearedActiveSet;
+                setActiveMcpCallIds(clearedActiveSet);
                 // 保留已完成的 MCP 工具调用状态（搜索结果等），仅移除进行中的
                 setMCPToolCallStates((prev) => {
                     const kept = new Map<number, MCPToolCallUpdateEvent>();
@@ -771,6 +852,8 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             refreshMcpToolCalls,
             invalidateMcpCompensationPolling,
             stopMcpCompensationPolling,
+            stopMcpCompletionSync,
+            scheduleMcpCompletionSync,
             syncRuntimeState,
             syncShineState,
             updateStreamingMessagesState,
@@ -787,10 +870,13 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             runtimeSyncRequestIdRef.current += 1;
             shineSyncRequestIdRef.current += 1; // 使之前的同步请求失效
             updateStreamingMessagesState(new Map());
-            setShiningMessageIds(new Set());
+            setActivityShiningMessageIds(new Set());
+            setManualShiningMessageIds(new Set());
             setShiningMcpCallId(null);
             setMCPToolCallStates(new Map());
-            setActiveMcpCallIds(new Set());
+            const clearedActiveSet = new Set<number>();
+            activeMcpCallIdsRef.current = clearedActiveSet;
+            setActiveMcpCallIds(clearedActiveSet);
             setStreamingAssistantMessageIds(new Set());
             setPendingUserMessageId(null);
             setActivityFocus({ focus_type: 'none' });
@@ -807,14 +893,30 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             runtimeSyncRequestIdRef.current += 1; // 避免旧同步影响
             shineSyncRequestIdRef.current += 1; // 避免旧同步影响
             setRuntimeState(null);
+            setShineState(null);
+            setActivityShiningMessageIds(new Set());
+            setManualShiningMessageIds(new Set());
+            setShiningMcpCallId(null);
+            const clearedActiveSet = new Set<number>();
+            activeMcpCallIdsRef.current = clearedActiveSet;
+            setActiveMcpCallIds(clearedActiveSet);
             runtimeVersionRef.current = { epoch: -1, revision: -1 };
+            shineVersionRef.current = { epoch: -1, revision: -1 };
             console.warn("[ActivityFocus] Invalid conversationId for event subscription:", options.conversationId);
             return;
         }
 
         hasSyncedAfterMessageAddRef.current = false;
         setRuntimeState(null);
+        setShineState(null);
+        setActivityShiningMessageIds(new Set());
+        setManualShiningMessageIds(new Set());
+        setShiningMcpCallId(null);
+        const clearedActiveSet = new Set<number>();
+        activeMcpCallIdsRef.current = clearedActiveSet;
+        setActiveMcpCallIds(clearedActiveSet);
         runtimeVersionRef.current = { epoch: -1, revision: -1 };
+        shineVersionRef.current = { epoch: -1, revision: -1 };
 
         const eventName = `conversation_event_${conversationIdNum}`;
         console.log(
@@ -855,8 +957,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 }).catch((e) => console.warn('unlisten rejected (cleanup):', e));
             }
             stopMcpCompensationPolling("conversation listener cleanup");
+            stopMcpCompletionSync("conversation listener cleanup");
         };
-    }, [options.conversationId, syncRuntimeState, syncShineState, handleConversationEvent, stopMcpCompensationPolling, updateStreamingMessagesState]); // 只依赖 conversationId
+    }, [options.conversationId, syncRuntimeState, syncShineState, handleConversationEvent, stopMcpCompensationPolling, stopMcpCompletionSync, updateStreamingMessagesState]); // 只依赖 conversationId
 
     // 初始化获取已存在的 MCP 调用状态
     useEffect(() => {
@@ -892,11 +995,14 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         console.log("[DEBUG] Clearing shining/MCP state (manual reset)");
         cancelIdleTransientReset();
         invalidateMcpCompensationPolling("manual state clear");
-        setShiningMessageIds(new Set());
+        setActivityShiningMessageIds(new Set());
+        setManualShiningMessageIds(new Set());
         setShiningMcpCallId(null);
         setStreamingAssistantMessageIds(new Set());
         setPendingUserMessageId(null);
-        setActiveMcpCallIds(new Set());
+        const clearedActiveSet = new Set<number>();
+        activeMcpCallIdsRef.current = clearedActiveSet;
+        setActiveMcpCallIds(clearedActiveSet);
         // 保留已完成的 MCP 工具调用状态（搜索结果等），仅移除进行中的
         setMCPToolCallStates((prev) => {
             const kept = new Map<number, MCPToolCallUpdateEvent>();
@@ -916,7 +1022,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         setPendingUserMessageId(messageId);
     }, []);
 
-    const setManualShineMessage = useCallback((_messageId: number | null) => { }, []);
+    const setManualShineMessage = useCallback((messageId: number | null) => {
+        setManualShiningMessageIds(messageId === null ? new Set() : new Set([messageId]));
+    }, []);
 
     const handleError = useCallback((errorMessage: string) => {
         console.error("Global error handler called:", errorMessage);
@@ -925,7 +1033,8 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
         // 清理所有流式消息状态
         updateStreamingMessagesState(new Map());
-        setShiningMessageIds(new Set());
+        setActivityShiningMessageIds(new Set());
+        setManualShiningMessageIds(new Set());
         setShiningMcpCallId(null);
         // 保留已完成的 MCP 工具调用状态（搜索结果等），仅移除进行中的
         setMCPToolCallStates((prev) => {
@@ -937,7 +1046,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             });
             return kept;
         });
-        setActiveMcpCallIds(new Set());
+        const clearedActiveSet = new Set<number>();
+        activeMcpCallIdsRef.current = clearedActiveSet;
+        setActiveMcpCallIds(clearedActiveSet);
         setStreamingAssistantMessageIds(new Set());
         setPendingUserMessageId(null); // 清理等待回复的用户消息
         setActivityFocus({ focus_type: 'none' });
