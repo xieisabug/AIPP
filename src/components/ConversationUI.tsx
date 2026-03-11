@@ -46,6 +46,7 @@ import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 // 导入新创建的组件
 import ConversationHeader from "./conversation/ConversationHeader";
 import ConversationContent from "./conversation/ConversationContent";
+import { applyScrollHighlight } from "./conversation/scrollHighlight";
 
 // 导入 Chat Sidebar 相关
 import { ChatSidebar } from "./chat-sidebar";
@@ -820,13 +821,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             if (!target) {
                 return;
             }
-            requestAnimationFrame(() => {
-                target.scrollIntoView({ behavior: "smooth", block: "center" });
-                setShiningMessageIds(() => new Set([pendingScrollMessageId]));
-                setTimeout(() => {
-                    setShiningMessageIds(new Set());
-                }, 2000);
-                setPendingScrollMessageId(null);
+            applyScrollHighlight({
+                target,
+                messageId: pendingScrollMessageId,
+                setShiningMessageIds,
+                clearPendingScrollMessageId: setPendingScrollMessageId,
             });
         }, [pendingScrollMessageId, allDisplayMessages.length, scrollContainerRef, setShiningMessageIds]);
 

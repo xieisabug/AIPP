@@ -69,6 +69,12 @@ async fn queue_pending_batch_continuation(conversation_id: i64) {
     guard.insert(conversation_id, true);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchContinuationDisposition {
+    Executed,
+    Queued,
+}
+
 async fn take_pending_batch_continuation(conversation_id: i64) -> bool {
     let registry = pending_batch_continuation_registry();
     let mut guard = registry.lock().await;
@@ -94,6 +100,25 @@ where
     Ok(())
 }
 
+async fn run_or_queue_batch_continuation<F, Fut>(
+    continuation_lock: Arc<Mutex<()>>,
+    conversation_id: i64,
+    mut run_once: F,
+) -> Result<BatchContinuationDisposition>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    if let Ok(_lock_guard) = continuation_lock.try_lock() {
+        run_once().await?;
+        drain_pending_batch_continuations(conversation_id, || run_once()).await?;
+        return Ok(BatchContinuationDisposition::Executed);
+    }
+
+    queue_pending_batch_continuation(conversation_id).await;
+    Ok(BatchContinuationDisposition::Queued)
+}
+
 #[cfg(test)]
 mod continuation_queue_tests {
     use super::*;
@@ -101,6 +126,27 @@ mod continuation_queue_tests {
 
     async fn clear_pending(conversation_id: i64) {
         let _ = take_pending_batch_continuation(conversation_id).await;
+    }
+
+    fn build_tool_call(status: &str, error: Option<&str>) -> MCPToolCall {
+        MCPToolCall {
+            id: 1,
+            conversation_id: 2,
+            message_id: Some(10),
+            subtask_id: None,
+            server_id: 3,
+            server_name: "server".to_string(),
+            tool_name: "tool".to_string(),
+            parameters: "{}".to_string(),
+            status: status.to_string(),
+            result: None,
+            error: error.map(ToString::to_string),
+            created_time: "2024-01-01T00:00:00Z".to_string(),
+            started_time: None,
+            finished_time: None,
+            llm_call_id: None,
+            assistant_message_id: Some(11),
+        }
     }
 
     #[tokio::test]
@@ -146,52 +192,117 @@ mod continuation_queue_tests {
         assert_eq!(run_count.load(Ordering::SeqCst), 0);
     }
 
+    #[tokio::test]
+    async fn run_or_queue_batch_continuation_queues_when_lock_is_busy() {
+        let conversation_id = -903;
+        clear_pending(conversation_id).await;
+        let continuation_lock = Arc::new(Mutex::new(()));
+        let _guard = continuation_lock.lock().await;
+        let run_count = Arc::new(AtomicUsize::new(0));
+
+        let disposition = run_or_queue_batch_continuation(
+            continuation_lock.clone(),
+            conversation_id,
+            || {
+                let run_count = run_count.clone();
+                async move {
+                    run_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(disposition, BatchContinuationDisposition::Queued);
+        assert_eq!(run_count.load(Ordering::SeqCst), 0);
+        assert!(take_pending_batch_continuation(conversation_id).await);
+    }
+
+    #[tokio::test]
+    async fn run_or_queue_batch_continuation_drains_preexisting_queue_after_execution() {
+        let conversation_id = -904;
+        clear_pending(conversation_id).await;
+        queue_pending_batch_continuation(conversation_id).await;
+        let continuation_lock = Arc::new(Mutex::new(()));
+        let run_count = Arc::new(AtomicUsize::new(0));
+
+        let disposition = run_or_queue_batch_continuation(
+            continuation_lock,
+            conversation_id,
+            || {
+                let run_count = run_count.clone();
+                async move {
+                    run_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(disposition, BatchContinuationDisposition::Executed);
+        assert_eq!(run_count.load(Ordering::SeqCst), 2);
+        assert!(!take_pending_batch_continuation(conversation_id).await);
+    }
+
     #[test]
     fn continuation_anchor_prefers_assistant_message_id() {
-        let tool_call = MCPToolCall {
-            id: 1,
-            conversation_id: 2,
-            message_id: Some(10),
-            subtask_id: None,
-            server_id: 3,
-            server_name: "server".to_string(),
-            tool_name: "tool".to_string(),
-            parameters: "{}".to_string(),
-            status: "failed".to_string(),
-            result: None,
-            error: Some("boom".to_string()),
-            created_time: "2024-01-01T00:00:00Z".to_string(),
-            started_time: None,
-            finished_time: None,
-            llm_call_id: None,
-            assistant_message_id: Some(11),
-        };
+        let tool_call = build_tool_call("failed", Some("boom"));
 
         assert_eq!(continuation_anchor_message_id(&tool_call), Some(11));
     }
 
     #[test]
     fn continuation_anchor_falls_back_to_message_id() {
-        let tool_call = MCPToolCall {
-            id: 1,
-            conversation_id: 2,
-            message_id: Some(10),
-            subtask_id: None,
-            server_id: 3,
-            server_name: "server".to_string(),
-            tool_name: "tool".to_string(),
-            parameters: "{}".to_string(),
-            status: "failed".to_string(),
-            result: None,
-            error: Some("boom".to_string()),
-            created_time: "2024-01-01T00:00:00Z".to_string(),
-            started_time: None,
-            finished_time: None,
-            llm_call_id: None,
-            assistant_message_id: None,
-        };
+        let mut tool_call = build_tool_call("failed", Some("boom"));
+        tool_call.assistant_message_id = None;
 
         assert_eq!(continuation_anchor_message_id(&tool_call), Some(10));
+    }
+
+    #[test]
+    fn continuation_anchor_is_none_without_any_message_ids() {
+        let mut tool_call = build_tool_call("failed", Some("boom"));
+        tool_call.assistant_message_id = None;
+        tool_call.message_id = None;
+
+        assert_eq!(continuation_anchor_message_id(&tool_call), None);
+    }
+
+    #[test]
+    fn continue_with_error_requires_failed_status() {
+        let tool_call = build_tool_call("executing", Some("boom"));
+
+        assert_eq!(
+            validate_continue_with_error_request(&tool_call).unwrap_err(),
+            "只能从失败状态继续"
+        );
+    }
+
+    #[test]
+    fn continue_with_error_message_prefers_explicit_override() {
+        let tool_call = build_tool_call("failed", Some("stored error"));
+
+        assert_eq!(
+            resolve_continue_with_error_message(&tool_call, Some("  override error  ")),
+            "override error"
+        );
+    }
+
+    #[test]
+    fn continue_with_error_message_falls_back_to_stored_error_then_default() {
+        let tool_call = build_tool_call("failed", Some("stored error"));
+        assert_eq!(
+            resolve_continue_with_error_message(&tool_call, Some("   ")),
+            "stored error"
+        );
+
+        let no_error_tool_call = build_tool_call("failed", None);
+        assert_eq!(
+            resolve_continue_with_error_message(&no_error_tool_call, None),
+            "Tool execution failed with no error details"
+        );
     }
 }
 
@@ -515,6 +626,26 @@ fn broadcast_mcp_tool_call_update(app_handle: &tauri::AppHandle, tool_call: &MCP
 
 fn continuation_anchor_message_id(tool_call: &MCPToolCall) -> Option<i64> {
     tool_call.assistant_message_id.or(tool_call.message_id)
+}
+
+fn validate_continue_with_error_request(tool_call: &MCPToolCall) -> std::result::Result<(), String> {
+    if tool_call.status != "failed" {
+        return Err("只能从失败状态继续".to_string());
+    }
+
+    Ok(())
+}
+
+fn resolve_continue_with_error_message(
+    tool_call: &MCPToolCall,
+    override_message: Option<&str>,
+) -> String {
+    override_message
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| tool_call.error.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+        .unwrap_or("Tool execution failed with no error details")
+        .to_string()
 }
 
 async fn handoff_mcp_focus_to_origin_message(
@@ -1212,19 +1343,10 @@ pub async fn continue_with_error(
     let tool_call =
         db.get_mcp_tool_call(call_id).map_err(|e| format!("获取工具调用信息失败: {}", e))?;
 
-    // 验证工具调用状态必须为 failed
-    if tool_call.status != "failed" {
-        return Err("只能从失败状态继续".to_string());
-    }
+    validate_continue_with_error_request(&tool_call)?;
 
     // 获取错误信息，优先使用前端传入的错误文本（用于兜底保留细节）
-    let error_message = error_message
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .or_else(|| tool_call.error.as_deref().map(str::trim).filter(|s| !s.is_empty()))
-        .unwrap_or("Tool execution failed with no error details")
-        .to_string();
+    let error_message = resolve_continue_with_error_message(&tool_call, error_message.as_deref());
 
     // 触发续写
     trigger_conversation_continuation_with_error(
@@ -1814,35 +1936,39 @@ pub async fn trigger_conversation_continuation_batch(
     // 避免在同一会话续写过程中递归等待锁导致阻塞：
     // 若锁空闲，当前请求负责执行并顺带清空排队请求；
     // 若锁已占用，仅登记“有待处理续写”，由持锁方释放前继续处理。
-    if let Ok(_lock_guard) = continuation_lock.try_lock() {
-        run_batch_continuation_once(
-            app_handle.clone(),
-            window.clone(),
-            conversation_id,
-            assistant_id,
-            tool_calls.len(),
-        )
-        .await?;
+    let initial_tool_count = tool_calls.len();
+    let disposition = run_or_queue_batch_continuation(
+        continuation_lock,
+        conversation_id,
+        {
+            let mut is_first_run = true;
+            move || {
+                let current_tool_count = if is_first_run {
+                    is_first_run = false;
+                    initial_tool_count
+                } else {
+                    0
+                };
+                run_batch_continuation_once(
+                    app_handle.clone(),
+                    window.clone(),
+                    conversation_id,
+                    assistant_id,
+                    current_tool_count,
+                )
+            }
+        },
+    )
+    .await?;
 
-        drain_pending_batch_continuations(conversation_id, || {
-            run_batch_continuation_once(
-                app_handle.clone(),
-                window.clone(),
-                conversation_id,
-                assistant_id,
-                0,
-            )
-        })
-        .await?;
-        return Ok(());
+    if disposition == BatchContinuationDisposition::Queued {
+        info!(
+            conversation_id,
+            tool_count = initial_tool_count,
+            "Continuation lock busy, queued pending batch continuation"
+        );
     }
 
-    queue_pending_batch_continuation(conversation_id).await;
-    info!(
-        conversation_id,
-        tool_count = tool_calls.len(),
-        "Continuation lock busy, queued pending batch continuation"
-    );
     Ok(())
 }
 

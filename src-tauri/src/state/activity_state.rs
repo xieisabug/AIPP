@@ -499,4 +499,72 @@ mod tests {
             ActivityFocus::AssistantStreaming { message_id: 99 }
         );
     }
+
+    #[test]
+    fn runtime_and_shine_follow_user_to_assistant_to_idle_lifecycle() {
+        let conversation_id = 41;
+        let mut activity = ConversationActivity::default();
+        activity.epoch = 3;
+
+        activity.pending_user_message_id = Some(1001);
+        activity.current = ConversationActivityManager::recompute_focus(&activity);
+
+        let pending_runtime =
+            ConversationActivityManager::build_runtime_state(conversation_id, &activity);
+        let pending_shine =
+            ConversationActivityManager::build_shine_state(conversation_id, &activity);
+        assert_eq!(pending_runtime.phase, ConversationRuntimePhase::UserPending);
+        assert!(pending_runtime.is_running);
+        assert_eq!(
+            pending_shine.primary_target,
+            ShineTarget::Message {
+                message_id: 1001,
+                reason: "user_pending".to_string(),
+            }
+        );
+
+        activity.pending_user_message_id = None;
+        activity.streaming_message_id = Some(1002);
+        activity.current = ConversationActivityManager::recompute_focus(&activity);
+
+        let streaming_runtime =
+            ConversationActivityManager::build_runtime_state(conversation_id, &activity);
+        let streaming_shine =
+            ConversationActivityManager::build_shine_state(conversation_id, &activity);
+        assert_eq!(streaming_runtime.phase, ConversationRuntimePhase::AssistantStreaming);
+        assert!(streaming_runtime.is_running);
+        assert_eq!(
+            streaming_shine.primary_target,
+            ShineTarget::Message {
+                message_id: 1002,
+                reason: "assistant_streaming".to_string(),
+            }
+        );
+
+        activity.streaming_message_id = None;
+        activity.current = ConversationActivityManager::recompute_focus(&activity);
+
+        let idle_runtime = ConversationActivityManager::build_runtime_state(conversation_id, &activity);
+        let idle_shine = ConversationActivityManager::build_shine_state(conversation_id, &activity);
+        assert_eq!(idle_runtime.phase, ConversationRuntimePhase::Idle);
+        assert!(!idle_runtime.is_running);
+        assert_eq!(idle_shine.primary_target, ShineTarget::None);
+    }
+
+    #[test]
+    fn pending_mcp_only_keeps_runtime_idle_and_shine_none() {
+        let conversation_id = 42;
+        let mut activity = ConversationActivity::default();
+        activity.epoch = 4;
+        activity.upsert_mcp_call(88, ActiveMcpStatus::Pending);
+        activity.current = ConversationActivityManager::recompute_focus(&activity);
+
+        let runtime = ConversationActivityManager::build_runtime_state(conversation_id, &activity);
+        let shine = ConversationActivityManager::build_shine_state(conversation_id, &activity);
+
+        assert_eq!(activity.current, ActivityFocus::None);
+        assert_eq!(runtime.phase, ConversationRuntimePhase::Idle);
+        assert!(!runtime.is_running);
+        assert_eq!(shine.primary_target, ShineTarget::None);
+    }
 }
