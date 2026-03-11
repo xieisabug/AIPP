@@ -4,7 +4,7 @@ use crate::api::ai::config::{
 };
 use crate::api::ai::events::TITLE_CHANGE_EVENT;
 use crate::api::genai_client;
-use crate::db::conversation_db::{Conversation, ConversationDatabase};
+use crate::db::conversation_db::{Conversation, ConversationDatabase, Repository};
 use crate::db::llm_db::LLMDatabase;
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
@@ -13,6 +13,122 @@ use std::collections::HashMap;
 use tauri::Emitter;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, warn};
+
+pub const DEFAULT_CONVERSATION_TITLE: &str = "新对话";
+
+pub fn should_auto_generate_title(conversation_name: &str) -> bool {
+    let trimmed = conversation_name.trim();
+    trimmed.is_empty() || trimmed == DEFAULT_CONVERSATION_TITLE
+}
+
+fn has_explicit_title_model_config(
+    config_feature_map: &HashMap<String, HashMap<String, FeatureConfig>>,
+) -> bool {
+    config_feature_map.get("conversation_summary").is_some_and(|feature_config| {
+        let provider_id = feature_config
+            .get("title_provider_id")
+            .or(feature_config.get("provider_id"))
+            .and_then(|config| config.value.parse::<i64>().ok());
+        let model_code = feature_config
+            .get("title_model")
+            .or(feature_config.get("model_code"))
+            .map(|config| config.value.trim())
+            .filter(|value| !value.is_empty());
+
+        provider_id.is_some() && model_code.is_some()
+    })
+}
+
+pub fn spawn_title_generation(
+    app_handle: tauri::AppHandle,
+    conversation_id: i64,
+    user_prompt: String,
+    content: String,
+    config_feature_map: HashMap<String, HashMap<String, FeatureConfig>>,
+    window: tauri::Window,
+    reason: &'static str,
+) {
+    tokio::spawn(async move {
+        if let Err(e) = generate_title(
+            &app_handle,
+            conversation_id,
+            user_prompt,
+            content,
+            config_feature_map,
+            window,
+        )
+        .await
+        {
+            warn!(conversation_id, reason, error = %e, "title generation failed");
+        }
+    });
+}
+
+pub async fn maybe_generate_title_from_conversation_if_needed(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    config_feature_map: HashMap<String, HashMap<String, FeatureConfig>>,
+    window: tauri::Window,
+    reason: &'static str,
+) -> Result<bool, AppError> {
+    let conversation_db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
+    let conversation_repo = conversation_db.conversation_repo().map_err(AppError::from)?;
+    let message_repo = conversation_db.message_repo().map_err(AppError::from)?;
+
+    let Some(conversation) = conversation_repo.read(conversation_id).map_err(AppError::from)? else {
+        warn!(conversation_id, reason, "skipping title generation because conversation was not found");
+        return Ok(false);
+    };
+
+    if !should_auto_generate_title(&conversation.name) {
+        debug!(
+            conversation_id,
+            reason,
+            current_title = conversation.name.as_str(),
+            "skipping title generation because conversation already has a custom title"
+        );
+        return Ok(false);
+    }
+
+    let messages = message_repo
+        .list_by_conversation_id(conversation_id)
+        .map_err(AppError::from)?;
+    let Some(user_prompt) = messages
+        .iter()
+        .find(|(message, _)| message.message_type == "user" && !message.content.trim().is_empty())
+        .map(|(message, _)| message.content.clone())
+    else {
+        warn!(conversation_id, reason, "skipping title generation because no user message was found");
+        return Ok(false);
+    };
+
+    let response_content = messages
+        .iter()
+        .find(|(message, _)| message.message_type == "response" && !message.content.trim().is_empty())
+        .map(|(message, _)| message.content.clone())
+        .unwrap_or_default();
+
+    if response_content.is_empty() && !has_explicit_title_model_config(&config_feature_map) {
+        debug!(
+            conversation_id,
+            reason,
+            "skipping title generation because there is no response content and no dedicated title model"
+        );
+        return Ok(false);
+    }
+
+    spawn_title_generation(
+        app_handle.clone(),
+        conversation_id,
+        user_prompt,
+        response_content,
+        config_feature_map,
+        window,
+        reason,
+    );
+
+    Ok(true)
+}
 
 pub async fn generate_title(
     app_handle: &tauri::AppHandle,
@@ -271,4 +387,22 @@ pub async fn generate_title(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_auto_generate_title, DEFAULT_CONVERSATION_TITLE};
+
+    #[test]
+    fn should_generate_for_default_titles() {
+        assert!(should_auto_generate_title(""));
+        assert!(should_auto_generate_title("   "));
+        assert!(should_auto_generate_title(DEFAULT_CONVERSATION_TITLE));
+    }
+
+    #[test]
+    fn should_not_generate_for_custom_titles() {
+        assert!(!should_auto_generate_title("自定义标题"));
+        assert!(!should_auto_generate_title("Project kickoff"));
+    }
 }

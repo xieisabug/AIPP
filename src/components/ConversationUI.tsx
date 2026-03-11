@@ -316,7 +316,14 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         );
 
         // 滚动管理 - 移除依赖项，改为手动调用
-        const { messagesEndRef, scrollContainerRef, handleScroll, smartScroll, scrollToUserMessage } = useScrollManagement();
+        const {
+            messagesEndRef,
+            scrollContainerRef,
+            handleScroll,
+            handleUserScrollIntent,
+            smartScroll,
+            scrollToUserMessage,
+        } = useScrollManagement();
         const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
 
         // 使用 useMemo 稳定 options 对象，避免频繁触发 useConversationEvents 内部的 useEffect
@@ -876,6 +883,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
                     <div
                         ref={scrollContainerRef}
+                        onWheelCapture={handleUserScrollIntent}
+                        onTouchMoveCapture={handleUserScrollIntent}
                         onScroll={handleScroll}
                         className={`h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
                         data-aipp-slot="chat-conversation-scroll"

@@ -15,7 +15,7 @@ use crate::api::ai::events::{
     ActivityFocus, ConversationEvent, ConversationRuntimeState, ConversationShineState,
     MessageAddEvent, MessageUpdateEvent,
 };
-use crate::api::ai::title::generate_title;
+use crate::api::ai::title::{generate_title, maybe_generate_title_from_conversation_if_needed};
 use crate::api::ai::types::{AiRequest, AiResponse, McpOverrideConfig};
 use crate::api::assistant_api::{get_assistant, get_assistants};
 
@@ -1287,7 +1287,9 @@ pub async fn tool_result_continue_ask_ai(
 #[tauri::command]
 pub async fn cancel_ai(
     app_handle: tauri::AppHandle,
+    feature_config_state: State<'_, FeatureConfigState>,
     message_token_manager: State<'_, MessageTokenManager>,
+    window: tauri::Window,
     conversation_id: i64,
 ) -> Result<(), String> {
     message_token_manager.cancel_request(conversation_id).await;
@@ -1314,6 +1316,23 @@ pub async fn cancel_ai(
 
     if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
         activity_manager.clear_focus(&app_handle, conversation_id).await;
+    }
+
+    let config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
+    if let Err(err) = maybe_generate_title_from_conversation_if_needed(
+        &app_handle,
+        conversation_id,
+        config_feature_map,
+        window,
+        "manual cancel",
+    )
+    .await
+    {
+        warn!(
+            conversation_id,
+            error = %err,
+            "failed to schedule title generation after manual cancel"
+        );
     }
 
     // Send cancellation event to both ask and chat_ui windows
