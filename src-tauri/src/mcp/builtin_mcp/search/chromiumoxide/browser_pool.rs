@@ -51,24 +51,29 @@ impl BrowserPool {
         }
     }
 
+    fn try_acquire_slot(&self) -> Result<(), String> {
+        match self.active_count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            (current < self.config.max_pages).then_some(current + 1)
+        }) {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                Err(format!("Maximum concurrent page limit reached: {}", self.config.max_pages))
+            }
+        }
+    }
+
+    fn release_slot(&self) {
+        self.active_count.fetch_sub(1, Ordering::AcqRel);
+    }
+
     /// 获取一个页面（自动创建或复用）
     pub async fn acquire_page(&self) -> Result<PooledPage, String> {
-        // 检查并发限制
-        let current = self.active_count.load(Ordering::Acquire);
-        if current >= self.config.max_pages {
-            return Err(format!(
-                "Maximum concurrent page limit reached: {}",
-                self.config.max_pages
-            ));
-        }
-
-        // 增加活跃计数
-        self.active_count.fetch_add(1, Ordering::AcqRel);
+        self.try_acquire_slot()?;
 
         // 确保浏览器已初始化
         let mut browser = self.get_or_init_browser().await.map_err(|e| {
             // 初始化失败，减少计数
-            self.active_count.fetch_sub(1, Ordering::AcqRel);
+            self.release_slot();
             e
         })?;
 
@@ -91,7 +96,7 @@ impl BrowserPool {
                     warn!(error = %error_message, "Discarding unhealthy idle page from pool");
                     if Self::is_connection_closed_error(&error_message) {
                         browser = self.recreate_browser().await.map_err(|e| {
-                            self.active_count.fetch_sub(1, Ordering::AcqRel);
+                            self.release_slot();
                             e
                         })?;
                     }
@@ -115,7 +120,7 @@ impl BrowserPool {
                         "Browser connection appears closed when creating page, recreating browser"
                     );
                     browser = self.recreate_browser().await.map_err(|recreate_error| {
-                        self.active_count.fetch_sub(1, Ordering::AcqRel);
+                        self.release_slot();
                         recreate_error
                     })?;
                     let retry_result = {
@@ -123,14 +128,14 @@ impl BrowserPool {
                         browser_guard.new_page("about:blank").await
                     };
                     retry_result.map_err(|retry_error| {
-                        self.active_count.fetch_sub(1, Ordering::AcqRel);
+                        self.release_slot();
                         format!(
                             "Failed to create new page after browser recreation: {}",
                             retry_error
                         )
                     })?
                 } else {
-                    self.active_count.fetch_sub(1, Ordering::AcqRel);
+                    self.release_slot();
                     return Err(format!("Failed to create new page: {}", error_message));
                 }
             }
@@ -295,7 +300,7 @@ impl BrowserPool {
         let mut idle = self.idle_pages.lock().await;
         idle.push(page);
         // 减少活跃计数
-        self.active_count.fetch_sub(1, Ordering::AcqRel);
+        self.release_slot();
         debug!(
             "Returned page to pool, idle count: {}, active: {}",
             idle.len(),
@@ -330,7 +335,7 @@ impl PooledPage {
     pub fn consume(mut self) -> chromiumoxide::page::Page {
         // 消费时需要减少活跃计数
         if let Some(ref pool) = self.pool {
-            pool.active_count.fetch_sub(1, Ordering::AcqRel);
+            pool.release_slot();
         }
         self.page.take().expect("Page not available")
     }
@@ -346,5 +351,82 @@ impl Drop for PooledPage {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::task::JoinSet;
+
+    fn test_pool(max_pages: usize) -> BrowserPool {
+        BrowserPool::new(BrowserPoolConfig {
+            max_pages,
+            page_idle_timeout_secs: 60,
+            user_data_dir: None,
+            browser_path: PathBuf::from("/tmp/nonexistent-chromium"),
+            headless: true,
+            launch_args: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn try_acquire_slot_stops_at_configured_limit() {
+        let pool = test_pool(2);
+
+        assert!(pool.try_acquire_slot().is_ok());
+        assert!(pool.try_acquire_slot().is_ok());
+
+        let error = pool.try_acquire_slot().expect_err("third slot should be rejected");
+        assert!(error.contains("Maximum concurrent page limit reached: 2"));
+        assert_eq!(pool.active_count(), 2);
+    }
+
+    #[test]
+    fn release_slot_allows_future_acquisitions() {
+        let pool = test_pool(1);
+
+        pool.try_acquire_slot().expect("first slot should be reserved");
+        assert_eq!(pool.active_count(), 1);
+
+        pool.release_slot();
+        assert_eq!(pool.active_count(), 0);
+
+        pool.try_acquire_slot().expect("slot should be reusable after release");
+        assert_eq!(pool.active_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn try_acquire_slot_is_atomic_under_concurrency() {
+        let pool = Arc::new(test_pool(3));
+        let success_count = Arc::new(AtomicUsize::new(0));
+        let failure_count = Arc::new(AtomicUsize::new(0));
+        let mut tasks = JoinSet::new();
+
+        for _ in 0..16 {
+            let pool = pool.clone();
+            let success_count = success_count.clone();
+            let failure_count = failure_count.clone();
+            tasks.spawn(async move {
+                match pool.try_acquire_slot() {
+                    Ok(()) => {
+                        success_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(error) => {
+                        assert!(error.contains("Maximum concurrent page limit reached: 3"));
+                        failure_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            });
+        }
+
+        while let Some(result) = tasks.join_next().await {
+            result.expect("task should complete");
+        }
+
+        assert_eq!(success_count.load(Ordering::SeqCst), 3);
+        assert_eq!(failure_count.load(Ordering::SeqCst), 13);
+        assert_eq!(pool.active_count(), 3);
     }
 }

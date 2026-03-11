@@ -244,6 +244,66 @@ describe("useConversationEvents MCP completion reconciliation", () => {
         });
     });
 
+    it("shows assistant streaming as running before any continuation token arrives", async () => {
+        const conversationId = 18;
+        const callId = 68;
+        const responseMessageId = 109;
+        let currentCalls = [createActiveCall(conversationId, callId)];
+        let currentShine = createShineState(conversationId, 1, {
+            target_type: "mcp_call",
+            call_id: callId,
+            reason: "mcp_executing",
+        });
+        let currentRuntime = createRuntimeState(conversationId, 1, "mcp_executing");
+
+        mockInvokeHandler("get_mcp_tool_calls_by_conversation", () => currentCalls);
+        mockInvokeHandler("get_shine_state", () => currentShine);
+        mockInvokeHandler("get_conversation_runtime_state", () => currentRuntime);
+
+        const { result } = renderHook(() =>
+            useConversationEvents({
+                conversationId,
+            }),
+        );
+
+        await flushEffects();
+        await flushEffects();
+
+        expect(result.current.shiningMcpCallId).toBe(callId);
+        expect(result.current.runtimeState?.phase).toBe("mcp_executing");
+
+        currentCalls = [];
+        currentShine = createShineState(conversationId, 2, {
+            target_type: "message",
+            message_id: responseMessageId,
+            reason: "assistant_streaming",
+        });
+        currentRuntime = createRuntimeState(conversationId, 2, "assistant_streaming");
+
+        await act(async () => {
+            await emit(`conversation_event_${conversationId}`, {
+                type: "mcp_tool_call_update",
+                data: {
+                    call_id: callId,
+                    conversation_id: conversationId,
+                    status: "success",
+                    result: "{\"ok\":true}",
+                },
+            });
+        });
+
+        await flushEffects();
+
+        expect(result.current.shiningMcpCallId).toBeNull();
+        expect(result.current.shiningMessageIds.has(responseMessageId)).toBe(true);
+        expect(result.current.activityFocus).toEqual({
+            focus_type: "assistant_streaming",
+            message_id: responseMessageId,
+        });
+        expect(result.current.runtimeState?.phase).toBe("assistant_streaming");
+        expect(result.current.runtimeState?.is_running).toBe(true);
+    });
+
     it("allows failed MCP continuation to hand off shine state to assistant streaming", async () => {
         const conversationId = 10;
         const callId = 13;
@@ -633,6 +693,66 @@ describe("useConversationEvents MCP completion reconciliation", () => {
         expect(result.current.activeMcpCallIds.has(callId)).toBe(true);
         expect(result.current.shiningMcpCallId).toBeNull();
         expect(result.current.shiningMessageIds.size).toBe(0);
+        expect(result.current.activityFocus).toEqual({ focus_type: "none" });
+        expect(result.current.runtimeState?.phase).toBe("idle");
+        expect(result.current.runtimeState?.is_running).toBe(false);
+    });
+
+    it("clears user-message shine after a final stream error message arrives", async () => {
+        const conversationId = 18;
+        const userMessageId = 901;
+        let runtimeSyncCount = 0;
+        let shineSyncCount = 0;
+
+        mockInvokeHandler("get_mcp_tool_calls_by_conversation", () => []);
+        mockInvokeHandler("get_shine_state", () => {
+            shineSyncCount += 1;
+            if (shineSyncCount === 1) {
+                return createShineState(conversationId, 1, {
+                    target_type: "message",
+                    message_id: userMessageId,
+                    reason: "user_pending",
+                }, 5);
+            }
+            return createShineState(conversationId, 2, { target_type: "none" }, 5);
+        });
+        mockInvokeHandler("get_conversation_runtime_state", () => {
+            runtimeSyncCount += 1;
+            if (runtimeSyncCount === 1) {
+                return createRuntimeState(conversationId, 1, "user_pending", 5);
+            }
+            return createRuntimeState(conversationId, 2, "idle", 5);
+        });
+
+        const { result } = renderHook(() =>
+            useConversationEvents({
+                conversationId,
+            }),
+        );
+
+        await flushEffects();
+        await flushEffects();
+
+        expect(result.current.shiningMessageIds.has(userMessageId)).toBe(true);
+        expect(result.current.runtimeState?.phase).toBe("user_pending");
+
+        await act(async () => {
+            await emit(`conversation_event_${conversationId}`, {
+                type: "message_update",
+                data: {
+                    message_id: 999,
+                    message_type: "error",
+                    content: "AI stream failed after retries",
+                    is_done: true,
+                },
+            });
+        });
+
+        await flushEffects();
+        await flushEffects();
+
+        expect(result.current.shiningMessageIds.size).toBe(0);
+        expect(result.current.shiningMcpCallId).toBeNull();
         expect(result.current.activityFocus).toEqual({ focus_type: "none" });
         expect(result.current.runtimeState?.phase).toBe("idle");
         expect(result.current.runtimeState?.is_running).toBe(false);

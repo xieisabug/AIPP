@@ -70,7 +70,6 @@ impl ConversationActivity {
     fn finish_mcp_call(&mut self, call_id: i64) {
         self.active_mcp_calls.retain(|call| call.call_id != call_id);
     }
-
 }
 
 /// 对话活动状态管理器
@@ -142,18 +141,16 @@ impl ConversationActivityManager {
     ) -> ConversationShineState {
         let primary_target = match &activity.current {
             ActivityFocus::None => ShineTarget::None,
-            ActivityFocus::UserPending { message_id } => ShineTarget::Message {
-                message_id: *message_id,
-                reason: "user_pending".to_string(),
-            },
+            ActivityFocus::UserPending { message_id } => {
+                ShineTarget::Message { message_id: *message_id, reason: "user_pending".to_string() }
+            }
             ActivityFocus::AssistantStreaming { message_id } => ShineTarget::Message {
                 message_id: *message_id,
                 reason: "assistant_streaming".to_string(),
             },
-            ActivityFocus::McpExecuting { call_id } => ShineTarget::McpCall {
-                call_id: *call_id,
-                reason: "mcp_executing".to_string(),
-            },
+            ActivityFocus::McpExecuting { call_id } => {
+                ShineTarget::McpCall { call_id: *call_id, reason: "mcp_executing".to_string() }
+            }
         };
 
         ConversationShineState {
@@ -225,10 +222,7 @@ impl ConversationActivityManager {
             .iter()
             .filter(|call| call.status == "executing")
             .map(|call| {
-                (
-                    call.started_time.clone().unwrap_or_else(|| call.created_time.clone()),
-                    call.id,
-                )
+                (call.started_time.clone().unwrap_or_else(|| call.created_time.clone()), call.id)
             })
             .collect();
         executing.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
@@ -236,10 +230,12 @@ impl ConversationActivityManager {
         pending
             .into_iter()
             .map(|(_, call_id)| ActiveMcpCall { call_id, status: ActiveMcpStatus::Pending })
-            .chain(executing.into_iter().map(|(_, call_id)| ActiveMcpCall {
-                call_id,
-                status: ActiveMcpStatus::Executing,
-            }))
+            .chain(
+                executing.into_iter().map(|(_, call_id)| ActiveMcpCall {
+                    call_id,
+                    status: ActiveMcpStatus::Executing,
+                }),
+            )
             .collect()
     }
 
@@ -471,10 +467,7 @@ mod tests {
         activity.upsert_mcp_call(21, ActiveMcpStatus::Pending);
         activity.upsert_mcp_call(22, ActiveMcpStatus::Pending);
 
-        assert_eq!(
-            ConversationActivityManager::recompute_focus(&activity),
-            ActivityFocus::None
-        );
+        assert_eq!(ConversationActivityManager::recompute_focus(&activity), ActivityFocus::None);
     }
 
     #[test]
@@ -517,10 +510,7 @@ mod tests {
         assert!(pending_runtime.is_running);
         assert_eq!(
             pending_shine.primary_target,
-            ShineTarget::Message {
-                message_id: 1001,
-                reason: "user_pending".to_string(),
-            }
+            ShineTarget::Message { message_id: 1001, reason: "user_pending".to_string() }
         );
 
         activity.pending_user_message_id = None;
@@ -535,16 +525,14 @@ mod tests {
         assert!(streaming_runtime.is_running);
         assert_eq!(
             streaming_shine.primary_target,
-            ShineTarget::Message {
-                message_id: 1002,
-                reason: "assistant_streaming".to_string(),
-            }
+            ShineTarget::Message { message_id: 1002, reason: "assistant_streaming".to_string() }
         );
 
         activity.streaming_message_id = None;
         activity.current = ConversationActivityManager::recompute_focus(&activity);
 
-        let idle_runtime = ConversationActivityManager::build_runtime_state(conversation_id, &activity);
+        let idle_runtime =
+            ConversationActivityManager::build_runtime_state(conversation_id, &activity);
         let idle_shine = ConversationActivityManager::build_shine_state(conversation_id, &activity);
         assert_eq!(idle_runtime.phase, ConversationRuntimePhase::Idle);
         assert!(!idle_runtime.is_running);

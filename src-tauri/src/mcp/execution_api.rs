@@ -46,7 +46,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 type ToolCancelRegistry = Arc<Mutex<HashMap<i64, CancellationToken>>>;
 type ContinuationLockRegistry = Arc<Mutex<HashMap<i64, Arc<Mutex<()>>>>>;
-type PendingBatchContinuationRegistry = Arc<Mutex<HashMap<i64, bool>>>;
+type PendingBatchContinuationRegistry = Arc<Mutex<HashMap<i64, PendingBatchContinuation>>>;
 static TOOL_CANCEL_REGISTRY: OnceLock<ToolCancelRegistry> = OnceLock::new();
 static CONTINUATION_LOCKS: OnceLock<ContinuationLockRegistry> = OnceLock::new();
 static PENDING_BATCH_CONTINUATIONS: OnceLock<PendingBatchContinuationRegistry> = OnceLock::new();
@@ -63,10 +63,22 @@ fn pending_batch_continuation_registry() -> &'static PendingBatchContinuationReg
     PENDING_BATCH_CONTINUATIONS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
-async fn queue_pending_batch_continuation(conversation_id: i64) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingBatchContinuation {
+    anchor_message_id: Option<i64>,
+}
+
+async fn queue_pending_batch_continuation(conversation_id: i64, anchor_message_id: Option<i64>) {
     let registry = pending_batch_continuation_registry();
     let mut guard = registry.lock().await;
-    guard.insert(conversation_id, true);
+    guard
+        .entry(conversation_id)
+        .and_modify(|pending| {
+            if let Some(message_id) = anchor_message_id {
+                pending.anchor_message_id = Some(message_id);
+            }
+        })
+        .or_insert(PendingBatchContinuation { anchor_message_id });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,10 +87,14 @@ enum BatchContinuationDisposition {
     Queued,
 }
 
-async fn take_pending_batch_continuation(conversation_id: i64) -> bool {
+async fn take_pending_batch_continuation(conversation_id: i64) -> Option<PendingBatchContinuation> {
     let registry = pending_batch_continuation_registry();
     let mut guard = registry.lock().await;
-    guard.remove(&conversation_id).unwrap_or(false)
+    guard.remove(&conversation_id)
+}
+
+fn is_dynamic_mode_agent_tool(server_command: Option<&str>) -> bool {
+    server_command == Some("aipp:agent")
 }
 
 async fn drain_pending_batch_continuations<F, Fut>(
@@ -86,15 +102,16 @@ async fn drain_pending_batch_continuations<F, Fut>(
     mut run_once: F,
 ) -> Result<()>
 where
-    F: FnMut() -> Fut,
+    F: FnMut(Option<i64>) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
-    while take_pending_batch_continuation(conversation_id).await {
+    while let Some(pending) = take_pending_batch_continuation(conversation_id).await {
         info!(
             conversation_id,
+            anchor_message_id = ?pending.anchor_message_id,
             "Detected queued batch continuation request, draining next round"
         );
-        run_once().await?;
+        run_once(pending.anchor_message_id).await?;
     }
 
     Ok(())
@@ -103,19 +120,23 @@ where
 async fn run_or_queue_batch_continuation<F, Fut>(
     continuation_lock: Arc<Mutex<()>>,
     conversation_id: i64,
+    anchor_message_id: Option<i64>,
     mut run_once: F,
 ) -> Result<BatchContinuationDisposition>
 where
-    F: FnMut() -> Fut,
+    F: FnMut(Option<i64>) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
     if let Ok(_lock_guard) = continuation_lock.try_lock() {
-        run_once().await?;
-        drain_pending_batch_continuations(conversation_id, || run_once()).await?;
+        run_once(anchor_message_id).await?;
+        drain_pending_batch_continuations(conversation_id, |queued_anchor_message_id| {
+            run_once(queued_anchor_message_id)
+        })
+        .await?;
         return Ok(BatchContinuationDisposition::Executed);
     }
 
-    queue_pending_batch_continuation(conversation_id).await;
+    queue_pending_batch_continuation(conversation_id, anchor_message_id).await;
     Ok(BatchContinuationDisposition::Queued)
 }
 
@@ -153,15 +174,20 @@ mod continuation_queue_tests {
     async fn drain_pending_batch_continuations_replays_newly_queued_work() {
         let conversation_id = -901;
         clear_pending(conversation_id).await;
-        queue_pending_batch_continuation(conversation_id).await;
+        queue_pending_batch_continuation(conversation_id, Some(41)).await;
 
         let run_count = Arc::new(AtomicUsize::new(0));
-        drain_pending_batch_continuations(conversation_id, || {
+        drain_pending_batch_continuations(conversation_id, |anchor_message_id| {
             let run_count = run_count.clone();
             async move {
                 let current = run_count.fetch_add(1, Ordering::SeqCst) + 1;
                 if current == 1 {
-                    queue_pending_batch_continuation(conversation_id).await;
+                    assert_eq!(anchor_message_id, Some(41));
+                } else {
+                    assert_eq!(anchor_message_id, Some(42));
+                }
+                if current == 1 {
+                    queue_pending_batch_continuation(conversation_id, Some(42)).await;
                 }
                 Ok(())
             }
@@ -170,7 +196,7 @@ mod continuation_queue_tests {
         .unwrap();
 
         assert_eq!(run_count.load(Ordering::SeqCst), 2);
-        assert!(!take_pending_batch_continuation(conversation_id).await);
+        assert!(take_pending_batch_continuation(conversation_id).await.is_none());
     }
 
     #[tokio::test]
@@ -179,7 +205,7 @@ mod continuation_queue_tests {
         clear_pending(conversation_id).await;
 
         let run_count = Arc::new(AtomicUsize::new(0));
-        drain_pending_batch_continuations(conversation_id, || {
+        drain_pending_batch_continuations(conversation_id, |_anchor_message_id| {
             let run_count = run_count.clone();
             async move {
                 run_count.fetch_add(1, Ordering::SeqCst);
@@ -203,7 +229,8 @@ mod continuation_queue_tests {
         let disposition = run_or_queue_batch_continuation(
             continuation_lock.clone(),
             conversation_id,
-            || {
+            Some(99),
+            |_anchor_message_id| {
                 let run_count = run_count.clone();
                 async move {
                     run_count.fetch_add(1, Ordering::SeqCst);
@@ -216,21 +243,100 @@ mod continuation_queue_tests {
 
         assert_eq!(disposition, BatchContinuationDisposition::Queued);
         assert_eq!(run_count.load(Ordering::SeqCst), 0);
-        assert!(take_pending_batch_continuation(conversation_id).await);
+        assert_eq!(
+            take_pending_batch_continuation(conversation_id).await,
+            Some(PendingBatchContinuation { anchor_message_id: Some(99) })
+        );
     }
 
     #[tokio::test]
     async fn run_or_queue_batch_continuation_drains_preexisting_queue_after_execution() {
         let conversation_id = -904;
         clear_pending(conversation_id).await;
-        queue_pending_batch_continuation(conversation_id).await;
+        queue_pending_batch_continuation(conversation_id, Some(100)).await;
         let continuation_lock = Arc::new(Mutex::new(()));
         let run_count = Arc::new(AtomicUsize::new(0));
 
         let disposition = run_or_queue_batch_continuation(
             continuation_lock,
             conversation_id,
-            || {
+            Some(99),
+            |anchor_message_id| {
+                let run_count = run_count.clone();
+                async move {
+                    let current = run_count.fetch_add(1, Ordering::SeqCst) + 1;
+                    if current == 1 {
+                        assert_eq!(anchor_message_id, Some(99));
+                    } else {
+                        assert_eq!(anchor_message_id, Some(100));
+                    }
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(disposition, BatchContinuationDisposition::Executed);
+        assert_eq!(run_count.load(Ordering::SeqCst), 2);
+        assert!(take_pending_batch_continuation(conversation_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn queue_pending_batch_continuation_keeps_latest_known_anchor() {
+        let conversation_id = -905;
+        clear_pending(conversation_id).await;
+
+        queue_pending_batch_continuation(conversation_id, None).await;
+        queue_pending_batch_continuation(conversation_id, Some(7)).await;
+        queue_pending_batch_continuation(conversation_id, None).await;
+        queue_pending_batch_continuation(conversation_id, Some(8)).await;
+
+        assert_eq!(
+            take_pending_batch_continuation(conversation_id).await,
+            Some(PendingBatchContinuation { anchor_message_id: Some(8) })
+        );
+    }
+
+    #[tokio::test]
+    async fn continuation_lock_registry_is_scoped_per_conversation() {
+        let first_lock = {
+            let registry = continuation_lock_registry();
+            let mut guard = registry.lock().await;
+            guard.entry(-906).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+        };
+        let same_conversation_lock = {
+            let registry = continuation_lock_registry();
+            let mut guard = registry.lock().await;
+            guard.entry(-906).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+        };
+        let other_conversation_lock = {
+            let registry = continuation_lock_registry();
+            let mut guard = registry.lock().await;
+            guard.entry(-907).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+        };
+
+        assert!(Arc::ptr_eq(&first_lock, &same_conversation_lock));
+        assert!(!Arc::ptr_eq(&first_lock, &other_conversation_lock));
+    }
+
+    #[tokio::test]
+    async fn busy_conversation_lock_does_not_block_other_conversations() {
+        let conversation_a = -908;
+        let conversation_b = -909;
+        clear_pending(conversation_a).await;
+        clear_pending(conversation_b).await;
+
+        let lock_a = Arc::new(Mutex::new(()));
+        let lock_b = Arc::new(Mutex::new(()));
+        let _guard = lock_a.lock().await;
+        let run_count = Arc::new(AtomicUsize::new(0));
+
+        let queued = run_or_queue_batch_continuation(
+            lock_a.clone(),
+            conversation_a,
+            Some(1),
+            |_anchor_message_id| {
                 let run_count = run_count.clone();
                 async move {
                     run_count.fetch_add(1, Ordering::SeqCst);
@@ -241,9 +347,33 @@ mod continuation_queue_tests {
         .await
         .unwrap();
 
-        assert_eq!(disposition, BatchContinuationDisposition::Executed);
-        assert_eq!(run_count.load(Ordering::SeqCst), 2);
-        assert!(!take_pending_batch_continuation(conversation_id).await);
+        let executed =
+            run_or_queue_batch_continuation(lock_b, conversation_b, Some(2), |anchor_message_id| {
+                let run_count = run_count.clone();
+                async move {
+                    assert_eq!(anchor_message_id, Some(2));
+                    run_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(queued, BatchContinuationDisposition::Queued);
+        assert_eq!(executed, BatchContinuationDisposition::Executed);
+        assert_eq!(run_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            take_pending_batch_continuation(conversation_a).await,
+            Some(PendingBatchContinuation { anchor_message_id: Some(1) })
+        );
+        assert!(take_pending_batch_continuation(conversation_b).await.is_none());
+    }
+
+    #[test]
+    fn dynamic_mode_treats_agent_server_as_always_available() {
+        assert!(is_dynamic_mode_agent_tool(Some("aipp:agent")));
+        assert!(!is_dynamic_mode_agent_tool(Some("other")));
+        assert!(!is_dynamic_mode_agent_tool(None));
     }
 
     #[test]
@@ -293,10 +423,7 @@ mod continuation_queue_tests {
     #[test]
     fn continue_with_error_message_falls_back_to_stored_error_then_default() {
         let tool_call = build_tool_call("failed", Some("stored error"));
-        assert_eq!(
-            resolve_continue_with_error_message(&tool_call, Some("   ")),
-            "stored error"
-        );
+        assert_eq!(resolve_continue_with_error_message(&tool_call, Some("   ")), "stored error");
 
         let no_error_tool_call = build_tool_call("failed", None);
         assert_eq!(
@@ -628,7 +755,13 @@ fn continuation_anchor_message_id(tool_call: &MCPToolCall) -> Option<i64> {
     tool_call.assistant_message_id.or(tool_call.message_id)
 }
 
-fn validate_continue_with_error_request(tool_call: &MCPToolCall) -> std::result::Result<(), String> {
+fn newest_continuation_anchor_message_id(tool_calls: &[MCPToolCall]) -> Option<i64> {
+    tool_calls.iter().rev().find_map(continuation_anchor_message_id)
+}
+
+fn validate_continue_with_error_request(
+    tool_call: &MCPToolCall,
+) -> std::result::Result<(), String> {
     if tool_call.status != "failed" {
         return Err("只能从失败状态继续".to_string());
     }
@@ -668,9 +801,23 @@ async fn handoff_mcp_focus_to_origin_message(
         );
     }
 
-    activity_manager
-        .finish_mcp_call(app_handle, tool_call.conversation_id, tool_call.id)
-        .await;
+    activity_manager.finish_mcp_call(app_handle, tool_call.conversation_id, tool_call.id).await;
+}
+
+async fn mark_continuation_running_on_message(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    message_id: Option<i64>,
+) {
+    let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() else {
+        return;
+    };
+
+    if let Some(message_id) = message_id {
+        activity_manager.set_assistant_streaming(app_handle, conversation_id, message_id).await;
+    } else {
+        debug!(conversation_id, "Continuation start has no anchor message id");
+    }
 }
 
 // 验证工具调用是否可以执行
@@ -752,6 +899,7 @@ async fn handle_tool_execution_result(
 
             // 处理对话继续逻辑（仅当 trigger_continuation 为 true 时）
             if trigger_continuation {
+                handoff_mcp_focus_to_origin_message(app_handle, &tool_call).await;
                 info!("准备触发工具成功续写，call_id={}, is_retry={}", call_id, is_retry);
                 if let Err(e) = handle_tool_success_continuation(
                     app_handle,
@@ -765,6 +913,11 @@ async fn handle_tool_execution_result(
                 .await
                 {
                     warn!(error=%e, "tool execution succeeded but continuation failed");
+                    if let Some(activity_manager) =
+                        app_handle.try_state::<ConversationActivityManager>()
+                    {
+                        activity_manager.clear_focus(app_handle, tool_call.conversation_id).await;
+                    }
                 }
             } else {
                 debug!(
@@ -773,14 +926,14 @@ async fn handle_tool_execution_result(
                 );
             }
 
-            if trigger_continuation {
-                handoff_mcp_focus_to_origin_message(app_handle, &tool_call).await;
-            } else if let Some(activity_manager) =
-                app_handle.try_state::<ConversationActivityManager>()
-            {
-                activity_manager
-                    .finish_mcp_call(app_handle, tool_call.conversation_id, call_id)
-                    .await;
+            if !trigger_continuation {
+                if let Some(activity_manager) =
+                    app_handle.try_state::<ConversationActivityManager>()
+                {
+                    activity_manager
+                        .finish_mcp_call(app_handle, tool_call.conversation_id, call_id)
+                        .await;
+                }
             }
         }
         Err(error) => {
@@ -813,6 +966,7 @@ async fn handle_tool_execution_result(
                         "Skip continuation for user-cancelled tool error"
                     );
                 } else {
+                    handoff_mcp_focus_to_origin_message(app_handle, &tool_call).await;
                     info!("准备触发工具失败续写，call_id={}", call_id);
                     if let Err(e) = trigger_conversation_continuation_with_error(
                         app_handle,
@@ -825,6 +979,13 @@ async fn handle_tool_execution_result(
                     .await
                     {
                         warn!(error=%e, "tool execution failed but continuation with error failed");
+                        if let Some(activity_manager) =
+                            app_handle.try_state::<ConversationActivityManager>()
+                        {
+                            activity_manager
+                                .clear_focus(app_handle, tool_call.conversation_id)
+                                .await;
+                        }
                     } else {
                         continuation_dispatched = true;
                     }
@@ -833,7 +994,6 @@ async fn handle_tool_execution_result(
 
             if continuation_dispatched {
                 debug!(call_id = tool_call.id, "tool error continuation dispatched");
-                handoff_mcp_focus_to_origin_message(app_handle, &tool_call).await;
             } else if let Some(activity_manager) =
                 app_handle.try_state::<ConversationActivityManager>()
             {
@@ -1158,9 +1318,7 @@ pub async fn execute_mcp_tool_call(
                 .await;
             };
             let resolved_tool_name = resolved_tool.tool_name.clone();
-            let is_agent_loader_tool = server.command.as_deref() == Some("aipp:agent")
-                && (resolved_tool_name == "load_mcp_server"
-                    || resolved_tool_name == "load_mcp_tool");
+            let is_agent_loader_tool = is_dynamic_mode_agent_tool(server.command.as_deref());
             let is_loaded = match db.is_tool_loaded_for_conversation(
                 tool_call.conversation_id,
                 tool_call.server_id,
@@ -1348,8 +1506,11 @@ pub async fn continue_with_error(
     // 获取错误信息，优先使用前端传入的错误文本（用于兜底保留细节）
     let error_message = resolve_continue_with_error_message(&tool_call, error_message.as_deref());
 
+    // 让续写的流式响应接管；若首 token 启动较慢，先切回工具所属的消息边框。
+    handoff_mcp_focus_to_origin_message(&app_handle, &tool_call).await;
+
     // 触发续写
-    trigger_conversation_continuation_with_error(
+    if let Err(error) = trigger_conversation_continuation_with_error(
         &app_handle,
         &state,
         &feature_config_state,
@@ -1358,10 +1519,12 @@ pub async fn continue_with_error(
         &error_message,
     )
     .await
-    .map_err(|e| format!("续写失败: {}", e))?;
-
-    // 让续写的流式响应接管；若续写启动较慢，先切回工具所属的消息边框。
-    handoff_mcp_focus_to_origin_message(&app_handle, &tool_call).await;
+    {
+        if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+            activity_manager.clear_focus(&app_handle, tool_call.conversation_id).await;
+        }
+        return Err(format!("续写失败: {}", error));
+    }
 
     info!(call_id = call_id, "continued conversation with tool error");
     Ok(())
@@ -1501,13 +1664,16 @@ pub async fn send_mcp_tool_results(
 
     let _lock_guard = continuation_lock.lock().await;
 
+    let anchor_message_id = newest_continuation_anchor_message_id(&tool_calls);
+
     // 触发续写 - 使用专门的批量续写实现
-    let continuation_result = match batch_tool_result_continue_ask_ai_impl(
+    let continuation_result = match run_batch_continuation_once(
         app_handle.clone(),
-        feature_config_state,
         window,
         conversation_id,
         assistant_id,
+        tool_calls.len(),
+        anchor_message_id,
     )
     .await
     {
@@ -1528,11 +1694,6 @@ pub async fn send_mcp_tool_results(
             Err(format!("Anyhow错误: {}", e))
         }
     };
-
-    // Restore focus after batch continuation to keep MCP executing state until streaming starts.
-    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
-        activity_manager.restore_after_mcp(&app_handle, conversation_id).await;
-    }
 
     continuation_result
 }
@@ -1637,13 +1798,14 @@ async fn trigger_conversation_continuation(
 
             if let Err(e) = drain_pending_batch_continuations(
                 continuation_conversation_id,
-                || {
+                |anchor_message_id| {
                     run_batch_continuation_once(
                         app_handle_clone.clone(),
                         window_clone.clone(),
                         continuation_conversation_id,
                         assistant_id,
                         0,
+                        anchor_message_id,
                     )
                 },
             )
@@ -1755,13 +1917,14 @@ async fn trigger_conversation_continuation_with_error(
 
             if let Err(e) = drain_pending_batch_continuations(
                 continuation_conversation_id,
-                || {
+                |anchor_message_id| {
                     run_batch_continuation_once(
                         app_handle_clone.clone(),
                         window_clone.clone(),
                         continuation_conversation_id,
                         assistant_id,
                         0,
+                        anchor_message_id,
                     )
                 },
             )
@@ -1784,8 +1947,10 @@ async fn run_batch_continuation_once(
     conversation_id: i64,
     assistant_id: i64,
     tool_count: usize,
+    anchor_message_id: Option<i64>,
 ) -> Result<()> {
     let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+    mark_continuation_running_on_message(&app_handle, conversation_id, anchor_message_id).await;
     match batch_tool_result_continue_ask_ai_impl(
         app_handle.clone(),
         feature_config_state,
@@ -1797,13 +1962,13 @@ async fn run_batch_continuation_once(
     {
         Ok(_) => {
             info!(conversation_id, tool_count, "Batch tool continuation succeeded");
-            if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
-                activity_manager.restore_after_mcp(&app_handle, conversation_id).await;
-            }
             Ok(())
         }
         Err(e) => {
             warn!(conversation_id, error = %e, "Batch tool continuation failed");
+            if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+                activity_manager.clear_focus(&app_handle, conversation_id).await;
+            }
             Err(anyhow!(e.to_string()))
         }
     }
@@ -1937,12 +2102,14 @@ pub async fn trigger_conversation_continuation_batch(
     // 若锁空闲，当前请求负责执行并顺带清空排队请求；
     // 若锁已占用，仅登记“有待处理续写”，由持锁方释放前继续处理。
     let initial_tool_count = tool_calls.len();
+    let initial_anchor_message_id = newest_continuation_anchor_message_id(&tool_calls);
     let disposition = run_or_queue_batch_continuation(
         continuation_lock,
         conversation_id,
+        initial_anchor_message_id,
         {
             let mut is_first_run = true;
-            move || {
+            move |anchor_message_id| {
                 let current_tool_count = if is_first_run {
                     is_first_run = false;
                     initial_tool_count
@@ -1955,6 +2122,7 @@ pub async fn trigger_conversation_continuation_batch(
                     conversation_id,
                     assistant_id,
                     current_tool_count,
+                    anchor_message_id,
                 )
             }
         },

@@ -7,9 +7,9 @@ use crate::skills::installer::{
     inspect_skill_install_recipe as inspect_recipe_internal,
     install_skill_archive as install_archive_internal,
     install_skill_install_recipe as install_recipe_internal, load_skill_install_recipe_from_file,
-    validate_skill_install_dirs, SkillArchiveInstallResult, SkillArchiveInspection, SkillInstallPlan,
-    SkillInstallRecipe, SkillInstallRecipeDir, SkillInstallRecipeSource, SkillInstallRecipeSourceType,
-    SkillInstallResult,
+    validate_skill_install_dirs, SkillArchiveInspection, SkillArchiveInstallResult,
+    SkillInstallPlan, SkillInstallRecipe, SkillInstallRecipeDir, SkillInstallRecipeSource,
+    SkillInstallRecipeSourceType, SkillInstallResult,
 };
 use crate::skills::parser::SkillParser;
 use crate::skills::scanner::SkillScanner;
@@ -73,10 +73,7 @@ impl OfficialSkill {
             return Ok(source);
         }
 
-        Err(format!(
-            "Official skill {} is missing source information and download_url",
-            self.id
-        ))
+        Err(format!("Official skill {} is missing source information and download_url", self.id))
     }
 }
 
@@ -627,10 +624,8 @@ pub async fn fetch_official_skills(
             .json::<Vec<OfficialSkill>>()
             .await
             .map_err(|e| format!("Failed to parse skills response: {}", e))?;
-        let normalized_skills = skills
-            .into_iter()
-            .map(OfficialSkill::normalize)
-            .collect::<Result<Vec<_>, _>>()?;
+        let normalized_skills =
+            skills.into_iter().map(OfficialSkill::normalize).collect::<Result<Vec<_>, _>>()?;
 
         info!("Fetched {} official skills", normalized_skills.len());
         Ok::<Vec<OfficialSkill>, String>(normalized_skills)

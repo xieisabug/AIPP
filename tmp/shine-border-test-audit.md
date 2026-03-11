@@ -42,6 +42,30 @@
   - continuation lock busy -> queue
   - 预先排队 continuation 在执行后被 drain
 
+本轮继续补上的修复与回归包括：
+
+- 后端 handoff 前移：`src-tauri/src/mcp/execution_api.rs`
+  - 工具成功 continuation、工具失败 continuation、`continue_with_error()` 都在真正触发续写前先调用 `handoff_mcp_focus_to_origin_message()`
+  - 若续写同步启动失败，会立刻 `clear_focus()`，避免 message shine 假性残留
+- batch/manual continuation 改为后端先标记消息运行中：
+  - `send_mcp_tool_results()` 和 batch continuation drain 现在会在首 token 到来前，先把 origin assistant message 标成 `assistant_streaming`
+  - 这样即使 TTFT 较长，message shine 与 send button 仍由后端 authoritative `runtime_state_snapshot` 驱动
+- queued batch continuation 现在会记住 `anchor_message_id`
+  - 锁繁忙时不再只记录一个布尔值，而是把“下一轮该把 shine 还给哪条消息”一并保留下来
+  - 这样 drain 出队时仍能把 running/shine 恢复到正确消息上，而不是掉到 `none`
+- 新增前端回归：
+  - `shows assistant streaming as running before any continuation token arrives`
+  - 专门验证：MCP 成功后、还没有任何 response chunk 时，只要后端已经切到 `assistant_streaming`，前端也会立即把消息点亮并保持 `runtimeState.is_running === true`
+- 新增 Rust 回归：
+  - continuation queue 会保留最新已知的 anchor message id
+  - queued batch continuation drain 时会把保存的 anchor 传回执行函数
+
+这部分修复对应用户侧真实问题：
+
+- 工具执行完后续写首字较慢时，shine border 没有及时回到消息上
+- send button 会在 continuation gap 里错误显示成非运行态
+- batch/manual continuation 在锁繁忙或排队 drain 时，可能丢失该 handoff 到哪条消息的信息
+
 相关验证已通过：
 
 - `npm run test -- src/components/ConversationUI.test.ts src/hooks/useMcpToolCallProcessor.test.tsx src/hooks/useConversationEvents.test.ts src/components/McpToolCall.test.tsx`
@@ -49,6 +73,8 @@
 - `cargo test --manifest-path src-tauri/Cargo.toml activity_state::tests`
 - `npm run build`
 - `cargo check --manifest-path src-tauri/Cargo.toml`
+- `npm run test -- src/hooks/useConversationEvents.test.ts`
+- `cargo test --manifest-path src-tauri/Cargo.toml continuation_queue_tests && cargo check --manifest-path src-tauri/Cargo.toml`
 
 ## 本次确认过的现有测试
 
@@ -256,6 +282,11 @@
 - 没有直接测试 `handoff_mcp_focus_to_origin_message()`。
 - 没有测试 `assistant_message_id` 优先于 `message_id` 的 handoff 效果，只测试了 anchor 选择函数本身。
 - 没有测试“没有 anchor message id 时”的行为边界。
+
+更新：
+
+- 代码层面已修复真实 handoff 时序：`execution_api.rs` 中 success / failed / continue_with_error / batch send 都会先把后端 focus 切回 origin message，再开始 continuation。
+- 前端现在有回归测试覆盖“还没收到首 token，但后端已进入 `assistant_streaming` 时，消息继续发光且 runtime 仍为 running”。
 
 ### 9. 关键时序 B：queued batch continuation
 

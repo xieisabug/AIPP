@@ -4,6 +4,7 @@ use crate::api::assistant_api::{
 };
 use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
+use crate::mcp::builtin_mcp::get_builtin_tools_for_command;
 use std::collections::{HashMap, HashSet};
 use tauri::Manager;
 use tracing::{debug, instrument, trace, warn};
@@ -21,6 +22,10 @@ fn parse_bool(value: &str, default_value: bool) -> bool {
         return default_value;
     }
     !(value == "false" || value == "0" || value == "off")
+}
+
+fn is_agent_server(command: Option<&str>) -> bool {
+    command == Some("aipp:agent")
 }
 
 pub async fn is_dynamic_mcp_loading_enabled_for_assistant(
@@ -69,7 +74,7 @@ fn collect_all_enabled_servers_for_dynamic_mode(
         if !server.is_enabled {
             continue;
         }
-        if server.command.as_deref() != Some("aipp:agent") {
+        if !is_agent_server(server.command.as_deref()) {
             continue;
         }
         let tools = db
@@ -78,12 +83,12 @@ fn collect_all_enabled_servers_for_dynamic_mode(
                 AppError::DatabaseError(format!("Failed to load MCP server tools: {}", e))
             })?
             .into_iter()
-            .filter(|tool| tool.tool_name == "load_mcp_server" || tool.tool_name == "load_mcp_tool")
+            .filter(|tool| tool.is_enabled)
             .map(|tool| MCPToolInfo {
                 id: tool.id,
                 name: tool.tool_name,
                 description: tool.tool_description.unwrap_or_default(),
-                is_enabled: true,
+                is_enabled: tool.is_enabled,
                 is_auto_run: tool.is_auto_run,
                 parameters: tool.parameters.unwrap_or_else(|| "{}".to_string()),
             })
@@ -322,7 +327,8 @@ pub async fn format_mcp_prompt_with_filters(
 1. 只能调用系统已加载的工具，禁止虚构工具名或参数
 2. 仅在有助于完成任务时调用；能靠自身知识完成时不调用
 3. 每条消息最多调用一个工具；如需多步骤，分多轮依次调用
-4. **未加载的工具无法调用**——调用前必须先通过 `load_mcp_tool` 加载
+4. **Agent 工具始终可用，无需加载；非 Agent 工具在调用前必须先通过 `load_mcp_tool` 加载**
+5. 当用户明确要求使用某个 Skill / Agent 工作流时，应先调用 `load_skill` 读取该 Skill 的详细说明，再按说明执行
 
 ## 动态加载流程（必须按顺序执行）
 1. **浏览目录**：查看下方"工具集目录摘要"，确定目标工具集
@@ -342,7 +348,8 @@ pub async fn format_mcp_prompt_with_filters(
 2. 仅在有助于完成任务时调用；能靠自身知识完成时不调用
 3. 每条消息最多调用一个工具；如需多步骤，分多轮依次调用
 4. 工具调用必须放在消息的最末尾，调用之后禁止再输出任何文字
-5. **未加载的工具无法调用**——调用前必须先通过 `load_mcp_tool` 加载
+5. **Agent 工具始终可用，无需加载；非 Agent 工具在调用前必须先通过 `load_mcp_tool` 加载**
+6. 当用户明确要求使用某个 Skill / Agent 工作流时，应先调用 `load_skill` 读取该 Skill 的详细说明，再按说明执行
 
 ## 输出格式（强制）
 调用工具时，必须使用下面的**裸 XML 格式**直接输出，禁止用 Markdown 代码块（```）包裹：
@@ -375,11 +382,11 @@ pub async fn format_mcp_prompt_with_filters(
 "#
         };
 
-        let mut load_tools_info = String::from("\n## 必备加载工具（始终可用）\n\n");
+        let mut load_tools_info = String::from("\n## Agent 工具（始终可用，无需加载）\n\n");
         load_tools_info.push_str("### 工具集: Agent\n\n");
         let mut has_load_tools = false;
         for server_details in &mcp_info.enabled_servers {
-            if server_details.command.as_deref() != Some("aipp:agent") {
+            if !is_agent_server(server_details.command.as_deref()) {
                 continue;
             }
             for tool in &server_details.tools {
@@ -397,17 +404,23 @@ pub async fn format_mcp_prompt_with_filters(
             }
         }
         if !has_load_tools {
-            load_tools_info.push_str(
-                "**load_mcp_server** \n - description: 根据关键词加载工具集的工具目录摘要\n - parameters: {\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"要检索的工具集名称或关键词\"}},\"required\":[\"name\"]}\n\n",
-            );
-            load_tools_info.push_str(
-                "**load_mcp_tool** \n - description: 按关键词加载 MCP 工具到当前会话，加载后后续轮次可直接调用\n - parameters: {\"type\":\"object\",\"properties\":{\"names\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"需要加载的工具关键词列表，支持关键词或完整 server::tool 形式，可一次传入多个\"},\"server_name\":{\"type\":\"string\",\"description\":\"可选。限定在指定工具集（参数名为 server_name）下搜索工具\"}},\"required\":[\"names\"]}\n\n",
-            );
+            for tool in get_builtin_tools_for_command("aipp:agent") {
+                load_tools_info.push_str(&format!("#### {} \n", tool.name));
+                load_tools_info.push_str(&format!(" - description: {}\n", tool.description));
+                load_tools_info.push_str(&format!(" - parameters: {}\n\n", tool.input_schema));
+            }
         }
         // 只有非原生 toolcall 模式才显示 XML 范例
         if !mcp_info.use_native_toolcall {
             load_tools_info.push_str(
                 r#"### 使用范例
+
+加载某个 Skill 的详细说明：
+<mcp_tool_call>
+  <server_name>Agent</server_name>
+  <tool_name>load_skill</tool_name>
+  <parameters>{"command":"pdf","source_type":"AGENTS"}</parameters>
+</mcp_tool_call>
 
 查看 Search 工具集的工具列表：
 <mcp_tool_call>
@@ -533,4 +546,77 @@ pub async fn format_mcp_prompt_with_filters(
         "{}\n{}\n{}\n{}",
         "# 助手指令\n", assistant_prompt_result, mcp_constraint_prompt, tools_info
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::assistant_api::{MCPServerWithTools, MCPToolInfo};
+
+    #[test]
+    fn dynamic_mode_recognizes_load_skill_as_agent_loading_tool() {
+        assert!(is_agent_server(Some("aipp:agent")));
+        assert!(!is_agent_server(Some("aipp:search")));
+        assert!(!is_agent_server(None));
+    }
+
+    #[tokio::test]
+    async fn dynamic_prompt_fallback_introduces_load_skill() {
+        let prompt = format_mcp_prompt_with_filters(
+            "assistant prompt".to_string(),
+            &MCPInfoForAssistant {
+                enabled_servers: vec![MCPServerWithTools {
+                    id: 1,
+                    name: "Agent".to_string(),
+                    summary: String::new(),
+                    command: Some("aipp:agent".to_string()),
+                    is_enabled: true,
+                    tools: vec![],
+                }],
+                use_native_toolcall: false,
+                dynamic_loading_enabled: true,
+            },
+            None,
+            None,
+        )
+        .await;
+
+        assert!(prompt.contains("load_skill"));
+        assert!(prompt.contains("\"source_type\""));
+        assert!(prompt.contains("todo_write"));
+    }
+
+    #[tokio::test]
+    async fn dynamic_prompt_lists_load_skill_when_agent_tool_is_available() {
+        let prompt = format_mcp_prompt_with_filters(
+            "assistant prompt".to_string(),
+            &MCPInfoForAssistant {
+                enabled_servers: vec![MCPServerWithTools {
+                    id: 1,
+                    name: "Agent".to_string(),
+                    summary: String::new(),
+                    command: Some("aipp:agent".to_string()),
+                    is_enabled: true,
+                    tools: vec![MCPToolInfo {
+                        id: 1,
+                        name: "load_skill".to_string(),
+                        description: "Load skill details".to_string(),
+                        is_enabled: true,
+                        is_auto_run: false,
+                        parameters:
+                            "{\"type\":\"object\",\"required\":[\"command\",\"source_type\"]}"
+                                .to_string(),
+                    }],
+                }],
+                use_native_toolcall: false,
+                dynamic_loading_enabled: true,
+            },
+            None,
+            None,
+        )
+        .await;
+
+        assert!(prompt.contains("Load skill details"));
+        assert!(prompt.contains("load_skill"));
+    }
 }

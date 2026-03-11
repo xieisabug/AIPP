@@ -187,10 +187,8 @@ impl SkillInstallRecipeSource {
                 }
             }
             SkillInstallRecipeSourceType::Zip => {
-                let url = self
-                    .url
-                    .as_deref()
-                    .ok_or_else(|| "Zip source requires url".to_string())?;
+                let url =
+                    self.url.as_deref().ok_or_else(|| "Zip source requires url".to_string())?;
                 validate_zip_url(url)?;
             }
         }
@@ -246,10 +244,7 @@ impl SkillInstallRecipeSource {
                         parsed
                             .path_segments()
                             .and_then(|mut segments| {
-                                segments
-                                    .by_ref()
-                                    .filter(|segment| !segment.is_empty())
-                                    .next_back()
+                                segments.by_ref().filter(|segment| !segment.is_empty()).next_back()
                             })
                             .map(strip_archive_suffix)
                     })
@@ -301,7 +296,8 @@ pub async fn inspect_skill_archive(
     proxy_url: Option<&str>,
 ) -> Result<SkillArchiveInspection, String> {
     let archive = download_and_extract_source(source, proxy_url).await?;
-    let skills = build_archive_plan_skills(source, configured_dirs, &archive.repo_root, skills_dir)?;
+    let skills =
+        build_archive_plan_skills(source, configured_dirs, &archive.repo_root, skills_dir)?;
 
     Ok(SkillArchiveInspection {
         source: source.clone(),
@@ -332,7 +328,12 @@ pub async fn install_skill_archive(
     recipe.validate()?;
 
     let archive = download_and_extract_source(source, proxy_url).await?;
-    let result = install_recipe_from_repo_root(&recipe, &archive.repo_root, skills_dir, &archive.download_url)?;
+    let result = install_recipe_from_repo_root(
+        &recipe,
+        &archive.repo_root,
+        skills_dir,
+        &archive.download_url,
+    )?;
 
     Ok(SkillArchiveInstallResult {
         source: result.source,
@@ -451,13 +452,10 @@ async fn download_and_extract_source(
         ));
     }
 
-    let archive_bytes = response.bytes().await.map_err(|e| {
-        format!(
-            "读取下载的技能压缩包失败：{}（{}）",
-            download_url,
-            e
-        )
-    })?;
+    let archive_bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("读取下载的技能压缩包失败：{}（{}）", download_url, e))?;
 
     let temp_dir = TempExtractDir::new("skill_recipe_extract")?;
     extract_zip_bytes_to_dir(archive_bytes.as_ref(), &temp_dir.path)?;
@@ -470,14 +468,11 @@ fn build_archive_http_client(proxy_url: Option<&str>) -> Result<reqwest::Client,
     let mut builder = reqwest::Client::builder().user_agent("AIPP skill installer");
 
     if let Some(proxy_url) = proxy_url {
-        let proxy =
-            reqwest::Proxy::all(proxy_url).map_err(|e| format!("代理配置失败: {}", e))?;
+        let proxy = reqwest::Proxy::all(proxy_url).map_err(|e| format!("代理配置失败: {}", e))?;
         builder = builder.proxy(proxy);
     }
 
-    builder
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))
+    builder.build().map_err(|e| format!("Failed to build HTTP client: {}", e))
 }
 
 fn format_archive_download_error(
@@ -498,10 +493,7 @@ fn format_archive_download_error(
             source_label, download_url
         )
     } else {
-        format!(
-            "下载技能压缩包失败：{}（{}）：{}",
-            source_label, download_url, error
-        )
+        format!("下载技能压缩包失败：{}（{}）：{}", source_label, download_url, error)
     }
 }
 
@@ -579,13 +571,7 @@ fn build_plan_skills_from_dir_mappings(
         let entry_file = find_skill_entry_file_case_insensitive(&source_dir)?
             .ok_or_else(|| format!("Directory {} does not contain SKILL.md", dir.from))?;
 
-        skills.push(build_plan_skill(
-            &dir.from,
-            &dir.to,
-            &source_dir,
-            &entry_file,
-            skills_dir,
-        )?);
+        skills.push(build_plan_skill(&dir.from, &dir.to, &source_dir, &entry_file, skills_dir)?);
     }
 
     Ok(skills)
@@ -605,14 +591,11 @@ fn build_plan_skill(
         .to_string();
     let normalized_entry_file = normalized_entry_file_name(entry_file)?;
     let metadata = SkillParser::parse_metadata(entry_file).map_err(|e| {
-        format!(
-            "Failed to parse skill metadata from {}: {}",
-            entry_file.display(),
-            e
-        )
+        format!("Failed to parse skill metadata from {}: {}", entry_file.display(), e)
     })?;
     let fallback_name = fallback_skill_name(from, to);
-    let display_name = resolve_skill_display_name(metadata.name.clone(), entry_file, &fallback_name);
+    let display_name =
+        resolve_skill_display_name(metadata.name.clone(), entry_file, &fallback_name);
     let preview = build_skill_preview(entry_file, metadata.description.clone())?;
 
     Ok(SkillInstallPlanSkill {
@@ -682,15 +665,12 @@ fn validate_github_repo(repo: &str) -> Result<(), String> {
 }
 
 fn validate_zip_url(url: &str) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(url.trim())
-        .map_err(|e| format!("Zip source url is invalid: {}", e))?;
+    let parsed =
+        reqwest::Url::parse(url.trim()).map_err(|e| format!("Zip source url is invalid: {}", e))?;
 
     match parsed.scheme() {
         "http" | "https" => Ok(()),
-        scheme => Err(format!(
-            "Zip source url must use http or https, got scheme: {}",
-            scheme
-        )),
+        scheme => Err(format!("Zip source url must use http or https, got scheme: {}", scheme)),
     }
 }
 
@@ -748,11 +728,7 @@ fn resolve_archive_root(extract_dir: &Path) -> Result<PathBuf, String> {
 fn resolve_recipe_dir(repo_root: &Path, from: &str) -> Result<PathBuf, String> {
     validate_relative_source_path(from)?;
 
-    let resolved = if from.trim() == "." {
-        repo_root.to_path_buf()
-    } else {
-        repo_root.join(from)
-    };
+    let resolved = if from.trim() == "." { repo_root.to_path_buf() } else { repo_root.join(from) };
     if !resolved.exists() {
         return Err(format!(
             "Configured skill directory {} does not exist in extracted repository",
@@ -780,10 +756,18 @@ fn resolve_recipe_dir(repo_root: &Path, from: &str) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
-fn discover_archive_skill_candidates(repo_root: &Path) -> Result<Vec<DiscoveredSkillCandidate>, String> {
+fn discover_archive_skill_candidates(
+    repo_root: &Path,
+) -> Result<Vec<DiscoveredSkillCandidate>, String> {
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
-    discover_archive_skill_candidates_recursive(repo_root, repo_root, 0, &mut candidates, &mut seen)?;
+    discover_archive_skill_candidates_recursive(
+        repo_root,
+        repo_root,
+        0,
+        &mut candidates,
+        &mut seen,
+    )?;
     candidates.sort_by(|left, right| left.from.cmp(&right.from));
     Ok(candidates)
 }
@@ -814,7 +798,13 @@ fn discover_archive_skill_candidates_recursive(
             continue;
         }
 
-        discover_archive_skill_candidates_recursive(repo_root, &entry, depth + 1, candidates, seen)?;
+        discover_archive_skill_candidates_recursive(
+            repo_root,
+            &entry,
+            depth + 1,
+            candidates,
+            seen,
+        )?;
     }
 
     Ok(())
@@ -874,11 +864,7 @@ fn should_include_discovered_skill_dir(
 
 fn relative_archive_path(repo_root: &Path, dir: &Path) -> Result<String, String> {
     let relative = dir.strip_prefix(repo_root).map_err(|e| {
-        format!(
-            "Failed to determine archive-relative path for {}: {}",
-            dir.display(),
-            e
-        )
+        format!("Failed to determine archive-relative path for {}: {}", dir.display(), e)
     })?;
 
     let mut components = Vec::new();
@@ -909,10 +895,7 @@ fn assign_discovered_target_names(
     let initial_names: HashMap<String, String> = candidates
         .iter()
         .map(|candidate| {
-            (
-                candidate.from.clone(),
-                default_discovered_target_name(candidate, source),
-            )
+            (candidate.from.clone(), default_discovered_target_name(candidate, source))
         })
         .collect();
 
@@ -925,10 +908,8 @@ fn assign_discovered_target_names(
     let mut assigned = HashMap::new();
 
     for candidate in candidates {
-        let base_name = initial_names
-            .get(&candidate.from)
-            .cloned()
-            .unwrap_or_else(|| "skill".to_string());
+        let base_name =
+            initial_names.get(&candidate.from).cloned().unwrap_or_else(|| "skill".to_string());
         let mut proposed = if counts.get(&base_name).copied().unwrap_or_default() > 1 {
             disambiguated_discovered_target_name(candidate, source)
         } else {
@@ -993,10 +974,7 @@ fn find_skill_entry_file_case_insensitive(skill_dir: &Path) -> Result<Option<Pat
     let entries = collect_directory_entries(skill_dir)?;
     let files: Vec<PathBuf> = entries.into_iter().filter(|path| path.is_file()).collect();
 
-    Ok(files
-        .iter()
-        .find(|path| file_name_eq(path, "SKILL.md"))
-        .cloned())
+    Ok(files.iter().find(|path| file_name_eq(path, "SKILL.md")).cloned())
 }
 
 fn find_skill_entry_file_for_current_scanner(skill_dir: &Path) -> Result<Option<PathBuf>, String> {
@@ -1019,10 +997,7 @@ fn normalized_entry_file_name(entry_path: &Path) -> Result<String, String> {
         return Ok("SKILL.md".to_string());
     }
 
-    Err(format!(
-        "Unsupported skill entry file {}; only SKILL.md is allowed",
-        entry_path.display()
-    ))
+    Err(format!("Unsupported skill entry file {}; only SKILL.md is allowed", entry_path.display()))
 }
 
 fn normalize_selected_entry_file(
@@ -1173,11 +1148,7 @@ fn build_skill_preview(
     }
 
     let content = fs::read_to_string(entry_file).map_err(|e| {
-        format!(
-            "Failed to read skill entry file {} for preview: {}",
-            entry_file.display(),
-            e
-        )
+        format!("Failed to read skill entry file {} for preview: {}", entry_file.display(), e)
     })?;
 
     Ok(extract_markdown_preview(&content))
@@ -1276,13 +1247,7 @@ fn build_archive_recipe_id(source: &SkillInstallRecipeSource) -> String {
     let fallback = source.target_dir_fallback_name(None);
     let sanitized = fallback
         .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '-'
-            }
-        })
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '-' })
         .collect::<String>()
         .trim_matches('-')
         .to_string();
@@ -1460,10 +1425,7 @@ mod tests {
 
         let skills =
             build_archive_plan_skills(&source, None, repo_root.path(), skills_root.path()).unwrap();
-        let discovered_paths = skills
-            .iter()
-            .map(|skill| skill.from.clone())
-            .collect::<Vec<_>>();
+        let discovered_paths = skills.iter().map(|skill| skill.from.clone()).collect::<Vec<_>>();
 
         assert_eq!(
             discovered_paths,

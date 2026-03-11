@@ -584,14 +584,13 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 if (messageUpdateData.message_type === "error") {
                     // 对于错误消息，立即触发错误处理和状态清理
                     console.error("Received error message:", messageUpdateData.content);
+                    handleError(messageUpdateData.content);
 
-                    // 清理所有边框相关状态
-                    setPendingUserMessageId(null);
-                    setStreamingAssistantMessageIds(new Set());
-
-                    // 调用错误处理回调
-                    callbacksRef.current.onError?.(messageUpdateData.content);
-                    callbacksRef.current.onAiResponseComplete?.(); // 错误也算作响应完成
+                    const conversationIdNum = Number(callbacksRef.current.conversationId);
+                    if (!Number.isNaN(conversationIdNum)) {
+                        syncRuntimeState(conversationIdNum);
+                        syncShineState(conversationIdNum);
+                    }
 
                     // 对于错误消息，处理完成状态并延长显示时间
                     if (messageUpdateData.is_done) {
@@ -1030,6 +1029,10 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         console.error("Global error handler called:", errorMessage);
         cancelIdleTransientReset();
         invalidateMcpCompensationPolling("global error");
+        const conversationIdNum = Number(callbacksRef.current.conversationId);
+        const hasConversationId = !Number.isNaN(conversationIdNum) && conversationIdNum > 0;
+        const currentRuntimeVersion = runtimeVersionRef.current;
+        const currentShineVersion = shineVersionRef.current;
 
         // 清理所有流式消息状态
         updateStreamingMessagesState(new Map());
@@ -1052,8 +1055,27 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         setStreamingAssistantMessageIds(new Set());
         setPendingUserMessageId(null); // 清理等待回复的用户消息
         setActivityFocus({ focus_type: 'none' });
-        setShineState(null);
-        shineVersionRef.current = { epoch: -1, revision: -1 };
+        if (hasConversationId && currentRuntimeVersion.epoch >= 0) {
+            setRuntimeState({
+                conversation_id: conversationIdNum,
+                is_running: false,
+                phase: "idle",
+                epoch: currentRuntimeVersion.epoch,
+                revision: currentRuntimeVersion.revision,
+            });
+        } else {
+            setRuntimeState(null);
+        }
+        if (hasConversationId && currentShineVersion.epoch >= 0) {
+            setShineState({
+                conversation_id: conversationIdNum,
+                epoch: currentShineVersion.epoch,
+                revision: currentShineVersion.revision,
+                primary_target: { target_type: "none" },
+            });
+        } else {
+            setShineState(null);
+        }
 
         // 调用外部错误处理，确保状态重置
         callbacksRef.current.onError?.(errorMessage);

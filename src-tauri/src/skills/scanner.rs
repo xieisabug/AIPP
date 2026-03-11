@@ -512,7 +512,8 @@ impl SkillScanner {
                                 let direct_file = expanded_path.join(&relative_path);
                                 if direct_file.is_file()
                                     && direct_file.exists()
-                                    && direct_file.file_name().and_then(|s| s.to_str()) == Some("SKILL.md")
+                                    && direct_file.file_name().and_then(|s| s.to_str())
+                                        == Some("SKILL.md")
                                 {
                                     return true;
                                 }
@@ -584,7 +585,8 @@ impl SkillScanner {
                                 // Check for skill folder first
                                 let skill_folder = expanded_path.join(&relative_path);
                                 if skill_folder.is_dir() {
-                                    return self.scan_skill_folder_with_skill_md(&skill_folder, source);
+                                    return self
+                                        .scan_skill_folder_with_skill_md(&skill_folder, source);
                                 }
                                 // Also check for direct file (backward compatibility)
                                 let direct_file = expanded_path.join(&relative_path);
