@@ -675,12 +675,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                 description: "获取当前会话的 Artifact 工作区路径和 manifest 路径。首次调用会自动初始化目录结构。".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
-                    "properties": {
-                        "conversation_id": {
-                            "type": "number",
-                            "description": "可选。会话 ID，不提供时会使用当前会话上下文。"
-                        }
-                    }
+                    "properties": {}
                 }),
             },
             BuiltinToolInfo {
@@ -972,6 +967,23 @@ mod tests {
         assert!(
             browser_env.is_none(),
             "BROWSER_TYPE env should be removed because chromiumoxide now uses fixed browser path detection"
+        );
+    }
+
+    #[test]
+    fn test_get_artifact_workspace_schema_has_no_conversation_override() {
+        let tools = get_builtin_tools_for_command("aipp:artifact");
+        let workspace_tool = tools
+            .iter()
+            .find(|t| t.name == "get_artifact_workspace")
+            .expect("get_artifact_workspace tool should exist");
+
+        let properties = workspace_tool.input_schema["properties"]
+            .as_object()
+            .expect("input schema properties should be an object");
+        assert!(
+            !properties.contains_key("conversation_id"),
+            "get_artifact_workspace should not expose conversation_id override"
         );
     }
 
