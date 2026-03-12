@@ -4,6 +4,7 @@
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
 import { writeFile } from '@tauri-apps/plugin-fs';
 import mermaid from 'mermaid';
@@ -58,6 +59,7 @@ export default function EmbeddedArtifactPreview({ className, previewOnly = false
 
     const currentLangRef = useRef<string>('');
     const currentInputStrRef = useRef<string>('');
+    const [currentConversationId, setCurrentConversationId] = useState<number | undefined>(undefined);
 
     useEffect(() => {
         previewTypeRef.current = previewType;
@@ -102,6 +104,12 @@ export default function EmbeddedArtifactPreview({ className, previewOnly = false
         if (data.original_code && data.type) {
             restoreAbortRef.current = true;
             setOriginalCode(data.original_code);
+
+            // Track conversation ID for realtime updates
+            if (data.conversation_id !== undefined) {
+                setCurrentConversationId(data.conversation_id);
+            }
+
             switch (data.type) {
                 case 'vue':
                 case 'react':
@@ -220,6 +228,37 @@ export default function EmbeddedArtifactPreview({ className, previewOnly = false
         onUvInstallFinished: handleUvInstallFinished,
         onReset: resetPreviewState,
     });
+
+    // ====== 监听 artifact 更新事件，实现实时刷新 ======
+    useEffect(() => {
+        if (currentConversationId === undefined) return;
+
+        const unlistenPromise = listen<{ conversation_id: number; artifact: { artifact_key: string } }>(
+            'artifact-manifest-updated',
+            (event) => {
+                // 只处理当前对话的 artifact 更新
+                if (event.payload.conversation_id !== currentConversationId) return;
+
+                console.log('🔧 [EmbeddedArtifactPreview] 检测到 artifact 更新，自动刷新预览:', event.payload.artifact.artifact_key);
+
+                // 调用后端恢复命令，重新加载缓存的 artifact
+                // Note: For sidebar, we use the same restore command but with sourceWindow='sidebar'
+                invoke<string | null>('restore_artifact_preview')
+                    .then((result) => {
+                        if (result) {
+                            console.log('🔧 [EmbeddedArtifactPreview] Artifact 预览已刷新');
+                        }
+                    })
+                    .catch((error) => {
+                        console.error('[EmbeddedArtifactPreview] 刷新 artifact 预览失败:', error);
+                    });
+            }
+        );
+
+        return () => {
+            unlistenPromise.then((unlisten) => unlisten());
+        };
+    }, [currentConversationId]);
 
     const postDrawioLoad = useCallback((xml: string) => {
         drawioIframeRef.current?.contentWindow?.postMessage(

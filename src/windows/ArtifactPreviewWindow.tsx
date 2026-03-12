@@ -121,6 +121,36 @@ export default function ArtifactPreviewWindow() {
             });
     }, []);
 
+    // ====== 监听 artifact 更新事件，实现实时刷新 ======
+    useEffect(() => {
+        if (currentConversationId === undefined) return;
+
+        const unlistenPromise = listen<{ conversation_id: number; artifact: { artifact_key: string } }>(
+            'artifact-manifest-updated',
+            (event) => {
+                // 只处理当前对话的 artifact 更新
+                if (event.payload.conversation_id !== currentConversationId) return;
+
+                console.log('🔧 [ArtifactPreviewWindow] 检测到 artifact 更新，自动刷新预览:', event.payload.artifact.artifact_key);
+
+                // 调用后端恢复命令，重新加载缓存的 artifact
+                invoke<string | null>('restore_artifact_preview')
+                    .then((result) => {
+                        if (result) {
+                            console.log('🔧 [ArtifactPreviewWindow] Artifact 预览已刷新');
+                        }
+                    })
+                    .catch((error) => {
+                        console.error('[ArtifactPreviewWindow] 刷新 artifact 预览失败:', error);
+                    });
+            }
+        );
+
+        return () => {
+            unlistenPromise.then((unlisten) => unlisten());
+        };
+    }, [currentConversationId]);
+
     // ====== 缓存相关函数 ======
 
     // 保存当前 artifact 到 localStorage 缓存
