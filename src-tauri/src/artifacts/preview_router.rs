@@ -19,6 +19,7 @@ struct LastArtifactCache {
     input_str: String,
     db_id: Option<String>,
     assistant_id: Option<i64>,
+    source_window: Option<String>,
 }
 
 // 使用 LazyLock 延迟初始化全局状态
@@ -148,8 +149,9 @@ pub async fn run_artifacts(
             input_str: input_str.to_string(),
             db_id: db_id.clone(),
             assistant_id,
+            source_window: source_window.clone(),
         });
-        tracing::debug!("Cached artifact: lang={}, input_len={}", lang, input_str.len());
+        tracing::debug!("Cached artifact: lang={}, input_len={}, source_window={:?}", lang, input_str.len(), source_window);
     }
 
     match lang {
@@ -699,14 +701,16 @@ pub async fn restore_artifact_preview(
         let input_str = artifact.input_str.clone();
         let db_id = artifact.db_id.clone();
         let assistant_id = artifact.assistant_id;
+        let source_window = artifact.source_window.clone();
 
         // 释放锁，因为 run_artifacts 可能需要时间
         drop(cache);
 
-        tracing::info!("Restoring artifact preview: lang={}, input_len={}", lang, input_str.len());
+        tracing::info!("Restoring artifact preview: lang={}, input_len={}, source_window={:?}",
+                       lang, input_str.len(), source_window);
 
-        // 重新处理 artifact
-        match run_artifacts(app_handle, &lang, &input_str, None, None, db_id, assistant_id).await {
+        // 重新处理 artifact，使用缓存的 source_window
+        match run_artifacts(app_handle, &lang, &input_str, source_window, None, db_id, assistant_id).await {
             Ok(_) => Ok(Some(format!("Restored {} preview", lang))),
             Err(e) => Err(e.to_string()),
         }
