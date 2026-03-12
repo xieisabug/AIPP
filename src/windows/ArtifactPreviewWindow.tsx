@@ -30,7 +30,7 @@ import { Label } from '@/components/ui/label';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { Bot, Database, Settings2 } from 'lucide-react';
+import { Bot, Database, Settings2, Loader2 } from 'lucide-react';
 import { AssistantBasicInfo } from '@/data/ArtifactCollection';
 import ArtifactPreviewCodeBlock from '@/components/ArtifactPreviewCodeBlock';
 import {
@@ -1166,11 +1166,19 @@ export default function ArtifactPreviewWindow() {
                                         console.log('[Draw.io] iframe 加载完成');
                                     }}
                                 />
-                            ) : (
+                            ) : (previewType === 'react' || previewType === 'vue') && !previewUrl ? (
+                                /* 等待 React/Vue 预览服务器启动 */
+                                <div className="flex-1 flex items-center justify-center text-muted-foreground">
+                                    <div className="text-center">
+                                        <Loader2 className="h-8 w-8 mx-auto mb-2 animate-spin opacity-60" />
+                                        <p className="text-sm">正在启动预览服务器...</p>
+                                    </div>
+                                </div>
+                            ) : previewUrl ? (
                                 /* iframe 预览 - 用于 React 和 Vue */
                                 <iframe
                                     ref={previewIframeRef}
-                                    src={previewUrl || ''}
+                                    src={previewUrl}
                                     className="flex-1 w-full border-0"
                                     sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                                     onLoad={() => {
@@ -1178,6 +1186,13 @@ export default function ArtifactPreviewWindow() {
                                     onError={() => {
                                     }}
                                 />
+                            ) : (
+                                /* 没有预览内容 */
+                                <div className="flex-1 flex items-center justify-center text-muted-foreground">
+                                    <div className="text-center">
+                                        <p className="text-sm">等待预览数据...</p>
+                                    </div>
+                                </div>
                             )}
                         </div>
                     )}

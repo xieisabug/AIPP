@@ -564,13 +564,20 @@ export default function EmbeddedArtifactPreview({ className, previewOnly = false
                                     <p className="text-sm">正在启动预览...</p>
                                 </div>
                             </div>
-                        ) : (
+                        ) : previewUrl ? (
                             /* React/Vue iframe 预览 */
                             <iframe
-                                src={previewUrl || ''}
+                                src={previewUrl}
                                 className="w-full h-full border-0"
                                 sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                             />
+                        ) : (
+                            /* 没有可预览的内容 */
+                            <div className="h-full flex items-center justify-center text-muted-foreground">
+                                <div className="text-center">
+                                    <p className="text-sm">等待预览数据...</p>
+                                </div>
+                            </div>
                         )}
                     </div>
                 )}
