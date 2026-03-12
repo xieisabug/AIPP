@@ -17,6 +17,8 @@ interface MessageActionButtonsProps {
     outputTokenCount: number;
     ttftMs?: number | null;
     tps?: number | null;
+    startTime?: Date | null;
+    finishTime?: Date | null;
     messageContent?: string;
 }
 
@@ -33,6 +35,8 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
     outputTokenCount,
     ttftMs,
     tps,
+    startTime,
+    finishTime,
     messageContent,
 }) => {
     const showEditRegenerate = messageType === "assistant" || messageType === "response" || messageType === "user";
@@ -59,6 +63,8 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
                 messageType={messageType}
                 ttftMs={ttftMs}
                 tps={tps}
+                startTime={startTime}
+                finishTime={finishTime}
                 onOpenChange={setIsTokenTooltipOpen}
             />
             {messageContent && (
