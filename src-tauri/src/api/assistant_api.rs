@@ -824,3 +824,41 @@ pub async fn import_assistant(
     // Return the created assistant detail
     get_assistant(app_handle, new_assistant_id)
 }
+
+// Assistant Workspace Commands
+
+#[tauri::command]
+#[instrument(skip(app_handle), fields(assistant_id))]
+pub async fn get_assistant_workspaces(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+) -> Result<Vec<crate::db::assistant_db::AssistantWorkspace>, String> {
+    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    assistant_db
+        .get_assistant_workspaces(assistant_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle), fields(assistant_id, path))]
+pub async fn add_assistant_workspace(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+    path: String,
+) -> Result<(), String> {
+    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    assistant_db
+        .add_assistant_workspace(assistant_id, &path)
+        .map_err(|e| e.to_string())?;
+    info!(assistant_id, path = %path, "Added assistant workspace");
+    Ok(())
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle), fields(id))]
+pub async fn remove_assistant_workspace(app_handle: tauri::AppHandle, id: i64) -> Result<(), String> {
+    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    assistant_db.remove_assistant_workspace(id).map_err(|e| e.to_string())?;
+    info!(id, "Removed assistant workspace");
+    Ok(())
+}

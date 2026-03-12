@@ -188,6 +188,10 @@ pub struct PermissionRequestEvent {
 pub enum PermissionDecision {
     /// 仅本次允许
     Allow,
+    /// 单次对话信任（当前对话期间该路径自动放行）
+    AllowForConversation,
+    /// 添加到助手信任列表（持久化到助手配置，该助手的对话自动放行）
+    AllowForAssistant,
     /// 允许并加入白名单
     AllowAndSave,
     /// 拒绝
@@ -213,6 +217,14 @@ mod tests {
         let json = serde_json::to_string(&allow).unwrap();
         assert_eq!(json, "\"allow\"");
 
+        let allow_conversation = PermissionDecision::AllowForConversation;
+        let json = serde_json::to_string(&allow_conversation).unwrap();
+        assert_eq!(json, "\"allow_for_conversation\"");
+
+        let allow_assistant = PermissionDecision::AllowForAssistant;
+        let json = serde_json::to_string(&allow_assistant).unwrap();
+        assert_eq!(json, "\"allow_for_assistant\"");
+
         let allow_save = PermissionDecision::AllowAndSave;
         let json = serde_json::to_string(&allow_save).unwrap();
         assert_eq!(json, "\"allow_and_save\"");
@@ -226,6 +238,14 @@ mod tests {
     fn test_permission_decision_deserialize() {
         let allow: PermissionDecision = serde_json::from_str("\"allow\"").unwrap();
         assert_eq!(allow, PermissionDecision::Allow);
+
+        let allow_conversation: PermissionDecision =
+            serde_json::from_str("\"allow_for_conversation\"").unwrap();
+        assert_eq!(allow_conversation, PermissionDecision::AllowForConversation);
+
+        let allow_assistant: PermissionDecision =
+            serde_json::from_str("\"allow_for_assistant\"").unwrap();
+        assert_eq!(allow_assistant, PermissionDecision::AllowForAssistant);
 
         let allow_save: PermissionDecision = serde_json::from_str("\"allow_and_save\"").unwrap();
         assert_eq!(allow_save, PermissionDecision::AllowAndSave);

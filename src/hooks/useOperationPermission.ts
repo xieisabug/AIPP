@@ -67,7 +67,15 @@ export function useOperationPermission(options: UseOperationPermissionOptions = 
     }, [conversationId]);
 
     const handleDecision = useCallback(
-        async (requestId: string, decision: "allow" | "allow_and_save" | "deny") => {
+        async (
+            requestId: string,
+            decision:
+                | "allow"
+                | "allow_for_conversation"
+                | "allow_for_assistant"
+                | "allow_and_save"
+                | "deny"
+        ) => {
             if (!pendingRequest || pendingRequest.request_id !== requestId) {
                 return;
             }
@@ -82,7 +90,9 @@ export function useOperationPermission(options: UseOperationPermissionOptions = 
             } catch (error) {
                 const message = getErrorMessage(error) || "提交权限决策失败";
                 console.error("Failed to send permission decision:", message);
+                // 失败时直接关闭对话框，避免用户被卡住
                 setDecisionError(message);
+                shiftNextRequest();
             }
         },
         [pendingRequest, shiftNextRequest]

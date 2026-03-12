@@ -22,9 +22,10 @@ use crate::api::ai_api::{
     regenerate_ai, regenerate_conversation_title, tool_result_continue_ask_ai,
 };
 use crate::api::assistant_api::{
-    add_assistant, bulk_update_assistant_mcp_tools, copy_assistant, delete_assistant,
-    export_assistant, get_acp_working_directory, get_assistant, get_assistant_field_value,
-    get_assistant_mcp_servers_with_tools, get_assistants, import_assistant, save_assistant,
+    add_assistant, add_assistant_workspace, bulk_update_assistant_mcp_tools, copy_assistant,
+    delete_assistant, export_assistant, get_acp_working_directory, get_assistant,
+    get_assistant_field_value, get_assistant_mcp_servers_with_tools, get_assistant_workspaces,
+    get_assistants, import_assistant, remove_assistant_workspace, save_assistant,
     update_assistant_mcp_config, update_assistant_mcp_tool_config,
     update_assistant_model_config_value,
 };
@@ -647,6 +648,9 @@ pub fn run() {
             copy_assistant,
             export_assistant,
             import_assistant,
+            get_assistant_workspaces,
+            add_assistant_workspace,
+            remove_assistant_workspace,
             list_conversations,
             search_conversations,
             get_conversation_with_messages,

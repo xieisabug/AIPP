@@ -1,4 +1,6 @@
-use crate::db::mcp_db::MCPDatabase;
+use crate::db::{assistant_db::AssistantDatabase, conversation_db::ConversationDatabase, mcp_db::MCPDatabase};
+use crate::db::conversation_db::Repository;
+use crate::utils::path_utils::is_path_under_trusted;
 use std::path::{Component, Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
 use tracing::{debug, info, warn};
@@ -88,14 +90,78 @@ impl PermissionManager {
         let workspace_root = app_data_dir
             .join("artifact_workspaces")
             .join(format!("conversation_{}", conversation_id));
-        let Some(normalized_workspace_root) = Self::normalize_absolute_path(&workspace_root) else {
-            return false;
-        };
-        let Some(normalized_target_path) = Self::normalize_absolute_path(Path::new(path)) else {
-            return false;
+        let target_path = Path::new(path);
+
+        is_path_under_trusted(target_path, &workspace_root)
+    }
+
+    /// Get assistant_id from conversation
+    fn get_assistant_id_from_conversation(&self, conversation_id: i64) -> Option<i64> {
+        let conversation_db = ConversationDatabase::new(&self.app_handle).ok()?;
+        conversation_db
+            .conversation_repo()
+            .ok()?
+            .read(conversation_id)
+            .ok()??
+            .assistant_id
+    }
+
+    /// Check if path is in conversation trust list
+    async fn is_path_in_conversation_trust_list(
+        &self,
+        operation_state: &OperationState,
+        conversation_id: i64,
+        path: &str,
+    ) -> bool {
+        operation_state.is_path_trusted_for_conversation(conversation_id, path).await
+    }
+
+    /// Check if path is in assistant workspace
+    fn is_path_in_assistant_workspace(&self, assistant_id: i64, path: &str) -> bool {
+        let assistant_db = match AssistantDatabase::new(&self.app_handle) {
+            Ok(db) => db,
+            Err(e) => {
+                warn!(error = %e, "Failed to open assistant database");
+                return false;
+            }
         };
 
-        normalized_target_path.starts_with(&normalized_workspace_root)
+        match assistant_db.is_path_in_assistant_workspace(assistant_id, path) {
+            Ok(is_trusted) => {
+                if is_trusted {
+                    debug!(assistant_id, path = %path, "Path is in assistant workspace");
+                }
+                is_trusted
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to check assistant workspace");
+                false
+            }
+        }
+    }
+
+    /// Add path to assistant workspace
+    fn add_path_to_assistant_workspace(&self, assistant_id: i64, path: &str) -> Result<(), String> {
+        let assistant_db = AssistantDatabase::new(&self.app_handle).map_err(|e| e.to_string())?;
+
+        // 如果路径是目录，直接添加；如果是文件（或不存在），添加其父目录
+        let path_to_add = {
+            let p = Path::new(path);
+            if p.is_dir() {
+                path.to_string()
+            } else {
+                p.parent()
+                    .map(|parent| parent.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.to_string())
+            }
+        };
+
+        assistant_db
+            .add_assistant_workspace(assistant_id, &path_to_add)
+            .map_err(|e| e.to_string())?;
+
+        info!(assistant_id, path = %path_to_add, "Added path to assistant workspace");
+        Ok(())
     }
 
     /// 加载白名单目录列表
@@ -251,15 +317,23 @@ impl PermissionManager {
             }
         }
 
-        // 获取父目录作为白名单项
-        let parent_path = Path::new(path)
-            .parent()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.to_string());
+        // 如果路径是目录，直接添加；如果是文件（或不存在），添加其父目录
+        let path_to_add = {
+            let p = Path::new(path);
+            if p.is_dir() {
+                path.to_string()
+            } else {
+                p.parent()
+                    .map(|parent| parent.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.to_string())
+            }
+        };
+
+        info!(path = %path_to_add, "Adding to whitelist");
 
         // 更新白名单
-        if !current_dirs.contains(&parent_path) {
-            current_dirs.push(parent_path);
+        if !current_dirs.contains(&path_to_add) {
+            current_dirs.push(path_to_add);
         }
         env_map.insert("ALLOWED_DIRECTORIES".to_string(), current_dirs.join("\n"));
 
@@ -275,7 +349,6 @@ impl PermissionManager {
             )
             .map_err(|e| format!("Failed to update whitelist: {}", e))?;
 
-        info!(path = %path, "Added to whitelist");
         Ok(())
     }
 
@@ -287,7 +360,7 @@ impl PermissionManager {
         path: &str,
         conversation_id: Option<i64>,
     ) -> Result<bool, String> {
-        // 对会话专属 Artifact 工作区自动放行，避免每次弹窗确认
+        // 1. 对会话专属 Artifact 工作区自动放行，避免每次弹窗确认
         if self.is_conversation_artifact_workspace_path(path, conversation_id) {
             debug!(
                 path = %path,
@@ -297,17 +370,70 @@ impl PermissionManager {
             return Ok(true);
         }
 
-        // 首先检查白名单
+        // 2. 检查会话信任路径列表
+        if let Some(conv_id) = conversation_id {
+            if self
+                .is_path_in_conversation_trust_list(operation_state, conv_id, path)
+                .await
+            {
+                debug!(
+                    path = %path,
+                    conversation_id = conv_id,
+                    "Path auto-allowed for conversation trusted list"
+                );
+                return Ok(true);
+            }
+        }
+
+        // 3. 检查助手工作区信任列表
+        if let Some(conv_id) = conversation_id {
+            if let Some(assistant_id) = self.get_assistant_id_from_conversation(conv_id) {
+                if self.is_path_in_assistant_workspace(assistant_id, path) {
+                    debug!(
+                        path = %path,
+                        assistant_id = assistant_id,
+                        "Path auto-allowed for assistant workspace"
+                    );
+                    return Ok(true);
+                }
+            }
+        }
+
+        // 4. 检查全局白名单
         if self.is_path_allowed(path) {
             return Ok(true);
         }
 
-        // 请求用户权限
+        // 5. 请求用户权限
         let decision =
             self.request_permission(operation_state, operation, path, conversation_id).await?;
 
         match decision {
             PermissionDecision::Allow => Ok(true),
+            PermissionDecision::AllowForConversation => {
+                // 添加到会话信任列表
+                if let Some(conv_id) = conversation_id {
+                    let parent_path = Path::new(path)
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.to_string());
+                    operation_state
+                        .add_conversation_trusted_path(conv_id, parent_path)
+                        .await;
+                }
+                Ok(true)
+            }
+            PermissionDecision::AllowForAssistant => {
+                // 添加到助手工作区
+                if let Some(conv_id) = conversation_id {
+                    if let Some(assistant_id) = self.get_assistant_id_from_conversation(conv_id) {
+                        if let Err(e) = self.add_path_to_assistant_workspace(assistant_id, path) {
+                            warn!(error = %e, "Failed to add path to assistant workspace, but allowing operation");
+                        }
+                    }
+                }
+                Ok(true)
+            }
             PermissionDecision::AllowAndSave => {
                 // 添加到白名单
                 if let Err(e) = self.add_to_whitelist(path) {

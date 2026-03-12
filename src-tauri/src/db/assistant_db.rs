@@ -1,6 +1,8 @@
 use super::get_db_path;
+use crate::utils::path_utils::is_path_under_trusted;
 use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use tracing::{debug, error, instrument};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -65,6 +67,14 @@ pub struct AssistantMCPToolConfig {
     pub mcp_tool_id: i64,
     pub is_enabled: bool,
     pub is_auto_run: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AssistantWorkspace {
+    pub id: i64,
+    pub assistant_id: i64,
+    pub path: String,
+    pub created_time: Option<String>,
 }
 
 pub struct AssistantDatabase {
@@ -180,6 +190,19 @@ impl AssistantDatabase {
                 created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (assistant_id) REFERENCES assistant(id) ON DELETE CASCADE,
                 UNIQUE(assistant_id, mcp_tool_id)
+            );",
+            [],
+        )?;
+
+        // Create assistant workspace table for trusted paths
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS assistant_workspace (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                assistant_id INTEGER NOT NULL,
+                path TEXT NOT NULL,
+                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (assistant_id) REFERENCES assistant(id) ON DELETE CASCADE,
+                UNIQUE(assistant_id, path)
             );",
             [],
         )?;
@@ -799,5 +822,79 @@ impl AssistantDatabase {
 
         debug!(server_count = result.len(), "fetched assistant mcp servers with tools");
         Ok(result)
+    }
+
+    // Assistant Workspace Methods
+
+    /// Get all workspace paths for an assistant
+    #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
+    pub fn get_assistant_workspaces(&self, assistant_id: i64) -> Result<Vec<AssistantWorkspace>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, assistant_id, path, created_time FROM assistant_workspace WHERE assistant_id = ? ORDER BY created_time DESC"
+        )?;
+        let workspace_iter = stmt.query_map(params![assistant_id], |row| {
+            Ok(AssistantWorkspace {
+                id: row.get(0)?,
+                assistant_id: row.get(1)?,
+                path: row.get(2)?,
+                created_time: row.get(3)?,
+            })
+        })?;
+
+        let mut workspaces = Vec::new();
+        for workspace in workspace_iter {
+            workspaces.push(workspace?);
+        }
+        debug!(workspace_count = workspaces.len(), "assistant workspaces loaded");
+        Ok(workspaces)
+    }
+
+    /// Add a workspace path for an assistant
+    #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id, path = path))]
+    pub fn add_assistant_workspace(&self, assistant_id: i64, path: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO assistant_workspace (assistant_id, path) VALUES (?, ?)",
+            params![assistant_id, path],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        debug!(workspace_id = id, "assistant workspace inserted");
+        Ok(id)
+    }
+
+    /// Remove a workspace path by ID
+    #[instrument(level = "debug", skip(self), fields(id = id))]
+    pub fn remove_assistant_workspace(&self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM assistant_workspace WHERE id = ?", params![id])?;
+        debug!("assistant workspace deleted");
+        Ok(())
+    }
+
+    /// Remove all workspace paths for an assistant
+    #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
+    pub fn remove_assistant_workspaces_by_assistant_id(&self, assistant_id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM assistant_workspace WHERE assistant_id = ?",
+            params![assistant_id],
+        )?;
+        debug!("assistant workspaces deleted by assistant_id");
+        Ok(())
+    }
+
+    /// Check if a path is in the assistant's workspace (prefix match)
+    #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
+    pub fn is_path_in_assistant_workspace(&self, assistant_id: i64, path: &str) -> Result<bool> {
+        let workspaces = self.get_assistant_workspaces(assistant_id)?;
+        let target_path = Path::new(path);
+
+        for workspace in workspaces {
+            let workspace_path = Path::new(&workspace.path);
+            // 使用规范化路径比较（Windows 兼容）
+            if is_path_under_trusted(target_path, workspace_path) {
+                debug!(path = %path, workspace = %workspace.path, "Path matches assistant workspace");
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 }

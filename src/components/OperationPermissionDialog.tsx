@@ -46,7 +46,10 @@ export interface AcpPermissionRequest {
 interface OperationPermissionDialogProps {
     request: OperationPermissionRequest | null;
     isOpen: boolean;
-    onDecision: (requestId: string, decision: 'allow' | 'allow_and_save' | 'deny') => void;
+    onDecision: (
+        requestId: string,
+        decision: 'allow' | 'allow_for_conversation' | 'allow_for_assistant' | 'allow_and_save' | 'deny'
+    ) => void;
     errorMessage?: string | null;
 }
 
@@ -74,16 +77,24 @@ export function OperationPermissionDialog({
 
     const operationLabel = operationLabels[request.operation] || request.operation;
 
+    const handleDeny = () => {
+        onDecision(request.request_id, 'deny');
+    };
+
     const handleAllow = () => {
         onDecision(request.request_id, 'allow');
     };
 
-    const handleAllowAndSave = () => {
-        onDecision(request.request_id, 'allow_and_save');
+    const handleAllowForConversation = () => {
+        onDecision(request.request_id, 'allow_for_conversation');
     };
 
-    const handleDeny = () => {
-        onDecision(request.request_id, 'deny');
+    const handleAllowForAssistant = () => {
+        onDecision(request.request_id, 'allow_for_assistant');
+    };
+
+    const handleAllowAndSave = () => {
+        onDecision(request.request_id, 'allow_and_save');
     };
 
     return (
@@ -136,11 +147,27 @@ export function OperationPermissionDialog({
                         仅本次允许
                     </Button>
                     <Button
+                        variant="outline"
+                        onClick={handleAllowForConversation}
+                        className="flex items-center gap-2"
+                    >
+                        <Shield className="h-4 w-4" />
+                        对话期间信任
+                    </Button>
+                    <Button
+                        variant="outline"
+                        onClick={handleAllowForAssistant}
+                        className="flex items-center gap-2"
+                    >
+                        <ShieldCheck className="h-4 w-4" />
+                        添加到助手工作区
+                    </Button>
+                    <Button
                         onClick={handleAllowAndSave}
                         className="flex items-center gap-2"
                     >
                         <ShieldCheck className="h-4 w-4" />
-                        允许并加入白名单
+                        允许并加入全局白名单
                     </Button>
                 </AlertDialogFooter>
             </AlertDialogContent>

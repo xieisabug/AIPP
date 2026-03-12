@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::process::Child;
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, info};
+
+use crate::utils::path_utils::is_path_under_trusted;
 
 /// 文件读取记录
 #[derive(Debug, Clone)]
@@ -38,6 +41,8 @@ pub struct OperationState {
     /// 待处理的权限请求（request_id -> 发送通道）
     pub(crate) pending_permissions:
         Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<super::types::PermissionDecision>>>>,
+    /// 会话信任路径（conversation_id -> 信任路径列表）
+    pub(crate) conversation_trusted_paths: Arc<Mutex<HashMap<i64, Vec<String>>>>,
 }
 
 impl OperationState {
@@ -47,6 +52,7 @@ impl OperationState {
             written_files: Arc::new(Mutex::new(HashMap::new())),
             bash_processes: Arc::new(Mutex::new(HashMap::new())),
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
+            conversation_trusted_paths: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -224,6 +230,37 @@ impl OperationState {
         } else {
             false
         }
+    }
+
+    /// 添加会话信任路径
+    pub async fn add_conversation_trusted_path(&self, conversation_id: i64, path: String) {
+        let mut trusted = self.conversation_trusted_paths.lock().await;
+        trusted.entry(conversation_id).or_insert_with(Vec::new).push(path.clone());
+        info!(conversation_id, path = %path, "Added conversation trusted path");
+    }
+
+    /// 检查路径是否在会话信任列表中（前缀匹配）
+    pub async fn is_path_trusted_for_conversation(&self, conversation_id: i64, path: &str) -> bool {
+        let trusted = self.conversation_trusted_paths.lock().await;
+        if let Some(paths) = trusted.get(&conversation_id) {
+            let target_path = Path::new(path);
+            for trusted_path in paths {
+                let trusted = Path::new(trusted_path);
+                // 使用规范化路径比较（Windows 兼容）
+                if is_path_under_trusted(target_path, trusted) {
+                    debug!(path = %path, trusted_path = %trusted_path, "Path matched conversation trusted path");
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// 清除会话信任路径（对话结束时调用）
+    pub async fn clear_conversation_trusted_paths(&self, conversation_id: i64) {
+        let mut trusted = self.conversation_trusted_paths.lock().await;
+        trusted.remove(&conversation_id);
+        debug!(conversation_id, "Cleared conversation trusted paths");
     }
 
     /// 检查 Bash 进程是否存在

@@ -61,6 +61,13 @@ export interface AssistantMCPToolConfig {
     is_auto_run: boolean;
 }
 
+export interface AssistantWorkspace {
+    id: number;
+    assistant_id: number;
+    path: string;
+    created_time?: string;
+}
+
 export interface AssistantDetail {
     assistant: Assistant;
     prompts: AssistantPrompt[];

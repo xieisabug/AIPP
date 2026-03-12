@@ -310,6 +310,7 @@ impl Clone for OperationState {
             written_files: self.written_files.clone(),
             bash_processes: self.bash_processes.clone(),
             pending_permissions: self.pending_permissions.clone(),
+            conversation_trusted_paths: self.conversation_trusted_paths.clone(),
         }
     }
 }

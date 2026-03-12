@@ -17,6 +17,8 @@ pub async fn confirm_operation_permission(
 
     let decision = match decision.as_str() {
         "allow" => PermissionDecision::Allow,
+        "allow_for_conversation" => PermissionDecision::AllowForConversation,
+        "allow_for_assistant" => PermissionDecision::AllowForAssistant,
         "allow_and_save" => PermissionDecision::AllowAndSave,
         "deny" => PermissionDecision::Deny,
         _ => {
