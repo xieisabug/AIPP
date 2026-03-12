@@ -75,8 +75,12 @@ pub async fn maybe_generate_title_from_conversation_if_needed(
     let conversation_repo = conversation_db.conversation_repo().map_err(AppError::from)?;
     let message_repo = conversation_db.message_repo().map_err(AppError::from)?;
 
-    let Some(conversation) = conversation_repo.read(conversation_id).map_err(AppError::from)? else {
-        warn!(conversation_id, reason, "skipping title generation because conversation was not found");
+    let Some(conversation) = conversation_repo.read(conversation_id).map_err(AppError::from)?
+    else {
+        warn!(
+            conversation_id,
+            reason, "skipping title generation because conversation was not found"
+        );
         return Ok(false);
     };
 
@@ -90,21 +94,24 @@ pub async fn maybe_generate_title_from_conversation_if_needed(
         return Ok(false);
     }
 
-    let messages = message_repo
-        .list_by_conversation_id(conversation_id)
-        .map_err(AppError::from)?;
+    let messages = message_repo.list_by_conversation_id(conversation_id).map_err(AppError::from)?;
     let Some(user_prompt) = messages
         .iter()
         .find(|(message, _)| message.message_type == "user" && !message.content.trim().is_empty())
         .map(|(message, _)| message.content.clone())
     else {
-        warn!(conversation_id, reason, "skipping title generation because no user message was found");
+        warn!(
+            conversation_id,
+            reason, "skipping title generation because no user message was found"
+        );
         return Ok(false);
     };
 
     let response_content = messages
         .iter()
-        .find(|(message, _)| message.message_type == "response" && !message.content.trim().is_empty())
+        .find(|(message, _)| {
+            message.message_type == "response" && !message.content.trim().is_empty()
+        })
         .map(|(message, _)| message.content.clone())
         .unwrap_or_default();
 

@@ -135,7 +135,7 @@ export default function ArtifactPreviewWindow() {
                 console.log('🔧 [ArtifactPreviewWindow] 检测到 artifact 更新，自动刷新预览:', event.payload.artifact.artifact_key);
 
                 // 调用后端恢复命令，重新加载缓存的 artifact
-                invoke<string | null>('restore_artifact_preview')
+                invoke<string | null>('restore_artifact_preview', { sourceWindow: 'artifact_preview' })
                     .then((result) => {
                         if (result) {
                             console.log('🔧 [ArtifactPreviewWindow] Artifact 预览已刷新');
@@ -187,7 +187,9 @@ export default function ArtifactPreviewWindow() {
             console.log('🔧 [ArtifactPreviewWindow] 从缓存恢复 artifact:', cache.type);
 
             // 调用后端恢复命令
-            const result = await invoke<string | null>('restore_artifact_preview');
+            const result = await invoke<string | null>('restore_artifact_preview', {
+                sourceWindow: 'artifact_preview',
+            });
             return result !== null;
         } catch (e) {
             console.warn('从缓存恢复 artifact 失败:', e);
@@ -253,7 +255,7 @@ export default function ArtifactPreviewWindow() {
             saveArtifactToCache(data.type, data.original_code);
 
             // Update conversation ID and load session-level config
-            const convId = data.conversation_id;
+            const convId = typeof data.conversation_id === 'number' ? data.conversation_id : undefined;
             setCurrentConversationId(convId);
 
             // Load config for this conversation (or global if no conversation)
@@ -385,6 +387,7 @@ export default function ArtifactPreviewWindow() {
     // 使用统一的事件处理 hook
     const artifactEvents = useArtifactEvents({
         windowType: 'preview',
+        readyWindow: 'artifact_preview',
         onArtifactData: handleArtifactData,
         onRedirect: handleRedirect,
         onEnvironmentCheck: handleEnvironmentCheck,

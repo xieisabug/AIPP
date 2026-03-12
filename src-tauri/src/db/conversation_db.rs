@@ -867,26 +867,15 @@ impl ConversationDatabase {
                 FROM message
                 WHERE conversation_id = ?1",
                 &[&conversation_id],
-                |row| {
-                    Ok((
-                        row.get(0).ok(),
-                        row.get(1).ok(),
-                    ))
-                },
+                |row| Ok((row.get(0).ok(), row.get(1).ok())),
             )
             .unwrap_or((None, None));
 
-        let start_time_parsed = start_time.and_then(|s| {
-            DateTime::parse_from_rfc3339(&s)
-                .ok()
-                .map(|dt| dt.with_timezone(&Utc))
-        });
+        let start_time_parsed = start_time
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)));
 
-        let finish_time_parsed = finish_time.and_then(|s| {
-            DateTime::parse_from_rfc3339(&s)
-                .ok()
-                .map(|dt| dt.with_timezone(&Utc))
-        });
+        let finish_time_parsed = finish_time
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)));
 
         // 按模型分组统计
         let mut stmt = conn.prepare(

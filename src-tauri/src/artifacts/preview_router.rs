@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Emitter, EventId, Listener, Manager};
@@ -9,23 +10,117 @@ use crate::artifacts::code_utils::{
 };
 use crate::artifacts::react_preview::{create_react_preview, create_react_preview_for_artifact};
 use crate::artifacts::vue_preview::create_vue_preview_for_artifact;
+use crate::artifacts::workspace::list_published_artifacts;
 use crate::artifacts::{applescript::run_applescript, powershell::run_powershell};
 use crate::errors::AppError;
 use crate::utils::bun_utils::BunUtils;
 
 // 缓存最后一次预览的 artifact 信息，用于刷新恢复
+#[derive(Debug, Clone)]
 struct LastArtifactCache {
     lang: String,
     input_str: String,
     db_id: Option<String>,
     assistant_id: Option<i64>,
+    conversation_id: Option<i64>,
+    artifact_key: Option<String>,
+    entry_file: Option<String>,
     source_window: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedArtifactPreviewInput {
+    lang: String,
+    input_str: String,
+    db_id: Option<String>,
+    assistant_id: Option<i64>,
+    conversation_id: Option<i64>,
+    artifact_key: Option<String>,
+    entry_file: Option<String>,
+    source_window: Option<String>,
+}
+
+impl From<&LastArtifactCache> for ResolvedArtifactPreviewInput {
+    fn from(cache: &LastArtifactCache) -> Self {
+        Self {
+            lang: cache.lang.clone(),
+            input_str: cache.input_str.clone(),
+            db_id: cache.db_id.clone(),
+            assistant_id: cache.assistant_id,
+            conversation_id: cache.conversation_id,
+            artifact_key: cache.artifact_key.clone(),
+            entry_file: cache.entry_file.clone(),
+            source_window: cache.source_window.clone(),
+        }
+    }
 }
 
 // 使用 LazyLock 延迟初始化全局状态
 use std::sync::LazyLock;
-static LAST_ARTIFACT_CACHE: LazyLock<Arc<Mutex<Option<LastArtifactCache>>>> =
-    LazyLock::new(|| Arc::new(Mutex::new(None)));
+static LAST_ARTIFACT_CACHE: LazyLock<Arc<Mutex<HashMap<String, LastArtifactCache>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+fn preview_cache_key(source_window: Option<&str>) -> &'static str {
+    match source_window {
+        Some("sidebar") => "sidebar",
+        _ => "artifact_preview",
+    }
+}
+
+fn cached_artifact_matches(
+    artifact_key: &str,
+    cached_entry_file: Option<&str>,
+    candidate_key: &str,
+    candidate_entry_file: &str,
+) -> bool {
+    if candidate_key != artifact_key {
+        return false;
+    }
+    match cached_entry_file {
+        Some(entry_file) => {
+            candidate_entry_file == entry_file
+                || candidate_entry_file == format!("{artifact_key}/{entry_file}")
+                || candidate_entry_file
+                    .rsplit_once('/')
+                    .map(|(_, suffix)| suffix == entry_file)
+                    .unwrap_or(false)
+        }
+        None => true,
+    }
+}
+
+fn resolve_cached_artifact_input(
+    app_handle: &tauri::AppHandle,
+    cache: &LastArtifactCache,
+) -> Result<ResolvedArtifactPreviewInput, String> {
+    let mut resolved = ResolvedArtifactPreviewInput::from(cache);
+    let Some(conversation_id) = cache.conversation_id else {
+        return Ok(resolved);
+    };
+    let Some(artifact_key) = cache.artifact_key.as_deref() else {
+        return Ok(resolved);
+    };
+
+    let artifacts = list_published_artifacts(app_handle, conversation_id)?;
+    if let Some(item) = artifacts.into_iter().find(|item| {
+        cached_artifact_matches(
+            artifact_key,
+            cache.entry_file.as_deref(),
+            &item.artifact_key,
+            &item.entry_file,
+        )
+    }) {
+        resolved.lang = item.language;
+        resolved.input_str = item.code;
+        resolved.db_id = item.db_id;
+        resolved.assistant_id = item.assistant_id;
+        resolved.conversation_id = Some(conversation_id);
+        resolved.artifact_key = Some(item.artifact_key);
+        resolved.entry_file = Some(item.entry_file);
+    }
+
+    Ok(resolved)
+}
 
 /// Wait for the ArtifactPreview window to register its event listeners before sending data.
 ///
@@ -36,14 +131,18 @@ static LAST_ARTIFACT_CACHE: LazyLock<Arc<Mutex<Option<LastArtifactCache>>>> =
 /// 1. Extended timeout from 2s to 10s for slow machines or first-time loads
 /// 2. The frontend sends ready signals repeatedly, so we're more likely to catch one
 /// 3. Returns true if ready signal received, false on timeout
-async fn wait_for_artifact_preview_ready(app_handle: &tauri::AppHandle) -> bool {
+async fn wait_for_artifact_preview_ready(
+    app_handle: &tauri::AppHandle,
+    target_window: &str,
+) -> bool {
     use tokio::sync::oneshot;
 
     let (tx, rx) = oneshot::channel::<()>();
     let sender = Arc::new(Mutex::new(Some(tx)));
     let app_handle_clone = app_handle.clone();
+    let ready_event = format!("artifact-preview-ready-{target_window}");
 
-    let listener_id: EventId = app_handle.listen("artifact-preview-ready", move |_event| {
+    let listener_id: EventId = app_handle.listen(ready_event.as_str(), move |_event| {
         let sender_clone = sender.clone();
         // Use spawn_blocking to handle the async lock in sync context
         tokio::spawn(async move {
@@ -109,11 +208,10 @@ pub async fn run_artifacts(
     conversation_id: Option<i64>,
     db_id: Option<String>,
     assistant_id: Option<i64>,
+    artifact_key: Option<String>,
+    entry_file: Option<String>,
 ) -> Result<String, AppError> {
-    let target_window = match source_window.as_deref() {
-        Some("sidebar") => Some("sidebar"),
-        _ => Some("artifact_preview"),
-    };
+    let target_window = preview_cache_key(source_window.as_deref());
     let request_id = Uuid::new_v4().to_string();
 
     if source_window.as_deref() != Some("sidebar") {
@@ -130,35 +228,44 @@ pub async fn run_artifacts(
     }
 
     // 发送 reset 事件，通知前端清除旧状态（处理切换 artifact 时的状态清理）
-    if let Some(window) =
-        target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-    {
+    if let Some(window) = app_handle.get_webview_window(target_window) {
         let _ =
             window.emit("artifact-preview-reset", serde_json::json!({ "request_id": request_id }));
         tracing::debug!("artifact-preview-reset event emitted");
     }
 
     // Avoid first-open race by waiting for the front-end ready event
-    let _ = wait_for_artifact_preview_ready(&app_handle).await;
+    let _ = wait_for_artifact_preview_ready(&app_handle, target_window).await;
 
     // 缓存当前 artifact 信息，用于刷新恢复
     {
         let mut cache = LAST_ARTIFACT_CACHE.lock().await;
-        *cache = Some(LastArtifactCache {
-            lang: lang.to_string(),
-            input_str: input_str.to_string(),
-            db_id: db_id.clone(),
-            assistant_id,
-            source_window: source_window.clone(),
-        });
-        tracing::debug!("Cached artifact: lang={}, input_len={}, source_window={:?}", lang, input_str.len(), source_window);
+        cache.insert(
+            target_window.to_string(),
+            LastArtifactCache {
+                lang: lang.to_string(),
+                input_str: input_str.to_string(),
+                db_id: db_id.clone(),
+                assistant_id,
+                conversation_id,
+                artifact_key,
+                entry_file,
+                source_window: source_window.clone(),
+            },
+        );
+        tracing::debug!(
+            "Cached artifact for {}: lang={}, input_len={}, conversation_id={:?}, source_window={:?}",
+            target_window,
+            lang,
+            input_str.len(),
+            conversation_id,
+            source_window
+        );
     }
 
     match lang {
         "powershell" => {
-            if let Some(window) =
-                target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-            {
+            if let Some(window) = app_handle.get_webview_window(target_window) {
                 let _ = window.emit(
                     "artifact-preview-log",
                     serde_json::json!({ "message": "执行 PowerShell 脚本...", "request_id": request_id }),
@@ -166,9 +273,7 @@ pub async fn run_artifacts(
             }
             return Ok(run_powershell(input_str).map_err(|e| {
                 let error_msg = "PowerShell 脚本执行失败:".to_owned() + &e.to_string();
-                if let Some(window) =
-                    target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                {
+                if let Some(window) = app_handle.get_webview_window(target_window) {
                     let _ = window.emit(
                         "artifact-preview-error",
                         serde_json::json!({ "message": error_msg, "request_id": request_id }),
@@ -178,9 +283,7 @@ pub async fn run_artifacts(
             })?);
         }
         "applescript" => {
-            if let Some(window) =
-                target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-            {
+            if let Some(window) = app_handle.get_webview_window(target_window) {
                 let _ = window.emit(
                     "artifact-preview-log",
                     serde_json::json!({ "message": "执行 AppleScript 脚本...", "request_id": request_id }),
@@ -188,9 +291,7 @@ pub async fn run_artifacts(
             }
             return Ok(run_applescript(input_str).map_err(|e| {
                 let error_msg = "AppleScript 脚本执行失败:".to_owned() + &e.to_string();
-                if let Some(window) =
-                    target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                {
+                if let Some(window) = app_handle.get_webview_window(target_window) {
                     let _ = window.emit(
                         "artifact-preview-error",
                         serde_json::json!({ "message": error_msg, "request_id": request_id }),
@@ -200,17 +301,13 @@ pub async fn run_artifacts(
             })?);
         }
         "mermaid" => {
-            if let Some(window) =
-                target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-            {
+            if let Some(window) = app_handle.get_webview_window(target_window) {
                 let _ = window.emit(
                     "artifact-preview-log",
                     serde_json::json!({ "message": "准备预览 Mermaid 图表...", "request_id": request_id }),
                 );
             }
-            if let Some(window) =
-                target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-            {
+            if let Some(window) = app_handle.get_webview_window(target_window) {
                 let _ = window.emit(
                     "artifact-preview-data",
                     serde_json::json!({
@@ -236,9 +333,7 @@ pub async fn run_artifacts(
             }
         }
         "xml" | "svg" | "html" | "markdown" | "md" => {
-            if let Some(window) =
-                target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-            {
+            if let Some(window) = app_handle.get_webview_window(target_window) {
                 let _ = window.emit(
                     "artifact-preview-log",
                     serde_json::json!({
@@ -275,9 +370,7 @@ pub async fn run_artifacts(
         }
         // 支持 "drawio" 和 "drawio:xml" 两种格式
         lang if lang == "drawio" || lang.starts_with("drawio:") => {
-            if let Some(window) =
-                target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-            {
+            if let Some(window) = app_handle.get_webview_window(target_window) {
                 let _ = window.emit(
                     "artifact-preview-log",
                     serde_json::json!({ "message": "准备预览 Draw.io 图表...", "request_id": request_id }),
@@ -304,9 +397,7 @@ pub async fn run_artifacts(
             if bun_version.is_err()
                 || bun_version.as_ref().unwrap_or(&String::new()).contains("Not Installed")
             {
-                if let Some(window) =
-                    target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                {
+                if let Some(window) = app_handle.get_webview_window(target_window) {
                     let _ = window.emit("environment-check", serde_json::json!({
                         "tool": "bun",
                         "message": "React 预览需要 bun 环境，但系统中未安装 bun。是否要自动安装？",
@@ -321,9 +412,7 @@ pub async fn run_artifacts(
             if is_react_component(input_str) {
                 let component_name = extract_component_name(input_str)
                     .unwrap_or_else(|| "UserComponent".to_string());
-                if let Some(window) =
-                    target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                {
+                if let Some(window) = app_handle.get_webview_window(target_window) {
                     let _ = window.emit(
                         "artifact-preview-data",
                         serde_json::json!({
@@ -340,15 +429,13 @@ pub async fn run_artifacts(
                     app_handle.clone(),
                     input_str.to_string(),
                     component_name,
-                    target_window.map(|name| name.to_string()),
+                    Some(target_window.to_string()),
                     Some(request_id.clone()),
                 )
                 .await
                 .map_err(|e| {
                     let error_msg = format!("React 组件预览失败: {}", e);
-                    if let Some(window) =
-                        target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                    {
+                    if let Some(window) = app_handle.get_webview_window(target_window) {
                         let _ = window.emit(
                             "artifact-preview-error",
                             serde_json::json!({ "message": error_msg, "request_id": request_id }),
@@ -358,9 +445,7 @@ pub async fn run_artifacts(
                 })?;
                 return Ok(format!("React 组件预览已启动，预览 ID: {}", preview_id));
             } else {
-                if let Some(window) =
-                    target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                {
+                if let Some(window) = app_handle.get_webview_window(target_window) {
                     let _ = window.emit(
                         "artifact-preview-error",
                         serde_json::json!({
@@ -376,9 +461,7 @@ pub async fn run_artifacts(
             if bun_version.is_err()
                 || bun_version.as_ref().unwrap_or(&String::new()).contains("Not Installed")
             {
-                if let Some(window) =
-                    target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                {
+                if let Some(window) = app_handle.get_webview_window(target_window) {
                     let _ = window.emit("environment-check", serde_json::json!({
                         "tool": "bun",
                         "message": "Vue 预览需要 bun 环境，但系统中未安装 bun。是否要自动安装？",
@@ -393,9 +476,7 @@ pub async fn run_artifacts(
             if is_vue_component(input_str) {
                 let component_name = extract_vue_component_name(input_str)
                     .unwrap_or_else(|| "UserComponent".to_string());
-                if let Some(window) =
-                    target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                {
+                if let Some(window) = app_handle.get_webview_window(target_window) {
                     let _ = window.emit(
                         "artifact-preview-data",
                         serde_json::json!({
@@ -412,15 +493,13 @@ pub async fn run_artifacts(
                     app_handle.clone(),
                     input_str.to_string(),
                     component_name,
-                    target_window.map(|name| name.to_string()),
+                    Some(target_window.to_string()),
                     Some(request_id.clone()),
                 )
                 .await
                 .map_err(|e| {
                     let error_msg = format!("Vue 组件预览失败: {}", e);
-                    if let Some(window) =
-                        target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                    {
+                    if let Some(window) = app_handle.get_webview_window(target_window) {
                         let _ = window.emit(
                             "artifact-preview-error",
                             serde_json::json!({ "message": error_msg, "request_id": request_id }),
@@ -430,9 +509,7 @@ pub async fn run_artifacts(
                 })?;
                 return Ok(format!("Vue 组件预览已启动，预览 ID: {}", preview_id));
             } else {
-                if let Some(window) =
-                    target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                {
+                if let Some(window) = app_handle.get_webview_window(target_window) {
                     let _ = window.emit(
                         "artifact-preview-error",
                         serde_json::json!({
@@ -451,9 +528,7 @@ pub async fn run_artifacts(
                 if bun_version.is_err()
                     || bun_version.as_ref().unwrap_or(&String::new()).contains("Not Installed")
                 {
-                    if let Some(window) =
-                        target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                    {
+                    if let Some(window) = app_handle.get_webview_window(target_window) {
                         let _ = window.emit("environment-check", serde_json::json!({
                             "tool": "bun",
                             "message": "Vue 预览需要 bun 环境，但系统中未安装 bun。是否要自动安装？",
@@ -467,9 +542,7 @@ pub async fn run_artifacts(
 
                 let component_name = extract_vue_component_name(input_str)
                     .unwrap_or_else(|| "UserComponent".to_string());
-                if let Some(window) =
-                    target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                {
+                if let Some(window) = app_handle.get_webview_window(target_window) {
                     let _ = window.emit(
                         "artifact-preview-data",
                         serde_json::json!({
@@ -493,15 +566,13 @@ pub async fn run_artifacts(
                     app_handle.clone(),
                     input_str.to_string(),
                     component_name,
-                    target_window.map(|name| name.to_string()),
+                    Some(target_window.to_string()),
                     Some(request_id.clone()),
                 )
                 .await
                 .map_err(|e| {
                     let error_msg = format!("Vue 组件预览失败: {}", e);
-                    if let Some(window) =
-                        target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                    {
+                    if let Some(window) = app_handle.get_webview_window(target_window) {
                         let _ = window.emit(
                             "artifact-preview-error",
                             serde_json::json!({ "message": error_msg, "request_id": request_id }),
@@ -517,9 +588,7 @@ pub async fn run_artifacts(
                 if bun_version.is_err()
                     || bun_version.as_ref().unwrap_or(&String::new()).contains("Not Installed")
                 {
-                    if let Some(window) =
-                        target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                    {
+                    if let Some(window) = app_handle.get_webview_window(target_window) {
                         let _ = window.emit("environment-check", serde_json::json!({
                             "tool": "bun",
                             "message": "React 预览需要 bun 环境，但系统中未安装 bun。是否要自动安装？",
@@ -533,9 +602,7 @@ pub async fn run_artifacts(
 
                 let component_name = extract_component_name(input_str)
                     .unwrap_or_else(|| "UserComponent".to_string());
-                if let Some(window) =
-                    target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                {
+                if let Some(window) = app_handle.get_webview_window(target_window) {
                     let _ = window.emit(
                         "artifact-preview-data",
                         serde_json::json!({
@@ -559,15 +626,13 @@ pub async fn run_artifacts(
                     app_handle.clone(),
                     input_str.to_string(),
                     component_name,
-                    target_window.map(|name| name.to_string()),
+                    Some(target_window.to_string()),
                     Some(request_id.clone()),
                 )
                 .await
                 .map_err(|e| {
                     let error_msg = format!("React 组件预览失败: {}", e);
-                    if let Some(window) =
-                        target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                    {
+                    if let Some(window) = app_handle.get_webview_window(target_window) {
                         let _ = window.emit(
                             "artifact-preview-error",
                             serde_json::json!({ "message": error_msg, "request_id": request_id }),
@@ -579,9 +644,7 @@ pub async fn run_artifacts(
             } else {
                 let error_msg =
                     "无法识别为 React 或 Vue 组件，请确保代码是完整的组件格式".to_owned();
-                if let Some(window) =
-                    target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-                {
+                if let Some(window) = app_handle.get_webview_window(target_window) {
                     let _ = window.emit(
                         "artifact-preview-error",
                         serde_json::json!({ "message": error_msg, "request_id": request_id }),
@@ -592,9 +655,7 @@ pub async fn run_artifacts(
         }
         _ => {
             let error_msg = "暂不支持该语言的代码执行".to_owned();
-            if let Some(window) =
-                target_window.as_ref().and_then(|name| app_handle.get_webview_window(name))
-            {
+            if let Some(window) = app_handle.get_webview_window(target_window) {
                 let _ = window.emit(
                     "artifact-preview-error",
                     serde_json::json!({ "message": error_msg, "request_id": request_id }),
@@ -679,6 +740,8 @@ pub async fn retry_preview_after_install(
         conversation_id,
         db_id,
         assistant_id,
+        None,
+        None,
     )
     .await
     {
@@ -693,29 +756,69 @@ pub async fn retry_preview_after_install(
 #[tauri::command]
 pub async fn restore_artifact_preview(
     app_handle: tauri::AppHandle,
+    source_window: Option<String>,
 ) -> Result<Option<String>, String> {
+    let cache_key = preview_cache_key(source_window.as_deref()).to_string();
     let cache = LAST_ARTIFACT_CACHE.lock().await;
+    let Some(artifact) = cache.get(&cache_key).cloned() else {
+        tracing::debug!("No cached artifact to restore for {}", cache_key);
+        return Ok(None);
+    };
+    drop(cache);
 
-    if let Some(artifact) = cache.as_ref() {
-        let lang = artifact.lang.clone();
-        let input_str = artifact.input_str.clone();
-        let db_id = artifact.db_id.clone();
-        let assistant_id = artifact.assistant_id;
-        let source_window = artifact.source_window.clone();
+    let resolved = resolve_cached_artifact_input(&app_handle, &artifact)?;
+    tracing::info!(
+        "Restoring artifact preview for {}: lang={}, input_len={}, conversation_id={:?}, source_window={:?}",
+        cache_key,
+        resolved.lang,
+        resolved.input_str.len(),
+        resolved.conversation_id,
+        resolved.source_window
+    );
 
-        // 释放锁，因为 run_artifacts 可能需要时间
-        drop(cache);
+    match run_artifacts(
+        app_handle,
+        &resolved.lang,
+        &resolved.input_str,
+        resolved.source_window,
+        resolved.conversation_id,
+        resolved.db_id,
+        resolved.assistant_id,
+        resolved.artifact_key,
+        resolved.entry_file,
+    )
+    .await
+    {
+        Ok(_) => Ok(Some(format!("Restored {} preview", resolved.lang))),
+        Err(e) => Err(e.to_string()),
+    }
+}
 
-        tracing::info!("Restoring artifact preview: lang={}, input_len={}, source_window={:?}",
-                       lang, input_str.len(), source_window);
+#[cfg(test)]
+mod tests {
+    use super::{cached_artifact_matches, preview_cache_key};
 
-        // 重新处理 artifact，使用缓存的 source_window
-        match run_artifacts(app_handle, &lang, &input_str, source_window, None, db_id, assistant_id).await {
-            Ok(_) => Ok(Some(format!("Restored {} preview", lang))),
-            Err(e) => Err(e.to_string()),
-        }
-    } else {
-        tracing::debug!("No cached artifact to restore");
-        Ok(None) // 没有缓存的 artifact
+    #[test]
+    fn preview_cache_key_routes_sidebar_and_preview_window() {
+        assert_eq!(preview_cache_key(Some("sidebar")), "sidebar");
+        assert_eq!(preview_cache_key(Some("artifact_preview")), "artifact_preview");
+        assert_eq!(preview_cache_key(None), "artifact_preview");
+    }
+
+    #[test]
+    fn cached_artifact_matches_prefixed_or_relative_entry_file() {
+        assert!(cached_artifact_matches(
+            "counter",
+            Some("src/App.tsx"),
+            "counter",
+            "counter/src/App.tsx",
+        ));
+        assert!(cached_artifact_matches("counter", Some("src/App.tsx"), "counter", "src/App.tsx",));
+        assert!(!cached_artifact_matches(
+            "counter",
+            Some("src/App.tsx"),
+            "different",
+            "counter/src/App.tsx",
+        ));
     }
 }

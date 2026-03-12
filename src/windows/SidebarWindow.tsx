@@ -46,6 +46,8 @@ function SidebarWindow() {
         inputStr: string;
         dbId?: string;
         assistantId?: number;
+        artifactKey?: string;
+        entryFile?: string;
     } | null>(null);
     const [dataReceived, setDataReceived] = useState(false);
     const [hasAutoPreviewedLatest, setHasAutoPreviewedLatest] = useState(false);
@@ -81,6 +83,8 @@ function SidebarWindow() {
                 inputStr: latestArtifact.code,
                 dbId: latestArtifact.dbId,
                 assistantId: latestArtifact.assistantId,
+                artifactKey: latestArtifact.artifactKey,
+                entryFile: latestArtifact.entryFile,
             });
             setHasAutoPreviewedLatest(true);
 
@@ -92,6 +96,8 @@ function SidebarWindow() {
                 conversationId,
                 dbId: latestArtifact.dbId,
                 assistantId: latestArtifact.assistantId,
+                artifactKey: latestArtifact.artifactKey,
+                entryFile: latestArtifact.entryFile,
             })
                 .then((res) => {
                     console.log("Auto-preview latest artifact:", res);
@@ -169,6 +175,8 @@ function SidebarWindow() {
             inputStr: artifact.code,
             dbId: artifact.dbId,
             assistantId: artifact.assistantId,
+            artifactKey: artifact.artifactKey,
+            entryFile: artifact.entryFile,
         });
         
         // Call run_artifacts to start the preview
@@ -180,6 +188,8 @@ function SidebarWindow() {
             conversationId,
             dbId: artifact.dbId,
             assistantId: artifact.assistantId,
+            artifactKey: artifact.artifactKey,
+            entryFile: artifact.entryFile,
         })
             .then((res) => {
                 console.log("Artifact preview started:", res);
@@ -232,6 +242,8 @@ function SidebarWindow() {
             conversationId,
             dbId: previewPayload.dbId,
             assistantId: previewPayload.assistantId,
+            artifactKey: previewPayload.artifactKey,
+            entryFile: previewPayload.entryFile,
         }).catch((error) => {
             console.error("Failed to open preview in preview window:", error);
         });

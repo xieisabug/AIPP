@@ -106,7 +106,7 @@ export default function EmbeddedArtifactPreview({ className, previewOnly = false
             setOriginalCode(data.original_code);
 
             // Track conversation ID for realtime updates
-            if (data.conversation_id !== undefined) {
+            if (typeof data.conversation_id === 'number') {
                 setCurrentConversationId(data.conversation_id);
             }
 
@@ -220,6 +220,7 @@ export default function EmbeddedArtifactPreview({ className, previewOnly = false
     // 使用统一的事件处理 hook
     const artifactEvents = useArtifactEvents({
         windowType: 'preview',
+        readyWindow: 'sidebar',
         onArtifactData: handleArtifactData,
         onRedirect: handleRedirect,
         onEnvironmentCheck: handleEnvironmentCheck,
@@ -243,7 +244,7 @@ export default function EmbeddedArtifactPreview({ className, previewOnly = false
 
                 // 调用后端恢复命令，重新加载缓存的 artifact
                 // Note: For sidebar, we use the same restore command but with sourceWindow='sidebar'
-                invoke<string | null>('restore_artifact_preview')
+                invoke<string | null>('restore_artifact_preview', { sourceWindow: 'sidebar' })
                     .then((result) => {
                         if (result) {
                             console.log('🔧 [EmbeddedArtifactPreview] Artifact 预览已刷新');

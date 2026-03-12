@@ -34,6 +34,8 @@ export interface EnvironmentCheckData {
 export interface UseArtifactEventsOptions {
     /** 窗口类型: 'preview' 用于 artifact_preview 窗口, 'artifact' 用于 artifact 窗口 */
     windowType: 'preview' | 'artifact';
+    /** 可选的预览窗口名，用于区分 sidebar 和 artifact_preview 的 ready 信号 */
+    readyWindow?: string;
     /** 处理 artifact 数据的回调 */
     onArtifactData?: (data: ArtifactData) => void;
     /** 处理重定向 URL 的回调 */
@@ -74,6 +76,7 @@ export interface UseArtifactEventsReturn {
 export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifactEventsReturn {
     const {
         windowType,
+        readyWindow,
         onArtifactData,
         onRedirect,
         onEnvironmentCheck,
@@ -85,7 +88,10 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
 
     // 事件名称前缀
     const eventPrefix = windowType === 'preview' ? 'artifact-preview' : 'artifact';
-    const readyEvent = `${eventPrefix}-ready`;
+    const readyEvent =
+        windowType === 'preview' && readyWindow
+            ? `${eventPrefix}-ready-${readyWindow}`
+            : `${eventPrefix}-ready`;
     const dataEvent = `${eventPrefix}-data`;
     const logEvent = `${eventPrefix}-log`;
     const errorEvent = `${eventPrefix}-error`;
