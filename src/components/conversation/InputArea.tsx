@@ -60,10 +60,22 @@ import { getCaretCoordinates } from "../../utils/caretCoordinates";
 import BangCompletionList, { type BangCompletionItem } from "./BangCompletionList";
 import AssistantCompletionList from "./AssistantCompletionList";
 import ArtifactCompletionList from "./ArtifactCompletionList";
+import SlashCompletionList from "./SlashCompletionList";
 import { useFileList } from "../../hooks/useFileList";
 import { useAssistantListListener } from "../../hooks/useAssistantListListener";
 import PinyinFilter, { AssistantItem, FilteredAssistant } from "../../utils/pinyinFilter";
 import { ArtifactCollectionItem, FilteredArtifact } from "../../data/ArtifactCollection";
+import {
+    DEFAULT_SLASH_NAMESPACES,
+    FilteredSlashSkill,
+    SlashNamespaceItem,
+    SlashSkillCompletionItem,
+} from "../../data/Slash";
+import {
+    buildSkillInvocation,
+    getSlashCompletionContext,
+    type SlashCompletionContext,
+} from "../../utils/slashCompletion";
 
 // 暴露给外部的方法接口
 export interface InputAreaRef {
@@ -146,10 +158,217 @@ const InputArea = React.memo(
             const [filteredArtifacts, setFilteredArtifacts] = useState<FilteredArtifact[]>([]);
             const [selectedArtifactIndex, setSelectedArtifactIndex] = useState<number>(0);
 
+            const [slashListVisible, setSlashListVisible] = useState<boolean>(false);
+            const [slashMode, setSlashMode] = useState<"namespace" | "skill">("namespace");
+            const [slashContext, setSlashContext] = useState<SlashCompletionContext | null>(null);
+            const [slashSkills, setSlashSkills] = useState<SlashSkillCompletionItem[]>([]);
+            const [filteredSlashSkills, setFilteredSlashSkills] = useState<FilteredSlashSkill[]>([]);
+            const [filteredSlashNamespaces, setFilteredSlashNamespaces] =
+                useState<SlashNamespaceItem[]>(DEFAULT_SLASH_NAMESPACES);
+            const [selectedSlashIndex, setSelectedSlashIndex] = useState<number>(0);
+
             const handleOpenFile = (fileId: number) => {
                 invoke("open_attachment_with_default_app", { id: fileId });
             };
             const { renderFiles } = useFileList(fileInfoList, handleDeleteFile, handleOpenFile);
+
+            const updateCompletionCursorPosition = useCallback(
+                (textarea: HTMLTextAreaElement, anchorIndex: number) => {
+                    const cursorCoords = getCaretCoordinates(textarea, anchorIndex);
+                    const rect = textarea.getBoundingClientRect();
+                    const style = window.getComputedStyle(textarea);
+                    const paddingTop = parseFloat(style.paddingTop);
+                    const paddingBottom = parseFloat(style.paddingBottom);
+                    const textareaHeight = parseFloat(style.height);
+                    const inputAreaRect =
+                        document.querySelector(".input-area")!.getBoundingClientRect();
+
+                    const left = rect.left - inputAreaRect.left + cursorCoords.cursorLeft;
+
+                    if (placement === "top") {
+                        const top =
+                            rect.top +
+                            rect.height +
+                            Math.min(textareaHeight, cursorCoords.cursorTop) -
+                            paddingTop -
+                            paddingBottom;
+                        setCursorPosition({ bottom: 0, left, top });
+                    } else {
+                        const bottom =
+                            inputAreaRect.top -
+                            rect.top -
+                            cursorCoords.cursorTop +
+                            10 +
+                            (textarea.scrollHeight - textarea.clientHeight);
+                        setCursorPosition({ bottom, left, top: 0 });
+                    }
+                },
+                [placement]
+            );
+
+            const filterSlashNamespaces = useCallback((query: string) => {
+                const queryLower = query.trim().toLowerCase();
+                if (!queryLower) {
+                    return DEFAULT_SLASH_NAMESPACES;
+                }
+                return DEFAULT_SLASH_NAMESPACES.filter((namespace) => {
+                    return (
+                        namespace.name.toLowerCase().includes(queryLower) ||
+                        namespace.description.toLowerCase().includes(queryLower)
+                    );
+                });
+            }, []);
+
+            const loadSlashSkills = useCallback(
+                async (forceRefresh = false) => {
+                    try {
+                        const skills = await invoke<SlashSkillCompletionItem[]>(
+                            "get_skills_for_slash_completion",
+                            { forceRefresh },
+                        );
+                        setSlashSkills(skills);
+                        setFilteredSlashSkills(
+                            PinyinFilter.filterSlashSkills(skills, ""),
+                        );
+                    } catch (error) {
+                        console.warn(
+                            "Failed to load skills for slash completion:",
+                            error,
+                        );
+                    }
+                },
+                [],
+            );
+
+            const hideSlashCompletion = useCallback(() => {
+                setSlashListVisible(false);
+                setSlashContext(null);
+            }, []);
+
+            const showSlashCompletion = useCallback(
+                (
+                    context: SlashCompletionContext,
+                    textarea: HTMLTextAreaElement,
+                    cursorPosition: number,
+                ) => {
+                    setSlashContext(context);
+                    setSelectedSlashIndex(0);
+                    setBangListVisible(false);
+                    setAssistantListVisible(false);
+                    setArtifactListVisible(false);
+
+                    if (context.kind === "namespace") {
+                        const filtered = filterSlashNamespaces(context.query);
+                        if (filtered.length === 0) {
+                            hideSlashCompletion();
+                            return;
+                        }
+                        setSlashMode("namespace");
+                        setFilteredSlashNamespaces(filtered);
+                        setSlashListVisible(true);
+                    } else {
+                        const filtered = PinyinFilter.filterSlashSkills(
+                            slashSkills,
+                            context.query.replace(/\\([()\\])/g, "$1"),
+                        );
+                        if (filtered.length === 0) {
+                            hideSlashCompletion();
+                            return;
+                        }
+                        setSlashMode("skill");
+                        setFilteredSlashSkills(filtered);
+                        setSlashListVisible(true);
+                    }
+
+                    updateCompletionCursorPosition(textarea, cursorPosition);
+                },
+                [
+                    filterSlashNamespaces,
+                    hideSlashCompletion,
+                    slashSkills,
+                    updateCompletionCursorPosition,
+                ],
+            );
+
+            const handleSlashNamespaceSelect = useCallback(
+                (namespace: SlashNamespaceItem) => {
+                    if (
+                        !textareaRef.current ||
+                        !namespace.isEnabled ||
+                        !slashContext ||
+                        slashContext.kind !== "namespace"
+                    ) {
+                        return;
+                    }
+
+                    const textarea = textareaRef.current;
+                    const beforeSlash = textarea.value.substring(
+                        0,
+                        slashContext.replaceStart,
+                    );
+                    const afterSlash = textarea.value.substring(
+                        slashContext.replaceEnd,
+                    );
+                    const completionText = `/${namespace.name}()`;
+                    const newValue = beforeSlash + completionText + afterSlash;
+                    const newPosition = beforeSlash.length + completionText.length - 1;
+
+                    setInputText(newValue);
+
+                    setTimeout(() => {
+                        textarea.focus();
+                        textarea.setSelectionRange(newPosition, newPosition);
+                        const nextContext = getSlashCompletionContext(
+                            newValue,
+                            newPosition,
+                        );
+
+                        if (nextContext?.kind === "skill") {
+                            showSlashCompletion(
+                                nextContext,
+                                textarea,
+                                newPosition,
+                            );
+                        } else {
+                            hideSlashCompletion();
+                        }
+                    }, 0);
+                },
+                [hideSlashCompletion, setInputText, showSlashCompletion, slashContext],
+            );
+
+            const handleSlashSkillSelect = useCallback(
+                (skill: FilteredSlashSkill) => {
+                    if (
+                        !textareaRef.current ||
+                        !slashContext ||
+                        slashContext.kind !== "skill"
+                    ) {
+                        return;
+                    }
+
+                    const textarea = textareaRef.current;
+                    const beforeSlash = textarea.value.substring(
+                        0,
+                        slashContext.replaceStart,
+                    );
+                    const afterSlash = textarea.value.substring(
+                        slashContext.replaceEnd,
+                    );
+                    const completionText = buildSkillInvocation(skill.invokeName);
+                    const newValue = beforeSlash + completionText + afterSlash;
+                    const newPosition = beforeSlash.length + completionText.length;
+
+                    setInputText(newValue);
+                    hideSlashCompletion();
+
+                    setTimeout(() => {
+                        textarea.focus();
+                        textarea.setSelectionRange(newPosition, newPosition);
+                    }, 0);
+                },
+                [hideSlashCompletion, setInputText, slashContext],
+            );
 
             useEffect(() => {
                 if (textareaRef.current && !initialHeight) {
@@ -162,10 +381,36 @@ const InputArea = React.memo(
             }, [inputText, initialHeight, fileInfoList, isFocused]);
 
             useEffect(() => {
+                if (!slashListVisible || !slashContext) {
+                    return;
+                }
+
+                if (slashContext.kind === "namespace") {
+                    setFilteredSlashNamespaces(
+                        filterSlashNamespaces(slashContext.query),
+                    );
+                    return;
+                }
+
+                setFilteredSlashSkills(
+                    PinyinFilter.filterSlashSkills(
+                        slashSkills,
+                        slashContext.query.replace(/\\([()\\])/g, "$1"),
+                    ),
+                );
+            }, [
+                filterSlashNamespaces,
+                slashContext,
+                slashListVisible,
+                slashSkills,
+            ]);
+
+            useEffect(() => {
                 invoke<BangCompletionItem[]>("get_bang_list").then((bangList) => {
                     setBangList(bangList);
                     setOriginalBangList(bangList);
                 });
+                loadSlashSkills();
 
                 // Load assistants for @ selection
                 invoke<AssistantItem[]>("get_assistants").then((assistantList) => {
@@ -203,10 +448,19 @@ const InputArea = React.memo(
                     return unlisten;
                 };
 
+                const setupSlashListener = async () => {
+                    const unlisten = await listen("skills-registry-changed", () => {
+                        loadSlashSkills(true);
+                    });
+                    return unlisten;
+                };
+
                 let unlistenPromise: Promise<() => void> | null = null;
+                let slashUnlistenPromise: Promise<() => void> | null = null;
 
                 try {
                     unlistenPromise = setupArtifactListener();
+                    slashUnlistenPromise = setupSlashListener();
                 } catch (error) {
                     console.warn("Failed to setup artifact listener:", error);
                 }
@@ -215,8 +469,13 @@ const InputArea = React.memo(
                     if (unlistenPromise) {
                         unlistenPromise.then((unlisten) => unlisten()).catch(console.warn);
                     }
+                    if (slashUnlistenPromise) {
+                        slashUnlistenPromise
+                            .then((unlisten) => unlisten())
+                            .catch(console.warn);
+                    }
                 };
-            }, []);
+            }, [loadSlashSkills]);
 
             // 监听助手列表变化
             useAssistantListListener({
@@ -245,11 +504,32 @@ const InputArea = React.memo(
                             value.lastIndexOf("！", cursorPosition - 1)
                         );
                         const hashIndex = value.lastIndexOf("#", cursorPosition - 1);
+                        const currentSlashContext = getSlashCompletionContext(
+                            value,
+                            cursorPosition,
+                        );
+                        const slashIndex =
+                            currentSlashContext?.triggerStart ?? -1;
 
                         // Find the most recent symbol
-                        const maxIndex = Math.max(atIndex, bangIndex, hashIndex);
+                        const maxIndex = Math.max(
+                            atIndex,
+                            bangIndex,
+                            hashIndex,
+                            slashIndex,
+                        );
 
-                        if (hashIndex !== -1 && hashIndex === maxIndex) {
+                        if (
+                            currentSlashContext &&
+                            slashIndex !== -1 &&
+                            slashIndex === maxIndex
+                        ) {
+                            showSlashCompletion(
+                                currentSlashContext,
+                                textareaRef.current,
+                                cursorPosition,
+                            );
+                        } else if (hashIndex !== -1 && hashIndex === maxIndex) {
                             // Handle # symbol for artifacts
                             const hashInput = value.substring(hashIndex + 1, cursorPosition).toLowerCase();
 
@@ -262,6 +542,7 @@ const InputArea = React.memo(
                                 setArtifactListVisible(true);
                                 setBangListVisible(false);
                                 setAssistantListVisible(false);
+                                hideSlashCompletion();
 
                                 const cursorCoords = getCaretCoordinates(textareaRef.current, hashIndex + 1);
                                 const rect = textareaRef.current.getBoundingClientRect();
@@ -292,6 +573,7 @@ const InputArea = React.memo(
                                 }
                             } else {
                                 setArtifactListVisible(false);
+                                hideSlashCompletion();
                             }
                         } else if (atIndex !== -1 && atIndex === maxIndex) {
                             // Handle @ symbol for assistants
@@ -306,6 +588,7 @@ const InputArea = React.memo(
                                 setAssistantListVisible(true);
                                 setBangListVisible(false);
                                 setArtifactListVisible(false);
+                                hideSlashCompletion();
 
                                 const cursorCoords = getCaretCoordinates(textareaRef.current, atIndex + 1);
                                 const rect = textareaRef.current.getBoundingClientRect();
@@ -336,6 +619,7 @@ const InputArea = React.memo(
                                 }
                             } else {
                                 setAssistantListVisible(false);
+                                hideSlashCompletion();
                             }
                         } else if (bangIndex !== -1 && bangIndex === maxIndex) {
                             // Handle ! symbol (existing logic)
@@ -350,6 +634,7 @@ const InputArea = React.memo(
                                 setBangListVisible(true);
                                 setAssistantListVisible(false);
                                 setArtifactListVisible(false);
+                                hideSlashCompletion();
 
                                 const cursorCoords = getCaretCoordinates(textareaRef.current, bangIndex + 1);
                                 const rect = textareaRef.current.getBoundingClientRect();
@@ -380,12 +665,14 @@ const InputArea = React.memo(
                                 }
                             } else {
                                 setBangListVisible(false);
+                                hideSlashCompletion();
                             }
                         } else {
                             // Hide all lists when no trigger symbol is active
                             setBangListVisible(false);
                             setAssistantListVisible(false);
                             setArtifactListVisible(false);
+                            hideSlashCompletion();
                         }
                     }
                 };
@@ -394,7 +681,14 @@ const InputArea = React.memo(
                 return () => {
                     document.removeEventListener("selectionchange", handleSelectionChange);
                 };
-            }, [originalBangList, assistants, artifacts, placement]);
+            }, [
+                originalBangList,
+                assistants,
+                artifacts,
+                placement,
+                hideSlashCompletion,
+                showSlashCompletion,
+            ]);
 
             const adjustTextareaHeight = () => {
                 const textarea = textareaRef.current;
@@ -427,11 +721,31 @@ const InputArea = React.memo(
                     newValue.lastIndexOf("！", cursorPosition - 1)
                 );
                 const hashIndex = newValue.lastIndexOf("#", cursorPosition - 1);
+                const currentSlashContext = getSlashCompletionContext(
+                    newValue,
+                    cursorPosition,
+                );
+                const slashIndex = currentSlashContext?.triggerStart ?? -1;
 
                 // Find the most recent symbol
-                const maxIndex = Math.max(atIndex, bangIndex, hashIndex);
+                const maxIndex = Math.max(
+                    atIndex,
+                    bangIndex,
+                    hashIndex,
+                    slashIndex,
+                );
 
-                if (hashIndex !== -1 && hashIndex === maxIndex) {
+                if (
+                    currentSlashContext &&
+                    slashIndex !== -1 &&
+                    slashIndex === maxIndex
+                ) {
+                    showSlashCompletion(
+                        currentSlashContext,
+                        e.target,
+                        cursorPosition,
+                    );
+                } else if (hashIndex !== -1 && hashIndex === maxIndex) {
                     // Handle # symbol for artifacts
                     const hashInput = newValue.substring(hashIndex + 1, cursorPosition).toLowerCase();
 
@@ -444,6 +758,7 @@ const InputArea = React.memo(
                         setArtifactListVisible(true);
                         setBangListVisible(false);
                         setAssistantListVisible(false);
+                        hideSlashCompletion();
 
                         // Update cursor position
                         const textarea = e.target;
@@ -477,6 +792,7 @@ const InputArea = React.memo(
                         }
                     } else {
                         setArtifactListVisible(false);
+                        hideSlashCompletion();
                     }
                 } else if (atIndex !== -1 && atIndex === maxIndex) {
                     // Handle @ symbol for assistants
@@ -491,6 +807,7 @@ const InputArea = React.memo(
                         setAssistantListVisible(true);
                         setBangListVisible(false);
                         setArtifactListVisible(false);
+                        hideSlashCompletion();
 
                         // Update cursor position
                         const textarea = e.target;
@@ -524,6 +841,7 @@ const InputArea = React.memo(
                         }
                     } else {
                         setAssistantListVisible(false);
+                        hideSlashCompletion();
                     }
                 } else if (bangIndex !== -1 && bangIndex === maxIndex) {
                     // Handle ! symbol (existing logic)
@@ -536,6 +854,7 @@ const InputArea = React.memo(
                         setBangListVisible(true);
                         setAssistantListVisible(false);
                         setArtifactListVisible(false);
+                        hideSlashCompletion();
 
                         // Update cursor position
                         const textarea = e.target;
@@ -569,12 +888,14 @@ const InputArea = React.memo(
                         }
                     } else {
                         setBangListVisible(false);
+                        hideSlashCompletion();
                     }
                 } else {
                     // Hide all lists when no trigger symbol is active
                     setBangListVisible(false);
                     setAssistantListVisible(false);
                     setArtifactListVisible(false);
+                    hideSlashCompletion();
                 }
             };
 
@@ -589,6 +910,21 @@ const InputArea = React.memo(
                     if (e.shiftKey) {
                         // Shift + Enter for new line
                         return;
+                    } else if (slashListVisible) {
+                        e.preventDefault();
+                        if (slashMode === "namespace") {
+                            const selectedNamespace =
+                                filteredSlashNamespaces[selectedSlashIndex];
+                            if (selectedNamespace?.isEnabled) {
+                                handleSlashNamespaceSelect(selectedNamespace);
+                            }
+                        } else {
+                            const selectedSkill =
+                                filteredSlashSkills[selectedSlashIndex];
+                            if (selectedSkill) {
+                                handleSlashSkillSelect(selectedSkill);
+                            }
+                        }
                     } else if (artifactListVisible) {
                         // Open artifact - 阻止表单提交
                         e.preventDefault();
@@ -671,6 +1007,21 @@ const InputArea = React.memo(
                         e.preventDefault();
                         handleSend();
                     }
+                } else if (e.key === "Tab" && slashListVisible) {
+                    e.preventDefault();
+                    if (slashMode === "namespace") {
+                        const selectedNamespace =
+                            filteredSlashNamespaces[selectedSlashIndex];
+                        if (selectedNamespace?.isEnabled) {
+                            handleSlashNamespaceSelect(selectedNamespace);
+                        }
+                    } else {
+                        const selectedSkill =
+                            filteredSlashSkills[selectedSlashIndex];
+                        if (selectedSkill) {
+                            handleSlashSkillSelect(selectedSkill);
+                        }
+                    }
                 } else if (e.key === "Tab" && artifactListVisible) {
                     // Select artifact
                     e.preventDefault();
@@ -743,6 +1094,24 @@ const InputArea = React.memo(
                         }, 0);
                     }
                     setBangListVisible(false);
+                } else if (e.key === "ArrowUp" && slashListVisible) {
+                    e.preventDefault();
+                    const itemsCount =
+                        slashMode === "namespace"
+                            ? filteredSlashNamespaces.length
+                            : filteredSlashSkills.length;
+                    setSelectedSlashIndex((prevIndex) =>
+                        prevIndex > 0 ? prevIndex - 1 : itemsCount - 1,
+                    );
+                } else if (e.key === "ArrowDown" && slashListVisible) {
+                    e.preventDefault();
+                    const itemsCount =
+                        slashMode === "namespace"
+                            ? filteredSlashNamespaces.length
+                            : filteredSlashSkills.length;
+                    setSelectedSlashIndex((prevIndex) =>
+                        prevIndex < itemsCount - 1 ? prevIndex + 1 : 0,
+                    );
                 } else if (e.key === "ArrowUp" && artifactListVisible) {
                     e.preventDefault();
                     setSelectedArtifactIndex((prevIndex) =>
@@ -771,11 +1140,17 @@ const InputArea = React.memo(
                     setSelectedBangIndex((prevIndex) => (prevIndex < bangList.length - 1 ? prevIndex + 1 : 0));
                 } else if (e.key === "Escape") {
                     e.preventDefault();
-                    if (bangListVisible || assistantListVisible || artifactListVisible) {
+                    if (
+                        bangListVisible ||
+                        assistantListVisible ||
+                        artifactListVisible ||
+                        slashListVisible
+                    ) {
                         // Hide completion lists
                         setBangListVisible(false);
                         setAssistantListVisible(false);
                         setArtifactListVisible(false);
+                        hideSlashCompletion();
                     } else {
                         // No completion lists visible, blur the textarea to remove focus
                         textareaRef.current?.blur();
@@ -889,6 +1264,18 @@ const InputArea = React.memo(
                                 ? { right: (sidebarVisible ? 70 : 107) + sidebarWidth }
                                 : undefined
                         }
+                    />
+
+                    <SlashCompletionList
+                        visible={slashListVisible}
+                        placement={placement}
+                        cursorPosition={cursorPosition}
+                        mode={slashMode}
+                        namespaces={filteredSlashNamespaces}
+                        skills={filteredSlashSkills}
+                        selectedIndex={selectedSlashIndex}
+                        onSelectNamespace={handleSlashNamespaceSelect}
+                        onSelectSkill={handleSlashSkillSelect}
                     />
 
                     <BangCompletionList

@@ -191,6 +191,7 @@ export enum AttachmentType { // 添加AttachmentType枚举
     Word = 4,
     PowerPoint = 5,
     Excel = 6,
+    Skill = 7,
 }
 
 // Token统计相关类型

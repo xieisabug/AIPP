@@ -4,9 +4,14 @@ import { FileInfo, MCPToolCallUpdateEvent, Message } from '../data/Conversation'
 import { ContextItem, CONTEXT_TOOL_NAMES, SearchResultItem, getContextTypeFromToolName } from '../components/chat-sidebar/types';
 
 interface Attachment {
-    attachment_url: string;
-    attachment_content: string;
-    attachment_type: string;
+    attachment_url?: string;
+    attachment_content?: string;
+    attachment_type?: string;
+}
+
+interface SkillAttachmentPayload {
+    displayName?: string;
+    identifier?: string;
 }
 
 interface UseContextListOptions {
@@ -91,8 +96,34 @@ const getAttachmentTypeName = (type: string): string => {
             return 'PPT';
         case 'Excel':
             return 'Excel';
+        case 'Skill':
+            return '技能';
         default:
             return '文件';
+    }
+};
+
+const parseSkillAttachmentPayload = (
+    attachmentContent?: string,
+): SkillAttachmentPayload | null => {
+    if (!attachmentContent) {
+        return null;
+    }
+
+    try {
+        const parsed = JSON.parse(attachmentContent);
+        if (!parsed || typeof parsed !== 'object') {
+            return null;
+        }
+
+        return {
+            displayName:
+                typeof parsed.displayName === 'string' ? parsed.displayName : undefined,
+            identifier:
+                typeof parsed.identifier === 'string' ? parsed.identifier : undefined,
+        };
+    } catch {
+        return null;
     }
 };
 
@@ -146,8 +177,29 @@ export function useContextList({
                 for (const attachment of message.attachment_list as Attachment[]) {
                     const attType = attachment.attachment_type || 'File';
                     attachmentCounts[attType] = (attachmentCounts[attType] || 0) + 1;
+
+                    if (attType === 'Skill') {
+                        const skillPayload = parseSkillAttachmentPayload(
+                            attachment.attachment_content,
+                        );
+                        const skillName =
+                            skillPayload?.displayName?.trim() ||
+                            attachment.attachment_url ||
+                            `技能 ${attachmentCounts[attType]}`;
+                        const skillIdentifier = skillPayload?.identifier?.trim();
+
+                        items.push({
+                            id: `msg-skill-${message.id}-${attachmentCounts[attType]}`,
+                            type: 'skill',
+                            name: skillName,
+                            details: skillIdentifier,
+                            source: 'user',
+                        });
+                        continue;
+                    }
+
                     const displayName = `${getAttachmentTypeName(attType)} ${attachmentCounts[attType]}`;
-                    
+
                     items.push({
                         id: `msg-attachment-${message.id}-${attachmentCounts[attType]}`,
                         type: 'user_file',

@@ -27,7 +27,11 @@ use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
 use crate::mcp::execution_api::cancel_mcp_tool_calls_by_conversation;
 use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt};
-use crate::skills::{collect_skills_info_for_assistant, format_skills_prompt};
+use crate::skills::{
+    build_active_skill_attachments, collect_skills_info_for_assistant,
+    compose_user_message_with_active_skills, format_skills_prompt,
+};
+use crate::slash::parse_slash_prompt;
 use crate::state::activity_state::ConversationActivityManager;
 use crate::state::message_token::MessageTokenManager;
 use crate::template_engine::build_template_engine;
@@ -93,6 +97,32 @@ pub fn sanitize_tool_name(name: &str) -> String {
 /// 当原始名称包含大量非法字符（如中文）时，会使用 hash 确保唯一性
 pub fn build_tool_name(server_name: &str, tool_name: &str) -> String {
     format!("{}__{}", sanitize_tool_name(server_name), sanitize_tool_name(tool_name))
+}
+
+fn build_prompt_with_attachment_context(prompt: &str, context: &str) -> String {
+    if context.trim().is_empty() {
+        prompt.to_string()
+    } else if prompt.trim().is_empty() {
+        context.to_string()
+    } else {
+        format!("{}\n{}", prompt, context)
+    }
+}
+
+fn persist_active_skill_attachments(
+    app_handle: &tauri::AppHandle,
+    attachments: Vec<MessageAttachment>,
+) -> Result<Vec<MessageAttachment>, AppError> {
+    if attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
+    let attachment_repo = db.attachment_repo().map_err(AppError::from)?;
+    attachments
+        .into_iter()
+        .map(|attachment| attachment_repo.create(&attachment).map_err(AppError::from))
+        .collect()
 }
 
 /// 工具名称映射表，用于在 sanitized 名称和原始名称之间进行转换
@@ -272,13 +302,14 @@ pub async fn ask_ai(
     // 处理 @assistant_name 提取和消息清理
     let (actual_assistant_id, cleaned_prompt) =
         extract_assistant_from_message(&assistants, &request.prompt, request.assistant_id).await?;
+    let slash_parse_result = parse_slash_prompt(&app_handle, &cleaned_prompt).await?;
 
     debug!(?actual_assistant_id, ?cleaned_prompt, "assistant extraction result");
 
     // 创建一个新的请求对象，使用处理后的数据
     let mut processed_request = request.clone();
     processed_request.assistant_id = actual_assistant_id;
-    processed_request.prompt = cleaned_prompt;
+    processed_request.prompt = slash_parse_result.runtime_user_prompt.clone();
 
     let template_engine = build_template_engine(&app_handle)
         .map_err(|e| AppError::UnknownError(format!("Failed to build template engine: {}", e)))?;
@@ -356,8 +387,18 @@ pub async fn ask_ai(
     };
 
     let _need_generate_title = processed_request.conversation_id.is_empty();
-    let request_prompt_result =
-        template_engine.parse(&processed_request.prompt, &template_context).await;
+    let request_prompt_result = compose_user_message_with_active_skills(
+        &template_engine.parse(&slash_parse_result.runtime_user_prompt, &template_context).await,
+        &slash_parse_result.active_skills,
+    );
+    let display_prompt_result = compose_user_message_with_active_skills(
+        &template_engine.parse(&slash_parse_result.display_prompt, &template_context).await,
+        &slash_parse_result.active_skills,
+    );
+    let active_skill_attachments = persist_active_skill_attachments(
+        &app_handle,
+        build_active_skill_attachments(&slash_parse_result.active_skills)?,
+    )?;
 
     let app_handle_clone = app_handle.clone();
     let (
@@ -371,8 +412,10 @@ pub async fn ask_ai(
         &processed_request,
         &assistant_detail,
         assistant_prompt_result,
+        display_prompt_result,
         request_prompt_result.clone(),
         override_prompt.clone(),
+        active_skill_attachments,
     )
     .await?;
 
@@ -832,8 +875,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         .max_by_key(|msg| msg.id)
         .and_then(|m| m.generation_group_id.clone());
 
-    let init_message_list =
-        build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
+    let init_message_list = build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
     // 收集 MCP 信息
     let mcp_info = collect_mcp_info_for_assistant(&app_handle, assistant_id, None, None).await?;
@@ -1077,8 +1119,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
             .and_then(|m| m.generation_group_id.clone())
     };
 
-    let init_message_list =
-        build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
+    let init_message_list = build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
     // 收集 MCP 信息
     let mcp_info = collect_mcp_info_for_assistant(&app_handle, assistant_id, None, None).await?;
@@ -1438,8 +1479,7 @@ pub async fn regenerate_ai(
     let filtered_messages =
         filter_messages_for_parent_group(filtered_messages, regenerate_parent_group_id.as_deref());
 
-    let init_message_list =
-        build_message_list_from_db(&filtered_messages, BranchSelection::LatestBranch);
+    let init_message_list = build_message_list_from_db(&filtered_messages, BranchSelection::LatestBranch);
 
     debug!(?init_message_list, "initial message list for regenerate");
 
@@ -1724,12 +1764,16 @@ async fn initialize_conversation(
     request: &AiRequest,
     assistant_detail: &AssistantDetail,
     assistant_prompt_result: String,
-    request_prompt_result: String,
+    display_user_prompt: String,
+    runtime_user_prompt: String,
     override_prompt: Option<String>,
+    extra_user_attachments: Vec<MessageAttachment>,
 ) -> Result<(i64, Option<i64>, i64, String, Vec<(String, String, Vec<MessageAttachment>)>), AppError>
 {
     // 返回值：(conversation_id, add_message_id, user_message_id, request_prompt_with_context, init_message_list)
     let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
+
+    let system_prompt = override_prompt.unwrap_or(assistant_prompt_result);
 
     let (
         conversation_id,
@@ -1738,10 +1782,11 @@ async fn initialize_conversation(
         request_prompt_result_with_context,
         init_message_list,
     ) = if request.conversation_id.is_empty() {
-        let message_attachment_list = db
+        let mut message_attachment_list = db
             .attachment_repo()
             .unwrap()
             .list_by_id(&request.attachment_list.clone().unwrap_or(vec![]))?;
+        message_attachment_list.extend(extra_user_attachments.clone());
         // 新对话逻辑
         let text_attachments: Vec<String> = message_attachment_list
             .iter()
@@ -1755,18 +1800,33 @@ async fn initialize_conversation(
             })
             .collect();
         let context = text_attachments.join("\n");
-        let request_prompt_result_with_context = format!("{}\n{}", request_prompt_result, context);
-        let init_message_list = vec![
-            (String::from("system"), override_prompt.unwrap_or(assistant_prompt_result), vec![]),
+        let display_user_prompt_with_context = build_prompt_with_attachment_context(
+            &display_user_prompt,
+            &context,
+        );
+        let runtime_user_prompt_with_context = build_prompt_with_attachment_context(
+            &runtime_user_prompt,
+            &context,
+        );
+        let db_init_message_list = vec![
+            (String::from("system"), system_prompt.clone(), vec![]),
             (
                 String::from("user"),
-                request_prompt_result_with_context.clone(),
+                display_user_prompt_with_context.clone(),
+                message_attachment_list.clone(),
+            ),
+        ];
+        let runtime_init_message_list = vec![
+            (String::from("system"), system_prompt, vec![]),
+            (
+                String::from("user"),
+                runtime_user_prompt_with_context.clone(),
                 message_attachment_list,
             ),
         ];
         debug!(
             assistant_id = request.assistant_id,
-            ?init_message_list,
+            ?runtime_init_message_list,
             "initialize new conversation"
         );
         let (conversation, created_messages) = init_conversation(
@@ -1774,7 +1834,7 @@ async fn initialize_conversation(
             request.assistant_id,
             assistant_detail.model[0].id,
             assistant_detail.model[0].model_code.clone(),
-            &init_message_list,
+            &db_init_message_list,
         )?;
         // 获取用户消息的 ID（第二条消息是 user 类型）
         let user_msg_id =
@@ -1783,8 +1843,8 @@ async fn initialize_conversation(
             conversation.id,
             None, // 不预先创建空的assistant消息，让流式处理动态创建
             user_msg_id,
-            request_prompt_result_with_context,
-            init_message_list,
+            runtime_user_prompt_with_context,
+            runtime_init_message_list,
         )
     } else {
         // 已存在对话逻辑
@@ -1794,10 +1854,11 @@ async fn initialize_conversation(
         let message_list = build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
         // 获取到消息的附件列表
-        let message_attachment_list = db
+        let mut message_attachment_list = db
             .attachment_repo()
             .unwrap()
             .list_by_id(&request.attachment_list.clone().unwrap_or(vec![]))?;
+        message_attachment_list.extend(extra_user_attachments.clone());
         // 过滤出文本附件
         let text_attachments: Vec<String> = message_attachment_list
             .iter()
@@ -1812,14 +1873,21 @@ async fn initialize_conversation(
             .collect();
         let context = text_attachments.join("\n");
 
-        let request_prompt_result_with_context = format!("{}\n{}", request_prompt_result, context);
+        let display_user_prompt_with_context = build_prompt_with_attachment_context(
+            &display_user_prompt,
+            &context,
+        );
+        let runtime_user_prompt_with_context = build_prompt_with_attachment_context(
+            &runtime_user_prompt,
+            &context,
+        );
         // 添加用户消息
         let user_message = add_message(
             app_handle,
             None,
             conversation_id,
             "user".to_string(),
-            request_prompt_result_with_context.clone(),
+            display_user_prompt_with_context.clone(),
             Some(assistant_detail.model[0].id),
             Some(assistant_detail.model[0].model_code.clone()),
             None,
@@ -1855,7 +1923,7 @@ async fn initialize_conversation(
             data: serde_json::to_value(MessageUpdateEvent {
                 message_id: user_message.id,
                 message_type: "user".to_string(),
-                content: request_prompt_result_with_context.clone(),
+                content: display_user_prompt_with_context.clone(),
                 is_done: false,
                 token_count: None,
                 input_token_count: None,
@@ -1871,7 +1939,7 @@ async fn initialize_conversation(
         let mut updated_message_list = message_list;
         updated_message_list.push((
             String::from("user"),
-            request_prompt_result_with_context.clone(),
+            runtime_user_prompt_with_context.clone(),
             message_attachment_list,
         ));
 
@@ -1879,7 +1947,7 @@ async fn initialize_conversation(
             conversation_id,
             None, // 不预先创建空的assistant消息，让流式处理动态创建
             user_message.id,
-            request_prompt_result_with_context,
+            runtime_user_prompt_with_context,
             updated_message_list,
         )
     };

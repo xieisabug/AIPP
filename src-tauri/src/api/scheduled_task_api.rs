@@ -31,7 +31,11 @@ use crate::db::scheduled_task_db::{
 };
 use crate::db::system_db::FeatureConfig;
 use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt, MCPInfoForAssistant};
-use crate::skills::{collect_skills_info_for_assistant, format_skills_prompt};
+use crate::skills::{
+    build_active_skill_attachments, collect_skills_info_for_assistant,
+    compose_user_message_with_active_skills, format_skills_prompt,
+};
+use crate::slash::parse_slash_prompt;
 use crate::template_engine::build_template_engine;
 use crate::{AppState, FeatureConfigState, NameCacheState};
 use genai::chat::{ChatOptions, ToolCall};
@@ -1694,9 +1698,14 @@ async fn execute_scheduled_task_inner(
         let selected_text = state.selected_text.lock().await.clone();
         template_context.insert("selected_text".to_string(), selected_text);
     }
+    let slash_parse_result =
+        parse_slash_prompt(app_handle, &task.task_prompt).await.map_err(|e| e.to_string())?;
     let system_prompt_rendered = template_engine.parse(&system_prompt, &template_context).await;
-    let task_prompt_rendered = template_engine.parse(&task.task_prompt, &template_context).await;
-    log_task_message(app_handle, task.id, run_id, "task_prompt", task_prompt_rendered.clone());
+    let task_prompt_rendered =
+        template_engine.parse(&slash_parse_result.runtime_user_prompt, &template_context).await;
+    let task_prompt_display =
+        template_engine.parse(&slash_parse_result.display_prompt, &template_context).await;
+    log_task_message(app_handle, task.id, run_id, "task_prompt", task_prompt_display.clone());
 
     // ── 3. 收集 MCP 工具信息 & skills ────────────────────────────────
     let mcp_info = collect_mcp_info_for_assistant(app_handle, task.assistant_id, None, None)
@@ -1715,6 +1724,12 @@ async fn execute_scheduled_task_inner(
         assistant_prompt_result =
             format_skills_prompt(app_handle, assistant_prompt_result, &skills_info).await;
     }
+    let task_prompt_with_skills = compose_user_message_with_active_skills(
+        &task_prompt_rendered,
+        &slash_parse_result.active_skills,
+    );
+    let active_skill_attachments =
+        build_active_skill_attachments(&slash_parse_result.active_skills).map_err(|e| e.to_string())?;
 
     // ── 4. 构建 LLM 客户端 & 选项 ─────────────────────────────────
     let llm_db = LLMDatabase::new(app_handle).map_err(|e| e.to_string())?;
@@ -1784,10 +1799,8 @@ async fn execute_scheduled_task_inner(
         tool_config.as_ref().map(|c| c.tool_name_mapping.clone()).unwrap_or_default();
 
     // ── 5. 创建对话并初始化消息 ─────────────────────────────────────
-    let init_messages = vec![
-        ("system".to_string(), assistant_prompt_result.clone(), Vec::new()),
-        ("user".to_string(), task_prompt_rendered.clone(), Vec::new()),
-    ];
+    let mut init_messages = vec![("system".to_string(), assistant_prompt_result.clone(), Vec::new())];
+    init_messages.push(("user".to_string(), task_prompt_with_skills.clone(), active_skill_attachments));
     let (mut conversation, _) = crate::api::ai::conversation::init_conversation(
         app_handle,
         task.assistant_id,

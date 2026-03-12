@@ -1,5 +1,6 @@
 import { pinyin } from "pinyin-pro";
 import { ArtifactCollectionItem, FilteredArtifact } from "../data/ArtifactCollection";
+import { FilteredSlashSkill, SlashSkillCompletionItem } from "../data/Slash";
 
 export interface AssistantItem {
     id: number;
@@ -246,6 +247,78 @@ export class PinyinFilter {
         });
     }
 
+    static filterSlashSkills(
+        skills: SlashSkillCompletionItem[],
+        query: string,
+    ): FilteredSlashSkill[] {
+        if (!query.trim()) {
+            return skills.map((skill) => ({
+                ...skill,
+                matchType: "exact",
+                highlightIndices: [],
+            }));
+        }
+
+        const queryLower = query.toLowerCase();
+        const results: FilteredSlashSkill[] = [];
+
+        for (const skill of skills) {
+            const invokeNameLower = skill.invokeName.toLowerCase();
+            const displayNameLower = skill.displayName.toLowerCase();
+            const descriptionLower = skill.description?.toLowerCase() || "";
+            const tagsLower = skill.tags.join(" ").toLowerCase();
+            const identifierLower = skill.identifier.toLowerCase();
+
+            if (invokeNameLower.includes(queryLower)) {
+                results.push({
+                    ...skill,
+                    matchType: "exact",
+                    highlightIndices: this.getMatchIndices(
+                        invokeNameLower,
+                        queryLower,
+                    ),
+                });
+                continue;
+            }
+
+            if (
+                displayNameLower.includes(queryLower) ||
+                descriptionLower.includes(queryLower) ||
+                tagsLower.includes(queryLower) ||
+                identifierLower.includes(queryLower)
+            ) {
+                results.push({
+                    ...skill,
+                    matchType: "exact",
+                    highlightIndices: invokeNameLower.includes(queryLower)
+                        ? this.getMatchIndices(invokeNameLower, queryLower)
+                        : [],
+                });
+                continue;
+            }
+
+            const pinyinMatch =
+                this.matchSlashSkillPinyin(skill.invokeName, queryLower) ||
+                this.matchSlashSkillPinyin(skill.displayName, queryLower);
+
+            if (pinyinMatch) {
+                results.push({
+                    ...skill,
+                    matchType: pinyinMatch.matchType,
+                    highlightIndices: pinyinMatch.highlightIndices,
+                });
+            }
+        }
+
+        return results.sort((a, b) => {
+            const priority = { exact: 0, pinyin: 1, initial: 2 };
+            if (a.matchType !== b.matchType) {
+                return priority[a.matchType] - priority[b.matchType];
+            }
+            return a.invokeName.localeCompare(b.invokeName);
+        });
+    }
+
     /**
      * 获取匹配字符的索引位置用于高亮显示
      */
@@ -396,6 +469,60 @@ export class PinyinFilter {
         }
 
         return indices;
+    }
+
+    private static matchSlashSkillPinyin(
+        text: string,
+        queryLower: string,
+    ): Pick<FilteredSlashSkill, "matchType" | "highlightIndices"> | null {
+        try {
+            const pinyinArray = pinyin(text, {
+                toneType: "none",
+                type: "array",
+            }).map((p) => p.toLowerCase());
+
+            const pinyinFull = pinyinArray.join("");
+            const pinyinWithSpace = pinyinArray.join(" ");
+            const pinyinInitials = pinyinArray
+                .map((p) => p.charAt(0))
+                .join("");
+
+            if (pinyinFull.includes(queryLower)) {
+                return {
+                    matchType: "pinyin",
+                    highlightIndices: this.getPinyinMatchIndices(
+                        pinyinArray,
+                        pinyinFull,
+                        queryLower,
+                    ),
+                };
+            }
+
+            if (pinyinWithSpace.includes(queryLower)) {
+                return {
+                    matchType: "pinyin",
+                    highlightIndices: this.getSpacedPinyinMatchIndices(
+                        text,
+                        pinyinWithSpace,
+                        queryLower,
+                    ),
+                };
+            }
+
+            if (this.isInitialsMatch(pinyinInitials, queryLower)) {
+                return {
+                    matchType: "initial",
+                    highlightIndices: this.getInitialsMatchIndices(
+                        pinyinInitials,
+                        queryLower,
+                    ),
+                };
+            }
+        } catch {
+            // 忽略拼音转换失败，回退到普通字符串匹配
+        }
+
+        return null;
     }
 
     /**

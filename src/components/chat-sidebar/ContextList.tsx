@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from 'react';
-import { File, Search, FolderOpen, FileInput, FileQuestion, ExternalLink, ChevronDown, Image } from 'lucide-react';
+import { File, Search, FolderOpen, FileInput, FileQuestion, ExternalLink, ChevronDown, Image, Sparkles } from 'lucide-react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { invoke } from '@tauri-apps/api/core';
 import { ContextItem } from './types';
@@ -19,6 +19,8 @@ const getContextIcon = (type: ContextItem['type'], attachmentType?: string) => {
     switch (type) {
         case 'user_file':
             return <FileInput className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
+        case 'skill':
+            return <Sparkles className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
         case 'read_file':
             return <File className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
         case 'search':
@@ -36,6 +38,8 @@ const getContextLabel = (type: ContextItem['type']): string => {
     switch (type) {
         case 'user_file':
             return '用户文件';
+        case 'skill':
+            return 'Skills';
         case 'read_file':
             return '读取文件';
         case 'search':

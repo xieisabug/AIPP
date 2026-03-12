@@ -2,6 +2,7 @@
 
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::db::skill_db::SkillDatabase;
+use crate::slash::{get_skills_for_completion, rebuild_skills_index, SlashSkillCompletionItem};
 use crate::skills::installer::{
     copy_dir_recursive, inspect_skill_archive as inspect_archive_internal,
     inspect_skill_install_recipe as inspect_recipe_internal,
@@ -17,7 +18,7 @@ use crate::skills::types::{ScannedSkill, SkillContent, SkillSourceConfig, SkillW
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tracing::{debug, error, info, warn};
 
 /// Official skill from the skills store API
@@ -263,8 +264,20 @@ pub fn migrate_skills_to_agents_dir(app_handle: &tauri::AppHandle) -> Result<(),
 pub async fn scan_skills(app_handle: tauri::AppHandle) -> Result<Vec<ScannedSkill>, String> {
     let scanner = create_scanner(&app_handle);
     let skills = scanner.scan_all();
+    rebuild_skills_index(&app_handle).await.map_err(|e| e.to_string())?;
+    let _ = app_handle.emit("skills-registry-changed", ());
     info!("Scanned {} skills", skills.len());
     Ok(skills)
+}
+
+#[tauri::command]
+pub async fn get_skills_for_slash_completion(
+    app_handle: tauri::AppHandle,
+    force_refresh: Option<bool>,
+) -> Result<Vec<SlashSkillCompletionItem>, String> {
+    get_skills_for_completion(&app_handle, force_refresh.unwrap_or(false))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Get all configured skill sources
@@ -782,6 +795,7 @@ pub async fn delete_skill(app_handle: tauri::AppHandle, identifier: String) -> R
     std::fs::remove_dir_all(skill_folder)
         .map_err(|e| format!("Failed to delete skill folder: {}", e))?;
 
+    let _ = scan_skills(app_handle).await?;
     info!("Deleted skill folder: {}", skill_folder.display());
     Ok(())
 }

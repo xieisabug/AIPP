@@ -43,7 +43,7 @@ impl SkillScanner {
     }
 
     /// Expand path variables like ~ and {app_data}
-    fn expand_path(&self, path: &str) -> PathBuf {
+    pub(crate) fn expand_path(&self, path: &str) -> PathBuf {
         let expanded = if path.starts_with("~/") {
             self.home_dir.join(&path[2..])
         } else if path.starts_with('~') {

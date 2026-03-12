@@ -13,7 +13,7 @@ interface RawTextRendererProps {
 
 // Render raw text while still allowing custom tags to hydrate as React components.
 const CUSTOM_TAG_PATTERN =
-    /<(fileattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*>[\s\S]*?<\/\1>|<(fileattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*\/>/gi;
+    /<(fileattachment|skillattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*>[\s\S]*?<\/\1>|<(fileattachment|skillattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*\/>/gi;
 
 const RawTextRenderer: React.FC<RawTextRendererProps> = ({ content }) => {
     const processedContent = useMemo(() => {

@@ -19,6 +19,7 @@ pub enum AttachmentType {
     Word = 4,
     PowerPoint = 5,
     Excel = 6,
+    Skill = 7,
 }
 
 impl TryFrom<i64> for AttachmentType {
@@ -32,6 +33,7 @@ impl TryFrom<i64> for AttachmentType {
             4 => Ok(AttachmentType::Word),
             5 => Ok(AttachmentType::PowerPoint),
             6 => Ok(AttachmentType::Excel),
+            7 => Ok(AttachmentType::Skill),
             _ => Err(rusqlite::Error::FromSqlConversionFailure(
                 2,
                 rusqlite::types::Type::Integer,
