@@ -858,6 +858,36 @@ impl ConversationDatabase {
             },
         )?;
 
+        // 获取对话的开始时间和结束时间
+        let (start_time, finish_time): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT
+                    MIN(start_time) as earliest_start,
+                    MAX(finish_time) as latest_finish
+                FROM message
+                WHERE conversation_id = ?1",
+                &[&conversation_id],
+                |row| {
+                    Ok((
+                        row.get(0).ok(),
+                        row.get(1).ok(),
+                    ))
+                },
+            )
+            .unwrap_or((None, None));
+
+        let start_time_parsed = start_time.and_then(|s| {
+            DateTime::parse_from_rfc3339(&s)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        });
+
+        let finish_time_parsed = finish_time.and_then(|s| {
+            DateTime::parse_from_rfc3339(&s)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        });
+
         // 按模型分组统计
         let mut stmt = conn.prepare(
             "SELECT
@@ -1073,6 +1103,8 @@ impl ConversationDatabase {
             tool_result_message_count: tool_result_count as i32,
             avg_ttft_ms: avg_ttft,
             avg_tps: aggregated_avg_tps.or(avg_tps),
+            start_time: start_time_parsed,
+            finish_time: finish_time_parsed,
         })
     }
 
@@ -1166,6 +1198,8 @@ impl ConversationDatabase {
                     model_name: row.get(4).ok(),
                     ttft_ms,
                     tps,
+                    start_time,
+                    finish_time,
                 })
             },
         )
@@ -1312,6 +1346,11 @@ pub struct ConversationTokenStats {
     // 性能指标统计
     pub avg_ttft_ms: Option<f64>, // 平均首字延迟 (毫秒)
     pub avg_tps: Option<f64>,     // 平均生成速度
+    // 时间戳信息
+    #[serde(serialize_with = "serialize_option_datetime_millis")]
+    pub start_time: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "serialize_option_datetime_millis")]
+    pub finish_time: Option<DateTime<Utc>>,
 }
 
 /// 模型token分解信息
@@ -1338,6 +1377,11 @@ pub struct MessageTokenStats {
     pub model_name: Option<String>,
     pub ttft_ms: Option<i64>, // Time to First Token (毫秒)
     pub tps: Option<f64>,     // Tokens Per Second
+    // 时间戳信息
+    #[serde(serialize_with = "serialize_option_datetime_millis")]
+    pub start_time: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "serialize_option_datetime_millis")]
+    pub finish_time: Option<DateTime<Utc>>,
 }
 
 /// 对话总结结构体

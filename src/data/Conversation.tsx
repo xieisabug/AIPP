@@ -209,6 +209,9 @@ export interface ConversationTokenStats {
     // 性能指标统计
     avg_ttft_ms?: number;
     avg_tps?: number;
+    // 时间戳信息
+    start_time?: Date | null;
+    finish_time?: Date | null;
 }
 
 export interface ModelTokenBreakdown {
@@ -233,6 +236,9 @@ export interface MessageTokenStats {
     // 性能指标
     ttft_ms?: number;
     tps?: number;
+    // 时间戳信息
+    start_time?: Date | null;
+    finish_time?: Date | null;
 }
 
 // ============ 对话导出相关类型 ============

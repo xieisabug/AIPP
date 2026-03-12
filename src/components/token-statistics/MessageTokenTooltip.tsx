@@ -10,6 +10,8 @@ interface MessageTokenTooltipProps {
     messageType: string;
     ttftMs?: number | null;
     tps?: number | null;
+    startTime?: Date | null;
+    finishTime?: Date | null;
     onOpenChange?: (open: boolean) => void;
 }
 
@@ -20,6 +22,8 @@ export function MessageTokenTooltip({
     messageType,
     ttftMs,
     tps,
+    startTime,
+    finishTime,
     onOpenChange,
 }: MessageTokenTooltipProps) {
     // 只在 response 类型消息上显示
@@ -40,6 +44,20 @@ export function MessageTokenTooltip({
 
     const formatTps = (tps: number) => {
         return tps.toFixed(1);
+    };
+
+    const formatDateTime = (date: Date | null | undefined) => {
+        if (!date) return "未知";
+        const d = date instanceof Date ? date : new Date(date);
+        return d.toLocaleString('zh-CN', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        });
     };
 
     const safeTtftMs =
@@ -99,6 +117,29 @@ export function MessageTokenTooltip({
                                     <span className="text-muted-foreground">生成速度 (TPS):</span>
                                     <span className="font-medium">{formatTps(safeTps)} tok/s</span>
                                 </div>
+                            </div>
+                        </>
+                    )}
+
+                    {/* 时间戳信息 */}
+                    {(startTime || finishTime) && (
+                        <>
+                            <div className="border-t pt-2 mt-2">
+                                <div className="text-xs font-medium text-muted-foreground mb-1">时间信息</div>
+                            </div>
+                            <div className="space-y-1 text-sm">
+                                {startTime && (
+                                    <div className="flex justify-between gap-4">
+                                        <span className="text-muted-foreground">开始时间:</span>
+                                        <span className="font-medium">{formatDateTime(startTime)}</span>
+                                    </div>
+                                )}
+                                {finishTime && (
+                                    <div className="flex justify-between gap-4">
+                                        <span className="text-muted-foreground">完成时间:</span>
+                                        <span className="font-medium">{formatDateTime(finishTime)}</span>
+                                    </div>
+                                )}
                             </div>
                         </>
                     )}

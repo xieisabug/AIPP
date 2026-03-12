@@ -54,6 +54,20 @@ export function ConversationStatsDialog({
         return new Intl.NumberFormat("en-US").format(num);
     };
 
+    const formatDateTime = (date: Date | null | undefined) => {
+        if (!date) return "未知";
+        const d = date instanceof Date ? date : new Date(date);
+        return d.toLocaleString('zh-CN', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        });
+    };
+
     return (
         <Dialog open={open} onOpenChange={setOpen}>
             <DialogTrigger asChild>
@@ -61,9 +75,9 @@ export function ConversationStatsDialog({
             </DialogTrigger>
             <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
                 <DialogHeader>
-                    <DialogTitle>对话 Token 统计</DialogTitle>
+                    <DialogTitle>对话信息</DialogTitle>
                     <DialogDescription>
-                        该对话的 Token 使用明细
+                        该对话的详细信息和统计
                     </DialogDescription>
                 </DialogHeader>
 
@@ -82,6 +96,31 @@ export function ConversationStatsDialog({
                 {stats && !loading && !error && (
                     <div className="flex-1 overflow-y-auto px-6 pb-6">
                         <div className="space-y-6">
+                            {/* 时间戳信息 */}
+                            {(stats.start_time || stats.finish_time) && (
+                                <div className="pt-4 border-t">
+                                    <h4 className="text-sm font-medium mb-3">时间信息</h4>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div className="text-center">
+                                            <p className="text-xs text-muted-foreground mb-1">
+                                                开始时间
+                                            </p>
+                                            <p className="text-sm font-semibold">
+                                                {formatDateTime(stats.start_time)}
+                                            </p>
+                                        </div>
+                                        <div className="text-center">
+                                            <p className="text-xs text-muted-foreground mb-1">
+                                                完成时间
+                                            </p>
+                                            <p className="text-sm font-semibold">
+                                                {formatDateTime(stats.finish_time)}
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
                             {/* Total Token Usage Display */}
                             <TokenUsageDisplay
                                 total={stats.total_tokens}
