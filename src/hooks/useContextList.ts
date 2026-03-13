@@ -82,20 +82,44 @@ const parseSearchResultText = (rawResult: string): string | undefined => {
     }
 };
 
-const normalizeContextIdentity = (value: string): string => value.trim();
+const DEDUPED_CONTEXT_TYPES: ContextItem['type'][] = [
+    'read_file',
+    'list_directory',
+    'search',
+];
+
+const normalizeContextValue = (
+    type: ContextItem['type'],
+    value: string,
+): string => {
+    const trimmedValue = value.trim();
+    if (!trimmedValue) {
+        return '';
+    }
+
+    // Search items dedupe by the trimmed query text, while path-like items normalize
+    // separators/trailing slashes so the same file or directory only appears once.
+    if (type !== 'read_file' && type !== 'list_directory') {
+        return trimmedValue;
+    }
+
+    const normalizedPath = trimmedValue.replace(/\\/g, '/');
+    if (normalizedPath === '/' || /^[A-Za-z]:\/$/.test(normalizedPath)) {
+        return normalizedPath;
+    }
+
+    return normalizedPath.replace(/\/+$/, '');
+};
 
 const getContextDedupKey = (
     type: ContextItem['type'],
     value?: string,
 ): string | null => {
-    if (
-        (type !== 'read_file' && type !== 'list_directory' && type !== 'search') ||
-        !value
-    ) {
+    if (!DEDUPED_CONTEXT_TYPES.includes(type) || !value) {
         return null;
     }
 
-    const normalizedValue = normalizeContextIdentity(value);
+    const normalizedValue = normalizeContextValue(type, value);
     if (!normalizedValue) {
         return null;
     }
@@ -177,6 +201,8 @@ export function useContextList({
         const items: ContextItem[] = [];
         const seenContextKeys = new Set<string>();
 
+        // Deduplicate repeated context operations (for example, reading the same file or
+        // listing the same directory multiple times) using the raw context value when provided.
         const pushContextItem = (item: ContextItem, dedupValue?: string) => {
             const dedupKey = getContextDedupKey(item.type, dedupValue);
             if (dedupKey) {

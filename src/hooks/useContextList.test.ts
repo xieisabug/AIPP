@@ -49,6 +49,7 @@ describe('useContextList skill attachments', () => {
             }),
         );
 
+        // Wait for the loaded-tool effect to settle so React doesn't warn about async state updates.
         await waitFor(() => {
             expect(result.current.contextItems).toEqual(
                 expect.arrayContaining([
@@ -82,7 +83,7 @@ describe('useContextList skill attachments', () => {
                     conversation_id: 1,
                     status: 'success',
                     tool_name: 'get_file_contents',
-                    parameters: JSON.stringify({ file_path: '/workspace/notes/todo.md' }),
+                    parameters: JSON.stringify({ file_path: '\\workspace\\notes\\todo.md' }),
                 },
             ],
             [
@@ -92,7 +93,7 @@ describe('useContextList skill attachments', () => {
                     conversation_id: 1,
                     status: 'success',
                     tool_name: 'list_directory',
-                    parameters: JSON.stringify({ directory: '/workspace/project' }),
+                    parameters: JSON.stringify({ directory: '/workspace/project/' }),
                 },
             ],
             [
@@ -123,7 +124,7 @@ describe('useContextList skill attachments', () => {
                 userFiles: null,
                 mcpToolCallStates,
                 messages: [],
-                acpWorkingDirectory: '/workspace/project',
+                acpWorkingDirectory: '\\workspace\\project\\',
             }),
         );
 
@@ -146,9 +147,10 @@ describe('useContextList skill attachments', () => {
             );
 
             expect(directories).toHaveLength(1);
+            // The UI keeps the original display value from the first item; only the dedupe key is normalized.
             expect(directories[0]).toEqual(
                 expect.objectContaining({
-                    name: '/workspace/project',
+                    name: '\\workspace\\project\\',
                     details: 'ACP 工作目录',
                 }),
             );
