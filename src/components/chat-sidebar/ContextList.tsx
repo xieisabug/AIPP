@@ -159,9 +159,11 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
                                 >
                                     {getContextIcon(item.type, item.attachmentData?.type)}
                                     <div className="flex-1 min-w-0">
-                                        <p className="text-sm font-medium truncate">{item.name}</p>
+                                        <p className="text-sm font-medium truncate" title={item.name}>
+                                            {item.name}
+                                        </p>
                                         {item.details && item.details !== item.name && (
-                                            <p className="text-xs text-muted-foreground truncate mt-0.5">
+                                            <p className="text-xs text-muted-foreground truncate mt-0.5" title={item.details}>
                                                 {item.details}
                                             </p>
                                         )}
@@ -197,13 +199,13 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
                                                 }}
                                             >
                                                 <div className="flex items-center gap-1.5">
-                                                    <span className="text-sm text-foreground flex-1 truncate">
+                                                    <span className="text-sm text-foreground flex-1 truncate" title={result.title}>
                                                         {result.title}
                                                     </span>
                                                     <ExternalLink className="h-3 w-3 text-muted-foreground flex-shrink-0" />
                                                 </div>
                                                 {result.snippet && (
-                                                    <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">
+                                                    <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5" title={result.snippet}>
                                                         {result.snippet}
                                                     </p>
                                                 )}

@@ -14,6 +14,8 @@ interface SkillAttachmentPayload {
     identifier?: string;
 }
 
+const DEDUPED_CONTEXT_TYPES = new Set<ContextItem['type']>(['read_file', 'list_directory']);
+
 interface UseContextListOptions {
     conversationId?: string | number;
     // User provided files from input area (pending to be sent)
@@ -127,6 +129,11 @@ const parseSkillAttachmentPayload = (
     }
 };
 
+const normalizeContextRawValue = (value?: string): string | undefined => {
+    const normalizedValue = value?.trim();
+    return normalizedValue ? normalizedValue : undefined;
+};
+
 export function useContextList({
     conversationId,
     userFiles,
@@ -154,15 +161,37 @@ export function useContextList({
 
     const contextItems = useMemo(() => {
         const items: ContextItem[] = [];
+        const dedupeKeys = new Set<string>();
+
+        const pushContextItem = (item: ContextItem, rawValue?: string) => {
+            if (!DEDUPED_CONTEXT_TYPES.has(item.type)) {
+                items.push(item);
+                return;
+            }
+
+            const normalizedRawValue = normalizeContextRawValue(rawValue ?? item.details ?? item.name);
+            if (!normalizedRawValue) {
+                items.push(item);
+                return;
+            }
+
+            const dedupeKey = `${item.type}:${normalizedRawValue}`;
+            if (dedupeKeys.has(dedupeKey)) {
+                return;
+            }
+
+            dedupeKeys.add(dedupeKey);
+            items.push(item);
+        };
 
         if (acpWorkingDirectory) {
-            items.push({
+            pushContextItem({
                 id: `acp-working-directory-${acpWorkingDirectory}`,
                 type: 'list_directory',
                 name: acpWorkingDirectory,
                 details: 'ACP 工作目录',
                 source: 'mcp',
-            });
+            }, acpWorkingDirectory);
         }
 
         // Track attachment counts by type for naming
@@ -244,14 +273,14 @@ export function useContextList({
             if (!isContextTool) return;
 
             // Parse parameters to get meaningful details
-            let details = '';
+            let rawValue = '';
             let resultType: string | undefined;
             try {
                 if (toolCall.parameters) {
                     const params = JSON.parse(toolCall.parameters);
                     // Common parameter names for file paths and search queries
-                    details = params.path || params.file_path || params.query ||
-                              params.pattern || params.directory || params.uri || params.url || '';
+                    rawValue = params.path || params.file_path || params.query ||
+                        params.pattern || params.directory || params.uri || params.url || '';
                     resultType = typeof params.result_type === 'string' ? params.result_type : undefined;
                 }
             } catch {
@@ -259,7 +288,7 @@ export function useContextList({
             }
 
             const contextType = getContextTypeFromToolName(toolName);
-            const displayName = details || toolCall.tool_name || 'Unknown';
+            const displayName = rawValue || toolCall.tool_name || 'Unknown';
             const searchResults =
                 contextType === 'search' && toolCall.result ? parseSearchResultItems(toolCall.result) : undefined;
             const searchMarkdown =
@@ -270,16 +299,16 @@ export function useContextList({
                     ? parseSearchResultText(toolCall.result)
                     : undefined;
 
-            items.push({
+            pushContextItem({
                 id: `mcp-${callId}`,
                 type: contextType,
-                name: displayName.length > 50 ? displayName.slice(0, 47) + '...' : displayName,
+                name: displayName,
                 details: toolCall.tool_name,
                 searchResults,
                 searchMarkdown,
                 source: 'mcp',
                 timestamp: new Date(),
-            });
+            }, rawValue);
         });
 
         loadedMcpTools.forEach((tool) => {

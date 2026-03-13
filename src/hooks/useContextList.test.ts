@@ -1,16 +1,16 @@
-import { renderHook } from '@testing-library/react';
+import { renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { clearAllMockHandlers, mockInvokeHandler } from '@/__tests__/mocks/tauri';
-import { Message } from '@/data/Conversation';
+import { MCPToolCallUpdateEvent, Message } from '@/data/Conversation';
 import { useContextList } from './useContextList';
 
-describe('useContextList skill attachments', () => {
+describe('useContextList', () => {
     beforeEach(() => {
         clearAllMockHandlers();
         mockInvokeHandler('get_conversation_loaded_mcp_tools', () => []);
     });
 
-    it('maps skill attachments into sidebar skill context items', () => {
+    it('maps skill attachments into sidebar skill context items', async () => {
         const messages: Message[] = [
             {
                 id: 1,
@@ -49,15 +49,121 @@ describe('useContextList skill attachments', () => {
             }),
         );
 
-        expect(result.current.contextItems).toEqual(
-            expect.arrayContaining([
-                expect.objectContaining({
-                    type: 'skill',
-                    name: 'skill-creator',
-                    details: 'agents:skill-creator',
-                    source: 'user',
-                }),
-            ]),
+        await waitFor(() => {
+            expect(result.current.contextItems).toEqual(
+                expect.arrayContaining([
+                    expect.objectContaining({
+                        type: 'skill',
+                        name: 'skill-creator',
+                        details: 'agents:skill-creator',
+                        source: 'user',
+                    }),
+                ]),
+            );
+        });
+    });
+
+    it('deduplicates identical file and directory context items while keeping repeated searches', async () => {
+        const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
+            [1, {
+                call_id: 1,
+                conversation_id: 1,
+                status: 'success',
+                tool_name: 'read_file',
+                parameters: JSON.stringify({ path: '/workspace/src/App.tsx' }),
+            }],
+            [2, {
+                call_id: 2,
+                conversation_id: 1,
+                status: 'success',
+                tool_name: 'read_file',
+                parameters: JSON.stringify({ path: '/workspace/src/App.tsx' }),
+            }],
+            [3, {
+                call_id: 3,
+                conversation_id: 1,
+                status: 'success',
+                tool_name: 'list_directory',
+                parameters: JSON.stringify({ path: '/workspace/src/components' }),
+            }],
+            [4, {
+                call_id: 4,
+                conversation_id: 1,
+                status: 'success',
+                tool_name: 'list_directory',
+                parameters: JSON.stringify({ path: '/workspace/src/components' }),
+            }],
+            [5, {
+                call_id: 5,
+                conversation_id: 1,
+                status: 'success',
+                tool_name: 'search_files',
+                parameters: JSON.stringify({ query: 'Button' }),
+            }],
+            [6, {
+                call_id: 6,
+                conversation_id: 1,
+                status: 'success',
+                tool_name: 'search_files',
+                parameters: JSON.stringify({ query: 'Button' }),
+            }],
+        ]);
+
+        const { result } = renderHook(() =>
+            useContextList({
+                conversationId: 1,
+                userFiles: null,
+                mcpToolCallStates,
+                messages: [],
+                acpWorkingDirectory: null,
+            }),
         );
+
+        await waitFor(() => {
+            expect(
+                result.current.contextItems.filter(
+                    (item) => item.type === 'read_file' && item.name === '/workspace/src/App.tsx',
+                ),
+            ).toHaveLength(1);
+            expect(
+                result.current.contextItems.filter(
+                    (item) => item.type === 'list_directory' && item.name === '/workspace/src/components',
+                ),
+            ).toHaveLength(1);
+            expect(
+                result.current.contextItems.filter(
+                    (item) => item.type === 'search' && item.name === 'Button',
+                ),
+            ).toHaveLength(2);
+        });
+    });
+
+    it('keeps full raw values in context item names for hover and dedupe', async () => {
+        const longPath = '/workspace/src/components/chat-sidebar/some/really/long/path/that/should/not/be/truncated/in/context-item-data/ContextList.tsx';
+        const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
+            [1, {
+                call_id: 1,
+                conversation_id: 1,
+                status: 'success',
+                tool_name: 'read_file',
+                parameters: JSON.stringify({ path: longPath }),
+            }],
+        ]);
+
+        const { result } = renderHook(() =>
+            useContextList({
+                conversationId: 1,
+                userFiles: null,
+                mcpToolCallStates,
+                messages: [],
+                acpWorkingDirectory: null,
+            }),
+        );
+
+        await waitFor(() => {
+            expect(
+                result.current.contextItems.find((item) => item.type === 'read_file')?.name,
+            ).toBe(longPath);
+        });
     });
 });

@@ -292,7 +292,9 @@ function SidebarWindow() {
                             ) : (
                                 <FileText className="h-4 w-4" />
                             )}
-                            <span className="font-medium text-sm truncate max-w-[200px]">{context.name}</span>
+                            <span className="font-medium text-sm truncate max-w-[200px]" title={context.name}>
+                                {context.name}
+                            </span>
                         </div>
                         <Button
                             variant="ghost"
