@@ -82,6 +82,27 @@ const parseSearchResultText = (rawResult: string): string | undefined => {
     }
 };
 
+const normalizeContextIdentity = (value: string): string => value.trim();
+
+const getContextDedupKey = (
+    type: ContextItem['type'],
+    value?: string,
+): string | null => {
+    if (
+        (type !== 'read_file' && type !== 'list_directory' && type !== 'search') ||
+        !value
+    ) {
+        return null;
+    }
+
+    const normalizedValue = normalizeContextIdentity(value);
+    if (!normalizedValue) {
+        return null;
+    }
+
+    return `${type}:${normalizedValue}`;
+};
+
 const getAttachmentTypeName = (type: string): string => {
     switch (type) {
         case 'Image':
@@ -154,15 +175,28 @@ export function useContextList({
 
     const contextItems = useMemo(() => {
         const items: ContextItem[] = [];
+        const seenContextKeys = new Set<string>();
+
+        const pushContextItem = (item: ContextItem, dedupValue?: string) => {
+            const dedupKey = getContextDedupKey(item.type, dedupValue);
+            if (dedupKey) {
+                if (seenContextKeys.has(dedupKey)) {
+                    return;
+                }
+                seenContextKeys.add(dedupKey);
+            }
+
+            items.push(item);
+        };
 
         if (acpWorkingDirectory) {
-            items.push({
+            pushContextItem({
                 id: `acp-working-directory-${acpWorkingDirectory}`,
                 type: 'list_directory',
                 name: acpWorkingDirectory,
                 details: 'ACP 工作目录',
                 source: 'mcp',
-            });
+            }, acpWorkingDirectory);
         }
 
         // Track attachment counts by type for naming
@@ -270,7 +304,7 @@ export function useContextList({
                     ? parseSearchResultText(toolCall.result)
                     : undefined;
 
-            items.push({
+            pushContextItem({
                 id: `mcp-${callId}`,
                 type: contextType,
                 name: displayName.length > 50 ? displayName.slice(0, 47) + '...' : displayName,
@@ -279,7 +313,7 @@ export function useContextList({
                 searchMarkdown,
                 source: 'mcp',
                 timestamp: new Date(),
-            });
+            }, details || displayName);
         });
 
         loadedMcpTools.forEach((tool) => {
