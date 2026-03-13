@@ -57,6 +57,11 @@ describe('useContextList', () => {
                         name: 'skill-creator',
                         details: 'agents:skill-creator',
                         source: 'user',
+                        previewStatus: 'needs_load',
+                        previewData: expect.objectContaining({
+                            rawValue: 'agents:skill-creator',
+                            subtitle: 'agents:skill-creator',
+                        }),
                     }),
                 ]),
             );
@@ -164,6 +169,50 @@ describe('useContextList', () => {
             expect(
                 result.current.contextItems.find((item) => item.type === 'read_file')?.name,
             ).toBe(longPath);
+            expect(
+                result.current.contextItems.find((item) => item.type === 'read_file')?.previewData,
+            ).toEqual(
+                expect.objectContaining({
+                    rawValue: longPath,
+                    path: longPath,
+                }),
+            );
+        });
+    });
+
+    it('builds preview data for read_file tool results', async () => {
+        const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
+            [1, {
+                call_id: 1,
+                conversation_id: 1,
+                status: 'success',
+                tool_name: 'read_file',
+                parameters: JSON.stringify({ path: '/workspace/src/App.tsx' }),
+                result: 'export const App = () => null;',
+            }],
+        ]);
+
+        const { result } = renderHook(() =>
+            useContextList({
+                conversationId: 1,
+                userFiles: null,
+                mcpToolCallStates,
+                messages: [],
+                acpWorkingDirectory: null,
+            }),
+        );
+
+        await waitFor(() => {
+            expect(
+                result.current.contextItems.find((item) => item.type === 'read_file')?.previewData,
+            ).toEqual(
+                expect.objectContaining({
+                    contentType: 'code',
+                    content: 'export const App = () => null;',
+                    language: 'typescript',
+                    path: '/workspace/src/App.tsx',
+                }),
+            );
         });
     });
 });

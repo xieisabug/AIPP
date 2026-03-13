@@ -16,4 +16,17 @@ describe("RawTextRenderer skillattachment", () => {
         expect(screen.queryByText(/请帮用户创建 Skill。/)).not.toBeInTheDocument();
         expect(screen.queryByText(/<skillattachment/i)).not.toBeInTheDocument();
     });
+
+    it("does not leak multiline skillattachment body content into the message", () => {
+        render(
+            <RawTextRenderer
+                content={`<skillattachment skill_name="AIPP Artifact" invocation="/skills(AIPP Artifact)" identifier="agents:aipp-artifact"># AIPP Artifact Skill Prompt（Workspace 版）\n\n你是 AIPP 的 Artifact 工作流助手。  \n\n</skillattachment>`}
+            />,
+        );
+
+        expect(screen.getByText("AIPP Artifact")).toBeInTheDocument();
+        expect(screen.getByText("agents:aipp-artifact")).toBeInTheDocument();
+        expect(screen.queryByText("你是 AIPP 的 Artifact 工作流助手。")).not.toBeInTheDocument();
+        expect(screen.queryByText("AIPP Artifact Skill Prompt（Workspace 版）")).not.toBeInTheDocument();
+    });
 });

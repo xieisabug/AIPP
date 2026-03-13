@@ -15,6 +15,18 @@ interface RawTextRendererProps {
 const CUSTOM_TAG_PATTERN =
     /<(fileattachment|skillattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*>[\s\S]*?<\/\1>|<(fileattachment|skillattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*\/>/gi;
 
+const BODYLESS_CUSTOM_TAG_PATTERN =
+    /<(fileattachment|skillattachment)\b([^>]*)>[\s\S]*?<\/\1>/i;
+
+const normalizeMatchedCustomTag = (tagText: string): string => {
+    const match = tagText.match(BODYLESS_CUSTOM_TAG_PATTERN);
+    if (!match) {
+        return tagText;
+    }
+
+    return `<${match[1]}${match[2]}></${match[1]}>`;
+};
+
 const RawTextRenderer: React.FC<RawTextRendererProps> = ({ content }) => {
     const processedContent = useMemo(() => {
         const segments: React.ReactNode[] = [];
@@ -39,7 +51,7 @@ const RawTextRenderer: React.FC<RawTextRendererProps> = ({ content }) => {
             segments.push(
                 <ReactMarkdown
                     key={`tag-${start}`}
-                    children={tagText}
+                    children={normalizeMatchedCustomTag(tagText)}
                     remarkPlugins={[
                         REMARK_PLUGINS.find(
                             (plugin) => plugin.name === "remarkCustomCompenent",

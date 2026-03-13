@@ -1,13 +1,17 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useTheme } from "../hooks/useTheme";
 import { ChatSidebarContent } from "../components/chat-sidebar";
 import { TodoItem, CodeArtifact, ContextItem } from "../components/chat-sidebar/types";
 import { Button } from "../components/ui/button";
-import { X, FileText, Globe, Image, ExternalLink } from "lucide-react";
+import { X, FileText, Globe, Image, ExternalLink, FolderOpen, Search, Sparkles, LoaderCircle, AlertCircle } from "lucide-react";
 import EmbeddedArtifactPreview from "../components/EmbeddedArtifactPreview";
+import RawTextRenderer from "../components/RawTextRenderer";
+import UnifiedMarkdown from "../components/UnifiedMarkdown";
 import { cn } from "../utils/utils";
+import { buildPreviewPayloadFromContextItem, hydrateContextPreview } from "../components/chat-sidebar/contextPreview";
 
 // Preview mode: 'artifact' shows EmbeddedArtifactPreview, 'context' shows context details
 type PreviewMode = 'artifact' | 'context' | 'none';
@@ -15,6 +19,8 @@ type PreviewMode = 'artifact' | 'context' | 'none';
 // Context preview content
 interface ContextPreview {
     context: ContextItem;
+    loading?: boolean;
+    error?: string;
 }
 
 // Sidebar data from main window
@@ -56,6 +62,7 @@ function SidebarWindow() {
     const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
     const [isResizing, setIsResizing] = useState(false);
     const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
+    const contextRequestIdRef = useRef(0);
 
     // Listen for sidebar data sync from main window
     useEffect(() => {
@@ -199,27 +206,54 @@ function SidebarWindow() {
             });
     }, [sidebarData.conversationId]);
 
-    // Handle context click - show context preview
-    const handleContextClick = useCallback((item: ContextItem) => {
-        if (item.type === 'search' && item.searchMarkdown) {
-            setPreviewMode('artifact');
-            setContextPreview(null);
-            setPreviewPayload({ lang: "markdown", inputStr: item.searchMarkdown });
-            const conversationId = sidebarData.conversationId ? parseInt(sidebarData.conversationId, 10) : undefined;
-            invoke("run_artifacts", {
-                lang: "markdown",
-                inputStr: item.searchMarkdown,
-                sourceWindow: "sidebar",
-                conversationId,
-            }).catch((error) => {
-                console.error("Failed to preview search markdown:", error);
-            });
+    const cacheContextItem = useCallback((nextItem: ContextItem) => {
+        setSidebarData((prev) => ({
+            ...prev,
+            contextItems: prev.contextItems.map((item) => (item.id === nextItem.id ? nextItem : item)),
+        }));
+    }, []);
+
+    const handleContextClick = useCallback(async (item: ContextItem) => {
+        const requestId = ++contextRequestIdRef.current;
+        setPreviewMode('context');
+        setContextPreview({
+            context: item,
+            loading: item.previewStatus === 'needs_load',
+        });
+        setPreviewPayload(buildPreviewPayloadFromContextItem(item));
+
+        if (item.previewStatus !== 'needs_load') {
             return;
         }
-        setPreviewMode('context');
-        setContextPreview({ context: item });
-        setPreviewPayload(null);
-    }, [sidebarData.conversationId]);
+
+        try {
+            const hydratedItem = await hydrateContextPreview(item);
+            if (requestId !== contextRequestIdRef.current) {
+                return;
+            }
+
+            cacheContextItem(hydratedItem);
+            setContextPreview({
+                context: hydratedItem,
+                loading: false,
+            });
+            setPreviewPayload(buildPreviewPayloadFromContextItem(hydratedItem));
+        } catch (error) {
+            if (requestId !== contextRequestIdRef.current) {
+                return;
+            }
+
+            setContextPreview({
+                context: {
+                    ...item,
+                    previewStatus: 'error',
+                },
+                loading: false,
+                error: error instanceof Error ? error.message : String(error),
+            });
+            setPreviewPayload(null);
+        }
+    }, [cacheContextItem]);
 
     // Close the window
     const handleClose = useCallback(() => {
@@ -250,16 +284,170 @@ function SidebarWindow() {
     }, [previewPayload, sidebarData.conversationId]);
 
     const canOpenInPreviewWindow = !!previewPayload;
-    const formatToolParameters = useCallback((raw?: string) => {
-        if (!raw || raw.trim().length === 0) {
-            return '{}';
-        }
-        try {
-            return JSON.stringify(JSON.parse(raw), null, 2);
-        } catch {
-            return raw;
-        }
+
+    const handleOpenUrl = useCallback((url?: string) => {
+        if (!url) return;
+        openUrl(url).catch((error) => {
+            console.error("Failed to open URL:", error);
+        });
     }, []);
+
+    const renderContextIcon = useCallback((context: ContextItem) => {
+        if (context.type === 'search') {
+            return <Search className="h-4 w-4" />;
+        }
+        if (context.type === 'list_directory') {
+            return <FolderOpen className="h-4 w-4" />;
+        }
+        if (context.type === 'skill') {
+            return <Sparkles className="h-4 w-4" />;
+        }
+        if (context.attachmentData?.type === 'Image' || context.previewData?.contentType === 'image') {
+            return <Image className="h-4 w-4" />;
+        }
+        if (context.type === 'loaded_mcp_tool') {
+            return <Globe className="h-4 w-4" />;
+        }
+        return <FileText className="h-4 w-4" />;
+    }, []);
+
+    const renderPreviewItems = useCallback((context: ContextItem) => {
+        const items = context.previewData?.items;
+        if (!items || items.length === 0) {
+            return null;
+        }
+
+        return (
+            <div className="space-y-3">
+                <p className="text-xs text-muted-foreground">条目</p>
+                {items.map((item, index) => (
+                    <div key={`${context.id}-item-${index}`} className="rounded-lg border border-border bg-muted/30 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                                <p className="text-sm font-medium break-all">{item.label}</p>
+                                {item.description && (
+                                    <p className="text-xs text-muted-foreground mt-1 break-all">{item.description}</p>
+                                )}
+                            </div>
+                            {item.url && (
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 px-2"
+                                    onClick={() => handleOpenUrl(item.url)}
+                                >
+                                    <ExternalLink className="h-3.5 w-3.5" />
+                                    打开
+                                </Button>
+                            )}
+                        </div>
+                        {item.value && !item.url && (
+                            <pre className="mt-3 max-h-48 overflow-auto rounded bg-background p-3 text-xs font-mono whitespace-pre-wrap break-all">
+                                {item.value}
+                            </pre>
+                        )}
+                    </div>
+                ))}
+            </div>
+        );
+    }, [handleOpenUrl]);
+
+    const renderPreviewMetadata = useCallback((context: ContextItem) => {
+        const metadata = context.previewData?.metadata;
+        if (!metadata || Object.keys(metadata).length === 0) {
+            return null;
+        }
+
+        return (
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {Object.entries(metadata).map(([label, value]) => (
+                    <div key={`${context.id}-${label}`} className="rounded-lg border border-border bg-muted/20 p-3">
+                        <p className="text-xs text-muted-foreground">{label}</p>
+                        <p className="text-sm mt-1 break-all">{value}</p>
+                    </div>
+                ))}
+            </div>
+        );
+    }, []);
+
+    const renderContextPreviewBody = useCallback((preview: ContextPreview) => {
+        const { context, loading, error } = preview;
+        const previewData = context.previewData;
+
+        if (loading) {
+            return (
+                <div className="flex h-full items-center justify-center text-muted-foreground">
+                    <div className="flex items-center gap-2 text-sm">
+                        <LoaderCircle className="h-4 w-4 animate-spin" />
+                        正在加载详情…
+                    </div>
+                </div>
+            );
+        }
+
+        if (error) {
+            return (
+                <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
+                    <div className="flex items-center gap-2 font-medium">
+                        <AlertCircle className="h-4 w-4" />
+                        加载失败
+                    </div>
+                    <p className="mt-2 break-all">{error}</p>
+                </div>
+            );
+        }
+
+        if (!previewData) {
+            return <p className="text-muted-foreground">暂无可预览的内容</p>;
+        }
+
+        return (
+            <div className="space-y-4">
+                {renderPreviewMetadata(context)}
+
+                {previewData.contentType === 'image' && previewData.content && (
+                    <img
+                        src={`data:image/png;base64,${previewData.content}`}
+                        alt={previewData.title || context.name}
+                        className="max-w-full h-auto rounded-lg border border-border"
+                    />
+                )}
+
+                {previewData.contentType === 'markdown' && previewData.content && (
+                    <div className="rounded-lg border border-border bg-background p-4">
+                        <UnifiedMarkdown className="break-all" noProseWrapper={false}>
+                            {previewData.content}
+                        </UnifiedMarkdown>
+                    </div>
+                )}
+
+                {previewData.content && previewData.contentType !== 'markdown' && previewData.contentType !== 'image' && (
+                    <div className="rounded-lg border border-border bg-background p-4">
+                        {previewData.contentType === 'text' ? (
+                            <RawTextRenderer content={previewData.content} />
+                        ) : (
+                            <pre className="text-sm font-mono whitespace-pre-wrap break-all">
+                                {previewData.content}
+                            </pre>
+                        )}
+                    </div>
+                )}
+
+                {renderPreviewItems(context)}
+
+                {!previewData.content && !previewData.items?.length && previewData.path && (
+                    <div className="rounded-lg border border-border bg-muted/20 p-4">
+                        <p className="text-xs text-muted-foreground mb-2">路径</p>
+                        <code className="text-xs break-all">{previewData.path}</code>
+                    </div>
+                )}
+
+                {!previewData.content && !previewData.items?.length && !previewData.path && (
+                    <p className="text-muted-foreground">暂无可预览的内容</p>
+                )}
+            </div>
+        );
+    }, [renderPreviewItems, renderPreviewMetadata]);
 
     // Render preview content based on mode
     const renderPreview = () => {
@@ -281,20 +469,25 @@ function SidebarWindow() {
 
         if (previewMode === 'context' && contextPreview) {
             const context = contextPreview.context;
+            const previewTitle = context.previewData?.title || context.name;
+            const previewSubtitle = context.previewData?.subtitle || context.details;
             return (
                 <div className="flex-1 flex flex-col min-h-0">
                     <div className="flex items-center justify-between p-3 border-b border-border flex-shrink-0">
-                        <div className="flex items-center gap-2">
-                            {context.type === 'search' ? (
-                                <Globe className="h-4 w-4" />
-                            ) : context.attachmentData?.type === 'Image' ? (
-                                <Image className="h-4 w-4" />
-                            ) : (
-                                <FileText className="h-4 w-4" />
-                            )}
-                            <span className="font-medium text-sm truncate max-w-[200px]" title={context.name}>
-                                {context.name}
-                            </span>
+                        <div className="flex items-start gap-2 min-w-0">
+                            <div className="mt-0.5 flex-shrink-0">
+                                {renderContextIcon(context)}
+                            </div>
+                            <div className="min-w-0">
+                                <span className="font-medium text-sm truncate max-w-[240px] block" title={previewTitle}>
+                                    {previewTitle}
+                                </span>
+                                {previewSubtitle && (
+                                    <p className="text-xs text-muted-foreground truncate mt-0.5" title={previewSubtitle}>
+                                        {previewSubtitle}
+                                    </p>
+                                )}
+                            </div>
                         </div>
                         <Button
                             variant="ghost"
@@ -306,92 +499,7 @@ function SidebarWindow() {
                         </Button>
                     </div>
                     <div className="flex-1 overflow-auto p-4">
-                        {context.type === 'loaded_mcp_tool' ? (
-                            <div className="space-y-4">
-                                <div className="rounded-lg border border-border bg-muted/30 p-3">
-                                    <p className="text-xs text-muted-foreground">工具</p>
-                                    <p className="text-sm font-mono break-all mt-1">
-                                        {context.loadedToolData?.serverName || '未知服务'}::{context.loadedToolData?.toolName || context.name}
-                                    </p>
-                                    <p className="text-xs text-muted-foreground mt-2">
-                                        状态: {context.details || context.loadedToolData?.status || '未知'}
-                                    </p>
-                                </div>
-                                <div>
-                                    <p className="text-xs text-muted-foreground mb-1">介绍</p>
-                                    <div className="rounded border border-border bg-background max-h-64 overflow-auto">
-                                        <pre className="p-3 text-sm whitespace-pre-wrap leading-6">
-                                            {context.loadedToolData?.description?.trim() || '暂无工具介绍'}
-                                        </pre>
-                                    </div>
-                                </div>
-                                <div>
-                                    <p className="text-xs text-muted-foreground mb-1">参数</p>
-                                    <div className="rounded border border-border bg-background max-h-80 overflow-auto">
-                                        <pre className="p-3 text-xs font-mono whitespace-pre-wrap break-all leading-5">
-                                            {formatToolParameters(context.loadedToolData?.parameters)}
-                                        </pre>
-                                    </div>
-                                </div>
-                            </div>
-                        ) : (
-                            <>
-                                {/* Image preview */}
-                                {context.attachmentData?.type === 'Image' && context.attachmentData.content && (
-                                    <img
-                                        src={`data:image/png;base64,${context.attachmentData.content}`}
-                                        alt={context.name}
-                                        className="max-w-full h-auto rounded-lg"
-                                    />
-                                )}
-                                {/* Text content preview */}
-                                {context.attachmentData?.type === 'Text' && context.attachmentData.content && (
-                                    <pre className="text-sm font-mono whitespace-pre-wrap break-all bg-muted p-4 rounded-lg">
-                                        {context.attachmentData.content}
-                                    </pre>
-                                )}
-                                {/* Search results */}
-                                {context.type === 'search' && context.searchMarkdown && (
-                                    <div className="prose prose-sm dark:prose-invert max-w-none">
-                                        <pre className="whitespace-pre-wrap">{context.searchMarkdown}</pre>
-                                    </div>
-                                )}
-                                {/* Search result items */}
-                                {context.type === 'search' && context.searchResults && context.searchResults.length > 0 && (
-                                    <div className="space-y-3">
-                                        {context.searchResults.map((result, idx) => (
-                                            <div key={idx} className="p-3 bg-muted rounded-lg">
-                                                <a
-                                                    href={result.url}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    className="text-sm font-medium text-primary hover:underline"
-                                                >
-                                                    {result.title}
-                                                </a>
-                                                {result.snippet && (
-                                                    <p className="text-xs text-muted-foreground mt-1">{result.snippet}</p>
-                                                )}
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                                {/* File path details */}
-                                {context.details && !context.searchMarkdown && !context.searchResults && (
-                                    <div className="text-sm text-muted-foreground">
-                                        <p className="font-medium mb-2">路径：</p>
-                                        <code className="text-xs bg-muted p-2 rounded block">{context.details}</code>
-                                    </div>
-                                )}
-                                {/* Fallback for no content */}
-                                {!context.attachmentData?.content &&
-                                    !context.searchMarkdown &&
-                                    !context.searchResults?.length &&
-                                    !context.details && (
-                                        <p className="text-muted-foreground">暂无可预览的内容</p>
-                                    )}
-                            </>
-                        )}
+                        {renderContextPreviewBody(contextPreview)}
                     </div>
                 </div>
             );

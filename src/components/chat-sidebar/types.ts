@@ -41,6 +41,37 @@ export interface SearchResultItem {
     rank?: number;
 }
 
+export type ContextPreviewContentType =
+    | 'text'
+    | 'code'
+    | 'markdown'
+    | 'image'
+    | 'json'
+    | 'directory'
+    | 'file-meta';
+
+export type ContextPreviewStatus = 'ready' | 'needs_load' | 'loading' | 'error';
+
+export interface ContextPreviewListItem {
+    label: string;
+    value?: string;
+    description?: string;
+    url?: string;
+}
+
+export interface ContextPreviewData {
+    title?: string;
+    subtitle?: string;
+    rawValue?: string;
+    contentType?: ContextPreviewContentType;
+    content?: string;
+    language?: string;
+    path?: string;
+    url?: string;
+    items?: ContextPreviewListItem[];
+    metadata?: Record<string, string>;
+}
+
 export interface ContextItem {
     id: string;
     type:
@@ -62,6 +93,8 @@ export interface ContextItem {
     source: 'user' | 'mcp';
     // Optional timestamp
     timestamp?: Date;
+    previewData?: ContextPreviewData;
+    previewStatus?: ContextPreviewStatus;
     // Attachment data for user files
     attachmentData?: {
         type: 'Image' | 'Text' | 'PDF' | 'Word' | 'PowerPoint' | 'Excel' | string;
