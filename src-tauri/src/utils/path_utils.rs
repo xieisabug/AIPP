@@ -21,11 +21,10 @@ pub fn normalize_path_for_comparison(path: &Path) -> Option<PathBuf> {
         match component {
             Component::Prefix(p) => {
                 // Windows: 规范化驱动器号为大写
-                let prefix_str = p.as_os_str().to_string_lossy();
                 #[cfg(windows)]
-                normalized.push(prefix_str.to_uppercase());
+                normalized.push(p.as_os_str().to_string_lossy().to_uppercase());
                 #[cfg(not(windows))]
-                normalized.push(prefix_str);
+                normalized.push(p.as_os_str());
             }
             Component::RootDir => {
                 normalized.push(std::path::MAIN_SEPARATOR.to_string());
