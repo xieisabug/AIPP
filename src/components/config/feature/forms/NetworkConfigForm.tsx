@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect } from "react";
-import { UseFormReturn } from "react-hook-form";
+import { UseFormReturn, useFieldArray } from "react-hook-form";
 import ConfigForm from "@/components/ConfigForm";
 import { toast } from "sonner";
 import { Plus, Trash2 } from "lucide-react";
@@ -19,6 +19,12 @@ interface NetworkConfigFormProps {
 
 export const NetworkConfigForm: React.FC<NetworkConfigFormProps> = ({ form, onSave }) => {
     const { featureConfig, saveFeatureConfig } = useFeatureConfig();
+
+    // 使用 useFieldArray 管理 custom_headers 数组字段
+    const { fields, append, remove } = useFieldArray({
+        control: form.control,
+        name: "custom_headers",
+    });
 
     // 加载自定义 headers 配置到 form
     useEffect(() => {
@@ -57,52 +63,35 @@ export const NetworkConfigForm: React.FC<NetworkConfigFormProps> = ({ form, onSa
         }
     }, [onSave, form, saveFeatureConfig]);
 
-    // 自定义 Headers 渲染函数
-    const renderCustomHeaders = () => {
-        const customHeaders = form.watch("custom_headers") || [];
-
+    // 使用 useCallback 包装渲染函数，确保函数引用稳定
+    const renderCustomHeaders = useCallback(() => {
         const addHeader = () => {
-            const current = form.getValues("custom_headers") || [];
-            form.setValue("custom_headers", [...current, { key: "", value: "" }]);
-        };
-
-        const removeHeader = (index: number) => {
-            const current = form.getValues("custom_headers") || [];
-            form.setValue("custom_headers", current.filter((_: any, i: number) => i !== index));
-        };
-
-        const updateHeader = (index: number, field: "key" | "value", value: string) => {
-            const current = form.getValues("custom_headers") || [];
-            const newHeaders = [...current];
-            newHeaders[index] = { ...newHeaders[index], [field]: value };
-            form.setValue("custom_headers", newHeaders);
+            append({ key: "", value: "" });
         };
 
         return (
             <div className="space-y-3">
-                {customHeaders.map((header: CustomHeader, index: number) => (
-                    <div key={index} className="flex items-center gap-2">
+                {fields.map((field, index) => (
+                    <div key={field.id} className="flex items-center gap-2">
                         <div className="flex-1">
                             <Input
                                 placeholder="Header Key (如 User-Agent)"
-                                value={header.key}
-                                onChange={(e) => updateHeader(index, "key", e.target.value)}
+                                {...form.register(`custom_headers.${index}.key`)}
                                 className="bg-white dark:bg-gray-800"
                             />
                         </div>
                         <div className="flex-1">
                             <Input
                                 placeholder="Header Value"
-                                value={header.value}
-                                onChange={(e) => updateHeader(index, "value", e.target.value)}
+                                {...form.register(`custom_headers.${index}.value`)}
                                 className="bg-white dark:bg-gray-800"
                             />
                         </div>
-                        {customHeaders.length > 1 && (
+                        {fields.length > 1 && (
                             <Button
                                 variant="ghost"
                                 size="icon"
-                                onClick={() => removeHeader(index)}
+                                onClick={() => remove(index)}
                                 className="h-9 w-9 text-gray-500 hover:text-red-500 dark:text-gray-400"
                             >
                                 <Trash2 className="h-4 w-4" />
@@ -124,7 +113,7 @@ export const NetworkConfigForm: React.FC<NetworkConfigFormProps> = ({ form, onSa
                 </div>
             </div>
         );
-    };
+    }, [fields, form, append, remove]);
 
     const NETWORK_FORM_CONFIG = [
         {
