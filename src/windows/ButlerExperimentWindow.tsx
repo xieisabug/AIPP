@@ -160,6 +160,7 @@ function ButlerExperimentWindow() {
     const [creatingTask, setCreatingTask] = useState(false);
     const [resettingMainConversation, setResettingMainConversation] = useState(false);
     const [isTaskDialogOpen, setIsTaskDialogOpen] = useState(false);
+    const [isTaskDetailDialogOpen, setIsTaskDetailDialogOpen] = useState(false);
     const [taskTitle, setTaskTitle] = useState("");
     const [taskGoal, setTaskGoal] = useState("");
     const [taskAssistantId, setTaskAssistantId] = useState<string>("");
@@ -262,7 +263,7 @@ function ButlerExperimentWindow() {
             if (current && nextTasks.some((task) => task.task_conversation_id === current)) {
                 return current;
             }
-            return nextTasks[0]?.task_conversation_id ?? null;
+            return null;
         });
     }, []);
 
@@ -383,11 +384,14 @@ function ButlerExperimentWindow() {
             setTaskTitle("");
             setTaskGoal("");
             setIsTaskDialogOpen(false);
+            setIsTaskDetailDialogOpen(false);
+            setSelectedTaskId(null);
+            setSelectedTaskDetail(null);
         });
         const focusListener = getCurrentWebviewWindow().onFocusChanged(({ payload }) => {
             if (payload) {
                 void loadMainConversation({ silentError: true });
-                if (selectedTaskId) {
+                if (selectedTaskId && isTaskDetailDialogOpen) {
                     void loadTaskDetail(selectedTaskId);
                 }
             }
@@ -397,7 +401,7 @@ function ButlerExperimentWindow() {
             unlistenHidden.then((unlisten) => unlisten()).catch(console.warn);
             focusListener.then((unlisten) => unlisten()).catch(console.warn);
         };
-    }, [loadMainConversation, loadTaskDetail, selectedTaskId]);
+    }, [isTaskDetailDialogOpen, loadMainConversation, loadTaskDetail, selectedTaskId]);
 
     useEffect(() => {
         if (!conversationIdNumber) {
@@ -410,7 +414,6 @@ function ButlerExperimentWindow() {
                     return;
                 }
                 setTasks((current) => upsertTask(current, payload));
-                setSelectedTaskId((current) => current ?? payload.task_conversation_id);
             }),
             listen<ButlerTaskListItem>("butler_task_updated", ({ payload }) => {
                 if (payload.butler_conversation_id !== conversationIdNumber) {
@@ -457,7 +460,9 @@ function ButlerExperimentWindow() {
                 "reset_butler_main_conversation"
             );
             applyMainConversationResult(result);
+            setSelectedTaskId(null);
             setSelectedTaskDetail(null);
+            setIsTaskDetailDialogOpen(false);
             toast.success("已重开新的总管家主会话");
         } catch (error) {
             console.error("[ButlerExperimentWindow] Failed to reset main conversation:", error);
@@ -536,6 +541,11 @@ function ButlerExperimentWindow() {
         }
     }, []);
 
+    const handleOpenTaskDetail = useCallback((taskConversationId: number) => {
+        setSelectedTaskId(taskConversationId);
+        setIsTaskDetailDialogOpen(true);
+    }, []);
+
     const selectedTaskOutput = useMemo(() => {
         const structured = safeParseJson<{ content?: string }>(
             selectedTaskDetail?.result?.structured_output_json
@@ -555,7 +565,7 @@ function ButlerExperimentWindow() {
                 data-aipp-window="butler_experiment"
                 data-aipp-slot="window-root"
             >
-                <div className="grid h-full grid-cols-[320px_minmax(0,1fr)_360px] gap-4 p-4">
+                <div className="grid h-full grid-cols-[320px_minmax(0,1fr)] gap-4 p-4">
                     <Card className="min-h-0 flex flex-col">
                         <CardHeader className="pb-3">
                             <div className="flex items-center justify-between gap-2">
@@ -627,12 +637,15 @@ function ButlerExperimentWindow() {
                                         <button
                                             key={task.task_conversation_id}
                                             type="button"
-                                            className={`w-full rounded-lg border p-3 text-left transition-colors ${selectedTaskId === task.task_conversation_id
+                                            className={`w-full rounded-lg border p-3 text-left transition-colors ${(isTaskDetailDialogOpen &&
+                                                selectedTaskId === task.task_conversation_id)
                                                 ? "border-primary bg-primary/5"
                                                 : "hover:bg-muted/40"
                                                 }`}
                                             onClick={() =>
-                                                setSelectedTaskId(task.task_conversation_id)
+                                                handleOpenTaskDetail(
+                                                    task.task_conversation_id
+                                                )
                                             }
                                         >
                                             <div className="flex items-start justify-between gap-2">
@@ -720,7 +733,6 @@ function ButlerExperimentWindow() {
                                         onChangeConversationId={() => undefined}
                                         pluginList={pluginList}
                                         hideHeader
-                                        hideSidebar
                                         onConversationChange={(conversation) =>
                                             setMainConversationTitle(
                                                 conversation?.name || "总管家主会话"
@@ -739,163 +751,6 @@ function ButlerExperimentWindow() {
                             </CardContent>
                         </Card>
                     </div>
-
-                    <Card className="min-h-0 flex flex-col">
-                        <CardHeader className="pb-3">
-                            <CardTitle className="text-base">任务详情</CardTitle>
-                        </CardHeader>
-                        <CardContent className="min-h-0 flex-1 overflow-hidden">
-                            {!selectedTaskId ? (
-                                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                                    选择左侧任务后，在这里查看状态与结果。
-                                </div>
-                            ) : loadingTaskDetail && !selectedTaskDetail ? (
-                                <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                    正在加载详情...
-                                </div>
-                            ) : selectedTaskDetail ? (
-                                <div className="flex h-full flex-col">
-                                    <div className="space-y-3">
-                                        <div className="flex items-start justify-between gap-2">
-                                            <div>
-                                                <div className="font-medium">
-                                                    {selectedTaskDetail.task.title}
-                                                </div>
-                                                <div className="text-xs text-muted-foreground mt-1">
-                                                    执行助手：
-                                                    {selectedTaskDetail.task.executor_assistant_name}
-                                                </div>
-                                            </div>
-                                            <Badge
-                                                variant={getStatusVariant(
-                                                    selectedTaskDetail.task.status
-                                                )}
-                                            >
-                                                {getStatusLabel(selectedTaskDetail.task.status)}
-                                            </Badge>
-                                        </div>
-                                        <div className="flex flex-wrap gap-2">
-                                            <Button
-                                                type="button"
-                                                variant="outline"
-                                                size="sm"
-                                                onClick={() =>
-                                                    void loadTaskDetail(selectedTaskId)
-                                                }
-                                            >
-                                                <RefreshCw className="mr-2 h-4 w-4" />
-                                                刷新
-                                            </Button>
-                                            <Button
-                                                type="button"
-                                                variant="outline"
-                                                size="sm"
-                                                onClick={() =>
-                                                    void handleOpenTaskConversation(
-                                                        selectedTaskDetail.task
-                                                            .task_conversation_id
-                                                    )
-                                                }
-                                            >
-                                                <ExternalLink className="mr-2 h-4 w-4" />
-                                                打开任务会话
-                                            </Button>
-                                            {selectedTaskDetail.task.is_running ? (
-                                                <Button
-                                                    type="button"
-                                                    variant="outline"
-                                                    size="sm"
-                                                    onClick={() =>
-                                                        void handleCancelTask(
-                                                            selectedTaskDetail.task
-                                                                .task_conversation_id
-                                                        )
-                                                    }
-                                                >
-                                                    <PauseCircle className="mr-2 h-4 w-4" />
-                                                    取消任务
-                                                </Button>
-                                            ) : null}
-                                        </div>
-                                    </div>
-
-                                    <Separator className="my-4" />
-
-                                    <ScrollArea className="min-h-0 flex-1 pr-2">
-                                        <div className="space-y-4">
-                                            <div>
-                                                <div className="text-xs font-medium text-muted-foreground mb-1">
-                                                    运行状态
-                                                </div>
-                                                <div className="text-sm">
-                                                    {selectedTaskDetail.runtime_state.phase}
-                                                </div>
-                                            </div>
-                                            <div>
-                                                <div className="text-xs font-medium text-muted-foreground mb-1">
-                                                    创建时间
-                                                </div>
-                                                <div className="text-sm">
-                                                    {formatTime(
-                                                        selectedTaskDetail.task.created_time
-                                                    )}
-                                                </div>
-                                            </div>
-                                            <div>
-                                                <div className="text-xs font-medium text-muted-foreground mb-1">
-                                                    完成时间
-                                                </div>
-                                                <div className="text-sm">
-                                                    {formatTime(
-                                                        selectedTaskDetail.task.finalized_at
-                                                    )}
-                                                </div>
-                                            </div>
-                                            <div>
-                                                <div className="text-xs font-medium text-muted-foreground mb-1">
-                                                    任务目标
-                                                </div>
-                                                <div className="rounded-md border bg-muted/20 p-3 text-sm whitespace-pre-wrap">
-                                                    {selectedTaskDetail.definition.goal}
-                                                </div>
-                                            </div>
-                                            <div>
-                                                <div className="text-xs font-medium text-muted-foreground mb-1">
-                                                    结果摘要
-                                                </div>
-                                                <div className="rounded-md border bg-muted/20 p-3 text-sm whitespace-pre-wrap">
-                                                    {selectedTaskDetail.result?.summary ||
-                                                        selectedTaskDetail.task.last_summary ||
-                                                        "暂无摘要"}
-                                                </div>
-                                            </div>
-                                            <div>
-                                                <div className="text-xs font-medium text-muted-foreground mb-1">
-                                                    最终输出
-                                                </div>
-                                                <div className="rounded-md border bg-muted/20 p-3 text-sm">
-                                                    {selectedTaskOutput ? (
-                                                        <UnifiedMarkdown>
-                                                            {selectedTaskOutput}
-                                                        </UnifiedMarkdown>
-                                                    ) : (
-                                                        <span className="text-muted-foreground">
-                                                            暂无可展示的最终输出
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </ScrollArea>
-                                </div>
-                            ) : (
-                                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                                    暂无任务详情。
-                                </div>
-                            )}
-                        </CardContent>
-                    </Card>
                 </div>
 
                 <OperationPermissionDialog
@@ -910,6 +765,174 @@ function ButlerExperimentWindow() {
                     errorMessage={acpDecisionError}
                     onDecision={handleAcpDecision}
                 />
+                <Dialog
+                    open={isTaskDetailDialogOpen}
+                    onOpenChange={(open) => {
+                        setIsTaskDetailDialogOpen(open);
+                        if (!open) {
+                            setSelectedTaskId(null);
+                            setSelectedTaskDetail(null);
+                        }
+                    }}
+                >
+                    <DialogContent className="max-w-4xl">
+                        <DialogHeader>
+                            <DialogTitle>任务详情</DialogTitle>
+                            <DialogDescription>
+                                查看任务状态、目标、摘要与最终输出。
+                            </DialogDescription>
+                        </DialogHeader>
+                        {!selectedTaskId ? (
+                            <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">
+                                请选择一个任务。
+                            </div>
+                        ) : loadingTaskDetail && !selectedTaskDetail ? (
+                            <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                                正在加载详情...
+                            </div>
+                        ) : selectedTaskDetail ? (
+                            <div className="flex max-h-[75vh] flex-col overflow-hidden">
+                                <div className="space-y-3">
+                                    <div className="flex items-start justify-between gap-2">
+                                        <div>
+                                            <div className="font-medium">
+                                                {selectedTaskDetail.task.title}
+                                            </div>
+                                            <div className="mt-1 text-xs text-muted-foreground">
+                                                执行助手：
+                                                {selectedTaskDetail.task.executor_assistant_name}
+                                            </div>
+                                        </div>
+                                        <Badge
+                                            variant={getStatusVariant(
+                                                selectedTaskDetail.task.status
+                                            )}
+                                        >
+                                            {getStatusLabel(selectedTaskDetail.task.status)}
+                                        </Badge>
+                                    </div>
+                                    <div className="flex flex-wrap gap-2">
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() =>
+                                                void loadTaskDetail(selectedTaskId)
+                                            }
+                                        >
+                                            <RefreshCw className="mr-2 h-4 w-4" />
+                                            刷新
+                                        </Button>
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() =>
+                                                void handleOpenTaskConversation(
+                                                    selectedTaskDetail.task
+                                                        .task_conversation_id
+                                                )
+                                            }
+                                        >
+                                            <ExternalLink className="mr-2 h-4 w-4" />
+                                            打开任务会话
+                                        </Button>
+                                        {selectedTaskDetail.task.is_running ? (
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                size="sm"
+                                                onClick={() =>
+                                                    void handleCancelTask(
+                                                        selectedTaskDetail.task
+                                                            .task_conversation_id
+                                                    )
+                                                }
+                                            >
+                                                <PauseCircle className="mr-2 h-4 w-4" />
+                                                取消任务
+                                            </Button>
+                                        ) : null}
+                                    </div>
+                                </div>
+
+                                <Separator className="my-4" />
+
+                                <ScrollArea className="min-h-0 flex-1 pr-2">
+                                    <div className="space-y-4">
+                                        <div>
+                                            <div className="mb-1 text-xs font-medium text-muted-foreground">
+                                                运行状态
+                                            </div>
+                                            <div className="text-sm">
+                                                {selectedTaskDetail.runtime_state.phase}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div className="mb-1 text-xs font-medium text-muted-foreground">
+                                                创建时间
+                                            </div>
+                                            <div className="text-sm">
+                                                {formatTime(
+                                                    selectedTaskDetail.task.created_time
+                                                )}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div className="mb-1 text-xs font-medium text-muted-foreground">
+                                                完成时间
+                                            </div>
+                                            <div className="text-sm">
+                                                {formatTime(
+                                                    selectedTaskDetail.task.finalized_at
+                                                )}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div className="mb-1 text-xs font-medium text-muted-foreground">
+                                                任务目标
+                                            </div>
+                                            <div className="whitespace-pre-wrap rounded-md border bg-muted/20 p-3 text-sm">
+                                                {selectedTaskDetail.definition.goal}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div className="mb-1 text-xs font-medium text-muted-foreground">
+                                                结果摘要
+                                            </div>
+                                            <div className="whitespace-pre-wrap rounded-md border bg-muted/20 p-3 text-sm">
+                                                {selectedTaskDetail.result?.summary ||
+                                                    selectedTaskDetail.task.last_summary ||
+                                                    "暂无摘要"}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div className="mb-1 text-xs font-medium text-muted-foreground">
+                                                最终输出
+                                            </div>
+                                            <div className="rounded-md border bg-muted/20 p-3 text-sm">
+                                                {selectedTaskOutput ? (
+                                                    <UnifiedMarkdown>
+                                                        {selectedTaskOutput}
+                                                    </UnifiedMarkdown>
+                                                ) : (
+                                                    <span className="text-muted-foreground">
+                                                        暂无可展示的最终输出
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </ScrollArea>
+                            </div>
+                        ) : (
+                            <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">
+                                暂无任务详情。
+                            </div>
+                        )}
+                    </DialogContent>
+                </Dialog>
                 <Dialog open={isTaskDialogOpen} onOpenChange={setIsTaskDialogOpen}>
                     <DialogContent>
                         <DialogHeader>
