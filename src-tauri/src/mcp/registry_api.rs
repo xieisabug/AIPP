@@ -1,3 +1,4 @@
+use crate::api::butler_api::is_butler_system_assistant;
 use crate::db::mcp_db::{
     MCPDatabase, MCPServer, MCPServerPrompt, MCPServerResource, MCPServerTool,
 };
@@ -1319,7 +1320,12 @@ pub async fn check_disable_operation_mcp(
     let skill_db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
     // 获取所有助手
-    let assistants = assistant_db.get_assistants().map_err(|e| e.to_string())?;
+    let assistants = assistant_db
+        .get_assistants()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|assistant| !is_butler_system_assistant(assistant))
+        .collect::<Vec<_>>();
 
     let mut affected_assistants = Vec::new();
 
@@ -1355,7 +1361,12 @@ pub async fn disable_operation_mcp_with_skills(app_handle: tauri::AppHandle) -> 
         let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
         let skill_db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
-        let assistants = assistant_db.get_assistants().map_err(|e| e.to_string())?;
+        let assistants = assistant_db
+            .get_assistants()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|assistant| !is_butler_system_assistant(assistant))
+            .collect::<Vec<_>>();
         for assistant in assistants {
             let enabled_skills =
                 skill_db.get_enabled_skill_configs(assistant.id).map_err(|e| e.to_string())?;
@@ -1388,7 +1399,12 @@ pub async fn check_disable_agent_mcp(
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let skill_db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
-    let assistants = assistant_db.get_assistants().map_err(|e| e.to_string())?;
+    let assistants = assistant_db
+        .get_assistants()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|assistant| !is_butler_system_assistant(assistant))
+        .collect::<Vec<_>>();
     let mut affected_assistants = Vec::new();
 
     for assistant in assistants {
@@ -1422,7 +1438,12 @@ pub async fn disable_agent_mcp_with_skills(app_handle: tauri::AppHandle) -> Resu
         let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
         let skill_db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
-        let assistants = assistant_db.get_assistants().map_err(|e| e.to_string())?;
+        let assistants = assistant_db
+            .get_assistants()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|assistant| !is_butler_system_assistant(assistant))
+            .collect::<Vec<_>>();
         for assistant in assistants {
             let enabled_skills =
                 skill_db.get_enabled_skill_configs(assistant.id).map_err(|e| e.to_string())?;

@@ -381,6 +381,15 @@ pub async fn generate_title(
                     name: response_text.clone(),
                     assistant_id: None,
                     created_time: chrono::Utc::now(),
+                    updated_time: chrono::Utc::now(),
+                    conversation_kind: "normal".to_string(),
+                    parent_butler_conversation_id: None,
+                    source_task_title: None,
+                    is_hidden_from_normal_chat_list: false,
+                    channel_source: None,
+                    butler_task_status: None,
+                    butler_task_summary: None,
+                    butler_task_finalized_at: None,
                 })
             {
                 error!(error = %e, conversation_id, "failed to update conversation name after title generation");

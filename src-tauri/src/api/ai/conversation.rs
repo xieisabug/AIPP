@@ -1,4 +1,5 @@
 use crate::api::ai::summary::get_latest_branch_messages;
+use crate::api::ai::types::McpOverrideConfig;
 use crate::api::ai_api::{build_tool_name, ToolNameMapping};
 use crate::db::conversation_db::AttachmentType;
 use crate::db::conversation_db::Repository;
@@ -835,6 +836,7 @@ pub async fn handle_message_type_end(
     conversation_id: i64,
     app_handle: &tauri::AppHandle,
     skip_mcp_detection: bool,
+    mcp_override_config: Option<&McpOverrideConfig>,
 ) -> Result<(), anyhow::Error> {
     let end_time = chrono::Utc::now();
     let duration_ms = end_time.timestamp_millis() - start_time.timestamp_millis();
@@ -850,7 +852,7 @@ pub async fn handle_message_type_end(
             conversation_id,
             message_id,
             &final_content,
-            None,
+            mcp_override_config,
         )
         .await
         {
@@ -972,6 +974,15 @@ pub fn init_conversation(
             name: "新对话".to_string(),
             assistant_id: Some(assistant_id),
             created_time: chrono::Utc::now(),
+            updated_time: chrono::Utc::now(),
+            conversation_kind: "normal".to_string(),
+            parent_butler_conversation_id: None,
+            source_task_title: None,
+            is_hidden_from_normal_chat_list: false,
+            channel_source: None,
+            butler_task_status: None,
+            butler_task_summary: None,
+            butler_task_finalized_at: None,
         })
         .map_err(AppError::from)?;
     let conversation_clone = conversation.clone();

@@ -47,6 +47,15 @@ fn create_test_conversation(id: i64, assistant_id: Option<i64>) -> Conversation 
         name: "Test Conversation".to_string(),
         assistant_id,
         created_time: Utc::now(),
+        updated_time: Utc::now(),
+        conversation_kind: "normal".to_string(),
+        parent_butler_conversation_id: None,
+        source_task_title: None,
+        is_hidden_from_normal_chat_list: false,
+        channel_source: None,
+        butler_task_status: None,
+        butler_task_summary: None,
+        butler_task_finalized_at: None,
     }
 }
 

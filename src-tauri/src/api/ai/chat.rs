@@ -1829,6 +1829,7 @@ async fn attempt_stream_chat(
                                     conversation_id,
                                     &app_handle,
                                     false, // allow MCP detection
+                                    mcp_override_config.as_ref(),
                                 )
                                 .await
                                 {
@@ -2225,6 +2226,7 @@ async fn attempt_stream_chat(
                                         conversation_id,
                                         &app_handle,
                                         false, // allow MCP detection
+                                        mcp_override_config.as_ref(),
                                     )
                                     .await
                                     {
@@ -2246,6 +2248,7 @@ async fn attempt_stream_chat(
                                         conversation_id,
                                         &app_handle,
                                         false, // allow MCP detection
+                                        mcp_override_config.as_ref(),
                                     )
                                     .await
                                     {
@@ -2837,6 +2840,12 @@ pub async fn handle_non_stream_chat(
 
             send_completion_notification(app_handle, &content, assistant_name, &config_feature_map)
                 .await;
+
+            if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+                activity_manager
+                    .clear_message_focus_keep_mcp(app_handle, conversation_id)
+                    .await;
+            }
 
             Ok(())
         }

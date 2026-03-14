@@ -32,7 +32,16 @@ pub fn create_test_db() -> Connection {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             assistant_id INTEGER,
-            created_time TEXT NOT NULL
+            created_time TEXT NOT NULL,
+            updated_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            conversation_kind TEXT NOT NULL DEFAULT 'normal',
+            parent_butler_conversation_id INTEGER,
+            source_task_title TEXT,
+            is_hidden_from_normal_chat_list INTEGER NOT NULL DEFAULT 0,
+            channel_source TEXT,
+            butler_task_status TEXT,
+            butler_task_summary TEXT,
+            butler_task_finalized_at TEXT
         )",
         [],
     )
@@ -83,14 +92,27 @@ pub fn create_test_db() -> Connection {
     conn
 }
 
+pub fn build_test_conversation(name: impl Into<String>, assistant_id: Option<i64>) -> Conversation {
+    Conversation {
+        id: 0,
+        name: name.into(),
+        assistant_id,
+        created_time: Utc::now(),
+        updated_time: Utc::now(),
+        conversation_kind: "normal".to_string(),
+        parent_butler_conversation_id: None,
+        source_task_title: None,
+        is_hidden_from_normal_chat_list: false,
+        channel_source: None,
+        butler_task_status: None,
+        butler_task_summary: None,
+        butler_task_finalized_at: None,
+    }
+}
+
 /// 创建测试用的对话数据
 pub fn create_test_conversation(repo: &ConversationRepository) -> Conversation {
-    let conversation = Conversation {
-        id: 0,
-        name: "Test Conversation".to_string(),
-        assistant_id: Some(1),
-        created_time: Utc::now(),
-    };
+    let conversation = build_test_conversation("Test Conversation", Some(1));
     repo.create(&conversation).unwrap()
 }
 
@@ -146,6 +168,15 @@ pub fn create_shared_test_db(
         name: "Test Conversation".to_string(),
         assistant_id: Some(1),
         created_time: Utc::now(),
+        updated_time: Utc::now(),
+        conversation_kind: "normal".to_string(),
+        parent_butler_conversation_id: None,
+        source_task_title: None,
+        is_hidden_from_normal_chat_list: false,
+        channel_source: None,
+        butler_task_status: None,
+        butler_task_summary: None,
+        butler_task_finalized_at: None,
     };
 
     let conv_repo = ConversationRepository::new(Connection::open_in_memory().unwrap());

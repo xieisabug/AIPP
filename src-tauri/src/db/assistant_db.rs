@@ -1,6 +1,6 @@
 use super::get_db_path;
 use crate::utils::path_utils::is_path_under_trusted;
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tracing::{debug, error, instrument};
@@ -75,6 +75,17 @@ pub struct AssistantWorkspace {
     pub assistant_id: i64,
     pub path: String,
     pub created_time: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AssistantSummary {
+    pub id: i64,
+    pub assistant_id: i64,
+    pub summary: String,
+    pub tags_json: String,
+    pub source_hash: String,
+    pub created_time: Option<String>,
+    pub updated_time: Option<String>,
 }
 
 pub struct AssistantDatabase {
@@ -204,6 +215,23 @@ impl AssistantDatabase {
                 FOREIGN KEY (assistant_id) REFERENCES assistant(id) ON DELETE CASCADE,
                 UNIQUE(assistant_id, path)
             );",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS assistant_summary (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                assistant_id INTEGER NOT NULL UNIQUE,
+                summary TEXT NOT NULL,
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                source_hash TEXT NOT NULL DEFAULT '',
+                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (assistant_id) REFERENCES assistant(id) ON DELETE CASCADE
+            );",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assistant_summary_assistant ON assistant_summary(assistant_id);",
             [],
         )?;
 
@@ -365,6 +393,16 @@ impl AssistantDatabase {
             params![assistant_id],
         )?;
         debug!("assistant model configs deleted by assistant_id");
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
+    pub fn delete_assistant_model_by_assistant_id(&self, assistant_id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM assistant_model WHERE assistant_id = ?",
+            params![assistant_id],
+        )?;
+        debug!("assistant models deleted by assistant_id");
         Ok(())
     }
 
@@ -896,5 +934,81 @@ impl AssistantDatabase {
         }
 
         Ok(false)
+    }
+
+    #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
+    pub fn get_assistant_summary(&self, assistant_id: i64) -> Result<Option<AssistantSummary>> {
+        self.conn
+            .query_row(
+                "SELECT id, assistant_id, summary, tags_json, source_hash, created_time, updated_time
+                 FROM assistant_summary
+                 WHERE assistant_id = ?1",
+                params![assistant_id],
+                |row| {
+                    Ok(AssistantSummary {
+                        id: row.get(0)?,
+                        assistant_id: row.get(1)?,
+                        summary: row.get(2)?,
+                        tags_json: row.get(3)?,
+                        source_hash: row.get(4)?,
+                        created_time: row.get(5)?,
+                        updated_time: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn list_assistant_summaries(&self) -> Result<Vec<AssistantSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, assistant_id, summary, tags_json, source_hash, created_time, updated_time
+             FROM assistant_summary
+             ORDER BY updated_time DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AssistantSummary {
+                id: row.get(0)?,
+                assistant_id: row.get(1)?,
+                summary: row.get(2)?,
+                tags_json: row.get(3)?,
+                source_hash: row.get(4)?,
+                created_time: row.get(5)?,
+                updated_time: row.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    #[instrument(level = "debug", skip(self, summary, tags_json, source_hash), fields(assistant_id = assistant_id))]
+    pub fn upsert_assistant_summary(
+        &self,
+        assistant_id: i64,
+        summary: &str,
+        tags_json: &str,
+        source_hash: &str,
+    ) -> Result<AssistantSummary> {
+        self.conn.execute(
+            "INSERT INTO assistant_summary (
+                assistant_id, summary, tags_json, source_hash, created_time, updated_time
+            ) VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(assistant_id) DO UPDATE SET
+                summary = excluded.summary,
+                tags_json = excluded.tags_json,
+                source_hash = excluded.source_hash,
+                updated_time = CURRENT_TIMESTAMP",
+            params![assistant_id, summary, tags_json, source_hash],
+        )?;
+        self.get_assistant_summary(assistant_id)?
+            .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
+    pub fn delete_assistant_summary_by_assistant_id(&self, assistant_id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM assistant_summary WHERE assistant_id = ?",
+            params![assistant_id],
+        )?;
+        Ok(())
     }
 }

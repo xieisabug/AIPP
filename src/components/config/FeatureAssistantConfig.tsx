@@ -39,7 +39,7 @@ const FeatureAssistantConfig: React.FC = () => {
         {
             id: "conversation_summary",
             name: "辅助AI",
-            description: "配置AI辅助功能：对话标题生成、表单自动填写、对话摘要、记忆生成",
+            description: "配置AI辅助功能：对话标题生成、表单自动填写、记忆生成",
             icon: <MessageSquare className="h-5 w-5" />,
             code: "conversation_summary",
         },
@@ -124,9 +124,6 @@ const FeatureAssistantConfig: React.FC = () => {
             // 表单自动填写
             form_autofill_enabled: true,
             form_autofill_model: "",
-            // 对话总结（实验功能，默认关闭）
-            conversation_summary_enabled: false,
-            conversation_summary_model: "",
             // 记忆总结（实验功能，默认关闭）
             memory_summary_enabled: false,
             memory_summary_model: "",
@@ -174,6 +171,13 @@ const FeatureAssistantConfig: React.FC = () => {
         defaultValues: {
             dynamic_mcp_loading_enabled: "false",
             mcp_summarizer_model_id: "",
+            assistant_summary_enabled: "false",
+            assistant_summarizer_model_id: "",
+            conversation_summary_enabled: "false",
+            conversation_summary_model: "",
+            butler_experiment_enabled: "false",
+            default_home_window: "ask",
+            butler_model_id: "",
         },
     });
 
@@ -221,21 +225,14 @@ const FeatureAssistantConfig: React.FC = () => {
                     // ConfigForm's model-select uses value format: `${model.code}%%${model.llm_provider_id}`
                     title_model: modelCode && providerId ? `${modelCode}%%${providerId}` : "",
                     title_summary_length: summaryConfig.get("title_summary_length") || summaryConfig.get("summary_length") || "100",
-                    title_prompt: summaryConfig.get("title_prompt") || summaryConfig.get("prompt") || "",
-                    // 表单自动填写
-                    form_autofill_enabled: summaryConfig.get("form_autofill_enabled") !== "false",
-                    form_autofill_model: summaryConfig.get("form_autofill_model") || "",
-                    // 对话总结
-                    conversation_summary_enabled: summaryConfig.get("conversation_summary_enabled") !== "false",
-                    conversation_summary_model: (() => {
-                        const model = summaryConfig.get("conversation_summary_model") || "";
-                        const providerId = summaryConfig.get("conversation_summary_provider_id") || "";
-                        return model && providerId ? `${model}%%${providerId}` : "";
-                    })(),
-                    // 记忆总结
-                    memory_summary_enabled: summaryConfig.get("memory_summary_enabled") !== "false",
-                    memory_summary_model: (() => {
-                        const model = summaryConfig.get("memory_summary_model") || "";
+                     title_prompt: summaryConfig.get("title_prompt") || summaryConfig.get("prompt") || "",
+                     // 表单自动填写
+                     form_autofill_enabled: summaryConfig.get("form_autofill_enabled") !== "false",
+                     form_autofill_model: summaryConfig.get("form_autofill_model") || "",
+                     // 记忆总结
+                     memory_summary_enabled: summaryConfig.get("memory_summary_enabled") !== "false",
+                     memory_summary_model: (() => {
+                         const model = summaryConfig.get("memory_summary_model") || "";
                         const providerId = summaryConfig.get("memory_summary_provider_id") || "";
                         return model && providerId ? `${model}%%${providerId}` : "";
                     })(),
@@ -247,6 +244,34 @@ const FeatureAssistantConfig: React.FC = () => {
                     experimentalConfig?.get("dynamic_mcp_loading_enabled") || "false",
                 mcp_summarizer_model_id:
                     experimentalConfig?.get("mcp_summarizer_model_id") || "",
+                assistant_summary_enabled:
+                    experimentalConfig?.get("assistant_summary_enabled") || "false",
+                assistant_summarizer_model_id:
+                    experimentalConfig?.get("assistant_summarizer_model_id") || "",
+                conversation_summary_enabled:
+                    experimentalConfig?.get("conversation_summary_enabled")
+                    || summaryConfig?.get("conversation_summary_enabled")
+                    || "false",
+                conversation_summary_model: (() => {
+                    const experimentalModel = experimentalConfig?.get("conversation_summary_model") || "";
+                    const experimentalProviderId =
+                        experimentalConfig?.get("conversation_summary_provider_id") || "";
+                    if (experimentalModel && experimentalProviderId) {
+                        return `${experimentalModel}%%${experimentalProviderId}`;
+                    }
+                    const legacyModel = summaryConfig?.get("conversation_summary_model") || "";
+                    const legacyProviderId =
+                        summaryConfig?.get("conversation_summary_provider_id") || "";
+                    return legacyModel && legacyProviderId
+                        ? `${legacyModel}%%${legacyProviderId}`
+                        : "";
+                })(),
+                butler_experiment_enabled:
+                    experimentalConfig?.get("butler_experiment_enabled") || "false",
+                default_home_window:
+                    experimentalConfig?.get("default_home_window") || "ask",
+                butler_model_id:
+                    experimentalConfig?.get("butler_model_id") || "",
             });
 
             // 更新 preview 表单
@@ -344,7 +369,6 @@ const FeatureAssistantConfig: React.FC = () => {
 
         const titleModel = parseModel(values.title_model as string);
         const formAutofillModel = parseModel(values.form_autofill_model as string);
-        const conversationSummaryModel = parseModel(values.conversation_summary_model as string);
         const memorySummaryModel = parseModel(values.memory_summary_model as string);
 
         // 验证标题模型
@@ -365,10 +389,6 @@ const FeatureAssistantConfig: React.FC = () => {
             form_autofill_enabled: values.form_autofill_enabled.toString(),
             form_autofill_model: values.form_autofill_model,
             form_autofill_provider_id: formAutofillModel.provider_id,
-            // 对话总结
-            conversation_summary_enabled: values.conversation_summary_enabled.toString(),
-            conversation_summary_model: conversationSummaryModel.model_code,
-            conversation_summary_provider_id: conversationSummaryModel.provider_id,
             // 记忆总结
             memory_summary_enabled: values.memory_summary_enabled.toString(),
             memory_summary_model: memorySummaryModel.model_code,
@@ -396,9 +416,26 @@ const FeatureAssistantConfig: React.FC = () => {
 
     const handleSaveExperimentalConfig = useCallback(async () => {
         const v = experimentalForm.getValues();
+        const parseModel = (modelValue: string) => {
+            if (!modelValue) return { model_code: "", provider_id: "" };
+            const parts = modelValue.split("%%");
+            return {
+                model_code: parts[0] || "",
+                provider_id: parts[1] || "",
+            };
+        };
+        const conversationSummaryModel = parseModel(String(v.conversation_summary_model || ""));
         await saveFeatureConfig("experimental", {
             dynamic_mcp_loading_enabled: String(v.dynamic_mcp_loading_enabled),
             mcp_summarizer_model_id: String(v.mcp_summarizer_model_id || ""),
+            assistant_summary_enabled: String(v.assistant_summary_enabled),
+            assistant_summarizer_model_id: String(v.assistant_summarizer_model_id || ""),
+            conversation_summary_enabled: String(v.conversation_summary_enabled),
+            conversation_summary_model: conversationSummaryModel.model_code,
+            conversation_summary_provider_id: conversationSummaryModel.provider_id,
+            butler_experiment_enabled: String(v.butler_experiment_enabled),
+            default_home_window: String(v.default_home_window || "ask"),
+            butler_model_id: String(v.butler_model_id || ""),
         });
     }, [experimentalForm, saveFeatureConfig]);
 

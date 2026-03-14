@@ -18,6 +18,7 @@ use crate::api::ai::events::{
 use crate::api::ai::title::{generate_title, maybe_generate_title_from_conversation_if_needed};
 use crate::api::ai::types::{AiRequest, AiResponse, McpOverrideConfig};
 use crate::api::assistant_api::{get_assistant, get_assistants};
+use crate::api::butler_api::{is_butler_system_assistant_name, mark_butler_task_cancelled};
 
 use crate::api::genai_client;
 use crate::db::conversation_db::{AttachmentType, Repository};
@@ -337,6 +338,19 @@ pub async fn ask_ai(
     if assistant_detail.model.is_empty() {
         return Err(AppError::NoModelFound);
     }
+
+    let override_mcp_config = if is_butler_system_assistant_name(&assistant_detail.assistant.name) {
+        let mut enforced = override_mcp_config.unwrap_or(McpOverrideConfig {
+            all_tool_auto_run: None,
+            tool_auto_run: None,
+            use_native_toolcall: None,
+            tool_call_timeout: None,
+        });
+        enforced.all_tool_auto_run = Some(true);
+        Some(enforced)
+    } else {
+        override_mcp_config
+    };
 
     // 收集 MCP 信息
     let mcp_info = collect_mcp_info_for_assistant(
@@ -1387,6 +1401,10 @@ pub async fn cancel_ai(
 
     send_conversation_event_to_chat_windows(&app_handle, conversation_id, cancel_event);
 
+    if let Err(error) = mark_butler_task_cancelled(&app_handle, conversation_id).await {
+        warn!(conversation_id, error = %error, "failed to finalize butler task on cancel");
+    }
+
     Ok(())
 }
 
@@ -1852,6 +1870,43 @@ async fn initialize_conversation(
         let all_messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id)?;
 
         let message_list = build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
+        let has_system_message =
+            message_list.iter().any(|(message_type, _, _)| message_type == "system");
+
+        if !has_system_message {
+            let system_message_created_time = all_messages
+                .first()
+                .map(|(message, _)| message.created_time.clone() - chrono::Duration::milliseconds(1))
+                .unwrap_or_else(chrono::Utc::now);
+            db.message_repo()
+                .unwrap()
+                .create_without_touch_conversation(&Message {
+                    id: 0,
+                    parent_id: None,
+                    conversation_id,
+                    message_type: "system".to_string(),
+                    content: system_prompt.clone(),
+                    llm_model_id: Some(assistant_detail.model[0].id),
+                    llm_model_name: Some(assistant_detail.model[0].model_code.clone()),
+                    created_time: system_message_created_time,
+                    start_time: None,
+                    finish_time: None,
+                    token_count: 0,
+                    input_token_count: 0,
+                    output_token_count: 0,
+                    generation_group_id: None,
+                    parent_group_id: None,
+                    tool_calls_json: None,
+                    first_token_time: None,
+                    ttft_ms: None,
+                })
+                .map_err(AppError::from)?;
+            debug!(
+                conversation_id,
+                assistant_id = request.assistant_id,
+                "injected missing system prompt into existing conversation"
+            );
+        }
 
         // 获取到消息的附件列表
         let mut message_attachment_list = db
@@ -1937,6 +1992,9 @@ async fn initialize_conversation(
             .emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
 
         let mut updated_message_list = message_list;
+        if !has_system_message {
+            updated_message_list.insert(0, (String::from("system"), system_prompt, vec![]));
+        }
         updated_message_list.push((
             String::from("user"),
             runtime_user_prompt_with_context.clone(),

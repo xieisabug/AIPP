@@ -346,6 +346,48 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                     "required": ["names"]
                 }),
             },
+            BuiltinToolInfo {
+                name: "spawn_task_conversation".into(),
+                description: "Create and start a hidden butler task conversation under the current butler main conversation. Use this when the butler needs to delegate a concrete task to another assistant and let it run asynchronously.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "A short task title shown in the butler task list."
+                        },
+                        "goal": {
+                            "type": "string",
+                            "description": "The exact execution goal/prompt that should be sent to the delegated task assistant."
+                        },
+                        "executor_assistant_id": {
+                            "type": "integer",
+                            "description": "Optional. Explicit assistant id to execute the task."
+                        },
+                        "executor_assistant_name": {
+                            "type": "string",
+                            "description": "Optional. Assistant name to execute the task when id is not provided."
+                        },
+                        "butler_conversation_id": {
+                            "type": "integer",
+                            "description": "Optional. Butler main conversation id. If omitted, the current conversation context is used."
+                        },
+                        "handoff_contract_json": {
+                            "type": "string",
+                            "description": "Optional JSON string describing handoff constraints or expected deliverables."
+                        },
+                        "result_handling_mode": {
+                            "type": "string",
+                            "description": "Optional result handling mode such as notify_only."
+                        },
+                        "notification_policy": {
+                            "type": "string",
+                            "description": "Optional notification policy for task result delivery."
+                        }
+                    },
+                    "required": ["title", "goal"]
+                }),
+            },
         ],
         Some("ui_interaction") => vec![
             BuiltinToolInfo {

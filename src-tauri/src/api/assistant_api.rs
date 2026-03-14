@@ -1,4 +1,5 @@
 use crate::{
+    api::butler_api::{is_butler_system_assistant, is_butler_system_assistant_name},
     db::{
         assistant_db::{
             Assistant, AssistantDatabase, AssistantMCPConfig, AssistantMCPToolConfig,
@@ -15,6 +16,14 @@ use crate::{
 };
 use tauri::Emitter;
 use tracing::{debug, info, instrument, warn};
+
+fn reject_reserved_butler_assistant_name(name: &str) -> Result<(), String> {
+    if is_butler_system_assistant_name(name) {
+        Err("该助手名称为系统保留名称，不能创建或修改".to_string())
+    } else {
+        Ok(())
+    }
+}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct AssistantDetail {
@@ -59,7 +68,15 @@ pub struct MCPServerWithTools {
 pub fn get_assistants(app_handle: tauri::AppHandle) -> Result<Vec<Assistant>, String> {
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     debug!("loading assistants from database");
-    assistant_db.get_assistants().map(|assistants| assistants.into()).map_err(|e| e.to_string())
+    assistant_db
+        .get_assistants()
+        .map(|assistants| {
+            assistants
+                .into_iter()
+                .filter(|assistant| !is_butler_system_assistant(assistant))
+                .collect()
+        })
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -126,6 +143,15 @@ pub async fn save_assistant(
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     info!("save assistant start");
     debug!(?assistant_detail, "assistant detail incoming");
+    reject_reserved_butler_assistant_name(&assistant_detail.assistant.name)?;
+    if assistant_detail.assistant.id != 0 {
+        let existing_assistant = assistant_db
+            .get_assistant(assistant_detail.assistant.id)
+            .map_err(|e| e.to_string())?;
+        if is_butler_system_assistant(&existing_assistant) {
+            return Err("系统保留的总管家助手不能修改".to_string());
+        }
+    }
 
     // Save or update the Assistant
     if assistant_detail.assistant.id == 0 {
@@ -251,6 +277,7 @@ pub fn add_assistant(
     assistant_type: i64,
 ) -> Result<AssistantDetail, String> {
     info!("add assistant start");
+    reject_reserved_butler_assistant_name(&name)?;
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
     // Add a default assistant
@@ -372,6 +399,9 @@ pub fn copy_assistant(
 
     // Get the original assistant
     let original_assistant = assistant_db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
+    if is_butler_system_assistant(&original_assistant) {
+        return Err("系统保留的总管家助手不能复制".to_string());
+    }
 
     // Create a new assistant based on the original
     let new_assistant_id = assistant_db
@@ -475,6 +505,10 @@ pub fn delete_assistant(app_handle: tauri::AppHandle, assistant_id: i64) -> Resu
     // 需要检查一下是不是快速使用助手，如果是，就不能够删除
     if assistant_id == 1 {
         return Err("快速使用助手不能删除".to_string());
+    }
+    let assistant = assistant_db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
+    if is_butler_system_assistant(&assistant) {
+        return Err("系统保留的总管家助手不能删除".to_string());
     }
 
     let _ = assistant_db

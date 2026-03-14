@@ -75,6 +75,17 @@ pub struct Conversation {
     pub assistant_id: Option<i64>,
     #[serde(serialize_with = "serialize_datetime_millis")]
     pub created_time: DateTime<Utc>,
+    #[serde(serialize_with = "serialize_datetime_millis")]
+    pub updated_time: DateTime<Utc>,
+    pub conversation_kind: String,
+    pub parent_butler_conversation_id: Option<i64>,
+    pub source_task_title: Option<String>,
+    pub is_hidden_from_normal_chat_list: bool,
+    pub channel_source: Option<String>,
+    pub butler_task_status: Option<String>,
+    pub butler_task_summary: Option<String>,
+    #[serde(serialize_with = "serialize_option_datetime_millis")]
+    pub butler_task_finalized_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -163,8 +174,12 @@ impl ConversationRepository {
     pub fn list(&self, page: u32, per_page: u32) -> Result<Vec<Conversation>> {
         let offset = (page - 1) * per_page;
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, assistant_id, created_time
-             FROM conversation
+            "SELECT id, name, assistant_id, created_time, updated_time, conversation_kind,
+                    parent_butler_conversation_id, source_task_title,
+                    is_hidden_from_normal_chat_list, channel_source, butler_task_status,
+                    butler_task_summary, butler_task_finalized_at
+              FROM conversation
+             WHERE COALESCE(is_hidden_from_normal_chat_list, 0) = 0
              ORDER BY created_time DESC
              LIMIT ?1 OFFSET ?2",
         )?;
@@ -174,6 +189,49 @@ impl ConversationRepository {
                 name: row.get(1)?,
                 assistant_id: row.get(2)?,
                 created_time: get_required_datetime_from_row(row, 3, "created_time")?,
+                updated_time: get_required_datetime_from_row(row, 4, "updated_time")?,
+                conversation_kind: row.get(5)?,
+                parent_butler_conversation_id: row.get(6)?,
+                source_task_title: row.get(7)?,
+                is_hidden_from_normal_chat_list: row.get(8)?,
+                channel_source: row.get(9)?,
+                butler_task_status: row.get(10)?,
+                butler_task_summary: row.get(11)?,
+                butler_task_finalized_at: get_datetime_from_row(row, 12)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    #[instrument(level = "debug", skip(self), fields(parent_butler_conversation_id = parent_butler_conversation_id))]
+    pub fn list_by_parent_butler_conversation_id(
+        &self,
+        parent_butler_conversation_id: i64,
+    ) -> Result<Vec<Conversation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, assistant_id, created_time, updated_time, conversation_kind,
+                    parent_butler_conversation_id, source_task_title,
+                    is_hidden_from_normal_chat_list, channel_source, butler_task_status,
+                    butler_task_summary, butler_task_finalized_at
+             FROM conversation
+             WHERE parent_butler_conversation_id = ?1
+             ORDER BY updated_time DESC, id DESC",
+        )?;
+        let rows = stmt.query_map(params![parent_butler_conversation_id], |row| {
+            Ok(Conversation {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                assistant_id: row.get(2)?,
+                created_time: get_required_datetime_from_row(row, 3, "created_time")?,
+                updated_time: get_required_datetime_from_row(row, 4, "updated_time")?,
+                conversation_kind: row.get(5)?,
+                parent_butler_conversation_id: row.get(6)?,
+                source_task_title: row.get(7)?,
+                is_hidden_from_normal_chat_list: row.get(8)?,
+                channel_source: row.get(9)?,
+                butler_task_status: row.get(10)?,
+                butler_task_summary: row.get(11)?,
+                butler_task_finalized_at: get_datetime_from_row(row, 12)?,
             })
         })?;
         rows.collect()
@@ -194,9 +252,27 @@ impl ConversationRepository {
 
     #[instrument(level = "debug", skip(self), fields(id = conversation.id, name = conversation.name))]
     pub fn update_name(&self, conversation: &Conversation) -> Result<()> {
+        let now = chrono::Utc::now();
         self.conn.execute(
-            "UPDATE conversation SET name = ?1 WHERE id = ?2",
-            (&conversation.name, &conversation.id),
+            "UPDATE conversation SET name = ?1, updated_time = ?2 WHERE id = ?3",
+            (&conversation.name, &now, &conversation.id),
+        )?;
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip(self), fields(origin_parent_id = origin_parent_id, new_parent_id = new_parent_id))]
+    pub fn reassign_parent_butler_conversation(
+        &self,
+        origin_parent_id: i64,
+        new_parent_id: i64,
+    ) -> Result<()> {
+        let now = chrono::Utc::now();
+        self.conn.execute(
+            "UPDATE conversation
+             SET parent_butler_conversation_id = ?1,
+                 updated_time = ?2
+             WHERE parent_butler_conversation_id = ?3",
+            params![new_parent_id, now, origin_parent_id],
         )?;
         Ok(())
     }
@@ -206,8 +282,34 @@ impl Repository<Conversation> for ConversationRepository {
     #[instrument(level = "debug", skip(self, conversation), fields(name = conversation.name))]
     fn create(&self, conversation: &Conversation) -> Result<Conversation> {
         self.conn.execute(
-            "INSERT INTO conversation (name, assistant_id, created_time) VALUES (?1, ?2, ?3)",
-            (&conversation.name, &conversation.assistant_id, &conversation.created_time),
+            "INSERT INTO conversation (
+                name,
+                assistant_id,
+                created_time,
+                updated_time,
+                conversation_kind,
+                parent_butler_conversation_id,
+                source_task_title,
+                is_hidden_from_normal_chat_list,
+                channel_source,
+                butler_task_status,
+                butler_task_summary,
+                butler_task_finalized_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            (
+                &conversation.name,
+                &conversation.assistant_id,
+                &conversation.created_time,
+                &conversation.updated_time,
+                &conversation.conversation_kind,
+                &conversation.parent_butler_conversation_id,
+                &conversation.source_task_title,
+                &conversation.is_hidden_from_normal_chat_list,
+                &conversation.channel_source,
+                &conversation.butler_task_status,
+                &conversation.butler_task_summary,
+                &conversation.butler_task_finalized_at,
+            ),
         )?;
         let id = self.conn.last_insert_rowid();
         debug!(conversation_id = id, "conversation inserted");
@@ -216,6 +318,15 @@ impl Repository<Conversation> for ConversationRepository {
             name: conversation.name.clone(),
             assistant_id: conversation.assistant_id,
             created_time: conversation.created_time,
+            updated_time: conversation.updated_time,
+            conversation_kind: conversation.conversation_kind.clone(),
+            parent_butler_conversation_id: conversation.parent_butler_conversation_id,
+            source_task_title: conversation.source_task_title.clone(),
+            is_hidden_from_normal_chat_list: conversation.is_hidden_from_normal_chat_list,
+            channel_source: conversation.channel_source.clone(),
+            butler_task_status: conversation.butler_task_status.clone(),
+            butler_task_summary: conversation.butler_task_summary.clone(),
+            butler_task_finalized_at: conversation.butler_task_finalized_at,
         })
     }
 
@@ -223,7 +334,12 @@ impl Repository<Conversation> for ConversationRepository {
     fn read(&self, id: i64) -> Result<Option<Conversation>> {
         self.conn
             .query_row(
-                "SELECT id, name, assistant_id, created_time FROM conversation WHERE id = ?",
+                "SELECT id, name, assistant_id, created_time, updated_time, conversation_kind,
+                        parent_butler_conversation_id, source_task_title,
+                        is_hidden_from_normal_chat_list, channel_source, butler_task_status,
+                        butler_task_summary, butler_task_finalized_at
+                 FROM conversation
+                 WHERE id = ?",
                 &[&id],
                 |row| {
                     Ok(Conversation {
@@ -231,6 +347,15 @@ impl Repository<Conversation> for ConversationRepository {
                         name: row.get(1)?,
                         assistant_id: row.get(2)?,
                         created_time: get_required_datetime_from_row(row, 3, "created_time")?,
+                        updated_time: get_required_datetime_from_row(row, 4, "updated_time")?,
+                        conversation_kind: row.get(5)?,
+                        parent_butler_conversation_id: row.get(6)?,
+                        source_task_title: row.get(7)?,
+                        is_hidden_from_normal_chat_list: row.get(8)?,
+                        channel_source: row.get(9)?,
+                        butler_task_status: row.get(10)?,
+                        butler_task_summary: row.get(11)?,
+                        butler_task_finalized_at: get_datetime_from_row(row, 12)?,
                     })
                 },
             )
@@ -240,8 +365,33 @@ impl Repository<Conversation> for ConversationRepository {
     #[instrument(level = "debug", skip(self, conversation), fields(id = conversation.id))]
     fn update(&self, conversation: &Conversation) -> Result<()> {
         self.conn.execute(
-            "UPDATE conversation SET name = ?1, assistant_id = ?2 WHERE id = ?3",
-            (&conversation.name, &conversation.assistant_id, &conversation.id),
+            "UPDATE conversation
+             SET name = ?1,
+                 assistant_id = ?2,
+                 updated_time = ?3,
+                 conversation_kind = ?4,
+                 parent_butler_conversation_id = ?5,
+                 source_task_title = ?6,
+                 is_hidden_from_normal_chat_list = ?7,
+                 channel_source = ?8,
+                 butler_task_status = ?9,
+                 butler_task_summary = ?10,
+                 butler_task_finalized_at = ?11
+             WHERE id = ?12",
+            (
+                &conversation.name,
+                &conversation.assistant_id,
+                &conversation.updated_time,
+                &conversation.conversation_kind,
+                &conversation.parent_butler_conversation_id,
+                &conversation.source_task_title,
+                &conversation.is_hidden_from_normal_chat_list,
+                &conversation.channel_source,
+                &conversation.butler_task_status,
+                &conversation.butler_task_summary,
+                &conversation.butler_task_finalized_at,
+                &conversation.id,
+            ),
         )?;
         Ok(())
     }
@@ -315,6 +465,63 @@ impl MessageRepository {
         rows.collect()
     }
 
+    fn insert_message(&self, message: &Message, touch_conversation: bool) -> Result<Message> {
+        self.conn.execute(
+            "INSERT INTO message (parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, input_token_count, output_token_count, generation_group_id, parent_group_id, tool_calls_json, first_token_time, ttft_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            rusqlite::params![
+                &message.parent_id,
+                &message.conversation_id,
+                &message.message_type,
+                &message.content,
+                &message.llm_model_id,
+                &message.llm_model_name,
+                &message.created_time,
+                &message.start_time,
+                &message.finish_time,
+                &message.token_count,
+                &message.input_token_count,
+                &message.output_token_count,
+                &message.generation_group_id,
+                &message.parent_group_id,
+                &message.tool_calls_json,
+                &message.first_token_time,
+                &message.ttft_ms,
+            ],
+        )?;
+        if touch_conversation {
+            self.conn.execute(
+                "UPDATE conversation SET updated_time = ?1 WHERE id = ?2",
+                rusqlite::params![&message.created_time, &message.conversation_id],
+            )?;
+        }
+        let id = self.conn.last_insert_rowid();
+        Ok(Message {
+            id,
+            parent_id: message.parent_id,
+            conversation_id: message.conversation_id,
+            message_type: message.message_type.clone(),
+            content: message.content.clone(),
+            llm_model_id: message.llm_model_id,
+            llm_model_name: message.llm_model_name.clone(),
+            created_time: message.created_time,
+            start_time: message.start_time,
+            finish_time: message.finish_time,
+            token_count: message.token_count,
+            input_token_count: message.input_token_count,
+            output_token_count: message.output_token_count,
+            generation_group_id: message.generation_group_id.clone(),
+            parent_group_id: message.parent_group_id.clone(),
+            tool_calls_json: message.tool_calls_json.clone(),
+            first_token_time: message.first_token_time,
+            ttft_ms: message.ttft_ms,
+        })
+    }
+
+    #[instrument(level = "debug", skip(self, message), fields(conversation_id = message.conversation_id, message_type = message.message_type))]
+    pub fn create_without_touch_conversation(&self, message: &Message) -> Result<Message> {
+        self.insert_message(message, false)
+    }
+
     #[instrument(level = "debug", skip(self), fields(id = id))]
     pub fn update_finish_time(&self, id: i64) -> Result<()> {
         // Avoid SQLite CURRENT_TIMESTAMP (second precision) which can be earlier than millisecond
@@ -350,50 +557,7 @@ impl MessageRepository {
 impl Repository<Message> for MessageRepository {
     #[instrument(level = "debug", skip(self, message), fields(conversation_id = message.conversation_id, message_type = message.message_type))]
     fn create(&self, message: &Message) -> Result<Message> {
-        // rusqlite Params trait only supports up to 16 parameters, use named params for 17+ fields
-        self.conn.execute(
-            "INSERT INTO message (parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, input_token_count, output_token_count, generation_group_id, parent_group_id, tool_calls_json, first_token_time, ttft_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-            rusqlite::params![
-                &message.parent_id,
-                &message.conversation_id,
-                &message.message_type,
-                &message.content,
-                &message.llm_model_id,
-                &message.llm_model_name,
-                &message.created_time,
-                &message.start_time,
-                &message.finish_time,
-                &message.token_count,
-                &message.input_token_count,
-                &message.output_token_count,
-                &message.generation_group_id,
-                &message.parent_group_id,
-                &message.tool_calls_json,
-                &message.first_token_time,
-                &message.ttft_ms,
-            ],
-        )?;
-        let id = self.conn.last_insert_rowid();
-        Ok(Message {
-            id,
-            parent_id: message.parent_id,
-            conversation_id: message.conversation_id,
-            message_type: message.message_type.clone(),
-            content: message.content.clone(),
-            llm_model_id: message.llm_model_id,
-            llm_model_name: message.llm_model_name.clone(),
-            created_time: message.created_time,
-            start_time: message.start_time,
-            finish_time: message.finish_time,
-            token_count: message.token_count,
-            input_token_count: message.input_token_count,
-            output_token_count: message.output_token_count,
-            generation_group_id: message.generation_group_id.clone(),
-            parent_group_id: message.parent_group_id.clone(),
-            tool_calls_json: message.tool_calls_json.clone(),
-            first_token_time: message.first_token_time,
-            ttft_ms: message.ttft_ms,
-        })
+        self.insert_message(message, true)
     }
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
@@ -571,6 +735,91 @@ pub struct ConversationDatabase {
     db_path: PathBuf,
 }
 
+pub(crate) fn ensure_conversation_table(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS conversation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            assistant_id INTEGER,
+            created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            conversation_kind TEXT NOT NULL DEFAULT 'normal',
+            parent_butler_conversation_id INTEGER,
+            source_task_title TEXT,
+            is_hidden_from_normal_chat_list INTEGER NOT NULL DEFAULT 0,
+            channel_source TEXT,
+            butler_task_status TEXT,
+            butler_task_summary TEXT,
+            butler_task_finalized_at DATETIME
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_conversation_name ON conversation(name)",
+        [],
+    )?;
+
+    let mut conversation_stmt = conn.prepare("PRAGMA table_info(conversation)")?;
+    let conversation_columns: Vec<String> = conversation_stmt
+        .query_map([], |row| {
+            let column_name: String = row.get(1)?;
+            Ok(column_name)
+        })?
+        .collect::<Result<Vec<String>, _>>()?;
+
+    if !conversation_columns.contains(&"updated_time".to_string()) {
+        conn.execute(
+            "ALTER TABLE conversation ADD COLUMN updated_time DATETIME",
+            [],
+        )?;
+    }
+    conn.execute(
+        "UPDATE conversation
+         SET updated_time = COALESCE(updated_time, created_time, CURRENT_TIMESTAMP)
+         WHERE updated_time IS NULL",
+        [],
+    )?;
+
+    if !conversation_columns.contains(&"conversation_kind".to_string()) {
+        conn.execute(
+            "ALTER TABLE conversation ADD COLUMN conversation_kind TEXT NOT NULL DEFAULT 'normal'",
+            [],
+        )?;
+    }
+    if !conversation_columns.contains(&"parent_butler_conversation_id".to_string()) {
+        conn.execute(
+            "ALTER TABLE conversation ADD COLUMN parent_butler_conversation_id INTEGER",
+            [],
+        )?;
+    }
+    if !conversation_columns.contains(&"source_task_title".to_string()) {
+        conn.execute("ALTER TABLE conversation ADD COLUMN source_task_title TEXT", [])?;
+    }
+    if !conversation_columns.contains(&"is_hidden_from_normal_chat_list".to_string()) {
+        conn.execute(
+            "ALTER TABLE conversation ADD COLUMN is_hidden_from_normal_chat_list INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !conversation_columns.contains(&"channel_source".to_string()) {
+        conn.execute("ALTER TABLE conversation ADD COLUMN channel_source TEXT", [])?;
+    }
+    if !conversation_columns.contains(&"butler_task_status".to_string()) {
+        conn.execute("ALTER TABLE conversation ADD COLUMN butler_task_status TEXT", [])?;
+    }
+    if !conversation_columns.contains(&"butler_task_summary".to_string()) {
+        conn.execute("ALTER TABLE conversation ADD COLUMN butler_task_summary TEXT", [])?;
+    }
+    if !conversation_columns.contains(&"butler_task_finalized_at".to_string()) {
+        conn.execute(
+            "ALTER TABLE conversation ADD COLUMN butler_task_finalized_at DATETIME",
+            [],
+        )?;
+    }
+
+    Ok(())
+}
+
 impl ConversationDatabase {
     pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
         let db_path = get_db_path(app_handle, "conversation.db");
@@ -617,19 +866,16 @@ impl ConversationDatabase {
     }
 
     #[instrument(level = "debug", skip(self), err)]
+    pub fn butler_repo(&self) -> Result<ButlerRepository, AppError> {
+        let conn = self.get_connection().map_err(AppError::from)?;
+        Ok(ButlerRepository::new(conn))
+    }
+
+    #[instrument(level = "debug", skip(self), err)]
     pub fn create_tables(&self) -> rusqlite::Result<()> {
         let conn = self.get_connection().unwrap();
 
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS conversation (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                assistant_id INTEGER,
-                created_time DATETIME DEFAULT CURRENT_TIMESTAMP
-            )",
-            [],
-        )?;
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_conversation_name ON conversation(name)", [])?;
+        ensure_conversation_table(&conn)?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS message (
                 id              INTEGER
@@ -724,6 +970,14 @@ impl ConversationDatabase {
             "CREATE INDEX IF NOT EXISTS idx_message_attachment_message_id ON message_attachment(message_id)",
             [],
         )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversation_kind_hidden_created ON conversation(conversation_kind, is_hidden_from_normal_chat_list, created_time DESC)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversation_parent_butler_updated ON conversation(parent_butler_conversation_id, updated_time DESC)",
+            [],
+        )?;
 
         // 创建对话总结表
         conn.execute(
@@ -764,6 +1018,64 @@ impl ConversationDatabase {
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_conversation_todo_conversation_id ON conversation_todo(conversation_id)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS butler_main_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                butler_conversation_id INTEGER NOT NULL,
+                slot TEXT NOT NULL UNIQUE DEFAULT 'default',
+                last_active_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (butler_conversation_id) REFERENCES conversation(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS butler_task_definition (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                butler_conversation_id INTEGER NOT NULL,
+                task_conversation_id INTEGER NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                goal TEXT NOT NULL,
+                executor_assistant_id INTEGER NOT NULL,
+                executor_assistant_source TEXT NOT NULL,
+                permission_template_source TEXT,
+                handoff_contract_json TEXT,
+                result_handling_mode TEXT,
+                notification_policy TEXT,
+                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (butler_conversation_id) REFERENCES conversation(id) ON DELETE CASCADE,
+                FOREIGN KEY (task_conversation_id) REFERENCES conversation(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_butler_task_definition_parent ON butler_task_definition(butler_conversation_id, created_time DESC)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS butler_task_result (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_conversation_id INTEGER NOT NULL UNIQUE,
+                handoff_mode TEXT,
+                payload_json TEXT,
+                summary TEXT,
+                structured_output_json TEXT,
+                evidence_json TEXT,
+                artifact_refs_json TEXT,
+                followup_suggestions_json TEXT,
+                final_message_id INTEGER,
+                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (task_conversation_id) REFERENCES conversation(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_butler_task_result_task ON butler_task_result(task_conversation_id)",
             [],
         )?;
 
@@ -1458,6 +1770,346 @@ impl ConversationSummaryRepository {
         self.conn.execute(
             "DELETE FROM conversation_summary WHERE conversation_id = ?",
             rusqlite::params![&conversation_id],
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ButlerMainState {
+    pub id: i64,
+    pub butler_conversation_id: i64,
+    pub slot: String,
+    #[serde(serialize_with = "serialize_datetime_millis")]
+    pub last_active_at: DateTime<Utc>,
+    #[serde(serialize_with = "serialize_datetime_millis")]
+    pub created_time: DateTime<Utc>,
+    #[serde(serialize_with = "serialize_datetime_millis")]
+    pub updated_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ButlerTaskDefinition {
+    pub id: i64,
+    pub butler_conversation_id: i64,
+    pub task_conversation_id: i64,
+    pub title: String,
+    pub goal: String,
+    pub executor_assistant_id: i64,
+    pub executor_assistant_source: String,
+    pub permission_template_source: Option<String>,
+    pub handoff_contract_json: Option<String>,
+    pub result_handling_mode: Option<String>,
+    pub notification_policy: Option<String>,
+    #[serde(serialize_with = "serialize_datetime_millis")]
+    pub created_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ButlerTaskResult {
+    pub id: i64,
+    pub task_conversation_id: i64,
+    pub handoff_mode: Option<String>,
+    pub payload_json: Option<String>,
+    pub summary: Option<String>,
+    pub structured_output_json: Option<String>,
+    pub evidence_json: Option<String>,
+    pub artifact_refs_json: Option<String>,
+    pub followup_suggestions_json: Option<String>,
+    pub final_message_id: Option<i64>,
+    #[serde(serialize_with = "serialize_datetime_millis")]
+    pub created_time: DateTime<Utc>,
+    #[serde(serialize_with = "serialize_datetime_millis")]
+    pub updated_time: DateTime<Utc>,
+}
+
+pub struct ButlerRepository {
+    conn: Connection,
+}
+
+impl ButlerRepository {
+    #[instrument(level = "debug", skip(conn))]
+    pub fn new(conn: Connection) -> Self {
+        Self { conn }
+    }
+
+    #[instrument(level = "debug", skip(self), fields(slot = slot))]
+    pub fn get_main_state(&self, slot: &str) -> Result<Option<ButlerMainState>> {
+        self.conn
+            .query_row(
+                "SELECT id, butler_conversation_id, slot, last_active_at, created_time, updated_time
+                 FROM butler_main_state
+                 WHERE slot = ?1",
+                params![slot],
+                |row| {
+                    Ok(ButlerMainState {
+                        id: row.get(0)?,
+                        butler_conversation_id: row.get(1)?,
+                        slot: row.get(2)?,
+                        last_active_at: get_required_datetime_from_row(row, 3, "last_active_at")?,
+                        created_time: get_required_datetime_from_row(row, 4, "created_time")?,
+                        updated_time: get_required_datetime_from_row(row, 5, "updated_time")?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    #[instrument(level = "debug", skip(self), fields(slot = slot, butler_conversation_id = butler_conversation_id))]
+    pub fn upsert_main_state(
+        &self,
+        butler_conversation_id: i64,
+        slot: &str,
+    ) -> Result<ButlerMainState> {
+        let now = Utc::now();
+        self.conn.execute(
+            "INSERT INTO butler_main_state (
+                butler_conversation_id, slot, last_active_at, created_time, updated_time
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(slot) DO UPDATE SET
+                butler_conversation_id = excluded.butler_conversation_id,
+                last_active_at = excluded.last_active_at,
+                updated_time = excluded.updated_time",
+            params![butler_conversation_id, slot, now, now, now],
+        )?;
+        self.get_main_state(slot)?
+            .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    #[instrument(level = "debug", skip(self), fields(slot = slot))]
+    pub fn touch_main_state(&self, slot: &str) -> Result<()> {
+        let now = Utc::now();
+        self.conn.execute(
+            "UPDATE butler_main_state
+             SET last_active_at = ?1, updated_time = ?1
+             WHERE slot = ?2",
+            params![now, slot],
+        )?;
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip(self, definition), fields(task_conversation_id = definition.task_conversation_id))]
+    pub fn create_task_definition(
+        &self,
+        definition: &ButlerTaskDefinition,
+    ) -> Result<ButlerTaskDefinition> {
+        self.conn.execute(
+            "INSERT INTO butler_task_definition (
+                butler_conversation_id,
+                task_conversation_id,
+                title,
+                goal,
+                executor_assistant_id,
+                executor_assistant_source,
+                permission_template_source,
+                handoff_contract_json,
+                result_handling_mode,
+                notification_policy,
+                created_time
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                definition.butler_conversation_id,
+                definition.task_conversation_id,
+                &definition.title,
+                &definition.goal,
+                definition.executor_assistant_id,
+                &definition.executor_assistant_source,
+                &definition.permission_template_source,
+                &definition.handoff_contract_json,
+                &definition.result_handling_mode,
+                &definition.notification_policy,
+                definition.created_time,
+            ],
+        )?;
+        Ok(ButlerTaskDefinition {
+            id: self.conn.last_insert_rowid(),
+            butler_conversation_id: definition.butler_conversation_id,
+            task_conversation_id: definition.task_conversation_id,
+            title: definition.title.clone(),
+            goal: definition.goal.clone(),
+            executor_assistant_id: definition.executor_assistant_id,
+            executor_assistant_source: definition.executor_assistant_source.clone(),
+            permission_template_source: definition.permission_template_source.clone(),
+            handoff_contract_json: definition.handoff_contract_json.clone(),
+            result_handling_mode: definition.result_handling_mode.clone(),
+            notification_policy: definition.notification_policy.clone(),
+            created_time: definition.created_time,
+        })
+    }
+
+    #[instrument(level = "debug", skip(self), fields(butler_conversation_id = butler_conversation_id))]
+    pub fn list_task_definitions(
+        &self,
+        butler_conversation_id: i64,
+    ) -> Result<Vec<ButlerTaskDefinition>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, butler_conversation_id, task_conversation_id, title, goal,
+                    executor_assistant_id, executor_assistant_source,
+                    permission_template_source, handoff_contract_json,
+                    result_handling_mode, notification_policy, created_time
+             FROM butler_task_definition
+             WHERE butler_conversation_id = ?1
+             ORDER BY created_time DESC, id DESC",
+        )?;
+        let rows = stmt.query_map(params![butler_conversation_id], |row| {
+            Ok(ButlerTaskDefinition {
+                id: row.get(0)?,
+                butler_conversation_id: row.get(1)?,
+                task_conversation_id: row.get(2)?,
+                title: row.get(3)?,
+                goal: row.get(4)?,
+                executor_assistant_id: row.get(5)?,
+                executor_assistant_source: row.get(6)?,
+                permission_template_source: row.get(7)?,
+                handoff_contract_json: row.get(8)?,
+                result_handling_mode: row.get(9)?,
+                notification_policy: row.get(10)?,
+                created_time: get_required_datetime_from_row(row, 11, "created_time")?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    #[instrument(level = "debug", skip(self), fields(task_conversation_id = task_conversation_id))]
+    pub fn get_task_definition_by_task_conversation_id(
+        &self,
+        task_conversation_id: i64,
+    ) -> Result<Option<ButlerTaskDefinition>> {
+        self.conn
+            .query_row(
+                "SELECT id, butler_conversation_id, task_conversation_id, title, goal,
+                        executor_assistant_id, executor_assistant_source,
+                        permission_template_source, handoff_contract_json,
+                        result_handling_mode, notification_policy, created_time
+                 FROM butler_task_definition
+                 WHERE task_conversation_id = ?1",
+                params![task_conversation_id],
+                |row| {
+                    Ok(ButlerTaskDefinition {
+                        id: row.get(0)?,
+                        butler_conversation_id: row.get(1)?,
+                        task_conversation_id: row.get(2)?,
+                        title: row.get(3)?,
+                        goal: row.get(4)?,
+                        executor_assistant_id: row.get(5)?,
+                        executor_assistant_source: row.get(6)?,
+                        permission_template_source: row.get(7)?,
+                        handoff_contract_json: row.get(8)?,
+                        result_handling_mode: row.get(9)?,
+                        notification_policy: row.get(10)?,
+                        created_time: get_required_datetime_from_row(row, 11, "created_time")?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    #[instrument(level = "debug", skip(self), fields(origin_butler_conversation_id = origin_butler_conversation_id, new_butler_conversation_id = new_butler_conversation_id))]
+    pub fn reassign_task_definitions(
+        &self,
+        origin_butler_conversation_id: i64,
+        new_butler_conversation_id: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE butler_task_definition
+             SET butler_conversation_id = ?1
+             WHERE butler_conversation_id = ?2",
+            params![new_butler_conversation_id, origin_butler_conversation_id],
+        )?;
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip(self, result), fields(task_conversation_id = result.task_conversation_id))]
+    pub fn upsert_task_result(&self, result: &ButlerTaskResult) -> Result<ButlerTaskResult> {
+        self.conn.execute(
+            "INSERT INTO butler_task_result (
+                task_conversation_id,
+                handoff_mode,
+                payload_json,
+                summary,
+                structured_output_json,
+                evidence_json,
+                artifact_refs_json,
+                followup_suggestions_json,
+                final_message_id,
+                created_time,
+                updated_time
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ON CONFLICT(task_conversation_id) DO UPDATE SET
+                handoff_mode = excluded.handoff_mode,
+                payload_json = excluded.payload_json,
+                summary = excluded.summary,
+                structured_output_json = excluded.structured_output_json,
+                evidence_json = excluded.evidence_json,
+                artifact_refs_json = excluded.artifact_refs_json,
+                followup_suggestions_json = excluded.followup_suggestions_json,
+                final_message_id = excluded.final_message_id,
+                updated_time = excluded.updated_time",
+            params![
+                result.task_conversation_id,
+                &result.handoff_mode,
+                &result.payload_json,
+                &result.summary,
+                &result.structured_output_json,
+                &result.evidence_json,
+                &result.artifact_refs_json,
+                &result.followup_suggestions_json,
+                &result.final_message_id,
+                result.created_time,
+                result.updated_time,
+            ],
+        )?;
+        self.get_task_result(result.task_conversation_id)?
+            .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    #[instrument(level = "debug", skip(self), fields(task_conversation_id = task_conversation_id))]
+    pub fn get_task_result(&self, task_conversation_id: i64) -> Result<Option<ButlerTaskResult>> {
+        self.conn
+            .query_row(
+                "SELECT id, task_conversation_id, handoff_mode, payload_json, summary,
+                        structured_output_json, evidence_json, artifact_refs_json,
+                        followup_suggestions_json, final_message_id, created_time, updated_time
+                 FROM butler_task_result
+                 WHERE task_conversation_id = ?1",
+                params![task_conversation_id],
+                |row| {
+                    Ok(ButlerTaskResult {
+                        id: row.get(0)?,
+                        task_conversation_id: row.get(1)?,
+                        handoff_mode: row.get(2)?,
+                        payload_json: row.get(3)?,
+                        summary: row.get(4)?,
+                        structured_output_json: row.get(5)?,
+                        evidence_json: row.get(6)?,
+                        artifact_refs_json: row.get(7)?,
+                        followup_suggestions_json: row.get(8)?,
+                        final_message_id: row.get(9)?,
+                        created_time: get_required_datetime_from_row(row, 10, "created_time")?,
+                        updated_time: get_required_datetime_from_row(row, 11, "updated_time")?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    #[instrument(level = "debug", skip(self), fields(task_conversation_id = task_conversation_id, status = status))]
+    pub fn update_task_conversation_state(
+        &self,
+        task_conversation_id: i64,
+        status: &str,
+        summary: Option<&str>,
+        finalized_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let now = Utc::now();
+        self.conn.execute(
+            "UPDATE conversation
+             SET butler_task_status = ?1,
+                 butler_task_summary = COALESCE(?2, butler_task_summary),
+                 butler_task_finalized_at = COALESCE(?3, butler_task_finalized_at),
+                 updated_time = ?4
+             WHERE id = ?5",
+            params![status, summary, finalized_at, now, task_conversation_id],
         )?;
         Ok(())
     }

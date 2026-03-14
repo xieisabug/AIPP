@@ -12,6 +12,20 @@ use std::collections::{HashMap, HashSet};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
 
+fn get_conversation_summary_config<'a>(
+    config_feature_map: &'a HashMap<String, HashMap<String, FeatureConfig>>,
+) -> Option<&'a HashMap<String, FeatureConfig>> {
+    if let Some(experimental) = config_feature_map.get("experimental") {
+        if experimental.contains_key("conversation_summary_enabled")
+            || experimental.contains_key("conversation_summary_model")
+            || experimental.contains_key("conversation_summary_provider_id")
+        {
+            return Some(experimental);
+        }
+    }
+    config_feature_map.get("conversation_summary")
+}
+
 /// Get latest branch messages (keep the latest branch flow intact).
 ///
 /// Algorithm:
@@ -92,7 +106,7 @@ pub async fn generate_conversation_summary(
     config_feature_map: HashMap<String, HashMap<String, FeatureConfig>>,
 ) -> Result<(), AppError> {
     // 0) 检查对话总结功能是否启用
-    let feature_config_opt = config_feature_map.get("conversation_summary");
+    let feature_config_opt = get_conversation_summary_config(&config_feature_map);
     let summary_enabled = feature_config_opt
         .and_then(|fc| fc.get("conversation_summary_enabled"))
         .map(|c| c.value.clone())

@@ -278,33 +278,6 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
                     />
                 </ConfigSection>
 
-                {/* 对话总结 */}
-                <ConfigSection
-                    title="对话总结（实验）"
-                    description="对话结束后生成对话摘要"
-                    enabled={form.watch("conversation_summary_enabled") === true || form.watch("conversation_summary_enabled") === "true"}
-                    onEnabledChange={(value) => form.setValue("conversation_summary_enabled", value)}
-                >
-                    <Controller
-                        control={form.control}
-                        name="conversation_summary_model"
-                        render={({ field }) => (
-                            <FormItem>
-                                <FormLabel>对话摘要模型</FormLabel>
-                                <FormControl>
-                                    <ModelSelect
-                                        value={field.value || ""}
-                                        onChange={field.onChange}
-                                        placeholder="选择对话摘要模型"
-                                        disabled={!form.watch("conversation_summary_enabled")}
-                                    />
-                                </FormControl>
-                                <FormMessage />
-                            </FormItem>
-                        )}
-                    />
-                </ConfigSection>
-
                 {/* 记忆总结 */}
                 {/* <ConfigSection
                     title="记忆总结（实验）"

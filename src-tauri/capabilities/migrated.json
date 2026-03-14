@@ -19,7 +19,8 @@
     "artifact_collections",
     "artifact",
     "sidebar",
-    "schedule"
+    "schedule",
+    "butler_experiment"
   ],
   "permissions": [
     "core:default",

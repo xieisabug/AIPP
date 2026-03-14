@@ -29,7 +29,13 @@ use crate::api::assistant_api::{
     update_assistant_mcp_config, update_assistant_mcp_tool_config,
     update_assistant_model_config_value,
 };
+use crate::api::assistant_summary_api::summarize_all_assistant_summaries;
 use crate::api::attachment_api::{add_attachment, open_attachment_with_default_app};
+use crate::api::butler_api::{
+    get_butler_task_detail, list_butler_tasks, load_butler_main_conversation,
+    reset_butler_main_conversation,
+    spawn_butler_task_conversation,
+};
 use crate::api::conversation_api::{
     create_conversation_with_messages, create_message, delete_conversation, fork_conversation,
     get_conversation_with_messages, list_conversations, search_conversations,
@@ -162,11 +168,15 @@ use crate::mcp::registry_api::{
 };
 use crate::mcp::summarizer::summarize_all_mcp_catalogs;
 use crate::window::{
-    awaken_aipp, close_sidebar_window, create_ask_window, create_chat_ui_window_hidden,
-    create_config_window_hidden, create_schedule_window_hidden, ensure_hidden_search_window,
-    handle_open_ask_window, open_artifact_collections_window, open_artifact_preview_window,
-    open_chat_ui_window, open_chat_ui_window_inner, open_config_window, open_config_window_inner,
-    open_plugin_window, open_schedule_window, open_sidebar_window,
+    close_sidebar_window, create_ask_window, create_ask_window_hidden,
+    create_butler_experiment_window, create_butler_experiment_window_hidden,
+    create_chat_ui_window_hidden, create_config_window_hidden, create_schedule_window_hidden,
+    ensure_hidden_search_window, handle_open_ask_window, is_butler_experiment_enabled,
+    open_artifact_collections_window, open_artifact_preview_window,
+    open_butler_experiment_window, open_butler_experiment_window_inner, open_chat_ui_window,
+    open_chat_ui_window_inner, open_config_window, open_config_window_inner,
+    open_default_home_window, open_plugin_window, open_schedule_window, open_sidebar_window,
+    preferred_home_window_label,
 };
 use db::conversation_db::ConversationDatabase;
 use db::database_upgrade;
@@ -397,11 +407,20 @@ pub fn run() {
             {
                 let ask_item = MenuItemBuilder::with_id("ask", "Ask").build(app)?;
                 let chat_item = MenuItemBuilder::with_id("chat", "Chat").build(app)?;
+                let butler_item =
+                    MenuItemBuilder::with_id("butler", "总管家（实验）").build(app)?;
                 let config_item = MenuItemBuilder::with_id("config", "配置").build(app)?;
                 let separator = PredefinedMenuItem::separator(app)?;
                 let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;
                 let tray_menu = MenuBuilder::new(app)
-                    .items(&[&ask_item, &chat_item, &config_item, &separator, &quit_item])
+                    .items(&[
+                        &ask_item,
+                        &chat_item,
+                        &butler_item,
+                        &config_item,
+                        &separator,
+                        &quit_item,
+                    ])
                     .build()?;
 
                 let tray = app.tray_by_id("aipp").unwrap();
@@ -416,13 +435,7 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        if let Some(chat_window) =
-                            app_handle_for_click.get_webview_window("chat_ui")
-                        {
-                            open_chat_ui_window_inner(&app_handle_for_click, &chat_window);
-                        } else {
-                            crate::window::create_chat_ui_window(&app_handle_for_click);
-                        }
+                        open_default_home_window(&app_handle_for_click);
                     }
                 });
 
@@ -436,6 +449,13 @@ pub fn run() {
                             open_chat_ui_window_inner(app, &chat_window);
                         } else {
                             crate::window::create_chat_ui_window(app);
+                        }
+                    }
+                    "butler" => {
+                        if let Some(butler_window) = app.get_webview_window("butler_experiment") {
+                            open_butler_experiment_window_inner(app, &butler_window);
+                        } else {
+                            create_butler_experiment_window(app);
                         }
                     }
                     "config" => {
@@ -574,7 +594,30 @@ pub fn run() {
                     create_chat_ui_window_hidden(&app_handle);
                     create_config_window_hidden(&app_handle);
                     create_schedule_window_hidden(&app_handle);
-                    create_ask_window(&app_handle);
+                    if is_butler_experiment_enabled(&app_handle) {
+                        create_butler_experiment_window_hidden(&app_handle);
+                    }
+                    match preferred_home_window_label(&app_handle).as_str() {
+                        "chat_ui" => {
+                            create_ask_window_hidden(&app_handle);
+                            if let Some(chat_window) = app_handle.get_webview_window("chat_ui") {
+                                open_chat_ui_window_inner(&app_handle, &chat_window);
+                            }
+                        }
+                        "butler_experiment" => {
+                            create_ask_window_hidden(&app_handle);
+                            if let Some(butler_window) =
+                                app_handle.get_webview_window("butler_experiment")
+                            {
+                                open_butler_experiment_window_inner(&app_handle, &butler_window);
+                            } else {
+                                create_butler_experiment_window(&app_handle);
+                            }
+                        }
+                        _ => {
+                            create_ask_window(&app_handle);
+                        }
+                    }
                 }
             }
 
@@ -609,6 +652,7 @@ pub fn run() {
             get_selected,
             open_config_window,
             open_chat_ui_window,
+            open_butler_experiment_window,
             open_plugin_window,
             open_schedule_window,
             open_artifact_preview_window,
@@ -653,6 +697,11 @@ pub fn run() {
             remove_assistant_workspace,
             list_conversations,
             search_conversations,
+            load_butler_main_conversation,
+            list_butler_tasks,
+            get_butler_task_detail,
+            reset_butler_main_conversation,
+            spawn_butler_task_conversation,
             get_conversation_with_messages,
             create_conversation_with_messages,
             delete_conversation,
@@ -759,6 +808,7 @@ pub fn run() {
             update_assistant_mcp_tool_config,
             bulk_update_assistant_mcp_tools,
             update_assistant_model_config_value,
+            summarize_all_assistant_summaries,
             start_github_copilot_device_flow,
             poll_github_copilot_token,
             // Copilot LSP commands

@@ -123,6 +123,8 @@ interface ConversationUIProps {
     onChangeConversationId: (conversationId: string) => void;
     pluginList: any[];
     isMobile?: boolean;
+    hideHeader?: boolean;
+    hideSidebar?: boolean;
     onConversationChange?: (conversation?: Conversation) => void;
     inlineInteractionItems?: InlineInteractionItem[];
     inlineInteractionVisible?: boolean;
@@ -135,6 +137,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             onChangeConversationId,
             pluginList,
             isMobile = false,
+            hideHeader = false,
+            hideSidebar = false,
             onConversationChange,
             inlineInteractionItems,
             inlineInteractionVisible = false,
@@ -868,7 +872,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 {/* Main content area */}
                 <div className="flex-1 flex flex-col min-w-0" data-aipp-slot="chat-conversation-main">
                     {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}
-                    {!isMobile && (
+                    {!isMobile && !hideHeader && (
                         <ConversationHeader
                             conversationId={conversationId}
                             conversation={conversation}
@@ -933,12 +937,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         placement="bottom"
                         isMobile={isMobile}
                         sidebarWidth={sidebarWidth}
-                        sidebarVisible={!isMobile && Boolean(conversationId)}
+                        sidebarVisible={!isMobile && !hideSidebar && Boolean(conversationId)}
                     />
                 </div>
 
                 {/* Right sidebar - only show on desktop when sidebar window is not open */}
-                {!isMobile && conversationId && !sidebarWindowOpen && (
+                {!isMobile && !hideSidebar && conversationId && !sidebarWindowOpen && (
                     <ChatSidebar
                         todos={todos}
                         artifacts={artifacts}

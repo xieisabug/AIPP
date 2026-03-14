@@ -4,6 +4,15 @@ export interface Conversation {
     assistant_id: number | null;
     assistant_name: string;
     created_time: Date;
+    updated_time?: Date | string;
+    conversation_kind?: string;
+    parent_butler_conversation_id?: number | null;
+    source_task_title?: string | null;
+    is_hidden_from_normal_chat_list?: boolean;
+    channel_source?: string | null;
+    butler_task_status?: string | null;
+    butler_task_summary?: string | null;
+    butler_task_finalized_at?: Date | string | null;
 }
 
 // 新增：用于 get_conversation_with_messages API 的响应结构

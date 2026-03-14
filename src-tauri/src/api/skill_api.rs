@@ -1,6 +1,8 @@
 //! Skill API - Tauri commands for skill management
 
 use crate::api::ai::config::get_network_proxy_from_config;
+use crate::api::butler_api::is_butler_system_assistant_name;
+use crate::db::assistant_db::AssistantDatabase;
 use crate::db::skill_db::SkillDatabase;
 use crate::slash::{get_skills_for_completion, rebuild_skills_index, SlashSkillCompletionItem};
 use crate::skills::installer::{
@@ -381,6 +383,17 @@ pub async fn get_enabled_assistant_skills_internal(
     app_handle: &tauri::AppHandle,
     assistant_id: i64,
 ) -> Result<Vec<ScannedSkill>, crate::errors::AppError> {
+    let assistant_db = AssistantDatabase::new(app_handle).map_err(crate::errors::AppError::from)?;
+    let assistant = assistant_db
+        .get_assistant(assistant_id)
+        .map_err(crate::errors::AppError::from)?;
+    if is_butler_system_assistant_name(&assistant.name) {
+        let scanner = create_scanner(app_handle);
+        let mut all_skills = scanner.scan_all();
+        all_skills.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+        return Ok(all_skills);
+    }
+
     let db = SkillDatabase::new(app_handle).map_err(crate::errors::AppError::from)?;
     let configs =
         db.get_enabled_skill_configs(assistant_id).map_err(crate::errors::AppError::from)?;
