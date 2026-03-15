@@ -4,7 +4,6 @@ use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::butler_api::is_butler_system_assistant_name;
 use crate::db::assistant_db::AssistantDatabase;
 use crate::db::skill_db::SkillDatabase;
-use crate::slash::{get_skills_for_completion, rebuild_skills_index, SlashSkillCompletionItem};
 use crate::skills::installer::{
     copy_dir_recursive, inspect_skill_archive as inspect_archive_internal,
     inspect_skill_install_recipe as inspect_recipe_internal,
@@ -17,6 +16,7 @@ use crate::skills::installer::{
 use crate::skills::parser::SkillParser;
 use crate::skills::scanner::SkillScanner;
 use crate::skills::types::{ScannedSkill, SkillContent, SkillSourceConfig, SkillWithConfig};
+use crate::slash::{get_skills_for_completion, rebuild_skills_index, SlashSkillCompletionItem};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -384,9 +384,8 @@ pub async fn get_enabled_assistant_skills_internal(
     assistant_id: i64,
 ) -> Result<Vec<ScannedSkill>, crate::errors::AppError> {
     let assistant_db = AssistantDatabase::new(app_handle).map_err(crate::errors::AppError::from)?;
-    let assistant = assistant_db
-        .get_assistant(assistant_id)
-        .map_err(crate::errors::AppError::from)?;
+    let assistant =
+        assistant_db.get_assistant(assistant_id).map_err(crate::errors::AppError::from)?;
     if is_butler_system_assistant_name(&assistant.name) {
         let scanner = create_scanner(app_handle);
         let mut all_skills = scanner.scan_all();

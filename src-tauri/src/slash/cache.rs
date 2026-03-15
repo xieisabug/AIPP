@@ -67,11 +67,7 @@ fn build_aliases(skill: &ScannedSkill, invoke_name: &str) -> Vec<String> {
 
 fn build_lookup_maps(
     items: &[SlashSkillCompletionItem],
-) -> (
-    HashMap<String, SlashSkillCompletionItem>,
-    HashMap<String, String>,
-    HashMap<String, String>,
-) {
+) -> (HashMap<String, SlashSkillCompletionItem>, HashMap<String, String>, HashMap<String, String>) {
     let by_identifier = items
         .iter()
         .cloned()
@@ -80,12 +76,7 @@ fn build_lookup_maps(
 
     let by_invoke_name = items
         .iter()
-        .map(|item| {
-            (
-                normalize_slash_lookup_key(&item.invoke_name),
-                item.identifier.clone(),
-            )
-        })
+        .map(|item| (normalize_slash_lookup_key(&item.invoke_name), item.identifier.clone()))
         .collect::<HashMap<_, _>>();
 
     let mut alias_counts = HashMap::new();
@@ -140,7 +131,9 @@ fn fingerprints_changed(fingerprints: &[SourceFingerprint]) -> bool {
     })
 }
 
-pub fn build_completion_items_from_skills(skills: &[ScannedSkill]) -> Vec<SlashSkillCompletionItem> {
+pub fn build_completion_items_from_skills(
+    skills: &[ScannedSkill],
+) -> Vec<SlashSkillCompletionItem> {
     let display_counts = skills.iter().fold(HashMap::new(), |mut counts, skill| {
         *counts.entry(normalize_slash_lookup_key(&skill.display_name)).or_insert(0usize) += 1;
         counts
@@ -166,12 +159,10 @@ pub fn build_completion_items_from_skills(skills: &[ScannedSkill]) -> Vec<SlashS
                 display_key
             );
 
-            let invoke_name = if display_counts.get(&display_key).copied().unwrap_or_default() <= 1 {
+            let invoke_name = if display_counts.get(&display_key).copied().unwrap_or_default() <= 1
+            {
                 skill.display_name.clone()
-            } else if source_display_counts
-                .get(&source_display_key)
-                .copied()
-                .unwrap_or_default()
+            } else if source_display_counts.get(&source_display_key).copied().unwrap_or_default()
                 <= 1
             {
                 format!("{} / {}", skill.source_display_name, skill.display_name)
@@ -209,7 +200,9 @@ fn build_cached_index(scanner: &SkillScanner, skills: Vec<ScannedSkill>) -> Cach
     CachedSkillsIndex { items, by_identifier, by_invoke_name, by_alias, fingerprints }
 }
 
-pub async fn rebuild_skills_index(app_handle: &tauri::AppHandle) -> Result<CachedSkillsIndex, AppError> {
+pub async fn rebuild_skills_index(
+    app_handle: &tauri::AppHandle,
+) -> Result<CachedSkillsIndex, AppError> {
     let scanner = create_scanner(app_handle);
     let skills = scanner.scan_all();
     let index = build_cached_index(&scanner, skills);
@@ -272,10 +265,7 @@ pub async fn find_skill_by_source_and_command(
         if let Some(item) = index.items.iter().find(|item| {
             item.source_type == source_key
                 && (item.invoke_name.to_lowercase().contains(&command_lc)
-                    || item
-                        .aliases
-                        .iter()
-                        .any(|alias| alias.to_lowercase().contains(&command_lc))
+                    || item.aliases.iter().any(|alias| alias.to_lowercase().contains(&command_lc))
                     || item.identifier.to_lowercase().contains(&command_lc))
         }) {
             return Ok(Some(item.clone()));

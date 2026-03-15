@@ -1,5 +1,6 @@
 [package]
 name = "Aipp"
+default-run = "Aipp"
 version = "0.10.0"
 description = "Chat with LLM use powerful tools"
 authors = ["xieisabug"]

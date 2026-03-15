@@ -119,17 +119,11 @@ fn read_experimental_config_value(app_handle: &AppHandle, key: &str) -> Option<S
 }
 
 fn parse_config_bool(value: Option<String>) -> bool {
-    matches!(
-        value.as_deref(),
-        Some("true") | Some("1") | Some("yes") | Some("on")
-    )
+    matches!(value.as_deref(), Some("true") | Some("1") | Some("yes") | Some("on"))
 }
 
 pub(crate) fn is_butler_experiment_enabled(app_handle: &AppHandle) -> bool {
-    parse_config_bool(read_experimental_config_value(
-        app_handle,
-        "butler_experiment_enabled",
-    ))
+    parse_config_bool(read_experimental_config_value(app_handle, "butler_experiment_enabled"))
 }
 
 pub(crate) fn preferred_home_window_label(app_handle: &AppHandle) -> String {
@@ -389,14 +383,17 @@ fn create_butler_experiment_window_with_visibility(app: &AppHandle, visible: boo
         let (window_size, window_position) =
             get_window_size_and_position(app, 1450.0, 920.0, &["ask", "chat_ui"]);
 
-        let mut window_builder =
-            WebviewWindowBuilder::new(app, "butler_experiment", WebviewUrl::App("index.html".into()))
-                .title("总管家（实验） - Aipp")
-                .inner_size(window_size.width, window_size.height)
-                .fullscreen(false)
-                .resizable(true)
-                .visible(visible)
-                .decorations(true);
+        let mut window_builder = WebviewWindowBuilder::new(
+            app,
+            "butler_experiment",
+            WebviewUrl::App("index.html".into()),
+        )
+        .title("总管家（实验） - Aipp")
+        .inner_size(window_size.width, window_size.height)
+        .fullscreen(false)
+        .resizable(true)
+        .visible(visible)
+        .decorations(true);
 
         if let Some(position) = window_position {
             window_builder = window_builder.position(position.x, position.y);
@@ -428,8 +425,11 @@ fn create_butler_experiment_window_with_visibility(app: &AppHandle, visible: boo
     }
     #[cfg(mobile)]
     {
-        let window_builder =
-            WebviewWindowBuilder::new(app, "butler_experiment", WebviewUrl::App("index.html".into()));
+        let window_builder = WebviewWindowBuilder::new(
+            app,
+            "butler_experiment",
+            WebviewUrl::App("index.html".into()),
+        );
         if let Err(e) = window_builder.build() {
             error!(error=%e, "Failed to build butler experiment window");
         }

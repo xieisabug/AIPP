@@ -398,10 +398,8 @@ impl AssistantDatabase {
 
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
     pub fn delete_assistant_model_by_assistant_id(&self, assistant_id: i64) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM assistant_model WHERE assistant_id = ?",
-            params![assistant_id],
-        )?;
+        self.conn
+            .execute("DELETE FROM assistant_model WHERE assistant_id = ?", params![assistant_id])?;
         debug!("assistant models deleted by assistant_id");
         Ok(())
     }

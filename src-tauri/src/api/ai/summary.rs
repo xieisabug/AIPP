@@ -120,7 +120,8 @@ pub async fn generate_conversation_summary(
     // Butler 主会话不参与对话总结；派发任务会话允许总结
     let conversation_db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
     let conversation_repo = conversation_db.conversation_repo().map_err(AppError::from)?;
-    let Some(conversation) = conversation_repo.read(conversation_id).map_err(AppError::from)? else {
+    let Some(conversation) = conversation_repo.read(conversation_id).map_err(AppError::from)?
+    else {
         return Ok(());
     };
     if conversation.conversation_kind == "butler_main" {

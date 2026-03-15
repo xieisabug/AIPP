@@ -8,10 +8,11 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chrono::Utc;
 use openlark_client::ws_client::{EventDispatcherHandler, LarkWsClient};
+use pulldown_cmark::{Options as MarkdownOptions, Parser as MarkdownParser};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::sleep;
@@ -209,11 +210,38 @@ struct ChannelLinkRecord<'a> {
     payload_type: &'a str,
 }
 
+#[derive(Debug, Clone)]
+struct FeishuReplyOutcome {
+    message_id: String,
+    payload_type: &'static str,
+    interactive_error: Option<String>,
+    interactive_card: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+enum FeishuCardBlock {
+    Markdown(String),
+    Table(FeishuMarkdownTable),
+}
+
+#[derive(Debug, Clone)]
+struct FeishuMarkdownTable {
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FeishuDebugSendResult {
+    pub external_message_id: String,
+    pub payload_type: String,
+    pub reply_to_message_id: String,
+    pub rendered_text: String,
+    pub interactive_error: Option<String>,
+    pub interactive_card: Option<Value>,
+}
+
 fn parse_bool_flag(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "true" | "1" | "yes" | "on"
-    )
+    matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")
 }
 
 fn now_string() -> String {
@@ -284,8 +312,7 @@ fn get_or_create_master_key(app_handle: &AppHandle) -> Result<[u8; 32], String> 
         match db.add_system_config(SECURE_MASTER_KEY, &encoded) {
             Ok(_) => encoded,
             Err(_) => {
-                db.update_system_config(SECURE_MASTER_KEY, &encoded)
-                    .map_err(|e| e.to_string())?;
+                db.update_system_config(SECURE_MASTER_KEY, &encoded).map_err(|e| e.to_string())?;
                 encoded
             }
         }
@@ -293,9 +320,7 @@ fn get_or_create_master_key(app_handle: &AppHandle) -> Result<[u8; 32], String> 
         existing
     };
     let decoded = BASE64.decode(key_b64).map_err(|e| e.to_string())?;
-    decoded
-        .try_into()
-        .map_err(|_| "Invalid secure config master key length".to_string())
+    decoded.try_into().map_err(|_| "Invalid secure config master key length".to_string())
 }
 
 fn encrypt_secret(app_handle: &AppHandle, plaintext: &str) -> Result<(String, String), String> {
@@ -341,15 +366,13 @@ pub(crate) fn save_feishu_secret(app_handle: &AppHandle, app_secret: &str) -> Re
 
 pub(crate) fn clear_feishu_secret(app_handle: &AppHandle) -> Result<(), String> {
     let db = SystemDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    db.delete_secure_config(FEISHU_SCOPE, FEISHU_SECRET_KEY)
-        .map_err(|e| e.to_string())
+    db.delete_secure_config(FEISHU_SCOPE, FEISHU_SECRET_KEY).map_err(|e| e.to_string())
 }
 
 fn load_feishu_secret(app_handle: &AppHandle) -> Result<Option<String>, String> {
     let db = SystemDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    let Some(entry) = db
-        .get_secure_config(FEISHU_SCOPE, FEISHU_SECRET_KEY)
-        .map_err(|e| e.to_string())?
+    let Some(entry) =
+        db.get_secure_config(FEISHU_SCOPE, FEISHU_SECRET_KEY).map_err(|e| e.to_string())?
     else {
         return Ok(None);
     };
@@ -485,9 +508,7 @@ pub(crate) fn refresh_runtime_async(app_handle: &AppHandle) {
     });
 }
 
-pub(crate) async fn refresh_runtime(
-    app_handle: &AppHandle,
-) -> Result<FeishuRuntimeStatus, String> {
+pub(crate) async fn refresh_runtime(app_handle: &AppHandle) -> Result<FeishuRuntimeStatus, String> {
     crate::ensure_rustls_crypto_provider();
     let config = load_runtime_config(app_handle).await?;
     let state = app_handle.state::<FeishuButlerState>();
@@ -549,9 +570,7 @@ async fn run_runtime_loop(app_handle: AppHandle, config: FeishuRuntimeConfig) {
         };
 
         let (payload_tx, payload_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let event_handler = EventDispatcherHandler::builder()
-            .payload_sender(payload_tx)
-            .build();
+        let event_handler = EventDispatcherHandler::builder().payload_sender(payload_tx).build();
 
         let processor_app = app_handle.clone();
         let processor_config = config.clone();
@@ -728,9 +747,8 @@ async fn process_incoming_text_message(
     let _ingress_guard = state.ingress_lock.lock().await;
 
     let butler_conversation = load_or_create_butler_main_internal(app_handle).await?;
-    let assistant_id = butler_conversation
-        .assistant_id
-        .ok_or_else(|| "总管家主会话缺少 assistant".to_string())?;
+    let assistant_id =
+        butler_conversation.assistant_id.ok_or_else(|| "总管家主会话缺少 assistant".to_string())?;
 
     let before_message_max_id = get_latest_message_id(app_handle, butler_conversation.id)?;
 
@@ -797,9 +815,12 @@ async fn process_incoming_text_message(
 
     wait_for_butler_to_settle(app_handle, butler_conversation.id).await?;
 
-    if let Some(user_message_id) =
-        find_latest_message_id_by_type(app_handle, butler_conversation.id, before_message_max_id, "user")?
-    {
+    if let Some(user_message_id) = find_latest_message_id_by_type(
+        app_handle,
+        butler_conversation.id,
+        before_message_max_id,
+        "user",
+    )? {
         update_external_link_local_message(
             app_handle,
             CHANNEL_FEISHU,
@@ -834,7 +855,8 @@ async fn wait_for_butler_to_settle(
     app_handle: &AppHandle,
     butler_conversation_id: i64,
 ) -> Result<(), String> {
-    let activity_manager = app_handle.state::<crate::state::activity_state::ConversationActivityManager>();
+    let activity_manager =
+        app_handle.state::<crate::state::activity_state::ConversationActivityManager>();
     let mut idle_checks = 0;
     for _ in 0..1200 {
         let runtime_state = activity_manager.get_runtime_state(butler_conversation_id).await;
@@ -852,7 +874,10 @@ async fn wait_for_butler_to_settle(
     Err("等待总管家处理飞书消息超时".to_string())
 }
 
-fn count_pending_butler_tasks(app_handle: &AppHandle, butler_conversation_id: i64) -> Result<i64, String> {
+fn count_pending_butler_tasks(
+    app_handle: &AppHandle,
+    butler_conversation_id: i64,
+) -> Result<i64, String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conn = db.get_connection().map_err(|e| e.to_string())?;
     conn.query_row(
@@ -980,7 +1005,11 @@ fn mark_relay_scope_progress(
     Ok(())
 }
 
-fn mark_relay_scope_failed(app_handle: &AppHandle, scope_id: i64, error: &str) -> Result<(), String> {
+fn mark_relay_scope_failed(
+    app_handle: &AppHandle,
+    scope_id: i64,
+    error: &str,
+) -> Result<(), String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conn = db.get_connection().map_err(|e| e.to_string())?;
     conn.execute(
@@ -1055,7 +1084,10 @@ fn find_latest_feishu_target(
     .map_err(|e| e.to_string())
 }
 
-fn find_scope_reply_anchor(app_handle: &AppHandle, scope_id: i64) -> Result<Option<String>, String> {
+fn find_scope_reply_anchor(
+    app_handle: &AppHandle,
+    scope_id: i64,
+) -> Result<Option<String>, String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conn = db.get_connection().map_err(|e| e.to_string())?;
     conn.query_row(
@@ -1111,9 +1143,7 @@ async fn flush_feishu_relay_scope(
 
     let mut current_reply_to = find_scope_reply_anchor(app_handle, scope.id)?
         .unwrap_or_else(|| scope.anchor_external_message_id.clone());
-    let start_after = scope
-        .last_delivered_local_message_id
-        .max(scope.start_after_local_message_id);
+    let start_after = scope.last_delivered_local_message_id.max(scope.start_after_local_message_id);
     let messages = list_relayable_messages(app_handle, scope.conversation_id, start_after)?;
     let mut delivered_count = 0usize;
     let mut last_processed_message_id = scope.last_delivered_local_message_id;
@@ -1121,27 +1151,24 @@ async fn flush_feishu_relay_scope(
     for message in messages {
         let rendered = render_message_for_external_channel(
             &message,
-            &RenderContext {
-                channel: &scope.channel,
-                relay_origin: &scope.origin,
-            },
+            &RenderContext { channel: &scope.channel, relay_origin: &scope.origin },
         );
         last_processed_message_id = message.id;
 
         match rendered {
             Some(rendered_text) if !rendered_text.trim().is_empty() => {
-                let outbound_message_id =
-                    reply_text_message(config, &current_reply_to, &rendered_text).await?;
+                let outbound =
+                    reply_markdown_message(config, &current_reply_to, &rendered_text).await?;
                 insert_external_link(
                     app_handle,
                     ChannelLinkRecord {
-                        external_message_id: &outbound_message_id,
+                        external_message_id: &outbound.message_id,
                         external_chat_id: scope.external_chat_id.as_deref(),
                         external_user_id: scope.external_user_id.as_deref(),
                         conversation_id: scope.conversation_id,
                         local_message_id: Some(message.id),
                         direction: "outbound",
-                        payload_type: "text",
+                        payload_type: outbound.payload_type,
                     },
                 )?;
                 record_scope_delivery(
@@ -1150,11 +1177,11 @@ async fn flush_feishu_relay_scope(
                     &scope.channel,
                     scope.conversation_id,
                     message.id,
-                    Some(&outbound_message_id),
+                    Some(&outbound.message_id),
                     "sent",
                     &rendered_text,
                 )?;
-                current_reply_to = outbound_message_id;
+                current_reply_to = outbound.message_id;
                 delivered_count += 1;
             }
             _ => {
@@ -1205,7 +1232,10 @@ fn external_message_exists(
     Ok(result.is_some())
 }
 
-fn linked_to_outbound_message(app_handle: &AppHandle, external_message_id: Option<&str>) -> Result<bool, String> {
+fn linked_to_outbound_message(
+    app_handle: &AppHandle,
+    external_message_id: Option<&str>,
+) -> Result<bool, String> {
     let Some(external_message_id) = external_message_id else {
         return Ok(false);
     };
@@ -1225,7 +1255,10 @@ fn linked_to_outbound_message(app_handle: &AppHandle, external_message_id: Optio
     Ok(result.is_some())
 }
 
-fn insert_external_link(app_handle: &AppHandle, record: ChannelLinkRecord<'_>) -> Result<(), String> {
+fn insert_external_link(
+    app_handle: &AppHandle,
+    record: ChannelLinkRecord<'_>,
+) -> Result<(), String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conn = db.get_connection().map_err(|e| e.to_string())?;
     conn.execute(
@@ -1266,6 +1299,7 @@ fn update_external_link_local_message(
 }
 
 async fn fetch_tenant_access_token(config: &FeishuRuntimeConfig) -> Result<String, String> {
+    crate::ensure_rustls_crypto_provider();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -1293,16 +1327,351 @@ async fn fetch_tenant_access_token(config: &FeishuRuntimeConfig) -> Result<Strin
         .ok_or_else(|| "飞书未返回 tenant_access_token".to_string())
 }
 
-async fn reply_text_message(
+fn build_feishu_markdown_card(markdown: &str) -> Result<Value, String> {
+    let normalized = markdown.replace("\r\n", "\n").trim().to_string();
+    if normalized.is_empty() {
+        return Err("飞书卡片内容为空".to_string());
+    }
+
+    // Validate that the source is parseable markdown before building a card.
+    let _ = MarkdownParser::new_ext(&normalized, MarkdownOptions::all()).count();
+
+    let mut elements = Vec::new();
+    for (index, block) in split_markdown_into_feishu_blocks(&normalized)
+        .into_iter()
+        .enumerate()
+    {
+        match block {
+            FeishuCardBlock::Markdown(content) => {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    elements.push(build_feishu_markdown_element(trimmed));
+                }
+            }
+            FeishuCardBlock::Table(table) => {
+                elements.push(build_feishu_table_element(index, &table)?);
+            }
+        }
+    }
+
+    if elements.is_empty() {
+        return Err("飞书卡片缺少可发送内容".to_string());
+    }
+
+    Ok(json!({
+        "schema": "2.0",
+        "body": {
+            "elements": elements
+        }
+    }))
+}
+
+fn split_markdown_into_feishu_blocks(markdown: &str) -> Vec<FeishuCardBlock> {
+    let lines: Vec<&str> = markdown.lines().collect();
+    let mut blocks = Vec::new();
+    let mut markdown_buffer = Vec::new();
+    let mut index = 0usize;
+    let mut in_fence = false;
+    let mut fence_marker = '`';
+    let mut fence_length = 0usize;
+
+    while index < lines.len() {
+        let line = lines[index];
+
+        if let Some((marker, length)) = parse_fence_delimiter(line) {
+            if !in_fence {
+                in_fence = true;
+                fence_marker = marker;
+                fence_length = length;
+            } else if marker == fence_marker && length >= fence_length {
+                in_fence = false;
+            }
+            markdown_buffer.push(line.to_string());
+            index += 1;
+            continue;
+        }
+
+        if !in_fence
+            && index + 1 < lines.len()
+            && looks_like_markdown_table_header(lines[index], lines[index + 1])
+        {
+            flush_markdown_block(&mut blocks, &mut markdown_buffer);
+
+            let mut table_lines = vec![lines[index].to_string(), lines[index + 1].to_string()];
+            index += 2;
+            while index < lines.len() && looks_like_markdown_table_row(lines[index]) {
+                table_lines.push(lines[index].to_string());
+                index += 1;
+            }
+
+            match parse_markdown_table(&table_lines) {
+                Ok(table) => blocks.push(FeishuCardBlock::Table(table)),
+                Err(_) => blocks.push(FeishuCardBlock::Markdown(table_lines.join("\n"))),
+            }
+            continue;
+        }
+
+        markdown_buffer.push(line.to_string());
+        index += 1;
+    }
+
+    flush_markdown_block(&mut blocks, &mut markdown_buffer);
+    blocks
+}
+
+fn flush_markdown_block(blocks: &mut Vec<FeishuCardBlock>, markdown_buffer: &mut Vec<String>) {
+    if markdown_buffer.is_empty() {
+        return;
+    }
+    let content = markdown_buffer.join("\n");
+    markdown_buffer.clear();
+    if !content.trim().is_empty() {
+        blocks.push(FeishuCardBlock::Markdown(content));
+    }
+}
+
+fn parse_fence_delimiter(line: &str) -> Option<(char, usize)> {
+    let trimmed = line.trim_start();
+    let marker = trimmed.chars().next()?;
+    if marker != '`' && marker != '~' {
+        return None;
+    }
+    let length = trimmed.chars().take_while(|ch| *ch == marker).count();
+    (length >= 3).then_some((marker, length))
+}
+
+fn looks_like_markdown_table_header(header_line: &str, separator_line: &str) -> bool {
+    looks_like_markdown_table_row(header_line) && is_markdown_table_separator(separator_line)
+}
+
+fn looks_like_markdown_table_row(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty() && trimmed.contains('|')
+}
+
+fn is_markdown_table_separator(line: &str) -> bool {
+    let cells = split_markdown_table_row(line);
+    !cells.is_empty()
+        && cells.iter().all(|cell| {
+            let trimmed = cell.trim();
+            !trimmed.is_empty()
+                && trimmed.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')
+                && trimmed.chars().any(|ch| ch == '-')
+        })
+}
+
+fn parse_markdown_table(lines: &[String]) -> Result<FeishuMarkdownTable, String> {
+    if lines.len() < 2 {
+        return Err("markdown 表格行数不足".to_string());
+    }
+
+    let headers = split_markdown_table_row(&lines[0])
+        .into_iter()
+        .map(|cell| cell.trim().to_string())
+        .collect::<Vec<_>>();
+    if headers.is_empty() {
+        return Err("markdown 表格缺少表头".to_string());
+    }
+    if !is_markdown_table_separator(&lines[1]) {
+        return Err("markdown 表格缺少分隔行".to_string());
+    }
+
+    let rows = lines
+        .iter()
+        .skip(2)
+        .map(|line| normalize_table_row(split_markdown_table_row(line), headers.len()))
+        .collect::<Vec<_>>();
+
+    Ok(FeishuMarkdownTable { headers, rows })
+}
+
+fn split_markdown_table_row(line: &str) -> Vec<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut cells = Vec::new();
+    let mut current = String::new();
+    let mut chars = trimmed.chars().peekable();
+
+    if matches!(chars.peek(), Some('|')) {
+        chars.next();
+    }
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                if matches!(chars.peek(), Some('|')) {
+                    current.push('|');
+                    chars.next();
+                } else {
+                    current.push(ch);
+                }
+            }
+            '|' => {
+                cells.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if !current.is_empty() || !trimmed.ends_with('|') {
+        cells.push(current.trim().to_string());
+    }
+
+    cells
+}
+
+fn normalize_table_row(mut cells: Vec<String>, width: usize) -> Vec<String> {
+    if cells.len() > width {
+        cells.truncate(width);
+        return cells;
+    }
+    while cells.len() < width {
+        cells.push(String::new());
+    }
+    cells
+}
+
+fn build_feishu_markdown_element(content: &str) -> Value {
+    json!({
+        "tag": "markdown",
+        "content": content,
+        "text_align": "left"
+    })
+}
+
+fn build_feishu_table_element(index: usize, table: &FeishuMarkdownTable) -> Result<Value, String> {
+    if table.headers.is_empty() {
+        return Err("飞书表格缺少列定义".to_string());
+    }
+
+    let columns = table
+        .headers
+        .iter()
+        .enumerate()
+        .map(|(column_index, header)| {
+            json!({
+                "name": format!("col_{}", column_index + 1),
+                "display_name": if header.is_empty() {
+                    format!("列{}", column_index + 1)
+                } else {
+                    header.clone()
+                },
+                "data_type": "lark_md",
+                "width": "auto"
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let rows = table
+        .rows
+        .iter()
+        .map(|row| {
+            let mut map = Map::new();
+            for (column_index, cell) in row.iter().enumerate() {
+                map.insert(format!("col_{}", column_index + 1), Value::String(cell.clone()));
+            }
+            Value::Object(map)
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "tag": "table",
+        "element_id": format!("md_table_{}", index + 1),
+        "row_height": "low",
+        "page_size": rows.len().max(1),
+        "columns": columns,
+        "rows": rows
+    }))
+}
+
+async fn reply_markdown_message(
     config: &FeishuRuntimeConfig,
     reply_to_message_id: &str,
-    text: &str,
-) -> Result<String, String> {
+    markdown: &str,
+) -> Result<FeishuReplyOutcome, String> {
     let token = fetch_tenant_access_token(config).await?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
+    let mut interactive_error = None;
+    let interactive_card = match build_feishu_markdown_card(markdown) {
+        Ok(card) => Some(card),
+        Err(error) => {
+            let error = format!("构建飞书卡片失败: {error}");
+            debug!(error = %error, "failed to build feishu markdown card, falling back to raw text");
+            interactive_error = Some(error);
+            None
+        }
+    };
+
+    if let Some(card) = interactive_card.as_ref() {
+        match send_reply_message_request(
+            &client,
+            config,
+            &token,
+            reply_to_message_id,
+            build_feishu_interactive_payload(card),
+        )
+        .await
+        {
+            Ok(message_id) => {
+                return Ok(FeishuReplyOutcome {
+                    message_id,
+                    payload_type: "interactive",
+                    interactive_error,
+                    interactive_card,
+                })
+            }
+            Err(error) => {
+                warn!(error = %error, "failed to send feishu interactive reply, falling back to raw text");
+                interactive_error = Some(format!("发送飞书 interactive 卡片失败: {error}"));
+            }
+        }
+    }
+
+    let message_id = send_reply_message_request(
+        &client,
+        config,
+        &token,
+        reply_to_message_id,
+        build_feishu_text_payload(markdown),
+    )
+    .await?;
+
+    Ok(FeishuReplyOutcome {
+        message_id,
+        payload_type: "text",
+        interactive_error,
+        interactive_card,
+    })
+}
+
+fn build_feishu_text_payload(text: &str) -> Value {
+    json!({
+        "msg_type": "text",
+        "content": json!({ "text": text }).to_string()
+    })
+}
+
+fn build_feishu_interactive_payload(card: &Value) -> Value {
+    json!({
+        "msg_type": "interactive",
+        "content": card.to_string()
+    })
+}
+
+async fn send_reply_message_request(
+    client: &reqwest::Client,
+    config: &FeishuRuntimeConfig,
+    token: &str,
+    reply_to_message_id: &str,
+    payload: Value,
+) -> Result<String, String> {
     let url = format!(
         "{}/open-apis/im/v1/messages/{}/reply",
         config.base_url.trim_end_matches('/'),
@@ -1312,10 +1681,7 @@ async fn reply_text_message(
         .post(url)
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .header(CONTENT_TYPE, "application/json")
-        .json(&json!({
-            "msg_type": "text",
-            "content": json!({ "text": text }).to_string()
-        }))
+        .json(&payload)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1326,4 +1692,367 @@ async fn reply_text_message(
     body.data
         .map(|data| data.message_id)
         .ok_or_else(|| "飞书回发成功但未返回 message_id".to_string())
+}
+
+async fn reply_text_message(
+    config: &FeishuRuntimeConfig,
+    reply_to_message_id: &str,
+    text: &str,
+) -> Result<String, String> {
+    let token = fetch_tenant_access_token(config).await?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    send_reply_message_request(
+        &client,
+        config,
+        &token,
+        reply_to_message_id,
+        build_feishu_text_payload(text),
+    )
+    .await
+}
+
+pub(crate) async fn resend_message_to_feishu_for_debug(
+    app_handle: &AppHandle,
+    message_id: i64,
+) -> Result<FeishuDebugSendResult, String> {
+    let config = load_runtime_config(app_handle).await?;
+    if config.app_id.trim().is_empty() || config.app_secret.trim().is_empty() {
+        return Err("飞书 App ID 或 App Secret 未配置，无法执行调试重发".to_string());
+    }
+
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let message = db
+        .message_repo()
+        .map_err(|e| e.to_string())?
+        .read(message_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("未找到消息: {message_id}"))?;
+
+    let rendered_text = render_message_for_external_channel(
+        &message,
+        &RenderContext {
+            channel: CHANNEL_FEISHU,
+            relay_origin: RELAY_ORIGIN_AIPP,
+        },
+    )
+    .filter(|content| !content.trim().is_empty())
+    .ok_or_else(|| "该消息没有可发送到飞书的可读内容".to_string())?;
+
+    let target = find_latest_feishu_target(app_handle, message.conversation_id)?
+        .ok_or_else(|| "当前对话没有可用的飞书回发目标，请先让该对话与飞书建立一次消息链路".to_string())?;
+
+    let outcome = reply_markdown_message(&config, &target.external_message_id, &rendered_text).await?;
+
+    insert_external_link(
+        app_handle,
+        ChannelLinkRecord {
+            external_message_id: &outcome.message_id,
+            external_chat_id: target.external_chat_id.as_deref(),
+            external_user_id: target.external_user_id.as_deref(),
+            conversation_id: message.conversation_id,
+            local_message_id: Some(message.id),
+            direction: "outbound",
+            payload_type: outcome.payload_type,
+        },
+    )?;
+
+    Ok(FeishuDebugSendResult {
+        external_message_id: outcome.message_id,
+        payload_type: outcome.payload_type.to_string(),
+        reply_to_message_id: target.external_message_id,
+        rendered_text,
+        interactive_error: outcome.interactive_error,
+        interactive_card: outcome.interactive_card,
+    })
+}
+
+pub fn debug_build_feishu_markdown_card(markdown: &str) -> Result<Value, String> {
+    build_feishu_markdown_card(markdown)
+}
+
+pub fn debug_build_feishu_interactive_payload(markdown: &str) -> Result<Value, String> {
+    let card = build_feishu_markdown_card(markdown)?;
+    Ok(build_feishu_interactive_payload(&card))
+}
+
+pub fn debug_describe_feishu_markdown_blocks(markdown: &str) -> Value {
+    Value::Array(
+        split_markdown_into_feishu_blocks(markdown)
+            .into_iter()
+            .map(|block| match block {
+                FeishuCardBlock::Markdown(content) => json!({
+                    "type": "markdown",
+                    "content": content,
+                }),
+                FeishuCardBlock::Table(table) => json!({
+                    "type": "table",
+                    "headers": table.headers,
+                    "rows": table.rows,
+                }),
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_markdown_blocks_extracts_table() {
+        let blocks = split_markdown_into_feishu_blocks(
+            "# Title\n\n| Name | Value |\n| --- | --- |\n| A | **1** |\n| B | [2](https://example.com) |\n\nTail",
+        );
+
+        assert_eq!(blocks.len(), 3);
+        assert!(
+            matches!(&blocks[0], FeishuCardBlock::Markdown(content) if content.contains("# Title"))
+        );
+        assert!(matches!(
+            &blocks[1],
+            FeishuCardBlock::Table(table)
+                if table.headers == vec!["Name".to_string(), "Value".to_string()]
+                && table.rows.len() == 2
+        ));
+        assert!(
+            matches!(&blocks[2], FeishuCardBlock::Markdown(content) if content.contains("Tail"))
+        );
+    }
+
+    #[test]
+    fn split_markdown_blocks_ignores_table_inside_code_fence() {
+        let blocks = split_markdown_into_feishu_blocks(
+            "```markdown\n| Name | Value |\n| --- | --- |\n| A | B |\n```\n",
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert!(
+            matches!(&blocks[0], FeishuCardBlock::Markdown(content) if content.contains("```markdown"))
+        );
+    }
+
+    #[test]
+    fn build_feishu_markdown_card_uses_markdown_and_table_elements() {
+        let card = build_feishu_markdown_card(
+            "# Summary\n\n- item 1\n- item 2\n\n| Name | Status |\n| --- | --- |\n| A | ~~done~~ |\n",
+        )
+        .expect("card should be built");
+
+        let elements = card["body"]["elements"].as_array().expect("elements should be an array");
+        assert_eq!(elements.len(), 2);
+        assert_eq!(elements[0]["tag"], "markdown");
+        assert_eq!(elements[1]["tag"], "table");
+        assert_eq!(elements[1]["columns"][0]["display_name"], "Name");
+        assert_eq!(elements[1]["rows"][0]["col_2"], "~~done~~");
+    }
+
+    #[test]
+    fn parse_markdown_table_handles_alignment_escaped_pipes_and_irregular_rows() {
+        let table = parse_markdown_table(&[
+            "| Name | Value \\| Detail | Score |".to_string(),
+            "| :--- | :------------- | ----: |".to_string(),
+            "| Alice | `A\\|B` | 42 |".to_string(),
+            "| Bob | plain |".to_string(),
+            "| Carol | too | many | columns |".to_string(),
+        ])
+        .expect("table should parse");
+
+        assert_eq!(
+            table.headers,
+            vec!["Name".to_string(), "Value | Detail".to_string(), "Score".to_string()]
+        );
+        assert_eq!(
+            table.rows,
+            vec![
+                vec!["Alice".to_string(), "`A|B`".to_string(), "42".to_string()],
+                vec!["Bob".to_string(), "plain".to_string(), String::new()],
+                vec!["Carol".to_string(), "too".to_string(), "many".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn split_markdown_blocks_keeps_invalid_table_like_text_as_markdown() {
+        let blocks = split_markdown_into_feishu_blocks(
+            "Value A | Value B\nThis line is not a markdown separator\nnext line",
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(
+            &blocks[0],
+            FeishuCardBlock::Markdown(content)
+                if content.contains("Value A | Value B")
+                && content.contains("This line is not a markdown separator")
+        ));
+    }
+
+    #[test]
+    fn build_feishu_markdown_card_supports_multiple_tables_and_markdown_blocks() {
+        let card = build_feishu_markdown_card(
+            "前言\n\n| Key | Value |\n| --- | --- |\n| A | 1 |\n\n中间段落\n\n| Env | Status |\n| --- | --- |\n| Prod | **OK** |\n",
+        )
+        .expect("card should be built");
+
+        let elements = card["body"]["elements"].as_array().expect("elements should be an array");
+        assert_eq!(elements.len(), 4);
+        assert_eq!(elements[0]["tag"], "markdown");
+        assert_eq!(elements[1]["tag"], "table");
+        assert_eq!(elements[2]["tag"], "markdown");
+        assert_eq!(elements[3]["tag"], "table");
+        assert_eq!(elements[3]["rows"][0]["col_2"], "**OK**");
+    }
+
+    #[test]
+    fn build_feishu_markdown_card_preserves_complex_chinese_supplement_table() {
+        let card = build_feishu_markdown_card(
+            "| 补剂 | 证据强度 | 推荐剂量 | 关键注意事项 |\n\
+             |------|----------|----------|--------------|\n\
+             | **圣约翰草** | ⭐⭐⭐ 最强 | 900mg/日 (分3次) | ⚠️与避孕药、抗凝药、抗抑郁药严重冲突；孕妇禁用 |\n\
+             | **SAM-e** | ⭐⭐⭐ 强 | 800-1600mg/日 | ⚠️双相患者慎用（诱发躁狂）；与SSRI同服有风险 |\n\
+             | **EPA鱼油** | ⭐⭐ 中等 | EPA 1-2g/日 | ⚠️与阿司匹林/华法林同服增加出血风险 |\n\
+             | **藏红花** | ⭐⭐ 中等 | 30mg/日 | ⚠️孕妇禁用 |\n\
+             | **维生素D** | ⭐⭐ 缺乏者有效 | 1000-4000 IU/日 | 建议先检测水平再补充 |\n\
+             | **L-甲基叶酸** | ⭐⭐ 增效剂 | 7.5-15mg/日 | 配合抗抑郁药使用效果更佳 |\n\
+             | **NAC** | ⭐⭐ 辅助 | 2000mg/日 | 哮喘患者慎用 |\n\
+             | **锌** | ⭐ 初步 | 25-50mg/日 | 长期高剂量导致铜缺乏 |\n\
+             | **5-HTP** | ⭐ 有限 | 100-300mg/日 | ⚠️与抗抑郁药同服有血清素综合征风险 |\n",
+        )
+        .expect("card should be built");
+
+        let elements = card["body"]["elements"].as_array().expect("elements should be an array");
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0]["tag"], "table");
+        assert_eq!(elements[0]["columns"][0]["display_name"], "补剂");
+        assert_eq!(elements[0]["columns"][3]["display_name"], "关键注意事项");
+        assert_eq!(elements[0]["rows"].as_array().expect("rows should be array").len(), 9);
+        assert_eq!(elements[0]["rows"][0]["col_1"], "**圣约翰草**");
+        assert_eq!(elements[0]["rows"][0]["col_2"], "⭐⭐⭐ 最强");
+        assert_eq!(elements[0]["rows"][0]["col_4"], "⚠️与避孕药、抗凝药、抗抑郁药严重冲突；孕妇禁用");
+        assert_eq!(elements[0]["rows"][1]["col_1"], "**SAM-e**");
+        assert_eq!(elements[0]["rows"][4]["col_2"], "⭐⭐ 缺乏者有效");
+        assert_eq!(elements[0]["rows"][5]["col_4"], "配合抗抑郁药使用效果更佳");
+        assert_eq!(elements[0]["rows"][8]["col_1"], "**5-HTP**");
+        assert_eq!(elements[0]["rows"][8]["col_4"], "⚠️与抗抑郁药同服有血清素综合征风险");
+    }
+
+    #[test]
+    fn build_feishu_markdown_card_matches_expected_supplement_table_schema() {
+        let markdown = "| 补剂 | 证据强度 | 推荐剂量 | 关键注意事项 |\n\
+                        |------|----------|----------|--------------|\n\
+                        | **圣约翰草** | ⭐⭐⭐ 最强 | 900mg/日 (分3次) | ⚠️与避孕药、抗凝药、抗抑郁药严重冲突；孕妇禁用 |\n\
+                        | **SAM-e** | ⭐⭐⭐ 强 | 800-1600mg/日 | ⚠️双相患者慎用（诱发躁狂）；与SSRI同服有风险 |\n\
+                        | **EPA鱼油** | ⭐⭐ 中等 | EPA 1-2g/日 | ⚠️与阿司匹林/华法林同服增加出血风险 |\n\
+                        | **藏红花** | ⭐⭐ 中等 | 30mg/日 | ⚠️孕妇禁用 |\n\
+                        | **维生素D** | ⭐⭐ 缺乏者有效 | 1000-4000 IU/日 | 建议先检测水平再补充 |\n\
+                        | **L-甲基叶酸** | ⭐⭐ 增效剂 | 7.5-15mg/日 | 配合抗抑郁药使用效果更佳 |\n\
+                        | **NAC** | ⭐⭐ 辅助 | 2000mg/日 | 哮喘患者慎用 |\n\
+                        | **锌** | ⭐ 初步 | 25-50mg/日 | 长期高剂量导致铜缺乏 |\n\
+                        | **5-HTP** | ⭐ 有限 | 100-300mg/日 | ⚠️与抗抑郁药同服有血清素综合征风险 |\n";
+        let card = build_feishu_markdown_card(markdown).expect("card should be built");
+
+        let expected = json!({
+            "schema": "2.0",
+            "body": {
+                "elements": [
+                    {
+                        "tag": "table",
+                        "element_id": "md_table_1",
+                        "row_height": "low",
+                        "page_size": 9,
+                        "columns": [
+                            { "name": "col_1", "display_name": "补剂", "data_type": "lark_md", "width": "auto" },
+                            { "name": "col_2", "display_name": "证据强度", "data_type": "lark_md", "width": "auto" },
+                            { "name": "col_3", "display_name": "推荐剂量", "data_type": "lark_md", "width": "auto" },
+                            { "name": "col_4", "display_name": "关键注意事项", "data_type": "lark_md", "width": "auto" }
+                        ],
+                        "rows": [
+                            { "col_1": "**圣约翰草**", "col_2": "⭐⭐⭐ 最强", "col_3": "900mg/日 (分3次)", "col_4": "⚠️与避孕药、抗凝药、抗抑郁药严重冲突；孕妇禁用" },
+                            { "col_1": "**SAM-e**", "col_2": "⭐⭐⭐ 强", "col_3": "800-1600mg/日", "col_4": "⚠️双相患者慎用（诱发躁狂）；与SSRI同服有风险" },
+                            { "col_1": "**EPA鱼油**", "col_2": "⭐⭐ 中等", "col_3": "EPA 1-2g/日", "col_4": "⚠️与阿司匹林/华法林同服增加出血风险" },
+                            { "col_1": "**藏红花**", "col_2": "⭐⭐ 中等", "col_3": "30mg/日", "col_4": "⚠️孕妇禁用" },
+                            { "col_1": "**维生素D**", "col_2": "⭐⭐ 缺乏者有效", "col_3": "1000-4000 IU/日", "col_4": "建议先检测水平再补充" },
+                            { "col_1": "**L-甲基叶酸**", "col_2": "⭐⭐ 增效剂", "col_3": "7.5-15mg/日", "col_4": "配合抗抑郁药使用效果更佳" },
+                            { "col_1": "**NAC**", "col_2": "⭐⭐ 辅助", "col_3": "2000mg/日", "col_4": "哮喘患者慎用" },
+                            { "col_1": "**锌**", "col_2": "⭐ 初步", "col_3": "25-50mg/日", "col_4": "长期高剂量导致铜缺乏" },
+                            { "col_1": "**5-HTP**", "col_2": "⭐ 有限", "col_3": "100-300mg/日", "col_4": "⚠️与抗抑郁药同服有血清素综合征风险" }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        assert_eq!(card, expected);
+    }
+
+    #[test]
+    fn build_feishu_interactive_payload_serializes_card_into_content_string() {
+        let card = json!({
+            "schema": "2.0",
+            "body": {
+                "elements": [
+                    {
+                        "tag": "markdown",
+                        "content": "**bold**",
+                        "text_align": "left"
+                    }
+                ]
+            }
+        });
+
+        let payload = build_feishu_interactive_payload(&card);
+        assert_eq!(payload["msg_type"], "interactive");
+        assert!(payload.get("card").is_none());
+
+        let content = payload["content"]
+            .as_str()
+            .expect("interactive content should be a serialized JSON string");
+        let reparsed: Value =
+            serde_json::from_str(content).expect("interactive content should parse back to JSON");
+        assert_eq!(reparsed, card);
+    }
+
+    #[test]
+    fn build_feishu_interactive_payload_matches_expected_reply_body_for_supplement_table() {
+        let card = json!({
+            "schema": "2.0",
+            "body": {
+                "elements": [
+                    {
+                        "tag": "table",
+                        "element_id": "md_table_1",
+                        "row_height": "low",
+                        "page_size": 9,
+                        "columns": [
+                            { "name": "col_1", "display_name": "补剂", "data_type": "lark_md", "width": "auto" },
+                            { "name": "col_2", "display_name": "证据强度", "data_type": "lark_md", "width": "auto" },
+                            { "name": "col_3", "display_name": "推荐剂量", "data_type": "lark_md", "width": "auto" },
+                            { "name": "col_4", "display_name": "关键注意事项", "data_type": "lark_md", "width": "auto" }
+                        ],
+                        "rows": [
+                            { "col_1": "**圣约翰草**", "col_2": "⭐⭐⭐ 最强", "col_3": "900mg/日 (分3次)", "col_4": "⚠️与避孕药、抗凝药、抗抑郁药严重冲突；孕妇禁用" },
+                            { "col_1": "**SAM-e**", "col_2": "⭐⭐⭐ 强", "col_3": "800-1600mg/日", "col_4": "⚠️双相患者慎用（诱发躁狂）；与SSRI同服有风险" },
+                            { "col_1": "**EPA鱼油**", "col_2": "⭐⭐ 中等", "col_3": "EPA 1-2g/日", "col_4": "⚠️与阿司匹林/华法林同服增加出血风险" },
+                            { "col_1": "**藏红花**", "col_2": "⭐⭐ 中等", "col_3": "30mg/日", "col_4": "⚠️孕妇禁用" },
+                            { "col_1": "**维生素D**", "col_2": "⭐⭐ 缺乏者有效", "col_3": "1000-4000 IU/日", "col_4": "建议先检测水平再补充" },
+                            { "col_1": "**L-甲基叶酸**", "col_2": "⭐⭐ 增效剂", "col_3": "7.5-15mg/日", "col_4": "配合抗抑郁药使用效果更佳" },
+                            { "col_1": "**NAC**", "col_2": "⭐⭐ 辅助", "col_3": "2000mg/日", "col_4": "哮喘患者慎用" },
+                            { "col_1": "**锌**", "col_2": "⭐ 初步", "col_3": "25-50mg/日", "col_4": "长期高剂量导致铜缺乏" },
+                            { "col_1": "**5-HTP**", "col_2": "⭐ 有限", "col_3": "100-300mg/日", "col_4": "⚠️与抗抑郁药同服有血清素综合征风险" }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let expected_payload = json!({
+            "msg_type": "interactive",
+            "content": card.to_string()
+        });
+
+        let payload = build_feishu_interactive_payload(&card);
+        assert_eq!(payload, expected_payload);
+    }
 }

@@ -126,11 +126,7 @@ pub fn format_active_skills_prompt(active_skills: &[ActiveSkillInvocation]) -> S
 }
 
 fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+    value.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 pub fn build_active_skill_attachment_tag(skill: &ActiveSkillInvocation) -> String {
@@ -171,7 +167,9 @@ pub fn build_active_skill_attachments(
         .iter()
         .map(|skill| {
             let payload = serde_json::to_string(skill).map_err(|error| {
-                AppError::InternalError(format!("Failed to serialize active skill payload: {error}"))
+                AppError::InternalError(format!(
+                    "Failed to serialize active skill payload: {error}"
+                ))
             })?;
             let mut hasher = Sha256::new();
             hasher.update(payload.as_bytes());
@@ -214,10 +212,8 @@ mod tests {
     #[test]
     fn compose_user_message_appends_skill_tag_after_prompt_and_embeds_content() {
         let skill = make_active_skill();
-        let composed = compose_user_message_with_active_skills(
-            "我想创建一个帮我炒股的skill",
-            &[skill],
-        );
+        let composed =
+            compose_user_message_with_active_skills("我想创建一个帮我炒股的skill", &[skill]);
 
         assert!(composed.starts_with("我想创建一个帮我炒股的skill"));
         assert!(composed.contains(r#"skill_name="skill-creator""#));

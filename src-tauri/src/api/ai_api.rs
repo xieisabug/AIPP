@@ -916,7 +916,8 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         .max_by_key(|msg| msg.id)
         .and_then(|m| m.generation_group_id.clone());
 
-    let init_message_list = build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
+    let init_message_list =
+        build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
     // 收集 MCP 信息
     let mcp_info = collect_mcp_info_for_assistant(&app_handle, assistant_id, None, None).await?;
@@ -1160,7 +1161,8 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
             .and_then(|m| m.generation_group_id.clone())
     };
 
-    let init_message_list = build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
+    let init_message_list =
+        build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
     // 收集 MCP 信息
     let mcp_info = collect_mcp_info_for_assistant(&app_handle, assistant_id, None, None).await?;
@@ -1524,7 +1526,8 @@ pub async fn regenerate_ai(
     let filtered_messages =
         filter_messages_for_parent_group(filtered_messages, regenerate_parent_group_id.as_deref());
 
-    let init_message_list = build_message_list_from_db(&filtered_messages, BranchSelection::LatestBranch);
+    let init_message_list =
+        build_message_list_from_db(&filtered_messages, BranchSelection::LatestBranch);
 
     debug!(?init_message_list, "initial message list for regenerate");
 
@@ -1845,14 +1848,10 @@ async fn initialize_conversation(
             })
             .collect();
         let context = text_attachments.join("\n");
-        let display_user_prompt_with_context = build_prompt_with_attachment_context(
-            &display_user_prompt,
-            &context,
-        );
-        let runtime_user_prompt_with_context = build_prompt_with_attachment_context(
-            &runtime_user_prompt,
-            &context,
-        );
+        let display_user_prompt_with_context =
+            build_prompt_with_attachment_context(&display_user_prompt, &context);
+        let runtime_user_prompt_with_context =
+            build_prompt_with_attachment_context(&runtime_user_prompt, &context);
         let db_init_message_list = vec![
             (String::from("system"), system_prompt.clone(), vec![]),
             (
@@ -1903,7 +1902,9 @@ async fn initialize_conversation(
         if !has_system_message {
             let system_message_created_time = all_messages
                 .first()
-                .map(|(message, _)| message.created_time.clone() - chrono::Duration::milliseconds(1))
+                .map(|(message, _)| {
+                    message.created_time.clone() - chrono::Duration::milliseconds(1)
+                })
                 .unwrap_or_else(chrono::Utc::now);
             db.message_repo()
                 .unwrap()
@@ -1955,14 +1956,10 @@ async fn initialize_conversation(
             .collect();
         let context = text_attachments.join("\n");
 
-        let display_user_prompt_with_context = build_prompt_with_attachment_context(
-            &display_user_prompt,
-            &context,
-        );
-        let runtime_user_prompt_with_context = build_prompt_with_attachment_context(
-            &runtime_user_prompt,
-            &context,
-        );
+        let display_user_prompt_with_context =
+            build_prompt_with_attachment_context(&display_user_prompt, &context);
+        let runtime_user_prompt_with_context =
+            build_prompt_with_attachment_context(&runtime_user_prompt, &context);
         // 添加用户消息
         let user_message = add_message(
             app_handle,

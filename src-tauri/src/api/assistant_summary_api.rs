@@ -130,10 +130,7 @@ fn normalize_tags(tags: Vec<String>) -> Vec<String> {
 fn parse_tags_from_value(value: Option<&Value>) -> Vec<String> {
     match value {
         Some(Value::Array(items)) => normalize_tags(
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(|text| text.to_string()))
-                .collect(),
+            items.iter().filter_map(|item| item.as_str().map(|text| text.to_string())).collect(),
         ),
         Some(Value::String(text)) => normalize_tags(
             text.split(|ch| matches!(ch, ',' | '，' | ';' | '；' | '\n' | '|'))
@@ -275,10 +272,7 @@ fn build_summary_user_prompt(
         ("系统提示词", "无".to_string())
     } else if let Some(limit) = prompt_limit {
         if raw_prompt.chars().count() > limit {
-            (
-                "系统提示词（首次生成失败后，已截断重试）",
-                trim_chars(raw_prompt, limit),
-            )
+            ("系统提示词（首次生成失败后，已截断重试）", trim_chars(raw_prompt, limit))
         } else {
             ("系统提示词", raw_prompt.to_string())
         }
@@ -355,13 +349,13 @@ async fn collect_assistant_profile(
                 tools: tools
                     .into_iter()
                     .filter(|(_, _, _, tool_enabled, _, _)| *tool_enabled)
-                    .map(
-                        |(_, tool_name, tool_description, _, tool_is_auto_run, _)| AssistantToolSummaryInput {
+                    .map(|(_, tool_name, tool_description, _, tool_is_auto_run, _)| {
+                        AssistantToolSummaryInput {
                             name: tool_name,
                             description: tool_description,
                             is_auto_run: tool_is_auto_run,
-                        },
-                    )
+                        }
+                    })
                     .collect(),
             })
             .collect::<Vec<_>>();
@@ -442,22 +436,11 @@ async fn generate_assistant_summary(
     let max_retry_attempts = get_retry_attempts_from_config(config_map).max(1);
     let mut attempts = 0;
     let response_text = loop {
-        let prompt_limit = if attempts == 0 {
-            None
-        } else {
-            Some(ASSISTANT_SUMMARY_RETRY_PROMPT_LIMIT)
-        };
+        let prompt_limit =
+            if attempts == 0 { None } else { Some(ASSISTANT_SUMMARY_RETRY_PROMPT_LIMIT) };
         let message_list = vec![
-            (
-                "system".to_string(),
-                ASSISTANT_SUMMARIZER_SYSTEM_PROMPT.to_string(),
-                Vec::new(),
-            ),
-            (
-                "user".to_string(),
-                build_summary_user_prompt(&profile, prompt_limit),
-                Vec::new(),
-            ),
+            ("system".to_string(), ASSISTANT_SUMMARIZER_SYSTEM_PROMPT.to_string(), Vec::new()),
+            ("user".to_string(), build_summary_user_prompt(&profile, prompt_limit), Vec::new()),
         ];
         let chat_request = crate::api::ai::conversation::build_chat_request_from_messages(
             &message_list,
@@ -466,10 +449,7 @@ async fn generate_assistant_summary(
         )
         .chat_request;
 
-        match client
-            .exec_chat(&model_detail.model.code, chat_request, None)
-            .await
-        {
+        match client.exec_chat(&model_detail.model.code, chat_request, None).await {
             Ok(response) => break response.first_text().unwrap_or("").to_string(),
             Err(error) => {
                 attempts += 1;
@@ -555,10 +535,7 @@ mod tests {
         );
 
         assert!(rendered.contains("系统提示词（首次生成失败后，已截断重试）："));
-        assert_eq!(
-            rendered.matches('B').count(),
-            ASSISTANT_SUMMARY_RETRY_PROMPT_LIMIT
-        );
+        assert_eq!(rendered.matches('B').count(), ASSISTANT_SUMMARY_RETRY_PROMPT_LIMIT);
     }
 }
 
@@ -567,9 +544,7 @@ fn emit_summary_progress(app_handle: &AppHandle, payload: AssistantSummaryProgre
 }
 
 fn parse_tags_json(tags_json: &str) -> Vec<String> {
-    serde_json::from_str::<Vec<String>>(tags_json)
-        .map(normalize_tags)
-        .unwrap_or_default()
+    serde_json::from_str::<Vec<String>>(tags_json).map(normalize_tags).unwrap_or_default()
 }
 
 pub async fn list_assistant_directory_for_butler(
@@ -588,22 +563,16 @@ pub async fn list_assistant_directory_for_butler(
 
     let mut items = Vec::new();
     for assistant in assistants {
-        let profile = collect_assistant_profile(app_handle, &assistant)
-            .await
-            .map_err(|e| e.to_string())?;
+        let profile =
+            collect_assistant_profile(app_handle, &assistant).await.map_err(|e| e.to_string())?;
         let stored_summary = {
             let assistant_db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
-            assistant_db
-                .get_assistant_summary(assistant.id)
-                .map_err(|e| e.to_string())?
+            assistant_db.get_assistant_summary(assistant.id).map_err(|e| e.to_string())?
         };
         let (summary, tags) = match stored_summary {
-            Some(AssistantSummary {
-                summary,
-                tags_json,
-                source_hash,
-                ..
-            }) if source_hash == profile.source_hash && !summary.trim().is_empty() => {
+            Some(AssistantSummary { summary, tags_json, source_hash, .. })
+                if source_hash == profile.source_hash && !summary.trim().is_empty() =>
+            {
                 (trim_chars(summary.trim(), 100), parse_tags_json(&tags_json))
             }
             _ => build_summary_fallback(&profile),
@@ -672,9 +641,7 @@ pub async fn build_butler_assistant_directory_prompt(
 
 #[tauri::command]
 pub async fn summarize_all_assistant_summaries(app_handle: tauri::AppHandle) -> Result<(), String> {
-    let config_map = get_feature_config_map(&app_handle)
-        .await
-        .map_err(|e| e.to_string())?;
+    let config_map = get_feature_config_map(&app_handle).await.map_err(|e| e.to_string())?;
     let Some(model_selection) = parse_model_selection(&config_map) else {
         return Err("请先在实验性功能中选择助手总结 AI 模型".to_string());
     };
@@ -722,13 +689,8 @@ pub async fn summarize_all_assistant_summaries(app_handle: tauri::AppHandle) -> 
             },
         );
 
-        match generate_assistant_summary(
-            &app_handle,
-            &assistant,
-            &model_selection,
-            &config_map,
-        )
-        .await
+        match generate_assistant_summary(&app_handle, &assistant, &model_selection, &config_map)
+            .await
         {
             Ok(_) => {
                 completed += 1;

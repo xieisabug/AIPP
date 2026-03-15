@@ -91,7 +91,10 @@ pub fn parse_slash_invocations(prompt: &str) -> Result<Vec<SlashInvocation>, App
     Ok(invocations)
 }
 
-pub fn remove_slash_invocations_from_prompt(prompt: &str, invocations: &[SlashInvocation]) -> String {
+pub fn remove_slash_invocations_from_prompt(
+    prompt: &str,
+    invocations: &[SlashInvocation],
+) -> String {
     if invocations.is_empty() {
         return prompt.to_string();
     }
@@ -154,12 +157,7 @@ pub fn escape_slash_argument(argument: &str) -> String {
 }
 
 pub fn normalize_slash_lookup_key(value: &str) -> String {
-    value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_lowercase()
+    value.split_whitespace().collect::<Vec<_>>().join(" ").trim().to_lowercase()
 }
 
 #[cfg(test)]
@@ -205,10 +203,7 @@ mod tests {
     fn test_parse_reports_missing_closing_parenthesis() {
         let error = parse_slash_invocations("/skills(React Best Practices").unwrap_err();
 
-        assert_eq!(
-            error.to_string(),
-            "解析错误: Slash 调用语法错误：/skills(...) 缺少闭合右括号"
-        );
+        assert_eq!(error.to_string(), "解析错误: Slash 调用语法错误：/skills(...) 缺少闭合右括号");
     }
 
     #[test]
@@ -216,10 +211,7 @@ mod tests {
         let prompt = "请 /skills(React Best Practices) 帮我处理";
         let invocations = parse_slash_invocations(prompt).unwrap();
 
-        assert_eq!(
-            remove_slash_invocations_from_prompt(prompt, &invocations),
-            "请  帮我处理"
-        );
+        assert_eq!(remove_slash_invocations_from_prompt(prompt, &invocations), "请  帮我处理");
     }
 
     #[test]
@@ -240,6 +232,9 @@ mod tests {
         let round_trip = unescape_slash_argument(&escaped);
 
         assert_eq!(round_trip, original);
-        assert_eq!(normalize_slash_lookup_key("  React   Best  Practices "), "react best practices");
+        assert_eq!(
+            normalize_slash_lookup_key("  React   Best  Practices "),
+            "react best practices"
+        );
     }
 }

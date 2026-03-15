@@ -1,5 +1,7 @@
-use crate::db::{assistant_db::AssistantDatabase, conversation_db::ConversationDatabase, mcp_db::MCPDatabase};
 use crate::db::conversation_db::Repository;
+use crate::db::{
+    assistant_db::AssistantDatabase, conversation_db::ConversationDatabase, mcp_db::MCPDatabase,
+};
 use crate::utils::path_utils::is_path_under_trusted;
 use std::path::{Component, Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
@@ -98,12 +100,7 @@ impl PermissionManager {
     /// Get assistant_id from conversation
     fn get_assistant_id_from_conversation(&self, conversation_id: i64) -> Option<i64> {
         let conversation_db = ConversationDatabase::new(&self.app_handle).ok()?;
-        conversation_db
-            .conversation_repo()
-            .ok()?
-            .read(conversation_id)
-            .ok()??
-            .assistant_id
+        conversation_db.conversation_repo().ok()?.read(conversation_id).ok()??.assistant_id
     }
 
     /// Check if path is in conversation trust list
@@ -372,10 +369,7 @@ impl PermissionManager {
 
         // 2. 检查会话信任路径列表
         if let Some(conv_id) = conversation_id {
-            if self
-                .is_path_in_conversation_trust_list(operation_state, conv_id, path)
-                .await
-            {
+            if self.is_path_in_conversation_trust_list(operation_state, conv_id, path).await {
                 debug!(
                     path = %path,
                     conversation_id = conv_id,
@@ -417,9 +411,7 @@ impl PermissionManager {
                         .parent()
                         .map(|p| p.to_string_lossy().to_string())
                         .unwrap_or_else(|| path.to_string());
-                    operation_state
-                        .add_conversation_trusted_path(conv_id, parent_path)
-                        .await;
+                    operation_state.add_conversation_trusted_path(conv_id, parent_path).await;
                 }
                 Ok(true)
             }

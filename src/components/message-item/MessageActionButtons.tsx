@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Edit2, GitBranch, Copy, Check, RefreshCw } from "lucide-react";
+import { Edit2, GitBranch, Copy, Check, RefreshCw, Send } from "lucide-react";
 import IconButton from "../IconButton";
 import { MessageTokenTooltip } from "../token-statistics";
 import MessageExportDialog from "./MessageExportDialog";
@@ -12,6 +12,8 @@ interface MessageActionButtonsProps {
     onEdit?: () => void;
     onRegenerate?: () => void;
     onFork?: () => void;
+    onResendToFeishuDebug?: () => void;
+    isResendToFeishuDebugPending?: boolean;
     tokenCount: number;
     inputTokenCount: number;
     outputTokenCount: number;
@@ -30,6 +32,8 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
     onEdit,
     onRegenerate,
     onFork,
+    onResendToFeishuDebug,
+    isResendToFeishuDebugPending = false,
     tokenCount,
     inputTokenCount,
     outputTokenCount,
@@ -55,6 +59,21 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
             )}
             {messageType === "response" && onFork && (
                 <IconButton icon={<GitBranch size={16} className="text-icon" />} onClick={onFork} />
+            )}
+            {messageType === "response" && onResendToFeishuDebug && (
+                <IconButton
+                    icon={
+                        isResendToFeishuDebugPending ? (
+                            <RefreshCw size={16} className="text-icon animate-spin" />
+                        ) : (
+                            <Send size={16} className="text-icon" />
+                        )
+                    }
+                    onClick={onResendToFeishuDebug}
+                    disabled={isResendToFeishuDebugPending}
+                    title="调试：重新发送到飞书"
+                    dataAippSlot="message-toolbar-resend-feishu"
+                />
             )}
             <MessageTokenTooltip
                 tokenCount={tokenCount}

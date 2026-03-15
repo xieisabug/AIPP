@@ -1729,7 +1729,8 @@ async fn execute_scheduled_task_inner(
         &slash_parse_result.active_skills,
     );
     let active_skill_attachments =
-        build_active_skill_attachments(&slash_parse_result.active_skills).map_err(|e| e.to_string())?;
+        build_active_skill_attachments(&slash_parse_result.active_skills)
+            .map_err(|e| e.to_string())?;
 
     // ── 4. 构建 LLM 客户端 & 选项 ─────────────────────────────────
     let llm_db = LLMDatabase::new(app_handle).map_err(|e| e.to_string())?;
@@ -1799,8 +1800,13 @@ async fn execute_scheduled_task_inner(
         tool_config.as_ref().map(|c| c.tool_name_mapping.clone()).unwrap_or_default();
 
     // ── 5. 创建对话并初始化消息 ─────────────────────────────────────
-    let mut init_messages = vec![("system".to_string(), assistant_prompt_result.clone(), Vec::new())];
-    init_messages.push(("user".to_string(), task_prompt_with_skills.clone(), active_skill_attachments));
+    let mut init_messages =
+        vec![("system".to_string(), assistant_prompt_result.clone(), Vec::new())];
+    init_messages.push((
+        "user".to_string(),
+        task_prompt_with_skills.clone(),
+        active_skill_attachments,
+    ));
     let (mut conversation, _) = crate::api::ai::conversation::init_conversation(
         app_handle,
         task.assistant_id,

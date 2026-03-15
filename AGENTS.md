@@ -35,6 +35,12 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 **Important**: Frontend debugging should be done through the built application, not through `npm run dev`.
 
+**Important**:
+
+- If you add a standalone Rust binary under `src-tauri/src/bin/` (for example, a debug/preview CLI), keep `src-tauri/Cargo.toml` aligned with `default-run = "Aipp"`.
+- Otherwise `cargo run` becomes ambiguous once multiple binaries exist, which breaks the default Tauri dev flow with errors like: `cargo run could not determine which binary to run`.
+- Run auxiliary CLIs explicitly with `--bin`, for example: `cargo run --manifest-path src-tauri/Cargo.toml --bin feishu_markdown_debug -- --help`.
+
 ## Architecture Overview
 
 ### Window-Based Architecture

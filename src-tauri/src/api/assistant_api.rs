@@ -145,9 +145,8 @@ pub async fn save_assistant(
     debug!(?assistant_detail, "assistant detail incoming");
     reject_reserved_butler_assistant_name(&assistant_detail.assistant.name)?;
     if assistant_detail.assistant.id != 0 {
-        let existing_assistant = assistant_db
-            .get_assistant(assistant_detail.assistant.id)
-            .map_err(|e| e.to_string())?;
+        let existing_assistant =
+            assistant_db.get_assistant(assistant_detail.assistant.id).map_err(|e| e.to_string())?;
         if is_butler_system_assistant(&existing_assistant) {
             return Err("系统保留的总管家助手不能修改".to_string());
         }
@@ -868,9 +867,7 @@ pub async fn get_assistant_workspaces(
     assistant_id: i64,
 ) -> Result<Vec<crate::db::assistant_db::AssistantWorkspace>, String> {
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    assistant_db
-        .get_assistant_workspaces(assistant_id)
-        .map_err(|e| e.to_string())
+    assistant_db.get_assistant_workspaces(assistant_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -881,16 +878,17 @@ pub async fn add_assistant_workspace(
     path: String,
 ) -> Result<(), String> {
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    assistant_db
-        .add_assistant_workspace(assistant_id, &path)
-        .map_err(|e| e.to_string())?;
+    assistant_db.add_assistant_workspace(assistant_id, &path).map_err(|e| e.to_string())?;
     info!(assistant_id, path = %path, "Added assistant workspace");
     Ok(())
 }
 
 #[tauri::command]
 #[instrument(skip(app_handle), fields(id))]
-pub async fn remove_assistant_workspace(app_handle: tauri::AppHandle, id: i64) -> Result<(), String> {
+pub async fn remove_assistant_workspace(
+    app_handle: tauri::AppHandle,
+    id: i64,
+) -> Result<(), String> {
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     assistant_db.remove_assistant_workspace(id).map_err(|e| e.to_string())?;
     info!(id, "Removed assistant workspace");

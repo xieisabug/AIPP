@@ -48,10 +48,7 @@ async fn resolve_active_skill_with_refresh(
         }
     }
 
-    Err(AppError::ParseError(format!(
-        "未找到 Skill: {}",
-        invocation.raw_text
-    )))
+    Err(AppError::ParseError(format!("未找到 Skill: {}", invocation.raw_text)))
 }
 
 pub async fn parse_slash_prompt(
@@ -67,7 +64,8 @@ pub async fn parse_slash_prompt(
         });
     }
 
-    let cleaned_prompt = remove_slash_invocations_from_prompt(prompt, &invocations).trim().to_string();
+    let cleaned_prompt =
+        remove_slash_invocations_from_prompt(prompt, &invocations).trim().to_string();
     let mut active_skills = Vec::new();
     let mut seen_identifiers = HashSet::new();
 

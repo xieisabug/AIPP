@@ -2842,9 +2842,7 @@ pub async fn handle_non_stream_chat(
                 .await;
 
             if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
-                activity_manager
-                    .clear_message_focus_keep_mcp(app_handle, conversation_id)
-                    .await;
+                activity_manager.clear_message_focus_keep_mcp(app_handle, conversation_id).await;
             }
 
             Ok(())

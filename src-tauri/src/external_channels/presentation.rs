@@ -190,9 +190,8 @@ fn parse_tool_result(content: &str) -> Option<ExternalToolResult> {
         .trim()
         .to_string();
     let raw_parameters = extract_labeled_line(content, "Parameters: ");
-    let parameters = raw_parameters
-        .as_deref()
-        .and_then(|value| serde_json::from_str::<Value>(value).ok());
+    let parameters =
+        raw_parameters.as_deref().and_then(|value| serde_json::from_str::<Value>(value).ok());
 
     Some(ExternalToolResult {
         call_id: extract_labeled_line(content, "Tool Call ID: "),
@@ -227,11 +226,7 @@ fn sanitize_plain_text(content: &str) -> Option<String> {
 
     let without_tool_comments = tool_comment_regex.replace_all(content, "");
     let without_attachments = attachment_regex.replace_all(&without_tool_comments, "[附件: $1]");
-    let normalized = without_attachments
-        .lines()
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let normalized = without_attachments.lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
 
     collapse_blank_lines(&normalized)
 }
@@ -322,7 +317,8 @@ impl ToolPresenter for AgentToolPresenter {
                 })
             }
             "load_skill" => {
-                let identifier = value_string(&tool_call.parameters, "identifier").unwrap_or("未知技能");
+                let identifier =
+                    value_string(&tool_call.parameters, "identifier").unwrap_or("未知技能");
                 Some(format!("加载技能 {}", identifier))
             }
             "todo_write" => Some("更新执行 Todo 清单".to_string()),
@@ -422,13 +418,16 @@ impl ToolPresenter for OperationToolPresenter {
                 .map(|path| format!("写入文件 {}", path)),
             "edit_file" => value_string(&tool_call.parameters, "file_path")
                 .map(|path| format!("编辑文件 {}", path)),
-            "list_directory" => value_string(&tool_call.parameters, "path")
-                .map(|path| format!("列出目录 {}", path)),
+            "list_directory" => {
+                value_string(&tool_call.parameters, "path").map(|path| format!("列出目录 {}", path))
+            }
             "execute_bash" => {
                 let description = value_string(&tool_call.parameters, "description");
                 let command = value_string(&tool_call.parameters, "command");
                 Some(match (description, command) {
-                    (Some(description), _) => format!("执行命令：{}", preview_text(description, 120)),
+                    (Some(description), _) => {
+                        format!("执行命令：{}", preview_text(description, 120))
+                    }
                     (None, Some(command)) => format!("执行命令：{}", preview_text(command, 120)),
                     _ => "执行命令".to_string(),
                 })
@@ -466,7 +465,9 @@ impl ToolPresenter for OperationToolPresenter {
             Some("execute_bash") if tool_result.success => {
                 Some(format!("命令执行完成：{}", preview_text(&tool_result.output, 180)))
             }
-            Some("execute_bash") => Some(format!("命令执行失败：{}", preview_text(&tool_result.output, 180))),
+            Some("execute_bash") => {
+                Some(format!("命令执行失败：{}", preview_text(&tool_result.output, 180)))
+            }
             Some("get_bash_output") if tool_result.success => {
                 Some(format!("后台命令输出：{}", preview_text(&tool_result.output, 180)))
             }
@@ -496,7 +497,9 @@ impl ToolPresenter for ArtifactToolPresenter {
     fn present_result(&self, tool_result: &ExternalToolResult) -> Option<String> {
         match tool_result.tool_name.as_deref() {
             Some("show_artifact") if tool_result.success => Some("Artifact 已展示".to_string()),
-            Some("get_artifact_workspace") if tool_result.success => Some("Artifact 工作区已读取".to_string()),
+            Some("get_artifact_workspace") if tool_result.success => {
+                Some("Artifact 工作区已读取".to_string())
+            }
             _ => None,
         }
     }
@@ -519,7 +522,8 @@ impl ToolPresenter for FallbackToolPresenter {
     }
 
     fn present_result(&self, tool_result: &ExternalToolResult) -> Option<String> {
-        let server_name = tool_result.server_name.as_deref().map(normalize_server_name).unwrap_or("unknown");
+        let server_name =
+            tool_result.server_name.as_deref().map(normalize_server_name).unwrap_or("unknown");
         let tool_name = tool_result.tool_name.as_deref().unwrap_or("unknown");
         let call_id = tool_result
             .call_id

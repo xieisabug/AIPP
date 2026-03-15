@@ -113,6 +113,14 @@ pub async fn refresh_butler_feishu_runtime_command(
 }
 
 #[tauri::command]
+pub async fn debug_resend_message_to_feishu(
+    app_handle: tauri::AppHandle,
+    message_id: i64,
+) -> Result<crate::feishu::FeishuDebugSendResult, String> {
+    crate::feishu::resend_message_to_feishu_for_debug(&app_handle, message_id).await
+}
+
+#[tauri::command]
 pub async fn open_data_folder(app: tauri::AppHandle) -> Result<(), String> {
     let app_dir = app.path().app_data_dir().unwrap();
     let db_path = app_dir.join("db");

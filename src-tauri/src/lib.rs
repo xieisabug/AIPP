@@ -9,12 +9,17 @@ mod feishu;
 mod mcp;
 mod plugin;
 mod scheduler;
-mod slash;
 mod skills;
+mod slash;
 mod state;
 mod template_engine;
 mod utils;
 mod window;
+
+pub use crate::feishu::{
+    debug_build_feishu_interactive_payload, debug_build_feishu_markdown_card,
+    debug_describe_feishu_markdown_blocks,
+};
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
@@ -36,8 +41,7 @@ use crate::api::assistant_summary_api::summarize_all_assistant_summaries;
 use crate::api::attachment_api::{add_attachment, open_attachment_with_default_app};
 use crate::api::butler_api::{
     get_butler_task_detail, list_butler_tasks, load_butler_main_conversation,
-    reset_butler_main_conversation,
-    spawn_butler_task_conversation,
+    reset_butler_main_conversation, spawn_butler_task_conversation,
 };
 use crate::api::conversation_api::{
     create_conversation_with_messages, create_message, delete_conversation, fork_conversation,
@@ -80,8 +84,8 @@ use crate::api::skill_api::{
     toggle_assistant_skill, update_assistant_skill_config,
 };
 use crate::api::system_api::{
-    clear_butler_feishu_secret, copy_image_to_clipboard, get_all_feature_config,
-    get_autostart_state, get_bang_list, get_butler_feishu_runtime_status,
+    clear_butler_feishu_secret, copy_image_to_clipboard, debug_resend_message_to_feishu,
+    get_all_feature_config, get_autostart_state, get_bang_list, get_butler_feishu_runtime_status,
     get_selected_text_api, open_data_folder, open_image, refresh_butler_feishu_runtime_command,
     resume_global_shortcut, save_butler_feishu_secret, save_feature_config, set_autostart,
     set_shortcut_recording, suspend_global_shortcut,
@@ -131,6 +135,7 @@ use crate::db::llm_db::LLMDatabase;
 use crate::db::mcp_db::MCPDatabase;
 use crate::db::scheduled_task_db::ScheduledTaskDatabase;
 use crate::db::system_db::SystemDatabase;
+use crate::feishu::FeishuButlerState;
 use crate::mcp::builtin_mcp::{
     add_or_update_aipp_builtin_server, execute_aipp_builtin_tool,
     handle_preview_file_relay_request, init_builtin_mcp_servers, list_aipp_builtin_templates,
@@ -177,13 +182,11 @@ use crate::window::{
     create_butler_experiment_window, create_butler_experiment_window_hidden,
     create_chat_ui_window_hidden, create_config_window_hidden, create_schedule_window_hidden,
     ensure_hidden_search_window, handle_open_ask_window, is_butler_experiment_enabled,
-    open_artifact_collections_window, open_artifact_preview_window,
-    open_butler_experiment_window, open_butler_experiment_window_inner, open_chat_ui_window,
-    open_chat_ui_window_inner, open_config_window, open_config_window_inner,
-    open_default_home_window, open_plugin_window, open_schedule_window, open_sidebar_window,
-    preferred_home_window_label,
+    open_artifact_collections_window, open_artifact_preview_window, open_butler_experiment_window,
+    open_butler_experiment_window_inner, open_chat_ui_window, open_chat_ui_window_inner,
+    open_config_window, open_config_window_inner, open_default_home_window, open_plugin_window,
+    open_schedule_window, open_sidebar_window, preferred_home_window_label,
 };
-use crate::feishu::FeishuButlerState;
 use db::conversation_db::ConversationDatabase;
 use db::database_upgrade;
 use db::plugin_db::PluginDatabase;
@@ -676,6 +679,7 @@ pub fn run() {
             clear_butler_feishu_secret,
             get_butler_feishu_runtime_status,
             refresh_butler_feishu_runtime_command,
+            debug_resend_message_to_feishu,
             open_data_folder,
             get_llm_providers,
             get_filtered_providers,

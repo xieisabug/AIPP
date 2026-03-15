@@ -754,10 +754,7 @@ pub(crate) fn ensure_conversation_table(conn: &Connection) -> rusqlite::Result<(
         )",
         [],
     )?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_conversation_name ON conversation(name)",
-        [],
-    )?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_conversation_name ON conversation(name)", [])?;
 
     let mut conversation_stmt = conn.prepare("PRAGMA table_info(conversation)")?;
     let conversation_columns: Vec<String> = conversation_stmt
@@ -768,10 +765,7 @@ pub(crate) fn ensure_conversation_table(conn: &Connection) -> rusqlite::Result<(
         .collect::<Result<Vec<String>, _>>()?;
 
     if !conversation_columns.contains(&"updated_time".to_string()) {
-        conn.execute(
-            "ALTER TABLE conversation ADD COLUMN updated_time DATETIME",
-            [],
-        )?;
+        conn.execute("ALTER TABLE conversation ADD COLUMN updated_time DATETIME", [])?;
     }
     conn.execute(
         "UPDATE conversation
@@ -811,10 +805,7 @@ pub(crate) fn ensure_conversation_table(conn: &Connection) -> rusqlite::Result<(
         conn.execute("ALTER TABLE conversation ADD COLUMN butler_task_summary TEXT", [])?;
     }
     if !conversation_columns.contains(&"butler_task_finalized_at".to_string()) {
-        conn.execute(
-            "ALTER TABLE conversation ADD COLUMN butler_task_finalized_at DATETIME",
-            [],
-        )?;
+        conn.execute("ALTER TABLE conversation ADD COLUMN butler_task_finalized_at DATETIME", [])?;
     }
 
     Ok(())
@@ -1954,8 +1945,7 @@ impl ButlerRepository {
                 updated_time = excluded.updated_time",
             params![butler_conversation_id, slot, now, now, now],
         )?;
-        self.get_main_state(slot)?
-            .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
+        self.get_main_state(slot)?.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
     }
 
     #[instrument(level = "debug", skip(self), fields(slot = slot))]
