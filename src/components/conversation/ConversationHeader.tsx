@@ -11,9 +11,24 @@ export interface ConversationHeaderProps {
     onStatsOpenChange?: (open: boolean) => void;
     exportOpen?: boolean;
     onExportOpenChange?: (open: boolean) => void;
+    allowRename?: boolean;
+    allowDelete?: boolean;
+    extraActions?: React.ReactNode;
 }
 
-const ConversationHeader: React.FC<ConversationHeaderProps> = memo(({ conversationId, conversation, onEdit, onDelete, statsOpen, onStatsOpenChange, exportOpen, onExportOpenChange }) => {
+const ConversationHeader: React.FC<ConversationHeaderProps> = memo(({
+    conversationId,
+    conversation,
+    onEdit,
+    onDelete,
+    statsOpen,
+    onStatsOpenChange,
+    exportOpen,
+    onExportOpenChange,
+    allowRename = true,
+    allowDelete = true,
+    extraActions,
+}) => {
     if (!conversationId) {
         return null;
     }
@@ -27,6 +42,9 @@ const ConversationHeader: React.FC<ConversationHeaderProps> = memo(({ conversati
             onStatsOpenChange={onStatsOpenChange}
             exportOpen={exportOpen}
             onExportOpenChange={onExportOpenChange}
+            allowRename={allowRename}
+            allowDelete={allowDelete}
+            extraActions={extraActions}
         />
     );
 });

@@ -287,6 +287,7 @@ pub async fn ask_ai(
     override_model_config: Option<HashMap<String, serde_json::Value>>,
     override_prompt: Option<String>,
     override_mcp_config: Option<McpOverrideConfig>,
+    runtime_user_prompt_prefix: Option<String>,
 ) -> Result<AiResponse, AppError> {
     info!("Ask AI start");
     debug!(
@@ -294,6 +295,7 @@ pub async fn ask_ai(
         ?override_model_config,
         ?override_prompt,
         ?override_mcp_config,
+        ?runtime_user_prompt_prefix,
         "ask_ai input parameters"
     );
 
@@ -405,6 +407,12 @@ pub async fn ask_ai(
         &template_engine.parse(&slash_parse_result.runtime_user_prompt, &template_context).await,
         &slash_parse_result.active_skills,
     );
+    let runtime_prompt_result = runtime_user_prompt_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|prefix| format!("{}\n\n{}", prefix, request_prompt_result))
+        .unwrap_or_else(|| request_prompt_result.clone());
     let display_prompt_result = compose_user_message_with_active_skills(
         &template_engine.parse(&slash_parse_result.display_prompt, &template_context).await,
         &slash_parse_result.active_skills,
@@ -427,7 +435,7 @@ pub async fn ask_ai(
         &assistant_detail,
         assistant_prompt_result,
         display_prompt_result,
-        request_prompt_result.clone(),
+        runtime_prompt_result.clone(),
         override_prompt.clone(),
         active_skill_attachments,
     )

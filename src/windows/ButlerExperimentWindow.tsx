@@ -28,7 +28,6 @@ import {
 } from "@/components/InlineInteractionCards";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
     Dialog,
     DialogContent,
@@ -150,7 +149,6 @@ function ButlerExperimentWindow() {
     const [assistants, setAssistants] = useState<AssistantListItem[]>([]);
     const [mainConversationId, setMainConversationId] = useState<string>("");
     const [mainModelDisplayName, setMainModelDisplayName] = useState<string>("");
-    const [mainConversationTitle, setMainConversationTitle] = useState("总管家主会话");
     const [tasks, setTasks] = useState<ButlerTaskListItem[]>([]);
     const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
     const [selectedTaskDetail, setSelectedTaskDetail] =
@@ -257,7 +255,6 @@ function ButlerExperimentWindow() {
         setLoadError(null);
         setMainConversationId(String(result.conversation.id));
         setMainModelDisplayName(result.model_display_name);
-        setMainConversationTitle(result.conversation.name || "总管家主会话");
         setTasks(nextTasks);
         setSelectedTaskId((current) => {
             if (current && nextTasks.some((task) => task.task_conversation_id === current)) {
@@ -561,196 +558,183 @@ function ButlerExperimentWindow() {
     return (
         <AntiLeakageProvider enabled={antiLeakageEnabled}>
             <div
-                className="h-screen bg-background text-foreground"
+                className="flex h-screen bg-background text-foreground"
                 data-aipp-window="butler_experiment"
                 data-aipp-slot="window-root"
             >
-                <div className="grid h-full grid-cols-[320px_minmax(0,1fr)] gap-4 p-4">
-                    <Card className="min-h-0 flex flex-col">
-                        <CardHeader className="pb-3">
-                            <div className="flex items-center justify-between gap-2">
-                                <div>
-                                    <CardTitle className="flex items-center gap-2 text-base">
-                                        <Bot className="h-4 w-4" />
-                                        任务台
-                                    </CardTitle>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                    <Button
-                                        type="button"
-                                        size="sm"
-                                        onClick={() => setIsTaskDialogOpen(true)}
-                                        disabled={!mainConversationId}
-                                    >
-                                        <Plus className="mr-2 h-4 w-4" />
-                                        派发任务
-                                    </Button>
-                                    <Button
-                                        type="button"
-                                        size="icon"
-                                        variant="ghost"
-                                        onClick={() => void loadMainConversation()}
-                                    >
-                                        <RefreshCw className="h-4 w-4" />
-                                    </Button>
-                                </div>
+                <div
+                    className="flex-none w-[320px] flex flex-col shadow-lg box-border rounded-r-xl mb-2 mr-2 bg-background overflow-hidden"
+                    data-aipp-slot="butler-task-rail"
+                >
+                    <div
+                        className="flex items-start justify-between gap-3 px-5 py-4 border-b border-border"
+                        data-aipp-slot="butler-task-rail-header"
+                    >
+                        <div className="min-w-0">
+                            <div className="flex items-center gap-2 text-sm font-semibold">
+                                <Bot className="h-4 w-4" />
+                                任务台
                             </div>
-                        </CardHeader>
-                        <CardContent className="min-h-0 flex-1 space-y-4 overflow-hidden">
-                            <div className="flex items-center justify-between">
-                                <div className="text-sm font-medium">
-                                    任务列表
-                                </div>
-                                <Badge variant="secondary">{tasks.length}</Badge>
-                            </div>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                                {mainConversationId
+                                    ? (mainModelDisplayName || "总管家主会话已就绪")
+                                    : (loadingMain
+                                        ? "正在准备总管家主会话..."
+                                        : "总管家主会话尚未初始化")}
+                            </p>
+                        </div>
+                        <Badge variant="secondary">{tasks.length}</Badge>
+                    </div>
 
-                            <ScrollArea className="min-h-0 flex-1 rounded-md border">
-                                <div className="space-y-2 p-3">
-                                    {tasks.length === 0 ? (
-                                        <div className="space-y-3 text-sm text-muted-foreground">
-                                            <div>
-                                                {mainConversationId ? (
-                                                    <>
-                                                        暂无任务。你可以在主会话中调用
-                                                        <code className="mx-1">
-                                                            spawn_task_conversation
-                                                        </code>
-                                                        ，或点击上方按钮手动派发。
-                                                    </>
-                                                ) : (
-                                                    "正在准备总管家任务台..."
-                                                )}
-                                            </div>
-                                            <Button
-                                                type="button"
-                                                variant="outline"
-                                                size="sm"
-                                                onClick={() => setIsTaskDialogOpen(true)}
-                                                disabled={!mainConversationId}
-                                            >
-                                                <Plus className="mr-2 h-4 w-4" />
-                                                新建第一个任务
-                                            </Button>
-                                        </div>
-                                    ) : null}
-                                    {tasks.map((task) => (
-                                        <button
-                                            key={task.task_conversation_id}
-                                            type="button"
-                                            className={`w-full rounded-lg border p-3 text-left transition-colors ${(isTaskDetailDialogOpen &&
-                                                selectedTaskId === task.task_conversation_id)
-                                                ? "border-primary bg-primary/5"
-                                                : "hover:bg-muted/40"
-                                                }`}
-                                            onClick={() =>
-                                                handleOpenTaskDetail(
-                                                    task.task_conversation_id
-                                                )
-                                            }
-                                        >
-                                            <div className="flex items-start justify-between gap-2">
-                                                <div className="min-w-0">
-                                                    <div className="font-medium truncate">
-                                                        {task.title}
-                                                    </div>
-                                                    <div className="text-xs text-muted-foreground mt-1 truncate">
-                                                        {task.executor_assistant_name}
-                                                    </div>
-                                                </div>
-                                                <Badge
-                                                    variant={getStatusVariant(task.status)}
-                                                >
-                                                    {getStatusLabel(task.status)}
-                                                </Badge>
-                                            </div>
-                                            <div className="mt-2 text-xs text-muted-foreground line-clamp-2">
-                                                {task.last_summary || task.goal}
-                                            </div>
-                                            <div className="mt-2 text-[11px] text-muted-foreground">
-                                                更新于 {formatTime(task.updated_time)}
-                                            </div>
-                                        </button>
-                                    ))}
-                                </div>
-                            </ScrollArea>
-                        </CardContent>
-                    </Card>
+                    <div
+                        className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-border"
+                        data-aipp-slot="butler-task-rail-actions"
+                    >
+                        <Button
+                            type="button"
+                            size="sm"
+                            onClick={() => setIsTaskDialogOpen(true)}
+                            disabled={!mainConversationId}
+                        >
+                            <Plus className="mr-2 h-4 w-4" />
+                            派发任务
+                        </Button>
+                        <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            onClick={() => void loadMainConversation()}
+                            aria-label="刷新任务台"
+                        >
+                            <RefreshCw className="h-4 w-4" />
+                        </Button>
+                    </div>
 
-                    <div className="min-h-0">
-                        <Card className="h-full min-h-0 flex flex-col">
-                            <CardHeader className="pb-3">
-                                <div className="flex items-start justify-between gap-3">
+                    <ScrollArea className="min-h-0 flex-1" data-aipp-slot="butler-task-list-scroll">
+                        <div className="space-y-2 p-3">
+                            {tasks.length === 0 ? (
+                                <div className="space-y-3 rounded-xl border border-dashed border-border p-4 text-sm text-muted-foreground">
                                     <div>
-                                        <CardTitle className="text-base">
-                                            {mainConversationTitle}
-                                        </CardTitle>
-                                        <p className="text-xs text-muted-foreground">
-                                            {mainModelDisplayName ? `${mainModelDisplayName}` : ""}
-                                        </p>
+                                        {mainConversationId ? (
+                                            <>
+                                                暂无任务。你可以在主会话中调用
+                                                <code className="mx-1">
+                                                    spawn_task_conversation
+                                                </code>
+                                                ，或点击上方按钮手动派发。
+                                            </>
+                                        ) : (
+                                            "正在准备总管家任务台..."
+                                        )}
                                     </div>
                                     <Button
                                         type="button"
                                         variant="outline"
                                         size="sm"
-                                        onClick={() => void handleResetMainConversation()}
-                                        disabled={!mainConversationId || resettingMainConversation}
+                                        onClick={() => setIsTaskDialogOpen(true)}
+                                        disabled={!mainConversationId}
                                     >
-                                        {resettingMainConversation ? (
-                                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                        ) : (
-                                            <RefreshCw className="mr-2 h-4 w-4" />
-                                        )}
-                                        重开新会话
+                                        <Plus className="mr-2 h-4 w-4" />
+                                        新建第一个任务
                                     </Button>
                                 </div>
-                            </CardHeader>
-                            <CardContent className="min-h-0 flex-1 p-0">
-                                {loadError ? (
-                                    <div className="flex h-full items-center justify-center p-6">
-                                        <Card className="max-w-md">
-                                            <CardHeader>
-                                                <CardTitle className="text-base">
-                                                    无法打开总管家实验窗口
-                                                </CardTitle>
-                                            </CardHeader>
-                                            <CardContent className="space-y-3 text-sm text-muted-foreground">
-                                                <p>{loadError}</p>
-                                                <Button
-                                                    type="button"
-                                                    variant="outline"
-                                                    onClick={() => void invoke("open_config_window")}
-                                                >
-                                                    打开设置
-                                                </Button>
-                                            </CardContent>
-                                        </Card>
+                            ) : null}
+                            {tasks.map((task) => (
+                                <button
+                                    key={task.task_conversation_id}
+                                    type="button"
+                                    className={`w-full rounded-xl p-3 text-left transition-colors ${
+                                        isTaskDetailDialogOpen &&
+                                        selectedTaskId === task.task_conversation_id
+                                            ? "bg-primary/8 ring-1 ring-primary"
+                                            : "hover:bg-muted/40"
+                                    }`}
+                                    onClick={() =>
+                                        handleOpenTaskDetail(task.task_conversation_id)
+                                    }
+                                >
+                                    <div className="flex items-start justify-between gap-2">
+                                        <div className="min-w-0">
+                                            <div className="font-medium truncate">
+                                                {task.title}
+                                            </div>
+                                            <div className="text-xs text-muted-foreground mt-1 truncate">
+                                                {task.executor_assistant_name}
+                                            </div>
+                                        </div>
+                                        <Badge variant={getStatusVariant(task.status)}>
+                                            {getStatusLabel(task.status)}
+                                        </Badge>
                                     </div>
-                                ) : mainConversationId ? (
-                                    <ConversationUI
-                                        key={mainConversationId}
-                                        ref={conversationUIRef}
-                                        conversationId={mainConversationId}
-                                        onChangeConversationId={() => undefined}
-                                        pluginList={pluginList}
-                                        hideHeader
-                                        onConversationChange={(conversation) =>
-                                            setMainConversationTitle(
-                                                conversation?.name || "总管家主会话"
-                                            )
-                                        }
-                                        inlineInteractionItems={inlineInteractionItems}
-                                        inlineInteractionVisible={hasInlineInteraction}
-                                    />
-                                ) : (
-                                    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                                        {loadingMain
-                                            ? "正在准备总管家主会话..."
-                                            : "总管家主会话尚未初始化"}
+                                    <div className="mt-2 text-xs text-muted-foreground line-clamp-2">
+                                        {task.last_summary || task.goal}
                                     </div>
-                                )}
-                            </CardContent>
-                        </Card>
-                    </div>
+                                    <div className="mt-2 text-[11px] text-muted-foreground">
+                                        更新于 {formatTime(task.updated_time)}
+                                    </div>
+                                </button>
+                            ))}
+                        </div>
+                    </ScrollArea>
+                </div>
+
+                <div
+                    className="flex-1 min-w-0 bg-background overflow-hidden rounded-xl m-2 ml-0 shadow-lg"
+                    data-aipp-slot="butler-main-content"
+                >
+                    {loadError ? (
+                        <div className="flex h-full items-center justify-center p-6">
+                            <div className="max-w-md space-y-4 rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground">
+                                <div className="space-y-1">
+                                    <div className="text-base font-semibold text-foreground">
+                                        无法打开总管家实验窗口
+                                    </div>
+                                    <p>{loadError}</p>
+                                </div>
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    onClick={() => void invoke("open_config_window")}
+                                >
+                                    打开设置
+                                </Button>
+                            </div>
+                        </div>
+                    ) : mainConversationId ? (
+                        <ConversationUI
+                            key={mainConversationId}
+                            ref={conversationUIRef}
+                            conversationId={mainConversationId}
+                            onChangeConversationId={() => undefined}
+                            pluginList={pluginList}
+                            allowRename={false}
+                            allowDelete={false}
+                            headerExtraActions={(
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => void handleResetMainConversation()}
+                                    disabled={!mainConversationId || resettingMainConversation}
+                                >
+                                    {resettingMainConversation ? (
+                                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                    ) : (
+                                        <RefreshCw className="mr-2 h-4 w-4" />
+                                    )}
+                                    重开新会话
+                                </Button>
+                            )}
+                            inlineInteractionItems={inlineInteractionItems}
+                            inlineInteractionVisible={hasInlineInteraction}
+                        />
+                    ) : (
+                        <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                            {loadingMain
+                                ? "正在准备总管家主会话..."
+                                : "总管家主会话尚未初始化"}
+                        </div>
+                    )}
                 </div>
 
                 <OperationPermissionDialog

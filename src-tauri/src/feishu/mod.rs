@@ -18,7 +18,7 @@ use tokio::time::sleep;
 use tracing::{debug, warn};
 
 use crate::api::ai::types::AiRequest;
-use crate::api::ai_api::{add_message, ask_ai};
+use crate::api::ai_api::ask_ai;
 use crate::api::butler_api::{
     get_butler_main_continuation_lock, load_or_create_butler_main_internal,
     resolve_butler_execution_window, wait_for_butler_main_to_be_idle,
@@ -647,22 +647,6 @@ async fn process_incoming_text_message(
     {
         let _guard = continuation_lock.lock().await;
         wait_for_butler_main_to_be_idle(app_handle, butler_conversation.id).await;
-        add_message(
-            app_handle,
-            None,
-            butler_conversation.id,
-            "system".to_string(),
-            build_feishu_system_message(event),
-            None,
-            None,
-            None,
-            None,
-            0,
-            None,
-            None,
-        )
-        .map_err(|e| e.to_string())?;
-
         let window = resolve_butler_execution_window(app_handle)?;
         let request = AiRequest {
             conversation_id: butler_conversation.id.to_string(),
@@ -688,6 +672,7 @@ async fn process_incoming_text_message(
             None,
             None,
             None,
+            Some(build_feishu_system_message(event)),
         )
         .await
         .map_err(|e| e.to_string())?;

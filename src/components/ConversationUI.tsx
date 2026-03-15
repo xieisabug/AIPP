@@ -128,6 +128,9 @@ interface ConversationUIProps {
     onConversationChange?: (conversation?: Conversation) => void;
     inlineInteractionItems?: InlineInteractionItem[];
     inlineInteractionVisible?: boolean;
+    allowRename?: boolean;
+    allowDelete?: boolean;
+    headerExtraActions?: ReactNode;
 }
 
 const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
@@ -142,6 +145,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             onConversationChange,
             inlineInteractionItems,
             inlineInteractionVisible = false,
+            allowRename = true,
+            allowDelete = true,
+            headerExtraActions,
         },
         ref
     ) => {
@@ -882,6 +888,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onStatsOpenChange={setStatsDialogOpen}
                             exportOpen={exportDialogOpen}
                             onExportOpenChange={setExportDialogOpen}
+                            allowRename={allowRename}
+                            allowDelete={allowDelete}
+                            extraActions={headerExtraActions}
                         />
                     )}
 

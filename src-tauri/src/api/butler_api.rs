@@ -310,6 +310,36 @@ fn sync_butler_skill_capabilities(app_handle: &AppHandle, assistant_id: i64) -> 
     Ok(())
 }
 
+fn is_external_channel_metadata_system_message(content: &str) -> bool {
+    let trimmed = content.trim();
+    trimmed.starts_with("<external_channel_input>")
+        && trimmed.ends_with("</external_channel_input>")
+}
+
+fn cleanup_butler_external_channel_system_messages(
+    app_handle: &AppHandle,
+    conversation_id: i64,
+) -> Result<(), String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let message_repo = db.message_repo().map_err(|e| e.to_string())?;
+    let polluted_message_ids: Vec<i64> = message_repo
+        .list_by_conversation_id(conversation_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter_map(|(message, _)| {
+            (message.message_type == "system"
+                && is_external_channel_metadata_system_message(&message.content))
+            .then_some(message.id)
+        })
+        .collect();
+
+    for message_id in polluted_message_ids {
+        message_repo.delete(message_id).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
 async fn ensure_butler_system_assistant(app_handle: &AppHandle) -> Result<Assistant, String> {
     let model_selection = get_butler_model_selection(app_handle).await?;
     let system_prompt = build_butler_system_prompt(app_handle).await?;
@@ -650,6 +680,7 @@ fn schedule_butler_main_followup(
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -815,6 +846,7 @@ pub(crate) async fn load_or_create_butler_main_internal(
                     conversation.updated_time = Utc::now();
                     conversation_repo.update(&conversation).map_err(|e| e.to_string())?;
                 }
+                cleanup_butler_external_channel_system_messages(app_handle, conversation.id)?;
                 conversation
             }
             None => {
@@ -832,6 +864,7 @@ pub(crate) async fn load_or_create_butler_main_internal(
                 butler_repo
                     .upsert_main_state(created.id, BUTLER_MAIN_SLOT)
                     .map_err(|e| e.to_string())?;
+                cleanup_butler_external_channel_system_messages(app_handle, created.id)?;
                 created
             }
         }
@@ -848,6 +881,7 @@ pub(crate) async fn load_or_create_butler_main_internal(
             ))
             .map_err(|e| e.to_string())?;
         butler_repo.upsert_main_state(created.id, BUTLER_MAIN_SLOT).map_err(|e| e.to_string())?;
+        cleanup_butler_external_channel_system_messages(app_handle, created.id)?;
         created
     };
 
@@ -1324,6 +1358,7 @@ pub(crate) async fn spawn_butler_task_with_window(
                     .state::<crate::state::activity_state::ConversationActivityManager>(),
                 window_clone,
                 ai_request,
+                None,
                 None,
                 None,
                 None,
