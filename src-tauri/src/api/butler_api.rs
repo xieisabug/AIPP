@@ -681,6 +681,7 @@ fn schedule_butler_main_followup(
                 None,
                 None,
                 None,
+                Some("internal".to_string()),
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -1362,6 +1363,7 @@ pub(crate) async fn spawn_butler_task_with_window(
                 None,
                 None,
                 None,
+                Some("internal".to_string()),
             )
             .await
             {

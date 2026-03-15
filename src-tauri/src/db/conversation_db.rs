@@ -1006,6 +1006,60 @@ impl ConversationDatabase {
             "CREATE INDEX IF NOT EXISTS idx_external_channel_message_chat_direction ON external_channel_message_link(channel, external_chat_id, direction)",
             [],
         )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS external_channel_relay_scope (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel TEXT NOT NULL,
+                conversation_id INTEGER NOT NULL,
+                origin TEXT NOT NULL,
+                external_chat_id TEXT,
+                external_user_id TEXT,
+                anchor_external_message_id TEXT NOT NULL,
+                start_after_local_message_id INTEGER NOT NULL DEFAULT 0,
+                last_delivered_local_message_id INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending',
+                last_error TEXT,
+                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_time DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_external_channel_relay_scope_conversation
+             ON external_channel_relay_scope(channel, conversation_id, created_time DESC)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_external_channel_relay_scope_status
+             ON external_channel_relay_scope(channel, status, updated_time DESC)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS external_channel_message_delivery (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope_id INTEGER NOT NULL,
+                channel TEXT NOT NULL,
+                conversation_id INTEGER NOT NULL,
+                local_message_id INTEGER NOT NULL,
+                external_message_id TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                rendered_text TEXT,
+                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(scope_id, local_message_id)
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_external_channel_message_delivery_scope
+             ON external_channel_message_delivery(scope_id, local_message_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_external_channel_message_delivery_conversation
+             ON external_channel_message_delivery(channel, conversation_id, local_message_id)",
+            [],
+        )?;
 
         // 创建对话总结表
         conn.execute(

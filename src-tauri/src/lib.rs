@@ -4,6 +4,7 @@ mod api;
 mod artifacts;
 mod db;
 mod errors;
+mod external_channels;
 mod feishu;
 mod mcp;
 mod plugin;

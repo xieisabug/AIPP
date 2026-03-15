@@ -26,6 +26,7 @@ use crate::db::conversation_db::{ConversationDatabase, Message, MessageAttachmen
 use crate::db::llm_db::LLMDatabase;
 use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
+use crate::feishu::maybe_schedule_butler_feishu_relay_for_aipp_turn;
 use crate::mcp::execution_api::cancel_mcp_tool_calls_by_conversation;
 use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt};
 use crate::skills::{
@@ -288,6 +289,7 @@ pub async fn ask_ai(
     override_prompt: Option<String>,
     override_mcp_config: Option<McpOverrideConfig>,
     runtime_user_prompt_prefix: Option<String>,
+    relay_origin: Option<String>,
 ) -> Result<AiResponse, AppError> {
     info!("Ask AI start");
     debug!(
@@ -296,6 +298,7 @@ pub async fn ask_ai(
         ?override_prompt,
         ?override_mcp_config,
         ?runtime_user_prompt_prefix,
+        ?relay_origin,
         "ask_ai input parameters"
     );
 
@@ -443,6 +446,22 @@ pub async fn ask_ai(
 
     // 设置用户消息的活动状态（闪亮边框）
     activity_manager.set_user_pending(&app_handle, conversation_id, user_message_id).await;
+
+    if let Err(error) = maybe_schedule_butler_feishu_relay_for_aipp_turn(
+        &app_handle,
+        conversation_id,
+        user_message_id.saturating_sub(1),
+        relay_origin.as_deref(),
+    )
+    .await
+    {
+        warn!(
+            conversation_id,
+            user_message_id,
+            error = %error,
+            "failed to schedule butler feishu relay scope"
+        );
+    }
 
     message_token_manager.reset_cancel_token(conversation_id).await;
 

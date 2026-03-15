@@ -185,6 +185,7 @@ const FeatureAssistantConfig: React.FC = () => {
             butler_feishu_receive_p2p: "true",
             butler_feishu_receive_group: "true",
             butler_feishu_group_require_mention: "true",
+            butler_feishu_only_reply_feishu_originated: "false",
             butler_feishu_allowed_open_ids: "",
             butler_feishu_allowed_chat_ids: "",
         },
@@ -294,6 +295,8 @@ const FeatureAssistantConfig: React.FC = () => {
                     experimentalConfig?.get("butler_feishu_receive_group") || "true",
                 butler_feishu_group_require_mention:
                     experimentalConfig?.get("butler_feishu_group_require_mention") || "true",
+                butler_feishu_only_reply_feishu_originated:
+                    experimentalConfig?.get("butler_feishu_only_reply_feishu_originated") || "false",
                 butler_feishu_allowed_open_ids:
                     experimentalConfig?.get("butler_feishu_allowed_open_ids") || "",
                 butler_feishu_allowed_chat_ids:
@@ -468,6 +471,8 @@ const FeatureAssistantConfig: React.FC = () => {
             butler_feishu_receive_p2p: String(v.butler_feishu_receive_p2p),
             butler_feishu_receive_group: String(v.butler_feishu_receive_group),
             butler_feishu_group_require_mention: String(v.butler_feishu_group_require_mention),
+            butler_feishu_only_reply_feishu_originated:
+                String(v.butler_feishu_only_reply_feishu_originated),
             butler_feishu_allowed_open_ids: String(v.butler_feishu_allowed_open_ids || ""),
             butler_feishu_allowed_chat_ids: String(v.butler_feishu_allowed_chat_ids || ""),
         });

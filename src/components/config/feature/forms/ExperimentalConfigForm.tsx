@@ -802,6 +802,27 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
 
                                     <Controller
                                         control={form.control}
+                                        name="butler_feishu_only_reply_feishu_originated"
+                                        render={({ field }) => (
+                                            <FormItem className="flex items-center justify-between rounded-md border p-4">
+                                                <div>
+                                                    <FormLabel>是否只返回飞书请求的响应到飞书</FormLabel>
+                                                    <p className="text-xs text-muted-foreground mt-1">
+                                                        默认关闭。关闭时，总管家主会话会尽量同步到 AIPP 与飞书；开启后，仅飞书触发的回合会回发到飞书。
+                                                    </p>
+                                                </div>
+                                                <FormControl>
+                                                    <Switch
+                                                        checked={field.value === true || field.value === "true"}
+                                                        onCheckedChange={field.onChange}
+                                                    />
+                                                </FormControl>
+                                            </FormItem>
+                                        )}
+                                    />
+
+                                    <Controller
+                                        control={form.control}
                                         name="butler_feishu_allowed_open_ids"
                                         render={({ field }) => (
                                             <FormItem>

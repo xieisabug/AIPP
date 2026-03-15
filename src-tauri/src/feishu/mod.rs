@@ -23,8 +23,9 @@ use crate::api::butler_api::{
     get_butler_main_continuation_lock, load_or_create_butler_main_internal,
     resolve_butler_execution_window, wait_for_butler_main_to_be_idle,
 };
-use crate::db::conversation_db::ConversationDatabase;
+use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::system_db::{SecureConfigEntry, SystemDatabase};
+use crate::external_channels::presentation::{render_message_for_external_channel, RenderContext};
 
 const EXPERIMENTAL_FEATURE_CODE: &str = "experimental";
 const FEISHU_SCOPE: &str = "butler_feishu";
@@ -33,6 +34,9 @@ const SECURE_MASTER_KEY: &str = "secure_config_master_key";
 const CHANNEL_FEISHU: &str = "feishu";
 const BOTLER_SOURCE: &str = "feishu_butler";
 const TERMINAL_TASK_STATUSES: [&str; 3] = ["succeeded", "failed", "cancelled"];
+const RELAY_ORIGIN_AIPP: &str = "aipp";
+const RELAY_ORIGIN_FEISHU: &str = "feishu";
+const RELAY_ORIGIN_INTERNAL: &str = "internal";
 
 pub struct FeishuButlerState {
     runtime_task: StdMutex<Option<tauri::async_runtime::JoinHandle<()>>>,
@@ -78,8 +82,41 @@ struct FeishuRuntimeConfig {
     allow_p2p: bool,
     allow_group: bool,
     group_require_mention: bool,
+    only_reply_feishu_originated: bool,
     allowed_open_ids: HashSet<String>,
     allowed_chat_ids: HashSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ChannelLinkTarget {
+    external_message_id: String,
+    external_chat_id: Option<String>,
+    external_user_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RelayScopeRecord {
+    id: i64,
+    channel: String,
+    conversation_id: i64,
+    origin: String,
+    external_chat_id: Option<String>,
+    external_user_id: Option<String>,
+    anchor_external_message_id: String,
+    start_after_local_message_id: i64,
+    last_delivered_local_message_id: i64,
+    status: String,
+}
+
+#[derive(Debug, Clone)]
+struct NewRelayScope<'a> {
+    channel: &'a str,
+    conversation_id: i64,
+    origin: &'a str,
+    external_chat_id: Option<&'a str>,
+    external_user_id: Option<&'a str>,
+    anchor_external_message_id: &'a str,
+    start_after_local_message_id: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -349,6 +386,10 @@ async fn load_runtime_config(app_handle: &AppHandle) -> Result<FeishuRuntimeConf
             get("butler_feishu_group_require_mention").as_str(),
             "false" | "0"
         ),
+        only_reply_feishu_originated: matches!(
+            get("butler_feishu_only_reply_feishu_originated").as_str(),
+            "true" | "1"
+        ),
         allowed_open_ids: split_allowlist(&get("butler_feishu_allowed_open_ids")),
         allowed_chat_ids: split_allowlist(&get("butler_feishu_allowed_chat_ids")),
     })
@@ -370,6 +411,69 @@ pub(crate) async fn get_runtime_status(
     status.allow_group = config.allow_group;
     status.group_require_mention = config.group_require_mention;
     Ok(status)
+}
+
+pub(crate) async fn maybe_schedule_butler_feishu_relay_for_aipp_turn(
+    app_handle: &AppHandle,
+    conversation_id: i64,
+    start_after_local_message_id: i64,
+    relay_origin: Option<&str>,
+) -> Result<(), String> {
+    match relay_origin.unwrap_or(RELAY_ORIGIN_AIPP) {
+        RELAY_ORIGIN_FEISHU | RELAY_ORIGIN_INTERNAL => return Ok(()),
+        _ => {}
+    }
+
+    let config = load_runtime_config(app_handle).await?;
+    if !config.butler_enabled || !config.enabled || config.only_reply_feishu_originated {
+        return Ok(());
+    }
+
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conversation = db
+        .conversation_repo()
+        .map_err(|e| e.to_string())?
+        .read(conversation_id)
+        .map_err(|e| e.to_string())?;
+    let Some(conversation) = conversation else {
+        return Ok(());
+    };
+    if conversation.conversation_kind != "butler_main" {
+        return Ok(());
+    }
+
+    let Some(target) = find_latest_feishu_target(app_handle, conversation_id)? else {
+        return Ok(());
+    };
+
+    let scope_id = create_relay_scope(
+        app_handle,
+        NewRelayScope {
+            channel: CHANNEL_FEISHU,
+            conversation_id,
+            origin: RELAY_ORIGIN_AIPP,
+            external_chat_id: target.external_chat_id.as_deref(),
+            external_user_id: target.external_user_id.as_deref(),
+            anchor_external_message_id: &target.external_message_id,
+            start_after_local_message_id,
+        },
+    )?;
+
+    let app_handle_clone = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = wait_for_butler_to_settle(&app_handle_clone, conversation_id).await {
+            let _ = mark_relay_scope_failed(&app_handle_clone, scope_id, &error);
+            warn!(conversation_id, scope_id, error = %error, "butler relay scope settle failed");
+            return;
+        }
+
+        if let Err(error) = flush_feishu_relay_scope(&app_handle_clone, &config, scope_id).await {
+            let _ = mark_relay_scope_failed(&app_handle_clone, scope_id, &error);
+            warn!(conversation_id, scope_id, error = %error, "butler relay scope flush failed");
+        }
+    });
+
+    Ok(())
 }
 
 pub(crate) fn refresh_runtime_async(app_handle: &AppHandle) {
@@ -642,6 +746,18 @@ async fn process_incoming_text_message(
             payload_type: "text",
         },
     )?;
+    let relay_scope_id = create_relay_scope(
+        app_handle,
+        NewRelayScope {
+            channel: CHANNEL_FEISHU,
+            conversation_id: butler_conversation.id,
+            origin: RELAY_ORIGIN_FEISHU,
+            external_chat_id: event.chat_id.as_deref(),
+            external_user_id: Some(&event.sender_open_id),
+            anchor_external_message_id: &event.message_id,
+            start_after_local_message_id: before_message_max_id,
+        },
+    )?;
 
     let continuation_lock = get_butler_main_continuation_lock(butler_conversation.id).await;
     {
@@ -673,6 +789,7 @@ async fn process_incoming_text_message(
             None,
             None,
             Some(build_feishu_system_message(event)),
+            Some(RELAY_ORIGIN_FEISHU.to_string()),
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -691,25 +808,7 @@ async fn process_incoming_text_message(
         )?;
     }
 
-    let assistant_message = find_latest_completed_assistant_message(
-        app_handle,
-        butler_conversation.id,
-        before_message_max_id,
-    )?
-    .ok_or_else(|| "总管家未产生可回发的最终文本结果".to_string())?;
-    let outbound_message_id = reply_text_message(config, &event.message_id, &assistant_message.content).await?;
-    insert_external_link(
-        app_handle,
-        ChannelLinkRecord {
-            external_message_id: &outbound_message_id,
-            external_chat_id: event.chat_id.as_deref(),
-            external_user_id: Some(&event.sender_open_id),
-            conversation_id: butler_conversation.id,
-            local_message_id: Some(assistant_message.id),
-            direction: "outbound",
-            payload_type: "text",
-        },
-    )?;
+    flush_feishu_relay_scope(app_handle, config, relay_scope_id).await?;
     mutate_status(app_handle, |status| {
         status.last_error = None;
         status.status_text = "飞书消息处理完成".to_string();
@@ -809,11 +908,176 @@ fn find_latest_message_id_by_type(
     .map_err(|e| e.to_string())
 }
 
-fn find_latest_completed_assistant_message(
+fn create_relay_scope(app_handle: &AppHandle, new_scope: NewRelayScope<'_>) -> Result<i64, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO external_channel_relay_scope
+            (channel, conversation_id, origin, external_chat_id, external_user_id,
+             anchor_external_message_id, start_after_local_message_id, last_delivered_local_message_id,
+             status, updated_time)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 'pending', CURRENT_TIMESTAMP)",
+        params![
+            new_scope.channel,
+            new_scope.conversation_id,
+            new_scope.origin,
+            new_scope.external_chat_id,
+            new_scope.external_user_id,
+            new_scope.anchor_external_message_id,
+            new_scope.start_after_local_message_id,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn load_relay_scope(app_handle: &AppHandle, scope_id: i64) -> Result<RelayScopeRecord, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT id, channel, conversation_id, origin, external_chat_id, external_user_id,
+                anchor_external_message_id, start_after_local_message_id,
+                last_delivered_local_message_id, status
+         FROM external_channel_relay_scope
+         WHERE id = ?1",
+        params![scope_id],
+        |row| {
+            Ok(RelayScopeRecord {
+                id: row.get(0)?,
+                channel: row.get(1)?,
+                conversation_id: row.get(2)?,
+                origin: row.get(3)?,
+                external_chat_id: row.get(4)?,
+                external_user_id: row.get(5)?,
+                anchor_external_message_id: row.get(6)?,
+                start_after_local_message_id: row.get(7)?,
+                last_delivered_local_message_id: row.get(8)?,
+                status: row.get(9)?,
+            })
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn mark_relay_scope_progress(
+    app_handle: &AppHandle,
+    scope_id: i64,
+    last_delivered_local_message_id: i64,
+    status: &str,
+) -> Result<(), String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE external_channel_relay_scope
+         SET last_delivered_local_message_id = ?2,
+             status = ?3,
+             last_error = NULL,
+             updated_time = CURRENT_TIMESTAMP
+         WHERE id = ?1",
+        params![scope_id, last_delivered_local_message_id, status],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn mark_relay_scope_failed(app_handle: &AppHandle, scope_id: i64, error: &str) -> Result<(), String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE external_channel_relay_scope
+         SET status = 'failed',
+             last_error = ?2,
+             updated_time = CURRENT_TIMESTAMP
+         WHERE id = ?1",
+        params![scope_id, truncate_text(error, 500)],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn record_scope_delivery(
+    app_handle: &AppHandle,
+    scope_id: i64,
+    channel: &str,
+    conversation_id: i64,
+    local_message_id: i64,
+    external_message_id: Option<&str>,
+    status: &str,
+    rendered_text: &str,
+) -> Result<(), String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO external_channel_message_delivery
+            (scope_id, channel, conversation_id, local_message_id, external_message_id, status, rendered_text, updated_time)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP)
+         ON CONFLICT(scope_id, local_message_id) DO UPDATE SET
+            external_message_id = excluded.external_message_id,
+            status = excluded.status,
+            rendered_text = excluded.rendered_text,
+            updated_time = CURRENT_TIMESTAMP",
+        params![
+            scope_id,
+            channel,
+            conversation_id,
+            local_message_id,
+            external_message_id,
+            status,
+            rendered_text,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn find_latest_feishu_target(
+    app_handle: &AppHandle,
+    conversation_id: i64,
+) -> Result<Option<ChannelLinkTarget>, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT external_message_id, external_chat_id, external_user_id
+         FROM external_channel_message_link
+         WHERE channel = ?1 AND conversation_id = ?2
+         ORDER BY created_time DESC, id DESC
+         LIMIT 1",
+        params![CHANNEL_FEISHU, conversation_id],
+        |row| {
+            Ok(ChannelLinkTarget {
+                external_message_id: row.get(0)?,
+                external_chat_id: row.get(1)?,
+                external_user_id: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+fn find_scope_reply_anchor(app_handle: &AppHandle, scope_id: i64) -> Result<Option<String>, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT external_message_id
+         FROM external_channel_message_delivery
+         WHERE scope_id = ?1
+           AND status = 'sent'
+           AND external_message_id IS NOT NULL
+         ORDER BY local_message_id DESC, id DESC
+         LIMIT 1",
+        params![scope_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+fn list_relayable_messages(
     app_handle: &AppHandle,
     conversation_id: i64,
     after_message_id: i64,
-) -> Result<Option<crate::db::conversation_db::Message>, String> {
+) -> Result<Vec<crate::db::conversation_db::Message>, String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let messages = db
         .message_repo()
@@ -821,23 +1085,106 @@ fn find_latest_completed_assistant_message(
         .list_by_conversation_id(conversation_id)
         .map_err(|e| e.to_string())?;
     let mut seen = HashSet::new();
-    let reply_messages: Vec<_> = messages
+    Ok(messages
         .into_iter()
         .map(|(message, _)| message)
         .filter(|message| seen.insert(message.id))
         .filter(|message| {
             message.id > after_message_id
-                && matches!(message.message_type.as_str(), "response" | "assistant")
-                && !message.content.trim().is_empty()
+                && matches!(
+                    message.message_type.as_str(),
+                    "user" | "response" | "assistant" | "tool_result"
+                )
         })
-        .collect();
+        .collect())
+}
 
-    Ok(reply_messages
-        .iter()
-        .filter(|message| message.finish_time.is_some())
-        .max_by_key(|message| message.id)
-        .cloned()
-        .or_else(|| reply_messages.into_iter().max_by_key(|message| message.id)))
+async fn flush_feishu_relay_scope(
+    app_handle: &AppHandle,
+    config: &FeishuRuntimeConfig,
+    scope_id: i64,
+) -> Result<(), String> {
+    let scope = load_relay_scope(app_handle, scope_id)?;
+    if scope.status == "completed" {
+        return Ok(());
+    }
+
+    let mut current_reply_to = find_scope_reply_anchor(app_handle, scope.id)?
+        .unwrap_or_else(|| scope.anchor_external_message_id.clone());
+    let start_after = scope
+        .last_delivered_local_message_id
+        .max(scope.start_after_local_message_id);
+    let messages = list_relayable_messages(app_handle, scope.conversation_id, start_after)?;
+    let mut delivered_count = 0usize;
+    let mut last_processed_message_id = scope.last_delivered_local_message_id;
+
+    for message in messages {
+        let rendered = render_message_for_external_channel(
+            &message,
+            &RenderContext {
+                channel: &scope.channel,
+                relay_origin: &scope.origin,
+            },
+        );
+        last_processed_message_id = message.id;
+
+        match rendered {
+            Some(rendered_text) if !rendered_text.trim().is_empty() => {
+                let outbound_message_id =
+                    reply_text_message(config, &current_reply_to, &rendered_text).await?;
+                insert_external_link(
+                    app_handle,
+                    ChannelLinkRecord {
+                        external_message_id: &outbound_message_id,
+                        external_chat_id: scope.external_chat_id.as_deref(),
+                        external_user_id: scope.external_user_id.as_deref(),
+                        conversation_id: scope.conversation_id,
+                        local_message_id: Some(message.id),
+                        direction: "outbound",
+                        payload_type: "text",
+                    },
+                )?;
+                record_scope_delivery(
+                    app_handle,
+                    scope.id,
+                    &scope.channel,
+                    scope.conversation_id,
+                    message.id,
+                    Some(&outbound_message_id),
+                    "sent",
+                    &rendered_text,
+                )?;
+                current_reply_to = outbound_message_id;
+                delivered_count += 1;
+            }
+            _ => {
+                record_scope_delivery(
+                    app_handle,
+                    scope.id,
+                    &scope.channel,
+                    scope.conversation_id,
+                    message.id,
+                    None,
+                    "skipped",
+                    "",
+                )?;
+            }
+        }
+
+        mark_relay_scope_progress(app_handle, scope.id, message.id, "sending")?;
+    }
+
+    if delivered_count == 0 && scope.origin == RELAY_ORIGIN_FEISHU {
+        return Err("总管家未产生可回发的可读内容".to_string());
+    }
+
+    mark_relay_scope_progress(
+        app_handle,
+        scope.id,
+        last_processed_message_id.max(scope.last_delivered_local_message_id),
+        "completed",
+    )?;
+    Ok(())
 }
 
 fn external_message_exists(
