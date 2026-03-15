@@ -3,7 +3,7 @@ use crate::api::ai::config::{
     get_retry_attempts_from_config,
 };
 use crate::api::genai_client;
-use crate::db::conversation_db::{ConversationDatabase, ConversationSummary, Message};
+use crate::db::conversation_db::{ConversationDatabase, ConversationSummary, Message, Repository};
 use crate::db::llm_db::LLMDatabase;
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
@@ -117,8 +117,22 @@ pub async fn generate_conversation_summary(
         return Ok(());
     }
 
-    // 检查是否已经总结过
+    // Butler 主会话不参与对话总结；派发任务会话允许总结
     let conversation_db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
+    let conversation_repo = conversation_db.conversation_repo().map_err(AppError::from)?;
+    let Some(conversation) = conversation_repo.read(conversation_id).map_err(AppError::from)? else {
+        return Ok(());
+    };
+    if conversation.conversation_kind == "butler_main" {
+        debug!(
+            conversation_id,
+            conversation_kind = %conversation.conversation_kind,
+            "Butler 对话跳过总结生成"
+        );
+        return Ok(());
+    }
+
+    // 检查是否已经总结过
     if let Ok(repo) = conversation_db.conversation_summary_repo() {
         if repo.exists(conversation_id)? {
             debug!(conversation_id, "对话已经总结过，跳过");

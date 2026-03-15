@@ -591,25 +591,28 @@ pub async fn search_conversations(
                 c.name as hit_text, 'title' as hit_type \
              FROM conversation c \
              WHERE c.name LIKE ?1 COLLATE NOCASE \
-               AND COALESCE(c.is_hidden_from_normal_chat_list, 0) = 0 \
+                AND COALESCE(c.is_hidden_from_normal_chat_list, 0) = 0 \
+                AND COALESCE(c.conversation_kind, 'normal') NOT IN ('butler_main', 'butler_task') \
              UNION ALL \
              SELECT c.id, c.name, c.assistant_id, c.created_time, \
                  NULL as message_id, NULL as message_type, cs.created_time as hit_time, \
                  cs.summary as hit_text, 'summary' as hit_type \
-              FROM conversation_summary cs \
-              JOIN conversation c ON cs.conversation_id = c.id \
-              WHERE cs.summary LIKE ?1 COLLATE NOCASE \
-                AND COALESCE(c.is_hidden_from_normal_chat_list, 0) = 0 \
+               FROM conversation_summary cs \
+               JOIN conversation c ON cs.conversation_id = c.id \
+               WHERE cs.summary LIKE ?1 COLLATE NOCASE \
+                 AND COALESCE(c.is_hidden_from_normal_chat_list, 0) = 0 \
+                 AND COALESCE(c.conversation_kind, 'normal') NOT IN ('butler_main', 'butler_task') \
              UNION ALL \
              SELECT c.id, c.name, c.assistant_id, c.created_time, \
-                 m.id as message_id, m.message_type, m.created_time as hit_time, \
-                 m.content as hit_text, 'message' as hit_type \
-              FROM message m \
-              JOIN conversation c ON m.conversation_id = c.id \
-              WHERE m.content LIKE ?1 COLLATE NOCASE \
-                AND COALESCE(c.is_hidden_from_normal_chat_list, 0) = 0 \
-              ORDER BY hit_time DESC \
-              LIMIT ?2 OFFSET ?3",
+                  m.id as message_id, m.message_type, m.created_time as hit_time, \
+                  m.content as hit_text, 'message' as hit_type \
+               FROM message m \
+               JOIN conversation c ON m.conversation_id = c.id \
+               WHERE m.content LIKE ?1 COLLATE NOCASE \
+                 AND COALESCE(c.is_hidden_from_normal_chat_list, 0) = 0 \
+                 AND COALESCE(c.conversation_kind, 'normal') NOT IN ('butler_main', 'butler_task') \
+               ORDER BY hit_time DESC \
+               LIMIT ?2 OFFSET ?3",
         )
         .map_err(|e| e.to_string())?;
 
