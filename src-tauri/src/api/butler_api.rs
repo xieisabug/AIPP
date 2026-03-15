@@ -171,7 +171,7 @@ fn butler_main_continuation_lock_registry() -> &'static ButlerContinuationLockRe
     BUTLER_MAIN_CONTINUATION_LOCKS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
-async fn get_butler_main_continuation_lock(conversation_id: i64) -> Arc<Mutex<()>> {
+pub(crate) async fn get_butler_main_continuation_lock(conversation_id: i64) -> Arc<Mutex<()>> {
     let registry = butler_main_continuation_lock_registry();
     let mut guard = registry.lock().await;
     guard.entry(conversation_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
@@ -476,7 +476,7 @@ fn describe_task_terminal_status(status: &str) -> &'static str {
     }
 }
 
-fn resolve_butler_execution_window(app_handle: &AppHandle) -> Result<Window, String> {
+pub(crate) fn resolve_butler_execution_window(app_handle: &AppHandle) -> Result<Window, String> {
     for label in ["butler_experiment", "chat_ui", "ask"] {
         if let Some(window) = app_handle.get_webview_window(label) {
             return Ok(window.as_ref().window());
@@ -485,7 +485,7 @@ fn resolve_butler_execution_window(app_handle: &AppHandle) -> Result<Window, Str
     Err("No available window for butler continuation".to_string())
 }
 
-async fn wait_for_butler_main_to_be_idle(app_handle: &AppHandle, conversation_id: i64) {
+pub(crate) async fn wait_for_butler_main_to_be_idle(app_handle: &AppHandle, conversation_id: i64) {
     let activity_manager =
         app_handle.state::<crate::state::activity_state::ConversationActivityManager>();
     for _ in 0..600 {
@@ -784,7 +784,7 @@ async fn list_butler_tasks_internal(
     Ok(tasks)
 }
 
-async fn load_or_create_butler_main_internal(
+pub(crate) async fn load_or_create_butler_main_internal(
     app_handle: &AppHandle,
 ) -> Result<Conversation, String> {
     ensure_butler_enabled(app_handle).await?;

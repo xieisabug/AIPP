@@ -7,11 +7,13 @@ import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
 import { useModels } from "@/hooks/useModels";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Form, FormControl, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import { Form, FormControl, FormDescription, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 
 interface ExperimentalConfigFormProps {
     form: UseFormReturn<any>;
@@ -38,11 +40,29 @@ interface AssistantSummaryProgressPayload {
     message?: string;
 }
 
+interface FeishuRuntimeStatus {
+    butler_enabled: boolean;
+    enabled: boolean;
+    configured: boolean;
+    secret_configured: boolean;
+    running: boolean;
+    connected: boolean;
+    app_id?: string | null;
+    base_url?: string | null;
+    allow_p2p: boolean;
+    allow_group: boolean;
+    group_require_mention: boolean;
+    last_error?: string | null;
+    last_event_at?: string | null;
+    status_text: string;
+}
+
 export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ form, onSave }) => {
     const [isSaving, setIsSaving] = useState(false);
     const [summaryProgress, setSummaryProgress] = useState<MCPSummaryProgressPayload | null>(null);
     const [assistantSummaryProgress, setAssistantSummaryProgress] =
         useState<AssistantSummaryProgressPayload | null>(null);
+    const [feishuStatus, setFeishuStatus] = useState<FeishuRuntimeStatus | null>(null);
 
     const dynamicEnabled =
         form.watch("dynamic_mcp_loading_enabled") === true ||
@@ -56,10 +76,16 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
     const butlerEnabled =
         form.watch("butler_experiment_enabled") === true ||
         form.watch("butler_experiment_enabled") === "true";
+    const feishuEnabled =
+        form.watch("butler_feishu_enabled") === true ||
+        form.watch("butler_feishu_enabled") === "true";
     const summarizerModelId = form.watch("mcp_summarizer_model_id") || "";
     const assistantSummarizerModelId = form.watch("assistant_summarizer_model_id") || "";
     const conversationSummaryModel = form.watch("conversation_summary_model") || "";
     const butlerModelId = form.watch("butler_model_id") || "";
+    const feishuAppId = String(form.watch("butler_feishu_app_id") || "");
+    const feishuAppSecret = String(form.watch("butler_feishu_app_secret") || "");
+    const feishuBaseUrl = String(form.watch("butler_feishu_base_url") || "https://open.feishu.cn");
     const { models, loading: modelsLoading, error: modelsError } = useModels(
         dynamicEnabled || assistantSummaryEnabled || conversationSummaryEnabled || butlerEnabled
     );
@@ -92,6 +118,22 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
             unlistenPromise.then((unlisten) => unlisten()).catch(console.warn);
         };
     }, []);
+
+    const loadFeishuStatus = useCallback(async () => {
+        const status = await invoke<FeishuRuntimeStatus>("get_butler_feishu_runtime_status");
+        setFeishuStatus(status);
+        return status;
+    }, []);
+
+    useEffect(() => {
+        loadFeishuStatus().catch(console.warn);
+        const unlistenPromise = listen<FeishuRuntimeStatus>("butler_feishu_status_changed", (event) => {
+            setFeishuStatus(event.payload);
+        });
+        return () => {
+            unlistenPromise.then((unlisten) => unlisten()).catch(console.warn);
+        };
+    }, [loadFeishuStatus]);
 
     const runAssistantSummary = useCallback(async (showSuccessToast: boolean) => {
         setAssistantSummaryProgress({
@@ -126,12 +168,36 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
             toast.error("请先为总管家模式选择模型");
             return;
         }
+        if (butlerEnabled && feishuEnabled && !feishuAppId.trim()) {
+            toast.error("请先填写飞书 App ID");
+            return;
+        }
+        if (
+            butlerEnabled
+            && feishuEnabled
+            && !feishuAppSecret.trim()
+            && !feishuStatus?.secret_configured
+        ) {
+            toast.error("请先填写飞书 App Secret");
+            return;
+        }
 
         setIsSaving(true);
         setSummaryProgress(null);
         setAssistantSummaryProgress(null);
         try {
             await onSave();
+            if (butlerEnabled && feishuEnabled && feishuAppSecret.trim()) {
+                await invoke("save_butler_feishu_secret", {
+                    appSecret: feishuAppSecret.trim(),
+                    app_secret: feishuAppSecret.trim(),
+                });
+                form.setValue("butler_feishu_app_secret", "");
+            }
+            const latestFeishuStatus = await invoke<FeishuRuntimeStatus>(
+                "refresh_butler_feishu_runtime_command"
+            );
+            setFeishuStatus(latestFeishuStatus);
 
             if (dynamicEnabled) {
                 await invoke("summarize_all_mcp_catalogs");
@@ -148,15 +214,20 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
     }, [
         assistantSummarizerModelId,
         assistantSummaryEnabled,
-        butlerEnabled,
-        butlerModelId,
-        conversationSummaryEnabled,
-        conversationSummaryModel,
-        dynamicEnabled,
-        onSave,
-        runAssistantSummary,
-        summarizerModelId,
-    ]);
+            butlerEnabled,
+            butlerModelId,
+            conversationSummaryEnabled,
+            conversationSummaryModel,
+            dynamicEnabled,
+            feishuAppId,
+            feishuAppSecret,
+            feishuEnabled,
+            feishuStatus?.secret_configured,
+            onSave,
+            runAssistantSummary,
+            summarizerModelId,
+            form,
+        ]);
 
     const handleRunAssistantSummary = useCallback(async () => {
         if (!assistantSummarizerModelId) {
@@ -181,12 +252,42 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
         assistantSummaryProgress && assistantSummaryProgress.total > 0
             ? Math.round((assistantSummaryProgress.completed / assistantSummaryProgress.total) * 100)
             : 0;
+    const handleRefreshFeishu = useCallback(async () => {
+        setIsSaving(true);
+        try {
+            const status = await invoke<FeishuRuntimeStatus>("refresh_butler_feishu_runtime_command");
+            setFeishuStatus(status);
+            toast.success("飞书机器人已重载");
+        } catch (error) {
+            toast.error("重连飞书机器人失败: " + getErrorMessage(error));
+        } finally {
+            setIsSaving(false);
+        }
+    }, []);
+
+    const handleClearFeishuSecret = useCallback(async () => {
+        setIsSaving(true);
+        try {
+            await invoke("clear_butler_feishu_secret");
+            form.setValue("butler_feishu_app_secret", "");
+            const status = await invoke<FeishuRuntimeStatus>("refresh_butler_feishu_runtime_command");
+            setFeishuStatus(status);
+            toast.success("飞书 App Secret 已清除");
+        } catch (error) {
+            toast.error("清除飞书密钥失败: " + getErrorMessage(error));
+        } finally {
+            setIsSaving(false);
+        }
+    }, [form]);
+
     const saveDisabled =
         isSaving
         || (dynamicEnabled && !summarizerModelId)
         || (assistantSummaryEnabled && !assistantSummarizerModelId)
         || (conversationSummaryEnabled && !conversationSummaryModel)
-        || (butlerEnabled && !butlerModelId);
+        || (butlerEnabled && !butlerModelId)
+        || (butlerEnabled && feishuEnabled && !feishuAppId.trim())
+        || (butlerEnabled && feishuEnabled && !feishuAppSecret.trim() && !feishuStatus?.secret_configured);
 
     return (
         <Form {...form}>
@@ -501,6 +602,249 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                     </FormItem>
                                 )}
                             />
+
+                            <Controller
+                                control={form.control}
+                                name="butler_feishu_enabled"
+                                render={({ field }) => (
+                                    <FormItem className="flex items-center justify-between rounded-md border p-4">
+                                        <div>
+                                            <FormLabel className="text-base">飞书机器人接入（实验）</FormLabel>
+                                            <p className="text-sm text-muted-foreground mt-1">
+                                                开启后总管家会通过飞书长连接接收文本消息，并把最终答复回发到飞书。
+                                            </p>
+                                        </div>
+                                        <FormControl>
+                                            <Switch
+                                                checked={field.value === true || field.value === "true"}
+                                                onCheckedChange={field.onChange}
+                                            />
+                                        </FormControl>
+                                    </FormItem>
+                                )}
+                            />
+
+                            {feishuEnabled && (
+                                <div className="space-y-4 rounded-md border p-4 bg-muted/20">
+                                    <div className="space-y-2 rounded-md border p-4 bg-background">
+                                        <div className="flex items-center justify-between gap-3">
+                                            <div>
+                                                <p className="text-sm font-medium">飞书机器人状态</p>
+                                                <p className="text-xs text-muted-foreground mt-1">
+                                                    {feishuStatus?.status_text || "正在读取状态..."}
+                                                </p>
+                                            </div>
+                                            <div className="flex gap-2">
+                                                <Button
+                                                    type="button"
+                                                    variant="outline"
+                                                    onClick={handleRefreshFeishu}
+                                                    disabled={isSaving}
+                                                >
+                                                    重连机器人
+                                                </Button>
+                                                <Button
+                                                    type="button"
+                                                    variant="outline"
+                                                    onClick={handleClearFeishuSecret}
+                                                    disabled={isSaving || !feishuStatus?.secret_configured}
+                                                >
+                                                    清除密钥
+                                                </Button>
+                                            </div>
+                                        </div>
+                                        <div className="grid gap-2 text-xs text-muted-foreground md:grid-cols-2">
+                                            <div>App ID：{feishuStatus?.app_id || feishuAppId || "未配置"}</div>
+                                            <div>Secret：{feishuStatus?.secret_configured ? "已保存" : "未保存"}</div>
+                                            <div>连接：{feishuStatus?.connected ? "已连接" : "未连接"}</div>
+                                            <div>最近事件：{feishuStatus?.last_event_at || "暂无"}</div>
+                                            {feishuStatus?.last_error && (
+                                                <div className="md:col-span-2 text-destructive">
+                                                    最近错误：{feishuStatus.last_error}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    <Controller
+                                        control={form.control}
+                                        name="butler_feishu_app_id"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormLabel>飞书 App ID</FormLabel>
+                                                <FormControl>
+                                                    <Input {...field} value={field.value || ""} placeholder="cli_xxx" />
+                                                </FormControl>
+                                                <FormDescription>
+                                                    使用飞书自建应用机器人的 App ID。
+                                                </FormDescription>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+
+                                    <Controller
+                                        control={form.control}
+                                        name="butler_feishu_app_secret"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormLabel>飞书 App Secret</FormLabel>
+                                                <FormControl>
+                                                    <Input
+                                                        {...field}
+                                                        type="password"
+                                                        value={field.value || ""}
+                                                        placeholder={
+                                                            feishuStatus?.secret_configured
+                                                                ? "已保存，留空则保持不变"
+                                                                : "输入新的 App Secret"
+                                                        }
+                                                    />
+                                                </FormControl>
+                                                <FormDescription>
+                                                    仅在点击“保存配置”时单独加密保存，不会进入普通 experimental 配置。
+                                                </FormDescription>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+
+                                    <Controller
+                                        control={form.control}
+                                        name="butler_feishu_base_url"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormLabel>飞书开放平台域名</FormLabel>
+                                                <FormControl>
+                                                    <Select value={field.value || feishuBaseUrl} onValueChange={field.onChange}>
+                                                        <SelectTrigger>
+                                                            <SelectValue placeholder="选择飞书开放平台域名" />
+                                                        </SelectTrigger>
+                                                        <SelectContent>
+                                                            <SelectItem value="https://open.feishu.cn">
+                                                                飞书（中国大陆）
+                                                            </SelectItem>
+                                                            <SelectItem value="https://open.larksuite.com">
+                                                                Lark（国际版）
+                                                            </SelectItem>
+                                                        </SelectContent>
+                                                    </Select>
+                                                </FormControl>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+
+                                    <div className="grid gap-4 md:grid-cols-2">
+                                        <Controller
+                                            control={form.control}
+                                            name="butler_feishu_receive_p2p"
+                                            render={({ field }) => (
+                                                <FormItem className="flex items-center justify-between rounded-md border p-4">
+                                                    <div>
+                                                        <FormLabel>接收单聊</FormLabel>
+                                                        <p className="text-xs text-muted-foreground mt-1">
+                                                            允许飞书用户私聊机器人驱动总管家。
+                                                        </p>
+                                                    </div>
+                                                    <FormControl>
+                                                        <Switch
+                                                            checked={field.value === true || field.value === "true"}
+                                                            onCheckedChange={field.onChange}
+                                                        />
+                                                    </FormControl>
+                                                </FormItem>
+                                            )}
+                                        />
+
+                                        <Controller
+                                            control={form.control}
+                                            name="butler_feishu_receive_group"
+                                            render={({ field }) => (
+                                                <FormItem className="flex items-center justify-between rounded-md border p-4">
+                                                    <div>
+                                                        <FormLabel>接收群聊</FormLabel>
+                                                        <p className="text-xs text-muted-foreground mt-1">
+                                                            允许群消息进入总管家。
+                                                        </p>
+                                                    </div>
+                                                    <FormControl>
+                                                        <Switch
+                                                            checked={field.value === true || field.value === "true"}
+                                                            onCheckedChange={field.onChange}
+                                                        />
+                                                    </FormControl>
+                                                </FormItem>
+                                            )}
+                                        />
+                                    </div>
+
+                                    <Controller
+                                        control={form.control}
+                                        name="butler_feishu_group_require_mention"
+                                        render={({ field }) => (
+                                            <FormItem className="flex items-center justify-between rounded-md border p-4">
+                                                <div>
+                                                    <FormLabel>@ 或回复后才处理群消息</FormLabel>
+                                                    <p className="text-xs text-muted-foreground mt-1">
+                                                        群聊默认只处理带 mention 或回复机器人已发送消息的文本。
+                                                    </p>
+                                                </div>
+                                                <FormControl>
+                                                    <Switch
+                                                        checked={field.value === true || field.value === "true"}
+                                                        onCheckedChange={field.onChange}
+                                                    />
+                                                </FormControl>
+                                            </FormItem>
+                                        )}
+                                    />
+
+                                    <Controller
+                                        control={form.control}
+                                        name="butler_feishu_allowed_open_ids"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormLabel>允许对话的用户 Open ID 列表</FormLabel>
+                                                <FormControl>
+                                                    <Textarea
+                                                        {...field}
+                                                        value={field.value || ""}
+                                                        placeholder={"ou_xxx\nou_yyy"}
+                                                        rows={4}
+                                                    />
+                                                </FormControl>
+                                                <FormDescription>
+                                                    为空则不按用户限制；支持换行、逗号或分号分隔。
+                                                </FormDescription>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+
+                                    <Controller
+                                        control={form.control}
+                                        name="butler_feishu_allowed_chat_ids"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormLabel>允许对话的群 Chat ID 列表</FormLabel>
+                                                <FormControl>
+                                                    <Textarea
+                                                        {...field}
+                                                        value={field.value || ""}
+                                                        placeholder={"oc_xxx\noc_yyy"}
+                                                        rows={4}
+                                                    />
+                                                </FormControl>
+                                                <FormDescription>
+                                                    仅对群聊生效；为空则不按群限制。
+                                                </FormDescription>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+                                </div>
+                            )}
                         </div>
                     )}
 
@@ -551,6 +895,12 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                         )}
                         {conversationSummaryEnabled && !conversationSummaryModel && (
                             <p className="text-sm text-destructive mt-2">请先选择对话总结模型</p>
+                        )}
+                        {butlerEnabled && feishuEnabled && !feishuAppId.trim() && (
+                            <p className="text-sm text-destructive mt-2">请先填写飞书 App ID</p>
+                        )}
+                        {butlerEnabled && feishuEnabled && !feishuAppSecret.trim() && !feishuStatus?.secret_configured && (
+                            <p className="text-sm text-destructive mt-2">请先填写飞书 App Secret</p>
                         )}
                     </div>
                 </CardContent>

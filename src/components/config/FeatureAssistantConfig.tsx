@@ -178,6 +178,15 @@ const FeatureAssistantConfig: React.FC = () => {
             butler_experiment_enabled: "false",
             default_home_window: "ask",
             butler_model_id: "",
+            butler_feishu_enabled: "false",
+            butler_feishu_app_id: "",
+            butler_feishu_app_secret: "",
+            butler_feishu_base_url: "https://open.feishu.cn",
+            butler_feishu_receive_p2p: "true",
+            butler_feishu_receive_group: "true",
+            butler_feishu_group_require_mention: "true",
+            butler_feishu_allowed_open_ids: "",
+            butler_feishu_allowed_chat_ids: "",
         },
     });
 
@@ -272,6 +281,23 @@ const FeatureAssistantConfig: React.FC = () => {
                     experimentalConfig?.get("default_home_window") || "ask",
                 butler_model_id:
                     experimentalConfig?.get("butler_model_id") || "",
+                butler_feishu_enabled:
+                    experimentalConfig?.get("butler_feishu_enabled") || "false",
+                butler_feishu_app_id:
+                    experimentalConfig?.get("butler_feishu_app_id") || "",
+                butler_feishu_app_secret: "",
+                butler_feishu_base_url:
+                    experimentalConfig?.get("butler_feishu_base_url") || "https://open.feishu.cn",
+                butler_feishu_receive_p2p:
+                    experimentalConfig?.get("butler_feishu_receive_p2p") || "true",
+                butler_feishu_receive_group:
+                    experimentalConfig?.get("butler_feishu_receive_group") || "true",
+                butler_feishu_group_require_mention:
+                    experimentalConfig?.get("butler_feishu_group_require_mention") || "true",
+                butler_feishu_allowed_open_ids:
+                    experimentalConfig?.get("butler_feishu_allowed_open_ids") || "",
+                butler_feishu_allowed_chat_ids:
+                    experimentalConfig?.get("butler_feishu_allowed_chat_ids") || "",
             });
 
             // 更新 preview 表单
@@ -436,6 +462,14 @@ const FeatureAssistantConfig: React.FC = () => {
             butler_experiment_enabled: String(v.butler_experiment_enabled),
             default_home_window: String(v.default_home_window || "ask"),
             butler_model_id: String(v.butler_model_id || ""),
+            butler_feishu_enabled: String(v.butler_feishu_enabled),
+            butler_feishu_app_id: String(v.butler_feishu_app_id || ""),
+            butler_feishu_base_url: String(v.butler_feishu_base_url || "https://open.feishu.cn"),
+            butler_feishu_receive_p2p: String(v.butler_feishu_receive_p2p),
+            butler_feishu_receive_group: String(v.butler_feishu_receive_group),
+            butler_feishu_group_require_mention: String(v.butler_feishu_group_require_mention),
+            butler_feishu_allowed_open_ids: String(v.butler_feishu_allowed_open_ids || ""),
+            butler_feishu_allowed_chat_ids: String(v.butler_feishu_allowed_chat_ids || ""),
         });
     }, [experimentalForm, saveFeatureConfig]);
 

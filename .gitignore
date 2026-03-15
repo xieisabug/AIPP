@@ -31,3 +31,4 @@ src-tauri/*.db
 .aider*
 .env
 GEMINI.md
+.cargo

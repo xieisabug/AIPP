@@ -74,7 +74,42 @@ pub async fn save_feature_config(
     // 发出配置变更事件，通知所有窗口重新加载配置
     let _ = app_handle.emit("feature_config_changed", ());
 
+    if feature_code == "experimental" {
+        crate::feishu::refresh_runtime_async(&app_handle);
+    }
+
     Ok(())
+}
+
+#[tauri::command]
+pub async fn save_butler_feishu_secret(
+    app_handle: tauri::AppHandle,
+    app_secret: String,
+) -> Result<(), String> {
+    crate::feishu::save_feishu_secret(&app_handle, &app_secret)?;
+    crate::feishu::refresh_runtime_async(&app_handle);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn clear_butler_feishu_secret(app_handle: tauri::AppHandle) -> Result<(), String> {
+    crate::feishu::clear_feishu_secret(&app_handle)?;
+    crate::feishu::refresh_runtime_async(&app_handle);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_butler_feishu_runtime_status(
+    app_handle: tauri::AppHandle,
+) -> Result<crate::feishu::FeishuRuntimeStatus, String> {
+    crate::feishu::get_runtime_status(&app_handle).await
+}
+
+#[tauri::command]
+pub async fn refresh_butler_feishu_runtime_command(
+    app_handle: tauri::AppHandle,
+) -> Result<crate::feishu::FeishuRuntimeStatus, String> {
+    crate::feishu::refresh_runtime(&app_handle).await
 }
 
 #[tauri::command]

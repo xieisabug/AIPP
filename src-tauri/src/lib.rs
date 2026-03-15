@@ -4,6 +4,7 @@ mod api;
 mod artifacts;
 mod db;
 mod errors;
+mod feishu;
 mod mcp;
 mod plugin;
 mod scheduler;
@@ -15,6 +16,7 @@ mod utils;
 mod window;
 
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::OnceLock;
 
 use crate::api::ai::acp::AcpPermissionState;
 use crate::api::ai_api::{
@@ -77,9 +79,11 @@ use crate::api::skill_api::{
     toggle_assistant_skill, update_assistant_skill_config,
 };
 use crate::api::system_api::{
-    copy_image_to_clipboard, get_all_feature_config, get_autostart_state, get_bang_list,
-    get_selected_text_api, open_data_folder, open_image, resume_global_shortcut,
-    save_feature_config, set_autostart, set_shortcut_recording, suspend_global_shortcut,
+    clear_butler_feishu_secret, copy_image_to_clipboard, get_all_feature_config,
+    get_autostart_state, get_bang_list, get_butler_feishu_runtime_status,
+    get_selected_text_api, open_data_folder, open_image, refresh_butler_feishu_runtime_command,
+    resume_global_shortcut, save_butler_feishu_secret, save_feature_config, set_autostart,
+    set_shortcut_recording, suspend_global_shortcut,
 };
 use crate::api::todo_api::get_todos;
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
@@ -178,6 +182,7 @@ use crate::window::{
     open_default_home_window, open_plugin_window, open_schedule_window, open_sidebar_window,
     preferred_home_window_label,
 };
+use crate::feishu::FeishuButlerState;
 use db::conversation_db::ConversationDatabase;
 use db::database_upgrade;
 use db::plugin_db::PluginDatabase;
@@ -387,6 +392,7 @@ pub fn run() {
         .with_thread_ids(false)
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
+    ensure_rustls_crypto_provider();
     let app = tauri::Builder::default()
         .register_uri_scheme_protocol(PREVIEW_FILE_RELAY_SCHEME, handle_preview_file_relay_request)
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -621,6 +627,8 @@ pub fn run() {
                 }
             }
 
+            crate::feishu::refresh_runtime_async(&app_handle);
+
             Ok(())
         })
         .manage(AppState {
@@ -635,7 +643,8 @@ pub fn run() {
         .manage(AcpPermissionState::new())
         .manage(TodoState::new())
         .manage(InteractionState::new())
-        .manage(PreviewFileRelayState::new());
+        .manage(PreviewFileRelayState::new())
+        .manage(FeishuButlerState::default());
     #[cfg(desktop)]
     let app = app.manage(CopilotLspState::default());
     let app = app
@@ -662,6 +671,10 @@ pub fn run() {
             get_config,
             get_all_feature_config,
             save_feature_config,
+            save_butler_feishu_secret,
+            clear_butler_feishu_secret,
+            get_butler_feishu_runtime_status,
+            refresh_butler_feishu_runtime_command,
             open_data_folder,
             get_llm_providers,
             get_filtered_providers,
@@ -1277,3 +1290,15 @@ const EXIT_STATE_REQUESTED: u8 = 1;
 const EXIT_STATE_CLEANING: u8 = 2;
 const EXIT_STATE_READY: u8 = 3;
 static EXIT_STATE: AtomicU8 = AtomicU8::new(EXIT_STATE_IDLE);
+static RUSTLS_CRYPTO_PROVIDER_READY: OnceLock<()> = OnceLock::new();
+
+pub(crate) fn ensure_rustls_crypto_provider() {
+    RUSTLS_CRYPTO_PROVIDER_READY.get_or_init(|| {
+        if let Err(error) = rustls::crypto::aws_lc_rs::default_provider().install_default() {
+            debug!(
+                "rustls crypto provider already initialized, keep existing provider: {:?}",
+                error
+            );
+        }
+    });
+}

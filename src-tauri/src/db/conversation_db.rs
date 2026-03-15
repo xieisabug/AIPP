@@ -978,6 +978,34 @@ impl ConversationDatabase {
             "CREATE INDEX IF NOT EXISTS idx_conversation_parent_butler_updated ON conversation(parent_butler_conversation_id, updated_time DESC)",
             [],
         )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS external_channel_message_link (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel TEXT NOT NULL,
+                external_message_id TEXT NOT NULL,
+                external_chat_id TEXT,
+                external_user_id TEXT,
+                conversation_id INTEGER NOT NULL,
+                local_message_id INTEGER,
+                direction TEXT NOT NULL,
+                payload_type TEXT NOT NULL DEFAULT 'text',
+                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(channel, external_message_id)
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_external_channel_message_conversation ON external_channel_message_link(conversation_id, created_time DESC)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_external_channel_message_local ON external_channel_message_link(local_message_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_external_channel_message_chat_direction ON external_channel_message_link(channel, external_chat_id, direction)",
+            [],
+        )?;
 
         // 创建对话总结表
         conn.execute(
