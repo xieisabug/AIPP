@@ -138,6 +138,26 @@ pub fn get_network_proxy_from_config(
     None
 }
 
+/// 根据代理地址构建常见的代理环境变量
+pub fn build_proxy_env_vars(proxy_url: &str) -> HashMap<String, String> {
+    let proxy_url = proxy_url.trim();
+    if proxy_url.is_empty() {
+        return HashMap::new();
+    }
+
+    [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ]
+    .into_iter()
+    .map(|key| (key.to_string(), proxy_url.to_string()))
+    .collect()
+}
+
 /// 从工具错误配置中获取是否继续对话（默认开启）
 pub fn get_continue_on_tool_error_from_config(
     config_feature_map: &HashMap<String, HashMap<String, crate::db::system_db::FeatureConfig>>,

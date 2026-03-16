@@ -31,9 +31,10 @@ use crate::api::ai_api::{
 };
 use crate::api::assistant_api::{
     add_assistant, add_assistant_workspace, bulk_update_assistant_mcp_tools, copy_assistant,
-    delete_assistant, export_assistant, get_acp_working_directory, get_assistant,
-    get_assistant_field_value, get_assistant_mcp_servers_with_tools, get_assistant_workspaces,
-    get_assistants, import_assistant, remove_assistant_workspace, save_assistant,
+    delete_assistant, export_assistant, get_acp_launch_diagnostics, get_acp_working_directory,
+    get_assistant, get_assistant_field_value, get_assistant_mcp_servers_with_tools,
+    get_assistant_workspaces, get_assistants, import_assistant, remove_assistant_workspace,
+    save_assistant,
     update_assistant_mcp_config, update_assistant_mcp_tool_config,
     update_assistant_model_config_value,
 };
@@ -85,10 +86,12 @@ use crate::api::skill_api::{
 };
 use crate::api::system_api::{
     clear_butler_feishu_secret, copy_image_to_clipboard, debug_resend_message_to_feishu,
-    get_all_feature_config, get_autostart_state, get_bang_list, get_butler_feishu_runtime_status,
+    get_all_feature_config, get_autostart_state, get_bang_list,
+    get_butler_feishu_runtime_status, get_experimental_summary_task_status,
     get_selected_text_api, open_data_folder, open_image, refresh_butler_feishu_runtime_command,
     resume_global_shortcut, save_butler_feishu_secret, save_feature_config, set_autostart,
-    set_shortcut_recording, suspend_global_shortcut,
+    set_shortcut_recording, suspend_global_shortcut, trigger_assistant_summary_generation,
+    trigger_conversation_summary_generation, trigger_mcp_summary_generation,
 };
 use crate::api::todo_api::get_todos;
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
@@ -109,10 +112,10 @@ use crate::artifacts::collection_api::{
     update_artifact_collection,
 };
 use crate::artifacts::env_installer::{
-    check_acp_library, check_bun_update, check_bun_update_with_proxy, check_bun_version,
-    check_uv_update, check_uv_update_with_proxy, check_uv_version, get_python_info,
-    install_acp_library, install_bun, install_python3, install_uv, update_bun,
-    update_bun_with_proxy, update_uv, update_uv_with_proxy,
+    check_acp_library, check_acp_library_update, check_bun_update, check_bun_update_with_proxy,
+    check_bun_version, check_uv_update, check_uv_update_with_proxy, check_uv_version,
+    get_python_info, install_acp_library, install_bun, install_python3, install_uv,
+    update_acp_library, update_bun, update_bun_with_proxy, update_uv, update_uv_with_proxy,
 };
 use crate::artifacts::preview_router::{
     confirm_environment_install, preview_react_component, restore_artifact_preview,
@@ -679,6 +682,10 @@ pub fn run() {
             clear_butler_feishu_secret,
             get_butler_feishu_runtime_status,
             refresh_butler_feishu_runtime_command,
+            get_experimental_summary_task_status,
+            trigger_mcp_summary_generation,
+            trigger_assistant_summary_generation,
+            trigger_conversation_summary_generation,
             debug_resend_message_to_feishu,
             open_data_folder,
             get_llm_providers,
@@ -774,7 +781,10 @@ pub fn run() {
             get_python_info,
             install_python3,
             check_acp_library,
+            check_acp_library_update,
             install_acp_library,
+            update_acp_library,
+            get_acp_launch_diagnostics,
             preview_react_component,
             create_react_preview,
             create_react_preview_for_artifact,

@@ -11,6 +11,8 @@ use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{debug, error, info};
 
+use crate::errors::AppError;
+
 /// 调度器状态，用于管理正在进行的任务
 #[derive(Clone)]
 pub struct SchedulerState {
@@ -33,6 +35,17 @@ impl Default for SchedulerState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub async fn run_conversation_summary_now(
+    app_handle: &tauri::AppHandle,
+    scheduler_state: &SchedulerState,
+) -> Result<(), AppError> {
+    summary_task::run_summary_task(app_handle, scheduler_state).await
+}
+
+pub async fn get_conversation_summary_running_count(scheduler_state: &SchedulerState) -> usize {
+    scheduler_state.summarizing_conversations.lock().await.len()
 }
 
 /// 启动定时任务调度器

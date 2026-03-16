@@ -7,6 +7,7 @@ use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chrono::Utc;
+use futures::FutureExt;
 use openlark_client::ws_client::{EventDispatcherHandler, LarkWsClient};
 use pulldown_cmark::{Options as MarkdownOptions, Parser as MarkdownParser};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -70,6 +71,8 @@ pub struct FeishuRuntimeStatus {
     pub group_require_mention: bool,
     pub last_error: Option<String>,
     pub last_event_at: Option<String>,
+    pub last_status_at: Option<String>,
+    pub status_detail: Option<String>,
     pub status_text: String,
 }
 
@@ -281,14 +284,18 @@ fn build_status(config: &FeishuRuntimeConfig) -> FeishuRuntimeStatus {
         group_require_mention: config.group_require_mention,
         last_error: None,
         last_event_at: None,
+        last_status_at: Some(now_string()),
+        status_detail: None,
         status_text: "飞书机器人未启动".to_string(),
     }
 }
 
 async fn replace_status(app_handle: &AppHandle, status: FeishuRuntimeStatus) {
     let state = app_handle.state::<FeishuButlerState>();
-    *state.status.lock().await = status.clone();
-    let _ = app_handle.emit("butler_feishu_status_changed", status);
+    let mut snapshot = status;
+    snapshot.last_status_at = Some(now_string());
+    *state.status.lock().await = snapshot.clone();
+    let _ = app_handle.emit("butler_feishu_status_changed", snapshot);
 }
 
 async fn mutate_status<F>(app_handle: &AppHandle, apply: F)
@@ -298,9 +305,20 @@ where
     let state = app_handle.state::<FeishuButlerState>();
     let mut status = state.status.lock().await;
     apply(&mut status);
+    status.last_status_at = Some(now_string());
     let snapshot = status.clone();
     drop(status);
     let _ = app_handle.emit("butler_feishu_status_changed", snapshot);
+}
+
+fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
 }
 
 fn get_or_create_master_key(app_handle: &AppHandle) -> Result<[u8; 32], String> {
@@ -530,18 +548,35 @@ pub(crate) async fn refresh_runtime(app_handle: &AppHandle) -> Result<FeishuRunt
     }
     if config.app_id.trim().is_empty() || config.app_secret.trim().is_empty() {
         status.status_text = "请先配置飞书 App ID 和 App Secret".to_string();
+        status.status_detail = Some("缺少飞书应用凭据，无法启动连接".to_string());
         replace_status(app_handle, status.clone()).await;
         return Ok(status);
     }
 
     status.running = true;
     status.status_text = "正在连接飞书长连接".to_string();
+    status.status_detail = Some("已创建后台任务，准备初始化飞书 WebSocket 客户端".to_string());
     replace_status(app_handle, status.clone()).await;
 
     let app_handle_clone = app_handle.clone();
     let config_clone = config.clone();
     let task = tauri::async_runtime::spawn(async move {
-        run_runtime_loop(app_handle_clone, config_clone).await;
+        let panic_guard =
+            std::panic::AssertUnwindSafe(run_runtime_loop(app_handle_clone.clone(), config_clone))
+                .catch_unwind()
+                .await;
+        if let Err(payload) = panic_guard {
+            let panic_message = format_panic_payload(payload);
+            mutate_status(&app_handle_clone, |status| {
+                status.running = false;
+                status.connected = false;
+                status.last_error = Some(format!("飞书运行时 panic: {}", panic_message));
+                status.status_text = "飞书运行时异常退出".to_string();
+                status.status_detail = Some("后台运行任务发生未捕获异常，请检查配置和连接环境".to_string());
+            })
+            .await;
+            warn!(error = %panic_message, "feishu runtime loop panicked");
+        }
     });
     *state.runtime_task.lock().unwrap() = Some(task);
     Ok(status)
@@ -549,6 +584,14 @@ pub(crate) async fn refresh_runtime(app_handle: &AppHandle) -> Result<FeishuRunt
 
 async fn run_runtime_loop(app_handle: AppHandle, config: FeishuRuntimeConfig) {
     loop {
+        mutate_status(&app_handle, |status| {
+            status.running = true;
+            status.connected = false;
+            status.status_text = "正在连接飞书长连接".to_string();
+            status.status_detail = Some("正在构建飞书连接配置".to_string());
+        })
+        .await;
+
         let ws_config = match openlark_client::Config::builder()
             .app_id(config.app_id.clone())
             .app_secret(config.app_secret.clone())
@@ -563,6 +606,7 @@ async fn run_runtime_loop(app_handle: AppHandle, config: FeishuRuntimeConfig) {
                     status.connected = false;
                     status.last_error = Some(error.to_string());
                     status.status_text = "飞书配置无效".to_string();
+                    status.status_detail = Some("连接配置构建失败，请检查 App ID、Secret 和域名".to_string());
                 })
                 .await;
                 return;
@@ -571,6 +615,14 @@ async fn run_runtime_loop(app_handle: AppHandle, config: FeishuRuntimeConfig) {
 
         let (payload_tx, payload_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let event_handler = EventDispatcherHandler::builder().payload_sender(payload_tx).build();
+
+        mutate_status(&app_handle, |status| {
+            status.running = true;
+            status.connected = false;
+            status.status_text = "正在连接飞书长连接".to_string();
+            status.status_detail = Some("连接配置已生成，正在启动 WebSocket 客户端".to_string());
+        })
+        .await;
 
         let processor_app = app_handle.clone();
         let processor_config = config.clone();
@@ -583,6 +635,7 @@ async fn run_runtime_loop(app_handle: AppHandle, config: FeishuRuntimeConfig) {
             status.connected = true;
             status.last_error = None;
             status.status_text = "飞书机器人已连接，等待消息".to_string();
+            status.status_detail = Some("WebSocket 已建立，正在等待飞书事件".to_string());
         })
         .await;
 
@@ -594,6 +647,7 @@ async fn run_runtime_loop(app_handle: AppHandle, config: FeishuRuntimeConfig) {
                 mutate_status(&app_handle, |status| {
                     status.connected = false;
                     status.status_text = "飞书长连接已断开，准备重连".to_string();
+                    status.status_detail = Some("长连接会话正常退出，5 秒后自动重连".to_string());
                 })
                 .await;
             }
@@ -602,6 +656,7 @@ async fn run_runtime_loop(app_handle: AppHandle, config: FeishuRuntimeConfig) {
                     status.connected = false;
                     status.last_error = Some(error.to_string());
                     status.status_text = "飞书连接失败，准备重连".to_string();
+                    status.status_detail = Some("握手或长连接建立失败，等待自动重连".to_string());
                 })
                 .await;
             }

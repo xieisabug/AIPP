@@ -2,6 +2,10 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use tauri::{Emitter, Manager, State};
 
+use crate::api::ai::acp::resolve_acp_cli_path;
+use crate::api::ai::config::{build_proxy_env_vars, get_network_proxy_from_config};
+use crate::FeatureConfigState;
+
 #[tauri::command]
 pub async fn check_bun_version(app: tauri::AppHandle) -> Result<String, String> {
     let app = app.clone();
@@ -22,6 +26,12 @@ pub async fn check_uv_version(app: tauri::AppHandle) -> Result<String, String> {
 #[derive(serde::Deserialize)]
 struct GitHubRelease {
     tag_name: String,
+}
+
+/// npm 包版本信息
+#[derive(serde::Deserialize)]
+struct NpmPackageVersionInfo {
+    version: String,
 }
 
 /// 从 GitHub Releases API 获取最新版本
@@ -80,19 +90,73 @@ async fn fetch_latest_version(
 
 /// 比较版本号，返回 true 如果 latest > current
 fn compare_versions(current: &str, latest: &str) -> bool {
-    let current_parts: Vec<&str> = current.split('.').collect();
-    let latest_parts: Vec<&str> = latest.split('.').collect();
+    let Some(current_version) = parse_version(current) else {
+        return false;
+    };
+    let Some(latest_version) = parse_version(latest) else {
+        return false;
+    };
 
-    for i in 0..3 {
-        let c = current_parts.get(i).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-        let l = latest_parts.get(i).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-        if l > c {
-            return true;
-        } else if l < c {
-            return false;
+    latest_version > current_version
+}
+
+fn parse_version(raw: &str) -> Option<semver::Version> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
+    let candidate = first_line
+        .split_whitespace()
+        .find(|part| part.chars().any(|c| c.is_ascii_digit()))
+        .unwrap_or(first_line)
+        .trim_matches(|c: char| c == ',' || c == ';' || c == ')' || c == '(')
+        .trim_start_matches(|c: char| !c.is_ascii_digit())
+        .trim_start_matches('v');
+
+    semver::Version::parse(candidate).ok()
+}
+
+async fn fetch_latest_npm_package_version(
+    package_name: &str,
+    proxy_url: Option<&str>,
+) -> Result<String, String> {
+    let encoded_package_name = urlencoding::encode(package_name);
+    let url = format!("https://registry.npmjs.org/{}/latest", encoded_package_name);
+    tracing::info!(
+        "检查 ACP 库更新 - 包: {}, 代理地址: {:?}",
+        package_name,
+        proxy_url
+    );
+
+    let mut client_builder = reqwest::Client::builder();
+    if let Some(proxy) = proxy_url {
+        if let Ok(proxy_config) = reqwest::Proxy::all(proxy) {
+            client_builder = client_builder.proxy(proxy_config);
+            tracing::info!("已为 ACP 更新检查配置代理: {}", proxy);
         }
     }
-    false
+
+    let client = client_builder
+        .user_agent("AIPP-App")
+        .build()
+        .map_err(|e| format!("创建客户端失败: {}", e))?;
+
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("请求 npm registry 失败: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("npm registry 返回错误: {}", response.status()));
+    }
+
+    let package_info: NpmPackageVersionInfo =
+        response.json().await.map_err(|e| format!("解析 npm 响应失败: {}", e))?;
+
+    Ok(package_info.version)
 }
 
 #[tauri::command]
@@ -1136,6 +1200,8 @@ pub struct AcpLibraryInfo {
     pub installed: bool,
     /// 安装的版本（如果已安装）
     pub version: Option<String>,
+    /// 已安装 CLI 的解析路径（如果已安装）
+    pub installed_path: Option<String>,
     /// 是否需要外部安装（如 gemini 需要用户自行安装）
     pub requires_external_install: bool,
     /// 安装说明
@@ -1162,103 +1228,170 @@ fn get_acp_library_config(cli_command: &str) -> (String, bool, String) {
     }
 }
 
+fn resolve_installed_cli_path(cli_command: &str) -> Option<String> {
+    let resolved_path = resolve_acp_cli_path(cli_command);
+    if resolved_path.exists() {
+        Some(resolved_path.display().to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_bun_global_package_version(stdout: &str, package_name: &str) -> Option<String> {
+    let marker = format!("{}@", package_name);
+    stdout.lines().find_map(|line| {
+        let (_, remainder) = line.split_once(&marker)?;
+        let version = remainder.split_whitespace().next()?.trim();
+        if version.is_empty() {
+            None
+        } else {
+            Some(version.to_string())
+        }
+    })
+}
+
+fn detect_acp_library(app: &tauri::AppHandle, cli_command: &str) -> AcpLibraryInfo {
+    let (package_name, requires_external, install_hint) = get_acp_library_config(cli_command);
+
+    if requires_external {
+        let output = std::process::Command::new(cli_command).arg("--version").output();
+
+        return match output {
+            Ok(out) if out.status.success() => {
+                let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                AcpLibraryInfo {
+                    cli_command: cli_command.to_string(),
+                    package_name,
+                    installed: true,
+                    version: Some(version),
+                    installed_path: resolve_installed_cli_path(cli_command),
+                    requires_external_install: true,
+                    install_hint,
+                }
+            }
+            _ => AcpLibraryInfo {
+                cli_command: cli_command.to_string(),
+                package_name,
+                installed: false,
+                version: None,
+                installed_path: None,
+                requires_external_install: true,
+                install_hint,
+            },
+        };
+    }
+
+    let bun_path = match crate::utils::bun_utils::BunUtils::get_bun_executable(app) {
+        Ok(path) => path,
+        Err(_) => {
+            return AcpLibraryInfo {
+                cli_command: cli_command.to_string(),
+                package_name,
+                installed: false,
+                version: None,
+                installed_path: None,
+                requires_external_install: false,
+                install_hint: "需要先安装 Bun 运行时".to_string(),
+            };
+        }
+    };
+
+    let output = std::process::Command::new(&bun_path).args(["pm", "ls", "-g"]).output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let is_installed = stdout.contains(&package_name);
+
+            let version = if is_installed {
+                extract_bun_global_package_version(&stdout, &package_name)
+            } else {
+                None
+            };
+
+            let installed_path = if is_installed {
+                resolve_installed_cli_path(cli_command)
+            } else {
+                None
+            };
+
+            AcpLibraryInfo {
+                cli_command: cli_command.to_string(),
+                package_name,
+                installed: is_installed,
+                version,
+                installed_path,
+                requires_external_install: false,
+                install_hint,
+            }
+        }
+        _ => AcpLibraryInfo {
+            cli_command: cli_command.to_string(),
+            package_name,
+            installed: false,
+            version: None,
+            installed_path: None,
+            requires_external_install: false,
+            install_hint,
+        },
+    }
+}
+
 /// 检查 ACP CLI 工具是否已安装
 #[tauri::command]
 pub async fn check_acp_library(
     app: tauri::AppHandle,
+    _feature_config_state: State<'_, crate::FeatureConfigState>,
     cli_command: String,
 ) -> Result<AcpLibraryInfo, String> {
     let app_clone = app.clone();
     let cli_command_clone = cli_command.clone();
 
-    tokio::task::spawn_blocking(move || {
-        let (package_name, requires_external, install_hint) =
-            get_acp_library_config(&cli_command_clone);
-
-        // 对于需要外部安装的工具，直接检查系统 PATH
-        if requires_external {
-            let output = std::process::Command::new(&cli_command_clone).arg("--version").output();
-
-            return match output {
-                Ok(out) if out.status.success() => {
-                    let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    AcpLibraryInfo {
-                        cli_command: cli_command_clone,
-                        package_name,
-                        installed: true,
-                        version: Some(version),
-                        requires_external_install: true,
-                        install_hint,
-                    }
-                }
-                _ => AcpLibraryInfo {
-                    cli_command: cli_command_clone,
-                    package_name,
-                    installed: false,
-                    version: None,
-                    requires_external_install: true,
-                    install_hint,
-                },
-            };
-        }
-
-        // 对于可以通过 bun 安装的包，检查全局安装目录
-        let bun_path = match crate::utils::bun_utils::BunUtils::get_bun_executable(&app_clone) {
-            Ok(path) => path,
-            Err(_) => {
-                return AcpLibraryInfo {
-                    cli_command: cli_command_clone,
-                    package_name,
-                    installed: false,
-                    version: None,
-                    requires_external_install: false,
-                    install_hint: "需要先安装 Bun 运行时".to_string(),
-                };
-            }
-        };
-
-        // 使用 bun pm ls -g 检查全局包
-        let output = std::process::Command::new(&bun_path).args(["pm", "ls", "-g"]).output();
-
-        match output {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let is_installed = stdout.contains(&package_name);
-
-                // 如果已安装，尝试获取版本
-                let version = if is_installed {
-                    // 尝试运行命令获取版本
-                    std::process::Command::new(&cli_command_clone)
-                        .arg("--version")
-                        .output()
-                        .ok()
-                        .filter(|o| o.status.success())
-                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
-                    None
-                };
-
-                AcpLibraryInfo {
-                    cli_command: cli_command_clone,
-                    package_name,
-                    installed: is_installed,
-                    version,
-                    requires_external_install: false,
-                    install_hint,
-                }
-            }
-            _ => AcpLibraryInfo {
-                cli_command: cli_command_clone,
-                package_name,
-                installed: false,
-                version: None,
-                requires_external_install: false,
-                install_hint,
-            },
-        }
-    })
+    tokio::task::spawn_blocking(move || detect_acp_library(&app_clone, &cli_command_clone))
     .await
     .map_err(|e| format!("任务执行失败: {}", e))
+}
+
+#[tauri::command]
+pub async fn check_acp_library_update(
+    app: tauri::AppHandle,
+    feature_config_state: State<'_, crate::FeatureConfigState>,
+    cli_command: String,
+    use_proxy: Option<bool>,
+) -> Result<Option<String>, String> {
+    let app_clone = app.clone();
+    let cli_command_clone = cli_command.clone();
+    let info = tokio::task::spawn_blocking(move || detect_acp_library(&app_clone, &cli_command_clone))
+        .await
+        .map_err(|e| format!("任务执行失败: {}", e))?;
+
+    if !info.installed {
+        return Err(format!("{} 尚未安装，无法检查更新", cli_command));
+    }
+
+    if info.requires_external_install {
+        return Err(format!("{} 需要手动安装/更新，暂不支持自动检查更新", cli_command));
+    }
+
+    let Some(current_version) = info.version.as_deref() else {
+        return Err(format!("无法获取 {} 当前版本", cli_command));
+    };
+
+    let proxy_url = if use_proxy.unwrap_or(false) {
+        let config_map = feature_config_state.config_feature_map.lock().await;
+        get_network_proxy_from_config(&config_map)
+    } else {
+        None
+    };
+
+    let latest_version =
+        fetch_latest_npm_package_version(&info.package_name, proxy_url.as_deref()).await?;
+
+    if compare_versions(current_version, &latest_version) {
+        Ok(Some(latest_version))
+    } else {
+        Ok(None)
+    }
 }
 
 /// 安装 ACP 库
@@ -1272,6 +1405,11 @@ pub async fn install_acp_library(app: tauri::AppHandle, cli_command: String) -> 
 
     let bun_path = crate::utils::bun_utils::BunUtils::get_bun_executable(&app)
         .map_err(|e| format!("获取 Bun 路径失败: {}", e))?;
+    let network_proxy = {
+        let feature_config_state = app.state::<FeatureConfigState>();
+        let config_map = feature_config_state.config_feature_map.lock().await.clone();
+        get_network_proxy_from_config(&config_map)
+    };
 
     tracing::info!("开始安装 ACP 库: {}", package_name);
 
@@ -1282,6 +1420,7 @@ pub async fn install_acp_library(app: tauri::AppHandle, cli_command: String) -> 
     let app_clone = app.clone();
     let package_name_clone = package_name.clone();
     let cli_command_clone = cli_command.clone();
+    let network_proxy_clone = network_proxy.clone();
 
     tokio::task::spawn_blocking(move || {
         let emit_log = |msg: &str| {
@@ -1294,6 +1433,7 @@ pub async fn install_acp_library(app: tauri::AppHandle, cli_command: String) -> 
                 "acp-install-finished",
                 serde_json::json!({
                     "success": success,
+                    "action": "install",
                     "cli_command": cli_command_clone,
                     "package_name": package_name_clone,
                 }),
@@ -1302,11 +1442,17 @@ pub async fn install_acp_library(app: tauri::AppHandle, cli_command: String) -> 
 
         emit_log(&format!("执行: bun add -g {}", package_name_clone));
 
-        let output = std::process::Command::new(&bun_path)
+        let mut command = std::process::Command::new(&bun_path);
+        command
             .args(["add", "-g", &package_name_clone])
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output();
+            .stderr(std::process::Stdio::piped());
+        if let Some(proxy_url) = network_proxy_clone.as_deref() {
+            command.envs(build_proxy_env_vars(proxy_url));
+            emit_log(&format!("检测到全局网络代理，已为安装命令注入代理环境变量: {}", proxy_url));
+        }
+
+        let output = command.output();
 
         match output {
             Ok(out) => {
@@ -1330,6 +1476,114 @@ pub async fn install_acp_library(app: tauri::AppHandle, cli_command: String) -> 
             }
             Err(e) => {
                 emit_log(&format!("执行安装命令失败: {}", e));
+                emit_finished(false);
+            }
+        }
+    });
+
+    Ok(())
+}
+
+/// 更新 ACP 库
+#[tauri::command]
+pub async fn update_acp_library(
+    app: tauri::AppHandle,
+    feature_config_state: State<'_, crate::FeatureConfigState>,
+    cli_command: String,
+    use_proxy: Option<bool>,
+) -> Result<(), String> {
+    let info = {
+        let app_clone = app.clone();
+        let cli_command_clone = cli_command.clone();
+        tokio::task::spawn_blocking(move || detect_acp_library(&app_clone, &cli_command_clone))
+            .await
+            .map_err(|e| format!("任务执行失败: {}", e))?
+    };
+
+    if !info.installed {
+        return Err(format!("{} 尚未安装，无法更新", cli_command));
+    }
+
+    if info.requires_external_install {
+        return Err(format!("{} 需要手动更新，无法自动更新", cli_command));
+    }
+
+    let bun_path = crate::utils::bun_utils::BunUtils::get_bun_executable(&app)
+        .map_err(|e| format!("获取 Bun 路径失败: {}", e))?;
+    let use_proxy = use_proxy.unwrap_or(false);
+    let network_proxy = if use_proxy {
+        let config_map = feature_config_state.config_feature_map.lock().await.clone();
+        get_network_proxy_from_config(&config_map)
+    } else {
+        None
+    };
+
+    tracing::info!("开始更新 ACP 库: {}", info.package_name);
+    let _ = app.emit("acp-install-log", format!("开始更新 {}...", info.package_name));
+
+    let app_clone = app.clone();
+    let package_name_clone = info.package_name.clone();
+    let cli_command_clone = cli_command.clone();
+    let network_proxy_clone = network_proxy.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let emit_log = |msg: &str| {
+            tracing::info!("ACP Update: {}", msg);
+            let _ = app_clone.emit("acp-install-log", msg.to_string());
+        };
+
+        let emit_finished = |success: bool| {
+            let _ = app_clone.emit(
+                "acp-install-finished",
+                serde_json::json!({
+                    "success": success,
+                    "action": "update",
+                    "used_proxy": use_proxy,
+                    "cli_command": cli_command_clone,
+                    "package_name": package_name_clone,
+                }),
+            );
+        };
+
+        emit_log(&format!(
+            "执行: bun add -g {}@latest",
+            package_name_clone
+        ));
+
+        let mut command = std::process::Command::new(&bun_path);
+        command
+            .args(["add", "-g", &format!("{}@latest", package_name_clone)])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if let Some(proxy_url) = network_proxy_clone.as_deref() {
+            command.envs(build_proxy_env_vars(proxy_url));
+            emit_log(&format!("检测到全局网络代理，已为更新命令注入代理环境变量: {}", proxy_url));
+        }
+
+        let output = command.output();
+
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+
+                if !stdout.is_empty() {
+                    emit_log(&stdout);
+                }
+                if !stderr.is_empty() {
+                    emit_log(&stderr);
+                }
+
+                if out.status.success() {
+                    emit_log(&format!("{} 更新成功!", package_name_clone));
+                    emit_finished(true);
+                } else {
+                    emit_log(&format!("更新失败，退出码: {}", out.status.code().unwrap_or(-1)));
+                    emit_finished(false);
+                }
+            }
+            Err(e) => {
+                emit_log(&format!("执行更新命令失败: {}", e));
                 emit_finished(false);
             }
         }

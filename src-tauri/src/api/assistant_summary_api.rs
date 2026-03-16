@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, info, warn};
@@ -22,6 +23,7 @@ use crate::errors::AppError;
 
 const EXPERIMENTAL_FEATURE_CODE: &str = "experimental";
 const ASSISTANT_SUMMARY_RETRY_PROMPT_LIMIT: usize = 3500;
+static ASSISTANT_SUMMARY_RUNNING: AtomicBool = AtomicBool::new(false);
 const ASSISTANT_SUMMARIZER_SYSTEM_PROMPT: &str = r#"你是 AIPP 的助手画像总结器。你的任务是把一个 AI 助手的名称、系统提示词、已启用 MCP 能力、已启用 Skills，压缩成总管家可读的执行画像。
 
 输出要求：
@@ -91,6 +93,10 @@ pub struct AssistantSummaryProgressPayload {
 
 fn is_butler_reserved_assistant(assistant: &Assistant) -> bool {
     assistant.name.trim() == BUTLER_SYSTEM_ASSISTANT_NAME
+}
+
+pub fn is_assistant_summary_running() -> bool {
+    ASSISTANT_SUMMARY_RUNNING.load(Ordering::SeqCst)
 }
 
 fn trim_chars(value: &str, max_chars: usize) -> String {
@@ -641,6 +647,17 @@ pub async fn build_butler_assistant_directory_prompt(
 
 #[tauri::command]
 pub async fn summarize_all_assistant_summaries(app_handle: tauri::AppHandle) -> Result<(), String> {
+    if ASSISTANT_SUMMARY_RUNNING.swap(true, Ordering::SeqCst) {
+        return Err("助手画像生成任务正在进行中，请稍后重试".to_string());
+    }
+    struct ResetRunning;
+    impl Drop for ResetRunning {
+        fn drop(&mut self) {
+            ASSISTANT_SUMMARY_RUNNING.store(false, Ordering::SeqCst);
+        }
+    }
+    let _reset = ResetRunning;
+
     let config_map = get_feature_config_map(&app_handle).await.map_err(|e| e.to_string())?;
     let Some(model_selection) = parse_model_selection(&config_map) else {
         return Err("请先在实验性功能中选择助手总结 AI 模型".to_string());
@@ -748,4 +765,23 @@ pub async fn summarize_all_assistant_summaries(app_handle: tauri::AppHandle) -> 
 
     debug!(total, succeeded, failed, "assistant summary generation completed");
     Ok(())
+}
+
+pub async fn start_assistant_summary_generation(app_handle: tauri::AppHandle) -> Result<bool, String> {
+    if is_assistant_summary_running() {
+        return Ok(false);
+    }
+
+    let config_map = get_feature_config_map(&app_handle).await.map_err(|e| e.to_string())?;
+    if parse_model_selection(&config_map).is_none() {
+        return Err("请先在实验性功能中选择助手总结 AI 模型".to_string());
+    }
+
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = summarize_all_assistant_summaries(app_handle).await {
+            warn!(error = %error, "assistant summary background task failed");
+        }
+    });
+
+    Ok(true)
 }

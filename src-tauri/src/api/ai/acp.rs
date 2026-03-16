@@ -1,6 +1,7 @@
 //! ACP (Agent Client Protocol) integration module
 //! Handles communication with ACP-compatible agents via stdio
 
+use crate::api::ai::config::build_proxy_env_vars;
 use crate::api::ai::conversation::extract_tool_result;
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent, MessageUpdateEvent};
 use crate::db::assistant_db::AssistantModelConfig;
@@ -25,6 +26,8 @@ use agent_client_protocol::{
 };
 use regex::Regex;
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -42,6 +45,62 @@ pub struct AcpConfig {
     pub working_directory: PathBuf,
     pub env_vars: HashMap<String, String>,
     pub additional_args: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AcpLaunchPlan {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub extra_env: HashMap<String, String>,
+    pub proxy_strategy: String,
+}
+
+fn merge_acp_env_blob(env_vars: &mut HashMap<String, String>, raw: &str) {
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if let Some((key, value)) = trimmed.split_once('=') {
+            let key = key.trim();
+            if !key.is_empty() {
+                env_vars.insert(key.to_string(), value.trim().to_string());
+            }
+        }
+    }
+}
+
+/// 为 ACP agent client 注入标准代理环境变量，但不覆盖显式配置的代理变量。
+pub fn apply_network_proxy_to_env_vars(
+    env_vars: &mut HashMap<String, String>,
+    proxy_url: &str,
+) -> usize {
+    let proxy_env_groups = [
+        ["HTTP_PROXY", "http_proxy"],
+        ["HTTPS_PROXY", "https_proxy"],
+        ["ALL_PROXY", "all_proxy"],
+    ];
+    let proxy_envs = build_proxy_env_vars(proxy_url);
+    let mut injected = 0;
+
+    for env_group in proxy_env_groups {
+        let has_existing = env_vars.keys().any(|existing| {
+            env_group.iter().any(|candidate| existing.eq_ignore_ascii_case(candidate))
+        });
+        if has_existing {
+            continue;
+        }
+
+        for env_name in env_group {
+            if let Some(proxy_value) = proxy_envs.get(env_name) {
+                env_vars.insert(env_name.to_string(), proxy_value.clone());
+                injected += 1;
+            }
+        }
+    }
+
+    injected
 }
 
 #[derive(Debug, Clone)]
@@ -131,7 +190,7 @@ impl AcpSessionHandle {
 /// 2. Check ~/.bun/bin/ for bun-installed global packages
 /// 3. Check system PATH
 /// 4. Fall back to the original command (let the system handle it)
-fn resolve_acp_cli_path(cli_command: &str) -> PathBuf {
+pub fn resolve_acp_cli_path(cli_command: &str) -> PathBuf {
     let cli_path = PathBuf::from(cli_command);
 
     // If it's already an absolute path, use it directly
@@ -186,6 +245,75 @@ fn resolve_acp_cli_path(cli_command: &str) -> PathBuf {
 
     info!("ACP: CLI not found in known paths, using original command: {}", cli_command);
     cli_path
+}
+
+fn has_proxy_env_vars(env_vars: &HashMap<String, String>) -> bool {
+    env_vars.keys().any(|key| {
+        matches!(
+            key.to_ascii_lowercase().as_str(),
+            "http_proxy" | "https_proxy" | "all_proxy"
+        )
+    })
+}
+
+fn is_node_shebang_script(path: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Some(first_line) = content.lines().next() else {
+        return false;
+    };
+    first_line.contains("env node") || first_line.contains("/node")
+}
+
+fn node_supports_use_env_proxy(node_path: &Path) -> bool {
+    let Ok(output) = std::process::Command::new(node_path).arg("--help").output() else {
+        return false;
+    };
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout).contains("--use-env-proxy")
+}
+
+pub fn build_acp_launch_plan(
+    cli_command: &str,
+    resolved_cli_command: &Path,
+    additional_args: &[String],
+    env_vars: &HashMap<String, String>,
+) -> AcpLaunchPlan {
+    let mut plan = AcpLaunchPlan {
+        program: resolved_cli_command.to_path_buf(),
+        args: additional_args.to_vec(),
+        extra_env: HashMap::new(),
+        proxy_strategy: "standard-env".to_string(),
+    };
+
+    if cli_command != "claude-code-acp" || !has_proxy_env_vars(env_vars) {
+        return plan;
+    }
+
+    if !is_node_shebang_script(resolved_cli_command) {
+        plan.proxy_strategy = "standard-env-non-node-script".to_string();
+        return plan;
+    }
+
+    let Ok(node_path) = which::which("node") else {
+        plan.proxy_strategy = "standard-env-node-not-found".to_string();
+        return plan;
+    };
+
+    plan.extra_env.insert("NODE_USE_ENV_PROXY".to_string(), "1".to_string());
+    plan.program = node_path.clone();
+    plan.args = vec![resolved_cli_command.display().to_string()];
+    plan.args.extend(additional_args.iter().cloned());
+
+    if node_supports_use_env_proxy(&node_path) {
+        plan.args.insert(0, "--use-env-proxy".to_string());
+        plan.proxy_strategy = "node-use-env-proxy-flag".to_string();
+    } else {
+        plan.proxy_strategy = "node-use-env-proxy-env".to_string();
+    }
+
+    plan
 }
 
 /// Terminal ID to bash_id mapping for ACP terminal management
@@ -1838,16 +1966,24 @@ async fn run_acp_session(
     info!("ACP: Original CLI command: {}", acp_config.cli_command);
     info!("ACP: Resolved CLI path: {}", resolved_cli_command.display());
 
-    // Build the command
-    let full_command = if acp_config.additional_args.is_empty() {
-        resolved_cli_command.display().to_string()
+    let launch_plan = build_acp_launch_plan(
+        &acp_config.cli_command,
+        &resolved_cli_command,
+        &acp_config.additional_args,
+        &acp_config.env_vars,
+    );
+    let full_command = if launch_plan.args.is_empty() {
+        launch_plan.program.display().to_string()
     } else {
-        format!("{} {}", resolved_cli_command.display(), acp_config.additional_args.join(" "))
+        format!("{} {}", launch_plan.program.display(), launch_plan.args.join(" "))
     };
-    info!("ACP: Full command: {}", full_command);
+    info!(
+        "ACP: Full command: {} (proxy_strategy={})",
+        full_command, launch_plan.proxy_strategy
+    );
     info!("ACP: Working directory: {}", acp_config.working_directory.display());
 
-    let mut cmd = Command::new(&resolved_cli_command);
+    let mut cmd = Command::new(&launch_plan.program);
     cmd.current_dir(&acp_config.working_directory)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1871,10 +2007,18 @@ async fn run_acp_session(
         info!("ACP: Environment variables set: {}", acp_config.env_vars.len());
     }
 
-    // Add additional arguments
-    if !acp_config.additional_args.is_empty() {
-        cmd.args(&acp_config.additional_args);
-        info!("ACP: Additional args: {:?}", acp_config.additional_args);
+    for (key, value) in &launch_plan.extra_env {
+        cmd.env(key, value);
+        debug!("ACP: Set runtime env var: {}={}", key, value);
+    }
+    if !launch_plan.extra_env.is_empty() {
+        info!("ACP: Runtime environment variables set: {}", launch_plan.extra_env.len());
+    }
+
+    // Add effective arguments
+    if !launch_plan.args.is_empty() {
+        cmd.args(&launch_plan.args);
+        info!("ACP: Effective args: {:?}", launch_plan.args);
     }
 
     // Spawn the process
@@ -2204,6 +2348,11 @@ pub fn extract_acp_config(
 
     // 先从 provider_configs 收集
     for config in provider_configs {
+        if config.name == "acp_env_vars" {
+            merge_acp_env_blob(&mut env_vars, &config.value);
+            continue;
+        }
+
         if let Some(key) = config.name.strip_prefix("acp_env_") {
             env_vars.insert(key.to_uppercase(), config.value.clone());
         }
@@ -2211,6 +2360,13 @@ pub fn extract_acp_config(
 
     // 再从 model_configs 收集（会覆盖 provider 的同名配置）
     for config in model_configs {
+        if config.name == "acp_env_vars" {
+            if let Some(value) = &config.value {
+                merge_acp_env_blob(&mut env_vars, value);
+            }
+            continue;
+        }
+
         if let Some(key) = config.name.strip_prefix("acp_env_") {
             if let Some(value) = &config.value {
                 env_vars.insert(key.to_uppercase(), value.clone());
@@ -2235,4 +2391,119 @@ pub fn extract_acp_config(
     );
 
     Ok(AcpConfig { cli_command, working_directory, env_vars, additional_args })
+}
+
+#[cfg(test)]
+    mod tests {
+    use super::{
+        apply_network_proxy_to_env_vars, build_acp_launch_plan, extract_acp_config,
+    };
+    use crate::db::assistant_db::AssistantModelConfig;
+    use crate::db::llm_db::LLMProviderConfig;
+    use std::collections::HashMap;
+    use tempfile::NamedTempFile;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+
+    fn provider_config(name: &str, value: &str) -> LLMProviderConfig {
+        LLMProviderConfig {
+            id: 0,
+            name: name.to_string(),
+            llm_provider_id: 1,
+            value: value.to_string(),
+            append_location: "header".to_string(),
+            is_addition: false,
+        }
+    }
+
+    fn model_config(name: &str, value: &str) -> AssistantModelConfig {
+        AssistantModelConfig {
+            id: 0,
+            assistant_id: 1,
+            assistant_model_id: 1,
+            name: name.to_string(),
+            value: Some(value.to_string()),
+            value_type: "string".to_string(),
+        }
+    }
+
+    #[test]
+    fn extract_acp_config_parses_multiline_env_blob_and_model_overrides() {
+        let provider_configs = vec![
+            provider_config("acp_cli_command", "claude-code-acp"),
+            provider_config("acp_env_vars", "FOO=provider\nSHARED=provider"),
+        ];
+        let model_configs =
+            vec![model_config("acp_env_vars", "BAR=model\nSHARED=model\n# COMMENT\nINVALID")];
+
+        let config = extract_acp_config(&model_configs, &provider_configs).unwrap();
+
+        assert_eq!(config.env_vars.get("FOO"), Some(&"provider".to_string()));
+        assert_eq!(config.env_vars.get("BAR"), Some(&"model".to_string()));
+        assert_eq!(config.env_vars.get("SHARED"), Some(&"model".to_string()));
+        assert!(!config.env_vars.contains_key("INVALID"));
+    }
+
+    #[test]
+    fn apply_network_proxy_to_env_vars_preserves_existing_proxy_group() {
+        let mut env_vars = HashMap::from([(
+            "https_proxy".to_string(),
+            "http://custom.example.com:8443".to_string(),
+        )]);
+
+        let injected = apply_network_proxy_to_env_vars(
+            &mut env_vars,
+            "http://proxy.example.com:8080",
+        );
+
+        assert_eq!(injected, 4);
+        assert_eq!(
+            env_vars.get("https_proxy"),
+            Some(&"http://custom.example.com:8443".to_string())
+        );
+        assert_eq!(
+            env_vars.get("HTTP_PROXY"),
+            Some(&"http://proxy.example.com:8080".to_string())
+        );
+        assert_eq!(
+            env_vars.get("ALL_PROXY"),
+            Some(&"http://proxy.example.com:8080".to_string())
+        );
+    }
+
+    #[test]
+    fn build_acp_launch_plan_uses_standard_env_for_non_claude_cli() {
+        let env_vars = HashMap::from([("HTTPS_PROXY".to_string(), "http://127.0.0.1:7897".to_string())]);
+        let plan = build_acp_launch_plan(
+            "codex-acp",
+            Path::new("/tmp/codex-acp"),
+            &["--foo".to_string()],
+            &env_vars,
+        );
+
+        assert_eq!(plan.proxy_strategy, "standard-env");
+        assert_eq!(plan.program, PathBuf::from("/tmp/codex-acp"));
+        assert_eq!(plan.args, vec!["--foo".to_string()]);
+    }
+
+    #[test]
+    fn build_acp_launch_plan_switches_claude_node_script_to_node_runtime() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "#!/usr/bin/env node").unwrap();
+        writeln!(file, "console.log('hello')").unwrap();
+
+        let env_vars = HashMap::from([("HTTPS_PROXY".to_string(), "http://127.0.0.1:7897".to_string())]);
+        let plan = build_acp_launch_plan(
+            "claude-code-acp",
+            file.path(),
+            &["--bar".to_string()],
+            &env_vars,
+        );
+
+        assert!(plan.program.ends_with("node"));
+        assert_eq!(plan.extra_env.get("NODE_USE_ENV_PROXY"), Some(&"1".to_string()));
+        assert!(plan.proxy_strategy.starts_with("node-use-env-proxy"));
+        assert!(plan.args.iter().any(|arg| arg == "--bar"));
+        assert!(plan.args.iter().any(|arg| arg.contains(file.path().to_string_lossy().as_ref())));
+    }
 }

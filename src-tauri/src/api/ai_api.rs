@@ -1,5 +1,7 @@
 use super::assistant_api::AssistantDetail;
-use crate::api::ai::acp::{extract_acp_config, spawn_acp_session_task};
+use crate::api::ai::acp::{
+    apply_network_proxy_to_env_vars, extract_acp_config, spawn_acp_session_task,
+};
 use crate::api::ai::chat::{
     extract_assistant_from_message, handle_non_stream_chat as ai_handle_non_stream_chat,
     handle_stream_chat as ai_handle_stream_chat,
@@ -499,7 +501,23 @@ pub async fn ask_ai(
         debug!("ACP: Loaded {} provider configs", provider_configs.len());
 
         // 从 assistant_model_configs 和 llm_provider_configs 提取 ACP 配置
-        let acp_config = extract_acp_config(&assistant_detail.model_configs, &provider_configs)?;
+        let proxy_enabled = provider_configs
+            .iter()
+            .find(|config| config.name == "proxy_enabled")
+            .and_then(|config| config.value.parse::<bool>().ok())
+            .unwrap_or(false);
+        let network_proxy =
+            proxy_enabled.then(|| get_network_proxy_from_config(&_config_feature_map)).flatten();
+        let mut acp_config = extract_acp_config(&assistant_detail.model_configs, &provider_configs)?;
+        if let Some(proxy_url) = network_proxy.as_deref() {
+            let injected = apply_network_proxy_to_env_vars(&mut acp_config.env_vars, proxy_url);
+            info!(
+                proxy_url = %proxy_url,
+                injected,
+                conversation_id,
+                "ACP proxy env vars applied"
+            );
+        }
         info!(
             "ACP config: cli_command={}, working_directory={}, env_vars={}, additional_args={}",
             acp_config.cli_command,

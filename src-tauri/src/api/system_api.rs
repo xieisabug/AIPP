@@ -1,4 +1,5 @@
 use base64::Engine;
+use serde::Serialize;
 use std::cmp::Ord;
 use std::collections::HashMap;
 use tauri::{Emitter, Manager, State};
@@ -6,8 +7,24 @@ use tauri::{Emitter, Manager, State};
 use crate::template_engine::{build_template_engine, BangType};
 use crate::AppState;
 use crate::FeatureConfigState;
+use crate::scheduler::SchedulerState;
 
 use crate::db::system_db::{FeatureConfig, SystemDatabase};
+
+#[derive(Serialize)]
+pub struct ExperimentalSummaryTaskStatus {
+    pub mcp_running: bool,
+    pub assistant_running: bool,
+    pub conversation_running: bool,
+    pub conversation_running_count: usize,
+}
+
+#[derive(Serialize)]
+pub struct SummaryTriggerResult {
+    pub started: bool,
+    pub already_running: bool,
+    pub message: String,
+}
 
 #[tauri::command]
 pub async fn get_all_feature_config(
@@ -110,6 +127,94 @@ pub async fn refresh_butler_feishu_runtime_command(
     app_handle: tauri::AppHandle,
 ) -> Result<crate::feishu::FeishuRuntimeStatus, String> {
     crate::feishu::refresh_runtime(&app_handle).await
+}
+
+#[tauri::command]
+pub async fn get_experimental_summary_task_status(
+    scheduler_state: State<'_, SchedulerState>,
+) -> Result<ExperimentalSummaryTaskStatus, String> {
+    let conversation_running_count =
+        crate::scheduler::get_conversation_summary_running_count(&scheduler_state).await;
+    Ok(ExperimentalSummaryTaskStatus {
+        mcp_running: crate::mcp::summarizer::is_mcp_summary_running(),
+        assistant_running: crate::api::assistant_summary_api::is_assistant_summary_running(),
+        conversation_running: conversation_running_count > 0,
+        conversation_running_count,
+    })
+}
+
+#[tauri::command]
+pub async fn trigger_mcp_summary_generation(
+    app_handle: tauri::AppHandle,
+) -> Result<SummaryTriggerResult, String> {
+    let started = crate::mcp::summarizer::start_mcp_summary_generation(app_handle).await?;
+    Ok(if started {
+        SummaryTriggerResult {
+            started: true,
+            already_running: false,
+            message: "MCP 总结任务已在后台启动".to_string(),
+        }
+    } else {
+        SummaryTriggerResult {
+            started: false,
+            already_running: true,
+            message: "MCP 总结任务正在进行中".to_string(),
+        }
+    })
+}
+
+#[tauri::command]
+pub async fn trigger_assistant_summary_generation(
+    app_handle: tauri::AppHandle,
+) -> Result<SummaryTriggerResult, String> {
+    let started = crate::api::assistant_summary_api::start_assistant_summary_generation(app_handle).await?;
+    Ok(if started {
+        SummaryTriggerResult {
+            started: true,
+            already_running: false,
+            message: "助手画像生成任务已在后台启动".to_string(),
+        }
+    } else {
+        SummaryTriggerResult {
+            started: false,
+            already_running: true,
+            message: "助手画像生成任务正在进行中".to_string(),
+        }
+    })
+}
+
+#[tauri::command]
+pub async fn trigger_conversation_summary_generation(
+    app_handle: tauri::AppHandle,
+    scheduler_state: State<'_, SchedulerState>,
+) -> Result<SummaryTriggerResult, String> {
+    let running_count = crate::scheduler::get_conversation_summary_running_count(&scheduler_state).await;
+    if running_count > 0 {
+        return Ok(SummaryTriggerResult {
+            started: false,
+            already_running: true,
+            message: format!("已有 {} 个对话总结任务正在进行中", running_count),
+        });
+    }
+
+    crate::scheduler::run_conversation_summary_now(&app_handle, &scheduler_state)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let started_count = crate::scheduler::get_conversation_summary_running_count(&scheduler_state).await;
+    Ok(if started_count > 0 {
+        SummaryTriggerResult {
+            started: true,
+            already_running: false,
+            message: format!("已在后台启动 {} 个对话总结任务", started_count),
+        }
+    } else {
+        SummaryTriggerResult {
+            started: false,
+            already_running: false,
+            message: "当前没有需要立即处理的对话总结任务".to_string(),
+        }
+    })
 }
 
 #[tauri::command]

@@ -16,6 +16,10 @@ use tracing::{debug, info, warn};
 
 static MCP_SUMMARY_RUNNING: AtomicBool = AtomicBool::new(false);
 
+pub fn is_mcp_summary_running() -> bool {
+    MCP_SUMMARY_RUNNING.load(Ordering::SeqCst)
+}
+
 const MCP_SUMMARIZER_SYSTEM_PROMPT: &str = r#"
 你是 MCP 工具目录摘要助手。你的摘要将被 AI 助手用来判断"是否需要加载此工具集/工具"。
 
@@ -321,6 +325,25 @@ pub async fn summarize_all_mcp_catalogs(app_handle: tauri::AppHandle) -> Result<
     );
 
     Ok(())
+}
+
+pub async fn start_mcp_summary_generation(app_handle: tauri::AppHandle) -> Result<bool, String> {
+    if is_mcp_summary_running() {
+        return Ok(false);
+    }
+
+    let config_map = get_feature_config_map(&app_handle).await.map_err(|e| e.to_string())?;
+    if parse_model_selection(&config_map).is_none() {
+        return Err("请先在实验性配置中选择 MCP 总结 AI 模型".to_string());
+    }
+
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = summarize_all_mcp_catalogs(app_handle).await {
+            warn!(error = %err, "MCP summary background task failed");
+        }
+    });
+
+    Ok(true)
 }
 
 pub fn trigger_mcp_catalog_summary_generation(app_handle: tauri::AppHandle, server_id: i64) {
