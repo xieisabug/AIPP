@@ -572,7 +572,8 @@ pub(crate) async fn refresh_runtime(app_handle: &AppHandle) -> Result<FeishuRunt
                 status.connected = false;
                 status.last_error = Some(format!("飞书运行时 panic: {}", panic_message));
                 status.status_text = "飞书运行时异常退出".to_string();
-                status.status_detail = Some("后台运行任务发生未捕获异常，请检查配置和连接环境".to_string());
+                status.status_detail =
+                    Some("后台运行任务发生未捕获异常，请检查配置和连接环境".to_string());
             })
             .await;
             warn!(error = %panic_message, "feishu runtime loop panicked");
@@ -606,7 +607,8 @@ async fn run_runtime_loop(app_handle: AppHandle, config: FeishuRuntimeConfig) {
                     status.connected = false;
                     status.last_error = Some(error.to_string());
                     status.status_text = "飞书配置无效".to_string();
-                    status.status_detail = Some("连接配置构建失败，请检查 App ID、Secret 和域名".to_string());
+                    status.status_detail =
+                        Some("连接配置构建失败，请检查 App ID、Secret 和域名".to_string());
                 })
                 .await;
                 return;
@@ -1392,10 +1394,7 @@ fn build_feishu_markdown_card(markdown: &str) -> Result<Value, String> {
     let _ = MarkdownParser::new_ext(&normalized, MarkdownOptions::all()).count();
 
     let mut elements = Vec::new();
-    for (index, block) in split_markdown_into_feishu_blocks(&normalized)
-        .into_iter()
-        .enumerate()
-    {
+    for (index, block) in split_markdown_into_feishu_blocks(&normalized).into_iter().enumerate() {
         match block {
             FeishuCardBlock::Markdown(content) => {
                 let trimmed = content.trim();
@@ -1698,12 +1697,7 @@ async fn reply_markdown_message(
     )
     .await?;
 
-    Ok(FeishuReplyOutcome {
-        message_id,
-        payload_type: "text",
-        interactive_error,
-        interactive_card,
-    })
+    Ok(FeishuReplyOutcome { message_id, payload_type: "text", interactive_error, interactive_card })
 }
 
 fn build_feishu_text_payload(text: &str) -> Value {
@@ -1788,18 +1782,18 @@ pub(crate) async fn resend_message_to_feishu_for_debug(
 
     let rendered_text = render_message_for_external_channel(
         &message,
-        &RenderContext {
-            channel: CHANNEL_FEISHU,
-            relay_origin: RELAY_ORIGIN_AIPP,
-        },
+        &RenderContext { channel: CHANNEL_FEISHU, relay_origin: RELAY_ORIGIN_AIPP },
     )
     .filter(|content| !content.trim().is_empty())
     .ok_or_else(|| "该消息没有可发送到飞书的可读内容".to_string())?;
 
-    let target = find_latest_feishu_target(app_handle, message.conversation_id)?
-        .ok_or_else(|| "当前对话没有可用的飞书回发目标，请先让该对话与飞书建立一次消息链路".to_string())?;
+    let target =
+        find_latest_feishu_target(app_handle, message.conversation_id)?.ok_or_else(|| {
+            "当前对话没有可用的飞书回发目标，请先让该对话与飞书建立一次消息链路".to_string()
+        })?;
 
-    let outcome = reply_markdown_message(&config, &target.external_message_id, &rendered_text).await?;
+    let outcome =
+        reply_markdown_message(&config, &target.external_message_id, &rendered_text).await?;
 
     insert_external_link(
         app_handle,
@@ -1985,7 +1979,10 @@ mod tests {
         assert_eq!(elements[0]["rows"].as_array().expect("rows should be array").len(), 9);
         assert_eq!(elements[0]["rows"][0]["col_1"], "**圣约翰草**");
         assert_eq!(elements[0]["rows"][0]["col_2"], "⭐⭐⭐ 最强");
-        assert_eq!(elements[0]["rows"][0]["col_4"], "⚠️与避孕药、抗凝药、抗抑郁药严重冲突；孕妇禁用");
+        assert_eq!(
+            elements[0]["rows"][0]["col_4"],
+            "⚠️与避孕药、抗凝药、抗抑郁药严重冲突；孕妇禁用"
+        );
         assert_eq!(elements[0]["rows"][1]["col_1"], "**SAM-e**");
         assert_eq!(elements[0]["rows"][4]["col_2"], "⭐⭐ 缺乏者有效");
         assert_eq!(elements[0]["rows"][5]["col_4"], "配合抗抑郁药使用效果更佳");

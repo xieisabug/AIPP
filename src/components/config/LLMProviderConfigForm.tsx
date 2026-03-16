@@ -131,7 +131,10 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     configArray.forEach((item) => {
                         newConfig[item.name] = item.value;
                     });
-                    form.reset(newConfig);
+                    form.reset({
+                        ...defaultValues,
+                        ...newConfig,
+                    });
                     setHasApiKey(!!newConfig.api_key);
                 })
                 .catch((e) => {
@@ -146,6 +149,8 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             api_key: "",
             proxy_enabled: "false",
             acp_cli_command: "",
+            acp_claude_auth_mode: "claude_settings",
+            acp_claude_env_vars: "",
         }),
         [],
     );
@@ -159,6 +164,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
 
     // 监听 ACP CLI 命令变化
     const acpCliCommand = form.watch("acp_cli_command");
+    const claudeAuthMode = form.watch("acp_claude_auth_mode") || "claude_settings";
 
     // ACP 环境检测 Hook
     const acpEnv = useAcpEnvironment(isAcpProvider ? (acpCliCommand || "") : "");
@@ -207,6 +213,9 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             endpoint: "",
             api_key: "",
             proxy_enabled: "false",
+            acp_cli_command: "",
+            acp_claude_auth_mode: "claude_settings",
+            acp_claude_env_vars: "",
         });
         setTags([]);
         setHasApiKey(false);
@@ -218,7 +227,10 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             configArray.forEach((item) => {
                 newConfig[item.name] = item.value;
             });
-            form.reset(newConfig);
+            form.reset({
+                ...defaultValues,
+                ...newConfig,
+            });
 
             // 检查 GitHub Copilot 是否有 api_key
             if (isCopilotProvider) {
@@ -234,7 +246,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             // 调用子组件的方法，更新 tags
             setTags(newTags);
         });
-    }, [id, isCopilotProvider]);
+    }, [defaultValues, form, id, isCopilotProvider]);
 
     // 处理模型选择确认
     const handleModelSelectionConfirm = useCallback(
@@ -772,6 +784,50 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         customRender: renderAcpEnvironmentStatus,
                     },
                 },
+                ...(acpCliCommand === "claude-code-acp"
+                    ? [
+                        {
+                            key: "acp_claude_auth_mode",
+                            config: {
+                                type: "radio" as const,
+                                label: "Claude 认证来源",
+                                value: "claude_settings",
+                                tooltip: "决定 claude-code-acp 启动时如何准备认证环境变量",
+                                options: [
+                                    {
+                                        value: "claude_settings",
+                                        label: "自动读取 ~/.claude/settings.json",
+                                        tooltip:
+                                            "读取 settings.json 中 env 对象里的环境变量，例如 ANTHROPIC_API_KEY、ANTHROPIC_BASE_URL",
+                                    },
+                                    {
+                                        value: "env_vars",
+                                        label: "手动填写环境变量",
+                                        tooltip:
+                                            "在下方按 KEY=VALUE 每行一条填写，将在启动 claude-code-acp 时注入",
+                                    },
+                                ],
+                            },
+                        },
+                        ...(claudeAuthMode === "env_vars"
+                            ? [
+                                {
+                                    key: "acp_claude_env_vars",
+                                    config: {
+                                        type: "textarea" as const,
+                                        label: "Claude 环境变量",
+                                        value: "",
+                                        className: "min-h-32",
+                                        placeholder:
+                                            "ANTHROPIC_API_KEY=sk-ant-...\nANTHROPIC_BASE_URL=https://your-proxy.example.com",
+                                        tooltip:
+                                            "每行一个 KEY=VALUE；仅在“手动填写环境变量”模式下生效",
+                                    },
+                                },
+                            ]
+                            : []),
+                    ]
+                    : []),
                 {
                     key: "advanced_config",
                     config: {
@@ -833,7 +889,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     },
                 },
             ];
-    }, [apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange]);
+    }, [apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode]);
 
     // 打开改名对话框
     const handleOpenRenameDialog = useCallback(() => {

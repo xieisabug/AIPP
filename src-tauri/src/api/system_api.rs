@@ -4,10 +4,10 @@ use std::cmp::Ord;
 use std::collections::HashMap;
 use tauri::{Emitter, Manager, State};
 
+use crate::scheduler::SchedulerState;
 use crate::template_engine::{build_template_engine, BangType};
 use crate::AppState;
 use crate::FeatureConfigState;
-use crate::scheduler::SchedulerState;
 
 use crate::db::system_db::{FeatureConfig, SystemDatabase};
 
@@ -167,7 +167,8 @@ pub async fn trigger_mcp_summary_generation(
 pub async fn trigger_assistant_summary_generation(
     app_handle: tauri::AppHandle,
 ) -> Result<SummaryTriggerResult, String> {
-    let started = crate::api::assistant_summary_api::start_assistant_summary_generation(app_handle).await?;
+    let started =
+        crate::api::assistant_summary_api::start_assistant_summary_generation(app_handle).await?;
     Ok(if started {
         SummaryTriggerResult {
             started: true,
@@ -188,7 +189,8 @@ pub async fn trigger_conversation_summary_generation(
     app_handle: tauri::AppHandle,
     scheduler_state: State<'_, SchedulerState>,
 ) -> Result<SummaryTriggerResult, String> {
-    let running_count = crate::scheduler::get_conversation_summary_running_count(&scheduler_state).await;
+    let running_count =
+        crate::scheduler::get_conversation_summary_running_count(&scheduler_state).await;
     if running_count > 0 {
         return Ok(SummaryTriggerResult {
             started: false,
@@ -201,7 +203,8 @@ pub async fn trigger_conversation_summary_generation(
         .await
         .map_err(|e| e.to_string())?;
 
-    let started_count = crate::scheduler::get_conversation_summary_running_count(&scheduler_state).await;
+    let started_count =
+        crate::scheduler::get_conversation_summary_running_count(&scheduler_state).await;
     Ok(if started_count > 0 {
         SummaryTriggerResult {
             started: true,

@@ -145,17 +145,10 @@ pub fn build_proxy_env_vars(proxy_url: &str) -> HashMap<String, String> {
         return HashMap::new();
     }
 
-    [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-    ]
-    .into_iter()
-    .map(|key| (key.to_string(), proxy_url.to_string()))
-    .collect()
+    ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
+        .into_iter()
+        .map(|key| (key.to_string(), proxy_url.to_string()))
+        .collect()
 }
 
 /// 从工具错误配置中获取是否继续对话（默认开启）

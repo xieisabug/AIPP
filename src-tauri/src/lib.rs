@@ -34,8 +34,7 @@ use crate::api::assistant_api::{
     delete_assistant, export_assistant, get_acp_launch_diagnostics, get_acp_working_directory,
     get_assistant, get_assistant_field_value, get_assistant_mcp_servers_with_tools,
     get_assistant_workspaces, get_assistants, import_assistant, remove_assistant_workspace,
-    save_assistant,
-    update_assistant_mcp_config, update_assistant_mcp_tool_config,
+    save_assistant, update_assistant_mcp_config, update_assistant_mcp_tool_config,
     update_assistant_model_config_value,
 };
 use crate::api::assistant_summary_api::summarize_all_assistant_summaries;
@@ -86,12 +85,12 @@ use crate::api::skill_api::{
 };
 use crate::api::system_api::{
     clear_butler_feishu_secret, copy_image_to_clipboard, debug_resend_message_to_feishu,
-    get_all_feature_config, get_autostart_state, get_bang_list,
-    get_butler_feishu_runtime_status, get_experimental_summary_task_status,
-    get_selected_text_api, open_data_folder, open_image, refresh_butler_feishu_runtime_command,
-    resume_global_shortcut, save_butler_feishu_secret, save_feature_config, set_autostart,
-    set_shortcut_recording, suspend_global_shortcut, trigger_assistant_summary_generation,
-    trigger_conversation_summary_generation, trigger_mcp_summary_generation,
+    get_all_feature_config, get_autostart_state, get_bang_list, get_butler_feishu_runtime_status,
+    get_experimental_summary_task_status, get_selected_text_api, open_data_folder, open_image,
+    refresh_butler_feishu_runtime_command, resume_global_shortcut, save_butler_feishu_secret,
+    save_feature_config, set_autostart, set_shortcut_recording, suspend_global_shortcut,
+    trigger_assistant_summary_generation, trigger_conversation_summary_generation,
+    trigger_mcp_summary_generation,
 };
 use crate::api::todo_api::get_todos;
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};

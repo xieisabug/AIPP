@@ -767,7 +767,9 @@ pub async fn summarize_all_assistant_summaries(app_handle: tauri::AppHandle) -> 
     Ok(())
 }
 
-pub async fn start_assistant_summary_generation(app_handle: tauri::AppHandle) -> Result<bool, String> {
+pub async fn start_assistant_summary_generation(
+    app_handle: tauri::AppHandle,
+) -> Result<bool, String> {
     if is_assistant_summary_running() {
         return Ok(false);
     }

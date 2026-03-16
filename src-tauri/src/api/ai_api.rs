@@ -508,7 +508,8 @@ pub async fn ask_ai(
             .unwrap_or(false);
         let network_proxy =
             proxy_enabled.then(|| get_network_proxy_from_config(&_config_feature_map)).flatten();
-        let mut acp_config = extract_acp_config(&assistant_detail.model_configs, &provider_configs)?;
+        let mut acp_config =
+            extract_acp_config(&assistant_detail.model_configs, &provider_configs)?;
         if let Some(proxy_url) = network_proxy.as_deref() {
             let injected = apply_network_proxy_to_env_vars(&mut acp_config.env_vars, proxy_url);
             info!(

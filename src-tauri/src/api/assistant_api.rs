@@ -17,8 +17,7 @@ use crate::{
         compress_assistant_data, decompress_assistant_data, AssistantShareData, ModelConfigShare,
         SharedAssistant,
     },
-    NameCacheState,
-    FeatureConfigState,
+    FeatureConfigState, NameCacheState,
 };
 use std::collections::HashMap;
 use tauri::{Emitter, Manager};
@@ -106,10 +105,7 @@ pub struct AcpLaunchDiagnostics {
 }
 
 fn is_proxy_env_key(key: &str) -> bool {
-    matches!(
-        key.to_ascii_lowercase().as_str(),
-        "http_proxy" | "https_proxy" | "all_proxy"
-    )
+    matches!(key.to_ascii_lowercase().as_str(), "http_proxy" | "https_proxy" | "all_proxy")
 }
 
 fn trim_probe_output(value: &[u8]) -> String {
@@ -683,7 +679,8 @@ pub async fn get_acp_launch_diagnostics(
         .ok_or_else(|| "ACP assistant has no provider model configured".to_string())?;
 
     let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let provider_configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
+    let provider_configs =
+        llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
 
     let proxy_enabled = provider_configs
         .iter()
@@ -696,14 +693,10 @@ pub async fn get_acp_launch_diagnostics(
     let network_proxy =
         proxy_enabled.then(|| get_network_proxy_from_config(&config_feature_map)).flatten();
 
-    let mut acp_config =
-        extract_acp_config(&assistant_model_configs, &provider_configs).map_err(|e| e.to_string())?;
-    let explicit_proxy_env_keys = acp_config
-        .env_vars
-        .keys()
-        .filter(|key| is_proxy_env_key(key))
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut acp_config = extract_acp_config(&assistant_model_configs, &provider_configs)
+        .map_err(|e| e.to_string())?;
+    let explicit_proxy_env_keys =
+        acp_config.env_vars.keys().filter(|key| is_proxy_env_key(key)).cloned().collect::<Vec<_>>();
 
     let injected_proxy_env_count = if let Some(proxy_url) = network_proxy.as_deref() {
         apply_network_proxy_to_env_vars(&mut acp_config.env_vars, proxy_url)
@@ -722,10 +715,7 @@ pub async fn get_acp_launch_diagnostics(
         .env_vars
         .iter()
         .filter(|(key, _)| is_proxy_env_key(key))
-        .map(|(key, value)| AcpProxyEnvEntry {
-            key: key.clone(),
-            value: value.clone(),
-        })
+        .map(|(key, value)| AcpProxyEnvEntry { key: key.clone(), value: value.clone() })
         .collect::<Vec<_>>();
     proxy_env.sort_by(|a, b| a.key.cmp(&b.key));
 
@@ -769,7 +759,9 @@ pub async fn get_acp_launch_diagnostics(
         notes.push("provider 已启用代理，但全局 network_proxy 为空".to_string());
     }
     if proxy_enabled && network_proxy.is_some() && injected_proxy_env_count == 0 {
-        notes.push("未注入新的代理环境变量，可能是你已在 ACP 环境变量里显式配置了 proxy env".to_string());
+        notes.push(
+            "未注入新的代理环境变量，可能是你已在 ACP 环境变量里显式配置了 proxy env".to_string(),
+        );
     }
     if !version_probe.success {
         notes.push("CLI --version 探测失败，请优先确认 ACP CLI 是否可执行".to_string());

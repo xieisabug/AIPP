@@ -124,11 +124,7 @@ async fn fetch_latest_npm_package_version(
 ) -> Result<String, String> {
     let encoded_package_name = urlencoding::encode(package_name);
     let url = format!("https://registry.npmjs.org/{}/latest", encoded_package_name);
-    tracing::info!(
-        "检查 ACP 库更新 - 包: {}, 代理地址: {:?}",
-        package_name,
-        proxy_url
-    );
+    tracing::info!("检查 ACP 库更新 - 包: {}, 代理地址: {:?}", package_name, proxy_url);
 
     let mut client_builder = reqwest::Client::builder();
     if let Some(proxy) = proxy_url {
@@ -143,11 +139,8 @@ async fn fetch_latest_npm_package_version(
         .build()
         .map_err(|e| format!("创建客户端失败: {}", e))?;
 
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("请求 npm registry 失败: {}", e))?;
+    let response =
+        client.get(&url).send().await.map_err(|e| format!("请求 npm registry 失败: {}", e))?;
 
     if !response.status().is_success() {
         return Err(format!("npm registry 返回错误: {}", response.status()));
@@ -1309,11 +1302,8 @@ fn detect_acp_library(app: &tauri::AppHandle, cli_command: &str) -> AcpLibraryIn
                 None
             };
 
-            let installed_path = if is_installed {
-                resolve_installed_cli_path(cli_command)
-            } else {
-                None
-            };
+            let installed_path =
+                if is_installed { resolve_installed_cli_path(cli_command) } else { None };
 
             AcpLibraryInfo {
                 cli_command: cli_command.to_string(),
@@ -1348,8 +1338,8 @@ pub async fn check_acp_library(
     let cli_command_clone = cli_command.clone();
 
     tokio::task::spawn_blocking(move || detect_acp_library(&app_clone, &cli_command_clone))
-    .await
-    .map_err(|e| format!("任务执行失败: {}", e))
+        .await
+        .map_err(|e| format!("任务执行失败: {}", e))
 }
 
 #[tauri::command]
@@ -1361,9 +1351,10 @@ pub async fn check_acp_library_update(
 ) -> Result<Option<String>, String> {
     let app_clone = app.clone();
     let cli_command_clone = cli_command.clone();
-    let info = tokio::task::spawn_blocking(move || detect_acp_library(&app_clone, &cli_command_clone))
-        .await
-        .map_err(|e| format!("任务执行失败: {}", e))?;
+    let info =
+        tokio::task::spawn_blocking(move || detect_acp_library(&app_clone, &cli_command_clone))
+            .await
+            .map_err(|e| format!("任务执行失败: {}", e))?;
 
     if !info.installed {
         return Err(format!("{} 尚未安装，无法检查更新", cli_command));
@@ -1545,10 +1536,7 @@ pub async fn update_acp_library(
             );
         };
 
-        emit_log(&format!(
-            "执行: bun add -g {}@latest",
-            package_name_clone
-        ));
+        emit_log(&format!("执行: bun add -g {}@latest", package_name_clone));
 
         let mut command = std::process::Command::new(&bun_path);
         command
