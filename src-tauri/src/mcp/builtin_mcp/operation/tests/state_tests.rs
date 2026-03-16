@@ -159,7 +159,8 @@ async fn test_permission_request_handling() {
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     // 存储权限请求
-    state.store_permission_request(request_id.to_string(), tx).await;
+    state.store_permission_request(request_id.to_string(), Some(42), tx).await;
+    assert!(state.has_pending_permission_for_conversation(42).await);
 
     // 在另一个任务中解决权限请求
     let state_clone = state.clone();
@@ -167,10 +168,11 @@ async fn test_permission_request_handling() {
     tokio::spawn(async move {
         // 模拟用户响应
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        let success = state_clone
+        let resolution = state_clone
             .resolve_permission_request(&request_id_clone, PermissionDecision::Allow)
             .await;
-        assert!(success);
+        assert!(resolution.as_ref().is_some_and(|value| value.delivered));
+        assert_eq!(resolution.and_then(|value| value.conversation_id), Some(42));
     });
 
     // 等待接收响应
@@ -178,8 +180,9 @@ async fn test_permission_request_handling() {
     assert_eq!(decision, PermissionDecision::Allow);
 
     // 再次尝试解决应该失败（已被移除）
-    let success = state.resolve_permission_request(request_id, PermissionDecision::Deny).await;
-    assert!(!success);
+    assert!(!state.has_pending_permission_for_conversation(42).await);
+    let resolution = state.resolve_permission_request(request_id, PermissionDecision::Deny).await;
+    assert!(resolution.is_none());
 }
 
 /// 测试 OperationState Clone

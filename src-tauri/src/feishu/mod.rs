@@ -102,7 +102,7 @@ struct FeishuRuntimeConfig {
 
 #[derive(Debug, Clone)]
 struct ChannelLinkTarget {
-    external_message_id: String,
+    reply_to_message_id: Option<String>,
     external_chat_id: Option<String>,
     external_user_id: Option<String>,
 }
@@ -246,10 +246,31 @@ struct FeishuMarkdownTable {
 pub struct FeishuDebugSendResult {
     pub external_message_id: String,
     pub payload_type: String,
-    pub reply_to_message_id: String,
+    pub delivery_mode: String,
+    pub reply_to_message_id: Option<String>,
+    pub target_type: Option<String>,
+    pub target_id: Option<String>,
     pub rendered_text: String,
     pub interactive_error: Option<String>,
     pub interactive_card: Option<Value>,
+}
+
+fn normalize_optional_id(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+fn select_receive_target(target: &ChannelLinkTarget) -> Option<(&'static str, &str)> {
+    if let Some(chat_id) = target.external_chat_id.as_deref().filter(|value| !value.trim().is_empty()) {
+        return Some(("chat_id", chat_id));
+    }
+    target
+        .external_user_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|open_id| ("open_id", open_id))
 }
 
 fn parse_bool_flag(value: &str) -> bool {
@@ -543,7 +564,7 @@ pub(crate) async fn maybe_schedule_butler_feishu_relay_for_aipp_turn(
             origin: RELAY_ORIGIN_AIPP,
             external_chat_id: target.external_chat_id.as_deref(),
             external_user_id: target.external_user_id.as_deref(),
-            anchor_external_message_id: &target.external_message_id,
+            anchor_external_message_id: target.reply_to_message_id.as_deref().unwrap_or(""),
             start_after_local_message_id,
         },
     )?;
@@ -1277,16 +1298,38 @@ fn find_latest_feishu_target(
 ) -> Result<Option<ChannelLinkTarget>, String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conn = db.get_connection().map_err(|e| e.to_string())?;
+    let linked_target = conn
+        .query_row(
+            "SELECT external_message_id, external_chat_id, external_user_id
+             FROM external_channel_message_link
+             WHERE channel = ?1 AND conversation_id = ?2
+             ORDER BY created_time DESC, id DESC
+             LIMIT 1",
+            params![CHANNEL_FEISHU, conversation_id],
+            |row| {
+                Ok(ChannelLinkTarget {
+                    reply_to_message_id: normalize_optional_id(Some(row.get(0)?)),
+                    external_chat_id: row.get(1)?,
+                    external_user_id: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if linked_target.is_some() {
+        return Ok(linked_target);
+    }
+
     conn.query_row(
-        "SELECT external_message_id, external_chat_id, external_user_id
-         FROM external_channel_message_link
+        "SELECT anchor_external_message_id, external_chat_id, external_user_id
+         FROM external_channel_relay_scope
          WHERE channel = ?1 AND conversation_id = ?2
-         ORDER BY created_time DESC, id DESC
+         ORDER BY updated_time DESC, created_time DESC, id DESC
          LIMIT 1",
         params![CHANNEL_FEISHU, conversation_id],
         |row| {
             Ok(ChannelLinkTarget {
-                external_message_id: row.get(0)?,
+                reply_to_message_id: normalize_optional_id(Some(row.get(0)?)),
                 external_chat_id: row.get(1)?,
                 external_user_id: row.get(2)?,
             })
@@ -1296,13 +1339,51 @@ fn find_latest_feishu_target(
     .map_err(|e| e.to_string())
 }
 
+pub(crate) fn inherit_latest_feishu_target(
+    app_handle: &AppHandle,
+    source_conversation_id: i64,
+    target_conversation_id: i64,
+) -> Result<(), String> {
+    if source_conversation_id == target_conversation_id {
+        return Ok(());
+    }
+    if find_latest_feishu_target(app_handle, target_conversation_id)?.is_some() {
+        return Ok(());
+    }
+    let Some(target) = find_latest_feishu_target(app_handle, source_conversation_id)? else {
+        return Ok(());
+    };
+
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    let anchor_external_message_id = target.reply_to_message_id.unwrap_or_default();
+    conn.execute(
+        "INSERT INTO external_channel_relay_scope
+            (channel, conversation_id, origin, external_chat_id, external_user_id,
+             anchor_external_message_id, start_after_local_message_id, last_delivered_local_message_id,
+             status, updated_time)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0, 'completed', CURRENT_TIMESTAMP)",
+        params![
+            CHANNEL_FEISHU,
+            target_conversation_id,
+            RELAY_ORIGIN_AIPP,
+            target.external_chat_id.as_deref(),
+            target.external_user_id.as_deref(),
+            anchor_external_message_id,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn find_scope_reply_anchor(
     app_handle: &AppHandle,
     scope_id: i64,
 ) -> Result<Option<String>, String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conn = db.get_connection().map_err(|e| e.to_string())?;
-    conn.query_row(
+    let reply_to = conn
+        .query_row(
         "SELECT external_message_id
          FROM external_channel_message_delivery
          WHERE scope_id = ?1
@@ -1314,7 +1395,8 @@ fn find_scope_reply_anchor(
         |row| row.get::<_, String>(0),
     )
     .optional()
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    Ok(normalize_optional_id(reply_to))
 }
 
 fn list_relayable_messages(
@@ -1354,7 +1436,7 @@ async fn flush_feishu_relay_scope(
     }
 
     let mut current_reply_to = find_scope_reply_anchor(app_handle, scope.id)?
-        .unwrap_or_else(|| scope.anchor_external_message_id.clone());
+        .or_else(|| normalize_optional_id(Some(scope.anchor_external_message_id.clone())));
     let start_after = scope.last_delivered_local_message_id.max(scope.start_after_local_message_id);
     let messages = list_relayable_messages(app_handle, scope.conversation_id, start_after)?;
     let mut delivered_count = 0usize;
@@ -1369,19 +1451,27 @@ async fn flush_feishu_relay_scope(
 
         match rendered {
             Some(rendered_text) if !rendered_text.trim().is_empty() => {
-                let outbound =
-                    reply_markdown_message(app_handle, config, &current_reply_to, &rendered_text)
-                        .await?;
+                let outbound = send_markdown_message_to_target(
+                    app_handle,
+                    config,
+                    &ChannelLinkTarget {
+                        reply_to_message_id: current_reply_to.clone(),
+                        external_chat_id: scope.external_chat_id.clone(),
+                        external_user_id: scope.external_user_id.clone(),
+                    },
+                    &rendered_text,
+                )
+                .await?;
                 insert_external_link(
                     app_handle,
                     ChannelLinkRecord {
-                        external_message_id: &outbound.message_id,
+                        external_message_id: &outbound.external_message_id,
                         external_chat_id: scope.external_chat_id.as_deref(),
                         external_user_id: scope.external_user_id.as_deref(),
                         conversation_id: scope.conversation_id,
                         local_message_id: Some(message.id),
                         direction: "outbound",
-                        payload_type: outbound.payload_type,
+                        payload_type: &outbound.payload_type,
                     },
                 )?;
                 record_scope_delivery(
@@ -1390,11 +1480,11 @@ async fn flush_feishu_relay_scope(
                     &scope.channel,
                     scope.conversation_id,
                     message.id,
-                    Some(&outbound.message_id),
+                    Some(&outbound.external_message_id),
                     "sent",
                     &rendered_text,
                 )?;
-                current_reply_to = outbound.message_id;
+                current_reply_to = Some(outbound.external_message_id.clone());
                 delivered_count += 1;
             }
             _ => {
@@ -1854,6 +1944,41 @@ async fn reply_markdown_message(
     Ok(FeishuReplyOutcome { message_id, payload_type: "text", interactive_error, interactive_card })
 }
 
+async fn send_message_request(
+    client: &reqwest::Client,
+    config: &FeishuRuntimeConfig,
+    token: &str,
+    receive_id_type: &str,
+    receive_id: &str,
+    payload: Value,
+) -> Result<String, String> {
+    let url = format!(
+        "{}/open-apis/im/v1/messages?receive_id_type={}",
+        config.base_url.trim_end_matches('/'),
+        receive_id_type
+    );
+    let mut payload_object = payload
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "飞书发送消息 payload 格式非法".to_string())?;
+    payload_object.insert("receive_id".to_string(), Value::String(receive_id.to_string()));
+    let response = client
+        .post(url)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .header(CONTENT_TYPE, "application/json")
+        .json(&Value::Object(payload_object))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let body: SendMessageResponse = response.json().await.map_err(|e| e.to_string())?;
+    if body.code != 0 {
+        return Err(format!("发送飞书消息失败: {}", body.msg));
+    }
+    body.data
+        .map(|data| data.message_id)
+        .ok_or_else(|| "飞书发送成功但未返回 message_id".to_string())
+}
+
 fn build_feishu_text_payload(text: &str) -> Value {
     json!({
         "msg_type": "text",
@@ -1915,6 +2040,109 @@ async fn reply_text_message(
     .await
 }
 
+async fn send_markdown_message_to_target(
+    app_handle: &AppHandle,
+    config: &FeishuRuntimeConfig,
+    target: &ChannelLinkTarget,
+    markdown: &str,
+) -> Result<FeishuDebugSendResult, String> {
+    let token = fetch_tenant_access_token(app_handle, config).await?;
+    let client = feishu_http_client(app_handle);
+    let mut interactive_error = None;
+    let interactive_card = match build_feishu_markdown_card(markdown) {
+        Ok(card) => Some(card),
+        Err(error) => {
+            let error = format!("构建飞书卡片失败: {error}");
+            debug!(error = %error, "failed to build feishu markdown card, falling back to raw text");
+            interactive_error = Some(error);
+            None
+        }
+    };
+    let delivery_mode = if target.reply_to_message_id.is_some() { "reply" } else { "direct" };
+    let selected_target = select_receive_target(target)
+        .map(|(target_type, target_id)| (target_type.to_string(), target_id.to_string()));
+
+    if let Some(card) = interactive_card.as_ref() {
+        let interactive_result = if let Some(reply_to_message_id) = target.reply_to_message_id.as_deref() {
+            send_reply_message_request(
+                &client,
+                config,
+                &token,
+                reply_to_message_id,
+                build_feishu_interactive_payload(card),
+            )
+            .await
+        } else if let Some((receive_id_type, receive_id)) = select_receive_target(target) {
+            send_message_request(
+                &client,
+                config,
+                &token,
+                receive_id_type,
+                receive_id,
+                build_feishu_interactive_payload(card),
+            )
+            .await
+        } else {
+            Err("当前对话没有可用的飞书发送目标，请先让该对话与飞书建立一次消息链路".to_string())
+        };
+
+        match interactive_result {
+            Ok(message_id) => {
+                return Ok(FeishuDebugSendResult {
+                    external_message_id: message_id,
+                    payload_type: "interactive".to_string(),
+                    delivery_mode: delivery_mode.to_string(),
+                    reply_to_message_id: target.reply_to_message_id.clone(),
+                    target_type: selected_target.as_ref().map(|(target_type, _)| target_type.clone()),
+                    target_id: selected_target.as_ref().map(|(_, target_id)| target_id.clone()),
+                    rendered_text: markdown.to_string(),
+                    interactive_error,
+                    interactive_card,
+                });
+            }
+            Err(error) => {
+                warn!(error = %error, "failed to send feishu interactive message, falling back to raw text");
+                interactive_error = Some(format!("发送飞书 interactive 卡片失败: {error}"));
+            }
+        }
+    }
+
+    let message_id = if let Some(reply_to_message_id) = target.reply_to_message_id.as_deref() {
+        send_reply_message_request(
+            &client,
+            config,
+            &token,
+            reply_to_message_id,
+            build_feishu_text_payload(markdown),
+        )
+        .await?
+    } else if let Some((receive_id_type, receive_id)) = select_receive_target(target) {
+        send_message_request(
+            &client,
+            config,
+            &token,
+            receive_id_type,
+            receive_id,
+            build_feishu_text_payload(markdown),
+        )
+        .await?
+    } else {
+        return Err("当前对话没有可用的飞书发送目标，请先让该对话与飞书建立一次消息链路".to_string());
+    };
+
+    Ok(FeishuDebugSendResult {
+        external_message_id: message_id,
+        payload_type: "text".to_string(),
+        delivery_mode: delivery_mode.to_string(),
+        reply_to_message_id: target.reply_to_message_id.clone(),
+        target_type: selected_target.as_ref().map(|(target_type, _)| target_type.clone()),
+        target_id: selected_target.as_ref().map(|(_, target_id)| target_id.clone()),
+        rendered_text: markdown.to_string(),
+        interactive_error,
+        interactive_card,
+    })
+}
+
 pub(crate) async fn resend_message_to_feishu_for_debug(
     app_handle: &AppHandle,
     message_id: i64,
@@ -1939,36 +2167,25 @@ pub(crate) async fn resend_message_to_feishu_for_debug(
     .filter(|content| !content.trim().is_empty())
     .ok_or_else(|| "该消息没有可发送到飞书的可读内容".to_string())?;
 
-    let target =
-        find_latest_feishu_target(app_handle, message.conversation_id)?.ok_or_else(|| {
-            "当前对话没有可用的飞书回发目标，请先让该对话与飞书建立一次消息链路".to_string()
-        })?;
-
-    let outcome =
-        reply_markdown_message(app_handle, &config, &target.external_message_id, &rendered_text)
-            .await?;
+    let target = find_latest_feishu_target(app_handle, message.conversation_id)?.ok_or_else(|| {
+        "当前对话没有可用的飞书发送目标，请先让该对话与飞书建立一次消息链路".to_string()
+    })?;
+    let outcome = send_markdown_message_to_target(app_handle, &config, &target, &rendered_text).await?;
 
     insert_external_link(
         app_handle,
         ChannelLinkRecord {
-            external_message_id: &outcome.message_id,
+            external_message_id: &outcome.external_message_id,
             external_chat_id: target.external_chat_id.as_deref(),
             external_user_id: target.external_user_id.as_deref(),
             conversation_id: message.conversation_id,
             local_message_id: Some(message.id),
             direction: "outbound",
-            payload_type: outcome.payload_type,
+            payload_type: &outcome.payload_type,
         },
     )?;
 
-    Ok(FeishuDebugSendResult {
-        external_message_id: outcome.message_id,
-        payload_type: outcome.payload_type.to_string(),
-        reply_to_message_id: target.external_message_id,
-        rendered_text,
-        interactive_error: outcome.interactive_error,
-        interactive_card: outcome.interactive_card,
-    })
+    Ok(outcome)
 }
 
 pub fn debug_build_feishu_markdown_card(markdown: &str) -> Result<Value, String> {

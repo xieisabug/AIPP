@@ -241,7 +241,9 @@ impl PermissionManager {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         // 存储待处理请求
-        operation_state.store_permission_request(request_id.clone(), tx).await;
+        operation_state
+            .store_permission_request(request_id.clone(), conversation_id, tx)
+            .await;
 
         // 发送事件到前端
         let event = PermissionRequestEvent {
@@ -257,6 +259,23 @@ impl PermissionManager {
             operation_state.remove_permission_request(&request_id).await;
             warn!(error = %e, "Failed to emit permission request event");
             return Err("Failed to request permission".to_string());
+        }
+
+        if let Some(conversation_id) = conversation_id {
+            if let Err(error) = crate::api::butler_api::emit_butler_task_permission_state_changed(
+                &self.app_handle,
+                conversation_id,
+                "operation",
+                true,
+            )
+            .await
+            {
+                warn!(
+                    conversation_id,
+                    error = %error,
+                    "Failed to refresh Butler operation permission state"
+                );
+            }
         }
 
         // 等待用户响应（无超时，一直等待）

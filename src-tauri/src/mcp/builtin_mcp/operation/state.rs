@@ -30,6 +30,16 @@ pub struct BashProcessInfo {
     pub last_read_pos: usize,
 }
 
+pub(crate) struct PendingPermissionRequest {
+    sender: tokio::sync::oneshot::Sender<super::types::PermissionDecision>,
+    conversation_id: Option<i64>,
+}
+
+pub struct PermissionRequestResolution {
+    pub conversation_id: Option<i64>,
+    pub delivered: bool,
+}
+
 /// 操作工具状态管理器
 pub struct OperationState {
     /// 已读文件记录（路径 -> 读取记录）
@@ -39,8 +49,7 @@ pub struct OperationState {
     /// 后台 Bash 进程（bash_id -> 进程信息）
     pub(crate) bash_processes: Arc<Mutex<HashMap<String, BashProcessInfo>>>,
     /// 待处理的权限请求（request_id -> 发送通道）
-    pub(crate) pending_permissions:
-        Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<super::types::PermissionDecision>>>>,
+    pub(crate) pending_permissions: Arc<Mutex<HashMap<String, PendingPermissionRequest>>>,
     /// 会话信任路径（conversation_id -> 信任路径列表）
     pub(crate) conversation_trusted_paths: Arc<Mutex<HashMap<i64, Vec<String>>>>,
 }
@@ -206,10 +215,11 @@ impl OperationState {
     pub async fn store_permission_request(
         &self,
         request_id: String,
+        conversation_id: Option<i64>,
         sender: tokio::sync::oneshot::Sender<super::types::PermissionDecision>,
     ) {
         let mut pending = self.pending_permissions.lock().await;
-        pending.insert(request_id, sender);
+        pending.insert(request_id, PendingPermissionRequest { sender, conversation_id });
     }
 
     /// 移除待处理权限请求（用于事件发送失败等场景）
@@ -223,13 +233,17 @@ impl OperationState {
         &self,
         request_id: &str,
         decision: super::types::PermissionDecision,
-    ) -> bool {
+    ) -> Option<PermissionRequestResolution> {
         let mut pending = self.pending_permissions.lock().await;
-        if let Some(sender) = pending.remove(request_id) {
-            sender.send(decision).is_ok()
-        } else {
-            false
-        }
+        pending.remove(request_id).map(|request| PermissionRequestResolution {
+            conversation_id: request.conversation_id,
+            delivered: request.sender.send(decision).is_ok(),
+        })
+    }
+
+    pub async fn has_pending_permission_for_conversation(&self, conversation_id: i64) -> bool {
+        let pending = self.pending_permissions.lock().await;
+        pending.values().any(|request| request.conversation_id == Some(conversation_id))
     }
 
     /// 添加会话信任路径

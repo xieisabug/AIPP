@@ -103,6 +103,58 @@ pub fn build_tool_name(server_name: &str, tool_name: &str) -> String {
     format!("{}__{}", sanitize_tool_name(server_name), sanitize_tool_name(tool_name))
 }
 
+fn enforce_butler_mcp_override(
+    assistant_name: &str,
+    override_mcp_config: Option<McpOverrideConfig>,
+) -> Option<McpOverrideConfig> {
+    if is_butler_system_assistant_name(assistant_name) {
+        let mut enforced = override_mcp_config.unwrap_or(McpOverrideConfig {
+            all_tool_auto_run: None,
+            tool_auto_run: None,
+            use_native_toolcall: None,
+            tool_call_timeout: None,
+        });
+        enforced.all_tool_auto_run = Some(true);
+        enforced.use_native_toolcall = Some(true);
+        Some(enforced)
+    } else {
+        override_mcp_config
+    }
+}
+
+#[cfg(test)]
+mod butler_mcp_override_tests {
+    use super::enforce_butler_mcp_override;
+    use crate::api::ai::types::McpOverrideConfig;
+    use crate::api::butler_api::BUTLER_SYSTEM_ASSISTANT_NAME;
+
+    #[test]
+    fn butler_override_enables_native_toolcall_and_auto_run() {
+        let enforced = enforce_butler_mcp_override(BUTLER_SYSTEM_ASSISTANT_NAME, None)
+            .expect("Butler assistant should always receive an override");
+
+        assert_eq!(enforced.all_tool_auto_run, Some(true));
+        assert_eq!(enforced.use_native_toolcall, Some(true));
+    }
+
+    #[test]
+    fn non_butler_override_is_left_unchanged() {
+        let original = McpOverrideConfig {
+            all_tool_auto_run: Some(false),
+            tool_auto_run: None,
+            use_native_toolcall: Some(false),
+            tool_call_timeout: Some(15_000),
+        };
+
+        let preserved = enforce_butler_mcp_override("普通助手", Some(original.clone()))
+            .expect("Existing override should be preserved for non-Butler assistants");
+
+        assert_eq!(preserved.all_tool_auto_run, original.all_tool_auto_run);
+        assert_eq!(preserved.use_native_toolcall, original.use_native_toolcall);
+        assert_eq!(preserved.tool_call_timeout, original.tool_call_timeout);
+    }
+}
+
 fn build_prompt_with_attachment_context(prompt: &str, context: &str) -> String {
     if context.trim().is_empty() {
         prompt.to_string()
@@ -346,18 +398,8 @@ pub async fn ask_ai(
         return Err(AppError::NoModelFound);
     }
 
-    let override_mcp_config = if is_butler_system_assistant_name(&assistant_detail.assistant.name) {
-        let mut enforced = override_mcp_config.unwrap_or(McpOverrideConfig {
-            all_tool_auto_run: None,
-            tool_auto_run: None,
-            use_native_toolcall: None,
-            tool_call_timeout: None,
-        });
-        enforced.all_tool_auto_run = Some(true);
-        Some(enforced)
-    } else {
-        override_mcp_config
-    };
+    let override_mcp_config =
+        enforce_butler_mcp_override(&assistant_detail.assistant.name, override_mcp_config);
 
     // 收集 MCP 信息
     let mcp_info = collect_mcp_info_for_assistant(
@@ -938,8 +980,17 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let init_message_list =
         build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
+    let override_mcp_config =
+        enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
+
     // 收集 MCP 信息
-    let mcp_info = collect_mcp_info_for_assistant(&app_handle, assistant_id, None, None).await?;
+    let mcp_info = collect_mcp_info_for_assistant(
+        &app_handle,
+        assistant_id,
+        override_mcp_config.as_ref(),
+        None,
+    )
+    .await?;
     let is_native_toolcall = mcp_info.use_native_toolcall;
 
     // Get model details (same as ask_ai)
@@ -1094,7 +1145,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             None,                              // no parent_group_id
             model_id,
             model_code.clone(),
-            None,                      // no MCP override config
+            override_mcp_config.clone(), // preserve Butler MCP override config
             tool_name_mapping.clone(), // 工具名称映射表
         )
         .await?;
@@ -1115,7 +1166,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             None,                              // no parent_group_id
             model_id,
             model_code.clone(),
-            None,                      // no MCP override config
+            override_mcp_config,       // preserve Butler MCP override config
             tool_name_mapping.clone(), // 工具名称映射表
         )
         .await?;
@@ -1183,8 +1234,17 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let init_message_list =
         build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
+    let override_mcp_config =
+        enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
+
     // 收集 MCP 信息
-    let mcp_info = collect_mcp_info_for_assistant(&app_handle, assistant_id, None, None).await?;
+    let mcp_info = collect_mcp_info_for_assistant(
+        &app_handle,
+        assistant_id,
+        override_mcp_config.as_ref(),
+        None,
+    )
+    .await?;
     let is_native_toolcall = mcp_info.use_native_toolcall;
 
     // Get model details
@@ -1328,7 +1388,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
             None,
             model_id,
             model_code.clone(),
-            None,
+            override_mcp_config.clone(),
             tool_name_mapping.clone(),
         ))
         .await?;
@@ -1349,7 +1409,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
             None,
             model_id,
             model_code.clone(),
-            None,
+            override_mcp_config,
             tool_name_mapping,
         ))
         .await?;

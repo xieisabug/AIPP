@@ -22,7 +22,10 @@ import { toast } from "sonner";
 interface FeishuDebugSendResult {
     external_message_id: string;
     payload_type: string;
-    reply_to_message_id: string;
+    delivery_mode: string;
+    reply_to_message_id?: string | null;
+    target_type?: string | null;
+    target_id?: string | null;
     rendered_text: string;
     interactive_error?: string | null;
     interactive_card?: unknown;
@@ -234,8 +237,14 @@ const MessageItem = React.memo<MessageItemProps>(
 
                 const descriptionParts = [
                     `发送类型：${result.payload_type}`,
-                    `reply_to：${result.reply_to_message_id}`,
+                    `投递方式：${result.delivery_mode === "reply" ? "回复" : "直发"}`,
                 ];
+                if (result.reply_to_message_id) {
+                    descriptionParts.push(`reply_to：${result.reply_to_message_id}`);
+                }
+                if (result.target_type && result.target_id) {
+                    descriptionParts.push(`目标：${result.target_type}=${result.target_id}`);
+                }
                 if (result.interactive_error) {
                     descriptionParts.push(`interactive失败：${result.interactive_error}`);
                 }

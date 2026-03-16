@@ -87,6 +87,12 @@ interface SummaryActionLoadingState {
 }
 
 const isEnabledValue = (value: unknown) => value === true || value === "true";
+const toggleCardClassName = "flex items-center justify-between rounded-md border bg-background p-4";
+const nestedGroupClassName = "space-y-4 rounded-lg bg-muted/30 p-4";
+const nestedSubGroupClassName = "space-y-4 rounded-lg bg-muted/40 p-4";
+const actionPanelClassName =
+    "flex flex-col gap-3 rounded-md border bg-background p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between";
+const statusPanelClassName = "space-y-2 rounded-md border bg-background p-4 shadow-sm";
 
 const readSummaryEnabledState = (values?: Record<string, unknown>): SummaryEnabledState => ({
     mcp: isEnabledValue(values?.dynamic_mcp_loading_enabled),
@@ -496,12 +502,12 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                             </p>
                         </div>
 
-                        <div className="space-y-4 rounded-md border p-4">
+                        <div className="space-y-4">
                             <Controller
                                 control={form.control}
                                 name="dynamic_mcp_loading_enabled"
                                 render={({ field }) => (
-                                    <FormItem className="flex items-center justify-between rounded-md border p-4">
+                                    <FormItem className={toggleCardClassName}>
                                         <div>
                                             <FormLabel className="text-base">MCP 动态加载（实验）</FormLabel>
                                             <p className="mt-1 text-sm text-muted-foreground">
@@ -519,7 +525,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                             />
 
                             {dynamicEnabled && (
-                                <div className="space-y-4 rounded-md border bg-muted/20 p-4">
+                                <div className={nestedGroupClassName}>
                                     <Controller
                                         control={form.control}
                                         name="mcp_summarizer_model_id"
@@ -560,7 +566,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                         )}
                                     />
 
-                                    <div className="flex flex-col gap-3 rounded-md border bg-background p-4 sm:flex-row sm:items-center sm:justify-between">
+                                    <div className={actionPanelClassName}>
                                         <div>
                                             <p className="text-sm font-medium">MCP 总结任务</p>
                                             <p className="mt-1 text-xs text-muted-foreground">
@@ -587,7 +593,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                     </div>
 
                                     {(summaryProgress || mcpSummaryRunning) && (
-                                        <div className="space-y-2 rounded-md border bg-background p-4">
+                                        <div className={statusPanelClassName}>
                                             <div className="flex items-center justify-between text-sm">
                                                 <span className="font-medium">MCP 总结进度</span>
                                                 <span>
@@ -617,7 +623,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                 control={form.control}
                                 name="assistant_summary_enabled"
                                 render={({ field }) => (
-                                    <FormItem className="flex items-center justify-between rounded-md border p-4">
+                                    <FormItem className={toggleCardClassName}>
                                         <div>
                                             <FormLabel className="text-base">助手总结（实验）</FormLabel>
                                             <p className="mt-1 text-sm text-muted-foreground">
@@ -635,7 +641,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                             />
 
                             {assistantSummaryEnabled && (
-                                <div className="space-y-4 rounded-md border bg-muted/20 p-4">
+                                <div className={nestedGroupClassName}>
                                     <Controller
                                         control={form.control}
                                         name="assistant_summarizer_model_id"
@@ -676,7 +682,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                         )}
                                     />
 
-                                    <div className="flex flex-col gap-3 rounded-md border bg-background p-4 sm:flex-row sm:items-center sm:justify-between">
+                                    <div className={actionPanelClassName}>
                                         <div>
                                             <p className="text-sm font-medium">助手画像任务</p>
                                             <p className="mt-1 text-xs text-muted-foreground">
@@ -703,7 +709,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                     </div>
 
                                     {(assistantSummaryProgress || assistantSummaryRunning) && (
-                                        <div className="space-y-2 rounded-md border bg-background p-4">
+                                        <div className={statusPanelClassName}>
                                             <div className="flex items-center justify-between text-sm">
                                                 <span className="font-medium">助手画像进度</span>
                                                 <span>
@@ -733,7 +739,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                 control={form.control}
                                 name="conversation_summary_enabled"
                                 render={({ field }) => (
-                                    <FormItem className="flex items-center justify-between rounded-md border p-4">
+                                    <FormItem className={toggleCardClassName}>
                                         <div>
                                             <FormLabel className="text-base">对话总结（实验）</FormLabel>
                                             <p className="mt-1 text-sm text-muted-foreground">
@@ -751,7 +757,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                             />
 
                             {conversationSummaryEnabled && (
-                                <div className="space-y-4 rounded-md border bg-muted/20 p-4">
+                                <div className={nestedGroupClassName}>
                                     <Controller
                                         control={form.control}
                                         name="conversation_summary_model"
@@ -792,7 +798,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                         )}
                                     />
 
-                                    <div className="flex flex-col gap-3 rounded-md border bg-background p-4 sm:flex-row sm:items-center sm:justify-between">
+                                    <div className={actionPanelClassName}>
                                         <div>
                                             <p className="text-sm font-medium">对话总结任务</p>
                                             <p className="mt-1 text-xs text-muted-foreground">
@@ -818,7 +824,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                         </Button>
                                     </div>
 
-                                    <div className="space-y-2 rounded-md border bg-background p-4">
+                                    <div className={statusPanelClassName}>
                                         <div className="flex items-center justify-between text-sm">
                                             <span className="font-medium">对话总结后台状态</span>
                                             <span>
@@ -854,7 +860,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                             control={form.control}
                             name="butler_experiment_enabled"
                             render={({ field }) => (
-                                <FormItem className="flex items-center justify-between rounded-md border p-4">
+                                <FormItem className={toggleCardClassName}>
                                     <div>
                                         <FormLabel className="text-base">总管家模式（实验）</FormLabel>
                                         <p className="mt-1 text-sm text-muted-foreground">
@@ -872,7 +878,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                         />
 
                         {butlerEnabled && (
-                            <div className="space-y-4 rounded-md border p-4">
+                            <div className={nestedGroupClassName}>
                                 <Controller
                                     control={form.control}
                                     name="butler_model_id"
@@ -950,7 +956,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                     control={form.control}
                                     name="butler_feishu_enabled"
                                     render={({ field }) => (
-                                        <FormItem className="flex items-center justify-between rounded-md border p-4">
+                                        <FormItem className={toggleCardClassName}>
                                             <div>
                                                 <FormLabel className="text-base">飞书机器人接入（实验）</FormLabel>
                                                 <p className="text-sm text-muted-foreground mt-1">
@@ -968,8 +974,8 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                 />
 
                                 {feishuEnabled && (
-                                    <div className="space-y-4 rounded-md border p-4 bg-muted/20">
-                                        <div className="space-y-2 rounded-md border p-4 bg-background">
+                                    <div className={nestedSubGroupClassName}>
+                                        <div className={statusPanelClassName}>
                                             <div className="flex items-center justify-between gap-3">
                                                 <div>
                                                     <p className="text-sm font-medium">飞书机器人状态</p>
@@ -1089,7 +1095,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                                 control={form.control}
                                                 name="butler_feishu_receive_p2p"
                                                 render={({ field }) => (
-                                                    <FormItem className="flex items-center justify-between rounded-md border p-4">
+                                                    <FormItem className={toggleCardClassName}>
                                                         <div>
                                                             <FormLabel>接收单聊</FormLabel>
                                                             <p className="text-xs text-muted-foreground mt-1">
@@ -1110,7 +1116,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                                 control={form.control}
                                                 name="butler_feishu_receive_group"
                                                 render={({ field }) => (
-                                                    <FormItem className="flex items-center justify-between rounded-md border p-4">
+                                                    <FormItem className={toggleCardClassName}>
                                                         <div>
                                                             <FormLabel>接收群聊</FormLabel>
                                                             <p className="text-xs text-muted-foreground mt-1">
@@ -1132,7 +1138,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                             control={form.control}
                                             name="butler_feishu_group_require_mention"
                                             render={({ field }) => (
-                                                <FormItem className="flex items-center justify-between rounded-md border p-4">
+                                                <FormItem className={toggleCardClassName}>
                                                     <div>
                                                         <FormLabel>@ 或回复后才处理群消息</FormLabel>
                                                         <p className="text-xs text-muted-foreground mt-1">
@@ -1153,7 +1159,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                             control={form.control}
                                             name="butler_feishu_only_reply_feishu_originated"
                                             render={({ field }) => (
-                                                <FormItem className="flex items-center justify-between rounded-md border p-4">
+                                                <FormItem className={toggleCardClassName}>
                                                     <div>
                                                         <FormLabel>是否只返回飞书请求的响应到飞书</FormLabel>
                                                         <p className="text-xs text-muted-foreground mt-1">

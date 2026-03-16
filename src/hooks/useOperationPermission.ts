@@ -10,10 +10,29 @@ import { getErrorMessage } from "@/utils/error";
 interface UseOperationPermissionOptions {
     /** 当前会话 ID，用于过滤只处理当前会话的权限请求 */
     conversationId?: number;
+    /** 当前窗口可处理的一组会话 ID */
+    conversationIds?: number[];
+}
+
+function shouldHandleConversationRequest(
+    requestConversationId: number | undefined,
+    conversationId?: number,
+    conversationIds?: number[]
+) {
+    if (requestConversationId === undefined) {
+        return true;
+    }
+    if (conversationIds && conversationIds.length > 0) {
+        return conversationIds.includes(requestConversationId);
+    }
+    if (conversationId !== undefined) {
+        return requestConversationId === conversationId;
+    }
+    return true;
 }
 
 export function useOperationPermission(options: UseOperationPermissionOptions = {}) {
-    const { conversationId } = options;
+    const { conversationId, conversationIds } = options;
     const [pendingRequest, setPendingRequest] = useState<OperationPermissionRequest | null>(null);
     const [, setRequestQueue] = useState<OperationPermissionRequest[]>([]);
     const [isDialogOpen, setIsDialogOpen] = useState(false);
@@ -41,9 +60,11 @@ export function useOperationPermission(options: UseOperationPermissionOptions = 
                 // 如果指定了 conversationId，只处理匹配的请求
                 // 如果请求没有 conversation_id，则显示给所有窗口
                 if (
-                    conversationId !== undefined &&
-                    request.conversation_id !== undefined &&
-                    request.conversation_id !== conversationId
+                    !shouldHandleConversationRequest(
+                        request.conversation_id,
+                        conversationId,
+                        conversationIds
+                    )
                 ) {
                     return;
                 }
@@ -64,7 +85,7 @@ export function useOperationPermission(options: UseOperationPermissionOptions = 
         return () => {
             unsubscribe.then((f) => f());
         };
-    }, [conversationId]);
+    }, [conversationId, conversationIds]);
 
     const handleDecision = useCallback(
         async (
@@ -108,10 +129,11 @@ export function useOperationPermission(options: UseOperationPermissionOptions = 
 
 interface UseAcpPermissionOptions {
     conversationId?: number;
+    conversationIds?: number[];
 }
 
 export function useAcpPermission(options: UseAcpPermissionOptions = {}) {
-    const { conversationId } = options;
+    const { conversationId, conversationIds } = options;
     const [pendingRequest, setPendingRequest] = useState<AcpPermissionRequest | null>(null);
     const [, setRequestQueue] = useState<AcpPermissionRequest[]>([]);
     const [isDialogOpen, setIsDialogOpen] = useState(false);
@@ -135,9 +157,11 @@ export function useAcpPermission(options: UseAcpPermissionOptions = {}) {
             const request = event.payload;
 
             if (
-                conversationId !== undefined &&
-                request.conversation_id !== undefined &&
-                request.conversation_id !== conversationId
+                !shouldHandleConversationRequest(
+                    request.conversation_id,
+                    conversationId,
+                    conversationIds
+                )
             ) {
                 return;
             }
@@ -157,7 +181,7 @@ export function useAcpPermission(options: UseAcpPermissionOptions = {}) {
         return () => {
             unsubscribe.then((f) => f());
         };
-    }, [conversationId]);
+    }, [conversationId, conversationIds]);
 
     const handleDecision = useCallback(
         async (requestId: string, optionId?: string, cancelled?: boolean) => {

@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, warn};
 
+use crate::api::ai::acp::AcpPermissionState;
 use crate::api::ai::events::ConversationRuntimeState;
 use crate::api::ai::types::AiRequest;
 use crate::api::ai_api::{add_message, ask_ai};
@@ -20,6 +21,8 @@ use crate::db::conversation_db::{
 use crate::db::llm_db::LLMDatabase;
 use crate::db::mcp_db::{MCPDatabase, MCPServer, MCPServerTool};
 use crate::db::skill_db::SkillDatabase;
+use crate::feishu::inherit_latest_feishu_target;
+use crate::mcp::builtin_mcp::OperationState;
 use crate::mcp::registry_api::ensure_agent_load_skill_for_assistant;
 use crate::skills::scanner::SkillScanner;
 
@@ -397,6 +400,7 @@ async fn ensure_butler_system_assistant(app_handle: &AppHandle) -> Result<Assist
         ("temperature", "0.8", "float"),
         ("top_p", "1.0", "float"),
         ("stream", "true", "boolean"),
+        ("use_native_toolcall", "true", "boolean"),
     ] {
         assistant_db
             .add_assistant_model_config(assistant_id, assistant_model_id, name, value, value_type)
@@ -745,6 +749,71 @@ fn emit_butler_notification(
     let _ = app_handle.emit("butler_notification_created", payload);
 }
 
+fn format_permission_kind_label(permission_kind: &str) -> &'static str {
+    match permission_kind {
+        "acp" => "ACP 工具权限",
+        _ => "操作权限",
+    }
+}
+
+pub(crate) async fn emit_butler_task_permission_state_changed(
+    app_handle: &AppHandle,
+    task_conversation_id: i64,
+    permission_kind: &str,
+    requested: bool,
+) -> Result<(), String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
+    let butler_repo = db.butler_repo().map_err(|e| e.to_string())?;
+    let Some(conversation) = conversation_repo
+        .read(task_conversation_id)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
+    if conversation.conversation_kind != BUTLER_KIND_TASK {
+        return Ok(());
+    }
+    let Some(definition) = butler_repo
+        .get_task_definition_by_task_conversation_id(task_conversation_id)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
+    let result = butler_repo.get_task_result(task_conversation_id).map_err(|e| e.to_string())?;
+    let task_item = build_task_list_item(app_handle, conversation, &definition, result.as_ref()).await?;
+    let _ = app_handle.emit("butler_task_updated", task_item.clone());
+
+    let permission_label = format_permission_kind_label(permission_kind);
+    if requested {
+        emit_butler_notification(
+            app_handle,
+            definition.butler_conversation_id,
+            task_conversation_id,
+            "permission_requested",
+            format!("任务 {} 等待{}审批", definition.title, permission_label),
+            "请在总管家窗口中确认后继续执行。".to_string(),
+            "medium",
+        );
+    } else {
+        emit_butler_notification(
+            app_handle,
+            definition.butler_conversation_id,
+            task_conversation_id,
+            "permission_resolved",
+            format!("任务 {} 的{}请求已处理", definition.title, permission_label),
+            if task_item.has_pending_permission {
+                "该任务仍有其他待处理权限请求。".to_string()
+            } else {
+                "任务执行将继续推进。".to_string()
+            },
+            "light",
+        );
+    }
+
+    Ok(())
+}
+
 async fn build_task_list_item(
     app_handle: &AppHandle,
     conversation: Conversation,
@@ -765,6 +834,14 @@ async fn build_task_list_item(
     let last_summary = result
         .and_then(|value| value.summary.clone())
         .or_else(|| conversation.butler_task_summary.clone());
+    let operation_state = app_handle.state::<OperationState>();
+    let acp_permission_state = app_handle.state::<AcpPermissionState>();
+    let has_pending_permission = operation_state
+        .has_pending_permission_for_conversation(conversation.id)
+        .await
+        || acp_permission_state
+            .has_pending_permission_for_conversation(conversation.id)
+            .await;
 
     Ok(ButlerTaskListItem {
         butler_conversation_id: definition.butler_conversation_id,
@@ -779,7 +856,7 @@ async fn build_task_list_item(
         updated_time: conversation.updated_time,
         finalized_at: conversation.butler_task_finalized_at,
         is_finalized: conversation.butler_task_finalized_at.is_some(),
-        has_pending_permission: false,
+        has_pending_permission,
         is_running: runtime_state.is_running,
     })
 }
@@ -1462,6 +1539,7 @@ pub async fn reset_butler_main_conversation(
         butler_repo
             .reassign_task_definitions(previous_main_conversation_id, new_conversation.id)
             .map_err(|e| e.to_string())?;
+        inherit_latest_feishu_target(&app_handle, previous_main_conversation_id, new_conversation.id)?;
     }
 
     butler_repo

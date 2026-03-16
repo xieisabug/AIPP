@@ -366,10 +366,10 @@ pub async fn format_mcp_prompt_with_filters(
 - 禁止伪造工具响应或猜测未返回的数据
 
 ### 错误示例（以下写法均无效，系统无法识别）
-- ❌ 用代码块包裹：```xml <mcp_tool_call>...</mcp_tool_call> ```
-- ❌ 工具调用后继续输出文字
-- ❌ 调用未列出或未加载的工具名
-- ❌ 使用原生的工具调用格式
+- 用代码块包裹：```xml <mcp_tool_call>...</mcp_tool_call> ```
+- 工具调用后继续输出文字
+- 调用未列出或未加载的工具名
+- 使用原生的工具调用格式
 
 ## 动态加载流程（必须按顺序执行）
 1. **浏览目录**：查看下方"工具集目录摘要"，确定目标工具集
@@ -504,11 +504,11 @@ pub async fn format_mcp_prompt_with_filters(
 - 禁止伪造工具响应或猜测未返回的数据
 
 ### 错误示例（以下写法均无效，系统无法识别）
-- ❌ 用代码块包裹：```xml <mcp_tool_call>...</mcp_tool_call> ```
-- ❌ 工具调用后继续输出文字
-- ❌ 一条消息中包含多个 `<mcp_tool_call>` 块
-- ❌ 调用未列出的工具名
-- ❌ 使用原生的工具调用格式
+- 用代码块包裹：```xml <mcp_tool_call>...</mcp_tool_call> ```
+- 工具调用后继续输出文字
+- 一条消息中包含多个 `<mcp_tool_call>` 块
+- 调用未列出的工具名
+- 使用原生的工具调用格式
 "#;
 
     let mut tools_info = String::from("\n## 可用的 MCP 工具\n\n");

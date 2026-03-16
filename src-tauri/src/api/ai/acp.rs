@@ -36,7 +36,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// ACP configuration extracted from assistant_model_config
 #[derive(Debug, Clone)]
@@ -242,9 +242,19 @@ pub enum AcpPermissionDecision {
     Cancelled,
 }
 
+struct PendingAcpPermissionRequest {
+    sender: oneshot::Sender<AcpPermissionDecision>,
+    conversation_id: Option<i64>,
+}
+
+pub struct AcpPermissionResolution {
+    pub conversation_id: Option<i64>,
+    pub delivered: bool,
+}
+
 #[derive(Default)]
 pub struct AcpPermissionState {
-    pending_requests: TokioMutex<HashMap<String, oneshot::Sender<AcpPermissionDecision>>>,
+    pending_requests: TokioMutex<HashMap<String, PendingAcpPermissionRequest>>,
 }
 
 impl AcpPermissionState {
@@ -255,24 +265,33 @@ impl AcpPermissionState {
     pub async fn store_request(
         &self,
         request_id: String,
+        conversation_id: Option<i64>,
         sender: oneshot::Sender<AcpPermissionDecision>,
     ) {
         let mut pending = self.pending_requests.lock().await;
-        pending.insert(request_id, sender);
+        pending.insert(request_id, PendingAcpPermissionRequest { sender, conversation_id });
     }
 
-    pub async fn resolve_request(&self, request_id: &str, decision: AcpPermissionDecision) -> bool {
+    pub async fn resolve_request(
+        &self,
+        request_id: &str,
+        decision: AcpPermissionDecision,
+    ) -> Option<AcpPermissionResolution> {
         let mut pending = self.pending_requests.lock().await;
-        if let Some(sender) = pending.remove(request_id) {
-            sender.send(decision).is_ok()
-        } else {
-            false
-        }
+        pending.remove(request_id).map(|request| AcpPermissionResolution {
+            conversation_id: request.conversation_id,
+            delivered: request.sender.send(decision).is_ok(),
+        })
     }
 
     pub async fn remove_request(&self, request_id: &str) {
         let mut pending = self.pending_requests.lock().await;
         pending.remove(request_id);
+    }
+
+    pub async fn has_pending_permission_for_conversation(&self, conversation_id: i64) -> bool {
+        let pending = self.pending_requests.lock().await;
+        pending.values().any(|request| request.conversation_id == Some(conversation_id))
     }
 }
 
@@ -1717,7 +1736,9 @@ impl AcpClient for AcpTauriClient {
         let (tx, rx) = oneshot::channel();
 
         let state = self.app_handle.state::<AcpPermissionState>();
-        state.store_request(request_id.clone(), tx).await;
+        state
+            .store_request(request_id.clone(), Some(self.conversation_id), tx)
+            .await;
 
         let options = args
             .options
@@ -1754,6 +1775,21 @@ impl AcpClient for AcpTauriClient {
             return Ok(acp::RequestPermissionResponse::new(
                 acp::RequestPermissionOutcome::Cancelled,
             ));
+        }
+
+        if let Err(error) = crate::api::butler_api::emit_butler_task_permission_state_changed(
+            &self.app_handle,
+            self.conversation_id,
+            "acp",
+            true,
+        )
+        .await
+        {
+            warn!(
+                conversation_id = self.conversation_id,
+                error = %error,
+                "failed to refresh Butler ACP permission state"
+            );
         }
 
         match rx.await {

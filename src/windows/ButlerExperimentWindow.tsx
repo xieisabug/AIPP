@@ -225,6 +225,16 @@ function ButlerExperimentWindow() {
     const [feishuStatus, setFeishuStatus] = useState<FeishuRuntimeStatus | null>(null);
 
     const conversationIdNumber = mainConversationId ? parseInt(mainConversationId, 10) : undefined;
+    const permissionConversationIds = useMemo(() => {
+        const ids = new Set<number>();
+        if (conversationIdNumber !== undefined) {
+            ids.add(conversationIdNumber);
+        }
+        tasks.forEach((task) => {
+            ids.add(task.task_conversation_id);
+        });
+        return Array.from(ids);
+    }, [conversationIdNumber, tasks]);
 
     const {
         pendingRequest,
@@ -233,6 +243,7 @@ function ButlerExperimentWindow() {
         handleDecision,
     } = useOperationPermission({
         conversationId: conversationIdNumber,
+        conversationIds: permissionConversationIds,
     });
     const {
         pendingRequest: pendingAcpRequest,
@@ -241,6 +252,7 @@ function ButlerExperimentWindow() {
         handleDecision: handleAcpDecision,
     } = useAcpPermission({
         conversationId: conversationIdNumber,
+        conversationIds: permissionConversationIds,
     });
     const {
         pendingRequest: pendingAskUserRequest,
@@ -801,9 +813,14 @@ function ButlerExperimentWindow() {
                                                 {task.executor_assistant_name}
                                             </div>
                                         </div>
-                                        <Badge variant={getStatusVariant(task.status)}>
-                                            {getStatusLabel(task.status)}
-                                        </Badge>
+                                        <div className="flex items-center gap-2">
+                                            {task.has_pending_permission ? (
+                                                <Badge variant="secondary">待审批</Badge>
+                                            ) : null}
+                                            <Badge variant={getStatusVariant(task.status)}>
+                                                {getStatusLabel(task.status)}
+                                            </Badge>
+                                        </div>
                                     </div>
                                     <div className="mt-2 text-xs text-muted-foreground line-clamp-2">
                                         {task.last_summary || task.goal}
