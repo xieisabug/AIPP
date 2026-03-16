@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use aes_gcm::aead::Aead;
@@ -17,7 +17,7 @@ use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::sleep;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::api::ai::types::AiRequest;
 use crate::api::ai_api::ask_ai;
@@ -39,9 +39,17 @@ const TERMINAL_TASK_STATUSES: [&str; 3] = ["succeeded", "failed", "cancelled"];
 const RELAY_ORIGIN_AIPP: &str = "aipp";
 const RELAY_ORIGIN_FEISHU: &str = "feishu";
 const RELAY_ORIGIN_INTERNAL: &str = "internal";
+const FEISHU_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const FEISHU_RUNTIME_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const FEISHU_SETTLE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+const FEISHU_SETTLE_TIMEOUT: Duration = Duration::from_secs(120);
+const FEISHU_SETTLE_STATUS_INTERVAL_STEPS: usize = 10;
+const FEISHU_STATUS_READY_DETAIL: &str =
+    "飞书 SDK 已启用心跳与内部重连；若长连接退出，AIPP 还会在 5 秒后自动重试";
 
 pub struct FeishuButlerState {
-    runtime_task: StdMutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    runtime_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    http_client: reqwest::Client,
     pub ingress_lock: Mutex<()>,
     pub status: Mutex<FeishuRuntimeStatus>,
 }
@@ -49,7 +57,8 @@ pub struct FeishuButlerState {
 impl Default for FeishuButlerState {
     fn default() -> Self {
         Self {
-            runtime_task: StdMutex::new(None),
+            runtime_task: Mutex::new(None),
+            http_client: build_feishu_http_client(),
             ingress_lock: Mutex::new(()),
             status: Mutex::new(FeishuRuntimeStatus::default()),
         }
@@ -290,6 +299,45 @@ fn build_status(config: &FeishuRuntimeConfig) -> FeishuRuntimeStatus {
     }
 }
 
+fn build_feishu_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(FEISHU_HTTP_TIMEOUT)
+        .build()
+        .expect("failed to build Feishu HTTP client")
+}
+
+fn feishu_http_client(app_handle: &AppHandle) -> reqwest::Client {
+    app_handle.state::<FeishuButlerState>().http_client.clone()
+}
+
+async fn mark_relay_scope_failed_with_log(
+    app_handle: &AppHandle,
+    scope_id: i64,
+    error_message: &str,
+    context: &str,
+) {
+    if let Err(mark_error) = mark_relay_scope_failed(app_handle, scope_id, error_message) {
+        error!(
+            scope_id,
+            relay_error = %error_message,
+            mark_error = %mark_error,
+            "{context}"
+        );
+    }
+}
+
+async fn set_feishu_runtime_ready_status(app_handle: &AppHandle, detail: impl Into<String>) {
+    let detail = detail.into();
+    mutate_status(app_handle, |status| {
+        status.running = true;
+        status.connected = true;
+        status.last_error = None;
+        status.status_text = "飞书机器人已连接，等待消息".to_string();
+        status.status_detail = Some(detail);
+    })
+    .await;
+}
+
 async fn replace_status(app_handle: &AppHandle, status: FeishuRuntimeStatus) {
     let state = app_handle.state::<FeishuButlerState>();
     let mut snapshot = status;
@@ -503,13 +551,54 @@ pub(crate) async fn maybe_schedule_butler_feishu_relay_for_aipp_turn(
     let app_handle_clone = app_handle.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(error) = wait_for_butler_to_settle(&app_handle_clone, conversation_id).await {
-            let _ = mark_relay_scope_failed(&app_handle_clone, scope_id, &error);
+            mark_relay_scope_failed_with_log(
+                &app_handle_clone,
+                scope_id,
+                &error,
+                "failed to persist Feishu relay settle error",
+            )
+            .await;
             warn!(conversation_id, scope_id, error = %error, "butler relay scope settle failed");
             return;
         }
 
-        if let Err(error) = flush_feishu_relay_scope(&app_handle_clone, &config, scope_id).await {
-            let _ = mark_relay_scope_failed(&app_handle_clone, scope_id, &error);
+        let fresh_config = match load_runtime_config(&app_handle_clone).await {
+            Ok(config) => config,
+            Err(error) => {
+                mark_relay_scope_failed_with_log(
+                    &app_handle_clone,
+                    scope_id,
+                    &error,
+                    "failed to reload Feishu runtime config for relay scope",
+                )
+                .await;
+                warn!(conversation_id, scope_id, error = %error, "failed to reload Feishu config before relay flush");
+                return;
+            }
+        };
+        if !fresh_config.butler_enabled || !fresh_config.enabled {
+            let error = "飞书回发已被停用，跳过当前回发任务".to_string();
+            mark_relay_scope_failed_with_log(
+                &app_handle_clone,
+                scope_id,
+                &error,
+                "failed to persist Feishu relay disabled state",
+            )
+            .await;
+            warn!(conversation_id, scope_id, "skip Feishu relay because runtime is disabled");
+            return;
+        }
+
+        if let Err(error) =
+            flush_feishu_relay_scope(&app_handle_clone, &fresh_config, scope_id).await
+        {
+            mark_relay_scope_failed_with_log(
+                &app_handle_clone,
+                scope_id,
+                &error,
+                "failed to persist Feishu relay flush error",
+            )
+            .await;
             warn!(conversation_id, scope_id, error = %error, "butler relay scope flush failed");
         }
     });
@@ -531,7 +620,11 @@ pub(crate) async fn refresh_runtime(app_handle: &AppHandle) -> Result<FeishuRunt
     let config = load_runtime_config(app_handle).await?;
     let state = app_handle.state::<FeishuButlerState>();
 
-    if let Some(handle) = state.runtime_task.lock().unwrap().take() {
+    let previous_handle = {
+        let mut runtime_task = state.runtime_task.lock().await;
+        runtime_task.take()
+    };
+    if let Some(handle) = previous_handle {
         handle.abort();
     }
 
@@ -579,7 +672,10 @@ pub(crate) async fn refresh_runtime(app_handle: &AppHandle) -> Result<FeishuRunt
             warn!(error = %panic_message, "feishu runtime loop panicked");
         }
     });
-    *state.runtime_task.lock().unwrap() = Some(task);
+    {
+        let mut runtime_task = state.runtime_task.lock().await;
+        *runtime_task = Some(task);
+    }
     Ok(status)
 }
 
@@ -597,7 +693,7 @@ async fn run_runtime_loop(app_handle: AppHandle, config: FeishuRuntimeConfig) {
             .app_id(config.app_id.clone())
             .app_secret(config.app_secret.clone())
             .base_url(config.base_url.clone())
-            .timeout(Duration::from_secs(30))
+            .timeout(FEISHU_HTTP_TIMEOUT)
             .build()
         {
             Ok(config_value) => config_value,
@@ -627,18 +723,14 @@ async fn run_runtime_loop(app_handle: AppHandle, config: FeishuRuntimeConfig) {
         .await;
 
         let processor_app = app_handle.clone();
-        let processor_config = config.clone();
         let processor_task = tauri::async_runtime::spawn(async move {
-            process_payload_loop(processor_app, processor_config, payload_rx).await;
+            process_payload_loop(processor_app, payload_rx).await;
         });
 
-        mutate_status(&app_handle, |status| {
-            status.running = true;
-            status.connected = true;
-            status.last_error = None;
-            status.status_text = "飞书机器人已连接，等待消息".to_string();
-            status.status_detail = Some("WebSocket 已建立，正在等待飞书事件".to_string());
-        })
+        set_feishu_runtime_ready_status(
+            &app_handle,
+            format!("WebSocket 已建立，正在等待飞书事件；{FEISHU_STATUS_READY_DETAIL}"),
+        )
         .await;
 
         let result = LarkWsClient::open(Arc::new(ws_config), event_handler).await;
@@ -649,7 +741,10 @@ async fn run_runtime_loop(app_handle: AppHandle, config: FeishuRuntimeConfig) {
                 mutate_status(&app_handle, |status| {
                     status.connected = false;
                     status.status_text = "飞书长连接已断开，准备重连".to_string();
-                    status.status_detail = Some("长连接会话正常退出，5 秒后自动重连".to_string());
+                    status.status_detail = Some(
+                        "长连接会话正常退出，飞书 SDK 会先内部重连，AIPP 也会在 5 秒后兜底重试"
+                            .to_string(),
+                    );
                 })
                 .await;
             }
@@ -658,19 +753,21 @@ async fn run_runtime_loop(app_handle: AppHandle, config: FeishuRuntimeConfig) {
                     status.connected = false;
                     status.last_error = Some(error.to_string());
                     status.status_text = "飞书连接失败，准备重连".to_string();
-                    status.status_detail = Some("握手或长连接建立失败，等待自动重连".to_string());
+                    status.status_detail = Some(
+                        "握手或长连接建立失败，飞书 SDK 会先内部重连，AIPP 也会在 5 秒后兜底重试"
+                            .to_string(),
+                    );
                 })
                 .await;
             }
         }
 
-        sleep(Duration::from_secs(5)).await;
+        sleep(FEISHU_RUNTIME_RETRY_INTERVAL).await;
     }
 }
 
 async fn process_payload_loop(
     app_handle: AppHandle,
-    config: FeishuRuntimeConfig,
     mut payload_rx: mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
     while let Some(payload) = payload_rx.recv().await {
@@ -678,6 +775,25 @@ async fn process_payload_loop(
             status.last_event_at = Some(now_string());
         })
         .await;
+
+        let config = match load_runtime_config(&app_handle).await {
+            Ok(config) => config,
+            Err(error) => {
+                warn!(error = %error, "failed to reload Feishu runtime config before handling payload");
+                mutate_status(&app_handle, |status| {
+                    status.last_error = Some(error);
+                    status.status_text = "飞书事件到达，但配置读取失败".to_string();
+                })
+                .await;
+                continue;
+            }
+        };
+
+        if !config.butler_enabled || !config.enabled {
+            debug!("ignore Feishu payload because runtime is disabled by latest config");
+            continue;
+        }
+
         if let Err(error) = handle_payload(&app_handle, &config, &payload).await {
             warn!(error = %error, "failed to handle feishu payload");
         }
@@ -706,12 +822,20 @@ async fn handle_payload(
 
     if let Err(error) = process_incoming_text_message(app_handle, config, &event).await {
         warn!(message_id = %event.message_id, error = %error, "failed to process feishu message");
-        let _ = reply_text_message(
+        if let Err(reply_error) = reply_text_message(
+            app_handle,
             config,
             &event.message_id,
             &format!("总管家处理飞书消息失败：{}", truncate_text(&error, 180)),
         )
-        .await;
+        .await
+        {
+            warn!(
+                message_id = %event.message_id,
+                error = %reply_error,
+                "failed to send Feishu error reply"
+            );
+        }
         mutate_status(app_handle, |status| {
             status.last_error = Some(error);
             status.status_text = "处理飞书消息时发生错误".to_string();
@@ -803,6 +927,16 @@ async fn process_incoming_text_message(
     let state = app_handle.state::<FeishuButlerState>();
     let _ingress_guard = state.ingress_lock.lock().await;
 
+    mutate_status(app_handle, |status| {
+        status.running = true;
+        status.connected = true;
+        status.last_error = None;
+        status.status_text = "总管家正在处理飞书消息".to_string();
+        status.status_detail =
+            Some(format!("收到飞书消息，正在总管家主会话中处理（chat_type={}）", event.chat_type));
+    })
+    .await;
+
     let butler_conversation = load_or_create_butler_main_internal(app_handle).await?;
     let assistant_id =
         butler_conversation.assistant_id.ok_or_else(|| "总管家主会话缺少 assistant".to_string())?;
@@ -887,10 +1021,10 @@ async fn process_incoming_text_message(
     }
 
     flush_feishu_relay_scope(app_handle, config, relay_scope_id).await?;
-    mutate_status(app_handle, |status| {
-        status.last_error = None;
-        status.status_text = "飞书消息处理完成".to_string();
-    })
+    set_feishu_runtime_ready_status(
+        app_handle,
+        format!("最近一条飞书消息已处理完成；{FEISHU_STATUS_READY_DETAIL}"),
+    )
     .await;
     Ok(())
 }
@@ -915,7 +1049,9 @@ async fn wait_for_butler_to_settle(
     let activity_manager =
         app_handle.state::<crate::state::activity_state::ConversationActivityManager>();
     let mut idle_checks = 0;
-    for _ in 0..1200 {
+    let max_checks =
+        (FEISHU_SETTLE_TIMEOUT.as_millis() / FEISHU_SETTLE_CHECK_INTERVAL.as_millis()) as usize;
+    for attempt in 0..max_checks {
         let runtime_state = activity_manager.get_runtime_state(butler_conversation_id).await;
         let pending_tasks = count_pending_butler_tasks(app_handle, butler_conversation_id)?;
         if !runtime_state.is_running && pending_tasks == 0 {
@@ -925,10 +1061,29 @@ async fn wait_for_butler_to_settle(
             }
         } else {
             idle_checks = 0;
+            if attempt % FEISHU_SETTLE_STATUS_INTERVAL_STEPS == 0 {
+                let waited_seconds =
+                    (((attempt + 1) as u128) * FEISHU_SETTLE_CHECK_INTERVAL.as_millis()) / 1000;
+                mutate_status(app_handle, |status| {
+                    status.running = true;
+                    status.connected = true;
+                    status.status_text = "总管家仍在处理飞书消息".to_string();
+                    status.status_detail = Some(format!(
+                        "正在等待总管家完成当前消息（运行中={}, 待完成任务={}，已等待 {} 秒）",
+                        runtime_state.is_running, pending_tasks, waited_seconds
+                    ));
+                })
+                .await;
+            }
         }
-        sleep(Duration::from_millis(500)).await;
+        sleep(FEISHU_SETTLE_CHECK_INTERVAL).await;
     }
-    Err("等待总管家处理飞书消息超时".to_string())
+    let pending_tasks = count_pending_butler_tasks(app_handle, butler_conversation_id)?;
+    let runtime_state = activity_manager.get_runtime_state(butler_conversation_id).await;
+    Err(format!(
+        "等待总管家处理飞书消息超时（运行中={}，待完成任务={}）",
+        runtime_state.is_running, pending_tasks
+    ))
 }
 
 fn count_pending_butler_tasks(
@@ -1215,7 +1370,8 @@ async fn flush_feishu_relay_scope(
         match rendered {
             Some(rendered_text) if !rendered_text.trim().is_empty() => {
                 let outbound =
-                    reply_markdown_message(config, &current_reply_to, &rendered_text).await?;
+                    reply_markdown_message(app_handle, config, &current_reply_to, &rendered_text)
+                        .await?;
                 insert_external_link(
                     app_handle,
                     ChannelLinkRecord {
@@ -1355,12 +1511,12 @@ fn update_external_link_local_message(
     Ok(())
 }
 
-async fn fetch_tenant_access_token(config: &FeishuRuntimeConfig) -> Result<String, String> {
+async fn fetch_tenant_access_token(
+    app_handle: &AppHandle,
+    config: &FeishuRuntimeConfig,
+) -> Result<String, String> {
     crate::ensure_rustls_crypto_provider();
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = feishu_http_client(app_handle);
     let url = format!(
         "{}/open-apis/auth/v3/tenant_access_token/internal",
         config.base_url.trim_end_matches('/')
@@ -1643,15 +1799,13 @@ fn build_feishu_table_element(index: usize, table: &FeishuMarkdownTable) -> Resu
 }
 
 async fn reply_markdown_message(
+    app_handle: &AppHandle,
     config: &FeishuRuntimeConfig,
     reply_to_message_id: &str,
     markdown: &str,
 ) -> Result<FeishuReplyOutcome, String> {
-    let token = fetch_tenant_access_token(config).await?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let token = fetch_tenant_access_token(app_handle, config).await?;
+    let client = feishu_http_client(app_handle);
     let mut interactive_error = None;
     let interactive_card = match build_feishu_markdown_card(markdown) {
         Ok(card) => Some(card),
@@ -1744,15 +1898,13 @@ async fn send_reply_message_request(
 }
 
 async fn reply_text_message(
+    app_handle: &AppHandle,
     config: &FeishuRuntimeConfig,
     reply_to_message_id: &str,
     text: &str,
 ) -> Result<String, String> {
-    let token = fetch_tenant_access_token(config).await?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let token = fetch_tenant_access_token(app_handle, config).await?;
+    let client = feishu_http_client(app_handle);
     send_reply_message_request(
         &client,
         config,
@@ -1793,7 +1945,8 @@ pub(crate) async fn resend_message_to_feishu_for_debug(
         })?;
 
     let outcome =
-        reply_markdown_message(&config, &target.external_message_id, &rendered_text).await?;
+        reply_markdown_message(app_handle, &config, &target.external_message_id, &rendered_text)
+            .await?;
 
     insert_external_link(
         app_handle,

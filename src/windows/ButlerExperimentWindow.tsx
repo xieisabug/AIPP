@@ -5,12 +5,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
     Bot,
+    Check,
     ExternalLink,
     Loader2,
     PauseCircle,
     Plus,
     RefreshCw,
-    Sparkles,
+    X,
 } from "lucide-react";
 
 import ConversationUI, {
@@ -139,10 +140,67 @@ function getStatusLabel(status: string) {
     }
 }
 
+interface FeishuRuntimeStatus {
+    butler_enabled: boolean;
+    enabled: boolean;
+    configured: boolean;
+    secret_configured: boolean;
+    running: boolean;
+    connected: boolean;
+    app_id?: string | null;
+    base_url?: string | null;
+    allow_p2p: boolean;
+    allow_group: boolean;
+    group_require_mention: boolean;
+    last_error?: string | null;
+    last_event_at?: string | null;
+    last_status_at?: string | null;
+    status_detail?: string | null;
+    status_text: string;
+}
+
+function getFeishuStatusVariant(
+    status?: FeishuRuntimeStatus | null
+): "default" | "destructive" | "secondary" | "outline" {
+    if (!status) {
+        return "secondary";
+    }
+    if (status.last_error) {
+        return "destructive";
+    }
+    if (status.connected) {
+        return "default";
+    }
+    if (status.running) {
+        return "outline";
+    }
+    return "secondary";
+}
+
+function getFeishuStatusIcon(
+    status?: FeishuRuntimeStatus | null,
+    loading?: boolean
+) {
+    if (loading || (!status && loading !== false)) {
+        return <Loader2 className="h-3 w-3 animate-spin" />;
+    }
+    if (status?.connected) {
+        return <Check className="h-3 w-3" />;
+    }
+    if (status?.running) {
+        return <Loader2 className="h-3 w-3 animate-spin" />;
+    }
+    return <X className="h-3 w-3" />;
+}
+
 function ButlerExperimentWindow() {
     useTheme("butler_experiment");
     const { getConfigValue, loadFeatureConfig } = useFeatureConfig();
     const antiLeakageEnabled = getConfigValue("anti_leakage", "enabled") === "true";
+    const butlerExperimentEnabled =
+        getConfigValue("experimental", "butler_experiment_enabled") === "true";
+    const feishuEnabled = getConfigValue("experimental", "butler_feishu_enabled") === "true";
+    const showFeishuStatus = butlerExperimentEnabled && feishuEnabled;
 
     const conversationUIRef = useRef<ConversationUIRef>(null);
     const [pluginList, setPluginList] = useState<any[]>([]);
@@ -157,12 +215,14 @@ function ButlerExperimentWindow() {
     const [loadingTaskDetail, setLoadingTaskDetail] = useState(false);
     const [creatingTask, setCreatingTask] = useState(false);
     const [resettingMainConversation, setResettingMainConversation] = useState(false);
+    const [loadingFeishuStatus, setLoadingFeishuStatus] = useState(false);
     const [isTaskDialogOpen, setIsTaskDialogOpen] = useState(false);
     const [isTaskDetailDialogOpen, setIsTaskDetailDialogOpen] = useState(false);
     const [taskTitle, setTaskTitle] = useState("");
     const [taskGoal, setTaskGoal] = useState("");
     const [taskAssistantId, setTaskAssistantId] = useState<string>("");
     const [loadError, setLoadError] = useState<string | null>(null);
+    const [feishuStatus, setFeishuStatus] = useState<FeishuRuntimeStatus | null>(null);
 
     const conversationIdNumber = mainConversationId ? parseInt(mainConversationId, 10) : undefined;
 
@@ -313,6 +373,38 @@ function ButlerExperimentWindow() {
         }
     }, []);
 
+    const loadFeishuStatus = useCallback(
+        async (options?: { silent?: boolean }) => {
+            if (!showFeishuStatus) {
+                setFeishuStatus(null);
+                return;
+            }
+            const silent = options?.silent ?? false;
+            if (!silent) {
+                setLoadingFeishuStatus(true);
+            }
+            try {
+                const status = await invoke<FeishuRuntimeStatus>(
+                    "get_butler_feishu_runtime_status"
+                );
+                setFeishuStatus(status);
+            } catch (error) {
+                console.error(
+                    "[ButlerExperimentWindow] Failed to load Feishu runtime status:",
+                    error
+                );
+                if (!silent) {
+                    toast.error("加载飞书连接状态失败");
+                }
+            } finally {
+                if (!silent) {
+                    setLoadingFeishuStatus(false);
+                }
+            }
+        },
+        [showFeishuStatus]
+    );
+
     useEffect(() => {
         void loadAssistants();
         void loadMainConversation({ showLoading: true });
@@ -346,6 +438,30 @@ function ButlerExperimentWindow() {
             unlisten.then((fn) => fn()).catch(console.warn);
         };
     }, [loadFeatureConfig]);
+
+    useEffect(() => {
+        if (!showFeishuStatus) {
+            setFeishuStatus(null);
+            setLoadingFeishuStatus(false);
+            return;
+        }
+
+        void loadFeishuStatus({ silent: true });
+        const intervalId = window.setInterval(() => {
+            void loadFeishuStatus({ silent: true });
+        }, 5000);
+        const statusListener = listen<FeishuRuntimeStatus>(
+            "butler_feishu_status_changed",
+            ({ payload }) => {
+                setFeishuStatus(payload);
+            }
+        );
+
+        return () => {
+            window.clearInterval(intervalId);
+            statusListener.then((unlisten) => unlisten()).catch(console.warn);
+        };
+    }, [loadFeishuStatus, showFeishuStatus]);
 
     useEffect(() => {
         let mounted = true;
@@ -388,6 +504,9 @@ function ButlerExperimentWindow() {
         const focusListener = getCurrentWebviewWindow().onFocusChanged(({ payload }) => {
             if (payload) {
                 void loadMainConversation({ silentError: true });
+                if (showFeishuStatus) {
+                    void loadFeishuStatus({ silent: true });
+                }
                 if (selectedTaskId && isTaskDetailDialogOpen) {
                     void loadTaskDetail(selectedTaskId);
                 }
@@ -398,7 +517,14 @@ function ButlerExperimentWindow() {
             unlistenHidden.then((unlisten) => unlisten()).catch(console.warn);
             focusListener.then((unlisten) => unlisten()).catch(console.warn);
         };
-    }, [isTaskDetailDialogOpen, loadMainConversation, loadTaskDetail, selectedTaskId]);
+    }, [
+        isTaskDetailDialogOpen,
+        loadFeishuStatus,
+        loadMainConversation,
+        loadTaskDetail,
+        selectedTaskId,
+        showFeishuStatus,
+    ]);
 
     useEffect(() => {
         if (!conversationIdNumber) {
@@ -574,6 +700,19 @@ function ButlerExperimentWindow() {
                             <div className="flex items-center gap-2 text-sm font-semibold">
                                 <Bot className="h-4 w-4" />
                                 任务台
+                                {showFeishuStatus ? (
+                                    <Badge
+                                        variant={getFeishuStatusVariant(feishuStatus)}
+                                        className="gap-1"
+                                        title={feishuStatus?.status_text || "正在读取飞书连接状态"}
+                                    >
+                                        {getFeishuStatusIcon(
+                                            feishuStatus,
+                                            loadingFeishuStatus
+                                        )}
+                                        飞书
+                                    </Badge>
+                                ) : null}
                             </div>
                             <p className="mt-1 text-xs text-muted-foreground">
                                 {mainConversationId
@@ -990,7 +1129,7 @@ function ButlerExperimentWindow() {
                                 {creatingTask ? (
                                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                                 ) : (
-                                    <Sparkles className="mr-2 h-4 w-4" />
+                                    <Plus className="mr-2 h-4 w-4" />
                                 )}
                                 派发任务
                             </Button>
