@@ -962,7 +962,7 @@ pub fn run() {
         }
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => {
-            awaken_aipp(app_handle);
+            crate::window::awaken_aipp(app_handle);
         }
         _ => {}
     });
