@@ -88,6 +88,10 @@ impl SearchHandler {
         let user_data_dir = resolve_search_user_data_dir(&self.app_handle, &config)?;
         let pool_config = BrowserPoolConfig {
             max_pages: config.get("MAX_CONCURRENT_PAGES").and_then(|v| v.parse().ok()).unwrap_or(5), // 默认最多5个并发页面
+            acquire_timeout_ms: config
+                .get("POOL_ACQUIRE_TIMEOUT_MS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10_000),
             page_idle_timeout_secs: config
                 .get("PAGE_IDLE_TIMEOUT_SECS")
                 .and_then(|v| v.parse().ok())
@@ -284,7 +288,7 @@ impl SearchHandler {
         // 获取浏览器池
         let browser_pool = self.get_or_create_browser_pool().await?;
 
-        match fetcher.fetch_content(url, &browser_manager, browser_pool.as_ref()).await {
+        match fetcher.fetch_content_http_first(url, &browser_manager, browser_pool.as_ref()).await {
             Ok(html) => {
                 info!("Successfully fetched URL content, bytes = {}", html.len());
 
@@ -339,6 +343,14 @@ impl SearchHandler {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(15000),
             wait_poll_ms: config.get("WAIT_POLL_MS").and_then(|v| v.parse().ok()).unwrap_or(250),
+            debug_capture_empty_artifacts: config
+                .get("DEBUG_CAPTURE_EMPTY_ARTIFACTS")
+                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .unwrap_or(false),
+            debug_artifact_dir: config
+                .get("DEBUG_ARTIFACT_DIR")
+                .cloned()
+                .filter(|s| !s.trim().is_empty()),
             kagi_session_url: config
                 .get("KAGI_SESSION_URL")
                 .cloned()
@@ -358,7 +370,15 @@ impl SearchHandler {
                 .filter(|s| !s.is_empty())
                 .collect()
         } else {
-            vec!["body".to_string(), "main".to_string(), "#content".to_string()]
+            vec![
+                "main".to_string(),
+                "article".to_string(),
+                "[role=\"main\"]".to_string(),
+                "#content".to_string(),
+                ".content".to_string(),
+                ".article".to_string(),
+                ".post-content".to_string(),
+            ]
         };
 
         Ok(FetchConfig {
@@ -376,6 +396,14 @@ impl SearchHandler {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(15000),
             wait_poll_ms: config.get("WAIT_POLL_MS").and_then(|v| v.parse().ok()).unwrap_or(250),
+            debug_capture_empty_artifacts: config
+                .get("DEBUG_CAPTURE_EMPTY_ARTIFACTS")
+                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .unwrap_or(false),
+            debug_artifact_dir: config
+                .get("DEBUG_ARTIFACT_DIR")
+                .cloned()
+                .filter(|s| !s.trim().is_empty()),
             kagi_session_url: None, // 通用抓取不需要 Kagi 会话链接
         })
     }
