@@ -89,6 +89,59 @@ pub fn create_test_db() -> Connection {
     )
     .unwrap();
 
+    conn.execute(
+        "CREATE TABLE butler_main_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            butler_conversation_id INTEGER NOT NULL,
+            slot TEXT NOT NULL UNIQUE,
+            last_active_at TEXT NOT NULL,
+            created_time TEXT NOT NULL,
+            updated_time TEXT NOT NULL
+        )",
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        "CREATE TABLE butler_task_definition (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            butler_conversation_id INTEGER NOT NULL,
+            task_conversation_id INTEGER NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            goal TEXT NOT NULL,
+            executor_assistant_id INTEGER NOT NULL,
+            executor_assistant_source TEXT NOT NULL,
+            permission_template_source TEXT,
+            handoff_contract_json TEXT,
+            result_handling_mode TEXT,
+            notification_policy TEXT,
+            created_time TEXT NOT NULL
+        )",
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        "CREATE TABLE butler_task_result (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_conversation_id INTEGER NOT NULL UNIQUE,
+            handoff_mode TEXT,
+            payload_json TEXT,
+            summary TEXT,
+            structured_output_json TEXT,
+            evidence_json TEXT,
+            artifact_refs_json TEXT,
+            followup_suggestions_json TEXT,
+            followup_status TEXT DEFAULT 'enqueued',
+            handoff_message_id INTEGER,
+            final_message_id INTEGER,
+            created_time TEXT NOT NULL,
+            updated_time TEXT NOT NULL
+        )",
+        [],
+    )
+    .unwrap();
+
     conn
 }
 

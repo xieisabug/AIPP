@@ -580,6 +580,7 @@ pub fn run() {
 
             app.manage(initialize_state(&app_handle));
             app.manage(initialize_name_cache_state(&app_handle));
+            crate::api::butler_api::spawn_butler_task_reconciler(app_handle.clone());
             crate::mcp::summarizer::trigger_pending_mcp_catalog_summary_generation(
                 app_handle.clone(),
             );

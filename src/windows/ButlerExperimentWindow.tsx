@@ -346,15 +346,18 @@ function ButlerExperimentWindow() {
     const loadMainConversation = useCallback(async (options?: {
         showLoading?: boolean;
         silentError?: boolean;
+        reconcile?: boolean;
     }) => {
         const showLoading = options?.showLoading ?? false;
         const silentError = options?.silentError ?? false;
+        const reconcile = options?.reconcile ?? false;
         if (showLoading) {
             setLoadingMain(true);
         }
         try {
             const result = await invoke<ButlerMainLoadResponse>(
-                "load_butler_main_conversation"
+                "load_butler_main_conversation",
+                { reconcile }
             );
             applyMainConversationResult(result);
         } catch (error) {
@@ -809,7 +812,7 @@ function ButlerExperimentWindow() {
                         />
                         <IconButton
                             icon={<RefreshCw className="h-4 w-4 text-icon" />}
-                            onClick={() => void loadMainConversation()}
+                            onClick={() => void loadMainConversation({ reconcile: true })}
                             border
                             title="刷新任务台"
                             dataAippSlot="butler-task-refresh"

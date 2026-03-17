@@ -68,6 +68,27 @@ where
     }
 }
 
+fn ensure_column_exists(
+    conn: &Connection,
+    table_name: &str,
+    column_name: &str,
+    column_definition: &str,
+) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
+    let existing_columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if existing_columns.iter().any(|existing| existing == column_name) {
+        return Ok(());
+    }
+
+    conn.execute(
+        &format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"),
+        [],
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Conversation {
     pub id: i64,
@@ -234,6 +255,39 @@ impl ConversationRepository {
                 butler_task_finalized_at: get_datetime_from_row(row, 12)?,
             })
         })?;
+        rows.collect()
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn list_reconcilable_butler_task_conversation_ids(&self) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT conversation.id
+             FROM conversation
+             WHERE conversation_kind = 'butler_task'
+               AND COALESCE(butler_task_status, '') IN ('running', 'cancelled')
+               AND (
+                    butler_task_finalized_at IS NULL
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM butler_task_result
+                        WHERE butler_task_result.task_conversation_id = conversation.id
+                    )
+               )
+             ORDER BY updated_time ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn list_butler_task_conversation_ids_pending_followup(&self) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT task_conversation_id
+             FROM butler_task_result
+             WHERE COALESCE(followup_status, 'enqueued') IN ('pending', 'handoff_injected')
+             ORDER BY updated_time ASC, task_conversation_id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
         rows.collect()
     }
 
@@ -1140,6 +1194,8 @@ impl ConversationDatabase {
                 evidence_json TEXT,
                 artifact_refs_json TEXT,
                 followup_suggestions_json TEXT,
+                followup_status TEXT DEFAULT 'enqueued',
+                handoff_message_id INTEGER,
                 final_message_id INTEGER,
                 created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1151,6 +1207,13 @@ impl ConversationDatabase {
             "CREATE INDEX IF NOT EXISTS idx_butler_task_result_task ON butler_task_result(task_conversation_id)",
             [],
         )?;
+        ensure_column_exists(
+            &conn,
+            "butler_task_result",
+            "followup_status",
+            "TEXT DEFAULT 'enqueued'",
+        )?;
+        ensure_column_exists(&conn, "butler_task_result", "handoff_message_id", "INTEGER")?;
 
         Ok(())
     }
@@ -1889,6 +1952,8 @@ pub struct ButlerTaskResult {
     pub evidence_json: Option<String>,
     pub artifact_refs_json: Option<String>,
     pub followup_suggestions_json: Option<String>,
+    pub followup_status: Option<String>,
+    pub handoff_message_id: Option<i64>,
     pub final_message_id: Option<i64>,
     #[serde(serialize_with = "serialize_datetime_millis")]
     pub created_time: DateTime<Utc>,
@@ -2103,10 +2168,12 @@ impl ButlerRepository {
                 evidence_json,
                 artifact_refs_json,
                 followup_suggestions_json,
+                followup_status,
+                handoff_message_id,
                 final_message_id,
                 created_time,
                 updated_time
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             ON CONFLICT(task_conversation_id) DO UPDATE SET
                 handoff_mode = excluded.handoff_mode,
                 payload_json = excluded.payload_json,
@@ -2115,6 +2182,8 @@ impl ButlerRepository {
                 evidence_json = excluded.evidence_json,
                 artifact_refs_json = excluded.artifact_refs_json,
                 followup_suggestions_json = excluded.followup_suggestions_json,
+                followup_status = excluded.followup_status,
+                handoff_message_id = excluded.handoff_message_id,
                 final_message_id = excluded.final_message_id,
                 updated_time = excluded.updated_time",
             params![
@@ -2126,6 +2195,8 @@ impl ButlerRepository {
                 &result.evidence_json,
                 &result.artifact_refs_json,
                 &result.followup_suggestions_json,
+                &result.followup_status,
+                &result.handoff_message_id,
                 &result.final_message_id,
                 result.created_time,
                 result.updated_time,
@@ -2141,7 +2212,8 @@ impl ButlerRepository {
             .query_row(
                 "SELECT id, task_conversation_id, handoff_mode, payload_json, summary,
                         structured_output_json, evidence_json, artifact_refs_json,
-                        followup_suggestions_json, final_message_id, created_time, updated_time
+                        followup_suggestions_json, followup_status, handoff_message_id,
+                        final_message_id, created_time, updated_time
                  FROM butler_task_result
                  WHERE task_conversation_id = ?1",
                 params![task_conversation_id],
@@ -2156,13 +2228,53 @@ impl ButlerRepository {
                         evidence_json: row.get(6)?,
                         artifact_refs_json: row.get(7)?,
                         followup_suggestions_json: row.get(8)?,
-                        final_message_id: row.get(9)?,
-                        created_time: get_required_datetime_from_row(row, 10, "created_time")?,
-                        updated_time: get_required_datetime_from_row(row, 11, "updated_time")?,
+                        followup_status: row.get(9)?,
+                        handoff_message_id: row.get(10)?,
+                        final_message_id: row.get(11)?,
+                        created_time: get_required_datetime_from_row(row, 12, "created_time")?,
+                        updated_time: get_required_datetime_from_row(row, 13, "updated_time")?,
                     })
                 },
             )
             .optional()
+    }
+
+    #[instrument(level = "debug", skip(self), fields(task_conversation_id = task_conversation_id, followup_status = followup_status))]
+    pub fn update_task_result_followup_state(
+        &self,
+        task_conversation_id: i64,
+        followup_status: &str,
+        handoff_message_id: Option<i64>,
+    ) -> Result<()> {
+        let now = Utc::now();
+        self.conn.execute(
+            "UPDATE butler_task_result
+             SET followup_status = ?1,
+                 handoff_message_id = ?2,
+                 updated_time = ?3
+             WHERE task_conversation_id = ?4",
+            params![followup_status, handoff_message_id, now, task_conversation_id],
+        )?;
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip(self), fields(task_conversation_id = task_conversation_id))]
+    pub fn try_mark_task_result_followup_dispatching(
+        &self,
+        task_conversation_id: i64,
+        handoff_message_id: Option<i64>,
+    ) -> Result<bool> {
+        let now = Utc::now();
+        let affected = self.conn.execute(
+            "UPDATE butler_task_result
+             SET followup_status = 'dispatching',
+                 handoff_message_id = COALESCE(?1, handoff_message_id),
+                 updated_time = ?2
+             WHERE task_conversation_id = ?3
+               AND COALESCE(followup_status, 'pending') IN ('pending', 'handoff_injected')",
+            params![handoff_message_id, now, task_conversation_id],
+        )?;
+        Ok(affected > 0)
     }
 
     #[instrument(level = "debug", skip(self), fields(task_conversation_id = task_conversation_id, status = status))]
