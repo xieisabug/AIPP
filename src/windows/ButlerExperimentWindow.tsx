@@ -18,6 +18,7 @@ import ConversationUI, {
     ConversationUIRef,
     type InlineInteractionItem,
 } from "@/components/ConversationUI";
+import IconButton from "@/components/IconButton";
 import UnifiedMarkdown from "@/components/UnifiedMarkdown";
 import {
     AcpPermissionDialog,
@@ -48,6 +49,7 @@ import {
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select";
+import { ConversationStatsDialog } from "@/components/token-statistics";
 import { AssistantListItem } from "@/data/Assistant";
 import {
     ButlerMainLoadResponse,
@@ -58,6 +60,7 @@ import {
 } from "@/data/Butler";
 import { useAskUserQuestion, usePreviewFile } from "@/hooks/useInlineInteraction";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
+import { useAppShortcuts } from "@/hooks/useAppShortcuts";
 import { useTheme } from "@/hooks/useTheme";
 import { useAcpPermission, useOperationPermission } from "@/hooks/useOperationPermission";
 import { AntiLeakageProvider } from "@/contexts/AntiLeakageContext";
@@ -199,6 +202,9 @@ function ButlerExperimentWindow() {
     const antiLeakageEnabled = getConfigValue("anti_leakage", "enabled") === "true";
     const butlerExperimentEnabled =
         getConfigValue("experimental", "butler_experiment_enabled") === "true";
+    const butlerDisplayName = (
+        getConfigValue("experimental", "butler_display_name", "总管家").trim() || "总管家"
+    );
     const feishuEnabled = getConfigValue("experimental", "butler_feishu_enabled") === "true";
     const showFeishuStatus = butlerExperimentEnabled && feishuEnabled;
 
@@ -216,6 +222,7 @@ function ButlerExperimentWindow() {
     const [creatingTask, setCreatingTask] = useState(false);
     const [resettingMainConversation, setResettingMainConversation] = useState(false);
     const [loadingFeishuStatus, setLoadingFeishuStatus] = useState(false);
+    const [isStatsDialogOpen, setIsStatsDialogOpen] = useState(false);
     const [isTaskDialogOpen, setIsTaskDialogOpen] = useState(false);
     const [isTaskDetailDialogOpen, setIsTaskDetailDialogOpen] = useState(false);
     const [taskTitle, setTaskTitle] = useState("");
@@ -508,6 +515,7 @@ function ButlerExperimentWindow() {
         const unlistenHidden = listen("butler-window-hidden", () => {
             setTaskTitle("");
             setTaskGoal("");
+            setIsStatsDialogOpen(false);
             setIsTaskDialogOpen(false);
             setIsTaskDetailDialogOpen(false);
             setSelectedTaskId(null);
@@ -609,6 +617,28 @@ function ButlerExperimentWindow() {
         }
     }, [applyMainConversationResult]);
 
+    const handleOpenSettings = useCallback(() => {
+        void invoke("open_config_window").catch((error) => {
+            console.error("[ButlerExperimentWindow] Failed to open config window:", error);
+            toast.error("打开设置失败");
+        });
+    }, []);
+
+    const handleToggleSidebar = useCallback(() => {
+        conversationUIRef.current?.toggleSidebar();
+    }, []);
+
+    const handleOpenSidebarWindow = useCallback(() => {
+        conversationUIRef.current?.openSidebarWindow();
+    }, []);
+
+    const handleOpenStats = useCallback(() => {
+        if (!mainConversationId) {
+            return;
+        }
+        setIsStatsDialogOpen(true);
+    }, [mainConversationId]);
+
     const handleCreateTask = useCallback(async () => {
         if (!mainConversationId) {
             return;
@@ -681,6 +711,19 @@ function ButlerExperimentWindow() {
         setIsTaskDetailDialogOpen(true);
     }, []);
 
+    useAppShortcuts("butler", {
+        new: () => {
+            if (!mainConversationId || resettingMainConversation) {
+                return;
+            }
+            void handleResetMainConversation();
+        },
+        stats: handleOpenStats,
+        settings: handleOpenSettings,
+        toggle_sidebar: handleToggleSidebar,
+        open_sidebar_window: handleOpenSidebarWindow,
+    });
+
     const selectedTaskOutput = useMemo(() => {
         const structured = safeParseJson<{ content?: string }>(
             selectedTaskDetail?.result?.structured_output_json
@@ -712,27 +755,42 @@ function ButlerExperimentWindow() {
                             <div className="flex items-center gap-2 text-sm font-semibold">
                                 <Bot className="h-4 w-4" />
                                 任务台
-                                {showFeishuStatus ? (
-                                    <Badge
-                                        variant={getFeishuStatusVariant(feishuStatus)}
-                                        className="gap-1"
-                                        title={feishuStatus?.status_text || "正在读取飞书连接状态"}
-                                    >
-                                        {getFeishuStatusIcon(
-                                            feishuStatus,
-                                            loadingFeishuStatus
-                                        )}
-                                        飞书
-                                    </Badge>
-                                ) : null}
                             </div>
-                            <p className="mt-1 text-xs text-muted-foreground">
-                                {mainConversationId
-                                    ? (mainModelDisplayName || "总管家主会话已就绪")
-                                    : (loadingMain
+                            {mainConversationId || showFeishuStatus ? (
+                                <div className="mt-2 flex flex-wrap items-center gap-2">
+                                    {mainModelDisplayName ? (
+                                        <Badge variant="outline" className="max-w-full">
+                                            <span className="truncate">
+                                                模型：{mainModelDisplayName}
+                                            </span>
+                                        </Badge>
+                                    ) : null}
+                                    {showFeishuStatus ? (
+                                        <Badge
+                                            variant={getFeishuStatusVariant(feishuStatus)}
+                                            className="gap-1"
+                                            title={feishuStatus?.status_text || "正在读取飞书连接状态"}
+                                        >
+                                            {getFeishuStatusIcon(
+                                                feishuStatus,
+                                                loadingFeishuStatus
+                                            )}
+                                            飞书
+                                        </Badge>
+                                    ) : null}
+                                    {!mainModelDisplayName && !showFeishuStatus ? (
+                                        <span className="text-xs text-muted-foreground">
+                                            总管家主会话已就绪
+                                        </span>
+                                    ) : null}
+                                </div>
+                            ) : (
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                    {loadingMain
                                         ? "正在准备总管家主会话..."
-                                        : "总管家主会话尚未初始化")}
-                            </p>
+                                        : "总管家主会话尚未初始化"}
+                                </p>
+                            )}
                         </div>
                         <Badge variant="secondary">{tasks.length}</Badge>
                     </div>
@@ -741,24 +799,21 @@ function ButlerExperimentWindow() {
                         className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-border"
                         data-aipp-slot="butler-task-rail-actions"
                     >
-                        <Button
-                            type="button"
-                            size="sm"
+                        <IconButton
+                            icon={<Plus className="h-4 w-4 text-icon" />}
                             onClick={() => setIsTaskDialogOpen(true)}
                             disabled={!mainConversationId}
-                        >
-                            <Plus className="mr-2 h-4 w-4" />
-                            派发任务
-                        </Button>
-                        <Button
-                            type="button"
-                            size="icon"
-                            variant="ghost"
+                            border
+                            title="派发任务"
+                            dataAippSlot="butler-task-create"
+                        />
+                        <IconButton
+                            icon={<RefreshCw className="h-4 w-4 text-icon" />}
                             onClick={() => void loadMainConversation()}
-                            aria-label="刷新任务台"
-                        >
-                            <RefreshCw className="h-4 w-4" />
-                        </Button>
+                            border
+                            title="刷新任务台"
+                            dataAippSlot="butler-task-refresh"
+                        />
                     </div>
 
                     <ScrollArea className="min-h-0 flex-1" data-aipp-slot="butler-task-list-scroll">
@@ -835,7 +890,7 @@ function ButlerExperimentWindow() {
                 </div>
 
                 <div
-                    className="flex-1 min-w-0 bg-background overflow-hidden rounded-xl m-2 ml-0 shadow-lg"
+                    className="flex flex-1 min-w-0 flex-col overflow-hidden rounded-xl bg-background shadow-lg m-2 ml-0"
                     data-aipp-slot="butler-main-content"
                 >
                     {loadError ? (
@@ -857,33 +912,53 @@ function ButlerExperimentWindow() {
                             </div>
                         </div>
                     ) : mainConversationId ? (
-                        <ConversationUI
-                            key={mainConversationId}
-                            ref={conversationUIRef}
-                            conversationId={mainConversationId}
-                            onChangeConversationId={() => undefined}
-                            pluginList={pluginList}
-                            allowRename={false}
-                            allowDelete={false}
-                            headerExtraActions={(
-                                <Button
-                                    type="button"
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={() => void handleResetMainConversation()}
-                                    disabled={!mainConversationId || resettingMainConversation}
-                                >
-                                    {resettingMainConversation ? (
-                                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                    ) : (
-                                        <RefreshCw className="mr-2 h-4 w-4" />
-                                    )}
-                                    重开新会话
-                                </Button>
-                            )}
-                            inlineInteractionItems={inlineInteractionItems}
-                            inlineInteractionVisible={hasInlineInteraction}
-                        />
+                        <>
+                            <div
+                                className="flex flex-none items-start justify-between gap-3 border-b border-border px-6 py-4"
+                                data-aipp-slot="butler-main-header"
+                            >
+                                <div className="min-w-0">
+                                    <div className="text-base font-semibold">
+                                        {butlerDisplayName}
+                                    </div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <ConversationStatsDialog
+                                        conversationId={mainConversationId}
+                                        externalOpen={isStatsDialogOpen}
+                                        onExternalOpenChange={setIsStatsDialogOpen}
+                                    />
+                                    <IconButton
+                                        icon={
+                                            resettingMainConversation ? (
+                                                <Loader2 className="h-4 w-4 animate-spin text-icon" />
+                                            ) : (
+                                                <RefreshCw className="h-4 w-4 text-icon" />
+                                            )
+                                        }
+                                        onClick={() => void handleResetMainConversation()}
+                                        disabled={!mainConversationId || resettingMainConversation}
+                                        border
+                                        title="重开新会话"
+                                        dataAippSlot="butler-main-reset-conversation"
+                                    />
+                                </div>
+                            </div>
+                            <div className="min-h-0 flex-1">
+                                <ConversationUI
+                                    key={mainConversationId}
+                                    ref={conversationUIRef}
+                                    conversationId={mainConversationId}
+                                    onChangeConversationId={() => undefined}
+                                    pluginList={pluginList}
+                                    hideHeader
+                                    allowRename={false}
+                                    allowDelete={false}
+                                    inlineInteractionItems={inlineInteractionItems}
+                                    inlineInteractionVisible={hasInlineInteraction}
+                                />
+                            </div>
+                        </>
                     ) : (
                         <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                             {loadingMain

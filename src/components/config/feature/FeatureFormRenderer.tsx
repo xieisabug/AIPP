@@ -143,6 +143,10 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
                 <ShortcutsConfigForm
                     form={forms.shortcutsForm}
                     onSave={onSaveShortcuts}
+                    showButlerShortcuts={
+                        String(forms.experimentalForm.watch("butler_experiment_enabled")) ===
+                        "true"
+                    }
                 />
             );
         case "other":

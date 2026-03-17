@@ -924,6 +924,27 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
 
                                 <Controller
                                     control={form.control}
+                                    name="butler_display_name"
+                                    render={({ field }) => (
+                                        <FormItem>
+                                            <FormLabel>总管家显示名称</FormLabel>
+                                            <FormControl>
+                                                <Input
+                                                    value={field.value || ""}
+                                                    onChange={field.onChange}
+                                                    placeholder="总管家"
+                                                />
+                                            </FormControl>
+                                            <p className="mt-1 text-sm text-muted-foreground">
+                                                用于总管家工作台头部展示；留空时回退为“总管家”。
+                                            </p>
+                                            <FormMessage />
+                                        </FormItem>
+                                    )}
+                                />
+
+                                <Controller
+                                    control={form.control}
                                     name="default_home_window"
                                     render={({ field }) => (
                                         <FormItem>

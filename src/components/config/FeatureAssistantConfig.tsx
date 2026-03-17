@@ -9,6 +9,7 @@ import { ConfigPageLayout, SidebarList, ListItemButton, SelectOption } from "../
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useVersionManager } from "@/hooks/feature/useVersionManager";
 import { FeatureFormRenderer } from "./feature/FeatureFormRenderer";
+import { APP_SHORTCUT_KEY_PREFIX, SHORTCUT_ACTIONS } from "@/data/Shortcuts";
 
 interface FeatureItem {
     id: string;
@@ -99,6 +100,13 @@ const FeatureAssistantConfig: React.FC = () => {
     // 使用新的 hooks
     const { featureConfig, saveFeatureConfig, loading } = useFeatureConfig();
     const versionManager = useVersionManager();
+    const defaultAppShortcutValues = useMemo(() => {
+        const values: Record<string, string> = {};
+        for (const action of SHORTCUT_ACTIONS) {
+            values[APP_SHORTCUT_KEY_PREFIX + action.id] = action.defaultShortcut;
+        }
+        return values;
+    }, []);
 
     // 初始化表单
     const displayForm = useForm({
@@ -157,6 +165,7 @@ const FeatureAssistantConfig: React.FC = () => {
             shortcut: isMac ? "Option+Space" : "Alt+Space",
             // 兼容旧字段
             modifier_key: isMac ? "option" : "alt",
+            ...defaultAppShortcutValues,
         },
     });
 
@@ -176,6 +185,7 @@ const FeatureAssistantConfig: React.FC = () => {
             conversation_summary_enabled: "false",
             conversation_summary_model: "",
             butler_experiment_enabled: "false",
+            butler_display_name: "总管家",
             default_home_window: "ask",
             butler_model_id: "",
             butler_feishu_enabled: "false",
@@ -278,6 +288,8 @@ const FeatureAssistantConfig: React.FC = () => {
                 })(),
                 butler_experiment_enabled:
                     experimentalConfig?.get("butler_experiment_enabled") || "false",
+                butler_display_name:
+                    experimentalConfig?.get("butler_display_name") || "总管家",
                 default_home_window:
                     experimentalConfig?.get("default_home_window") || "ask",
                 butler_model_id:
@@ -337,10 +349,17 @@ const FeatureAssistantConfig: React.FC = () => {
                     if (mk === "cmd" || mk === "command" || mk === "super") return isMac ? "Command+Space" : "Super+Space";
                     return isMac ? "Option+Space" : "Alt+Space";
                 })();
-                shortcutsForm.reset({
+                const nextShortcutValues: Record<string, string> = {
                     shortcut: shortcut || fallbackShortcut,
                     modifier_key,
-                });
+                    ...defaultAppShortcutValues,
+                };
+                for (const action of SHORTCUT_ACTIONS) {
+                    const configKey = APP_SHORTCUT_KEY_PREFIX + action.id;
+                    nextShortcutValues[configKey] =
+                        shortcutsConfig.get(configKey) || action.defaultShortcut;
+                }
+                shortcutsForm.reset(nextShortcutValues);
             }
 
             // 更新 autostart 表单
@@ -363,7 +382,7 @@ const FeatureAssistantConfig: React.FC = () => {
                 tool_error_continue_enabled: toolErrorContinueEnabled,
             });
         }
-    }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm, otherForm, experimentalForm]);
+    }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm, otherForm, experimentalForm, defaultAppShortcutValues]);
 
     // 选择功能
     const handleSelectFeature = useCallback((feature: FeatureItem) => {
@@ -435,11 +454,20 @@ const FeatureAssistantConfig: React.FC = () => {
     }, [networkForm, saveFeatureConfig]);
 
     const handleSaveShortcutsConfig = useCallback(async () => {
-        const v = shortcutsForm.getValues();
+        const v = shortcutsForm.getValues() as Record<string, string | undefined>;
+        const appShortcutConfig = SHORTCUT_ACTIONS.reduce<Record<string, string>>(
+            (acc, action) => {
+                const configKey = APP_SHORTCUT_KEY_PREFIX + action.id;
+                acc[configKey] = v[configKey] || action.defaultShortcut;
+                return acc;
+            },
+            {}
+        );
         await saveFeatureConfig("shortcuts", {
             // 保存新旧两种字段，后端优先读取 shortcut
             shortcut: v.shortcut,
             modifier_key: v.modifier_key,
+            ...appShortcutConfig,
         });
     }, [shortcutsForm, saveFeatureConfig]);
 
@@ -463,6 +491,7 @@ const FeatureAssistantConfig: React.FC = () => {
             conversation_summary_model: conversationSummaryModel.model_code,
             conversation_summary_provider_id: conversationSummaryModel.provider_id,
             butler_experiment_enabled: String(v.butler_experiment_enabled),
+            butler_display_name: String(v.butler_display_name || "总管家"),
             default_home_window: String(v.default_home_window || "ask"),
             butler_model_id: String(v.butler_model_id || ""),
             butler_feishu_enabled: String(v.butler_feishu_enabled),

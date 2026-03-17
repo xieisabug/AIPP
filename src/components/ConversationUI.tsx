@@ -64,6 +64,7 @@ export interface ConversationUIRef {
     closeStats: () => void;
     openExport: () => void;
     closeExport: () => void;
+    toggleSidebar: () => void;
     openSidebarWindow: () => void;
     openSettings: () => void;
 }
@@ -208,6 +209,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // Sidebar expansion state and width
         const [, setSidebarExpanded] = useState(false);
         const [sidebarWidth, setSidebarWidth] = useState(0);
+        const [sidebarToggleRequestVersion, setSidebarToggleRequestVersion] = useState(0);
         
         // Sidebar window state - when true, hide the inline sidebar
         const [sidebarWindowOpen, setSidebarWindowOpen] = useState(false);
@@ -623,6 +625,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 closeExport: () => {
                     setExportDialogOpen(false);
                 },
+                toggleSidebar: () => {
+                    setSidebarToggleRequestVersion((current) => current + 1);
+                },
                 openSidebarWindow: () => {
                     handleOpenSidebarWindow();
                 },
@@ -899,7 +904,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         onWheelCapture={handleUserScrollIntent}
                         onTouchMoveCapture={handleUserScrollIntent}
                         onScroll={handleScroll}
-                        className={`h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
+                        className={`conversation-scroll-transparent-track h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
                         data-aipp-slot="chat-conversation-scroll"
                     >
                         <ConversationContent
@@ -952,15 +957,16 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
                 {/* Right sidebar - only show on desktop when sidebar window is not open */}
                 {!isMobile && !hideSidebar && conversationId && !sidebarWindowOpen && (
-                    <ChatSidebar
-                        todos={todos}
-                        artifacts={artifacts}
-                        contextItems={contextItems}
-                        conversationId={conversationId}
-                        onExpandChange={handleSidebarExpandChange}
-                        onOpenWindow={handleOpenSidebarWindow}
-                        onArtifactClick={(artifact) => handleArtifact(artifact.language, artifact.code)}
-                    />
+                        <ChatSidebar
+                            todos={todos}
+                            artifacts={artifacts}
+                            contextItems={contextItems}
+                            conversationId={conversationId}
+                            toggleRequestVersion={sidebarToggleRequestVersion}
+                            onExpandChange={handleSidebarExpandChange}
+                            onOpenWindow={handleOpenSidebarWindow}
+                            onArtifactClick={(artifact) => handleArtifact(artifact.language, artifact.code)}
+                        />
                 )}
 
                 <ConversationTitleEditDialog
