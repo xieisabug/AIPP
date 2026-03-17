@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,6 +28,9 @@ use crate::api::butler_api::{
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::system_db::{SecureConfigEntry, SystemDatabase};
 use crate::external_channels::presentation::{render_message_for_external_channel, RenderContext};
+use crate::mcp::builtin_mcp::interaction::{
+    resolve_ask_user_question_response, AskUserQuestionItem, AskUserQuestionRequestEvent,
+};
 
 const EXPERIMENTAL_FEATURE_CODE: &str = "experimental";
 const FEISHU_SCOPE: &str = "butler_feishu";
@@ -44,12 +47,14 @@ const FEISHU_RUNTIME_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const FEISHU_SETTLE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 const FEISHU_SETTLE_TIMEOUT: Duration = Duration::from_secs(120);
 const FEISHU_SETTLE_STATUS_INTERVAL_STEPS: usize = 10;
+const FEISHU_RELAY_IDLE_STABLE_CHECKS: usize = 2;
 const FEISHU_STATUS_READY_DETAIL: &str =
     "飞书 SDK 已启用心跳与内部重连；若长连接退出，AIPP 还会在 5 秒后自动重试";
 
 pub struct FeishuButlerState {
     runtime_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     http_client: reqwest::Client,
+    relay_workers: Mutex<HashSet<i64>>,
     pub ingress_lock: Mutex<()>,
     pub status: Mutex<FeishuRuntimeStatus>,
 }
@@ -59,6 +64,7 @@ impl Default for FeishuButlerState {
         Self {
             runtime_task: Mutex::new(None),
             http_client: build_feishu_http_client(),
+            relay_workers: Mutex::new(HashSet::new()),
             ingress_lock: Mutex::new(()),
             status: Mutex::new(FeishuRuntimeStatus::default()),
         }
@@ -154,7 +160,7 @@ struct SendMessageData {
 #[derive(Debug, Deserialize)]
 struct EventEnvelope {
     header: EventHeader,
-    event: EventBody,
+    event: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,6 +215,30 @@ struct IncomingTextEvent {
     parent_id: Option<String>,
     root_id: Option<String>,
     has_mentions: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuCardActionCallback {
+    event: FeishuCardActionEvent,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuCardActionEvent {
+    operator: FeishuCardActionOperator,
+    action: FeishuCardActionDetail,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuCardActionOperator {
+    open_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuCardActionDetail {
+    #[serde(default)]
+    value: Option<Value>,
+    #[serde(default)]
+    form_value: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone)]
@@ -378,6 +408,113 @@ where
     let snapshot = status.clone();
     drop(status);
     let _ = app_handle.emit("butler_feishu_status_changed", snapshot);
+}
+
+async fn spawn_feishu_relay_scope_worker(app_handle: &AppHandle, scope_id: i64, conversation_id: i64) {
+    let state = app_handle.state::<FeishuButlerState>();
+    let mut relay_workers = state.relay_workers.lock().await;
+    if !relay_workers.insert(scope_id) {
+        return;
+    }
+    drop(relay_workers);
+
+    let app_handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = run_feishu_relay_scope_worker(&app_handle, scope_id, conversation_id).await;
+        let state = app_handle.state::<FeishuButlerState>();
+        let mut relay_workers = state.relay_workers.lock().await;
+        relay_workers.remove(&scope_id);
+        drop(relay_workers);
+
+        if let Err(error) = result {
+            mark_relay_scope_failed_with_log(
+                &app_handle,
+                scope_id,
+                &error,
+                "failed to persist Feishu relay worker error",
+            )
+            .await;
+            warn!(conversation_id, scope_id, error = %error, "feishu relay worker failed");
+        }
+    });
+}
+
+async fn run_feishu_relay_scope_worker(
+    app_handle: &AppHandle,
+    scope_id: i64,
+    conversation_id: i64,
+) -> Result<(), String> {
+    let activity_manager =
+        app_handle.state::<crate::state::activity_state::ConversationActivityManager>();
+    let mut idle_checks = 0usize;
+
+    loop {
+        let scope = load_relay_scope(app_handle, scope_id)?;
+        if matches!(scope.status.as_str(), "completed" | "failed") {
+            return Ok(());
+        }
+
+        let fresh_config = load_runtime_config(app_handle).await?;
+        if !fresh_config.butler_enabled || !fresh_config.enabled {
+            return Err("飞书回发已被停用，跳过当前回发任务".to_string());
+        }
+
+        flush_feishu_relay_scope(app_handle, &fresh_config, scope_id).await?;
+
+        let scope = load_relay_scope(app_handle, scope_id)?;
+        let runtime_state = activity_manager.get_runtime_state(conversation_id).await;
+        let pending_tasks = count_pending_butler_tasks(app_handle, conversation_id)?;
+        let latest_message_id = get_latest_message_id(app_handle, conversation_id)?;
+        let no_new_messages = latest_message_id <= scope.last_delivered_local_message_id;
+
+        if !runtime_state.is_running && pending_tasks == 0 && no_new_messages {
+            idle_checks += 1;
+            if idle_checks >= FEISHU_RELAY_IDLE_STABLE_CHECKS {
+                mark_relay_scope_progress(
+                    app_handle,
+                    scope_id,
+                    scope.last_delivered_local_message_id,
+                    "completed",
+                )?;
+                if scope.origin == RELAY_ORIGIN_FEISHU {
+                    set_feishu_runtime_ready_status(
+                        app_handle,
+                        format!("最近一条飞书消息处理链路已稳定结束；{FEISHU_STATUS_READY_DETAIL}"),
+                    )
+                    .await;
+                }
+                return Ok(());
+            }
+        } else {
+            idle_checks = 0;
+            let next_status = if runtime_state.is_running && pending_tasks == 0 && no_new_messages {
+                "waiting_user_input"
+            } else {
+                "active"
+            };
+            mark_relay_scope_progress(
+                app_handle,
+                scope_id,
+                scope.last_delivered_local_message_id,
+                next_status,
+            )?;
+            if scope.origin == RELAY_ORIGIN_FEISHU {
+                mutate_status(app_handle, |status| {
+                    status.running = true;
+                    status.connected = true;
+                    status.last_error = None;
+                    status.status_text = "总管家正在持续回发飞书消息".to_string();
+                    status.status_detail = Some(format!(
+                        "飞书消息已受理；会话运行中={}，待完成任务={}，已回发到消息 {}",
+                        runtime_state.is_running, pending_tasks, scope.last_delivered_local_message_id
+                    ));
+                })
+                .await;
+            }
+        }
+
+        sleep(FEISHU_SETTLE_CHECK_INTERVAL).await;
+    }
 }
 
 fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
@@ -568,61 +705,7 @@ pub(crate) async fn maybe_schedule_butler_feishu_relay_for_aipp_turn(
             start_after_local_message_id,
         },
     )?;
-
-    let app_handle_clone = app_handle.clone();
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = wait_for_butler_to_settle(&app_handle_clone, conversation_id).await {
-            mark_relay_scope_failed_with_log(
-                &app_handle_clone,
-                scope_id,
-                &error,
-                "failed to persist Feishu relay settle error",
-            )
-            .await;
-            warn!(conversation_id, scope_id, error = %error, "butler relay scope settle failed");
-            return;
-        }
-
-        let fresh_config = match load_runtime_config(&app_handle_clone).await {
-            Ok(config) => config,
-            Err(error) => {
-                mark_relay_scope_failed_with_log(
-                    &app_handle_clone,
-                    scope_id,
-                    &error,
-                    "failed to reload Feishu runtime config for relay scope",
-                )
-                .await;
-                warn!(conversation_id, scope_id, error = %error, "failed to reload Feishu config before relay flush");
-                return;
-            }
-        };
-        if !fresh_config.butler_enabled || !fresh_config.enabled {
-            let error = "飞书回发已被停用，跳过当前回发任务".to_string();
-            mark_relay_scope_failed_with_log(
-                &app_handle_clone,
-                scope_id,
-                &error,
-                "failed to persist Feishu relay disabled state",
-            )
-            .await;
-            warn!(conversation_id, scope_id, "skip Feishu relay because runtime is disabled");
-            return;
-        }
-
-        if let Err(error) =
-            flush_feishu_relay_scope(&app_handle_clone, &fresh_config, scope_id).await
-        {
-            mark_relay_scope_failed_with_log(
-                &app_handle_clone,
-                scope_id,
-                &error,
-                "failed to persist Feishu relay flush error",
-            )
-            .await;
-            warn!(conversation_id, scope_id, error = %error, "butler relay scope flush failed");
-        }
-    });
+    spawn_feishu_relay_scope_worker(app_handle, scope_id, conversation_id).await;
 
     Ok(())
 }
@@ -833,61 +916,158 @@ async fn handle_payload(
             return Ok(());
         }
     };
-    if envelope.header.event_type != "im.message.receive_v1" {
-        return Ok(());
-    }
+    match envelope.header.event_type.as_str() {
+        "im.message.receive_v1" => {
+            let Some(event) = parse_incoming_text_event(config, envelope)? else {
+                return Ok(());
+            };
 
-    let Some(event) = parse_incoming_text_event(config, envelope)? else {
-        return Ok(());
-    };
-
-    if let Err(error) = process_incoming_text_message(app_handle, config, &event).await {
-        warn!(message_id = %event.message_id, error = %error, "failed to process feishu message");
-        if let Err(reply_error) = reply_text_message(
-            app_handle,
-            config,
-            &event.message_id,
-            &format!("总管家处理飞书消息失败：{}", truncate_text(&error, 180)),
-        )
-        .await
-        {
-            warn!(
-                message_id = %event.message_id,
-                error = %reply_error,
-                "failed to send Feishu error reply"
-            );
+            if let Err(error) = process_incoming_text_message(app_handle, config, &event).await {
+                warn!(message_id = %event.message_id, error = %error, "failed to process feishu message");
+                if let Err(reply_error) = reply_text_message(
+                    app_handle,
+                    config,
+                    &event.message_id,
+                    &format!("总管家处理飞书消息失败：{}", truncate_text(&error, 180)),
+                )
+                .await
+                {
+                    warn!(
+                        message_id = %event.message_id,
+                        error = %reply_error,
+                        "failed to send Feishu error reply"
+                    );
+                }
+                mutate_status(app_handle, |status| {
+                    status.last_error = Some(error);
+                    status.status_text = "处理飞书消息时发生错误".to_string();
+                })
+                .await;
+            }
         }
-        mutate_status(app_handle, |status| {
-            status.last_error = Some(error);
-            status.status_text = "处理飞书消息时发生错误".to_string();
-        })
-        .await;
+        "card.action.trigger" => {
+            handle_card_action_trigger(app_handle, &envelope.event).await?;
+        }
+        _ => {}
     }
 
     Ok(())
+}
+
+async fn handle_card_action_trigger(app_handle: &AppHandle, raw_event: &Value) -> Result<(), String> {
+    let callback: FeishuCardActionCallback =
+        serde_json::from_value(raw_event.clone()).map_err(|e| e.to_string())?;
+    let action_value = callback
+        .event
+        .action
+        .value
+        .as_ref()
+        .ok_or_else(|| "飞书卡片回调缺少 action.value".to_string())?;
+    let request_id = action_value
+        .get("request_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "飞书卡片回调缺少 request_id".to_string())?;
+    let action = action_value
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("submit");
+
+    if action == "cancel" {
+        resolve_ask_user_question_response(app_handle, request_id, None, true).await?;
+        return Ok(());
+    }
+
+    let answers = build_ask_user_answers_from_card_callback(app_handle, request_id, &callback).await?;
+    debug!(
+        request_id,
+        operator_open_id = %callback.event.operator.open_id,
+        "resolved AskUserQuestion from Feishu card callback"
+    );
+    resolve_ask_user_question_response(app_handle, request_id, Some(answers), false).await?;
+    Ok(())
+}
+
+async fn build_ask_user_answers_from_card_callback(
+    app_handle: &AppHandle,
+    request_id: &str,
+    callback: &FeishuCardActionCallback,
+) -> Result<HashMap<String, String>, String> {
+    let Some(interaction_state) = app_handle.try_state::<crate::mcp::builtin_mcp::interaction::InteractionState>() else {
+        return Err("InteractionState not found".to_string());
+    };
+    let request = interaction_state
+        .get_ask_user_request(request_id)
+        .await
+        .ok_or_else(|| "AskUserQuestion request not found".to_string())?;
+    let form_value = callback
+        .event
+        .action
+        .form_value
+        .as_ref()
+        .ok_or_else(|| "飞书卡片回调缺少 form_value".to_string())?;
+    map_ask_user_form_values_to_answers(&request.questions, form_value)
+}
+
+fn map_ask_user_form_values_to_answers(
+    questions: &[AskUserQuestionItem],
+    form_value: &Map<String, Value>,
+) -> Result<HashMap<String, String>, String> {
+    let mut answers = HashMap::new();
+    for (index, question) in questions.iter().enumerate() {
+        let field_name = format!("question_{}", index);
+        let raw_value = form_value
+            .get(&field_name)
+            .ok_or_else(|| format!("飞书卡片回答缺少字段 {}", field_name))?;
+        let answer = match raw_value {
+            Value::String(value) => value.clone(),
+            Value::Array(items) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+            Value::Object(map) => map
+                .get("value")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .or_else(|| {
+                    map.get("values").and_then(Value::as_array).map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                })
+                .ok_or_else(|| format!("飞书卡片回答字段 {} 结构无效", field_name))?,
+            _ => return Err(format!("飞书卡片回答字段 {} 类型无效", field_name)),
+        };
+        answers.insert(question.question.clone(), answer);
+    }
+    Ok(answers)
 }
 
 fn parse_incoming_text_event(
     config: &FeishuRuntimeConfig,
     envelope: EventEnvelope,
 ) -> Result<Option<IncomingTextEvent>, String> {
-    if envelope.event.message.message_type != "text" {
+    let event: EventBody = serde_json::from_value(envelope.event).map_err(|e| e.to_string())?;
+    if event.message.message_type != "text" {
         return Ok(None);
     }
 
     let text_content: TextMessageContent =
-        serde_json::from_str(&envelope.event.message.content).map_err(|e| e.to_string())?;
+        serde_json::from_str(&event.message.content).map_err(|e| e.to_string())?;
     let text = text_content.text.trim().to_string();
     if text.is_empty() {
         return Ok(None);
     }
 
-    let sender_open_id = envelope.event.sender.sender_id.open_id.trim().to_string();
+    let sender_open_id = event.sender.sender_id.open_id.trim().to_string();
     if sender_open_id.is_empty() {
         return Ok(None);
     }
 
-    let chat_type = envelope.event.message.chat_type.trim().to_string();
+    let chat_type = event.message.chat_type.trim().to_string();
     if chat_type == "p2p" && !config.allow_p2p {
         return Ok(None);
     }
@@ -895,7 +1075,7 @@ fn parse_incoming_text_event(
         return Ok(None);
     }
 
-    let chat_id = envelope.event.message.chat_id.clone();
+    let chat_id = event.message.chat_id.clone();
     if !config.allowed_open_ids.is_empty() && !config.allowed_open_ids.contains(&sender_open_id) {
         return Ok(None);
     }
@@ -910,15 +1090,14 @@ fn parse_incoming_text_event(
     }
 
     Ok(Some(IncomingTextEvent {
-        message_id: envelope.event.message.message_id,
+        message_id: event.message.message_id,
         sender_open_id,
         chat_id,
         text,
         chat_type,
-        parent_id: envelope.event.message.parent_id,
-        root_id: envelope.event.message.root_id,
-        has_mentions: envelope
-            .event
+        parent_id: event.message.parent_id,
+        root_id: event.message.root_id,
+        has_mentions: event
             .message
             .mentions
             .map(|mentions| !mentions.is_empty())
@@ -1025,8 +1204,6 @@ async fn process_incoming_text_message(
         .map_err(|e| e.to_string())?;
     }
 
-    wait_for_butler_to_settle(app_handle, butler_conversation.id).await?;
-
     if let Some(user_message_id) = find_latest_message_id_by_type(
         app_handle,
         butler_conversation.id,
@@ -1041,11 +1218,14 @@ async fn process_incoming_text_message(
         )?;
     }
 
-    flush_feishu_relay_scope(app_handle, config, relay_scope_id).await?;
-    set_feishu_runtime_ready_status(
-        app_handle,
-        format!("最近一条飞书消息已处理完成；{FEISHU_STATUS_READY_DETAIL}"),
-    )
+    spawn_feishu_relay_scope_worker(app_handle, relay_scope_id, butler_conversation.id).await;
+    mutate_status(app_handle, |status| {
+        status.running = true;
+        status.connected = true;
+        status.last_error = None;
+        status.status_text = "飞书消息已受理，正在持续回发".to_string();
+        status.status_detail = Some("总管家会继续处理本轮消息，并把后续输出持续回发到飞书".to_string());
+    })
     .await;
     Ok(())
 }
@@ -1214,6 +1394,44 @@ fn load_relay_scope(app_handle: &AppHandle, scope_id: i64) -> Result<RelayScopeR
             })
         },
     )
+    .map_err(|e| e.to_string())
+}
+
+fn find_active_relay_scope(
+    app_handle: &AppHandle,
+    conversation_id: i64,
+    origin: &str,
+) -> Result<Option<RelayScopeRecord>, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT id, channel, conversation_id, origin, external_chat_id, external_user_id,
+                anchor_external_message_id, start_after_local_message_id,
+                last_delivered_local_message_id, status
+         FROM external_channel_relay_scope
+         WHERE channel = ?1
+           AND conversation_id = ?2
+           AND origin = ?3
+           AND COALESCE(status, '') NOT IN ('completed', 'failed')
+         ORDER BY id DESC
+         LIMIT 1",
+        params![CHANNEL_FEISHU, conversation_id, origin],
+        |row| {
+            Ok(RelayScopeRecord {
+                id: row.get(0)?,
+                channel: row.get(1)?,
+                conversation_id: row.get(2)?,
+                origin: row.get(3)?,
+                external_chat_id: row.get(4)?,
+                external_user_id: row.get(5)?,
+                anchor_external_message_id: row.get(6)?,
+                start_after_local_message_id: row.get(7)?,
+                last_delivered_local_message_id: row.get(8)?,
+                status: row.get(9)?,
+            })
+        },
+    )
+    .optional()
     .map_err(|e| e.to_string())
 }
 
@@ -1421,8 +1639,16 @@ fn list_relayable_messages(
                     message.message_type.as_str(),
                     "user" | "response" | "assistant" | "tool_result"
                 )
+                && is_message_ready_for_feishu_relay(message)
         })
         .collect())
+}
+
+fn is_message_ready_for_feishu_relay(message: &crate::db::conversation_db::Message) -> bool {
+    match message.message_type.as_str() {
+        "response" | "assistant" => message.finish_time.is_some(),
+        _ => true,
+    }
 }
 
 async fn flush_feishu_relay_scope(
@@ -1504,15 +1730,11 @@ async fn flush_feishu_relay_scope(
         mark_relay_scope_progress(app_handle, scope.id, message.id, "sending")?;
     }
 
-    if delivered_count == 0 && scope.origin == RELAY_ORIGIN_FEISHU {
-        return Err("总管家未产生可回发的可读内容".to_string());
-    }
-
     mark_relay_scope_progress(
         app_handle,
         scope.id,
         last_processed_message_id.max(scope.last_delivered_local_message_id),
-        "completed",
+        if delivered_count > 0 { "active" } else { &scope.status },
     )?;
     Ok(())
 }
@@ -1991,6 +2213,152 @@ fn build_feishu_interactive_payload(card: &Value) -> Value {
         "msg_type": "interactive",
         "content": card.to_string()
     })
+}
+
+async fn send_interactive_card_to_target(
+    app_handle: &AppHandle,
+    config: &FeishuRuntimeConfig,
+    target: &ChannelLinkTarget,
+    card: &Value,
+) -> Result<String, String> {
+    let token = fetch_tenant_access_token(app_handle, config).await?;
+    let client = feishu_http_client(app_handle);
+    if let Some(reply_to_message_id) = target.reply_to_message_id.as_deref() {
+        send_reply_message_request(
+            &client,
+            config,
+            &token,
+            reply_to_message_id,
+            build_feishu_interactive_payload(card),
+        )
+        .await
+    } else if let Some((receive_id_type, receive_id)) = select_receive_target(target) {
+        send_message_request(
+            &client,
+            config,
+            &token,
+            receive_id_type,
+            receive_id,
+            build_feishu_interactive_payload(card),
+        )
+        .await
+    } else {
+        Err("当前对话没有可用的飞书发送目标，请先让该对话与飞书建立一次消息链路".to_string())
+    }
+}
+
+fn build_ask_user_question_card(event: &AskUserQuestionRequestEvent) -> Value {
+    let mut elements = Vec::new();
+    elements.push(json!({
+        "tag": "markdown",
+        "content": "总管家需要你补充一些信息后才能继续。",
+        "text_align": "left"
+    }));
+
+    let mut form_elements = Vec::new();
+    for (index, question) in event.questions.iter().enumerate() {
+        let field_name = format!("question_{}", index);
+        let options = question
+            .options
+            .iter()
+            .map(|option| {
+                json!({
+                    "text": {
+                        "tag": "plain_text",
+                        "content": format!("{} - {}", option.label, option.description)
+                    },
+                    "value": option.label
+                })
+            })
+            .collect::<Vec<_>>();
+        form_elements.push(json!({
+            "tag": "markdown",
+            "content": format!("**{}**\n{}", question.header, question.question),
+            "text_align": "left"
+        }));
+        let tag = if question.multi_select { "multi_select_static" } else { "select_static" };
+        form_elements.push(json!({
+            "tag": tag,
+            "name": field_name,
+            "placeholder": {
+                "tag": "plain_text",
+                "content": format!("请选择：{}", question.question)
+            },
+            "required": true,
+            "options": options,
+        }));
+    }
+
+    form_elements.push(json!({
+        "tag": "action",
+        "actions": [
+            {
+                "tag": "button",
+                "type": "primary",
+                "text": { "tag": "plain_text", "content": "提交" },
+                "behaviors": [{ "type": "form_submit" }],
+                "value": { "action": "submit", "request_id": event.request_id }
+            },
+            {
+                "tag": "button",
+                "text": { "tag": "plain_text", "content": "取消" },
+                "value": { "action": "cancel", "request_id": event.request_id }
+            }
+        ]
+    }));
+
+    elements.push(json!({
+        "tag": "form",
+        "elements": form_elements
+    }));
+
+    json!({
+        "schema": "2.0",
+        "config": { "update_multi": true, "wide_screen_mode": true },
+        "body": { "elements": elements }
+    })
+}
+
+pub(crate) async fn try_deliver_ask_user_question_to_feishu(
+    app_handle: &AppHandle,
+    conversation_id: i64,
+    event: &AskUserQuestionRequestEvent,
+) -> Result<bool, String> {
+    let config = load_runtime_config(app_handle).await?;
+    if !config.butler_enabled || !config.enabled {
+        return Ok(false);
+    }
+
+    let Some(target) = find_latest_feishu_target(app_handle, conversation_id)? else {
+        return Ok(false);
+    };
+    let card = build_ask_user_question_card(event);
+    let external_message_id = send_interactive_card_to_target(app_handle, &config, &target, &card).await?;
+
+    insert_external_link(
+        app_handle,
+        ChannelLinkRecord {
+            external_message_id: &external_message_id,
+            external_chat_id: target.external_chat_id.as_deref(),
+            external_user_id: target.external_user_id.as_deref(),
+            conversation_id,
+            local_message_id: None,
+            direction: "outbound",
+            payload_type: "interactive",
+        },
+    )?;
+
+    if let Some(scope) = find_active_relay_scope(app_handle, conversation_id, RELAY_ORIGIN_FEISHU)? {
+        mark_relay_scope_progress(
+            app_handle,
+            scope.id,
+            scope.last_delivered_local_message_id,
+            "waiting_user_input",
+        )?;
+        spawn_feishu_relay_scope_worker(app_handle, scope.id, conversation_id).await;
+    }
+
+    Ok(true)
 }
 
 async fn send_reply_message_request(
@@ -2476,5 +2844,142 @@ mod tests {
 
         let payload = build_feishu_interactive_payload(&card);
         assert_eq!(payload, expected_payload);
+    }
+
+    #[test]
+    fn build_ask_user_question_card_renders_single_and_multi_select_fields() {
+        let card = build_ask_user_question_card(&AskUserQuestionRequestEvent {
+            request_id: "req-1".to_string(),
+            conversation_id: Some(42),
+            questions: vec![
+                AskUserQuestionItem {
+                    question: "选择一个模型".to_string(),
+                    header: "模型".to_string(),
+                    options: vec![
+                        crate::mcp::builtin_mcp::interaction::AskUserQuestionOption {
+                            label: "GPT-5.4".to_string(),
+                            description: "推荐".to_string(),
+                        },
+                        crate::mcp::builtin_mcp::interaction::AskUserQuestionOption {
+                            label: "Claude".to_string(),
+                            description: "保守".to_string(),
+                        },
+                    ],
+                    multi_select: false,
+                },
+                AskUserQuestionItem {
+                    question: "选择输出格式".to_string(),
+                    header: "格式".to_string(),
+                    options: vec![
+                        crate::mcp::builtin_mcp::interaction::AskUserQuestionOption {
+                            label: "表格".to_string(),
+                            description: "结构化".to_string(),
+                        },
+                        crate::mcp::builtin_mcp::interaction::AskUserQuestionOption {
+                            label: "列表".to_string(),
+                            description: "简洁".to_string(),
+                        },
+                    ],
+                    multi_select: true,
+                },
+            ],
+            metadata: None,
+        });
+
+        let elements = card["body"]["elements"].as_array().expect("elements should be an array");
+        let form = elements
+            .iter()
+            .find(|element| element["tag"] == "form")
+            .expect("form should exist");
+        let form_elements = form["elements"].as_array().expect("form elements should be array");
+        assert!(form_elements.iter().any(|element| element["tag"] == "select_static"));
+        assert!(form_elements.iter().any(|element| element["tag"] == "multi_select_static"));
+        assert_eq!(form_elements.last().expect("action should exist")["tag"], "action");
+    }
+
+    #[test]
+    fn map_ask_user_form_values_to_answers_supports_single_and_multi_select() {
+        let questions = vec![
+            AskUserQuestionItem {
+                question: "选择一个模型".to_string(),
+                header: "模型".to_string(),
+                options: vec![
+                    crate::mcp::builtin_mcp::interaction::AskUserQuestionOption {
+                        label: "GPT-5.4".to_string(),
+                        description: "推荐".to_string(),
+                    },
+                    crate::mcp::builtin_mcp::interaction::AskUserQuestionOption {
+                        label: "Claude".to_string(),
+                        description: "保守".to_string(),
+                    },
+                ],
+                multi_select: false,
+            },
+            AskUserQuestionItem {
+                question: "选择输出格式".to_string(),
+                header: "格式".to_string(),
+                options: vec![
+                    crate::mcp::builtin_mcp::interaction::AskUserQuestionOption {
+                        label: "表格".to_string(),
+                        description: "结构化".to_string(),
+                    },
+                    crate::mcp::builtin_mcp::interaction::AskUserQuestionOption {
+                        label: "列表".to_string(),
+                        description: "简洁".to_string(),
+                    },
+                ],
+                multi_select: true,
+            },
+        ];
+        let form_value = Map::from_iter([
+            ("question_0".to_string(), Value::String("GPT-5.4".to_string())),
+            (
+                "question_1".to_string(),
+                Value::Array(vec![Value::String("表格".to_string()), Value::String("列表".to_string())]),
+            ),
+        ]);
+
+        let answers = map_ask_user_form_values_to_answers(&questions, &form_value)
+            .expect("answers should map");
+        assert_eq!(answers.get("选择一个模型"), Some(&"GPT-5.4".to_string()));
+        assert_eq!(answers.get("选择输出格式"), Some(&"表格, 列表".to_string()));
+    }
+
+    #[test]
+    fn feishu_relay_waits_for_finished_assistant_messages() {
+        let now = Utc::now();
+        let streaming = crate::db::conversation_db::Message {
+            id: 1,
+            parent_id: None,
+            conversation_id: 1,
+            message_type: "response".to_string(),
+            content: "半句输出".to_string(),
+            llm_model_id: None,
+            llm_model_name: None,
+            created_time: now,
+            start_time: Some(now),
+            finish_time: None,
+            token_count: 0,
+            input_token_count: 0,
+            output_token_count: 0,
+            generation_group_id: None,
+            parent_group_id: None,
+            tool_calls_json: None,
+            first_token_time: None,
+            ttft_ms: None,
+        };
+        let finished = crate::db::conversation_db::Message {
+            finish_time: Some(now),
+            ..streaming.clone()
+        };
+        let tool_result = crate::db::conversation_db::Message {
+            message_type: "tool_result".to_string(),
+            finish_time: None,
+            ..streaming.clone()
+        };
+
+        assert!(!is_message_ready_for_feishu_relay(&streaming));
+        assert!(is_message_ready_for_feishu_relay(&finished));
+        assert!(is_message_ready_for_feishu_relay(&tool_result));
     }
 }
