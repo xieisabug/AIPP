@@ -17,13 +17,14 @@ use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::sleep;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::api::ai::types::AiRequest;
 use crate::api::ai_api::ask_ai;
 use crate::api::butler_api::{
     get_butler_main_continuation_lock, load_or_create_butler_main_internal,
-    resolve_butler_execution_window, wait_for_butler_main_to_be_idle,
+    reset_butler_main_conversation, resolve_butler_execution_window,
+    wait_for_butler_main_to_be_idle,
 };
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::system_db::{SecureConfigEntry, SystemDatabase};
@@ -50,6 +51,7 @@ const FEISHU_SETTLE_STATUS_INTERVAL_STEPS: usize = 10;
 const FEISHU_RELAY_IDLE_STABLE_CHECKS: usize = 2;
 const FEISHU_STATUS_READY_DETAIL: &str =
     "飞书 SDK 已启用心跳与内部重连；若长连接退出，AIPP 还会在 5 秒后自动重试";
+const FEISHU_MENU_NEW_CONVERSATION_EVENT_KEY: &str = "feishu::conversation::new";
 
 pub struct FeishuButlerState {
     runtime_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
@@ -166,6 +168,8 @@ struct EventEnvelope {
 #[derive(Debug, Deserialize)]
 struct EventHeader {
     event_type: String,
+    #[serde(default)]
+    event_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -239,6 +243,28 @@ struct FeishuCardActionDetail {
     value: Option<Value>,
     #[serde(default)]
     form_value: Option<Map<String, Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuBotMenuEvent {
+    operator: FeishuBotMenuOperator,
+    event_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuBotMenuOperator {
+    operator_id: FeishuBotMenuOperatorId,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuBotMenuOperatorId {
+    open_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FeishuBotMenuClickEvent {
+    operator_open_id: String,
+    event_key: String,
 }
 
 #[derive(Debug, Clone)]
@@ -916,6 +942,13 @@ async fn handle_payload(
             return Ok(());
         }
     };
+    if envelope.header.event_type == "application.bot.menu_v6" {
+        info!(
+            event_type = %envelope.header.event_type,
+            event_id = %envelope.header.event_id.as_deref().unwrap_or(""),
+            "received Feishu bot menu event"
+        );
+    }
     match envelope.header.event_type.as_str() {
         "im.message.receive_v1" => {
             let Some(event) = parse_incoming_text_event(config, envelope)? else {
@@ -948,9 +981,169 @@ async fn handle_payload(
         "card.action.trigger" => {
             handle_card_action_trigger(app_handle, &envelope.event).await?;
         }
+        "application.bot.menu_v6" => {
+            handle_bot_menu_event(app_handle, config, &envelope.header, &envelope.event).await?;
+        }
         _ => {}
     }
 
+    Ok(())
+}
+
+fn parse_bot_menu_click_event(raw_event: &Value) -> Result<Option<FeishuBotMenuClickEvent>, String> {
+    let event: FeishuBotMenuEvent = serde_json::from_value(raw_event.clone()).map_err(|e| e.to_string())?;
+    let operator_open_id = event.operator.operator_id.open_id.trim().to_string();
+    let event_key = event.event_key.trim().to_string();
+    if operator_open_id.is_empty() || event_key.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(FeishuBotMenuClickEvent {
+        operator_open_id,
+        event_key,
+    }))
+}
+
+async fn handle_bot_menu_event(
+    app_handle: &AppHandle,
+    config: &FeishuRuntimeConfig,
+    header: &EventHeader,
+    raw_event: &Value,
+) -> Result<(), String> {
+    let Some(event) = parse_bot_menu_click_event(raw_event)? else {
+        warn!(
+            event_id = %header.event_id.as_deref().unwrap_or(""),
+            raw_event = %truncate_text(&raw_event.to_string(), 400),
+            "ignored Feishu bot menu event because event_key/open_id was missing"
+        );
+        return Ok(());
+    };
+    if !config.allowed_open_ids.is_empty() && !config.allowed_open_ids.contains(&event.operator_open_id) {
+        warn!(
+            event_id = %header.event_id.as_deref().unwrap_or(""),
+            operator_open_id = %event.operator_open_id,
+            event_key = %event.event_key,
+            "ignored Feishu bot menu event because operator is not in allowlist"
+        );
+        return Ok(());
+    }
+    if event.event_key != FEISHU_MENU_NEW_CONVERSATION_EVENT_KEY {
+        info!(
+            event_id = %header.event_id.as_deref().unwrap_or(""),
+            operator_open_id = %event.operator_open_id,
+            event_key = %event.event_key,
+            "ignored unsupported Feishu bot menu event"
+        );
+        return Ok(());
+    }
+    info!(
+        event_id = %header.event_id.as_deref().unwrap_or(""),
+        operator_open_id = %event.operator_open_id,
+        event_key = %event.event_key,
+        "processing Feishu bot menu event"
+    );
+
+    let event_id = header
+        .event_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(event_id) = event_id {
+        if external_message_exists(app_handle, CHANNEL_FEISHU, event_id)? {
+            info!(event_id, "ignored duplicated Feishu bot menu event");
+            return Ok(());
+        }
+    }
+
+    mutate_status(app_handle, |status| {
+        status.running = true;
+        status.connected = true;
+        status.last_error = None;
+        status.status_text = "正在处理飞书菜单事件".to_string();
+        status.status_detail = Some("收到“新建会话”菜单点击，正在重置总管家上下文".to_string());
+    })
+    .await;
+
+    let reset_response = match reset_butler_main_conversation(app_handle.clone()).await {
+        Ok(response) => response,
+        Err(error) => {
+            warn!(
+                event_id = %header.event_id.as_deref().unwrap_or(""),
+                operator_open_id = %event.operator_open_id,
+                event_key = %event.event_key,
+                error = %error,
+                "failed to reset Butler context from Feishu bot menu event"
+            );
+            mutate_status(app_handle, |status| {
+                status.running = true;
+                status.connected = true;
+                status.last_error = Some(error.clone());
+                status.status_text = "处理飞书菜单事件失败".to_string();
+                status.status_detail = Some("总管家主会话重置失败".to_string());
+            })
+            .await;
+            let _ = send_text_message_to_open_id(
+                app_handle,
+                config,
+                &event.operator_open_id,
+                &format!("清空上下文失败：{}", truncate_text(&error, 180)),
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    info!(
+        event_id = %header.event_id.as_deref().unwrap_or(""),
+        operator_open_id = %event.operator_open_id,
+        conversation_id = reset_response.conversation.id,
+        "reset Butler context from Feishu bot menu event"
+    );
+
+    if let Some(event_id) = event_id {
+        insert_external_link(
+            app_handle,
+            ChannelLinkRecord {
+                external_message_id: event_id,
+                external_chat_id: None,
+                external_user_id: Some(&event.operator_open_id),
+                conversation_id: reset_response.conversation.id,
+                local_message_id: None,
+                direction: "inbound",
+                payload_type: "menu",
+            },
+        )?;
+    }
+
+    let confirmation_message_id = send_text_message_to_open_id(
+        app_handle,
+        config,
+        &event.operator_open_id,
+        "已经清空上下文，并创建了新的总管家会话。",
+    )
+    .await?;
+    info!(
+        event_id = %header.event_id.as_deref().unwrap_or(""),
+        operator_open_id = %event.operator_open_id,
+        confirmation_message_id = %confirmation_message_id,
+        "sent Feishu bot menu confirmation message"
+    );
+    insert_external_link(
+        app_handle,
+        ChannelLinkRecord {
+            external_message_id: &confirmation_message_id,
+            external_chat_id: None,
+            external_user_id: Some(&event.operator_open_id),
+            conversation_id: reset_response.conversation.id,
+            local_message_id: None,
+            direction: "outbound",
+            payload_type: "text",
+        },
+    )?;
+
+    set_feishu_runtime_ready_status(
+        app_handle,
+        "已处理飞书“新建会话”菜单事件，总管家上下文已重置",
+    )
+    .await;
     Ok(())
 }
 
@@ -2408,6 +2601,25 @@ async fn reply_text_message(
     .await
 }
 
+async fn send_text_message_to_open_id(
+    app_handle: &AppHandle,
+    config: &FeishuRuntimeConfig,
+    open_id: &str,
+    text: &str,
+) -> Result<String, String> {
+    let token = fetch_tenant_access_token(app_handle, config).await?;
+    let client = feishu_http_client(app_handle);
+    send_message_request(
+        &client,
+        config,
+        &token,
+        "open_id",
+        open_id,
+        build_feishu_text_payload(text),
+    )
+    .await
+}
+
 async fn send_markdown_message_to_target(
     app_handle: &AppHandle,
     config: &FeishuRuntimeConfig,
@@ -2943,6 +3155,31 @@ mod tests {
             .expect("answers should map");
         assert_eq!(answers.get("选择一个模型"), Some(&"GPT-5.4".to_string()));
         assert_eq!(answers.get("选择输出格式"), Some(&"表格, 列表".to_string()));
+    }
+
+    #[test]
+    fn parse_bot_menu_click_event_extracts_open_id_and_event_key() {
+        let raw_event = json!({
+            "operator": {
+                "operator_id": {
+                    "open_id": "ou_test_user"
+                }
+            },
+            "event_key": "feishu::conversation::new",
+            "timestamp": 1669364458
+        });
+
+        let event = parse_bot_menu_click_event(&raw_event)
+            .expect("menu event should parse")
+            .expect("menu event should not be empty");
+
+        assert_eq!(
+            event,
+            FeishuBotMenuClickEvent {
+                operator_open_id: "ou_test_user".to_string(),
+                event_key: "feishu::conversation::new".to_string(),
+            }
+        );
     }
 
     #[test]
