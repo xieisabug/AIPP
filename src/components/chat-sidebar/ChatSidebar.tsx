@@ -10,6 +10,7 @@ interface ChatSidebarProps {
     artifacts: CodeArtifact[];
     contextItems: ContextItem[];
     conversationId: string;
+    toggleRequestVersion?: number;
     className?: string;
     onOpenWindow?: () => void;
     onArtifactClick?: (artifact: CodeArtifact) => void;
@@ -27,6 +28,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
     artifacts,
     contextItems,
     conversationId,
+    toggleRequestVersion,
     className,
     onOpenWindow,
     onArtifactClick,
@@ -38,6 +40,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
     const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
     const [isResizing, setIsResizing] = useState(false);
     const prevConversationId = useRef(conversationId);
+    const lastToggleRequestVersion = useRef(toggleRequestVersion);
     const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
     // Check if there's any data to display
@@ -57,6 +60,16 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
             prevConversationId.current = conversationId;
         }
     }, [conversationId]);
+
+    useEffect(() => {
+        if (toggleRequestVersion === undefined) {
+            return;
+        }
+        if (toggleRequestVersion !== lastToggleRequestVersion.current) {
+            setIsExpanded((prev) => !prev);
+            lastToggleRequestVersion.current = toggleRequestVersion;
+        }
+    }, [toggleRequestVersion]);
 
     // Auto-expand when first data arrives
     useEffect(() => {

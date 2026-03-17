@@ -12,6 +12,20 @@ use tracing::{debug, error, info, warn};
 
 use super::SchedulerState;
 
+fn get_conversation_summary_config<'a>(
+    config_map: &'a HashMap<String, HashMap<String, FeatureConfig>>,
+) -> Option<&'a HashMap<String, FeatureConfig>> {
+    if let Some(experimental) = config_map.get("experimental") {
+        if experimental.contains_key("conversation_summary_enabled")
+            || experimental.contains_key("conversation_summary_model")
+            || experimental.contains_key("conversation_summary_provider_id")
+        {
+            return Some(experimental);
+        }
+    }
+    config_map.get("conversation_summary")
+}
+
 /// 对话空闲时间阈值（秒）
 /// 对话最后一条消息超过此时间后，才会触发总结
 const IDLE_THRESHOLD_SECONDS: i64 = 600; // 10 分钟
@@ -107,8 +121,7 @@ async fn get_feature_config_map(
 
 /// 检查对话总结功能是否启用
 fn is_summary_enabled(config_map: &HashMap<String, HashMap<String, FeatureConfig>>) -> bool {
-    config_map
-        .get("conversation_summary")
+    get_conversation_summary_config(config_map)
         .and_then(|fc| fc.get("conversation_summary_enabled"))
         .map(|c| c.value == "true" || c.value == "1")
         .unwrap_or(true) // 默认启用
@@ -154,6 +167,7 @@ async fn get_conversations_needing_summary(
         INNER JOIN message m ON m.conversation_id = c.id
         LEFT JOIN conversation_summary cs ON cs.conversation_id = c.id
         WHERE cs.id IS NULL
+          AND COALESCE(c.conversation_kind, 'normal') != 'butler_main'
           AND (
               SELECT MAX(m2.created_time)
               FROM message m2

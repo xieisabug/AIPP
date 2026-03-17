@@ -1,7 +1,9 @@
 pub mod ai;
 pub mod ai_api;
 pub mod assistant_api;
+pub mod assistant_summary_api;
 pub mod attachment_api;
+pub mod butler_api;
 pub mod conversation_api;
 pub mod copilot_api;
 #[cfg(desktop)]

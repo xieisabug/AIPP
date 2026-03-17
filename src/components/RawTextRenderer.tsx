@@ -13,7 +13,19 @@ interface RawTextRendererProps {
 
 // Render raw text while still allowing custom tags to hydrate as React components.
 const CUSTOM_TAG_PATTERN =
-    /<(fileattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*>[\s\S]*?<\/\1>|<(fileattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*\/>/gi;
+    /<(fileattachment|skillattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*>[\s\S]*?<\/\1>|<(fileattachment|skillattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*\/>/gi;
+
+const BODYLESS_CUSTOM_TAG_PATTERN =
+    /<(fileattachment|skillattachment)\b([^>]*)>[\s\S]*?<\/\1>/i;
+
+const normalizeMatchedCustomTag = (tagText: string): string => {
+    const match = tagText.match(BODYLESS_CUSTOM_TAG_PATTERN);
+    if (!match) {
+        return tagText;
+    }
+
+    return `<${match[1]}${match[2]}></${match[1]}>`;
+};
 
 const RawTextRenderer: React.FC<RawTextRendererProps> = ({ content }) => {
     const processedContent = useMemo(() => {
@@ -39,7 +51,7 @@ const RawTextRenderer: React.FC<RawTextRendererProps> = ({ content }) => {
             segments.push(
                 <ReactMarkdown
                     key={`tag-${start}`}
-                    children={tagText}
+                    children={normalizeMatchedCustomTag(tagText)}
                     remarkPlugins={[
                         REMARK_PLUGINS.find(
                             (plugin) => plugin.name === "remarkCustomCompenent",

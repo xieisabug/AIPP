@@ -1,15 +1,24 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { confirm } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
-import { Puzzle, RefreshCcw, Power, PowerOff } from "lucide-react";
+import { Puzzle, RefreshCcw, Power, PowerOff, Trash2 } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
+import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+} from "../ui/alert-dialog";
 import { ConfigPageLayout, EmptyState, ListItemButton, SidebarList, type SelectOption } from "../common";
 import { pluginRuntime } from "../../services/PluginRuntime";
 
@@ -36,6 +45,18 @@ interface PluginConfigItem {
     configValue?: string | null;
 }
 
+const PLUGIN_TYPE_LABELS: Record<string, string> = {
+    interfaceType: "界面",
+    applicationType: "应用",
+    toolType: "工具",
+    themeType: "主题",
+    markdownType: "Markdown",
+    messageType: "消息",
+    exportType: "导出",
+};
+
+const getPluginTypeLabel = (type: string) => PLUGIN_TYPE_LABELS[type] ?? type;
+
 const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) => {
     const [plugins, setPlugins] = useState<PluginRegistryItem[]>([]);
     const [runtimePlugins, setRuntimePlugins] = useState<any[]>(pluginList);
@@ -48,6 +69,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     const [newConfigKey, setNewConfigKey] = useState("");
     const [newConfigValue, setNewConfigValue] = useState("");
     const [actionBusy, setActionBusy] = useState(false);
+    const [pendingUninstallPlugin, setPendingUninstallPlugin] = useState<PluginRegistryItem | null>(null);
     const missingReminderKeyRef = useRef("");
 
     useEffect(() => {
@@ -177,6 +199,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     );
 
     const currentLoadedPlugin = selectedPlugin ? loadedPluginByCode.get(selectedPlugin.code) : null;
+    const hasInterfacePluginType = selectedPlugin?.pluginType.includes("interfaceType") ?? false;
     const pluginUiBlockedReason = useMemo(() => {
         if (!selectedPlugin) {
             return "请选择一个插件。";
@@ -187,8 +210,8 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         if (!selectedPlugin.isActive) {
             return "插件已禁用，启用后可使用插件界面。";
         }
-        if (!selectedPlugin.pluginType.includes("interfaceType")) {
-            return "该插件未声明 interfaceType。";
+        if (!hasInterfacePluginType) {
+            return "该插件未提供界面能力。";
         }
         if (!currentLoadedPlugin) {
             return "插件运行时未加载该插件，请刷新插件运行时。";
@@ -200,7 +223,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
             return "插件已加载，但未实现 renderComponent()。";
         }
         return null;
-    }, [selectedPlugin, currentLoadedPlugin]);
+    }, [selectedPlugin, currentLoadedPlugin, hasInterfacePluginType]);
     const canRenderPluginUI = !pluginUiBlockedReason;
 
     const handleTogglePlugin = useCallback(async () => {
@@ -249,39 +272,23 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         }
     }, [selectedPlugin, newConfigKey, newConfigValue, loadConfigs]);
 
-    const handleUninstallPlugin = useCallback(async () => {
-        const plugin = selectedPlugin;
+    const handleRequestUninstallPlugin = useCallback(() => {
+        if (!selectedPlugin || actionBusy) {
+            return;
+        }
+        setPendingUninstallPlugin(selectedPlugin);
+    }, [selectedPlugin, actionBusy]);
+
+    const handleConfirmUninstallPlugin = useCallback(async () => {
+        const plugin = pendingUninstallPlugin;
         if (!plugin || actionBusy) {
-            return;
-        }
-        const confirmed = await confirm(
-            `确认卸载插件「${plugin.name}」吗？`,
-            {
-                title: "确认卸载插件",
-                kind: "warning",
-                okLabel: "下一步",
-                cancelLabel: "取消",
-            }
-        );
-        if (!confirmed) {
-            return;
-        }
-        const confirmedFinal = await confirm(
-            `该操作会删除插件文件夹和数据库记录，且不可恢复。确定继续卸载「${plugin.name}」吗？`,
-            {
-                title: "最终确认",
-                kind: "warning",
-                okLabel: "确认卸载",
-                cancelLabel: "取消",
-            }
-        );
-        if (!confirmedFinal) {
             return;
         }
         setActionBusy(true);
         try {
             await invoke("uninstall_plugin", { pluginId: plugin.pluginId });
             toast.success(`已卸载插件：${plugin.name}`);
+            setPendingUninstallPlugin(null);
             await loadPlugins();
         } catch (error) {
             console.error("[PluginCenterConfig] Failed to uninstall plugin:", error);
@@ -289,7 +296,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         } finally {
             setActionBusy(false);
         }
-    }, [selectedPlugin, actionBusy, loadPlugins]);
+    }, [pendingUninstallPlugin, actionBusy, loadPlugins]);
 
     const pluginUiNode = useMemo(() => {
         if (!canRenderPluginUI) {
@@ -330,7 +337,6 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                 >
                     <div className="flex flex-col items-start gap-1">
                         <span className="font-medium">{plugin.name}</span>
-                        <span className="text-xs opacity-80">{plugin.code}</span>
                         {!plugin.isInstalled && (
                             <span className="text-xs text-destructive">目录缺失，请卸载</span>
                         )}
@@ -365,17 +371,33 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                             <Badge variant="outline">v{selectedPlugin.version}</Badge>
                             {selectedPlugin.pluginType.map((type) => (
                                 <Badge key={type} variant="outline">
-                                    {type}
+                                    {getPluginTypeLabel(type)}
                                 </Badge>
                             ))}
                         </div>
                     </div>
-                    <div className="flex flex-wrap gap-2">
-                        <Button onClick={handleTogglePlugin} disabled={actionBusy || !selectedPlugin.isInstalled}>
-                            {selectedPlugin.isActive ? "禁用插件" : "启用插件"}
+                    <div className="flex items-center gap-2">
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            className="text-muted-foreground"
+                            onClick={handleTogglePlugin}
+                            disabled={actionBusy || !selectedPlugin.isInstalled}
+                            title={selectedPlugin.isActive ? "禁用插件" : "启用插件"}
+                            aria-label={selectedPlugin.isActive ? "禁用插件" : "启用插件"}
+                        >
+                            {selectedPlugin.isActive ? <PowerOff className="h-4 w-4" /> : <Power className="h-4 w-4" />}
                         </Button>
-                        <Button variant="destructive" onClick={handleUninstallPlugin} disabled={actionBusy}>
-                            卸载插件
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            className="text-muted-foreground"
+                            onClick={handleRequestUninstallPlugin}
+                            disabled={actionBusy}
+                            title="卸载插件"
+                            aria-label="卸载插件"
+                        >
+                            <Trash2 className="h-4 w-4 text-destructive" />
                         </Button>
                     </div>
                 </div>
@@ -398,7 +420,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                         </div>
                         {selectedPlugin.isInstalled &&
                             selectedPlugin.isActive &&
-                            selectedPlugin.pluginType.includes("interfaceType") && (
+                            hasInterfacePluginType && (
                                 <Button
                                     variant="outline"
                                     size="sm"
@@ -461,15 +483,46 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     );
 
     return (
-        <ConfigPageLayout
-            sidebar={sidebar}
-            content={content}
-            showEmptyState={false}
-            selectOptions={selectOptions}
-            selectedOptionId={selectedPluginId ? String(selectedPluginId) : undefined}
-            onSelectOption={(optionId) => setSelectedPluginId(Number(optionId))}
-            selectPlaceholder="选择插件"
-        />
+        <>
+            <ConfigPageLayout
+                sidebar={sidebar}
+                content={content}
+                showEmptyState={false}
+                selectOptions={selectOptions}
+                selectedOptionId={selectedPluginId ? String(selectedPluginId) : undefined}
+                onSelectOption={(optionId) => setSelectedPluginId(Number(optionId))}
+                selectPlaceholder="选择插件"
+            />
+            <AlertDialog
+                open={!!pendingUninstallPlugin}
+                onOpenChange={(open) => {
+                    if (!open && !actionBusy) {
+                        setPendingUninstallPlugin(null);
+                    }
+                }}
+            >
+                <AlertDialogContent>
+                    <AlertDialogHeader>
+                        <AlertDialogTitle>确认卸载插件</AlertDialogTitle>
+                        <AlertDialogDescription>
+                            {pendingUninstallPlugin
+                                ? `卸载后将删除插件「${pendingUninstallPlugin.name}」的文件夹和数据库记录，且不可恢复。`
+                                : "卸载后将删除插件文件夹和数据库记录，且不可恢复。"}
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                        <AlertDialogCancel disabled={actionBusy}>取消</AlertDialogCancel>
+                        <AlertDialogAction
+                            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                            onClick={handleConfirmUninstallPlugin}
+                            disabled={actionBusy}
+                        >
+                            确认卸载
+                        </AlertDialogAction>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
+        </>
     );
 };
 

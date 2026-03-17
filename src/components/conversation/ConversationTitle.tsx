@@ -17,7 +17,21 @@ const ConversationTitle: React.FC<{
     onStatsOpenChange?: (open: boolean) => void;
     exportOpen?: boolean;
     onExportOpenChange?: (open: boolean) => void;
-}> = React.memo(({ conversation, onEdit, onDelete, statsOpen, onStatsOpenChange, exportOpen, onExportOpenChange }) => {
+    allowRename?: boolean;
+    allowDelete?: boolean;
+    extraActions?: React.ReactNode;
+}> = React.memo(({
+    conversation,
+    onEdit,
+    onDelete,
+    statsOpen,
+    onStatsOpenChange,
+    exportOpen,
+    onExportOpenChange,
+    allowRename = true,
+    allowDelete = true,
+    extraActions,
+}) => {
     const [deleteDialogIsOpen, setDeleteDialogIsOpen] = useState<boolean>(false);
     const { deleteConversation } = useConversationManager();
     const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
@@ -56,14 +70,25 @@ const ConversationTitle: React.FC<{
         <>
             <div className="flex justify-between flex-none h-[68px] items-center px-6 box-border border-b border-border bg-background rounded-t-xl z-20" data-aipp-slot="chat-conversation-title-bar">
                 <div className="flex-1 overflow-hidden" data-aipp-slot="chat-conversation-title">
-                    <div className="text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap text-icon cursor-pointer" onClick={onEdit} data-aipp-slot="chat-conversation-title-text">{displayName}</div>
+                    <div
+                        className={`text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap text-icon ${allowRename ? "cursor-pointer" : ""}`}
+                        onClick={allowRename ? onEdit : undefined}
+                        data-aipp-slot="chat-conversation-title-text"
+                    >
+                        {displayName}
+                    </div>
                     <div className="text-xs text-muted-foreground overflow-hidden text-ellipsis whitespace-nowrap mt-0.5" data-aipp-slot="chat-conversation-title-subtext">{displayAssistantName}</div>
                 </div>
-                <div className="flex items-center flex-none w-64 justify-end gap-2" data-aipp-slot="chat-conversation-title-actions">
+                <div className="flex items-center flex-none shrink-0 justify-end gap-2 pl-4" data-aipp-slot="chat-conversation-title-actions">
                     <ConversationStatsDialog conversationId={conversation?.id.toString() || ""} externalOpen={statsOpen} onExternalOpenChange={onStatsOpenChange} />
                     <ConversationExportDialog conversationId={conversation?.id.toString() || ""} externalOpen={exportOpen} onExternalOpenChange={onExportOpenChange} />
-                    <IconButton icon={<Edit2 size={16} className="text-icon" />} onClick={onEdit} border dataAippSlot="chat-conversation-title-edit" />
-                    <IconButton icon={<Trash2 size={16} className="text-icon" />} onClick={openDeleteDialog} border dataAippSlot="chat-conversation-title-delete" />
+                    {extraActions}
+                    {allowRename ? (
+                        <IconButton icon={<Edit2 size={16} className="text-icon" />} onClick={onEdit} border dataAippSlot="chat-conversation-title-edit" />
+                    ) : null}
+                    {allowDelete ? (
+                        <IconButton icon={<Trash2 size={16} className="text-icon" />} onClick={openDeleteDialog} border dataAippSlot="chat-conversation-title-delete" />
+                    ) : null}
                 </div>
             </div>
 
@@ -72,7 +97,7 @@ const ConversationTitle: React.FC<{
                 confirmText={`确定要删除对话 "${conversation?.name}" 吗？此操作无法撤销。`}
                 onConfirm={handleConfirmDelete}
                 onCancel={closeDeleteDialog}
-                isOpen={deleteDialogIsOpen}
+                isOpen={deleteDialogIsOpen && allowDelete}
             />
         </>
     );

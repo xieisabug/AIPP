@@ -1,4 +1,10 @@
+use crate::api::ai::acp::{
+    apply_network_proxy_to_env_vars, build_acp_launch_plan, extract_acp_config,
+    resolve_acp_cli_path,
+};
+use crate::api::ai::config::get_network_proxy_from_config;
 use crate::{
+    api::butler_api::{is_butler_system_assistant, is_butler_system_assistant_name},
     db::{
         assistant_db::{
             Assistant, AssistantDatabase, AssistantMCPConfig, AssistantMCPToolConfig,
@@ -11,10 +17,19 @@ use crate::{
         compress_assistant_data, decompress_assistant_data, AssistantShareData, ModelConfigShare,
         SharedAssistant,
     },
-    NameCacheState,
+    FeatureConfigState, NameCacheState,
 };
-use tauri::Emitter;
+use std::collections::HashMap;
+use tauri::{Emitter, Manager};
 use tracing::{debug, info, instrument, warn};
+
+fn reject_reserved_butler_assistant_name(name: &str) -> Result<(), String> {
+    if is_butler_system_assistant_name(name) {
+        Err("该助手名称为系统保留名称，不能创建或修改".to_string())
+    } else {
+        Ok(())
+    }
+}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct AssistantDetail {
@@ -54,12 +69,69 @@ pub struct MCPServerWithTools {
     pub tools: Vec<MCPToolInfo>,
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct AcpProxyEnvEntry {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct AcpCommandProbe {
+    pub success: bool,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct AcpLaunchDiagnostics {
+    pub assistant_id: i64,
+    pub provider_id: i64,
+    pub cli_command: String,
+    pub resolved_cli_path: String,
+    pub working_directory: String,
+    pub additional_args: Vec<String>,
+    pub effective_program: String,
+    pub effective_args: Vec<String>,
+    pub proxy_strategy: String,
+    pub proxy_enabled: bool,
+    pub network_proxy: Option<String>,
+    pub injected_proxy_env_count: usize,
+    pub explicit_proxy_env_keys: Vec<String>,
+    pub proxy_env: Vec<AcpProxyEnvEntry>,
+    pub all_env_keys: Vec<String>,
+    pub version_probe: AcpCommandProbe,
+    pub notes: Vec<String>,
+}
+
+fn is_proxy_env_key(key: &str) -> bool {
+    matches!(key.to_ascii_lowercase().as_str(), "http_proxy" | "https_proxy" | "all_proxy")
+}
+
+fn trim_probe_output(value: &[u8]) -> String {
+    let text = String::from_utf8_lossy(value).trim().to_string();
+    const LIMIT: usize = 1000;
+    if text.len() <= LIMIT {
+        text
+    } else {
+        format!("{}...", &text[..LIMIT])
+    }
+}
+
 #[tauri::command]
 #[instrument(skip(app_handle))]
 pub fn get_assistants(app_handle: tauri::AppHandle) -> Result<Vec<Assistant>, String> {
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     debug!("loading assistants from database");
-    assistant_db.get_assistants().map(|assistants| assistants.into()).map_err(|e| e.to_string())
+    assistant_db
+        .get_assistants()
+        .map(|assistants| {
+            assistants
+                .into_iter()
+                .filter(|assistant| !is_butler_system_assistant(assistant))
+                .collect()
+        })
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -126,6 +198,14 @@ pub async fn save_assistant(
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     info!("save assistant start");
     debug!(?assistant_detail, "assistant detail incoming");
+    reject_reserved_butler_assistant_name(&assistant_detail.assistant.name)?;
+    if assistant_detail.assistant.id != 0 {
+        let existing_assistant =
+            assistant_db.get_assistant(assistant_detail.assistant.id).map_err(|e| e.to_string())?;
+        if is_butler_system_assistant(&existing_assistant) {
+            return Err("系统保留的总管家助手不能修改".to_string());
+        }
+    }
 
     // Save or update the Assistant
     if assistant_detail.assistant.id == 0 {
@@ -251,6 +331,7 @@ pub fn add_assistant(
     assistant_type: i64,
 ) -> Result<AssistantDetail, String> {
     info!("add assistant start");
+    reject_reserved_butler_assistant_name(&name)?;
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
     // Add a default assistant
@@ -372,6 +453,9 @@ pub fn copy_assistant(
 
     // Get the original assistant
     let original_assistant = assistant_db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
+    if is_butler_system_assistant(&original_assistant) {
+        return Err("系统保留的总管家助手不能复制".to_string());
+    }
 
     // Create a new assistant based on the original
     let new_assistant_id = assistant_db
@@ -476,6 +560,10 @@ pub fn delete_assistant(app_handle: tauri::AppHandle, assistant_id: i64) -> Resu
     if assistant_id == 1 {
         return Err("快速使用助手不能删除".to_string());
     }
+    let assistant = assistant_db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
+    if is_butler_system_assistant(&assistant) {
+        return Err("系统保留的总管家助手不能删除".to_string());
+    }
 
     let _ = assistant_db
         .delete_assistant_model_config_by_assistant_id(assistant_id)
@@ -566,6 +654,138 @@ pub fn get_acp_working_directory(
         .map_err(|e| e.to_string())?;
 
     Ok(acp_config.working_directory.display().to_string())
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle), fields(assistant_id))]
+pub async fn get_acp_launch_diagnostics(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+) -> Result<AcpLaunchDiagnostics, String> {
+    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let assistant = assistant_db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
+
+    if assistant.assistant_type != Some(4) {
+        return Err("Assistant is not ACP type".to_string());
+    }
+
+    let assistant_model_configs =
+        assistant_db.get_assistant_model_configs(assistant_id).map_err(|e| e.to_string())?;
+    let assistant_models =
+        assistant_db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?;
+    let provider_id = assistant_models
+        .first()
+        .map(|model| model.provider_id)
+        .ok_or_else(|| "ACP assistant has no provider model configured".to_string())?;
+
+    let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let provider_configs =
+        llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
+
+    let proxy_enabled = provider_configs
+        .iter()
+        .find(|config| config.name == "proxy_enabled")
+        .and_then(|config| config.value.parse::<bool>().ok())
+        .unwrap_or(false);
+
+    let feature_config_state = app_handle.state::<FeatureConfigState>();
+    let config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
+    let network_proxy =
+        proxy_enabled.then(|| get_network_proxy_from_config(&config_feature_map)).flatten();
+
+    let mut acp_config = extract_acp_config(&assistant_model_configs, &provider_configs)
+        .map_err(|e| e.to_string())?;
+    let explicit_proxy_env_keys =
+        acp_config.env_vars.keys().filter(|key| is_proxy_env_key(key)).cloned().collect::<Vec<_>>();
+
+    let injected_proxy_env_count = if let Some(proxy_url) = network_proxy.as_deref() {
+        apply_network_proxy_to_env_vars(&mut acp_config.env_vars, proxy_url)
+    } else {
+        0
+    };
+
+    let resolved_cli_path = resolve_acp_cli_path(&acp_config.cli_command);
+    let launch_plan = build_acp_launch_plan(
+        &acp_config.cli_command,
+        &resolved_cli_path,
+        &acp_config.additional_args,
+        &acp_config.env_vars,
+    );
+    let mut proxy_env = acp_config
+        .env_vars
+        .iter()
+        .filter(|(key, _)| is_proxy_env_key(key))
+        .map(|(key, value)| AcpProxyEnvEntry { key: key.clone(), value: value.clone() })
+        .collect::<Vec<_>>();
+    proxy_env.sort_by(|a, b| a.key.cmp(&b.key));
+
+    let mut all_env_keys = acp_config.env_vars.keys().cloned().collect::<Vec<_>>();
+    all_env_keys.sort();
+
+    let version_probe = {
+        let resolved_cli_path = resolved_cli_path.clone();
+        let working_directory = acp_config.working_directory.clone();
+        let env_vars: HashMap<String, String> = acp_config.env_vars.clone();
+        tokio::task::spawn_blocking(move || {
+            match std::process::Command::new(&resolved_cli_path)
+                .arg("--version")
+                .current_dir(&working_directory)
+                .envs(&env_vars)
+                .output()
+            {
+                Ok(output) => AcpCommandProbe {
+                    success: output.status.success(),
+                    exit_code: output.status.code(),
+                    stdout: trim_probe_output(&output.stdout),
+                    stderr: trim_probe_output(&output.stderr),
+                },
+                Err(error) => AcpCommandProbe {
+                    success: false,
+                    exit_code: None,
+                    stdout: String::new(),
+                    stderr: error.to_string(),
+                },
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    };
+
+    let mut notes = Vec::new();
+    if !proxy_enabled {
+        notes.push("provider proxy_enabled=false，当前不会注入全局网络代理".to_string());
+    }
+    if proxy_enabled && network_proxy.is_none() {
+        notes.push("provider 已启用代理，但全局 network_proxy 为空".to_string());
+    }
+    if proxy_enabled && network_proxy.is_some() && injected_proxy_env_count == 0 {
+        notes.push(
+            "未注入新的代理环境变量，可能是你已在 ACP 环境变量里显式配置了 proxy env".to_string(),
+        );
+    }
+    if !version_probe.success {
+        notes.push("CLI --version 探测失败，请优先确认 ACP CLI 是否可执行".to_string());
+    }
+
+    Ok(AcpLaunchDiagnostics {
+        assistant_id,
+        provider_id,
+        cli_command: acp_config.cli_command,
+        resolved_cli_path: resolved_cli_path.display().to_string(),
+        working_directory: acp_config.working_directory.display().to_string(),
+        additional_args: acp_config.additional_args,
+        effective_program: launch_plan.program.display().to_string(),
+        effective_args: launch_plan.args,
+        proxy_strategy: launch_plan.proxy_strategy,
+        proxy_enabled,
+        network_proxy,
+        injected_proxy_env_count,
+        explicit_proxy_env_keys,
+        proxy_env,
+        all_env_keys,
+        version_probe,
+        notes,
+    })
 }
 
 // MCP Configuration Commands
@@ -823,4 +1043,41 @@ pub async fn import_assistant(
 
     // Return the created assistant detail
     get_assistant(app_handle, new_assistant_id)
+}
+
+// Assistant Workspace Commands
+
+#[tauri::command]
+#[instrument(skip(app_handle), fields(assistant_id))]
+pub async fn get_assistant_workspaces(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+) -> Result<Vec<crate::db::assistant_db::AssistantWorkspace>, String> {
+    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    assistant_db.get_assistant_workspaces(assistant_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle), fields(assistant_id, path))]
+pub async fn add_assistant_workspace(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+    path: String,
+) -> Result<(), String> {
+    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    assistant_db.add_assistant_workspace(assistant_id, &path).map_err(|e| e.to_string())?;
+    info!(assistant_id, path = %path, "Added assistant workspace");
+    Ok(())
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle), fields(id))]
+pub async fn remove_assistant_workspace(
+    app_handle: tauri::AppHandle,
+    id: i64,
+) -> Result<(), String> {
+    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    assistant_db.remove_assistant_workspace(id).map_err(|e| e.to_string())?;
+    info!(id, "Removed assistant workspace");
+    Ok(())
 }

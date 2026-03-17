@@ -81,6 +81,21 @@ fn create_assistant_test_db() -> Connection {
     )
     .unwrap();
 
+    conn.execute(
+        "CREATE TABLE assistant_summary (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            assistant_id INTEGER NOT NULL UNIQUE,
+            summary TEXT NOT NULL,
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            source_hash TEXT NOT NULL DEFAULT '',
+            created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (assistant_id) REFERENCES assistant(id) ON DELETE CASCADE
+        )",
+        [],
+    )
+    .unwrap();
+
     conn
 }
 
@@ -214,6 +229,41 @@ fn test_assistant_prompt_operations() {
     db.delete_assistant_prompt_by_assistant_id(assistant_id).unwrap();
     let empty_prompts = db.get_assistant_prompt(assistant_id).unwrap();
     assert!(empty_prompts.is_empty());
+}
+
+#[test]
+fn test_assistant_summary_upsert_and_read() {
+    let db = create_assistant_db();
+    let assistant_id = db.add_assistant("Test", "Desc", None, false).unwrap();
+
+    let created = db
+        .upsert_assistant_summary(
+            assistant_id,
+            "擅长代码实现和问题定位",
+            r#"["代码","修复"]"#,
+            "hash-1",
+        )
+        .unwrap();
+    assert_eq!(created.assistant_id, assistant_id);
+    assert_eq!(created.summary, "擅长代码实现和问题定位");
+    assert_eq!(created.tags_json, r#"["代码","修复"]"#);
+
+    let updated = db
+        .upsert_assistant_summary(
+            assistant_id,
+            "更偏向前端工程任务",
+            r#"["前端","工程"]"#,
+            "hash-2",
+        )
+        .unwrap();
+    assert_eq!(updated.assistant_id, assistant_id);
+    assert_eq!(updated.summary, "更偏向前端工程任务");
+    assert_eq!(updated.source_hash, "hash-2");
+
+    let loaded = db.get_assistant_summary(assistant_id).unwrap().unwrap();
+    assert_eq!(loaded.summary, "更偏向前端工程任务");
+    assert_eq!(loaded.tags_json, r#"["前端","工程"]"#);
+    assert_eq!(loaded.source_hash, "hash-2");
 }
 
 /// 测试 Assistant Model Config 配置操作

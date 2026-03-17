@@ -131,7 +131,10 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     configArray.forEach((item) => {
                         newConfig[item.name] = item.value;
                     });
-                    form.reset(newConfig);
+                    form.reset({
+                        ...defaultValues,
+                        ...newConfig,
+                    });
                     setHasApiKey(!!newConfig.api_key);
                 })
                 .catch((e) => {
@@ -146,6 +149,8 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             api_key: "",
             proxy_enabled: "false",
             acp_cli_command: "",
+            acp_claude_auth_mode: "claude_settings",
+            acp_claude_env_vars: "",
         }),
         [],
     );
@@ -159,6 +164,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
 
     // 监听 ACP CLI 命令变化
     const acpCliCommand = form.watch("acp_cli_command");
+    const claudeAuthMode = form.watch("acp_claude_auth_mode") || "claude_settings";
 
     // ACP 环境检测 Hook
     const acpEnv = useAcpEnvironment(isAcpProvider ? (acpCliCommand || "") : "");
@@ -207,6 +213,9 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             endpoint: "",
             api_key: "",
             proxy_enabled: "false",
+            acp_cli_command: "",
+            acp_claude_auth_mode: "claude_settings",
+            acp_claude_env_vars: "",
         });
         setTags([]);
         setHasApiKey(false);
@@ -218,7 +227,10 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             configArray.forEach((item) => {
                 newConfig[item.name] = item.value;
             });
-            form.reset(newConfig);
+            form.reset({
+                ...defaultValues,
+                ...newConfig,
+            });
 
             // 检查 GitHub Copilot 是否有 api_key
             if (isCopilotProvider) {
@@ -234,7 +246,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             // 调用子组件的方法，更新 tags
             setTags(newTags);
         });
-    }, [id, isCopilotProvider]);
+    }, [defaultValues, form, id, isCopilotProvider]);
 
     // 处理模型选择确认
     const handleModelSelectionConfirm = useCallback(
@@ -281,6 +293,60 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             />
         ),
         [id, tags, onTagsChange, isModelListExpanded],
+    );
+
+    const renderProxyAdvancedConfig = useCallback(
+        (description: string) => (
+            <Collapsible
+                open={isAdvancedConfigExpanded}
+                onOpenChange={setIsAdvancedConfigExpanded}
+            >
+                <CollapsibleTrigger asChild>
+                    <Button
+                        variant="ghost"
+                        className="w-full justify-between p-2 h-auto text-left hover:bg-muted"
+                    >
+                        <span className="text-sm font-medium text-foreground">
+                            高级配置
+                        </span>
+                        <ChevronDown
+                            className={`h-4 w-4 transition-transform ${isAdvancedConfigExpanded
+                                ? "rotate-180"
+                                : ""
+                                }`}
+                        />
+                    </Button>
+                </CollapsibleTrigger>
+                <CollapsibleContent className="mt-2">
+                    <div className="p-3 border border-border rounded-lg bg-muted">
+                        <div className="flex items-center justify-between gap-4">
+                            <div className="flex flex-col">
+                                <label className="text-sm font-medium text-foreground">
+                                    使用网络代理进行请求
+                                </label>
+                                <span className="text-xs text-muted-foreground">
+                                    {description}
+                                </span>
+                            </div>
+                            <Switch
+                                checked={proxyEnabled === "true"}
+                                onCheckedChange={(checked) => {
+                                    form.setValue(
+                                        "proxy_enabled",
+                                        checked ? "true" : "false",
+                                    );
+                                    updateField(
+                                        "proxy_enabled",
+                                        checked ? "true" : "false",
+                                    );
+                                }}
+                            />
+                        </div>
+                    </div>
+                </CollapsibleContent>
+            </Collapsible>
+        ),
+        [form, isAdvancedConfigExpanded, proxyEnabled, updateField],
     );
 
     // 表单字段定义
@@ -444,56 +510,8 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         type: "custom" as const,
                         label: "",
                         value: "",
-                        customRender: () => (
-                            <Collapsible
-                                open={isAdvancedConfigExpanded}
-                                onOpenChange={setIsAdvancedConfigExpanded}
-                            >
-                                <CollapsibleTrigger asChild>
-                                    <Button
-                                        variant="ghost"
-                                        className="w-full justify-between p-2 h-auto text-left hover:bg-muted"
-                                    >
-                                        <span className="text-sm font-medium text-foreground">
-                                            高级配置
-                                        </span>
-                                        <ChevronDown
-                                            className={`h-4 w-4 transition-transform ${isAdvancedConfigExpanded
-                                                ? "rotate-180"
-                                                : ""
-                                                }`}
-                                        />
-                                    </Button>
-                                </CollapsibleTrigger>
-                                <CollapsibleContent className="mt-2">
-                                    <div className="p-3 border border-border rounded-lg bg-muted">
-                                        <div className="flex items-center justify-between">
-                                            <div className="flex flex-col">
-                                                <label className="text-sm font-medium text-foreground">
-                                                    使用网络代理进行请求
-                                                </label>
-                                                <span className="text-xs text-muted-foreground">
-                                                    启用后将使用全局网络代理配置进行模型请求
-                                                </span>
-                                            </div>
-                                            <Switch
-                                                checked={proxyEnabled === "true"}
-                                                onCheckedChange={(checked) => {
-                                                    form.setValue(
-                                                        "proxy_enabled",
-                                                        checked ? "true" : "false",
-                                                    );
-                                                    updateField(
-                                                        "proxy_enabled",
-                                                        checked ? "true" : "false",
-                                                    );
-                                                }}
-                                            />
-                                        </div>
-                                    </div>
-                                </CollapsibleContent>
-                            </Collapsible>
-                        ),
+                        customRender: () =>
+                            renderProxyAdvancedConfig("启用后将使用全局网络代理配置进行模型请求"),
                     },
                 },
             ];
@@ -503,7 +521,21 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         if (isAcpProvider) {
             // ACP 环境状态渲染
             const renderAcpEnvironmentStatus = () => {
-                const { status, libraryInfo, installAcpLibrary, checkAcpLibrary } = acpEnv;
+                const {
+                    status,
+                    libraryInfo,
+                    installAcpLibrary,
+                    updateAcpLibrary,
+                    checkAcpLibrary,
+                    checkAcpLibraryUpdate,
+                    isCheckingUpdate,
+                    latestVersion,
+                    hasCheckedUpdate,
+                    checkUpdateError,
+                    updateError,
+                    canRetryCheckWithProxy,
+                    canRetryUpdateWithProxy,
+                } = acpEnv;
 
                 // 未选择 CLI 命令时不显示环境状态
                 if (!acpCliCommand) {
@@ -577,11 +609,14 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         );
 
                     case "installing":
+                    case "updating":
                         return (
                             <div className="p-3 border border-border rounded-lg bg-muted/50">
                                 <div className="flex items-center gap-2 text-muted-foreground mb-2">
                                     <Loader2 className="h-4 w-4 animate-spin" />
-                                    <span className="text-sm font-medium">正在安装...</span>
+                                    <span className="text-sm font-medium">
+                                        {status === "updating" ? "正在更新..." : "正在安装..."}
+                                    </span>
                                 </div>
                                 <pre className="text-xs bg-background p-2 rounded max-h-32 overflow-auto whitespace-pre-wrap">
                                     {acpEnv.installLog || "等待安装日志..."}
@@ -621,11 +656,98 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                         </span>
                                     )}
                                 </div>
+                                {libraryInfo?.installed_path && (
+                                    <div className="mt-2">
+                                        <p className="text-xs text-muted-foreground mb-1">已安装位置</p>
+                                        <pre className="text-xs bg-background/80 p-2 rounded overflow-auto whitespace-pre-wrap break-all">
+                                            {libraryInfo.installed_path}
+                                        </pre>
+                                    </div>
+                                )}
                                 {libraryInfo?.install_hint && (
                                     <p className="text-xs text-muted-foreground mt-1">
                                         提示: {libraryInfo.install_hint}
                                     </p>
                                 )}
+                                <div className="mt-2">
+                                    {isCheckingUpdate && (
+                                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                            <span>正在检查更新...</span>
+                                        </div>
+                                    )}
+                                    {!isCheckingUpdate && latestVersion && (
+                                        <p className="text-xs text-amber-700 dark:text-amber-300">
+                                            发现可用更新: v{latestVersion}
+                                        </p>
+                                    )}
+                                    {!isCheckingUpdate && hasCheckedUpdate && !latestVersion && (
+                                        <p className="text-xs text-green-700 dark:text-green-300">
+                                            当前已是最新版本
+                                        </p>
+                                    )}
+                                    {!isCheckingUpdate && checkUpdateError && (
+                                        <p className="text-xs text-amber-700 dark:text-amber-300">
+                                            {checkUpdateError}
+                                        </p>
+                                    )}
+                                    {updateError && (
+                                        <p className="text-xs text-amber-700 dark:text-amber-300 mt-1">
+                                            {updateError}
+                                        </p>
+                                    )}
+                                </div>
+                                <div className="mt-3 flex flex-wrap gap-2">
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={() => checkAcpLibrary()}
+                                        disabled={isCheckingUpdate}
+                                    >
+                                        重新检测
+                                    </Button>
+                                    {!libraryInfo?.requires_external_install && (
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => checkAcpLibraryUpdate()}
+                                            disabled={isCheckingUpdate}
+                                        >
+                                            {isCheckingUpdate && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                                            检查更新
+                                        </Button>
+                                    )}
+                                    {canRetryCheckWithProxy && !libraryInfo?.requires_external_install && (
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => checkAcpLibraryUpdate(true)}
+                                            disabled={isCheckingUpdate}
+                                        >
+                                            使用代理检查更新
+                                        </Button>
+                                    )}
+                                    {latestVersion && (
+                                        <Button
+                                            variant="default"
+                                            size="sm"
+                                            onClick={() => updateAcpLibrary()}
+                                            disabled={isCheckingUpdate}
+                                        >
+                                            更新到 v{latestVersion}
+                                        </Button>
+                                    )}
+                                    {latestVersion && canRetryUpdateWithProxy && (
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => updateAcpLibrary(true)}
+                                            disabled={isCheckingUpdate}
+                                        >
+                                            使用代理更新到 v{latestVersion}
+                                        </Button>
+                                    )}
+                                </div>
                             </div>
                         );
 
@@ -660,6 +782,62 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         label: "环境状态",
                         value: "",
                         customRender: renderAcpEnvironmentStatus,
+                    },
+                },
+                ...(acpCliCommand === "claude-code-acp"
+                    ? [
+                        {
+                            key: "acp_claude_auth_mode",
+                            config: {
+                                type: "radio" as const,
+                                label: "Claude 认证来源",
+                                value: "claude_settings",
+                                tooltip: "决定 claude-code-acp 启动时如何准备认证环境变量",
+                                options: [
+                                    {
+                                        value: "claude_settings",
+                                        label: "自动读取 ~/.claude/settings.json",
+                                        tooltip:
+                                            "读取 settings.json 中 env 对象里的环境变量，例如 ANTHROPIC_API_KEY、ANTHROPIC_BASE_URL",
+                                    },
+                                    {
+                                        value: "env_vars",
+                                        label: "手动填写环境变量",
+                                        tooltip:
+                                            "在下方按 KEY=VALUE 每行一条填写，将在启动 claude-code-acp 时注入",
+                                    },
+                                ],
+                            },
+                        },
+                        ...(claudeAuthMode === "env_vars"
+                            ? [
+                                {
+                                    key: "acp_claude_env_vars",
+                                    config: {
+                                        type: "textarea" as const,
+                                        label: "Claude 环境变量",
+                                        value: "",
+                                        className: "min-h-32",
+                                        placeholder:
+                                            "ANTHROPIC_API_KEY=sk-ant-...\nANTHROPIC_BASE_URL=https://your-proxy.example.com",
+                                        tooltip:
+                                            "每行一个 KEY=VALUE；仅在“手动填写环境变量”模式下生效",
+                                    },
+                                },
+                            ]
+                            : []),
+                    ]
+                    : []),
+                {
+                    key: "advanced_config",
+                    config: {
+                        type: "custom" as const,
+                        label: "",
+                        value: "",
+                        customRender: () =>
+                            renderProxyAdvancedConfig(
+                                "启用后将在启动 ACP agent client 时注入全局网络代理环境变量",
+                            ),
                     },
                 },
             ];
@@ -701,65 +879,17 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 },
             },
             {
-                key: "advanced_config",
-                config: {
-                    type: "custom" as const,
-                    label: "",
-                    value: "",
-                    customRender: () => (
-                        <Collapsible
-                            open={isAdvancedConfigExpanded}
-                            onOpenChange={setIsAdvancedConfigExpanded}
-                        >
-                            <CollapsibleTrigger asChild>
-                                <Button
-                                    variant="ghost"
-                                    className="w-full justify-between p-2 h-auto text-left hover:bg-muted"
-                                >
-                                    <span className="text-sm font-medium text-foreground">
-                                        高级配置
-                                    </span>
-                                    <ChevronDown
-                                        className={`h-4 w-4 transition-transform ${isAdvancedConfigExpanded
-                                            ? "rotate-180"
-                                            : ""
-                                            }`}
-                                    />
-                                </Button>
-                            </CollapsibleTrigger>
-                            <CollapsibleContent className="mt-2">
-                                <div className="p-3 border border-border rounded-lg bg-muted">
-                                    <div className="flex items-center justify-between">
-                                        <div className="flex flex-col">
-                                            <label className="text-sm font-medium text-foreground">
-                                                使用网络代理进行请求
-                                            </label>
-                                            <span className="text-xs text-muted-foreground">
-                                                启用后将使用全局网络代理配置进行模型请求
-                                            </span>
-                                        </div>
-                                        <Switch
-                                            checked={proxyEnabled === "true"}
-                                            onCheckedChange={(checked) => {
-                                                form.setValue(
-                                                    "proxy_enabled",
-                                                    checked ? "true" : "false",
-                                                );
-                                                updateField(
-                                                    "proxy_enabled",
-                                                    checked ? "true" : "false",
-                                                );
-                                            }}
-                                        />
-                                    </div>
-                                </div>
-                            </CollapsibleContent>
-                        </Collapsible>
-                    ),
+                    key: "advanced_config",
+                    config: {
+                        type: "custom" as const,
+                        label: "",
+                        value: "",
+                        customRender: () =>
+                            renderProxyAdvancedConfig("启用后将使用全局网络代理配置进行模型请求"),
+                    },
                 },
-            },
-        ];
-    }, [apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, acpCliOptions, tagInputRender, isAdvancedConfigExpanded, form, updateField, proxyEnabled, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange]);
+            ];
+    }, [apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode]);
 
     // 打开改名对话框
     const handleOpenRenameDialog = useCallback(() => {

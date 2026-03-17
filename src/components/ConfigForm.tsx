@@ -46,6 +46,7 @@ interface ConfigField {
     options?: { value: string; label: string; tooltip?: string }[];
     value?: string | boolean;
     tooltip?: string;
+    placeholder?: string;
     onChange?: (value: string | boolean) => void;
     onBlur?: (value: string | boolean) => void;
     customRender?: (fieldRenderData: any) => React.ReactNode;
@@ -287,6 +288,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                         <Textarea
                             className={`focus:ring-ring/20 focus:border-ring ${field.className || ""}`}
                             disabled={field.disabled}
+                            placeholder={field.placeholder}
                             {...fieldRenderData}
                         />
                     );
@@ -297,6 +299,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                             className={`focus:ring-ring/20 focus:border-ring ${field.className || ""}`}
                             type={field.type === "password" ? "password" : "text"}
                             disabled={field.disabled}
+                            placeholder={field.placeholder}
                             {...fieldRenderData}
                         />
                     );

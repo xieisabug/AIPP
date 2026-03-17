@@ -1,6 +1,7 @@
 //! ACP (Agent Client Protocol) integration module
 //! Handles communication with ACP-compatible agents via stdio
 
+use crate::api::ai::config::build_proxy_env_vars;
 use crate::api::ai::conversation::extract_tool_result;
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent, MessageUpdateEvent};
 use crate::db::assistant_db::AssistantModelConfig;
@@ -25,6 +26,8 @@ use agent_client_protocol::{
 };
 use regex::Regex;
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -33,7 +36,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// ACP configuration extracted from assistant_model_config
 #[derive(Debug, Clone)]
@@ -45,14 +48,213 @@ pub struct AcpConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct AcpLaunchPlan {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub extra_env: HashMap<String, String>,
+    pub proxy_strategy: String,
+}
+
+fn merge_acp_env_blob(env_vars: &mut HashMap<String, String>, raw: &str) {
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if let Some((key, value)) = trimmed.split_once('=') {
+            let key = key.trim();
+            if !key.is_empty() {
+                env_vars.insert(key.to_string(), value.trim().to_string());
+            }
+        }
+    }
+}
+
+const CLAUDE_SETTINGS_AUTH_MODE: &str = "claude_settings";
+const CLAUDE_ENV_AUTH_MODE: &str = "env_vars";
+const CLAUDE_AUTH_ENV_KEYS: [&str; 3] =
+    ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"];
+
+fn env_blob_contains_any_key(raw: &str, keys: &[&str]) -> bool {
+    raw.lines().any(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return false;
+        }
+
+        trimmed.split_once('=').is_some_and(|(key, _)| {
+            keys.iter().any(|candidate| key.trim().eq_ignore_ascii_case(candidate))
+        })
+    })
+}
+
+fn has_explicit_claude_auth_override(
+    provider_configs: &[LLMProviderConfig],
+    model_configs: &[AssistantModelConfig],
+) -> bool {
+    let has_provider_override = provider_configs.iter().any(|config| {
+        if config.name == "acp_claude_env_vars" {
+            return !config.value.trim().is_empty();
+        }
+
+        if config.name == "acp_env_vars" {
+            return env_blob_contains_any_key(&config.value, &CLAUDE_AUTH_ENV_KEYS);
+        }
+
+        config.name.strip_prefix("acp_env_").is_some_and(|key| {
+            CLAUDE_AUTH_ENV_KEYS.iter().any(|candidate| key.eq_ignore_ascii_case(candidate))
+        })
+    });
+
+    let has_model_override = model_configs.iter().any(|config| {
+        if config.name == "acp_claude_env_vars" {
+            return config.value.as_deref().is_some_and(|value| !value.trim().is_empty());
+        }
+
+        if config.name == "acp_env_vars" {
+            return config
+                .value
+                .as_deref()
+                .is_some_and(|value| env_blob_contains_any_key(value, &CLAUDE_AUTH_ENV_KEYS));
+        }
+
+        config.name.strip_prefix("acp_env_").is_some_and(|key| {
+            CLAUDE_AUTH_ENV_KEYS.iter().any(|candidate| key.eq_ignore_ascii_case(candidate))
+        }) && config.value.as_deref().is_some_and(|value| !value.trim().is_empty())
+    });
+
+    has_provider_override || has_model_override
+}
+
+fn resolve_claude_auth_mode(
+    cli_command: &str,
+    explicit_mode: Option<String>,
+    provider_configs: &[LLMProviderConfig],
+    model_configs: &[AssistantModelConfig],
+) -> Option<String> {
+    if cli_command != "claude-code-acp" {
+        return None;
+    }
+
+    if let Some(mode) = explicit_mode.filter(|mode| !mode.trim().is_empty()) {
+        return Some(mode);
+    }
+
+    if has_explicit_claude_auth_override(provider_configs, model_configs) {
+        Some(CLAUDE_ENV_AUTH_MODE.to_string())
+    } else {
+        Some(CLAUDE_SETTINGS_AUTH_MODE.to_string())
+    }
+}
+
+fn load_claude_settings_env_vars_from_path(
+    path: &Path,
+) -> Result<HashMap<String, String>, AppError> {
+    let raw = fs::read_to_string(path).map_err(|e| {
+        AppError::UnknownError(format!(
+            "读取 Claude settings.json 失败 ({}): {}",
+            path.display(),
+            e
+        ))
+    })?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        AppError::UnknownError(format!(
+            "解析 Claude settings.json 失败 ({}): {}",
+            path.display(),
+            e
+        ))
+    })?;
+    let env_object = parsed.get("env").and_then(|value| value.as_object()).ok_or_else(|| {
+        AppError::UnknownError(format!("Claude settings.json 中缺少 env 对象 ({})", path.display()))
+    })?;
+
+    let mut env_vars = HashMap::new();
+    for (key, value) in env_object {
+        if let Some(string_value) = value.as_str() {
+            env_vars.insert(key.to_string(), string_value.to_string());
+        }
+    }
+
+    if env_vars.is_empty() {
+        return Err(AppError::UnknownError(format!(
+            "Claude settings.json 的 env 对象为空 ({})",
+            path.display()
+        )));
+    }
+
+    Ok(env_vars)
+}
+
+fn load_claude_settings_env_vars() -> Result<HashMap<String, String>, AppError> {
+    let home_dir = dirs::home_dir()
+        .ok_or_else(|| AppError::UnknownError("无法确定用户 home 目录".to_string()))?;
+    load_claude_settings_env_vars_from_path(&home_dir.join(".claude").join("settings.json"))
+}
+
+fn get_claude_model_override(
+    cli_command: &str,
+    env_vars: &HashMap<String, String>,
+) -> Option<String> {
+    if cli_command != "claude-code-acp" {
+        return None;
+    }
+
+    env_vars
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("ANTHROPIC_MODEL"))
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("default"))
+}
+
+/// 为 ACP agent client 注入标准代理环境变量，但不覆盖显式配置的代理变量。
+pub fn apply_network_proxy_to_env_vars(
+    env_vars: &mut HashMap<String, String>,
+    proxy_url: &str,
+) -> usize {
+    let proxy_env_groups =
+        [["HTTP_PROXY", "http_proxy"], ["HTTPS_PROXY", "https_proxy"], ["ALL_PROXY", "all_proxy"]];
+    let proxy_envs = build_proxy_env_vars(proxy_url);
+    let mut injected = 0;
+
+    for env_group in proxy_env_groups {
+        let has_existing = env_vars.keys().any(|existing| {
+            env_group.iter().any(|candidate| existing.eq_ignore_ascii_case(candidate))
+        });
+        if has_existing {
+            continue;
+        }
+
+        for env_name in env_group {
+            if let Some(proxy_value) = proxy_envs.get(env_name) {
+                env_vars.insert(env_name.to_string(), proxy_value.clone());
+                injected += 1;
+            }
+        }
+    }
+
+    injected
+}
+
+#[derive(Debug, Clone)]
 pub enum AcpPermissionDecision {
     Selected(String),
     Cancelled,
 }
 
+struct PendingAcpPermissionRequest {
+    sender: oneshot::Sender<AcpPermissionDecision>,
+    conversation_id: Option<i64>,
+}
+
+pub struct AcpPermissionResolution {
+    pub conversation_id: Option<i64>,
+    pub delivered: bool,
+}
+
 #[derive(Default)]
 pub struct AcpPermissionState {
-    pending_requests: TokioMutex<HashMap<String, oneshot::Sender<AcpPermissionDecision>>>,
+    pending_requests: TokioMutex<HashMap<String, PendingAcpPermissionRequest>>,
 }
 
 impl AcpPermissionState {
@@ -63,24 +265,33 @@ impl AcpPermissionState {
     pub async fn store_request(
         &self,
         request_id: String,
+        conversation_id: Option<i64>,
         sender: oneshot::Sender<AcpPermissionDecision>,
     ) {
         let mut pending = self.pending_requests.lock().await;
-        pending.insert(request_id, sender);
+        pending.insert(request_id, PendingAcpPermissionRequest { sender, conversation_id });
     }
 
-    pub async fn resolve_request(&self, request_id: &str, decision: AcpPermissionDecision) -> bool {
+    pub async fn resolve_request(
+        &self,
+        request_id: &str,
+        decision: AcpPermissionDecision,
+    ) -> Option<AcpPermissionResolution> {
         let mut pending = self.pending_requests.lock().await;
-        if let Some(sender) = pending.remove(request_id) {
-            sender.send(decision).is_ok()
-        } else {
-            false
-        }
+        pending.remove(request_id).map(|request| AcpPermissionResolution {
+            conversation_id: request.conversation_id,
+            delivered: request.sender.send(decision).is_ok(),
+        })
     }
 
     pub async fn remove_request(&self, request_id: &str) {
         let mut pending = self.pending_requests.lock().await;
         pending.remove(request_id);
+    }
+
+    pub async fn has_pending_permission_for_conversation(&self, conversation_id: i64) -> bool {
+        let pending = self.pending_requests.lock().await;
+        pending.values().any(|request| request.conversation_id == Some(conversation_id))
     }
 }
 
@@ -131,7 +342,7 @@ impl AcpSessionHandle {
 /// 2. Check ~/.bun/bin/ for bun-installed global packages
 /// 3. Check system PATH
 /// 4. Fall back to the original command (let the system handle it)
-fn resolve_acp_cli_path(cli_command: &str) -> PathBuf {
+pub fn resolve_acp_cli_path(cli_command: &str) -> PathBuf {
     let cli_path = PathBuf::from(cli_command);
 
     // If it's already an absolute path, use it directly
@@ -188,6 +399,71 @@ fn resolve_acp_cli_path(cli_command: &str) -> PathBuf {
     cli_path
 }
 
+fn has_proxy_env_vars(env_vars: &HashMap<String, String>) -> bool {
+    env_vars.keys().any(|key| {
+        matches!(key.to_ascii_lowercase().as_str(), "http_proxy" | "https_proxy" | "all_proxy")
+    })
+}
+
+fn is_node_shebang_script(path: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Some(first_line) = content.lines().next() else {
+        return false;
+    };
+    first_line.contains("env node") || first_line.contains("/node")
+}
+
+fn node_supports_use_env_proxy(node_path: &Path) -> bool {
+    let Ok(output) = std::process::Command::new(node_path).arg("--help").output() else {
+        return false;
+    };
+    output.status.success() && String::from_utf8_lossy(&output.stdout).contains("--use-env-proxy")
+}
+
+pub fn build_acp_launch_plan(
+    cli_command: &str,
+    resolved_cli_command: &Path,
+    additional_args: &[String],
+    env_vars: &HashMap<String, String>,
+) -> AcpLaunchPlan {
+    let mut plan = AcpLaunchPlan {
+        program: resolved_cli_command.to_path_buf(),
+        args: additional_args.to_vec(),
+        extra_env: HashMap::new(),
+        proxy_strategy: "standard-env".to_string(),
+    };
+
+    if cli_command != "claude-code-acp" || !has_proxy_env_vars(env_vars) {
+        return plan;
+    }
+
+    if !is_node_shebang_script(resolved_cli_command) {
+        plan.proxy_strategy = "standard-env-non-node-script".to_string();
+        return plan;
+    }
+
+    let Ok(node_path) = which::which("node") else {
+        plan.proxy_strategy = "standard-env-node-not-found".to_string();
+        return plan;
+    };
+
+    plan.extra_env.insert("NODE_USE_ENV_PROXY".to_string(), "1".to_string());
+    plan.program = node_path.clone();
+    plan.args = vec![resolved_cli_command.display().to_string()];
+    plan.args.extend(additional_args.iter().cloned());
+
+    if node_supports_use_env_proxy(&node_path) {
+        plan.args.insert(0, "--use-env-proxy".to_string());
+        plan.proxy_strategy = "node-use-env-proxy-flag".to_string();
+    } else {
+        plan.proxy_strategy = "node-use-env-proxy-env".to_string();
+    }
+
+    plan
+}
+
 /// Terminal ID to bash_id mapping for ACP terminal management
 struct TerminalMapping {
     terminal_id: acp::TerminalId,
@@ -210,6 +486,19 @@ fn extract_content_text(content: &acp::ContentBlock) -> String {
             }
         }
         _ => "[Unknown content]".to_string(),
+    }
+}
+
+fn append_buffered_content(buffer: &mut String, content: &acp::ContentBlock) -> String {
+    buffer.push_str(&extract_content_text(content));
+    buffer.clone()
+}
+
+fn build_prompt_to_send(prompt: String, history_prefix: Option<String>) -> String {
+    if let Some(prefix) = history_prefix {
+        format!("{}\n\n当前用户请求:\n{}", prefix, prompt)
+    } else {
+        prompt
     }
 }
 
@@ -630,12 +919,23 @@ impl AcpTauriClient {
 
     async fn sync_tool_shine_status(&self, call_id: i64, status: &str) {
         if let Some(activity_manager) = self.app_handle.try_state::<ConversationActivityManager>() {
-            if status == "pending" || status == "executing" {
-                activity_manager
-                    .set_mcp_executing(&self.app_handle, self.conversation_id, call_id)
-                    .await;
-            } else {
-                activity_manager.restore_after_mcp(&self.app_handle, self.conversation_id).await;
+            match status {
+                "pending" => {
+                    activity_manager
+                        .set_mcp_pending(&self.app_handle, self.conversation_id, call_id)
+                        .await;
+                }
+                "executing" => {
+                    activity_manager
+                        .set_mcp_executing(&self.app_handle, self.conversation_id, call_id)
+                        .await;
+                }
+                "success" | "failed" => {
+                    activity_manager
+                        .finish_mcp_call(&self.app_handle, self.conversation_id, call_id)
+                        .await;
+                }
+                _ => {}
             }
         }
     }
@@ -782,8 +1082,7 @@ impl AcpClient for AcpTauriClient {
                 // Accumulate content
                 let full_content = {
                     let mut buffer = self.response_content_buffer.lock().await;
-                    buffer.push_str(&text);
-                    buffer.clone()
+                    append_buffered_content(&mut buffer, &content)
                 };
 
                 // Persist to database
@@ -824,8 +1123,7 @@ impl AcpClient for AcpTauriClient {
                 // Accumulate reasoning content
                 let full_reasoning = {
                     let mut buffer = self.reasoning_content_buffer.lock().await;
-                    buffer.push_str(&text);
-                    buffer.clone()
+                    append_buffered_content(&mut buffer, &content)
                 };
 
                 // Emit full reasoning content to frontend
@@ -1438,7 +1736,9 @@ impl AcpClient for AcpTauriClient {
         let (tx, rx) = oneshot::channel();
 
         let state = self.app_handle.state::<AcpPermissionState>();
-        state.store_request(request_id.clone(), tx).await;
+        state
+            .store_request(request_id.clone(), Some(self.conversation_id), tx)
+            .await;
 
         let options = args
             .options
@@ -1475,6 +1775,21 @@ impl AcpClient for AcpTauriClient {
             return Ok(acp::RequestPermissionResponse::new(
                 acp::RequestPermissionOutcome::Cancelled,
             ));
+        }
+
+        if let Err(error) = crate::api::butler_api::emit_butler_task_permission_state_changed(
+            &self.app_handle,
+            self.conversation_id,
+            "acp",
+            true,
+        )
+        .await
+        {
+            warn!(
+                conversation_id = self.conversation_id,
+                error = %error,
+                "failed to refresh Butler ACP permission state"
+            );
         }
 
         match rx.await {
@@ -1675,11 +1990,11 @@ impl AcpClient for AcpTauriClient {
         Ok(acp::WaitForTerminalExitResponse::new(exit_status))
     }
 
-    async fn kill_terminal_command(
+    async fn kill_terminal(
         &self,
-        args: acp::KillTerminalCommandRequest,
-    ) -> acp::Result<acp::KillTerminalCommandResponse, acp::Error> {
-        info!("ACP kill_terminal_command: terminal_id={}", args.terminal_id.0);
+        args: acp::KillTerminalRequest,
+    ) -> acp::Result<acp::KillTerminalResponse, acp::Error> {
+        info!("ACP kill_terminal: terminal_id={}", args.terminal_id.0);
 
         let bash_id = args.terminal_id.0.to_string();
 
@@ -1687,7 +2002,7 @@ impl AcpClient for AcpTauriClient {
         self.operation_state.remove_bash_process(&bash_id).await;
 
         info!("Terminal command killed: {}", bash_id);
-        Ok(acp::KillTerminalCommandResponse::new())
+        Ok(acp::KillTerminalResponse::new())
     }
 
     async fn ext_method(&self, args: acp::ExtRequest) -> acp::Result<acp::ExtResponse, acp::Error> {
@@ -1748,11 +2063,7 @@ async fn process_acp_prompt(
     client_handle.set_window(window).await;
     client_handle.reset_buffers().await;
 
-    let prompt_to_send = if let Some(prefix) = history_prefix {
-        format!("{}\n\n当前用户请求:\n{}", prefix, prompt)
-    } else {
-        prompt
-    };
+    let prompt_to_send = build_prompt_to_send(prompt, history_prefix);
 
     info!("ACP: Sending prompt (conversation_id={}, message_id={})", conversation_id, message_id);
     let prompt_response = conn
@@ -1827,16 +2138,21 @@ async fn run_acp_session(
     info!("ACP: Original CLI command: {}", acp_config.cli_command);
     info!("ACP: Resolved CLI path: {}", resolved_cli_command.display());
 
-    // Build the command
-    let full_command = if acp_config.additional_args.is_empty() {
-        resolved_cli_command.display().to_string()
+    let launch_plan = build_acp_launch_plan(
+        &acp_config.cli_command,
+        &resolved_cli_command,
+        &acp_config.additional_args,
+        &acp_config.env_vars,
+    );
+    let full_command = if launch_plan.args.is_empty() {
+        launch_plan.program.display().to_string()
     } else {
-        format!("{} {}", resolved_cli_command.display(), acp_config.additional_args.join(" "))
+        format!("{} {}", launch_plan.program.display(), launch_plan.args.join(" "))
     };
-    info!("ACP: Full command: {}", full_command);
+    info!("ACP: Full command: {} (proxy_strategy={})", full_command, launch_plan.proxy_strategy);
     info!("ACP: Working directory: {}", acp_config.working_directory.display());
 
-    let mut cmd = Command::new(&resolved_cli_command);
+    let mut cmd = Command::new(&launch_plan.program);
     cmd.current_dir(&acp_config.working_directory)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1860,10 +2176,18 @@ async fn run_acp_session(
         info!("ACP: Environment variables set: {}", acp_config.env_vars.len());
     }
 
-    // Add additional arguments
-    if !acp_config.additional_args.is_empty() {
-        cmd.args(&acp_config.additional_args);
-        info!("ACP: Additional args: {:?}", acp_config.additional_args);
+    for (key, value) in &launch_plan.extra_env {
+        cmd.env(key, value);
+        debug!("ACP: Set runtime env var: {}={}", key, value);
+    }
+    if !launch_plan.extra_env.is_empty() {
+        info!("ACP: Runtime environment variables set: {}", launch_plan.extra_env.len());
+    }
+
+    // Add effective arguments
+    if !launch_plan.args.is_empty() {
+        cmd.args(&launch_plan.args);
+        info!("ACP: Effective args: {:?}", launch_plan.args);
     }
 
     // Spawn the process
@@ -2086,6 +2410,33 @@ async fn run_acp_session(
                 session_id
             };
 
+            if let Some(model_id) =
+                get_claude_model_override(&acp_config.cli_command, &acp_config.env_vars)
+            {
+                info!(
+                    "ACP: Applying Claude session model override from ANTHROPIC_MODEL={}",
+                    model_id
+                );
+                let set_model_result = conn
+                    .set_session_model(acp::SetSessionModelRequest::new(
+                        session_id.clone(),
+                        model_id.clone(),
+                    ))
+                    .await;
+
+                if let Err(e) = &set_model_result {
+                    let err_msg = format!(
+                        "ACP set_session_model failed for Claude model '{}': {:?}",
+                        model_id, e
+                    );
+                    error!("ACP: {}", err_msg);
+                    client_handle.send_error_event(&err_msg).await;
+                    return Err(AppError::UnknownError(err_msg));
+                }
+
+                info!("ACP: Claude session model override applied: {}", model_id);
+            }
+
             let history_fallback_prompt = if should_build_history_fallback {
                 build_acp_history_prompt(&app_handle, conversation_id)
             } else {
@@ -2180,6 +2531,14 @@ pub fn extract_acp_config(
     debug!("ACP: cli_command from provider_config: {:?}", get_provider_config("acp_cli_command"));
     debug!("ACP: final cli_command: {}", cli_command);
 
+    let claude_auth_mode = resolve_claude_auth_mode(
+        &cli_command,
+        get_model_config("acp_claude_auth_mode")
+            .or_else(|| get_provider_config("acp_claude_auth_mode")),
+        provider_configs,
+        model_configs,
+    );
+
     // 获取工作目录
     // 优先级: assistant_model_config > llm_provider_config > home_dir
     let working_directory = get_model_config("acp_working_directory")
@@ -2191,8 +2550,29 @@ pub fn extract_acp_config(
     // 从两个配置源收集，model_config 优先级更高
     let mut env_vars = HashMap::new();
 
+    if claude_auth_mode.as_deref() == Some(CLAUDE_SETTINGS_AUTH_MODE) {
+        let settings_env = load_claude_settings_env_vars()?;
+        info!(
+            "ACP Claude auth env loaded from ~/.claude/settings.json: {} vars",
+            settings_env.len()
+        );
+        env_vars.extend(settings_env);
+    }
+
     // 先从 provider_configs 收集
     for config in provider_configs {
+        if config.name == "acp_claude_env_vars" {
+            if claude_auth_mode.as_deref() == Some(CLAUDE_ENV_AUTH_MODE) {
+                merge_acp_env_blob(&mut env_vars, &config.value);
+            }
+            continue;
+        }
+
+        if config.name == "acp_env_vars" {
+            merge_acp_env_blob(&mut env_vars, &config.value);
+            continue;
+        }
+
         if let Some(key) = config.name.strip_prefix("acp_env_") {
             env_vars.insert(key.to_uppercase(), config.value.clone());
         }
@@ -2200,6 +2580,22 @@ pub fn extract_acp_config(
 
     // 再从 model_configs 收集（会覆盖 provider 的同名配置）
     for config in model_configs {
+        if config.name == "acp_claude_env_vars" {
+            if claude_auth_mode.as_deref() == Some(CLAUDE_ENV_AUTH_MODE) {
+                if let Some(value) = &config.value {
+                    merge_acp_env_blob(&mut env_vars, value);
+                }
+            }
+            continue;
+        }
+
+        if config.name == "acp_env_vars" {
+            if let Some(value) = &config.value {
+                merge_acp_env_blob(&mut env_vars, value);
+            }
+            continue;
+        }
+
         if let Some(key) = config.name.strip_prefix("acp_env_") {
             if let Some(value) = &config.value {
                 env_vars.insert(key.to_uppercase(), value.clone());
@@ -2216,12 +2612,435 @@ pub fn extract_acp_config(
 
     // Log the extracted configuration for debugging
     info!(
-        "extract_acp_config: cli_command='{}', working_directory='{}', env_vars={}, additional_args={:?}",
+        "extract_acp_config: cli_command='{}', working_directory='{}', env_vars={}, additional_args={:?}, claude_auth_mode={:?}",
         cli_command,
         working_directory.display(),
         env_vars.len(),
-        additional_args
+        additional_args,
+        claude_auth_mode
     );
 
     Ok(AcpConfig { cli_command, working_directory, env_vars, additional_args })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        append_buffered_content, apply_network_proxy_to_env_vars, build_acp_launch_plan,
+        build_prompt_to_send, extract_acp_config, extract_content_text, get_claude_model_override,
+        load_claude_settings_env_vars_from_path,
+    };
+    use crate::db::assistant_db::AssistantModelConfig;
+    use crate::db::llm_db::LLMProviderConfig;
+    use agent_client_protocol::{self as acp, Agent as _, Client as _};
+    use std::collections::HashMap;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use tempfile::NamedTempFile;
+    use tokio::io::duplex;
+    use tokio::sync::Notify;
+    use tokio::time::{timeout, Duration};
+    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+    fn provider_config(name: &str, value: &str) -> LLMProviderConfig {
+        LLMProviderConfig {
+            id: 0,
+            name: name.to_string(),
+            llm_provider_id: 1,
+            value: value.to_string(),
+            append_location: "header".to_string(),
+            is_addition: false,
+        }
+    }
+
+    fn model_config(name: &str, value: &str) -> AssistantModelConfig {
+        AssistantModelConfig {
+            id: 0,
+            assistant_id: 1,
+            assistant_model_id: 1,
+            name: name.to_string(),
+            value: Some(value.to_string()),
+            value_type: "string".to_string(),
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeStreamingAgent {
+        prompt_started: Arc<Notify>,
+        release_prompt: Arc<Notify>,
+        prompts_received: Arc<Mutex<Vec<(acp::SessionId, Vec<acp::ContentBlock>)>>>,
+    }
+
+    impl FakeStreamingAgent {
+        fn new() -> Self {
+            Self {
+                prompt_started: Arc::new(Notify::new()),
+                release_prompt: Arc::new(Notify::new()),
+                prompts_received: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingClient {
+        session_notifications: Arc<Mutex<Vec<acp::SessionNotification>>>,
+    }
+
+    impl RecordingClient {
+        fn new() -> Self {
+            Self { session_notifications: Arc::new(Mutex::new(Vec::new())) }
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl acp::Client for RecordingClient {
+        async fn request_permission(
+            &self,
+            _args: acp::RequestPermissionRequest,
+        ) -> acp::Result<acp::RequestPermissionResponse> {
+            Err(acp::Error::method_not_found())
+        }
+
+        async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
+            self.session_notifications.lock().unwrap().push(args);
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl acp::Agent for FakeStreamingAgent {
+        async fn initialize(
+            &self,
+            args: acp::InitializeRequest,
+        ) -> acp::Result<acp::InitializeResponse> {
+            Ok(acp::InitializeResponse::new(args.protocol_version).agent_info(
+                acp::Implementation::new("fake-acp-agent", "0.0.0").title("Fake ACP Agent"),
+            ))
+        }
+
+        async fn authenticate(
+            &self,
+            _args: acp::AuthenticateRequest,
+        ) -> acp::Result<acp::AuthenticateResponse> {
+            Ok(acp::AuthenticateResponse::default())
+        }
+
+        async fn new_session(
+            &self,
+            _args: acp::NewSessionRequest,
+        ) -> acp::Result<acp::NewSessionResponse> {
+            Ok(acp::NewSessionResponse::new("test-session"))
+        }
+
+        async fn prompt(&self, args: acp::PromptRequest) -> acp::Result<acp::PromptResponse> {
+            self.prompts_received.lock().unwrap().push((args.session_id, args.prompt));
+            self.prompt_started.notify_one();
+            self.release_prompt.notified().await;
+            Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))
+        }
+
+        async fn cancel(&self, _args: acp::CancelNotification) -> acp::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn create_connection_pair(
+        client: RecordingClient,
+        agent: FakeStreamingAgent,
+    ) -> (acp::ClientSideConnection, acp::AgentSideConnection) {
+        let (client_writer, agent_reader) = duplex(4096);
+        let (agent_writer, client_reader) = duplex(4096);
+
+        let (client_conn, client_io_task) = acp::ClientSideConnection::new(
+            client,
+            client_writer.compat_write(),
+            client_reader.compat(),
+            |fut| {
+                tokio::task::spawn_local(fut);
+            },
+        );
+        let (agent_conn, agent_io_task) = acp::AgentSideConnection::new(
+            agent,
+            agent_writer.compat_write(),
+            agent_reader.compat(),
+            |fut| {
+                tokio::task::spawn_local(fut);
+            },
+        );
+
+        tokio::task::spawn_local(async move {
+            let _ = client_io_task.await;
+        });
+        tokio::task::spawn_local(async move {
+            let _ = agent_io_task.await;
+        });
+
+        (client_conn, agent_conn)
+    }
+
+    #[test]
+    fn extract_acp_config_parses_multiline_env_blob_and_model_overrides() {
+        let provider_configs = vec![
+            provider_config("acp_cli_command", "codex-acp"),
+            provider_config("acp_env_vars", "FOO=provider\nSHARED=provider"),
+        ];
+        let model_configs =
+            vec![model_config("acp_env_vars", "BAR=model\nSHARED=model\n# COMMENT\nINVALID")];
+
+        let config = extract_acp_config(&model_configs, &provider_configs).unwrap();
+
+        assert_eq!(config.env_vars.get("FOO"), Some(&"provider".to_string()));
+        assert_eq!(config.env_vars.get("BAR"), Some(&"model".to_string()));
+        assert_eq!(config.env_vars.get("SHARED"), Some(&"model".to_string()));
+        assert!(!config.env_vars.contains_key("INVALID"));
+    }
+
+    #[test]
+    fn apply_network_proxy_to_env_vars_preserves_existing_proxy_group() {
+        let mut env_vars = HashMap::from([(
+            "https_proxy".to_string(),
+            "http://custom.example.com:8443".to_string(),
+        )]);
+
+        let injected =
+            apply_network_proxy_to_env_vars(&mut env_vars, "http://proxy.example.com:8080");
+
+        assert_eq!(injected, 4);
+        assert_eq!(
+            env_vars.get("https_proxy"),
+            Some(&"http://custom.example.com:8443".to_string())
+        );
+        assert_eq!(env_vars.get("HTTP_PROXY"), Some(&"http://proxy.example.com:8080".to_string()));
+        assert_eq!(env_vars.get("ALL_PROXY"), Some(&"http://proxy.example.com:8080".to_string()));
+    }
+
+    #[test]
+    fn build_acp_launch_plan_uses_standard_env_for_non_claude_cli() {
+        let env_vars =
+            HashMap::from([("HTTPS_PROXY".to_string(), "http://127.0.0.1:7897".to_string())]);
+        let plan = build_acp_launch_plan(
+            "codex-acp",
+            Path::new("/tmp/codex-acp"),
+            &["--foo".to_string()],
+            &env_vars,
+        );
+
+        assert_eq!(plan.proxy_strategy, "standard-env");
+        assert_eq!(plan.program, PathBuf::from("/tmp/codex-acp"));
+        assert_eq!(plan.args, vec!["--foo".to_string()]);
+    }
+
+    #[test]
+    fn build_acp_launch_plan_switches_claude_node_script_to_node_runtime() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "#!/usr/bin/env node").unwrap();
+        writeln!(file, "console.log('hello')").unwrap();
+
+        let env_vars =
+            HashMap::from([("HTTPS_PROXY".to_string(), "http://127.0.0.1:7897".to_string())]);
+        let plan = build_acp_launch_plan(
+            "claude-code-acp",
+            file.path(),
+            &["--bar".to_string()],
+            &env_vars,
+        );
+
+        assert!(plan.program.ends_with("node"));
+        assert_eq!(plan.extra_env.get("NODE_USE_ENV_PROXY"), Some(&"1".to_string()));
+        assert!(plan.proxy_strategy.starts_with("node-use-env-proxy"));
+        assert!(plan.args.iter().any(|arg| arg == "--bar"));
+        assert!(plan.args.iter().any(|arg| arg.contains(file.path().to_string_lossy().as_ref())));
+    }
+
+    #[test]
+    fn load_claude_settings_env_vars_from_path_reads_env_object() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "{{\"env\":{{\"ANTHROPIC_API_KEY\":\"test-key\",\"ANTHROPIC_BASE_URL\":\"https://proxy.example.com\"}}}}"
+        )
+        .unwrap();
+
+        let env_vars = load_claude_settings_env_vars_from_path(file.path()).unwrap();
+
+        assert_eq!(env_vars.get("ANTHROPIC_API_KEY"), Some(&"test-key".to_string()));
+        assert_eq!(
+            env_vars.get("ANTHROPIC_BASE_URL"),
+            Some(&"https://proxy.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_acp_config_merges_manual_claude_env_vars_when_selected() {
+        let provider_configs = vec![
+            provider_config("acp_cli_command", "claude-code-acp"),
+            provider_config("acp_claude_auth_mode", "env_vars"),
+            provider_config(
+                "acp_claude_env_vars",
+                "ANTHROPIC_API_KEY=provider-key\nANTHROPIC_BASE_URL=https://provider.example.com",
+            ),
+        ];
+        let model_configs =
+            vec![model_config("acp_claude_env_vars", "ANTHROPIC_API_KEY=model-key")];
+
+        let config = extract_acp_config(&model_configs, &provider_configs).unwrap();
+
+        assert_eq!(config.env_vars.get("ANTHROPIC_API_KEY"), Some(&"model-key".to_string()));
+        assert_eq!(
+            config.env_vars.get("ANTHROPIC_BASE_URL"),
+            Some(&"https://provider.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn get_claude_model_override_returns_custom_model_only_for_claude() {
+        let mut env_vars = HashMap::new();
+        env_vars.insert("ANTHROPIC_MODEL".to_string(), "glm-5".to_string());
+
+        assert_eq!(
+            get_claude_model_override("claude-code-acp", &env_vars),
+            Some("glm-5".to_string())
+        );
+        assert_eq!(get_claude_model_override("codex-acp", &env_vars), None);
+
+        env_vars.insert("ANTHROPIC_MODEL".to_string(), "default".to_string());
+        assert_eq!(get_claude_model_override("claude-code-acp", &env_vars), None);
+    }
+
+    #[tokio::test]
+    async fn append_buffered_content_accumulates_text_chunks() {
+        let mut buffer = String::new();
+        let first = append_buffered_content(&mut buffer, &acp::ContentBlock::from("Hello "));
+        let second = append_buffered_content(&mut buffer, &acp::ContentBlock::from("world"));
+
+        assert_eq!(first, "Hello ");
+        assert_eq!(second, "Hello world");
+    }
+
+    #[test]
+    fn build_prompt_to_send_prepends_history_prefix() {
+        let prompt = build_prompt_to_send(
+            "Summarize the workspace".to_string(),
+            Some("历史摘要".to_string()),
+        );
+
+        assert_eq!(prompt, "历史摘要\n\n当前用户请求:\nSummarize the workspace");
+    }
+
+    #[tokio::test]
+    async fn fake_agent_prompt_flow_streams_notifications_while_prompt_is_pending() {
+        let local_set = tokio::task::LocalSet::new();
+        local_set
+            .run_until(async {
+                let client = RecordingClient::new();
+                let fake_agent = FakeStreamingAgent::new();
+                let (client_conn, agent_conn) =
+                    create_connection_pair(client.clone(), fake_agent.clone());
+
+                client_conn
+                    .initialize(
+                        acp::InitializeRequest::new(acp::ProtocolVersion::LATEST).client_info(
+                            acp::Implementation::new("aipp-test-client", "0.0.0")
+                                .title("AIPP Test Client"),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+
+                let session = client_conn
+                    .new_session(acp::NewSessionRequest::new(std::env::temp_dir()))
+                    .await
+                    .unwrap();
+                let session_id = session.session_id.clone();
+                let prompt_text = build_prompt_to_send(
+                    "Summarize the workspace".to_string(),
+                    Some("历史摘要".to_string()),
+                );
+
+                let prompt_task = tokio::task::spawn_local({
+                    let session_id = session_id.clone();
+                    async move {
+                        client_conn
+                            .prompt(acp::PromptRequest::new(session_id, vec![prompt_text.into()]))
+                            .await
+                    }
+                });
+
+                timeout(Duration::from_secs(5), fake_agent.prompt_started.notified())
+                    .await
+                    .unwrap();
+                assert!(!prompt_task.is_finished());
+
+                {
+                    let prompts = fake_agent.prompts_received.lock().unwrap();
+                    assert_eq!(prompts.len(), 1);
+                    assert_eq!(
+                        extract_content_text(&prompts[0].1[0]),
+                        "历史摘要\n\n当前用户请求:\nSummarize the workspace"
+                    );
+                }
+
+                agent_conn
+                    .session_notification(acp::SessionNotification::new(
+                        session_id.clone(),
+                        acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(
+                            "thinking ".into(),
+                        )),
+                    ))
+                    .await
+                    .unwrap();
+                agent_conn
+                    .session_notification(acp::SessionNotification::new(
+                        session_id.clone(),
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            "Hello ".into(),
+                        )),
+                    ))
+                    .await
+                    .unwrap();
+                agent_conn
+                    .session_notification(acp::SessionNotification::new(
+                        session_id.clone(),
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            "world".into(),
+                        )),
+                    ))
+                    .await
+                    .unwrap();
+
+                tokio::task::yield_now().await;
+                assert!(!prompt_task.is_finished());
+
+                fake_agent.release_prompt.notify_one();
+
+                timeout(Duration::from_secs(5), prompt_task).await.unwrap().unwrap().unwrap();
+
+                let notifications = client.session_notifications.lock().unwrap().clone();
+                let mut reasoning = String::new();
+                let mut response = String::new();
+
+                for notification in notifications {
+                    match notification.update {
+                        acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk {
+                            content,
+                            ..
+                        }) => {
+                            append_buffered_content(&mut reasoning, &content);
+                        }
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk {
+                            content,
+                            ..
+                        }) => {
+                            append_buffered_content(&mut response, &content);
+                        }
+                        _ => {}
+                    }
+                }
+
+                assert_eq!(reasoning, "thinking ");
+                assert_eq!(response, "Hello world");
+            })
+            .await;
+    }
 }

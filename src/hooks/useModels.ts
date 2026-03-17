@@ -24,7 +24,14 @@ export const useModels = (shouldFetch: boolean = true) => {
         setLoading(true);
         invoke<Array<ModelForSelect>>("get_models_for_select")
             .then((modelList) => {
-                setModels(modelList);
+                const uniqueModels = new Map<string, ModelForSelect>();
+                for (const model of modelList) {
+                    const key = `${model.code}%%${model.llm_provider_id}`;
+                    if (!uniqueModels.has(key)) {
+                        uniqueModels.set(key, model);
+                    }
+                }
+                setModels(Array.from(uniqueModels.values()));
                 setError(null);
             })
             .catch((err) => {

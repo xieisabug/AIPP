@@ -14,6 +14,15 @@ pub struct FeatureConfig {
     pub description: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SecureConfigEntry {
+    pub scope: String,
+    pub key: String,
+    pub ciphertext: String,
+    pub nonce: String,
+    pub updated_time: Option<String>,
+}
+
 pub struct SystemDatabase {
     pub conn: Connection,
 }
@@ -47,6 +56,17 @@ impl SystemDatabase {
                 data_type TEXT,
                 description TEXT,
                 UNIQUE(feature_code, key)
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS secure_config (
+                scope TEXT NOT NULL,
+                key TEXT NOT NULL,
+                ciphertext TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(scope, key)
             )",
             [],
         )?;
@@ -214,6 +234,48 @@ impl SystemDatabase {
             .collect::<Result<Vec<_>, _>>()?;
         debug!(count = configs.len(), "Fetched all feature configs");
         Ok(configs)
+    }
+
+    #[instrument(level = "debug", skip(self, entry), fields(scope = %entry.scope, key = %entry.key))]
+    pub fn upsert_secure_config(&self, entry: &SecureConfigEntry) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO secure_config (scope, key, ciphertext, nonce, updated_time)
+             VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+             ON CONFLICT(scope, key) DO UPDATE SET
+                 ciphertext = excluded.ciphertext,
+                 nonce = excluded.nonce,
+                 updated_time = CURRENT_TIMESTAMP",
+            params![entry.scope, entry.key, entry.ciphertext, entry.nonce],
+        )?;
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip(self), fields(scope, key))]
+    pub fn get_secure_config(&self, scope: &str, key: &str) -> Result<Option<SecureConfigEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT scope, key, ciphertext, nonce, updated_time
+             FROM secure_config
+             WHERE scope = ?1 AND key = ?2",
+        )?;
+        stmt.query_row(params![scope, key], |row| {
+            Ok(SecureConfigEntry {
+                scope: row.get(0)?,
+                key: row.get(1)?,
+                ciphertext: row.get(2)?,
+                nonce: row.get(3)?,
+                updated_time: row.get(4)?,
+            })
+        })
+        .optional()
+    }
+
+    #[instrument(level = "debug", skip(self), fields(scope, key))]
+    pub fn delete_secure_config(&self, scope: &str, key: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM secure_config WHERE scope = ?1 AND key = ?2",
+            params![scope, key],
+        )?;
+        Ok(())
     }
 
     #[instrument(level = "debug", skip(self))]

@@ -160,7 +160,7 @@ function ChatUIWindow() {
         stats: () => conversationUIRef.current?.openStats(),
         export: () => conversationUIRef.current?.openExport(),
         settings: () => conversationUIRef.current?.openSettings(),
-        toggle_sidebar: () => conversationUIRef.current?.openSidebarWindow(),
+        toggle_sidebar: () => conversationUIRef.current?.toggleSidebar(),
         open_sidebar_window: () => conversationUIRef.current?.openSidebarWindow(),
     });
 

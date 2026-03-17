@@ -5,6 +5,7 @@ import { AssistantFormConfig } from "@/types/forms";
 import { validateConfig } from "@/utils/validate";
 import AssistantMCPFieldDisplay from "@/components/config/AssistantMCPFieldDisplay";
 import AssistantSkillsFieldDisplay from "@/components/config/AssistantSkillsFieldDisplay";
+import AssistantWorkspaceFieldDisplay from "@/components/config/AssistantWorkspaceFieldDisplay";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 
 interface UseAssistantFormConfigProps {
@@ -313,6 +314,26 @@ export const useAssistantFormConfig = ({
                                 console.log("Skills configuration changed");
                             },
                             navigateTo: navigateTo,
+                        });
+                    },
+                },
+            });
+        }
+
+        // 工作区配置（信任路径）
+        if (!assistantTypeHideField.includes("workspace_config")) {
+            baseConfigs.push({
+                key: "workspace_config",
+                config: {
+                    type: "custom" as const,
+                    label: "工作区",
+                    tooltip: "配置助手信任的文件路径，避免每次操作都需要确认",
+                    customRender: () => {
+                        return React.createElement(AssistantWorkspaceFieldDisplay, {
+                            assistantId: currentAssistant?.assistant.id ?? 0,
+                            onConfigChange: () => {
+                                console.log("Workspace configuration changed");
+                            },
                         });
                     },
                 },

@@ -8,6 +8,7 @@
 
 use super::test_helpers::*;
 use crate::db::conversation_db::*;
+use rusqlite::Connection;
 
 // ============================================================================
 // ConversationRepository CRUD 测试
@@ -61,12 +62,7 @@ fn test_conversation_list() {
 
     // 创建多个对话
     for i in 1..=3 {
-        let conversation = Conversation {
-            id: 0,
-            name: format!("Conversation {}", i),
-            assistant_id: Some(i),
-            created_time: chrono::Utc::now(),
-        };
+        let conversation = build_test_conversation(format!("Conversation {}", i), Some(i));
         repo.create(&conversation).unwrap();
     }
 
@@ -85,12 +81,7 @@ fn test_conversation_with_none_assistant() {
     let conn = create_test_db();
     let repo = ConversationRepository::new(conn);
 
-    let conversation = Conversation {
-        id: 0,
-        name: "No Assistant".to_string(),
-        assistant_id: None,
-        created_time: chrono::Utc::now(),
-    };
+    let conversation = build_test_conversation("No Assistant", None);
     let created = repo.create(&conversation).unwrap();
 
     let read = repo.read(created.id).unwrap().unwrap();
@@ -107,12 +98,7 @@ fn test_conversation_unicode_name() {
     let conn = create_test_db();
     let repo = ConversationRepository::new(conn);
 
-    let conversation = Conversation {
-        id: 0,
-        name: "中文对话名称 🎉".to_string(),
-        assistant_id: Some(1),
-        created_time: chrono::Utc::now(),
-    };
+    let conversation = build_test_conversation("中文对话名称 🎉", Some(1));
     let created = repo.create(&conversation).unwrap();
 
     let read = repo.read(created.id).unwrap().unwrap();
@@ -135,12 +121,7 @@ fn test_conversation_update_assistant_id() {
 
     // 创建多个关联同一助手的对话
     for i in 1..=3 {
-        let conversation = Conversation {
-            id: 0,
-            name: format!("Conversation {}", i),
-            assistant_id: Some(100), // 都关联 assistant_id = 100
-            created_time: chrono::Utc::now(),
-        };
+        let conversation = build_test_conversation(format!("Conversation {}", i), Some(100));
         repo.create(&conversation).unwrap();
     }
 
@@ -165,12 +146,7 @@ fn test_conversation_update_name() {
     let conn = create_test_db();
     let repo = ConversationRepository::new(conn);
 
-    let conversation = Conversation {
-        id: 0,
-        name: "Original Name".to_string(),
-        assistant_id: Some(1),
-        created_time: chrono::Utc::now(),
-    };
+    let conversation = build_test_conversation("Original Name", Some(1));
     let created = repo.create(&conversation).unwrap();
 
     // 使用 update_name 只更新名称
@@ -227,12 +203,7 @@ fn test_conversation_empty_name() {
     let conn = create_test_db();
     let repo = ConversationRepository::new(conn);
 
-    let conversation = Conversation {
-        id: 0,
-        name: "".to_string(),
-        assistant_id: None,
-        created_time: chrono::Utc::now(),
-    };
+    let conversation = build_test_conversation("", None);
     let created = repo.create(&conversation).unwrap();
 
     let read = repo.read(created.id).unwrap().unwrap();
@@ -250,12 +221,7 @@ fn test_conversation_very_long_name() {
     let repo = ConversationRepository::new(conn);
 
     let long_name = "A".repeat(10000); // 10000 个字符
-    let conversation = Conversation {
-        id: 0,
-        name: long_name.clone(),
-        assistant_id: None,
-        created_time: chrono::Utc::now(),
-    };
+    let conversation = build_test_conversation(long_name.clone(), None);
     let created = repo.create(&conversation).unwrap();
 
     let read = repo.read(created.id).unwrap().unwrap();
@@ -278,12 +244,7 @@ fn test_conversation_list_empty_and_out_of_range() {
 
     // 创建一些数据
     for i in 1..=3 {
-        let conversation = Conversation {
-            id: 0,
-            name: format!("Conversation {}", i),
-            assistant_id: None,
-            created_time: chrono::Utc::now(),
-        };
+        let conversation = build_test_conversation(format!("Conversation {}", i), None);
         repo.create(&conversation).unwrap();
     }
 
@@ -320,14 +281,130 @@ fn test_conversation_special_characters() {
     ];
 
     for name in special_names {
-        let conversation = Conversation {
-            id: 0,
-            name: name.to_string(),
-            assistant_id: None,
-            created_time: chrono::Utc::now(),
-        };
+        let conversation = build_test_conversation(name, None);
         let created = repo.create(&conversation).unwrap();
         let read = repo.read(created.id).unwrap().unwrap();
         assert_eq!(read.name, name);
     }
+}
+
+/// 测试隐藏的 butler 会话不会出现在普通会话列表中
+#[test]
+fn test_conversation_list_excludes_hidden_butler_conversations() {
+    let conn = create_test_db();
+    let repo = ConversationRepository::new(conn);
+
+    let visible = build_test_conversation("Visible Conversation", None);
+    let visible = repo.create(&visible).unwrap();
+
+    let mut hidden_task = build_test_conversation("Hidden Butler Task", None);
+    hidden_task.conversation_kind = "butler_task".to_string();
+    hidden_task.is_hidden_from_normal_chat_list = true;
+    hidden_task.source_task_title = Some("Write release notes".to_string());
+    repo.create(&hidden_task).unwrap();
+
+    let conversations = repo.list(1, 10).unwrap();
+    assert_eq!(conversations.len(), 1);
+    assert_eq!(conversations[0].id, visible.id);
+    assert!(!conversations[0].is_hidden_from_normal_chat_list);
+}
+
+/// 测试按 butler 父会话查询时会返回隐藏的任务会话
+#[test]
+fn test_list_by_parent_butler_conversation_id_includes_hidden_tasks() {
+    let conn = create_test_db();
+    let repo = ConversationRepository::new(conn);
+
+    let mut butler_main = build_test_conversation("Butler Main", None);
+    butler_main.conversation_kind = "butler_main".to_string();
+    butler_main.is_hidden_from_normal_chat_list = true;
+    let butler_main = repo.create(&butler_main).unwrap();
+
+    let mut task_a = build_test_conversation("Task A", None);
+    task_a.conversation_kind = "butler_task".to_string();
+    task_a.parent_butler_conversation_id = Some(butler_main.id);
+    task_a.is_hidden_from_normal_chat_list = true;
+    let task_a = repo.create(&task_a).unwrap();
+
+    let mut task_b = build_test_conversation("Task B", None);
+    task_b.conversation_kind = "butler_task".to_string();
+    task_b.parent_butler_conversation_id = Some(butler_main.id);
+    task_b.is_hidden_from_normal_chat_list = true;
+    let task_b = repo.create(&task_b).unwrap();
+
+    let mut other_main = build_test_conversation("Other Butler Main", None);
+    other_main.conversation_kind = "butler_main".to_string();
+    other_main.is_hidden_from_normal_chat_list = true;
+    let other_main = repo.create(&other_main).unwrap();
+
+    let mut other_task = build_test_conversation("Other Task", None);
+    other_task.conversation_kind = "butler_task".to_string();
+    other_task.parent_butler_conversation_id = Some(other_main.id);
+    other_task.is_hidden_from_normal_chat_list = true;
+    repo.create(&other_task).unwrap();
+
+    let mut task_ids = repo
+        .list_by_parent_butler_conversation_id(butler_main.id)
+        .unwrap()
+        .into_iter()
+        .map(|conversation| {
+            assert!(conversation.is_hidden_from_normal_chat_list);
+            assert_eq!(conversation.parent_butler_conversation_id, Some(butler_main.id));
+            conversation.id
+        })
+        .collect::<Vec<_>>();
+    task_ids.sort_unstable();
+
+    let mut expected = vec![task_a.id, task_b.id];
+    expected.sort_unstable();
+    assert_eq!(task_ids, expected);
+}
+
+/// 测试旧版 conversation 表升级时不会使用 SQLite 不支持的非静态默认值
+#[test]
+fn test_ensure_conversation_table_migrates_legacy_schema_without_non_constant_default() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute(
+        "CREATE TABLE conversation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            assistant_id INTEGER,
+            created_time DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO conversation (name, assistant_id, created_time) VALUES (?1, ?2, ?3)",
+        ("Legacy Conversation", Option::<i64>::None, "2026-03-13T13:37:48Z"),
+    )
+    .unwrap();
+
+    ensure_conversation_table(&conn).unwrap();
+
+    let updated_time: String = conn
+        .query_row(
+            "SELECT updated_time FROM conversation WHERE name = ?1",
+            ["Legacy Conversation"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let conversation_kind: String = conn
+        .query_row(
+            "SELECT conversation_kind FROM conversation WHERE name = ?1",
+            ["Legacy Conversation"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let is_hidden: i64 = conn
+        .query_row(
+            "SELECT is_hidden_from_normal_chat_list FROM conversation WHERE name = ?1",
+            ["Legacy Conversation"],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(updated_time, "2026-03-13T13:37:48Z");
+    assert_eq!(conversation_kind, "normal");
+    assert_eq!(is_hidden, 0);
 }

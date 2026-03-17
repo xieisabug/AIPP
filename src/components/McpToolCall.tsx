@@ -96,15 +96,9 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     shiningMcpCallId = null,
     isLastCall = true, // 默认为 true，向后兼容
 }) => {
-    const [toolCallId, setToolCallId] = useState<number | null>(callId || null);
-
-    useEffect(() => {
-        if (callId && callId !== toolCallId) {
-            setToolCallId(callId);
-        }
-    }, [callId, toolCallId]);
-
-    const metaOverride = toolCallId && mcpToolCallStates ? mcpToolCallStates.get(toolCallId) : undefined;
+    const [createdCallId, setCreatedCallId] = useState<number | null>(null);
+    const effectiveCallId = callId ?? createdCallId;
+    const metaOverride = effectiveCallId && mcpToolCallStates ? mcpToolCallStates.get(effectiveCallId) : undefined;
     const effectiveServerName = metaOverride?.server_name ?? serverName;
     const effectiveToolName = metaOverride?.tool_name ?? toolName;
     const effectiveParameters = metaOverride?.parameters ?? parameters;
@@ -138,8 +132,8 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     useEffect(() => {
         if (!mcpToolCallStates) return;
 
-        if (!toolCallId) {
-            console.log("[MCP] McpToolCall missing toolCallId; waiting for resolution", {
+        if (!effectiveCallId) {
+            console.log("[MCP] McpToolCall missing callId; waiting for streamed call_id", {
                 conversationId,
                 messageId,
                 serverName,
@@ -149,9 +143,9 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             return;
         }
 
-        if (mcpToolCallStates.has(toolCallId)) {
-            const globalState = mcpToolCallStates.get(toolCallId)!;
-            console.log(`McpToolCall ${toolCallId} received global state update:`, globalState);
+        if (mcpToolCallStates.has(effectiveCallId)) {
+            const globalState = mcpToolCallStates.get(effectiveCallId)!;
+            console.log(`McpToolCall ${effectiveCallId} received global state update:`, globalState);
 
             // 同步全局状态到本地状态
             switch (globalState.status) {
@@ -186,31 +180,29 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     break;
                 case "unknown":
                 default:
-                    setExecutionState("failed");
-                    setExecutionResult(null);
-                    setExecutionError(globalState.error || "状态未知");
+                    console.log(`[MCP] McpToolCall ${effectiveCallId} ignoring transient unknown state`, globalState);
                     break;
             }
         } else {
-            console.log(`[MCP] McpToolCall ${toolCallId} no match in map`, {
+            console.log(`[MCP] McpToolCall ${effectiveCallId} no match in map`, {
                 mapKeys: Array.from(mcpToolCallStates.keys()),
             });
         }
-    }, [mcpToolCallStates, toolCallId, conversationId, messageId, serverName, toolName]);
+    }, [mcpToolCallStates, effectiveCallId, conversationId, messageId, serverName, toolName]);
 
     // 检查执行状态
     const isFailed = executionState === "failed";
     const isExecuting = executionState === "executing";
     const canExecute = executionState === "idle" || executionState === "pending" || executionState === "failed"; // idle/pending/failed 状态都可以执行
-    const isRunning = toolCallId !== null && shiningMcpCallId === toolCallId; // 闪亮由全局 shine snapshot 决定
+    const isRunning = effectiveCallId !== null && shiningMcpCallId === effectiveCallId; // 闪亮由全局 shine snapshot 决定
 
     // 如果提供了 callId，尝试获取已有的执行结果
     useEffect(() => {
-        if (callId && executionState === "idle") {
+        if (effectiveCallId && executionState === "idle") {
             const fetchExistingResult = async () => {
                 try {
                     const result = await invoke<MCPToolCall>("get_mcp_tool_call", {
-                        callId: callId,
+                        callId: effectiveCallId,
                     });
 
                     if (result.status === "success") {
@@ -243,71 +235,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
 
             fetchExistingResult();
         }
-    }, [callId, executionState]);
-
-    // 如果没有 callId，尝试根据消息参数查询是否存在相关的工具调用记录
-    useEffect(() => {
-        if (!toolCallId && conversationId && messageId && executionState === "idle") {
-            const findExistingToolCall = async () => {
-                try {
-                    const allCalls = await invoke<MCPToolCall[]>("get_mcp_tool_calls_by_conversation", {
-                        conversationId: conversationId,
-                    });
-
-                    // 查找匹配的工具调用（相同的消息ID、服务器名和工具名）
-                    const matchingCall = allCalls.find(
-                        (call) =>
-                            call.message_id === messageId &&
-                            call.server_name === serverName &&
-                            call.tool_name === toolName &&
-                            call.parameters === parameters
-                    );
-
-                    if (matchingCall) {
-                        console.log("[MCP] matched tool call by message/server/tool/parameters", matchingCall);
-                        setToolCallId(matchingCall.id);
-
-                        if (matchingCall.status === "success") {
-                            setExecutionResult(matchingCall.result ?? null);
-                            setExecutionError(null);
-                            setExecutionState("success");
-                            if (matchingCall.result) {
-                                setIsExpanded(false); // 历史成功的调用默认收起
-                            }
-                        } else if (matchingCall.status === "failed") {
-                            setExecutionError(matchingCall.error || "执行失败");
-                            setExecutionResult(null);
-                            setExecutionState("failed");
-                            setIsExpanded(true); // 失败的调用默认展开，方便查看错误
-                        } else if (matchingCall.status === "executing") {
-                            setExecutionState("executing");
-                            setExecutionResult(null);
-                            setExecutionError(null);
-                            setIsExpanded(true); // 执行中的调用默认展开，显示进度
-                        } else if (matchingCall.status === "pending") {
-                            setExecutionState("pending");
-                            setExecutionResult(null);
-                            setExecutionError(null);
-                            setIsExpanded(true); // 待执行的调用默认展开，显示状态
-                        }
-                    } else {
-                        console.log("[MCP] no matching tool call found for message", {
-                            conversationId,
-                            messageId,
-                            serverName,
-                            toolName,
-                            parameters,
-                            allCallIds: allCalls.map((c) => ({ id: c.id, message_id: c.message_id, status: c.status })),
-                        });
-                    }
-                } catch (error) {
-                    console.warn("Failed to find existing tool call:", error);
-                }
-            };
-
-            findExistingToolCall();
-        }
-    }, [toolCallId, callId, conversationId, messageId, serverName, toolName, parameters, executionState, mcpToolCallStates]);
+    }, [effectiveCallId, executionState]);
 
     // 成功后3秒自动收起
     useEffect(() => {
@@ -373,7 +301,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             setExecutionResult(null);
             setExecutionError(null);
 
-            let currentCallId = toolCallId;
+            let currentCallId = effectiveCallId;
 
             // Create tool call if it doesn't exist
             if (!currentCallId) {
@@ -385,7 +313,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     parameters,
                 });
                 currentCallId = createdCall.id;
-                setToolCallId(currentCallId);
+                setCreatedCallId(currentCallId);
             }
 
             // Execute the tool call
@@ -417,16 +345,16 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             setExecutionError(errorMessage);
             setExecutionState("failed");
         }
-    }, [conversationId, messageId, serverName, toolName, parameters, toolCallId, isLastCall]);
+    }, [conversationId, messageId, serverName, toolName, parameters, effectiveCallId, isLastCall]);
 
     const handleStop = useCallback(async () => {
-        if (!toolCallId) {
+        if (!effectiveCallId) {
             console.error("Cannot stop: no tool call ID");
             return;
         }
 
         try {
-            await invoke("stop_mcp_tool_call", { callId: toolCallId });
+            await invoke("stop_mcp_tool_call", { callId: effectiveCallId });
             // 状态会通过 mcp_tool_call_update 事件自动更新
         } catch (error) {
             const errorMessage = getErrorMessage(error) || "停止失败";
@@ -434,23 +362,23 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             setExecutionError(errorMessage);
             setExecutionState("failed");
         }
-    }, [toolCallId]);
+    }, [effectiveCallId]);
 
     const handleContinueWithError = useCallback(async () => {
-        if (!toolCallId) {
+        if (!effectiveCallId) {
             console.error("Cannot continue: no tool call ID");
             return;
         }
 
         try {
-            await invoke("continue_with_error", { callId: toolCallId, errorMessage: executionError });
+            await invoke("continue_with_error", { callId: effectiveCallId, errorMessage: executionError });
             // 继续对话，状态保持为 failed
         } catch (error) {
             const errorMessage = getErrorMessage(error) || "继续失败";
             console.error("Failed to continue with error:", errorMessage);
             setExecutionError(errorMessage);
         }
-    }, [toolCallId, executionError]);
+    }, [effectiveCallId, executionError]);
 
     const renderResult = () => {
         // 防泄露模式：结果也需要脱敏

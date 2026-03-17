@@ -78,7 +78,7 @@ pub struct SkillSourceConfig {
     /// Display name for UI
     pub display_name: String,
     /// Paths to scan (supports ~ for home directory, {app_data} for app data)
-    /// Can be directories (scan subdirs for md files) or single files
+    /// Can be directories (scan subdirs for SKILL.md) or single files
     pub paths: Vec<String>,
     /// File pattern hint (mainly for backward compatibility, scanner now auto-detects)
     pub file_pattern: String,
@@ -101,30 +101,30 @@ impl SkillSourceConfig {
                 is_enabled: true,
                 is_builtin: true,
             },
-            // Codex skills (each subdirectory with .md is a skill)
+            // Codex skills (each subdirectory with SKILL.md is a skill)
             SkillSourceConfig {
                 source_type: SkillSourceType::Codex,
                 display_name: SkillSourceType::Codex.display_name().to_string(),
                 paths: vec!["~/.codex/skills/".to_string()],
-                file_pattern: "*.md".to_string(),
+                file_pattern: "SKILL.md".to_string(),
                 is_enabled: true,
                 is_builtin: true,
             },
-            // Copilot skills (each subdirectory with .md is a skill)
+            // Copilot skills (each subdirectory with SKILL.md is a skill)
             SkillSourceConfig {
                 source_type: SkillSourceType::Copilot,
                 display_name: SkillSourceType::Copilot.display_name().to_string(),
                 paths: vec!["~/.copilot/skills/".to_string()],
-                file_pattern: "*.md".to_string(),
+                file_pattern: "SKILL.md".to_string(),
                 is_enabled: true,
                 is_builtin: true,
             },
-            // Agents skills (each subdirectory with .md is a skill)
+            // Agents skills (each subdirectory with SKILL.md is a skill)
             SkillSourceConfig {
                 source_type: SkillSourceType::Agents,
                 display_name: SkillSourceType::Agents.display_name().to_string(),
                 paths: vec!["~/.agents/skills/".to_string()],
-                file_pattern: "*.md".to_string(),
+                file_pattern: "SKILL.md".to_string(),
                 is_enabled: true,
                 is_builtin: true,
             },

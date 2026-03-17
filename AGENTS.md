@@ -1,6 +1,6 @@
 ## Project Overview
 
-AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 2.0 that serves as a comprehensive AI assistant platform. The application enables users to interact with multiple large language models, execute scripts, manage conversations/artifacts, run scheduled AI tasks, and extend functionality through MCP/Skills/Plugins.
+AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 2.0 that serves as a comprehensive AI assistant platform. The application enables users to interact with multiple large language models, execute scripts, manage conversations/artifacts, run scheduled AI tasks, orchestrate work through Butler, and extend functionality through MCP/Skills/Plugins. The current product surface also includes experimental Feishu integration for Butler-driven external messaging.
 
 **Core Technologies:**
 
@@ -35,6 +35,12 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 **Important**: Frontend debugging should be done through the built application, not through `npm run dev`.
 
+**Important**:
+
+- If you add a standalone Rust binary under `src-tauri/src/bin/` (for example, a debug/preview CLI), keep `src-tauri/Cargo.toml` aligned with `default-run = "Aipp"`.
+- Otherwise `cargo run` becomes ambiguous once multiple binaries exist, which breaks the default Tauri dev flow with errors like: `cargo run could not determine which binary to run`.
+- Run auxiliary CLIs explicitly with `--bin`, for example: `cargo run --manifest-path src-tauri/Cargo.toml --bin feishu_markdown_debug -- --help`.
+
 ## Architecture Overview
 
 ### Window-Based Architecture
@@ -45,6 +51,7 @@ The application uses multiple Tauri windows for different features:
 -   **Config Window**: Settings and configuration
 -   **ChatUI Window**: Main chat interface
 -   **Schedule Window**: Scheduled task management and run logs
+-   **ButlerExperiment Window**: Butler main conversation, task board, approvals, Feishu status
 -   **Sidebar Window**: Conversation side panel for todo/context/artifact preview
 -   **ArtifactPreview Window**: Content preview (HTML, SVG, components)
 -   **Artifact Window**: Standalone artifact rendering window
@@ -70,7 +77,7 @@ src/
 ├── data/            # TypeScript types and data models
 ├── lib/             # Utility functions
 ├── services/        # Runtime services (PluginRuntime, search/export, token stats)
-├── windows/         # Window entry points (ask/chat/config/schedule/sidebar/artifacts)
+├── windows/         # Window entry points (ask/chat/config/schedule/butler/sidebar/artifacts)
 └── artifacts/       # React/Vue artifact templates
 ```
 
@@ -88,10 +95,12 @@ src-tauri/
 ├── src/
 │   ├── api/                 # Tauri command handlers
 │   │   ├── ai/              # AI modules (chat/acp/config/summary/title/types)
-│   │   ├── scheduled_task_api.rs  # 定时任务（创建/执行/日志/停止）
+│   │   ├── scheduled_task_api.rs  # 定时任务（once/interval 调度、执行、日志、停止）
 │   │   ├── skill_api.rs     # Skills 扫描、安装、助手绑定
+│   │   ├── butler_api.rs    # Butler 主会话、任务派发、结果回流
 │   │   ├── plugin_api.rs    # 插件安装、启停、配置与数据
 │   │   ├── token_statistics_api.rs # Token 统计
+│   │   ├── export_api.rs    # Markdown -> PDF / DOCX 导出
 │   │   ├── copilot_api.rs & copilot_lsp.rs # GitHub Copilot 集成
 │   │   └── [other apis]...
 │   ├── mcp/                 # MCP 核心（注册/执行/检测/总结）
@@ -100,6 +109,8 @@ src-tauri/
 │   │   ├── execution_api.rs # MCP tool call 执行与状态
 │   │   └── detection.rs     # AI 响应中的 tool call 检测
 │   ├── artifacts/           # Artifact 渲染、运行与集合管理
+│   ├── feishu/              # 飞书运行时、消息接入、回发与卡片回调
+│   ├── external_channels/   # 外部渠道消息渲染抽象
 │   ├── scheduler/           # 定时任务调度运行时
 │   ├── skills/              # Skills 扫描、解析、提示词拼装
 │   ├── db/                  # Database operations (SQLite)
@@ -114,8 +125,10 @@ src-tauri/
 -   `assistant_api.rs`: Assistant CRUD + model/MCP binding
 -   `conversation_api.rs`: Conversation/message management with versioning
 -   `llm_api.rs`: Provider/model management and model list sync
--   `scheduled_task_api.rs`: Scheduled task CRUD, run, logs, cancellation
+-   `scheduled_task_api.rs`: Scheduled task CRUD, structured scheduling, run, logs, cancellation
 -   `skill_api.rs`: Skill scanning/installing and assistant skill configuration
+-   `butler_api.rs`: Butler main conversation, task orchestration, task detail/result flow
+-   `export_api.rs`: Markdown to PDF / DOCX export helpers
 -   `plugin_api.rs`: Plugin registry, lifecycle, config and data storage
 -   `token_statistics_api.rs`: Conversation/message token statistics
 -   `copilot_api.rs` & `copilot_lsp.rs`: GitHub Copilot auth and LSP lifecycle
@@ -193,15 +206,17 @@ let config = state.configs.lock().await;
 4. **Message Versioning & Runtime State**: Response regeneration, parent/child chains, runtime state snapshots
 5. **Content Preview & Artifact Workspace**: Rendering HTML/SVG/React/Vue and managing artifact collections
 6. **Script Execution**: Running AI-generated code in configured environments
-7. **System Tray + Multi-Window UX**: Global shortcuts and coordinated Ask/Chat/Config/Schedule/Sidebar windows
+7. **System Tray + Multi-Window UX**: Global shortcuts and coordinated Ask/Chat/Config/Schedule/Butler/Sidebar windows
 8. **MCP Integration**: MCP server registry, tool-call execution state, and built-in MCP tool suites
 9. **Built-in MCP Tool Suites**: agent, ui_interaction, search, operation, artifact
-10. **Scheduled Tasks**: Agentic loop execution, run logs, run status updates, and stop support
-11. **Skills System**: Skills scanning, official skills install, assistant-skill binding
+10. **Scheduled Tasks**: Structured `once` / `interval` schedules, next-run calculation, run logs, notify decision, and stop support
+11. **Skills System**: File-system based skills, official/install-recipe/archive installs, assistant-skill binding, Agent `load_skill` dependency
 12. **Plugin Runtime**: Plugin loading/config/data + theme registration (`extraCss`/`windowCss`)
 13. **GitHub Copilot Integration**: Device flow auth and optional Copilot LSP integration
-14. **Token Statistics & Export**: Message/conversation token stats and markdown export (PDF/DOCX)
+14. **Token Statistics & Export**: Message/conversation token stats and conversation export to Markdown / PNG / PDF / DOCX
 15. **Assistant Types**: Different assistant configurations with custom forms
+16. **Butler Orchestration**: Main hidden conversation, task conversations, result callback injection, approval-aware task board
+17. **Feishu Integration**: Experimental Butler-driven Feishu ingress, relay workers, card callbacks, menu-triggered context reset
 
 ## ACP Integration Notes
 
@@ -240,6 +255,12 @@ let config = state.configs.lock().await;
 7. **Code Organization**: Follow domain-driven structure for both frontend and backend
 8. **No Model Fallback**: 当用户配置的模型（如对话总结模型、助手模型等）在数据库中不存在时，禁止自动回退到其他模型。应该直接返回错误信息，在界面上提示用户检查配置，而不是随意选择其他模型执行任务
 
+## Documentation Sync Guidelines
+
+- When a user-facing feature changes, update the matching file under `docs/product/` in the same task when practical.
+- Keep `docs/product/README.md` aligned with the actual set of product docs and major user-visible features.
+- Keep this `AGENTS.md` aligned with major architecture/product-surface changes that affect future engineering tasks, especially Butler, Feishu, export formats, scheduling model, and Skills behavior.
+
 ## Testing Changes
 
 Always verify both frontend and backend changes:
@@ -257,9 +278,11 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ### Validation runner note
 
-- In this environment, long `powershell` **sync-mode** validation chains can lose child-process completion/output and leave the shell looking hung even after `cargo`/`npm` has already exited.
-- For builds/tests, prefer **one command at a time** and use **async mode with explicit output reads** instead of chaining many commands in a single sync invocation.
-- If a validation shell appears stuck, check whether only the parent `pwsh` process remains; if so, stop that shell and rerun the command in async mode.
+- In this environment, `powershell` **sync-mode** is unreliable for long-running validation commands: even a single `cargo`/`npm` build or test can finish in the child process while the parent `pwsh` stays open, making the shell look hung and hiding completion/output.
+- For repository validation (`cargo build`, `cargo test`, `npm run build`, `npm run test`), treat **async mode with explicit `read_powershell` output reads as mandatory**. Do not use sync mode for these commands.
+- Run **exactly one validation command per shell**. Do not chain validation commands with `&&` or start the next validation before the previous shell has been fully read/stopped.
+- When launching async validation, append an explicit completion marker such as `; Write-Host "__AIPP_DONE__:$LASTEXITCODE"` and keep reading until that marker appears. Do not infer completion from the `pwsh` process state alone, because async sessions stay alive after the child process exits.
+- If a validation shell appears stuck and no `cargo`/`npm` child process remains, stop that shell and rerun with an explicit completion marker.
 
 ## Common Development Tasks
 

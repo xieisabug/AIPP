@@ -4,6 +4,7 @@ use tauri::State;
 
 use super::artifact_data_db::{ArtifactDataDatabase, ExecuteResult, QueryResult, TableInfo};
 use crate::api::ai::config::{get_network_proxy_from_config, get_request_timeout_from_config};
+use crate::api::butler_api::is_butler_system_assistant;
 use crate::api::genai_client;
 use crate::db::assistant_db::AssistantDatabase;
 use crate::db::llm_db::LLMDatabase;
@@ -175,6 +176,7 @@ pub fn artifact_get_assistants(
 
     Ok(assistants
         .into_iter()
+        .filter(|assistant| !is_butler_system_assistant(assistant))
         .map(|a| AssistantBasicInfo {
             id: a.id,
             name: a.name,

@@ -2,7 +2,7 @@
  * 应用内快捷键数据模型与动作注册表
  */
 
-export type ShortcutWindow = "ask" | "chat";
+export type ShortcutWindow = "ask" | "chat" | "butler";
 
 export interface ShortcutAction {
     /** 唯一标识，格式: window.action */
@@ -91,6 +91,37 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
         window: "chat",
         defaultShortcut: "Mod+Shift+B",
     },
+    // 总管家窗口
+    {
+        id: "butler.new",
+        label: "重开新会话",
+        window: "butler",
+        defaultShortcut: "Mod+N",
+    },
+    {
+        id: "butler.stats",
+        label: "查看消耗",
+        window: "butler",
+        defaultShortcut: "Mod+Shift+I",
+    },
+    {
+        id: "butler.settings",
+        label: "打开设置",
+        window: "butler",
+        defaultShortcut: "Mod+Comma",
+    },
+    {
+        id: "butler.toggle_sidebar",
+        label: "切换侧边栏",
+        window: "butler",
+        defaultShortcut: "Mod+B",
+    },
+    {
+        id: "butler.open_sidebar_window",
+        label: "侧边详情窗口",
+        window: "butler",
+        defaultShortcut: "Mod+Shift+B",
+    },
 ];
 
 /** 按窗口分组获取动作列表 */
@@ -129,4 +160,5 @@ export function configKeyToActionId(configKey: string): string | null {
 export const WINDOW_LABELS: Record<ShortcutWindow, string> = {
     ask: "Ask 窗口",
     chat: "Chat 窗口",
+    butler: "总管家窗口",
 };

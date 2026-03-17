@@ -2,6 +2,7 @@ use tauri::{AppHandle, Manager};
 use tracing::{info, instrument, warn};
 
 use crate::api::ai::acp::{AcpPermissionDecision, AcpPermissionState};
+use crate::api::butler_api::emit_butler_task_permission_state_changed;
 use crate::mcp::builtin_mcp::operation::types::PermissionDecision;
 use crate::mcp::builtin_mcp::OperationState;
 
@@ -17,6 +18,8 @@ pub async fn confirm_operation_permission(
 
     let decision = match decision.as_str() {
         "allow" => PermissionDecision::Allow,
+        "allow_for_conversation" => PermissionDecision::AllowForConversation,
+        "allow_for_assistant" => PermissionDecision::AllowForAssistant,
         "allow_and_save" => PermissionDecision::AllowAndSave,
         "deny" => PermissionDecision::Deny,
         _ => {
@@ -33,9 +36,23 @@ pub async fn confirm_operation_permission(
     // 解决权限请求
     let resolved = state.resolve_permission_request(&request_id, decision).await;
 
-    if resolved {
-        info!(request_id = %request_id, "Permission request resolved successfully");
-        Ok(true)
+    if let Some(resolution) = resolved {
+        if let Some(conversation_id) = resolution.conversation_id {
+            emit_butler_task_permission_state_changed(
+                &app_handle,
+                conversation_id,
+                "operation",
+                false,
+            )
+            .await?;
+        }
+        if resolution.delivered {
+            info!(request_id = %request_id, "Permission request resolved successfully");
+            Ok(true)
+        } else {
+            warn!(request_id = %request_id, "Permission request receiver dropped before resolution");
+            Err("Permission request receiver dropped before resolution".to_string())
+        }
     } else {
         warn!(request_id = %request_id, "Permission request not found or already resolved");
         Err("Permission request not found or already resolved".to_string())
@@ -67,9 +84,18 @@ pub async fn confirm_acp_permission(
 
     let resolved = state.resolve_request(&request_id, decision).await;
 
-    if resolved {
-        info!(request_id = %request_id, "ACP permission request resolved successfully");
-        Ok(true)
+    if let Some(resolution) = resolved {
+        if let Some(conversation_id) = resolution.conversation_id {
+            emit_butler_task_permission_state_changed(&app_handle, conversation_id, "acp", false)
+                .await?;
+        }
+        if resolution.delivered {
+            info!(request_id = %request_id, "ACP permission request resolved successfully");
+            Ok(true)
+        } else {
+            warn!(request_id = %request_id, "ACP permission receiver dropped before resolution");
+            Err("ACP permission receiver dropped before resolution".to_string())
+        }
     } else {
         warn!(request_id = %request_id, "ACP permission request not found or already resolved");
         Err("ACP permission request not found or already resolved".to_string())

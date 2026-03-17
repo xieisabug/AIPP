@@ -120,6 +120,22 @@ fn build_dynamic_mcp_loaded_tool_item(
     })
 }
 
+fn resolve_artifact_tool_conversation_id(
+    tool_name: &str,
+    args: &serde_json::Value,
+    conversation_id: Option<i64>,
+) -> Result<i64, String> {
+    if tool_name == "get_artifact_workspace" {
+        return conversation_id
+            .ok_or_else(|| "Artifact tools require conversation context".to_string());
+    }
+
+    args.get("conversation_id")
+        .and_then(|v| v.as_i64())
+        .or(conversation_id)
+        .ok_or_else(|| "Artifact tools require conversation context".to_string())
+}
+
 fn execute_dynamic_mcp_tool(
     app_handle: &AppHandle,
     tool_name: &str,
@@ -339,6 +355,15 @@ fn execute_dynamic_mcp_tool(
             "isError": true
         })),
     }
+}
+
+fn resolve_butler_spawn_window(app_handle: &AppHandle) -> Result<tauri::Window, String> {
+    for label in ["butler_experiment", "chat_ui", "ask"] {
+        if let Some(window) = app_handle.get_webview_window(label) {
+            return Ok(window.as_ref().window());
+        }
+    }
+    Err("No available window for butler task execution".to_string())
 }
 
 #[tauri::command]
@@ -690,14 +715,13 @@ pub async fn execute_aipp_builtin_tool(
                 get_artifact_workspace, show_artifact, ShowArtifactRequest,
             };
 
-            let resolved_conversation_id = args
-                .get("conversation_id")
-                .and_then(|v| v.as_i64())
-                .or(conversation_id)
-                .ok_or_else(|| "Artifact tools require conversation context".to_string())?;
-
             match tool_name.as_str() {
                 "get_artifact_workspace" => {
+                    let resolved_conversation_id = resolve_artifact_tool_conversation_id(
+                        tool_name.as_str(),
+                        &args,
+                        conversation_id,
+                    )?;
                     match get_artifact_workspace(&app_handle, resolved_conversation_id) {
                         Ok(response) => serde_json::json!({
                             "content": [{"type": "json", "json": response}],
@@ -713,6 +737,11 @@ pub async fn execute_aipp_builtin_tool(
                     }
                 }
                 "show_artifact" => {
+                    let resolved_conversation_id = resolve_artifact_tool_conversation_id(
+                        tool_name.as_str(),
+                        &args,
+                        conversation_id,
+                    )?;
                     let artifact_key = args
                         .get("artifact_key")
                         .and_then(|v| v.as_str())
@@ -816,6 +845,7 @@ pub async fn execute_aipp_builtin_tool(
             }),
         },
         "agent" => {
+            use crate::api::butler_api::{spawn_butler_task_with_window, SpawnButlerTaskRequest};
             use agent::types::*;
 
             let handler = AgentHandler::new(app_handle.clone());
@@ -956,6 +986,64 @@ pub async fn execute_aipp_builtin_tool(
                 "load_mcp_server" | "load_mcp_tool" => {
                     execute_dynamic_mcp_tool(&app_handle, &tool_name, &args, conversation_id)?
                 }
+                "spawn_task_conversation" => {
+                    let butler_conversation_id = args
+                        .get("butler_conversation_id")
+                        .and_then(|v| v.as_i64())
+                        .or(conversation_id)
+                        .ok_or_else(|| {
+                            "spawn_task_conversation requires butler conversation context"
+                                .to_string()
+                        })?;
+                    let title = args
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing required parameter: title".to_string())?;
+                    let goal = args
+                        .get("goal")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing required parameter: goal".to_string())?;
+
+                    let request = SpawnButlerTaskRequest {
+                        butler_conversation_id,
+                        title: title.to_string(),
+                        goal: goal.to_string(),
+                        executor_assistant_id: args
+                            .get("executor_assistant_id")
+                            .and_then(|v| v.as_i64()),
+                        executor_assistant_name: args
+                            .get("executor_assistant_name")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                        handoff_contract_json: args
+                            .get("handoff_contract_json")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                        result_handling_mode: args
+                            .get("result_handling_mode")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                        notification_policy: args
+                            .get("notification_policy")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                    };
+
+                    let window = resolve_butler_spawn_window(&app_handle)?;
+                    match spawn_butler_task_with_window(&app_handle, &window, request).await {
+                        Ok(response) => serde_json::json!({
+                            "content": [{"type": "json", "json": response}],
+                            "isError": false
+                        }),
+                        Err(e) => {
+                            error!(error = %e, "spawn_task_conversation tool execution failed");
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": e}],
+                                "isError": true
+                            })
+                        }
+                    }
+                }
                 _ => serde_json::json!({
                     "content": [{"type": "text", "text": format!("Unknown agent tool: {}", tool_name)}],
                     "isError": true
@@ -1021,5 +1109,24 @@ mod tests {
         assert!(payload.get("parameters_json").is_none());
         assert!(payload.get("is_auto_run").is_none());
         assert!(payload.get("tool_definition").is_none());
+    }
+
+    #[test]
+    fn get_artifact_workspace_uses_bound_conversation_context() {
+        let args = serde_json::json!({ "conversation_id": 999 });
+        let resolved =
+            resolve_artifact_tool_conversation_id("get_artifact_workspace", &args, Some(123))
+                .expect("bound conversation context should resolve");
+
+        assert_eq!(resolved, 123);
+    }
+
+    #[test]
+    fn show_artifact_can_still_override_conversation_context() {
+        let args = serde_json::json!({ "conversation_id": 999 });
+        let resolved = resolve_artifact_tool_conversation_id("show_artifact", &args, Some(123))
+            .expect("show_artifact should resolve");
+
+        assert_eq!(resolved, 999);
     }
 }

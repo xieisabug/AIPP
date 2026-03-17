@@ -442,25 +442,46 @@ pub fn handle_preview_file_relay_request<R: tauri::Runtime>(
 #[derive(Clone)]
 pub struct InteractionState {
     pending_ask_user: Arc<Mutex<HashMap<String, oneshot::Sender<AskUserQuestionDecision>>>>,
+    pending_ask_user_events: Arc<Mutex<HashMap<String, AskUserQuestionRequestEvent>>>,
 }
 
 impl InteractionState {
     pub fn new() -> Self {
-        Self { pending_ask_user: Arc::new(Mutex::new(HashMap::new())) }
+        Self {
+            pending_ask_user: Arc::new(Mutex::new(HashMap::new())),
+            pending_ask_user_events: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub async fn store_ask_user_request(
         &self,
-        request_id: String,
+        event: AskUserQuestionRequestEvent,
         sender: oneshot::Sender<AskUserQuestionDecision>,
     ) {
+        let request_id = event.request_id.clone();
         let mut pending = self.pending_ask_user.lock().await;
         pending.insert(request_id, sender);
+        drop(pending);
+
+        let mut pending_events = self.pending_ask_user_events.lock().await;
+        pending_events.insert(event.request_id.clone(), event);
+    }
+
+    pub async fn get_ask_user_request(
+        &self,
+        request_id: &str,
+    ) -> Option<AskUserQuestionRequestEvent> {
+        let pending_events = self.pending_ask_user_events.lock().await;
+        pending_events.get(request_id).cloned()
     }
 
     pub async fn remove_ask_user_request(&self, request_id: &str) {
         let mut pending = self.pending_ask_user.lock().await;
         pending.remove(request_id);
+        drop(pending);
+
+        let mut pending_events = self.pending_ask_user_events.lock().await;
+        pending_events.remove(request_id);
     }
 
     pub async fn resolve_ask_user_request(
@@ -469,7 +490,14 @@ impl InteractionState {
         decision: AskUserQuestionDecision,
     ) -> bool {
         let mut pending = self.pending_ask_user.lock().await;
-        if let Some(sender) = pending.remove(request_id) {
+        let sender = pending.remove(request_id);
+        drop(pending);
+
+        let mut pending_events = self.pending_ask_user_events.lock().await;
+        pending_events.remove(request_id);
+        drop(pending_events);
+
+        if let Some(sender) = sender {
             sender.send(decision).is_ok()
         } else {
             false
@@ -500,7 +528,7 @@ pub async fn request_ask_user_question(
     };
 
     let (tx, rx) = oneshot::channel::<AskUserQuestionDecision>();
-    interaction_state.store_ask_user_request(request_id.clone(), tx).await;
+    interaction_state.store_ask_user_request(event.clone(), tx).await;
 
     info!(
         request_id = %request_id,
@@ -508,16 +536,50 @@ pub async fn request_ask_user_question(
         "Requesting AskUserQuestion input from frontend"
     );
 
+    let delivered_to_feishu = if let Some(conversation_id) = conversation_id {
+        match crate::feishu::try_deliver_ask_user_question_to_feishu(
+            app_handle,
+            conversation_id,
+            &event,
+        )
+        .await
+        {
+            Ok(delivered) => delivered,
+            Err(error) => {
+                interaction_state.remove_ask_user_request(&request_id).await;
+                warn!(
+                    request_id = %request_id,
+                    conversation_id,
+                    error = %error,
+                    "Failed to deliver AskUserQuestion to Feishu"
+                );
+                return Err(error);
+            }
+        }
+    } else {
+        false
+    };
+
     if let Err(e) = app_handle.emit("ask-user-question-request", &event) {
-        interaction_state.remove_ask_user_request(&request_id).await;
-        warn!(request_id = %request_id, error = %e, "Failed to emit ask-user-question-request");
-        return Err("Failed to emit AskUserQuestion event".to_string());
+        if delivered_to_feishu {
+            warn!(
+                request_id = %request_id,
+                error = %e,
+                "AskUserQuestion frontend emit failed, but Feishu delivery is active"
+            );
+        } else {
+            interaction_state.remove_ask_user_request(&request_id).await;
+            warn!(request_id = %request_id, error = %e, "Failed to emit ask-user-question-request");
+            return Err("Failed to emit AskUserQuestion event".to_string());
+        }
     }
 
-    match rx.await {
+    let result = match rx.await {
         Ok(result) => result,
         Err(_) => Err("AskUserQuestion request was cancelled".to_string()),
-    }
+    };
+    interaction_state.remove_ask_user_request(&request_id).await;
+    result
 }
 
 pub fn emit_preview_file_request(
@@ -564,18 +626,17 @@ pub async fn prepare_preview_file_request_for_ui(
     Ok(request)
 }
 
-#[tauri::command]
-pub async fn submit_ask_user_question_response(
-    app_handle: AppHandle,
-    request_id: String,
+pub(crate) async fn resolve_ask_user_question_response(
+    app_handle: &AppHandle,
+    request_id: &str,
     answers: Option<HashMap<String, String>>,
-    cancelled: Option<bool>,
+    cancelled: bool,
 ) -> Result<bool, String> {
     let state = app_handle
         .try_state::<InteractionState>()
         .ok_or_else(|| "InteractionState not found".to_string())?;
 
-    let decision = if cancelled.unwrap_or(false) {
+    let decision = if cancelled {
         Err("User cancelled AskUserQuestion".to_string())
     } else {
         let Some(value) = answers else {
@@ -587,11 +648,27 @@ pub async fn submit_ask_user_question_response(
         Ok(value)
     };
 
-    let resolved = state.resolve_ask_user_request(&request_id, decision).await;
+    let resolved = state.resolve_ask_user_request(request_id, decision).await;
 
     if resolved {
         Ok(true)
     } else {
         Err("AskUserQuestion request not found or already resolved".to_string())
     }
+}
+
+#[tauri::command]
+pub async fn submit_ask_user_question_response(
+    app_handle: AppHandle,
+    request_id: String,
+    answers: Option<HashMap<String, String>>,
+    cancelled: Option<bool>,
+) -> Result<bool, String> {
+    resolve_ask_user_question_response(
+        &app_handle,
+        &request_id,
+        answers,
+        cancelled.unwrap_or(false),
+    )
+    .await
 }

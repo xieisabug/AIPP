@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::process::Child;
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, info};
+
+use crate::utils::path_utils::is_path_under_trusted;
 
 /// 文件读取记录
 #[derive(Debug, Clone)]
@@ -27,6 +30,16 @@ pub struct BashProcessInfo {
     pub last_read_pos: usize,
 }
 
+pub(crate) struct PendingPermissionRequest {
+    sender: tokio::sync::oneshot::Sender<super::types::PermissionDecision>,
+    conversation_id: Option<i64>,
+}
+
+pub struct PermissionRequestResolution {
+    pub conversation_id: Option<i64>,
+    pub delivered: bool,
+}
+
 /// 操作工具状态管理器
 pub struct OperationState {
     /// 已读文件记录（路径 -> 读取记录）
@@ -36,8 +49,9 @@ pub struct OperationState {
     /// 后台 Bash 进程（bash_id -> 进程信息）
     pub(crate) bash_processes: Arc<Mutex<HashMap<String, BashProcessInfo>>>,
     /// 待处理的权限请求（request_id -> 发送通道）
-    pub(crate) pending_permissions:
-        Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<super::types::PermissionDecision>>>>,
+    pub(crate) pending_permissions: Arc<Mutex<HashMap<String, PendingPermissionRequest>>>,
+    /// 会话信任路径（conversation_id -> 信任路径列表）
+    pub(crate) conversation_trusted_paths: Arc<Mutex<HashMap<i64, Vec<String>>>>,
 }
 
 impl OperationState {
@@ -47,6 +61,7 @@ impl OperationState {
             written_files: Arc::new(Mutex::new(HashMap::new())),
             bash_processes: Arc::new(Mutex::new(HashMap::new())),
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
+            conversation_trusted_paths: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -200,10 +215,11 @@ impl OperationState {
     pub async fn store_permission_request(
         &self,
         request_id: String,
+        conversation_id: Option<i64>,
         sender: tokio::sync::oneshot::Sender<super::types::PermissionDecision>,
     ) {
         let mut pending = self.pending_permissions.lock().await;
-        pending.insert(request_id, sender);
+        pending.insert(request_id, PendingPermissionRequest { sender, conversation_id });
     }
 
     /// 移除待处理权限请求（用于事件发送失败等场景）
@@ -217,13 +233,48 @@ impl OperationState {
         &self,
         request_id: &str,
         decision: super::types::PermissionDecision,
-    ) -> bool {
+    ) -> Option<PermissionRequestResolution> {
         let mut pending = self.pending_permissions.lock().await;
-        if let Some(sender) = pending.remove(request_id) {
-            sender.send(decision).is_ok()
-        } else {
-            false
+        pending.remove(request_id).map(|request| PermissionRequestResolution {
+            conversation_id: request.conversation_id,
+            delivered: request.sender.send(decision).is_ok(),
+        })
+    }
+
+    pub async fn has_pending_permission_for_conversation(&self, conversation_id: i64) -> bool {
+        let pending = self.pending_permissions.lock().await;
+        pending.values().any(|request| request.conversation_id == Some(conversation_id))
+    }
+
+    /// 添加会话信任路径
+    pub async fn add_conversation_trusted_path(&self, conversation_id: i64, path: String) {
+        let mut trusted = self.conversation_trusted_paths.lock().await;
+        trusted.entry(conversation_id).or_insert_with(Vec::new).push(path.clone());
+        info!(conversation_id, path = %path, "Added conversation trusted path");
+    }
+
+    /// 检查路径是否在会话信任列表中（前缀匹配）
+    pub async fn is_path_trusted_for_conversation(&self, conversation_id: i64, path: &str) -> bool {
+        let trusted = self.conversation_trusted_paths.lock().await;
+        if let Some(paths) = trusted.get(&conversation_id) {
+            let target_path = Path::new(path);
+            for trusted_path in paths {
+                let trusted = Path::new(trusted_path);
+                // 使用规范化路径比较（Windows 兼容）
+                if is_path_under_trusted(target_path, trusted) {
+                    debug!(path = %path, trusted_path = %trusted_path, "Path matched conversation trusted path");
+                    return true;
+                }
+            }
         }
+        false
+    }
+
+    /// 清除会话信任路径（对话结束时调用）
+    pub async fn clear_conversation_trusted_paths(&self, conversation_id: i64) {
+        let mut trusted = self.conversation_trusted_paths.lock().await;
+        trusted.remove(&conversation_id);
+        debug!(conversation_id, "Cleared conversation trusted paths");
     }
 
     /// 检查 Bash 进程是否存在

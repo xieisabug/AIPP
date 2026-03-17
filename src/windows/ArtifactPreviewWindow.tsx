@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { save } from '@tauri-apps/plugin-dialog';
@@ -29,7 +30,7 @@ import { Label } from '@/components/ui/label';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { Bot, Database, Settings2 } from 'lucide-react';
+import { Bot, Database, Settings2, Loader2 } from 'lucide-react';
 import { AssistantBasicInfo } from '@/data/ArtifactCollection';
 import ArtifactPreviewCodeBlock from '@/components/ArtifactPreviewCodeBlock';
 import {
@@ -121,6 +122,36 @@ export default function ArtifactPreviewWindow() {
             });
     }, []);
 
+    // ====== 监听 artifact 更新事件，实现实时刷新 ======
+    useEffect(() => {
+        if (currentConversationId === undefined) return;
+
+        const unlistenPromise = listen<{ conversation_id: number; artifact: { artifact_key: string } }>(
+            'artifact-manifest-updated',
+            (event) => {
+                // 只处理当前对话的 artifact 更新
+                if (event.payload.conversation_id !== currentConversationId) return;
+
+                console.log('🔧 [ArtifactPreviewWindow] 检测到 artifact 更新，自动刷新预览:', event.payload.artifact.artifact_key);
+
+                // 调用后端恢复命令，重新加载缓存的 artifact
+                invoke<string | null>('restore_artifact_preview', { sourceWindow: 'artifact_preview' })
+                    .then((result) => {
+                        if (result) {
+                            console.log('🔧 [ArtifactPreviewWindow] Artifact 预览已刷新');
+                        }
+                    })
+                    .catch((error) => {
+                        console.error('[ArtifactPreviewWindow] 刷新 artifact 预览失败:', error);
+                    });
+            }
+        );
+
+        return () => {
+            unlistenPromise.then((unlisten) => unlisten());
+        };
+    }, [currentConversationId]);
+
     // ====== 缓存相关函数 ======
 
     // 保存当前 artifact 到 localStorage 缓存
@@ -156,7 +187,9 @@ export default function ArtifactPreviewWindow() {
             console.log('🔧 [ArtifactPreviewWindow] 从缓存恢复 artifact:', cache.type);
 
             // 调用后端恢复命令
-            const result = await invoke<string | null>('restore_artifact_preview');
+            const result = await invoke<string | null>('restore_artifact_preview', {
+                sourceWindow: 'artifact_preview',
+            });
             return result !== null;
         } catch (e) {
             console.warn('从缓存恢复 artifact 失败:', e);
@@ -222,7 +255,7 @@ export default function ArtifactPreviewWindow() {
             saveArtifactToCache(data.type, data.original_code);
 
             // Update conversation ID and load session-level config
-            const convId = data.conversation_id;
+            const convId = typeof data.conversation_id === 'number' ? data.conversation_id : undefined;
             setCurrentConversationId(convId);
 
             // Load config for this conversation (or global if no conversation)
@@ -354,6 +387,7 @@ export default function ArtifactPreviewWindow() {
     // 使用统一的事件处理 hook
     const artifactEvents = useArtifactEvents({
         windowType: 'preview',
+        readyWindow: 'artifact_preview',
         onArtifactData: handleArtifactData,
         onRedirect: handleRedirect,
         onEnvironmentCheck: handleEnvironmentCheck,
@@ -1135,11 +1169,19 @@ export default function ArtifactPreviewWindow() {
                                         console.log('[Draw.io] iframe 加载完成');
                                     }}
                                 />
-                            ) : (
+                            ) : (previewType === 'react' || previewType === 'vue') && !previewUrl ? (
+                                /* 等待 React/Vue 预览服务器启动 */
+                                <div className="flex-1 flex items-center justify-center text-muted-foreground">
+                                    <div className="text-center">
+                                        <Loader2 className="h-8 w-8 mx-auto mb-2 animate-spin opacity-60" />
+                                        <p className="text-sm">正在启动预览服务器...</p>
+                                    </div>
+                                </div>
+                            ) : previewUrl ? (
                                 /* iframe 预览 - 用于 React 和 Vue */
                                 <iframe
                                     ref={previewIframeRef}
-                                    src={previewUrl || ''}
+                                    src={previewUrl}
                                     className="flex-1 w-full border-0"
                                     sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                                     onLoad={() => {
@@ -1147,6 +1189,13 @@ export default function ArtifactPreviewWindow() {
                                     onError={() => {
                                     }}
                                 />
+                            ) : (
+                                /* 没有预览内容 */
+                                <div className="flex-1 flex items-center justify-center text-muted-foreground">
+                                    <div className="text-center">
+                                        <p className="text-sm">等待预览数据...</p>
+                                    </div>
+                                </div>
                             )}
                         </div>
                     )}

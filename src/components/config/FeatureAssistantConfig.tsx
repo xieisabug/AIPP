@@ -9,6 +9,7 @@ import { ConfigPageLayout, SidebarList, ListItemButton, SelectOption } from "../
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useVersionManager } from "@/hooks/feature/useVersionManager";
 import { FeatureFormRenderer } from "./feature/FeatureFormRenderer";
+import { APP_SHORTCUT_KEY_PREFIX, SHORTCUT_ACTIONS } from "@/data/Shortcuts";
 
 interface FeatureItem {
     id: string;
@@ -39,7 +40,7 @@ const FeatureAssistantConfig: React.FC = () => {
         {
             id: "conversation_summary",
             name: "辅助AI",
-            description: "配置AI辅助功能：对话标题生成、表单自动填写、对话摘要、记忆生成",
+            description: "配置AI辅助功能：对话标题生成、表单自动填写、记忆生成",
             icon: <MessageSquare className="h-5 w-5" />,
             code: "conversation_summary",
         },
@@ -99,6 +100,13 @@ const FeatureAssistantConfig: React.FC = () => {
     // 使用新的 hooks
     const { featureConfig, saveFeatureConfig, loading } = useFeatureConfig();
     const versionManager = useVersionManager();
+    const defaultAppShortcutValues = useMemo(() => {
+        const values: Record<string, string> = {};
+        for (const action of SHORTCUT_ACTIONS) {
+            values[APP_SHORTCUT_KEY_PREFIX + action.id] = action.defaultShortcut;
+        }
+        return values;
+    }, []);
 
     // 初始化表单
     const displayForm = useForm({
@@ -124,9 +132,6 @@ const FeatureAssistantConfig: React.FC = () => {
             // 表单自动填写
             form_autofill_enabled: true,
             form_autofill_model: "",
-            // 对话总结（实验功能，默认关闭）
-            conversation_summary_enabled: false,
-            conversation_summary_model: "",
             // 记忆总结（实验功能，默认关闭）
             memory_summary_enabled: false,
             memory_summary_model: "",
@@ -160,6 +165,7 @@ const FeatureAssistantConfig: React.FC = () => {
             shortcut: isMac ? "Option+Space" : "Alt+Space",
             // 兼容旧字段
             modifier_key: isMac ? "option" : "alt",
+            ...defaultAppShortcutValues,
         },
     });
 
@@ -174,6 +180,24 @@ const FeatureAssistantConfig: React.FC = () => {
         defaultValues: {
             dynamic_mcp_loading_enabled: "false",
             mcp_summarizer_model_id: "",
+            assistant_summary_enabled: "false",
+            assistant_summarizer_model_id: "",
+            conversation_summary_enabled: "false",
+            conversation_summary_model: "",
+            butler_experiment_enabled: "false",
+            butler_display_name: "总管家",
+            default_home_window: "ask",
+            butler_model_id: "",
+            butler_feishu_enabled: "false",
+            butler_feishu_app_id: "",
+            butler_feishu_app_secret: "",
+            butler_feishu_base_url: "https://open.feishu.cn",
+            butler_feishu_receive_p2p: "true",
+            butler_feishu_receive_group: "true",
+            butler_feishu_group_require_mention: "true",
+            butler_feishu_only_reply_feishu_originated: "false",
+            butler_feishu_allowed_open_ids: "",
+            butler_feishu_allowed_chat_ids: "",
         },
     });
 
@@ -221,21 +245,14 @@ const FeatureAssistantConfig: React.FC = () => {
                     // ConfigForm's model-select uses value format: `${model.code}%%${model.llm_provider_id}`
                     title_model: modelCode && providerId ? `${modelCode}%%${providerId}` : "",
                     title_summary_length: summaryConfig.get("title_summary_length") || summaryConfig.get("summary_length") || "100",
-                    title_prompt: summaryConfig.get("title_prompt") || summaryConfig.get("prompt") || "",
-                    // 表单自动填写
-                    form_autofill_enabled: summaryConfig.get("form_autofill_enabled") !== "false",
-                    form_autofill_model: summaryConfig.get("form_autofill_model") || "",
-                    // 对话总结
-                    conversation_summary_enabled: summaryConfig.get("conversation_summary_enabled") !== "false",
-                    conversation_summary_model: (() => {
-                        const model = summaryConfig.get("conversation_summary_model") || "";
-                        const providerId = summaryConfig.get("conversation_summary_provider_id") || "";
-                        return model && providerId ? `${model}%%${providerId}` : "";
-                    })(),
-                    // 记忆总结
-                    memory_summary_enabled: summaryConfig.get("memory_summary_enabled") !== "false",
-                    memory_summary_model: (() => {
-                        const model = summaryConfig.get("memory_summary_model") || "";
+                     title_prompt: summaryConfig.get("title_prompt") || summaryConfig.get("prompt") || "",
+                     // 表单自动填写
+                     form_autofill_enabled: summaryConfig.get("form_autofill_enabled") !== "false",
+                     form_autofill_model: summaryConfig.get("form_autofill_model") || "",
+                     // 记忆总结
+                     memory_summary_enabled: summaryConfig.get("memory_summary_enabled") !== "false",
+                     memory_summary_model: (() => {
+                         const model = summaryConfig.get("memory_summary_model") || "";
                         const providerId = summaryConfig.get("memory_summary_provider_id") || "";
                         return model && providerId ? `${model}%%${providerId}` : "";
                     })(),
@@ -247,6 +264,55 @@ const FeatureAssistantConfig: React.FC = () => {
                     experimentalConfig?.get("dynamic_mcp_loading_enabled") || "false",
                 mcp_summarizer_model_id:
                     experimentalConfig?.get("mcp_summarizer_model_id") || "",
+                assistant_summary_enabled:
+                    experimentalConfig?.get("assistant_summary_enabled") || "false",
+                assistant_summarizer_model_id:
+                    experimentalConfig?.get("assistant_summarizer_model_id") || "",
+                conversation_summary_enabled:
+                    experimentalConfig?.get("conversation_summary_enabled")
+                    || summaryConfig?.get("conversation_summary_enabled")
+                    || "false",
+                conversation_summary_model: (() => {
+                    const experimentalModel = experimentalConfig?.get("conversation_summary_model") || "";
+                    const experimentalProviderId =
+                        experimentalConfig?.get("conversation_summary_provider_id") || "";
+                    if (experimentalModel && experimentalProviderId) {
+                        return `${experimentalModel}%%${experimentalProviderId}`;
+                    }
+                    const legacyModel = summaryConfig?.get("conversation_summary_model") || "";
+                    const legacyProviderId =
+                        summaryConfig?.get("conversation_summary_provider_id") || "";
+                    return legacyModel && legacyProviderId
+                        ? `${legacyModel}%%${legacyProviderId}`
+                        : "";
+                })(),
+                butler_experiment_enabled:
+                    experimentalConfig?.get("butler_experiment_enabled") || "false",
+                butler_display_name:
+                    experimentalConfig?.get("butler_display_name") || "总管家",
+                default_home_window:
+                    experimentalConfig?.get("default_home_window") || "ask",
+                butler_model_id:
+                    experimentalConfig?.get("butler_model_id") || "",
+                butler_feishu_enabled:
+                    experimentalConfig?.get("butler_feishu_enabled") || "false",
+                butler_feishu_app_id:
+                    experimentalConfig?.get("butler_feishu_app_id") || "",
+                butler_feishu_app_secret: "",
+                butler_feishu_base_url:
+                    experimentalConfig?.get("butler_feishu_base_url") || "https://open.feishu.cn",
+                butler_feishu_receive_p2p:
+                    experimentalConfig?.get("butler_feishu_receive_p2p") || "true",
+                butler_feishu_receive_group:
+                    experimentalConfig?.get("butler_feishu_receive_group") || "true",
+                butler_feishu_group_require_mention:
+                    experimentalConfig?.get("butler_feishu_group_require_mention") || "true",
+                butler_feishu_only_reply_feishu_originated:
+                    experimentalConfig?.get("butler_feishu_only_reply_feishu_originated") || "false",
+                butler_feishu_allowed_open_ids:
+                    experimentalConfig?.get("butler_feishu_allowed_open_ids") || "",
+                butler_feishu_allowed_chat_ids:
+                    experimentalConfig?.get("butler_feishu_allowed_chat_ids") || "",
             });
 
             // 更新 preview 表单
@@ -283,10 +349,17 @@ const FeatureAssistantConfig: React.FC = () => {
                     if (mk === "cmd" || mk === "command" || mk === "super") return isMac ? "Command+Space" : "Super+Space";
                     return isMac ? "Option+Space" : "Alt+Space";
                 })();
-                shortcutsForm.reset({
+                const nextShortcutValues: Record<string, string> = {
                     shortcut: shortcut || fallbackShortcut,
                     modifier_key,
-                });
+                    ...defaultAppShortcutValues,
+                };
+                for (const action of SHORTCUT_ACTIONS) {
+                    const configKey = APP_SHORTCUT_KEY_PREFIX + action.id;
+                    nextShortcutValues[configKey] =
+                        shortcutsConfig.get(configKey) || action.defaultShortcut;
+                }
+                shortcutsForm.reset(nextShortcutValues);
             }
 
             // 更新 autostart 表单
@@ -309,7 +382,7 @@ const FeatureAssistantConfig: React.FC = () => {
                 tool_error_continue_enabled: toolErrorContinueEnabled,
             });
         }
-    }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm, otherForm, experimentalForm]);
+    }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm, otherForm, experimentalForm, defaultAppShortcutValues]);
 
     // 选择功能
     const handleSelectFeature = useCallback((feature: FeatureItem) => {
@@ -344,7 +417,6 @@ const FeatureAssistantConfig: React.FC = () => {
 
         const titleModel = parseModel(values.title_model as string);
         const formAutofillModel = parseModel(values.form_autofill_model as string);
-        const conversationSummaryModel = parseModel(values.conversation_summary_model as string);
         const memorySummaryModel = parseModel(values.memory_summary_model as string);
 
         // 验证标题模型
@@ -365,10 +437,6 @@ const FeatureAssistantConfig: React.FC = () => {
             form_autofill_enabled: values.form_autofill_enabled.toString(),
             form_autofill_model: values.form_autofill_model,
             form_autofill_provider_id: formAutofillModel.provider_id,
-            // 对话总结
-            conversation_summary_enabled: values.conversation_summary_enabled.toString(),
-            conversation_summary_model: conversationSummaryModel.model_code,
-            conversation_summary_provider_id: conversationSummaryModel.provider_id,
             // 记忆总结
             memory_summary_enabled: values.memory_summary_enabled.toString(),
             memory_summary_model: memorySummaryModel.model_code,
@@ -386,19 +454,56 @@ const FeatureAssistantConfig: React.FC = () => {
     }, [networkForm, saveFeatureConfig]);
 
     const handleSaveShortcutsConfig = useCallback(async () => {
-        const v = shortcutsForm.getValues();
+        const v = shortcutsForm.getValues() as Record<string, string | undefined>;
+        const appShortcutConfig = SHORTCUT_ACTIONS.reduce<Record<string, string>>(
+            (acc, action) => {
+                const configKey = APP_SHORTCUT_KEY_PREFIX + action.id;
+                acc[configKey] = v[configKey] || action.defaultShortcut;
+                return acc;
+            },
+            {}
+        );
         await saveFeatureConfig("shortcuts", {
             // 保存新旧两种字段，后端优先读取 shortcut
             shortcut: v.shortcut,
             modifier_key: v.modifier_key,
+            ...appShortcutConfig,
         });
     }, [shortcutsForm, saveFeatureConfig]);
 
     const handleSaveExperimentalConfig = useCallback(async () => {
         const v = experimentalForm.getValues();
+        const parseModel = (modelValue: string) => {
+            if (!modelValue) return { model_code: "", provider_id: "" };
+            const parts = modelValue.split("%%");
+            return {
+                model_code: parts[0] || "",
+                provider_id: parts[1] || "",
+            };
+        };
+        const conversationSummaryModel = parseModel(String(v.conversation_summary_model || ""));
         await saveFeatureConfig("experimental", {
             dynamic_mcp_loading_enabled: String(v.dynamic_mcp_loading_enabled),
             mcp_summarizer_model_id: String(v.mcp_summarizer_model_id || ""),
+            assistant_summary_enabled: String(v.assistant_summary_enabled),
+            assistant_summarizer_model_id: String(v.assistant_summarizer_model_id || ""),
+            conversation_summary_enabled: String(v.conversation_summary_enabled),
+            conversation_summary_model: conversationSummaryModel.model_code,
+            conversation_summary_provider_id: conversationSummaryModel.provider_id,
+            butler_experiment_enabled: String(v.butler_experiment_enabled),
+            butler_display_name: String(v.butler_display_name || "总管家"),
+            default_home_window: String(v.default_home_window || "ask"),
+            butler_model_id: String(v.butler_model_id || ""),
+            butler_feishu_enabled: String(v.butler_feishu_enabled),
+            butler_feishu_app_id: String(v.butler_feishu_app_id || ""),
+            butler_feishu_base_url: String(v.butler_feishu_base_url || "https://open.feishu.cn"),
+            butler_feishu_receive_p2p: String(v.butler_feishu_receive_p2p),
+            butler_feishu_receive_group: String(v.butler_feishu_receive_group),
+            butler_feishu_group_require_mention: String(v.butler_feishu_group_require_mention),
+            butler_feishu_only_reply_feishu_originated:
+                String(v.butler_feishu_only_reply_feishu_originated),
+            butler_feishu_allowed_open_ids: String(v.butler_feishu_allowed_open_ids || ""),
+            butler_feishu_allowed_chat_ids: String(v.butler_feishu_allowed_chat_ids || ""),
         });
     }, [experimentalForm, saveFeatureConfig]);
 

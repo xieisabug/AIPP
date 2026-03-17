@@ -16,9 +16,14 @@ import { RotateCcw } from "lucide-react";
 interface ShortcutsConfigFormProps {
     form: UseFormReturn<any>;
     onSave: () => Promise<void>;
+    showButlerShortcuts?: boolean;
 }
 
-export const ShortcutsConfigForm: React.FC<ShortcutsConfigFormProps> = ({ form, onSave }) => {
+export const ShortcutsConfigForm: React.FC<ShortcutsConfigFormProps> = ({
+    form,
+    onSave,
+    showButlerShortcuts = true,
+}) => {
     const handleSaveShortcutsConfig = useCallback(async () => {
         try {
             await onSave();
@@ -108,7 +113,11 @@ export const ShortcutsConfigForm: React.FC<ShortcutsConfigFormProps> = ({ form, 
 
     // 按窗口分组
     const actionsByWindow = useMemo(() => {
-        const groups: Record<ShortcutWindow, typeof SHORTCUT_ACTIONS> = { ask: [], chat: [] };
+        const groups: Record<ShortcutWindow, typeof SHORTCUT_ACTIONS> = {
+            ask: [],
+            chat: [],
+            butler: [],
+        };
         for (const action of SHORTCUT_ACTIONS) {
             groups[action.window].push(action);
         }
@@ -179,6 +188,9 @@ export const ShortcutsConfigForm: React.FC<ShortcutsConfigFormProps> = ({ form, 
 
             {/* 应用内快捷键 */}
             {(Object.keys(actionsByWindow) as ShortcutWindow[]).map((windowKey) => {
+                if (windowKey === "butler" && !showButlerShortcuts) {
+                    return null;
+                }
                 const actions = actionsByWindow[windowKey];
                 if (actions.length === 0) return null;
                 return (

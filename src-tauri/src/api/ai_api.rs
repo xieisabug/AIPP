@@ -1,5 +1,7 @@
 use super::assistant_api::AssistantDetail;
-use crate::api::ai::acp::{extract_acp_config, spawn_acp_session_task};
+use crate::api::ai::acp::{
+    apply_network_proxy_to_env_vars, extract_acp_config, spawn_acp_session_task,
+};
 use crate::api::ai::chat::{
     extract_assistant_from_message, handle_non_stream_chat as ai_handle_non_stream_chat,
     handle_stream_chat as ai_handle_stream_chat,
@@ -15,9 +17,10 @@ use crate::api::ai::events::{
     ActivityFocus, ConversationEvent, ConversationRuntimeState, ConversationShineState,
     MessageAddEvent, MessageUpdateEvent,
 };
-use crate::api::ai::title::generate_title;
+use crate::api::ai::title::{generate_title, maybe_generate_title_from_conversation_if_needed};
 use crate::api::ai::types::{AiRequest, AiResponse, McpOverrideConfig};
 use crate::api::assistant_api::{get_assistant, get_assistants};
+use crate::api::butler_api::{is_butler_system_assistant_name, mark_butler_task_cancelled};
 
 use crate::api::genai_client;
 use crate::db::conversation_db::{AttachmentType, Repository};
@@ -25,9 +28,14 @@ use crate::db::conversation_db::{ConversationDatabase, Message, MessageAttachmen
 use crate::db::llm_db::LLMDatabase;
 use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
+use crate::feishu::maybe_schedule_butler_feishu_relay_for_aipp_turn;
 use crate::mcp::execution_api::cancel_mcp_tool_calls_by_conversation;
 use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt};
-use crate::skills::{collect_skills_info_for_assistant, format_skills_prompt};
+use crate::skills::{
+    build_active_skill_attachments, collect_skills_info_for_assistant,
+    compose_user_message_with_active_skills, format_skills_prompt,
+};
+use crate::slash::parse_slash_prompt;
 use crate::state::activity_state::ConversationActivityManager;
 use crate::state::message_token::MessageTokenManager;
 use crate::template_engine::build_template_engine;
@@ -93,6 +101,84 @@ pub fn sanitize_tool_name(name: &str) -> String {
 /// 当原始名称包含大量非法字符（如中文）时，会使用 hash 确保唯一性
 pub fn build_tool_name(server_name: &str, tool_name: &str) -> String {
     format!("{}__{}", sanitize_tool_name(server_name), sanitize_tool_name(tool_name))
+}
+
+fn enforce_butler_mcp_override(
+    assistant_name: &str,
+    override_mcp_config: Option<McpOverrideConfig>,
+) -> Option<McpOverrideConfig> {
+    if is_butler_system_assistant_name(assistant_name) {
+        let mut enforced = override_mcp_config.unwrap_or(McpOverrideConfig {
+            all_tool_auto_run: None,
+            tool_auto_run: None,
+            use_native_toolcall: None,
+            tool_call_timeout: None,
+        });
+        enforced.all_tool_auto_run = Some(true);
+        enforced.use_native_toolcall = Some(true);
+        Some(enforced)
+    } else {
+        override_mcp_config
+    }
+}
+
+#[cfg(test)]
+mod butler_mcp_override_tests {
+    use super::enforce_butler_mcp_override;
+    use crate::api::ai::types::McpOverrideConfig;
+    use crate::api::butler_api::BUTLER_SYSTEM_ASSISTANT_NAME;
+
+    #[test]
+    fn butler_override_enables_native_toolcall_and_auto_run() {
+        let enforced = enforce_butler_mcp_override(BUTLER_SYSTEM_ASSISTANT_NAME, None)
+            .expect("Butler assistant should always receive an override");
+
+        assert_eq!(enforced.all_tool_auto_run, Some(true));
+        assert_eq!(enforced.use_native_toolcall, Some(true));
+    }
+
+    #[test]
+    fn non_butler_override_is_left_unchanged() {
+        let original = McpOverrideConfig {
+            all_tool_auto_run: Some(false),
+            tool_auto_run: None,
+            use_native_toolcall: Some(false),
+            tool_call_timeout: Some(15_000),
+        };
+
+        let preserved = enforce_butler_mcp_override("普通助手", Some(original.clone()))
+            .expect("Existing override should be preserved for non-Butler assistants");
+
+        assert_eq!(preserved.all_tool_auto_run, original.all_tool_auto_run);
+        assert_eq!(preserved.use_native_toolcall, original.use_native_toolcall);
+        assert_eq!(preserved.tool_call_timeout, original.tool_call_timeout);
+    }
+}
+
+fn build_prompt_with_attachment_context(prompt: &str, context: &str) -> String {
+    if context.trim().is_empty() {
+        prompt.to_string()
+    } else if prompt.trim().is_empty() {
+        context.to_string()
+    } else {
+        format!("{}\n{}", prompt, context)
+    }
+}
+
+fn persist_active_skill_attachments(
+    app_handle: &tauri::AppHandle,
+    attachments: Vec<MessageAttachment>,
+) -> Result<Vec<MessageAttachment>, AppError> {
+    if attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
+    let attachment_repo = db.attachment_repo().map_err(AppError::from)?;
+    attachments
+        .into_iter()
+        .map(|attachment| attachment_repo.create(&attachment).map_err(AppError::from))
+        .collect()
 }
 
 /// 工具名称映射表，用于在 sanitized 名称和原始名称之间进行转换
@@ -256,6 +342,8 @@ pub async fn ask_ai(
     override_model_config: Option<HashMap<String, serde_json::Value>>,
     override_prompt: Option<String>,
     override_mcp_config: Option<McpOverrideConfig>,
+    runtime_user_prompt_prefix: Option<String>,
+    relay_origin: Option<String>,
 ) -> Result<AiResponse, AppError> {
     info!("Ask AI start");
     debug!(
@@ -263,6 +351,8 @@ pub async fn ask_ai(
         ?override_model_config,
         ?override_prompt,
         ?override_mcp_config,
+        ?runtime_user_prompt_prefix,
+        ?relay_origin,
         "ask_ai input parameters"
     );
 
@@ -272,13 +362,14 @@ pub async fn ask_ai(
     // 处理 @assistant_name 提取和消息清理
     let (actual_assistant_id, cleaned_prompt) =
         extract_assistant_from_message(&assistants, &request.prompt, request.assistant_id).await?;
+    let slash_parse_result = parse_slash_prompt(&app_handle, &cleaned_prompt).await?;
 
     debug!(?actual_assistant_id, ?cleaned_prompt, "assistant extraction result");
 
     // 创建一个新的请求对象，使用处理后的数据
     let mut processed_request = request.clone();
     processed_request.assistant_id = actual_assistant_id;
-    processed_request.prompt = cleaned_prompt;
+    processed_request.prompt = slash_parse_result.runtime_user_prompt.clone();
 
     let template_engine = build_template_engine(&app_handle)
         .map_err(|e| AppError::UnknownError(format!("Failed to build template engine: {}", e)))?;
@@ -287,8 +378,10 @@ pub async fn ask_ai(
     let selected_text = state.inner().selected_text.lock().await.clone();
     template_context.insert("selected_text".to_string(), selected_text);
     if !processed_request.conversation_id.trim().is_empty() {
-        template_context
-            .insert("conversation_id".to_string(), processed_request.conversation_id.trim().to_string());
+        template_context.insert(
+            "conversation_id".to_string(),
+            processed_request.conversation_id.trim().to_string(),
+        );
     }
 
     let app_handle_clone = app_handle.clone();
@@ -304,6 +397,9 @@ pub async fn ask_ai(
     if assistant_detail.model.is_empty() {
         return Err(AppError::NoModelFound);
     }
+
+    let override_mcp_config =
+        enforce_butler_mcp_override(&assistant_detail.assistant.name, override_mcp_config);
 
     // 收集 MCP 信息
     let mcp_info = collect_mcp_info_for_assistant(
@@ -354,8 +450,24 @@ pub async fn ask_ai(
     };
 
     let _need_generate_title = processed_request.conversation_id.is_empty();
-    let request_prompt_result =
-        template_engine.parse(&processed_request.prompt, &template_context).await;
+    let request_prompt_result = compose_user_message_with_active_skills(
+        &template_engine.parse(&slash_parse_result.runtime_user_prompt, &template_context).await,
+        &slash_parse_result.active_skills,
+    );
+    let runtime_prompt_result = runtime_user_prompt_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|prefix| format!("{}\n\n{}", prefix, request_prompt_result))
+        .unwrap_or_else(|| request_prompt_result.clone());
+    let display_prompt_result = compose_user_message_with_active_skills(
+        &template_engine.parse(&slash_parse_result.display_prompt, &template_context).await,
+        &slash_parse_result.active_skills,
+    );
+    let active_skill_attachments = persist_active_skill_attachments(
+        &app_handle,
+        build_active_skill_attachments(&slash_parse_result.active_skills)?,
+    )?;
 
     let app_handle_clone = app_handle.clone();
     let (
@@ -369,13 +481,31 @@ pub async fn ask_ai(
         &processed_request,
         &assistant_detail,
         assistant_prompt_result,
-        request_prompt_result.clone(),
+        display_prompt_result,
+        runtime_prompt_result.clone(),
         override_prompt.clone(),
+        active_skill_attachments,
     )
     .await?;
 
     // 设置用户消息的活动状态（闪亮边框）
     activity_manager.set_user_pending(&app_handle, conversation_id, user_message_id).await;
+
+    if let Err(error) = maybe_schedule_butler_feishu_relay_for_aipp_turn(
+        &app_handle,
+        conversation_id,
+        user_message_id.saturating_sub(1),
+        relay_origin.as_deref(),
+    )
+    .await
+    {
+        warn!(
+            conversation_id,
+            user_message_id,
+            error = %error,
+            "failed to schedule butler feishu relay scope"
+        );
+    }
 
     message_token_manager.reset_cancel_token(conversation_id).await;
 
@@ -413,7 +543,24 @@ pub async fn ask_ai(
         debug!("ACP: Loaded {} provider configs", provider_configs.len());
 
         // 从 assistant_model_configs 和 llm_provider_configs 提取 ACP 配置
-        let acp_config = extract_acp_config(&assistant_detail.model_configs, &provider_configs)?;
+        let proxy_enabled = provider_configs
+            .iter()
+            .find(|config| config.name == "proxy_enabled")
+            .and_then(|config| config.value.parse::<bool>().ok())
+            .unwrap_or(false);
+        let network_proxy =
+            proxy_enabled.then(|| get_network_proxy_from_config(&_config_feature_map)).flatten();
+        let mut acp_config =
+            extract_acp_config(&assistant_detail.model_configs, &provider_configs)?;
+        if let Some(proxy_url) = network_proxy.as_deref() {
+            let injected = apply_network_proxy_to_env_vars(&mut acp_config.env_vars, proxy_url);
+            info!(
+                proxy_url = %proxy_url,
+                injected,
+                conversation_id,
+                "ACP proxy env vars applied"
+            );
+        }
         info!(
             "ACP config: cli_command={}, working_directory={}, env_vars={}, additional_args={}",
             acp_config.cli_command,
@@ -833,8 +980,17 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let init_message_list =
         build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
+    let override_mcp_config =
+        enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
+
     // 收集 MCP 信息
-    let mcp_info = collect_mcp_info_for_assistant(&app_handle, assistant_id, None, None).await?;
+    let mcp_info = collect_mcp_info_for_assistant(
+        &app_handle,
+        assistant_id,
+        override_mcp_config.as_ref(),
+        None,
+    )
+    .await?;
     let is_native_toolcall = mcp_info.use_native_toolcall;
 
     // Get model details (same as ask_ai)
@@ -989,7 +1145,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             None,                              // no parent_group_id
             model_id,
             model_code.clone(),
-            None,                      // no MCP override config
+            override_mcp_config.clone(), // preserve Butler MCP override config
             tool_name_mapping.clone(), // 工具名称映射表
         )
         .await?;
@@ -1010,7 +1166,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             None,                              // no parent_group_id
             model_id,
             model_code.clone(),
-            None,                      // no MCP override config
+            override_mcp_config,       // preserve Butler MCP override config
             tool_name_mapping.clone(), // 工具名称映射表
         )
         .await?;
@@ -1078,8 +1234,17 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let init_message_list =
         build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
+    let override_mcp_config =
+        enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
+
     // 收集 MCP 信息
-    let mcp_info = collect_mcp_info_for_assistant(&app_handle, assistant_id, None, None).await?;
+    let mcp_info = collect_mcp_info_for_assistant(
+        &app_handle,
+        assistant_id,
+        override_mcp_config.as_ref(),
+        None,
+    )
+    .await?;
     let is_native_toolcall = mcp_info.use_native_toolcall;
 
     // Get model details
@@ -1223,7 +1388,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
             None,
             model_id,
             model_code.clone(),
-            None,
+            override_mcp_config.clone(),
             tool_name_mapping.clone(),
         ))
         .await?;
@@ -1244,7 +1409,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
             None,
             model_id,
             model_code.clone(),
-            None,
+            override_mcp_config,
             tool_name_mapping,
         ))
         .await?;
@@ -1285,7 +1450,9 @@ pub async fn tool_result_continue_ask_ai(
 #[tauri::command]
 pub async fn cancel_ai(
     app_handle: tauri::AppHandle,
+    feature_config_state: State<'_, FeatureConfigState>,
     message_token_manager: State<'_, MessageTokenManager>,
+    window: tauri::Window,
     conversation_id: i64,
 ) -> Result<(), String> {
     message_token_manager.cancel_request(conversation_id).await;
@@ -1314,6 +1481,23 @@ pub async fn cancel_ai(
         activity_manager.clear_focus(&app_handle, conversation_id).await;
     }
 
+    let config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
+    if let Err(err) = maybe_generate_title_from_conversation_if_needed(
+        &app_handle,
+        conversation_id,
+        config_feature_map,
+        window,
+        "manual cancel",
+    )
+    .await
+    {
+        warn!(
+            conversation_id,
+            error = %err,
+            "failed to schedule title generation after manual cancel"
+        );
+    }
+
     // Send cancellation event to both ask and chat_ui windows
     let cancel_event = crate::api::ai::events::ConversationEvent {
         r#type: "conversation_cancel".to_string(),
@@ -1324,6 +1508,10 @@ pub async fn cancel_ai(
     };
 
     send_conversation_event_to_chat_windows(&app_handle, conversation_id, cancel_event);
+
+    if let Err(error) = mark_butler_task_cancelled(&app_handle, conversation_id).await {
+        warn!(conversation_id, error = %error, "failed to finalize butler task on cancel");
+    }
 
     Ok(())
 }
@@ -1703,12 +1891,16 @@ async fn initialize_conversation(
     request: &AiRequest,
     assistant_detail: &AssistantDetail,
     assistant_prompt_result: String,
-    request_prompt_result: String,
+    display_user_prompt: String,
+    runtime_user_prompt: String,
     override_prompt: Option<String>,
+    extra_user_attachments: Vec<MessageAttachment>,
 ) -> Result<(i64, Option<i64>, i64, String, Vec<(String, String, Vec<MessageAttachment>)>), AppError>
 {
     // 返回值：(conversation_id, add_message_id, user_message_id, request_prompt_with_context, init_message_list)
     let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
+
+    let system_prompt = override_prompt.unwrap_or(assistant_prompt_result);
 
     let (
         conversation_id,
@@ -1717,10 +1909,11 @@ async fn initialize_conversation(
         request_prompt_result_with_context,
         init_message_list,
     ) = if request.conversation_id.is_empty() {
-        let message_attachment_list = db
+        let mut message_attachment_list = db
             .attachment_repo()
             .unwrap()
             .list_by_id(&request.attachment_list.clone().unwrap_or(vec![]))?;
+        message_attachment_list.extend(extra_user_attachments.clone());
         // 新对话逻辑
         let text_attachments: Vec<String> = message_attachment_list
             .iter()
@@ -1734,18 +1927,29 @@ async fn initialize_conversation(
             })
             .collect();
         let context = text_attachments.join("\n");
-        let request_prompt_result_with_context = format!("{}\n{}", request_prompt_result, context);
-        let init_message_list = vec![
-            (String::from("system"), override_prompt.unwrap_or(assistant_prompt_result), vec![]),
+        let display_user_prompt_with_context =
+            build_prompt_with_attachment_context(&display_user_prompt, &context);
+        let runtime_user_prompt_with_context =
+            build_prompt_with_attachment_context(&runtime_user_prompt, &context);
+        let db_init_message_list = vec![
+            (String::from("system"), system_prompt.clone(), vec![]),
             (
                 String::from("user"),
-                request_prompt_result_with_context.clone(),
+                display_user_prompt_with_context.clone(),
+                message_attachment_list.clone(),
+            ),
+        ];
+        let runtime_init_message_list = vec![
+            (String::from("system"), system_prompt, vec![]),
+            (
+                String::from("user"),
+                runtime_user_prompt_with_context.clone(),
                 message_attachment_list,
             ),
         ];
         debug!(
             assistant_id = request.assistant_id,
-            ?init_message_list,
+            ?runtime_init_message_list,
             "initialize new conversation"
         );
         let (conversation, created_messages) = init_conversation(
@@ -1753,7 +1957,7 @@ async fn initialize_conversation(
             request.assistant_id,
             assistant_detail.model[0].id,
             assistant_detail.model[0].model_code.clone(),
-            &init_message_list,
+            &db_init_message_list,
         )?;
         // 获取用户消息的 ID（第二条消息是 user 类型）
         let user_msg_id =
@@ -1762,8 +1966,8 @@ async fn initialize_conversation(
             conversation.id,
             None, // 不预先创建空的assistant消息，让流式处理动态创建
             user_msg_id,
-            request_prompt_result_with_context,
-            init_message_list,
+            runtime_user_prompt_with_context,
+            runtime_init_message_list,
         )
     } else {
         // 已存在对话逻辑
@@ -1771,12 +1975,52 @@ async fn initialize_conversation(
         let all_messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id)?;
 
         let message_list = build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
+        let has_system_message =
+            message_list.iter().any(|(message_type, _, _)| message_type == "system");
+
+        if !has_system_message {
+            let system_message_created_time = all_messages
+                .first()
+                .map(|(message, _)| {
+                    message.created_time.clone() - chrono::Duration::milliseconds(1)
+                })
+                .unwrap_or_else(chrono::Utc::now);
+            db.message_repo()
+                .unwrap()
+                .create_without_touch_conversation(&Message {
+                    id: 0,
+                    parent_id: None,
+                    conversation_id,
+                    message_type: "system".to_string(),
+                    content: system_prompt.clone(),
+                    llm_model_id: Some(assistant_detail.model[0].id),
+                    llm_model_name: Some(assistant_detail.model[0].model_code.clone()),
+                    created_time: system_message_created_time,
+                    start_time: None,
+                    finish_time: None,
+                    token_count: 0,
+                    input_token_count: 0,
+                    output_token_count: 0,
+                    generation_group_id: None,
+                    parent_group_id: None,
+                    tool_calls_json: None,
+                    first_token_time: None,
+                    ttft_ms: None,
+                })
+                .map_err(AppError::from)?;
+            debug!(
+                conversation_id,
+                assistant_id = request.assistant_id,
+                "injected missing system prompt into existing conversation"
+            );
+        }
 
         // 获取到消息的附件列表
-        let message_attachment_list = db
+        let mut message_attachment_list = db
             .attachment_repo()
             .unwrap()
             .list_by_id(&request.attachment_list.clone().unwrap_or(vec![]))?;
+        message_attachment_list.extend(extra_user_attachments.clone());
         // 过滤出文本附件
         let text_attachments: Vec<String> = message_attachment_list
             .iter()
@@ -1791,14 +2035,17 @@ async fn initialize_conversation(
             .collect();
         let context = text_attachments.join("\n");
 
-        let request_prompt_result_with_context = format!("{}\n{}", request_prompt_result, context);
+        let display_user_prompt_with_context =
+            build_prompt_with_attachment_context(&display_user_prompt, &context);
+        let runtime_user_prompt_with_context =
+            build_prompt_with_attachment_context(&runtime_user_prompt, &context);
         // 添加用户消息
         let user_message = add_message(
             app_handle,
             None,
             conversation_id,
             "user".to_string(),
-            request_prompt_result_with_context.clone(),
+            display_user_prompt_with_context.clone(),
             Some(assistant_detail.model[0].id),
             Some(assistant_detail.model[0].model_code.clone()),
             None,
@@ -1834,7 +2081,7 @@ async fn initialize_conversation(
             data: serde_json::to_value(MessageUpdateEvent {
                 message_id: user_message.id,
                 message_type: "user".to_string(),
-                content: request_prompt_result_with_context.clone(),
+                content: display_user_prompt_with_context.clone(),
                 is_done: false,
                 token_count: None,
                 input_token_count: None,
@@ -1848,9 +2095,12 @@ async fn initialize_conversation(
             .emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
 
         let mut updated_message_list = message_list;
+        if !has_system_message {
+            updated_message_list.insert(0, (String::from("system"), system_prompt, vec![]));
+        }
         updated_message_list.push((
             String::from("user"),
-            request_prompt_result_with_context.clone(),
+            runtime_user_prompt_with_context.clone(),
             message_attachment_list,
         ));
 
@@ -1858,7 +2108,7 @@ async fn initialize_conversation(
             conversation_id,
             None, // 不预先创建空的assistant消息，让流式处理动态创建
             user_message.id,
-            request_prompt_result_with_context,
+            runtime_user_prompt_with_context,
             updated_message_list,
         )
     };

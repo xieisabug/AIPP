@@ -80,7 +80,8 @@ fn register_single_bang(
         .description
         .clone()
         .unwrap_or_else(|| format!("{} 提供的 bang", manifest.name));
-    let primary_complete = derive_completion(&primary_name, None, contribution, &executor.arguments);
+    let primary_complete =
+        derive_completion(&primary_name, None, contribution, &executor.arguments);
 
     add_runtime_bang(
         engine,
@@ -162,7 +163,8 @@ async fn execute_runtime_bang(
         }
     };
 
-    let conversation_id = context.get("conversation_id").and_then(|value| value.parse::<i64>().ok());
+    let conversation_id =
+        context.get("conversation_id").and_then(|value| value.parse::<i64>().ok());
     let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
     match execute_tool_by_transport(
         app_handle,
@@ -186,33 +188,25 @@ fn resolve_runtime_executor(
     contribution: &PluginBangContribution,
 ) -> Result<RuntimeBangExecutor, String> {
     match &contribution.executor {
-        PluginBangExecutor::BuiltinTool {
-            command,
-            tool_name,
-            arguments,
-        } => Ok(RuntimeBangExecutor {
-            server: build_builtin_server(command.as_deref().unwrap_or(DEFAULT_BUILTIN_COMMAND)),
-            tool_name: tool_name.trim().to_string(),
-            arguments: arguments.clone(),
-        }),
-        PluginBangExecutor::McpTool {
-            server,
-            tool_name,
-            arguments,
-        } => Ok(RuntimeBangExecutor {
+        PluginBangExecutor::BuiltinTool { command, tool_name, arguments } => {
+            Ok(RuntimeBangExecutor {
+                server: build_builtin_server(command.as_deref().unwrap_or(DEFAULT_BUILTIN_COMMAND)),
+                tool_name: tool_name.trim().to_string(),
+                arguments: arguments.clone(),
+            })
+        }
+        PluginBangExecutor::McpTool { server, tool_name, arguments } => Ok(RuntimeBangExecutor {
             server: resolve_mcp_server(app_handle, server)?,
             tool_name: tool_name.trim().to_string(),
             arguments: arguments.clone(),
         }),
-        PluginBangExecutor::PluginMcpTool {
-            server,
-            tool_name,
-            arguments,
-        } => Ok(RuntimeBangExecutor {
-            server: build_plugin_mcp_server(manifest, server)?,
-            tool_name: tool_name.trim().to_string(),
-            arguments: arguments.clone(),
-        }),
+        PluginBangExecutor::PluginMcpTool { server, tool_name, arguments } => {
+            Ok(RuntimeBangExecutor {
+                server: build_plugin_mcp_server(manifest, server)?,
+                tool_name: tool_name.trim().to_string(),
+                arguments: arguments.clone(),
+            })
+        }
     }
 }
 
@@ -249,7 +243,11 @@ fn resolve_mcp_server(app_handle: &tauri::AppHandle, selector: &str) -> Result<M
         .find(|server| {
             server.is_enabled
                 && (server.name.eq_ignore_ascii_case(&normalized)
-                    || server.command.as_deref().unwrap_or_default().eq_ignore_ascii_case(&normalized))
+                    || server
+                        .command
+                        .as_deref()
+                        .unwrap_or_default()
+                        .eq_ignore_ascii_case(&normalized))
         })
         .ok_or_else(|| format!("未找到已启用的 MCP server: {}", selector))
 }
@@ -261,10 +259,14 @@ fn build_plugin_mcp_server(
     let plugin_dir = manifest.plugin_dir.to_string_lossy().to_string();
     let transport_type = definition.transport_type.trim().to_ascii_lowercase();
     if transport_type != "stdio" && transport_type != "http" {
-        return Err(format!("不支持的 pluginMcpTool transport_type: {}", definition.transport_type));
+        return Err(format!(
+            "不支持的 pluginMcpTool transport_type: {}",
+            definition.transport_type
+        ));
     }
 
-    let command = definition.command.as_ref().map(|value| replace_plugin_tokens(value, &plugin_dir));
+    let command =
+        definition.command.as_ref().map(|value| replace_plugin_tokens(value, &plugin_dir));
     let url = definition.url.as_ref().map(|value| replace_plugin_tokens(value, &plugin_dir));
     if transport_type == "stdio" && command.as_deref().unwrap_or_default().trim().is_empty() {
         return Err("pluginMcpTool server.command 不能为空".to_string());
@@ -281,7 +283,9 @@ fn build_plugin_mcp_server(
         Some(
             env_vars
                 .into_iter()
-                .map(|(key, value)| format!("{}={}", key, replace_plugin_tokens(&value, &plugin_dir)))
+                .map(|(key, value)| {
+                    format!("{}={}", key, replace_plugin_tokens(&value, &plugin_dir))
+                })
                 .collect::<Vec<_>>()
                 .join("\n"),
         )
@@ -368,10 +372,9 @@ fn resolve_argument_value(
                 Some(parsed_args.raw.clone())
             }
         }
-        PluginBangArgumentSource::Arg => parsed_args
-            .positional
-            .get(spec.index.unwrap_or(0))
-            .cloned(),
+        PluginBangArgumentSource::Arg => {
+            parsed_args.positional.get(spec.index.unwrap_or(0)).cloned()
+        }
         PluginBangArgumentSource::FirstArg => parsed_args.positional.first().cloned(),
         PluginBangArgumentSource::Named => {
             let key = spec.name.as_deref().unwrap_or(parameter_name).trim().to_ascii_lowercase();
@@ -570,7 +573,10 @@ fn split_top_level_once(input: &str, delimiter: char) -> Option<(String, String)
                 && square_depth == 0
                 && curly_depth == 0 =>
             {
-                return Some((input[..index].to_string(), input[index + ch.len_utf8()..].to_string()));
+                return Some((
+                    input[..index].to_string(),
+                    input[index + ch.len_utf8()..].to_string(),
+                ));
             }
             _ => {}
         }
@@ -590,20 +596,18 @@ fn flatten_tool_output(value: &JsonValue) -> String {
     match value {
         JsonValue::String(text) => text.clone(),
         JsonValue::Array(items) => {
-            let texts = items
-                .iter()
-                .filter_map(extract_text_part)
-                .collect::<Vec<_>>();
+            let texts = items.iter().filter_map(extract_text_part).collect::<Vec<_>>();
             if texts.is_empty() {
                 serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
             } else {
                 texts.join("\n\n")
             }
         }
-        JsonValue::Object(map) => map
-            .get("content")
-            .map(flatten_tool_output)
-            .unwrap_or_else(|| serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())),
+        JsonValue::Object(map) => {
+            map.get("content").map(flatten_tool_output).unwrap_or_else(|| {
+                serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+            })
+        }
         _ => value.to_string(),
     }
 }
@@ -659,10 +663,7 @@ fn derive_completion(
 }
 
 fn parse_bang_type(raw_type: Option<&str>) -> BangType {
-    match raw_type
-        .map(|value| value.trim().to_ascii_lowercase())
-        .as_deref()
-    {
+    match raw_type.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
         Some("image") => BangType::Image,
         Some("audio") => BangType::Audio,
         _ => BangType::Text,
@@ -710,7 +711,8 @@ mod tests {
 
     #[test]
     fn splits_top_level_without_breaking_nested_values() {
-        let parts = split_top_level(r#"path="/tmp,dev", json={"a": [1, 2]}, command=echo $(pwd)"#, ',');
+        let parts =
+            split_top_level(r#"path="/tmp,dev", json={"a": [1, 2]}, command=echo $(pwd)"#, ',');
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[0], r#"path="/tmp,dev""#);
         assert_eq!(parts[1], r#"json={"a": [1, 2]}"#);

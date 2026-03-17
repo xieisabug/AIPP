@@ -254,6 +254,14 @@ body {
     z-index: 1;
 }
 
+.conversation-scroll-transparent-track::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.conversation-scroll-transparent-track::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
 /* 为 ReactMarkdown 中的标题标签提供正确的样式 */
 .prose h1,
 .prose h2,

@@ -1,5 +1,8 @@
 use crate::api::ai::config::{calculate_retry_delay, get_retry_attempts_from_config};
 use crate::api::ai::events::{ConversationEvent, MessageAddEvent, MessageUpdateEvent};
+use crate::api::ai::title::{
+    maybe_generate_title_from_conversation_if_needed, spawn_title_generation,
+};
 use crate::api::ai::types::McpOverrideConfig;
 use crate::api::ai_api::{resolve_tool_name, sanitize_tool_name, ToolNameMapping};
 use crate::db::assistant_db::Assistant;
@@ -1624,6 +1627,24 @@ pub async fn handle_stream_chat(
                     )
                     .await;
 
+                    if need_generate_title {
+                        if let Err(err) = maybe_generate_title_from_conversation_if_needed(
+                            app_handle,
+                            conversation_id,
+                            config_feature_map.clone(),
+                            window.clone(),
+                            "stream failure",
+                        )
+                        .await
+                        {
+                            warn!(
+                                conversation_id,
+                                error = %err,
+                                "failed to schedule title generation after stream failure"
+                            );
+                        }
+                    }
+
                     return Err(anyhow::anyhow!("AI stream failed after retries"));
                 }
 
@@ -1808,6 +1829,7 @@ async fn attempt_stream_chat(
                                     conversation_id,
                                     &app_handle,
                                     false, // allow MCP detection
+                                    mcp_override_config.as_ref(),
                                 )
                                 .await
                                 {
@@ -2204,6 +2226,7 @@ async fn attempt_stream_chat(
                                         conversation_id,
                                         &app_handle,
                                         false, // allow MCP detection
+                                        mcp_override_config.as_ref(),
                                     )
                                     .await
                                     {
@@ -2225,6 +2248,7 @@ async fn attempt_stream_chat(
                                         conversation_id,
                                         &app_handle,
                                         false, // allow MCP detection
+                                        mcp_override_config.as_ref(),
                                     )
                                     .await
                                     {
@@ -2265,26 +2289,15 @@ async fn attempt_stream_chat(
                         // 工具调用事件已在 handle_captured_tool_calls_common 中按需发出
 
                         if need_generate_title && !response_content.is_empty() {
-                            let app_handle_clone = app_handle.clone();
-                            let user_prompt_clone = user_prompt.clone();
-                            let content_clone = response_content.clone();
-                            let config_feature_map_clone = config_feature_map.clone();
-                            let window_clone = window.clone();
-
-                            tokio::spawn(async move {
-                                if let Err(e) = crate::api::ai::title::generate_title(
-                                    &app_handle_clone,
-                                    conversation_id,
-                                    user_prompt_clone,
-                                    content_clone,
-                                    config_feature_map_clone,
-                                    window_clone,
-                                )
-                                .await
-                                {
-                                    warn!(error = %e, "title generation failed");
-                                }
-                            });
+                            spawn_title_generation(
+                                app_handle.clone(),
+                                conversation_id,
+                                user_prompt.clone(),
+                                response_content.clone(),
+                                config_feature_map.clone(),
+                                window.clone(),
+                                "stream success",
+                            );
                         }
 
                         // 获取助手名称并发送完成通知
@@ -2795,26 +2808,15 @@ pub async fn handle_non_stream_chat(
                 .emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
 
             if need_generate_title && !content.is_empty() {
-                let app_handle_clone = app_handle.clone();
-                let user_prompt_clone = user_prompt.clone();
-                let content_clone = content.clone();
-                let config_feature_map_clone = config_feature_map.clone();
-                let window_clone = window.clone();
-
-                tokio::spawn(async move {
-                    if let Err(e) = crate::api::ai::title::generate_title(
-                        &app_handle_clone,
-                        conversation_id,
-                        user_prompt_clone,
-                        content_clone,
-                        config_feature_map_clone,
-                        window_clone,
-                    )
-                    .await
-                    {
-                        warn!(error = %e, "title generation failed (non-stream)");
-                    }
-                });
+                spawn_title_generation(
+                    app_handle.clone(),
+                    conversation_id,
+                    user_prompt.clone(),
+                    content.clone(),
+                    config_feature_map.clone(),
+                    window.clone(),
+                    "non-stream success",
+                );
             }
 
             // 获取助手名称并发送完成通知
@@ -2838,6 +2840,10 @@ pub async fn handle_non_stream_chat(
 
             send_completion_notification(app_handle, &content, assistant_name, &config_feature_map)
                 .await;
+
+            if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+                activity_manager.clear_message_focus_keep_mcp(app_handle, conversation_id).await;
+            }
 
             Ok(())
         }
@@ -2920,6 +2926,24 @@ pub async fn handle_non_stream_chat(
             };
             let _ = window
                 .emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+
+            if need_generate_title {
+                if let Err(err) = maybe_generate_title_from_conversation_if_needed(
+                    app_handle,
+                    conversation_id,
+                    config_feature_map.clone(),
+                    window.clone(),
+                    "non-stream failure",
+                )
+                .await
+                {
+                    warn!(
+                        conversation_id,
+                        error = %err,
+                        "failed to schedule title generation after non-stream failure"
+                    );
+                }
+            }
 
             error!(error = %e, "chat error");
             Err(anyhow::anyhow!("Chat error: {}", e))

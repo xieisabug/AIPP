@@ -337,48 +337,41 @@ fn resolve_plugin_manifest_from_dir(dir_path: &Path, code: &str) -> Option<Resol
     }
 
     let manifest = read_plugin_manifest(&dir_path.join("plugin.json"));
-    let (
-        name,
-        version,
-        description,
-        author,
-        plugin_type,
-        permissions,
-        contributions,
-    ) = if let Some(manifest_data) = manifest {
-        let mut raw_types = manifest_data.plugin_types;
-        raw_types.extend(manifest_data.kinds);
+    let (name, version, description, author, plugin_type, permissions, contributions) =
+        if let Some(manifest_data) = manifest {
+            let mut raw_types = manifest_data.plugin_types;
+            raw_types.extend(manifest_data.kinds);
 
-        let declared_code =
-            manifest_data.code.or(manifest_data.id).unwrap_or_else(|| code.to_string());
-        if declared_code != code {
-            warn!(
-                folder = %code,
-                manifest_code = %declared_code,
-                "Plugin folder code and manifest code mismatch, using folder code"
-            );
-        }
+            let declared_code =
+                manifest_data.code.or(manifest_data.id).unwrap_or_else(|| code.to_string());
+            if declared_code != code {
+                warn!(
+                    folder = %code,
+                    manifest_code = %declared_code,
+                    "Plugin folder code and manifest code mismatch, using folder code"
+                );
+            }
 
-        (
-            manifest_data.name.unwrap_or_else(|| code.to_string()),
-            manifest_data.version.unwrap_or_else(|| "0.0.0".to_string()),
-            manifest_data.description,
-            manifest_data.author,
-            normalize_plugin_types(&raw_types),
-            normalize_permissions(&manifest_data.permissions),
-            manifest_data.contributions,
-        )
-    } else {
-        (
-            code.to_string(),
-            "0.0.0".to_string(),
-            None,
-            None,
-            vec!["assistantType".to_string()],
-            Vec::new(),
-            PluginContributions::default(),
-        )
-    };
+            (
+                manifest_data.name.unwrap_or_else(|| code.to_string()),
+                manifest_data.version.unwrap_or_else(|| "0.0.0".to_string()),
+                manifest_data.description,
+                manifest_data.author,
+                normalize_plugin_types(&raw_types),
+                normalize_permissions(&manifest_data.permissions),
+                manifest_data.contributions,
+            )
+        } else {
+            (
+                code.to_string(),
+                "0.0.0".to_string(),
+                None,
+                None,
+                vec!["assistantType".to_string()],
+                Vec::new(),
+                PluginContributions::default(),
+            )
+        };
 
     Some(ResolvedPluginManifest {
         code: code.to_string(),
@@ -551,13 +544,8 @@ fn plugin_to_item(
         description: plugin.description,
         author: plugin.author,
         plugin_type,
-        permissions: manifest
-            .as_ref()
-            .map(|item| item.permissions.clone())
-            .unwrap_or_default(),
-        contributions: manifest
-            .map(|item| item.contributions)
-            .unwrap_or_default(),
+        permissions: manifest.as_ref().map(|item| item.permissions.clone()).unwrap_or_default(),
+        contributions: manifest.map(|item| item.contributions).unwrap_or_default(),
         is_active: status.map(|value| value.is_active).unwrap_or(true),
         is_installed: plugin_entry_exists(app_handle, &code),
     })

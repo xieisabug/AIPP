@@ -74,6 +74,15 @@ pub struct ConversationResult {
     pub assistant_id: i64,
     pub assistant_name: String,
     pub created_time: DateTime<Utc>,
+    pub updated_time: DateTime<Utc>,
+    pub conversation_kind: String,
+    pub parent_butler_conversation_id: Option<i64>,
+    pub source_task_title: Option<String>,
+    pub is_hidden_from_normal_chat_list: bool,
+    pub channel_source: Option<String>,
+    pub butler_task_status: Option<String>,
+    pub butler_task_summary: Option<String>,
+    pub butler_task_finalized_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -87,6 +96,28 @@ pub struct CreateConversationResponse {
     pub conversation_id: i64,
     pub user_message_id: Option<i64>,
     pub system_message_id: Option<i64>,
+}
+
+fn to_conversation_result(
+    conversation: &crate::db::conversation_db::Conversation,
+    assistant_name: String,
+) -> ConversationResult {
+    ConversationResult {
+        id: conversation.id,
+        name: conversation.name.clone(),
+        assistant_id: conversation.assistant_id.unwrap_or(0),
+        assistant_name,
+        created_time: conversation.created_time,
+        updated_time: conversation.updated_time,
+        conversation_kind: conversation.conversation_kind.clone(),
+        parent_butler_conversation_id: conversation.parent_butler_conversation_id,
+        source_task_title: conversation.source_task_title.clone(),
+        is_hidden_from_normal_chat_list: conversation.is_hidden_from_normal_chat_list,
+        channel_source: conversation.channel_source.clone(),
+        butler_task_status: conversation.butler_task_status.clone(),
+        butler_task_summary: conversation.butler_task_summary.clone(),
+        butler_task_finalized_at: conversation.butler_task_finalized_at,
+    }
 }
 
 #[tauri::command]
@@ -197,13 +228,10 @@ pub async fn list_conversations(
     if let Ok(conversations) = &conversations {
         for conversation in conversations {
             let assistant_name = assistant_name_cache.get(&conversation.assistant_id.unwrap());
-            conversation_results.push(ConversationResult {
-                id: conversation.id,
-                name: conversation.name.clone(),
-                assistant_id: conversation.assistant_id.unwrap_or(0),
-                assistant_name: assistant_name.unwrap_or(&"未知".to_string()).clone(),
-                created_time: conversation.created_time,
-            });
+            conversation_results.push(to_conversation_result(
+                conversation,
+                assistant_name.unwrap_or(&"未知".to_string()).clone(),
+            ));
         }
     }
     Ok(conversation_results)
@@ -299,13 +327,7 @@ pub async fn get_conversation_with_messages(
     println!("[PERF] get_conversation_with_messages 总耗时: {:?}", total_duration);
 
     Ok(ConversationWithMessages {
-        conversation: ConversationResult {
-            id: conversation.id,
-            name: conversation.name,
-            assistant_id: conversation.assistant_id.unwrap_or(0),
-            assistant_name,
-            created_time: conversation.created_time,
-        },
+        conversation: to_conversation_result(&conversation, assistant_name),
         messages: final_messages,
     })
 }
@@ -424,6 +446,15 @@ pub async fn fork_conversation(
         name: new_conversation_name,
         assistant_id: original_conversation.assistant_id,
         created_time: chrono::Utc::now(),
+        updated_time: chrono::Utc::now(),
+        conversation_kind: "normal".to_string(),
+        parent_butler_conversation_id: None,
+        source_task_title: None,
+        is_hidden_from_normal_chat_list: false,
+        channel_source: original_conversation.channel_source.clone(),
+        butler_task_status: None,
+        butler_task_summary: None,
+        butler_task_finalized_at: None,
     };
 
     let created_conversation =
@@ -560,22 +591,28 @@ pub async fn search_conversations(
                 c.name as hit_text, 'title' as hit_type \
              FROM conversation c \
              WHERE c.name LIKE ?1 COLLATE NOCASE \
+                AND COALESCE(c.is_hidden_from_normal_chat_list, 0) = 0 \
+                AND COALESCE(c.conversation_kind, 'normal') NOT IN ('butler_main', 'butler_task') \
              UNION ALL \
              SELECT c.id, c.name, c.assistant_id, c.created_time, \
-                NULL as message_id, NULL as message_type, cs.created_time as hit_time, \
-                cs.summary as hit_text, 'summary' as hit_type \
-             FROM conversation_summary cs \
-             JOIN conversation c ON cs.conversation_id = c.id \
-             WHERE cs.summary LIKE ?1 COLLATE NOCASE \
+                 NULL as message_id, NULL as message_type, cs.created_time as hit_time, \
+                 cs.summary as hit_text, 'summary' as hit_type \
+               FROM conversation_summary cs \
+               JOIN conversation c ON cs.conversation_id = c.id \
+               WHERE cs.summary LIKE ?1 COLLATE NOCASE \
+                 AND COALESCE(c.is_hidden_from_normal_chat_list, 0) = 0 \
+                 AND COALESCE(c.conversation_kind, 'normal') NOT IN ('butler_main', 'butler_task') \
              UNION ALL \
              SELECT c.id, c.name, c.assistant_id, c.created_time, \
-                m.id as message_id, m.message_type, m.created_time as hit_time, \
-                m.content as hit_text, 'message' as hit_type \
-             FROM message m \
-             JOIN conversation c ON m.conversation_id = c.id \
-             WHERE m.content LIKE ?1 COLLATE NOCASE \
-             ORDER BY hit_time DESC \
-             LIMIT ?2 OFFSET ?3",
+                  m.id as message_id, m.message_type, m.created_time as hit_time, \
+                  m.content as hit_text, 'message' as hit_type \
+               FROM message m \
+               JOIN conversation c ON m.conversation_id = c.id \
+               WHERE m.content LIKE ?1 COLLATE NOCASE \
+                 AND COALESCE(c.is_hidden_from_normal_chat_list, 0) = 0 \
+                 AND COALESCE(c.conversation_kind, 'normal') NOT IN ('butler_main', 'butler_task') \
+               ORDER BY hit_time DESC \
+               LIMIT ?2 OFFSET ?3",
         )
         .map_err(|e| e.to_string())?;
 

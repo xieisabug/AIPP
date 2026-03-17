@@ -4,16 +4,25 @@ mod api;
 mod artifacts;
 mod db;
 mod errors;
+mod external_channels;
+mod feishu;
 mod mcp;
 mod plugin;
 mod scheduler;
 mod skills;
+mod slash;
 mod state;
 mod template_engine;
 mod utils;
 mod window;
 
+pub use crate::feishu::{
+    debug_build_feishu_interactive_payload, debug_build_feishu_markdown_card,
+    debug_describe_feishu_markdown_blocks,
+};
+
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::OnceLock;
 
 use crate::api::ai::acp::AcpPermissionState;
 use crate::api::ai_api::{
@@ -21,13 +30,19 @@ use crate::api::ai_api::{
     regenerate_ai, regenerate_conversation_title, tool_result_continue_ask_ai,
 };
 use crate::api::assistant_api::{
-    add_assistant, bulk_update_assistant_mcp_tools, copy_assistant, delete_assistant,
-    export_assistant, get_acp_working_directory, get_assistant, get_assistant_field_value,
-    get_assistant_mcp_servers_with_tools, get_assistants, import_assistant, save_assistant,
-    update_assistant_mcp_config, update_assistant_mcp_tool_config,
+    add_assistant, add_assistant_workspace, bulk_update_assistant_mcp_tools, copy_assistant,
+    delete_assistant, export_assistant, get_acp_launch_diagnostics, get_acp_working_directory,
+    get_assistant, get_assistant_field_value, get_assistant_mcp_servers_with_tools,
+    get_assistant_workspaces, get_assistants, import_assistant, remove_assistant_workspace,
+    save_assistant, update_assistant_mcp_config, update_assistant_mcp_tool_config,
     update_assistant_model_config_value,
 };
+use crate::api::assistant_summary_api::summarize_all_assistant_summaries;
 use crate::api::attachment_api::{add_attachment, open_attachment_with_default_app};
+use crate::api::butler_api::{
+    get_butler_task_detail, list_butler_tasks, load_butler_main_conversation,
+    reset_butler_main_conversation, spawn_butler_task_conversation,
+};
 use crate::api::conversation_api::{
     create_conversation_with_messages, create_message, delete_conversation, fork_conversation,
     get_conversation_with_messages, list_conversations, search_conversations,
@@ -61,14 +76,21 @@ use crate::api::scheduled_task_api::{
 use crate::api::skill_api::{
     bulk_update_assistant_skills, cleanup_orphaned_skill_configs, delete_skill,
     fetch_official_skills, get_assistant_skills, get_enabled_assistant_skills, get_skill,
-    get_skill_content, get_skill_sources, get_skills_directory, install_official_skill,
-    open_skill_parent_folder, open_skills_folder, open_source_url, remove_assistant_skill,
-    scan_skills, skill_exists, toggle_assistant_skill, update_assistant_skill_config,
+    get_skill_content, get_skill_sources, get_skills_directory, get_skills_for_slash_completion,
+    inspect_skill_archive_source, inspect_skill_install_recipe, inspect_skill_install_recipe_file,
+    install_official_skill, install_skill_archive_source, install_skill_install_recipe,
+    install_skill_install_recipe_file, load_skill_install_recipe_file, open_skill_parent_folder,
+    open_skills_folder, open_source_url, remove_assistant_skill, scan_skills, skill_exists,
+    toggle_assistant_skill, update_assistant_skill_config,
 };
 use crate::api::system_api::{
-    copy_image_to_clipboard, get_all_feature_config, get_autostart_state, get_bang_list,
-    get_selected_text_api, open_data_folder, open_image, resume_global_shortcut,
+    clear_butler_feishu_secret, copy_image_to_clipboard, debug_resend_message_to_feishu,
+    get_all_feature_config, get_autostart_state, get_bang_list, get_butler_feishu_runtime_status,
+    get_experimental_summary_task_status, get_selected_text_api, open_data_folder, open_image,
+    refresh_butler_feishu_runtime_command, resume_global_shortcut, save_butler_feishu_secret,
     save_feature_config, set_autostart, set_shortcut_recording, suspend_global_shortcut,
+    trigger_assistant_summary_generation, trigger_conversation_summary_generation,
+    trigger_mcp_summary_generation,
 };
 use crate::api::todo_api::get_todos;
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
@@ -89,10 +111,10 @@ use crate::artifacts::collection_api::{
     update_artifact_collection,
 };
 use crate::artifacts::env_installer::{
-    check_acp_library, check_bun_update, check_bun_update_with_proxy, check_bun_version,
-    check_uv_update, check_uv_update_with_proxy, check_uv_version, get_python_info,
-    install_acp_library, install_bun, install_python3, install_uv, update_bun,
-    update_bun_with_proxy, update_uv, update_uv_with_proxy,
+    check_acp_library, check_acp_library_update, check_bun_update, check_bun_update_with_proxy,
+    check_bun_version, check_uv_update, check_uv_update_with_proxy, check_uv_version,
+    get_python_info, install_acp_library, install_bun, install_python3, install_uv,
+    update_acp_library, update_bun, update_bun_with_proxy, update_uv, update_uv_with_proxy,
 };
 use crate::artifacts::preview_router::{
     confirm_environment_install, preview_react_component, restore_artifact_preview,
@@ -115,6 +137,7 @@ use crate::db::llm_db::LLMDatabase;
 use crate::db::mcp_db::MCPDatabase;
 use crate::db::scheduled_task_db::ScheduledTaskDatabase;
 use crate::db::system_db::SystemDatabase;
+use crate::feishu::FeishuButlerState;
 use crate::mcp::builtin_mcp::{
     add_or_update_aipp_builtin_server, execute_aipp_builtin_tool,
     handle_preview_file_relay_request, init_builtin_mcp_servers, list_aipp_builtin_templates,
@@ -157,11 +180,14 @@ use crate::mcp::registry_api::{
 };
 use crate::mcp::summarizer::summarize_all_mcp_catalogs;
 use crate::window::{
-    awaken_aipp, close_sidebar_window, create_ask_window, create_chat_ui_window_hidden,
-    create_config_window_hidden, create_schedule_window_hidden, ensure_hidden_search_window,
-    handle_open_ask_window, open_artifact_collections_window, open_artifact_preview_window,
-    open_chat_ui_window, open_chat_ui_window_inner, open_config_window, open_config_window_inner,
-    open_plugin_window, open_schedule_window, open_sidebar_window,
+    close_sidebar_window, create_ask_window, create_ask_window_hidden,
+    create_butler_experiment_window, create_butler_experiment_window_hidden,
+    create_chat_ui_window_hidden, create_config_window_hidden, create_schedule_window_hidden,
+    ensure_hidden_search_window, handle_open_ask_window, is_butler_experiment_enabled,
+    open_artifact_collections_window, open_artifact_preview_window, open_butler_experiment_window,
+    open_butler_experiment_window_inner, open_chat_ui_window, open_chat_ui_window_inner,
+    open_config_window, open_config_window_inner, open_default_home_window, open_plugin_window,
+    open_schedule_window, open_sidebar_window, preferred_home_window_label,
 };
 use db::conversation_db::ConversationDatabase;
 use db::database_upgrade;
@@ -372,6 +398,7 @@ pub fn run() {
         .with_thread_ids(false)
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
+    ensure_rustls_crypto_provider();
     let app = tauri::Builder::default()
         .register_uri_scheme_protocol(PREVIEW_FILE_RELAY_SCHEME, handle_preview_file_relay_request)
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -392,11 +419,20 @@ pub fn run() {
             {
                 let ask_item = MenuItemBuilder::with_id("ask", "Ask").build(app)?;
                 let chat_item = MenuItemBuilder::with_id("chat", "Chat").build(app)?;
+                let butler_item =
+                    MenuItemBuilder::with_id("butler", "总管家（实验）").build(app)?;
                 let config_item = MenuItemBuilder::with_id("config", "配置").build(app)?;
                 let separator = PredefinedMenuItem::separator(app)?;
                 let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;
                 let tray_menu = MenuBuilder::new(app)
-                    .items(&[&ask_item, &chat_item, &config_item, &separator, &quit_item])
+                    .items(&[
+                        &ask_item,
+                        &chat_item,
+                        &butler_item,
+                        &config_item,
+                        &separator,
+                        &quit_item,
+                    ])
                     .build()?;
 
                 let tray = app.tray_by_id("aipp").unwrap();
@@ -411,13 +447,7 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        if let Some(chat_window) =
-                            app_handle_for_click.get_webview_window("chat_ui")
-                        {
-                            open_chat_ui_window_inner(&app_handle_for_click, &chat_window);
-                        } else {
-                            crate::window::create_chat_ui_window(&app_handle_for_click);
-                        }
+                        open_default_home_window(&app_handle_for_click);
                     }
                 });
 
@@ -431,6 +461,13 @@ pub fn run() {
                             open_chat_ui_window_inner(app, &chat_window);
                         } else {
                             crate::window::create_chat_ui_window(app);
+                        }
+                    }
+                    "butler" => {
+                        if let Some(butler_window) = app.get_webview_window("butler_experiment") {
+                            open_butler_experiment_window_inner(app, &butler_window);
+                        } else {
+                            create_butler_experiment_window(app);
                         }
                     }
                     "config" => {
@@ -569,9 +606,34 @@ pub fn run() {
                     create_chat_ui_window_hidden(&app_handle);
                     create_config_window_hidden(&app_handle);
                     create_schedule_window_hidden(&app_handle);
-                    create_ask_window(&app_handle);
+                    if is_butler_experiment_enabled(&app_handle) {
+                        create_butler_experiment_window_hidden(&app_handle);
+                    }
+                    match preferred_home_window_label(&app_handle).as_str() {
+                        "chat_ui" => {
+                            create_ask_window_hidden(&app_handle);
+                            if let Some(chat_window) = app_handle.get_webview_window("chat_ui") {
+                                open_chat_ui_window_inner(&app_handle, &chat_window);
+                            }
+                        }
+                        "butler_experiment" => {
+                            create_ask_window_hidden(&app_handle);
+                            if let Some(butler_window) =
+                                app_handle.get_webview_window("butler_experiment")
+                            {
+                                open_butler_experiment_window_inner(&app_handle, &butler_window);
+                            } else {
+                                create_butler_experiment_window(&app_handle);
+                            }
+                        }
+                        _ => {
+                            create_ask_window(&app_handle);
+                        }
+                    }
                 }
             }
+
+            crate::feishu::refresh_runtime_async(&app_handle);
 
             Ok(())
         })
@@ -582,11 +644,13 @@ pub fn run() {
         .manage(AcpSessionState::new())
         .manage(MessageTokenManager::new())
         .manage(ConversationActivityManager::new())
+        .manage(crate::slash::SlashRegistryCacheState::default())
         .manage(OperationState::new())
         .manage(AcpPermissionState::new())
         .manage(TodoState::new())
         .manage(InteractionState::new())
-        .manage(PreviewFileRelayState::new());
+        .manage(PreviewFileRelayState::new())
+        .manage(FeishuButlerState::default());
     #[cfg(desktop)]
     let app = app.manage(CopilotLspState::default());
     let app = app
@@ -603,6 +667,7 @@ pub fn run() {
             get_selected,
             open_config_window,
             open_chat_ui_window,
+            open_butler_experiment_window,
             open_plugin_window,
             open_schedule_window,
             open_artifact_preview_window,
@@ -612,6 +677,15 @@ pub fn run() {
             get_config,
             get_all_feature_config,
             save_feature_config,
+            save_butler_feishu_secret,
+            clear_butler_feishu_secret,
+            get_butler_feishu_runtime_status,
+            refresh_butler_feishu_runtime_command,
+            get_experimental_summary_task_status,
+            trigger_mcp_summary_generation,
+            trigger_assistant_summary_generation,
+            trigger_conversation_summary_generation,
+            debug_resend_message_to_feishu,
             open_data_folder,
             get_llm_providers,
             get_filtered_providers,
@@ -642,8 +716,16 @@ pub fn run() {
             copy_assistant,
             export_assistant,
             import_assistant,
+            get_assistant_workspaces,
+            add_assistant_workspace,
+            remove_assistant_workspace,
             list_conversations,
             search_conversations,
+            load_butler_main_conversation,
+            list_butler_tasks,
+            get_butler_task_detail,
+            reset_butler_main_conversation,
+            spawn_butler_task_conversation,
             get_conversation_with_messages,
             create_conversation_with_messages,
             delete_conversation,
@@ -698,7 +780,10 @@ pub fn run() {
             get_python_info,
             install_python3,
             check_acp_library,
+            check_acp_library_update,
             install_acp_library,
+            update_acp_library,
+            get_acp_launch_diagnostics,
             preview_react_component,
             create_react_preview,
             create_react_preview_for_artifact,
@@ -750,6 +835,7 @@ pub fn run() {
             update_assistant_mcp_tool_config,
             bulk_update_assistant_mcp_tools,
             update_assistant_model_config_value,
+            summarize_all_assistant_summaries,
             start_github_copilot_device_flow,
             poll_github_copilot_token,
             // Copilot LSP commands
@@ -782,6 +868,7 @@ pub fn run() {
             scan_skills,
             get_skill_sources,
             get_skill_content,
+            get_skills_for_slash_completion,
             get_skill,
             skill_exists,
             get_assistant_skills,
@@ -795,6 +882,13 @@ pub fn run() {
             open_skill_parent_folder,
             get_skills_directory,
             fetch_official_skills,
+            load_skill_install_recipe_file,
+            inspect_skill_archive_source,
+            inspect_skill_install_recipe,
+            inspect_skill_install_recipe_file,
+            install_skill_install_recipe,
+            install_skill_install_recipe_file,
+            install_skill_archive_source,
             install_official_skill,
             open_source_url,
             delete_skill,
@@ -877,7 +971,7 @@ pub fn run() {
         }
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => {
-            awaken_aipp(app_handle);
+            crate::window::awaken_aipp(app_handle);
         }
         _ => {}
     });
@@ -1210,3 +1304,15 @@ const EXIT_STATE_REQUESTED: u8 = 1;
 const EXIT_STATE_CLEANING: u8 = 2;
 const EXIT_STATE_READY: u8 = 3;
 static EXIT_STATE: AtomicU8 = AtomicU8::new(EXIT_STATE_IDLE);
+static RUSTLS_CRYPTO_PROVIDER_READY: OnceLock<()> = OnceLock::new();
+
+pub(crate) fn ensure_rustls_crypto_provider() {
+    RUSTLS_CRYPTO_PROVIDER_READY.get_or_init(|| {
+        if let Err(error) = rustls::crypto::aws_lc_rs::default_provider().install_default() {
+            debug!(
+                "rustls crypto provider already initialized, keep existing provider: {:?}",
+                error
+            );
+        }
+    });
+}

@@ -3,7 +3,7 @@ use crate::api::ai::config::{
     get_retry_attempts_from_config,
 };
 use crate::api::genai_client;
-use crate::db::conversation_db::{ConversationDatabase, ConversationSummary, Message};
+use crate::db::conversation_db::{ConversationDatabase, ConversationSummary, Message, Repository};
 use crate::db::llm_db::LLMDatabase;
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
@@ -11,6 +11,20 @@ use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
+
+fn get_conversation_summary_config<'a>(
+    config_feature_map: &'a HashMap<String, HashMap<String, FeatureConfig>>,
+) -> Option<&'a HashMap<String, FeatureConfig>> {
+    if let Some(experimental) = config_feature_map.get("experimental") {
+        if experimental.contains_key("conversation_summary_enabled")
+            || experimental.contains_key("conversation_summary_model")
+            || experimental.contains_key("conversation_summary_provider_id")
+        {
+            return Some(experimental);
+        }
+    }
+    config_feature_map.get("conversation_summary")
+}
 
 /// Get latest branch messages (keep the latest branch flow intact).
 ///
@@ -92,7 +106,7 @@ pub async fn generate_conversation_summary(
     config_feature_map: HashMap<String, HashMap<String, FeatureConfig>>,
 ) -> Result<(), AppError> {
     // 0) 检查对话总结功能是否启用
-    let feature_config_opt = config_feature_map.get("conversation_summary");
+    let feature_config_opt = get_conversation_summary_config(&config_feature_map);
     let summary_enabled = feature_config_opt
         .and_then(|fc| fc.get("conversation_summary_enabled"))
         .map(|c| c.value.clone())
@@ -103,8 +117,23 @@ pub async fn generate_conversation_summary(
         return Ok(());
     }
 
-    // 检查是否已经总结过
+    // Butler 主会话不参与对话总结；派发任务会话允许总结
     let conversation_db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
+    let conversation_repo = conversation_db.conversation_repo().map_err(AppError::from)?;
+    let Some(conversation) = conversation_repo.read(conversation_id).map_err(AppError::from)?
+    else {
+        return Ok(());
+    };
+    if conversation.conversation_kind == "butler_main" {
+        debug!(
+            conversation_id,
+            conversation_kind = %conversation.conversation_kind,
+            "Butler 对话跳过总结生成"
+        );
+        return Ok(());
+    }
+
+    // 检查是否已经总结过
     if let Ok(repo) = conversation_db.conversation_summary_repo() {
         if repo.exists(conversation_id)? {
             debug!(conversation_id, "对话已经总结过，跳过");

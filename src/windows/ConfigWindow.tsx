@@ -66,16 +66,16 @@ function ConfigWindow() {
             iconSelected: <Sparkles className="w-full h-full text-foreground" />,
         },
         {
-            id: "feature-assistant-config",
-            name: "程序功能",
-            icon: <Settings className="w-full h-full text-muted-foreground" />,
-            iconSelected: <Settings className="w-full h-full text-foreground" />,
-        },
-        {
             id: "plugins-config",
             name: "插件",
             icon: <Puzzle className="w-full h-full text-muted-foreground" />,
             iconSelected: <Puzzle className="w-full h-full text-foreground" />,
+        },
+        {
+            id: "feature-assistant-config",
+            name: "程序功能",
+            icon: <Settings className="w-full h-full text-muted-foreground" />,
+            iconSelected: <Settings className="w-full h-full text-foreground" />,
         },
     ];
 

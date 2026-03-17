@@ -1,4 +1,5 @@
 use crate::artifacts::artifacts_db::ArtifactCollection;
+use crate::db::system_db::SystemDatabase;
 use serde::{Deserialize, Serialize};
 use tauri::webview::DownloadEvent;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -106,6 +107,53 @@ fn get_window_size_and_position(
 
     // 若所有方案均失败，交给窗口构建器自行居中
     (window_size, None)
+}
+
+fn read_experimental_config_value(app_handle: &AppHandle, key: &str) -> Option<String> {
+    SystemDatabase::new(app_handle)
+        .ok()?
+        .get_feature_config("experimental", key)
+        .ok()
+        .flatten()
+        .map(|config| config.value)
+}
+
+fn parse_config_bool(value: Option<String>) -> bool {
+    matches!(value.as_deref(), Some("true") | Some("1") | Some("yes") | Some("on"))
+}
+
+pub(crate) fn is_butler_experiment_enabled(app_handle: &AppHandle) -> bool {
+    parse_config_bool(read_experimental_config_value(app_handle, "butler_experiment_enabled"))
+}
+
+pub(crate) fn preferred_home_window_label(app_handle: &AppHandle) -> String {
+    match read_experimental_config_value(app_handle, "default_home_window").as_deref() {
+        Some("chat_ui") => "chat_ui".to_string(),
+        Some("butler_experiment") if is_butler_experiment_enabled(app_handle) => {
+            "butler_experiment".to_string()
+        }
+        _ => "ask".to_string(),
+    }
+}
+
+pub(crate) fn open_default_home_window(app_handle: &AppHandle) {
+    match preferred_home_window_label(app_handle).as_str() {
+        "chat_ui" => {
+            if let Some(chat_window) = app_handle.get_webview_window("chat_ui") {
+                open_chat_ui_window_inner(app_handle, &chat_window);
+            } else {
+                create_chat_ui_window(app_handle);
+            }
+        }
+        "butler_experiment" => {
+            if let Some(butler_window) = app_handle.get_webview_window("butler_experiment") {
+                open_butler_experiment_window_inner(app_handle, &butler_window);
+            } else {
+                create_butler_experiment_window(app_handle);
+            }
+        }
+        _ => handle_open_ask_window(app_handle),
+    }
 }
 
 pub fn create_ask_window(app: &AppHandle) {
@@ -321,6 +369,73 @@ fn create_chat_ui_window_with_visibility(app: &AppHandle, visible: bool) {
     }
 }
 
+pub fn create_butler_experiment_window(app: &AppHandle) {
+    create_butler_experiment_window_with_visibility(app, true);
+}
+
+pub fn create_butler_experiment_window_hidden(app: &AppHandle) {
+    create_butler_experiment_window_with_visibility(app, false);
+}
+
+fn create_butler_experiment_window_with_visibility(app: &AppHandle, visible: bool) {
+    #[cfg(desktop)]
+    {
+        let (window_size, window_position) =
+            get_window_size_and_position(app, 1450.0, 920.0, &["ask", "chat_ui"]);
+
+        let mut window_builder = WebviewWindowBuilder::new(
+            app,
+            "butler_experiment",
+            WebviewUrl::App("index.html".into()),
+        )
+        .title("总管家（实验） - Aipp")
+        .inner_size(window_size.width, window_size.height)
+        .fullscreen(false)
+        .resizable(true)
+        .visible(visible)
+        .decorations(true);
+
+        if let Some(position) = window_position {
+            window_builder = window_builder.position(position.x, position.y);
+        } else {
+            window_builder = window_builder.center();
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        let window_builder = window_builder.transparent(false);
+
+        match window_builder.build() {
+            Ok(window) => {
+                info!(visible=%visible, "Butler experiment window built");
+                let window_clone = window.clone();
+                let app_handle = app.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        window_clone.hide().unwrap();
+                        let _ = app_handle.emit_to("butler_experiment", "butler-window-hidden", ());
+                    }
+                });
+                if visible {
+                    let _ = window.maximize();
+                }
+            }
+            Err(e) => error!(error=%e, "Failed to build butler experiment window"),
+        }
+    }
+    #[cfg(mobile)]
+    {
+        let window_builder = WebviewWindowBuilder::new(
+            app,
+            "butler_experiment",
+            WebviewUrl::App("index.html".into()),
+        );
+        if let Err(e) = window_builder.build() {
+            error!(error=%e, "Failed to build butler experiment window");
+        }
+    }
+}
+
 pub fn create_plugin_window(app: &AppHandle) {
     #[cfg(desktop)]
     {
@@ -510,6 +625,35 @@ pub async fn open_chat_ui_window(app_handle: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn open_butler_experiment_window(app_handle: AppHandle) -> Result<(), String> {
+    if let Some(window) = app_handle.get_webview_window("butler_experiment") {
+        debug!("Showing butler_experiment window");
+        #[cfg(desktop)]
+        {
+            if window.is_minimized().unwrap_or(false) {
+                window.unminimize().unwrap();
+            }
+            if !window.is_visible().unwrap_or(false) {
+                let _ = window.maximize();
+            }
+            window.show().unwrap();
+            window.set_focus().unwrap();
+            if let Some(ask_window) = app_handle.get_webview_window("ask") {
+                let _ = ask_window.hide();
+            }
+        }
+    } else {
+        debug!("Creating butler_experiment window (fallback)");
+        create_butler_experiment_window(&app_handle);
+        #[cfg(desktop)]
+        if let Some(ask_window) = app_handle.get_webview_window("ask") {
+            let _ = ask_window.hide();
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn open_plugin_window(app_handle: AppHandle) -> Result<(), String> {
     if app_handle.get_webview_window("plugin").is_none() {
         debug!("Creating window");
@@ -571,8 +715,21 @@ pub fn handle_open_ask_window(app_handle: &AppHandle) {
 pub fn awaken_aipp(app_handle: &AppHandle) {
     use chrono::Local;
 
+    let butler_window = app_handle.get_webview_window("butler_experiment");
     let chat_ui_window = app_handle.get_webview_window("chat_ui");
     let ask_window = app_handle.get_webview_window("ask");
+
+    if let Some(window) = &butler_window {
+        #[cfg(desktop)]
+        if window.is_visible().unwrap_or(false) {
+            debug!(ts=%Local::now().to_string(), "Focusing visible butler_experiment window");
+            if window.is_minimized().unwrap_or(false) {
+                window.unminimize().unwrap();
+            }
+            window.set_focus().unwrap();
+            return;
+        }
+    }
 
     // 优先检查 chat_ui 窗口是否可见
     if let Some(window) = &chat_ui_window {
@@ -600,30 +757,9 @@ pub fn awaken_aipp(app_handle: &AppHandle) {
         }
     }
 
-    // 都不可见时，显示/创建 chat_ui 窗口
-    if let Some(window) = chat_ui_window {
-        debug!(ts=%Local::now().to_string(), "Showing hidden chat_ui window");
-        #[cfg(desktop)]
-        {
-            if window.is_minimized().unwrap_or(false) {
-                let _ = window.unminimize();
-            }
-            // 首次显示时最大化
-            if !window.is_visible().unwrap_or(false) {
-                let _ = window.maximize();
-            }
-            let _ = window.show();
-            let _ = window.set_focus();
-            // 显示聊天窗口时隐藏 Ask 窗口
-            if let Some(ask_win) = ask_window {
-                let _ = ask_win.hide();
-            }
-        }
-    } else {
-        // 窗口不存在时创建 chat_ui 窗口
-        info!(ts=%Local::now().to_string(), "Creating chat_ui window (fallback)");
-        create_chat_ui_window(app_handle);
-    }
+    // 都不可见时，显示默认主页窗口
+    debug!(ts=%Local::now().to_string(), "No visible primary window, opening preferred home");
+    open_default_home_window(app_handle);
 }
 
 /// 内部函数：显示配置窗口（用于托盘菜单）
@@ -652,6 +788,23 @@ pub fn open_chat_ui_window_inner(app: &AppHandle, window: &tauri::WebviewWindow)
         let _ = window.show();
         let _ = window.set_focus();
         // 显示聊天窗口时隐藏 Ask 窗口
+        if let Some(ask_window) = app.get_webview_window("ask") {
+            let _ = ask_window.hide();
+        }
+    }
+}
+
+pub fn open_butler_experiment_window_inner(app: &AppHandle, window: &tauri::WebviewWindow) {
+    #[cfg(desktop)]
+    {
+        if window.is_minimized().unwrap_or(false) {
+            let _ = window.unminimize();
+        }
+        if !window.is_visible().unwrap_or(false) {
+            let _ = window.maximize();
+        }
+        let _ = window.show();
+        let _ = window.set_focus();
         if let Some(ask_window) = app.get_webview_window("ask") {
             let _ = ask_window.hide();
         }

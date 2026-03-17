@@ -8,9 +8,9 @@
 //! - 重试延迟计算
 
 use crate::api::ai::config::{
-    calculate_retry_delay, get_network_proxy_from_config, get_request_timeout_from_config,
-    get_retry_attempts_from_config, ConfigBuilder, DEFAULT_REQUEST_TIMEOUT_SECS,
-    MAX_RETRY_ATTEMPTS, RETRY_DELAY_BASE_MS,
+    build_proxy_env_vars, calculate_retry_delay, get_network_proxy_from_config,
+    get_request_timeout_from_config, get_retry_attempts_from_config, ConfigBuilder,
+    DEFAULT_REQUEST_TIMEOUT_SECS, MAX_RETRY_ATTEMPTS, RETRY_DELAY_BASE_MS,
 };
 use crate::db::assistant_db::AssistantModelConfig;
 use crate::db::llm_db::{LLMModel, LLMProvider, LLMProviderConfig, ModelDetail};
@@ -358,6 +358,26 @@ fn test_get_network_proxy_no_config() {
 
     let proxy = get_network_proxy_from_config(&config_map);
     assert_eq!(proxy, None);
+}
+
+/// 测试构建代理环境变量
+#[test]
+fn test_build_proxy_env_vars() {
+    let envs = build_proxy_env_vars("http://proxy.example.com:8080");
+
+    assert_eq!(envs.get("HTTP_PROXY"), Some(&"http://proxy.example.com:8080".to_string()));
+    assert_eq!(envs.get("HTTPS_PROXY"), Some(&"http://proxy.example.com:8080".to_string()));
+    assert_eq!(envs.get("ALL_PROXY"), Some(&"http://proxy.example.com:8080".to_string()));
+    assert_eq!(envs.get("http_proxy"), Some(&"http://proxy.example.com:8080".to_string()));
+    assert_eq!(envs.get("https_proxy"), Some(&"http://proxy.example.com:8080".to_string()));
+    assert_eq!(envs.get("all_proxy"), Some(&"http://proxy.example.com:8080".to_string()));
+}
+
+/// 测试空代理地址不会生成环境变量
+#[test]
+fn test_build_proxy_env_vars_with_empty_value() {
+    let envs = build_proxy_env_vars("   ");
+    assert!(envs.is_empty());
 }
 
 // ============================================================================

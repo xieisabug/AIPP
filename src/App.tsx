@@ -8,6 +8,7 @@ const windowLoaders: Record<string, () => Promise<{ default: React.ComponentType
     ask: () => import("./windows/AskWindow"),
     config: () => import("./windows/ConfigWindow"),
     chat_ui: () => import("./windows/ChatUIWindow"),
+    butler_experiment: () => import("./windows/ButlerExperimentWindow"),
     artifact_preview: () => import("./windows/ArtifactPreviewWindow"),
     plugin: () => import("./windows/PluginWindow"),
     schedule: () => import("./windows/ScheduleWindow"),

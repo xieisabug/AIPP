@@ -4,6 +4,15 @@ export interface Conversation {
     assistant_id: number | null;
     assistant_name: string;
     created_time: Date;
+    updated_time?: Date | string;
+    conversation_kind?: string;
+    parent_butler_conversation_id?: number | null;
+    source_task_title?: string | null;
+    is_hidden_from_normal_chat_list?: boolean;
+    channel_source?: string | null;
+    butler_task_status?: string | null;
+    butler_task_summary?: string | null;
+    butler_task_finalized_at?: Date | string | null;
 }
 
 // 新增：用于 get_conversation_with_messages API 的响应结构
@@ -191,6 +200,7 @@ export enum AttachmentType { // 添加AttachmentType枚举
     Word = 4,
     PowerPoint = 5,
     Excel = 6,
+    Skill = 7,
 }
 
 // Token统计相关类型
@@ -209,6 +219,9 @@ export interface ConversationTokenStats {
     // 性能指标统计
     avg_ttft_ms?: number;
     avg_tps?: number;
+    // 时间戳信息
+    start_time?: Date | null;
+    finish_time?: Date | null;
 }
 
 export interface ModelTokenBreakdown {
@@ -233,6 +246,9 @@ export interface MessageTokenStats {
     // 性能指标
     ttft_ms?: number;
     tps?: number;
+    // 时间戳信息
+    start_time?: Date | null;
+    finish_time?: Date | null;
 }
 
 // ============ 对话导出相关类型 ============

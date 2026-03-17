@@ -462,10 +462,46 @@ async fn test_equal_timestamps_do_not_cluster_by_message_type() {
 
     let messages = vec![
         create_message_detail(1, 1, "user", "Question 1", None, None, None, base_time),
-        create_message_detail(2, 1, "response", "Response 1", None, Some("g1".to_string()), None, base_time),
-        create_message_detail(3, 1, "reasoning", "Reasoning 2", None, Some("g2".to_string()), None, base_time),
-        create_message_detail(4, 1, "response", "Response 3", None, Some("g3".to_string()), None, base_time),
-        create_message_detail(5, 1, "reasoning", "Reasoning 4", None, Some("g4".to_string()), None, base_time),
+        create_message_detail(
+            2,
+            1,
+            "response",
+            "Response 1",
+            None,
+            Some("g1".to_string()),
+            None,
+            base_time,
+        ),
+        create_message_detail(
+            3,
+            1,
+            "reasoning",
+            "Reasoning 2",
+            None,
+            Some("g2".to_string()),
+            None,
+            base_time,
+        ),
+        create_message_detail(
+            4,
+            1,
+            "response",
+            "Response 3",
+            None,
+            Some("g3".to_string()),
+            None,
+            base_time,
+        ),
+        create_message_detail(
+            5,
+            1,
+            "reasoning",
+            "Reasoning 4",
+            None,
+            Some("g4".to_string()),
+            None,
+            base_time,
+        ),
     ];
 
     let result = process_message_versions(messages);

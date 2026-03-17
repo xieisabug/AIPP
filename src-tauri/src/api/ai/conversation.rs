@@ -1,9 +1,12 @@
 use crate::api::ai::summary::get_latest_branch_messages;
+use crate::api::ai::types::McpOverrideConfig;
 use crate::api::ai_api::{build_tool_name, ToolNameMapping};
 use crate::db::conversation_db::AttachmentType;
 use crate::db::conversation_db::Repository;
 use crate::db::conversation_db::{Conversation, ConversationDatabase, Message, MessageAttachment};
 use crate::errors::AppError;
+use crate::skills::format_active_skills_prompt;
+use crate::slash::ActiveSkillInvocation;
 use base64::Engine;
 use genai::chat::{
     ChatMessage, ChatRequest, ContentPart, MessageContent, Tool, ToolCall, ToolResponse,
@@ -15,17 +18,56 @@ use tauri::Emitter;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+fn strip_skill_attachment_tags(content: &str) -> String {
+    let regex = Regex::new(
+        r"(?is)<skillattachment\b[^>]*>[\s\S]*?</skillattachment>|<skillattachment\b[^>]*/>",
+    )
+    .unwrap();
+    regex.replace_all(content, "").trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_skill_attachment_tags;
+
+    #[test]
+    fn strip_skill_attachment_tags_removes_non_empty_skill_blocks() {
+        let content = concat!(
+            "用户正文\n\n",
+            r#"<skillattachment skill_name="skill-creator" invocation="/skills(skill-creator)" identifier="agents:skill-creator">"#,
+            "# Skill Creator\n请帮用户创建 Skill。",
+            "</skillattachment>",
+        );
+
+        assert_eq!(strip_skill_attachment_tags(content), "用户正文");
+    }
+}
+
 fn build_user_message_with_attachments(
     content: &str,
     attachment_list: &[MessageAttachment],
 ) -> ChatMessage {
+    let cleaned_content = strip_skill_attachment_tags(content);
     if attachment_list.is_empty() {
-        return ChatMessage::user(content);
+        return ChatMessage::user(cleaned_content);
     }
 
     let mut parts = Vec::new();
-    parts.push(genai::chat::ContentPart::from_text(content));
+    if !cleaned_content.trim().is_empty() {
+        parts.push(genai::chat::ContentPart::from_text(cleaned_content));
+    }
+    let mut active_skills = Vec::new();
     for attachment in attachment_list {
+        if attachment.attachment_type == AttachmentType::Skill {
+            if let Some(payload) = &attachment.attachment_content {
+                match serde_json::from_str::<ActiveSkillInvocation>(payload) {
+                    Ok(skill) => active_skills.push(skill),
+                    Err(error) => warn!(?error, "failed to decode active skill attachment payload"),
+                }
+            }
+            continue;
+        }
+
         // 优先处理图片附件（OpenAI 不支持 file:// 本地 URL，需要转为 base64）
         if attachment.attachment_type == AttachmentType::Image {
             // 1) 若 attachment_content 为 data:URL，直接解析
@@ -100,6 +142,11 @@ fn build_user_message_with_attachments(
             }
         }
     }
+
+    if !active_skills.is_empty() {
+        parts.push(ContentPart::from_text(format_active_skills_prompt(&active_skills)));
+    }
+
     ChatMessage::user(parts)
 }
 
@@ -789,6 +836,7 @@ pub async fn handle_message_type_end(
     conversation_id: i64,
     app_handle: &tauri::AppHandle,
     skip_mcp_detection: bool,
+    mcp_override_config: Option<&McpOverrideConfig>,
 ) -> Result<(), anyhow::Error> {
     let end_time = chrono::Utc::now();
     let duration_ms = end_time.timestamp_millis() - start_time.timestamp_millis();
@@ -804,7 +852,7 @@ pub async fn handle_message_type_end(
             conversation_id,
             message_id,
             &final_content,
-            None,
+            mcp_override_config,
         )
         .await
         {
@@ -926,6 +974,15 @@ pub fn init_conversation(
             name: "新对话".to_string(),
             assistant_id: Some(assistant_id),
             created_time: chrono::Utc::now(),
+            updated_time: chrono::Utc::now(),
+            conversation_kind: "normal".to_string(),
+            parent_butler_conversation_id: None,
+            source_task_title: None,
+            is_hidden_from_normal_chat_list: false,
+            channel_source: None,
+            butler_task_status: None,
+            butler_task_summary: None,
+            butler_task_finalized_at: None,
         })
         .map_err(AppError::from)?;
     let conversation_clone = conversation.clone();
