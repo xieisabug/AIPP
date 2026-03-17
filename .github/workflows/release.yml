@@ -152,6 +152,11 @@ jobs:
               with:
                   targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
+            - name: Install Protoc
+              uses: arduino/setup-protoc@v3
+              with:
+                  repo-token: ${{ secrets.GITHUB_TOKEN }}
+
             - name: Install dependencies
               run: pnpm install
 
