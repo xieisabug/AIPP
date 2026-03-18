@@ -258,7 +258,7 @@ pub struct AcpPermissionResolution {
     pub delivered: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AcpPermissionRequestSnapshot {
     pub conversation_id: Option<i64>,
     pub event: AcpPermissionRequestEvent,
@@ -378,6 +378,25 @@ impl AcpPermissionState {
             request.allowed_open_id = allowed_open_id;
             request.allowed_chat_id = allowed_chat_id;
         }
+    }
+
+    pub async fn list_requests_for_conversation(
+        &self,
+        conversation_id: i64,
+    ) -> Vec<AcpPermissionRequestSnapshot> {
+        let pending = self.pending_requests.lock().await;
+        pending
+            .values()
+            .filter(|request| request.conversation_id == Some(conversation_id))
+            .map(|request| AcpPermissionRequestSnapshot {
+                conversation_id: request.conversation_id,
+                event: request.event.clone(),
+                review_code: request.review_code.clone(),
+                feishu_message_id: request.feishu_message_id.clone(),
+                allowed_open_id: request.allowed_open_id.clone(),
+                allowed_chat_id: request.allowed_chat_id.clone(),
+            })
+            .collect()
     }
 
     pub async fn has_pending_permission_for_conversation(&self, conversation_id: i64) -> bool {
@@ -1857,30 +1876,6 @@ impl AcpClient for AcpTauriClient {
 
         let state = self.app_handle.state::<AcpPermissionState>();
         state.store_request(event.clone(), tx).await;
-
-        if let Some(snapshot) = state.get_request(&request_id).await {
-            let auto_resolved = crate::api::butler_adjudication::start_acp_permission_auto_review(
-                self.app_handle.clone(),
-                snapshot,
-            )
-            .await;
-            if auto_resolved {
-                return match rx.await {
-                    Ok(AcpPermissionDecision::Selected(option_id)) => {
-                        Ok(acp::RequestPermissionResponse::new(
-                            acp::RequestPermissionOutcome::Selected(
-                                acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new(
-                                    option_id,
-                                )),
-                            ),
-                        ))
-                    }
-                    Ok(AcpPermissionDecision::Cancelled) | Err(_) => Ok(
-                        acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled),
-                    ),
-                };
-            }
-        }
 
         let delivered_to_feishu = match state.get_request(&request_id).await {
             Some(snapshot) => match crate::feishu::try_deliver_acp_permission_to_feishu(

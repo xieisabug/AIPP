@@ -31,6 +31,7 @@ pub struct BashProcessInfo {
     pub last_read_pos: usize,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PermissionRequestSnapshot {
     pub conversation_id: Option<i64>,
     pub event: PermissionRequestEvent,
@@ -316,6 +317,25 @@ impl OperationState {
             request.allowed_open_id = allowed_open_id;
             request.allowed_chat_id = allowed_chat_id;
         }
+    }
+
+    pub async fn list_permission_requests_for_conversation(
+        &self,
+        conversation_id: i64,
+    ) -> Vec<PermissionRequestSnapshot> {
+        let pending = self.pending_permissions.lock().await;
+        pending
+            .values()
+            .filter(|request| request.conversation_id == Some(conversation_id))
+            .map(|request| PermissionRequestSnapshot {
+                conversation_id: request.conversation_id,
+                event: request.event.clone(),
+                review_code: request.review_code.clone(),
+                feishu_message_id: request.feishu_message_id.clone(),
+                allowed_open_id: request.allowed_open_id.clone(),
+                allowed_chat_id: request.allowed_chat_id.clone(),
+            })
+            .collect()
     }
 
     /// 处理权限确认

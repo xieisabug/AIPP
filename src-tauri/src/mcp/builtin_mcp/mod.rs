@@ -366,6 +366,162 @@ fn resolve_butler_spawn_window(app_handle: &AppHandle) -> Result<tauri::Window, 
     Err("No available window for butler task execution".to_string())
 }
 
+fn dedupe_task_messages(
+    rows: Vec<(
+        crate::db::conversation_db::Message,
+        Option<crate::db::conversation_db::MessageAttachment>,
+    )>,
+) -> Vec<crate::db::conversation_db::Message> {
+    use std::collections::HashSet;
+
+    let mut seen = HashSet::new();
+    let mut messages = Vec::new();
+    for (message, _) in rows {
+        if seen.insert(message.id) {
+            messages.push(message);
+        }
+    }
+    messages
+}
+
+async fn resolve_accessible_butler_task_detail(
+    app_handle: &AppHandle,
+    current_conversation_id: Option<i64>,
+    task_conversation_id: i64,
+) -> Result<crate::api::butler_api::ButlerTaskDetailResponse, String> {
+    use crate::api::butler_api::get_butler_task_detail;
+    use crate::db::conversation_db::{ConversationDatabase, Repository};
+
+    let current_conversation_id = current_conversation_id
+        .ok_or_else(|| "task_conversation_operation requires Butler conversation context".to_string())?;
+    let detail = get_butler_task_detail(app_handle.clone(), task_conversation_id).await?;
+
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
+    let current_conversation = conversation_repo
+        .read(current_conversation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Current Butler conversation not found".to_string())?;
+
+    match current_conversation.conversation_kind.as_str() {
+        "butler_main" => {
+            if detail.definition.butler_conversation_id != current_conversation_id {
+                return Err(
+                    "Target task conversation does not belong to the current Butler main conversation"
+                        .to_string(),
+                );
+            }
+        }
+        "butler_task" => {
+            if current_conversation_id != task_conversation_id
+                && current_conversation.parent_butler_conversation_id
+                    != Some(detail.definition.butler_conversation_id)
+            {
+                return Err("Target task conversation is outside the current Butler task scope".to_string());
+            }
+        }
+        _ => {
+            return Err(
+                "task_conversation_operation can only be used inside Butler main/task conversations"
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(detail)
+}
+
+async fn build_task_conversation_read_payload(
+    app_handle: &AppHandle,
+    detail: &crate::api::butler_api::ButlerTaskDetailResponse,
+    latest_count: usize,
+) -> Result<serde_json::Value, String> {
+    use crate::db::conversation_db::ConversationDatabase;
+
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let messages = dedupe_task_messages(
+        db.message_repo()
+            .map_err(|e| e.to_string())?
+            .list_by_conversation_id(detail.conversation.id)
+            .map_err(|e| e.to_string())?,
+    );
+    let latest_count = latest_count.clamp(1, 10);
+    let start = messages.len().saturating_sub(latest_count);
+    let latest_messages = messages.into_iter().skip(start).collect::<Vec<_>>();
+
+    let operation_permissions = app_handle
+        .state::<OperationState>()
+        .list_permission_requests_for_conversation(detail.conversation.id)
+        .await;
+    let acp_permissions = app_handle
+        .state::<crate::api::ai::acp::AcpPermissionState>()
+        .list_requests_for_conversation(detail.conversation.id)
+        .await;
+
+    Ok(serde_json::json!({
+        "task": detail.task,
+        "conversation": detail.conversation,
+        "definition": detail.definition,
+        "result": detail.result,
+        "runtime_state": detail.runtime_state,
+        "latest_messages": latest_messages,
+        "pending_operation_permissions": operation_permissions,
+        "pending_acp_permissions": acp_permissions,
+    }))
+}
+
+async fn resolve_operation_permission_request_id(
+    app_handle: &AppHandle,
+    task_conversation_id: i64,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let state = app_handle.state::<OperationState>();
+    if let Some(request_id) = args.get("request_id").and_then(|v| v.as_str()) {
+        return Ok(request_id.to_string());
+    }
+    if let Some(review_code) = args.get("review_code").and_then(|v| v.as_str()) {
+        return state
+            .find_permission_request_by_review_code(review_code)
+            .await
+            .map(|snapshot| snapshot.event.request_id)
+            .ok_or_else(|| "No pending operation permission matched the review_code".to_string());
+    }
+    let pending = state.list_permission_requests_for_conversation(task_conversation_id).await;
+    if pending.len() == 1 {
+        Ok(pending[0].event.request_id.clone())
+    } else if pending.is_empty() {
+        Err("No pending operation permission exists for this task conversation".to_string())
+    } else {
+        Err("Multiple pending operation permissions exist; please specify request_id or review_code".to_string())
+    }
+}
+
+async fn resolve_acp_permission_request_id(
+    app_handle: &AppHandle,
+    task_conversation_id: i64,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let state = app_handle.state::<crate::api::ai::acp::AcpPermissionState>();
+    if let Some(request_id) = args.get("request_id").and_then(|v| v.as_str()) {
+        return Ok(request_id.to_string());
+    }
+    if let Some(review_code) = args.get("review_code").and_then(|v| v.as_str()) {
+        return state
+            .find_request_by_review_code(review_code)
+            .await
+            .map(|snapshot| snapshot.event.request_id)
+            .ok_or_else(|| "No pending ACP permission matched the review_code".to_string());
+    }
+    let pending = state.list_requests_for_conversation(task_conversation_id).await;
+    if pending.len() == 1 {
+        Ok(pending[0].event.request_id.clone())
+    } else if pending.is_empty() {
+        Err("No pending ACP permission exists for this task conversation".to_string())
+    } else {
+        Err("Multiple pending ACP permissions exist; please specify request_id or review_code".to_string())
+    }
+}
+
 #[tauri::command]
 #[instrument(skip(app_handle, parameters), fields(command = %server_command, tool = %tool_name))]
 pub async fn execute_aipp_builtin_tool(
@@ -845,7 +1001,12 @@ pub async fn execute_aipp_builtin_tool(
             }),
         },
         "agent" => {
-            use crate::api::butler_api::{spawn_butler_task_with_window, SpawnButlerTaskRequest};
+            use crate::api::ai::types::AiRequest;
+            use crate::api::ai_api::ask_ai;
+            use crate::api::butler_api::{
+                spawn_butler_task_watcher, spawn_butler_task_with_window, SpawnButlerTaskRequest,
+            };
+            use crate::api::operation_api::{confirm_acp_permission, confirm_operation_permission};
             use agent::types::*;
 
             let handler = AgentHandler::new(app_handle.clone());
@@ -1042,6 +1203,230 @@ pub async fn execute_aipp_builtin_tool(
                                 "isError": true
                             })
                         }
+                    }
+                }
+                "task_conversation_operation" => {
+                    let task_conversation_id = args
+                        .get("task_conversation_id")
+                        .and_then(|v| v.as_i64())
+                        .ok_or_else(|| "Missing required parameter: task_conversation_id".to_string())?;
+                    let action = args
+                        .get("action")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing required parameter: action".to_string())?;
+                    let detail = resolve_accessible_butler_task_detail(
+                        &app_handle,
+                        conversation_id,
+                        task_conversation_id,
+                    )
+                    .await?;
+
+                    match action {
+                        "read" => {
+                            let latest_count = args
+                                .get("latest_count")
+                                .and_then(|v| v.as_u64())
+                                .map(|v| v as usize)
+                                .unwrap_or(1);
+                            match build_task_conversation_read_payload(&app_handle, &detail, latest_count)
+                                .await
+                            {
+                                Ok(payload) => serde_json::json!({
+                                    "content": [{"type": "json", "json": payload}],
+                                    "isError": false
+                                }),
+                                Err(e) => {
+                                    error!(error = %e, "task_conversation_operation read failed");
+                                    serde_json::json!({
+                                        "content": [{"type": "text", "text": e}],
+                                        "isError": true
+                                    })
+                                }
+                            }
+                        }
+                        "reply_prompt" => {
+                            if detail.task.is_finalized {
+                                serde_json::json!({
+                                    "content": [{"type": "text", "text": "Task conversation is already finalized and cannot accept a new prompt."}],
+                                    "isError": true
+                                })
+                            } else if detail.runtime_state.is_running {
+                                serde_json::json!({
+                                    "content": [{"type": "text", "text": "Task conversation is currently running. Read the latest state or resolve pending permissions before sending another prompt."}],
+                                    "isError": true
+                                })
+                            } else {
+                                let prompt = args
+                                    .get("prompt")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())
+                                    .ok_or_else(|| "Missing required parameter: prompt".to_string())?;
+                                let assistant_id = detail
+                                    .conversation
+                                    .assistant_id
+                                    .ok_or_else(|| "Task conversation has no assigned assistant".to_string())?;
+                                let window = resolve_butler_spawn_window(&app_handle)?;
+                                let app_handle_clone = app_handle.clone();
+                                let window_clone = window.clone();
+                                let prompt_owned = prompt.to_string();
+                                std::thread::spawn(move || {
+                                    let task_conversation_id_for_spawn = task_conversation_id;
+                                    tauri::async_runtime::block_on(async move {
+                                        let request = AiRequest {
+                                            conversation_id: task_conversation_id_for_spawn.to_string(),
+                                            assistant_id,
+                                            prompt: prompt_owned,
+                                            model: None,
+                                            override_model_id: None,
+                                            temperature: None,
+                                            top_p: None,
+                                            max_tokens: None,
+                                            stream: Some(true),
+                                            attachment_list: None,
+                                        };
+                                        match ask_ai(
+                                            app_handle_clone.clone(),
+                                            app_handle_clone.state::<crate::AppState>(),
+                                            app_handle_clone.state::<crate::AcpSessionState>(),
+                                            app_handle_clone.state::<crate::FeatureConfigState>(),
+                                            app_handle_clone
+                                                .state::<crate::state::message_token::MessageTokenManager>(),
+                                            app_handle_clone.state::<
+                                                crate::state::activity_state::ConversationActivityManager,
+                                            >(),
+                                            window_clone,
+                                            request,
+                                            None,
+                                            None,
+                                            None,
+                                            None,
+                                            Some("internal".to_string()),
+                                        )
+                                        .await
+                                        {
+                                            Ok(_) => {
+                                                spawn_butler_task_watcher(
+                                                    app_handle_clone.clone(),
+                                                    task_conversation_id_for_spawn,
+                                                );
+                                            }
+                                            Err(error) => {
+                                                error!(
+                                                    task_conversation_id = task_conversation_id_for_spawn,
+                                                    error = %error,
+                                                    "task_conversation_operation reply_prompt failed"
+                                                );
+                                            }
+                                        }
+                                    });
+                                });
+
+                                serde_json::json!({
+                                    "content": [{
+                                        "type": "json",
+                                        "json": {
+                                            "status": "prompt_dispatched",
+                                            "task_conversation_id": task_conversation_id,
+                                            "prompt": prompt
+                                        }
+                                    }],
+                                    "isError": false
+                                })
+                            }
+                        }
+                        "permission_confirm" | "operate_confirm" => {
+                            let decision = args
+                                .get("decision")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| "Missing required parameter: decision".to_string())?;
+                            let request_id = resolve_operation_permission_request_id(
+                                &app_handle,
+                                task_conversation_id,
+                                &args,
+                            )
+                            .await?;
+                            match confirm_operation_permission(
+                                app_handle.clone(),
+                                request_id.clone(),
+                                decision.to_string(),
+                            )
+                            .await
+                            {
+                                Ok(result) => serde_json::json!({
+                                    "content": [{
+                                        "type": "json",
+                                        "json": {
+                                            "status": "permission_confirmed",
+                                            "request_id": request_id,
+                                            "decision": decision,
+                                            "resolved": result
+                                        }
+                                    }],
+                                    "isError": false
+                                }),
+                                Err(e) => {
+                                    error!(error = %e, "task_conversation_operation permission_confirm failed");
+                                    serde_json::json!({
+                                        "content": [{"type": "text", "text": e}],
+                                        "isError": true
+                                    })
+                                }
+                            }
+                        }
+                        "acp_permission_confirm" => {
+                            let request_id = resolve_acp_permission_request_id(
+                                &app_handle,
+                                task_conversation_id,
+                                &args,
+                            )
+                            .await?;
+                            let option_id =
+                                args.get("option_id").and_then(|v| v.as_str()).map(|v| v.to_string());
+                            let cancelled = args
+                                .get("cancelled")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            if !cancelled && option_id.is_none() {
+                                return Err(
+                                    "acp_permission_confirm requires option_id or cancelled=true"
+                                        .to_string(),
+                                );
+                            }
+                            match confirm_acp_permission(
+                                app_handle.clone(),
+                                request_id.clone(),
+                                option_id.clone(),
+                                Some(cancelled),
+                            )
+                            .await
+                            {
+                                Ok(result) => serde_json::json!({
+                                    "content": [{
+                                        "type": "json",
+                                        "json": {
+                                            "status": "acp_permission_confirmed",
+                                            "request_id": request_id,
+                                            "option_id": option_id,
+                                            "cancelled": cancelled,
+                                            "resolved": result
+                                        }
+                                    }],
+                                    "isError": false
+                                }),
+                                Err(e) => {
+                                    error!(error = %e, "task_conversation_operation acp_permission_confirm failed");
+                                    serde_json::json!({
+                                        "content": [{"type": "text", "text": e}],
+                                        "isError": true
+                                    })
+                                }
+                            }
+                        }
+                        _ => serde_json::json!({
+                            "content": [{"type": "text", "text": format!("Unknown task_conversation_operation action: {}", action)}],
+                            "isError": true
+                        }),
                     }
                 }
                 _ => serde_json::json!({

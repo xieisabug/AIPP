@@ -438,6 +438,54 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                     "required": ["title", "goal"]
                 }),
             },
+            BuiltinToolInfo {
+                name: "task_conversation_operation".into(),
+                description: "Inspect and operate an existing butler task conversation. Use this to read the latest task messages, send a follow-up prompt to the task assistant, or confirm pending operation/ACP permissions when a task becomes blocked.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["read", "reply_prompt", "permission_confirm", "operate_confirm", "acp_permission_confirm"],
+                            "description": "Action to perform on the target task conversation."
+                        },
+                        "task_conversation_id": {
+                            "type": "integer",
+                            "description": "The task conversation id to inspect or operate."
+                        },
+                        "latest_count": {
+                            "type": "integer",
+                            "description": "Only for read. Number of latest messages to return. Default 1, recommended 1-3."
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Only for reply_prompt. The follow-up prompt to send into the task conversation."
+                        },
+                        "request_id": {
+                            "type": "string",
+                            "description": "Optional. Exact pending permission request id."
+                        },
+                        "review_code": {
+                            "type": "string",
+                            "description": "Optional. Human-friendly pending permission review code such as OP-XXXXXX or ACP-XXXXXX."
+                        },
+                        "decision": {
+                            "type": "string",
+                            "enum": ["allow", "allow_for_conversation", "allow_for_assistant", "allow_and_save", "deny"],
+                            "description": "Only for permission_confirm / operate_confirm."
+                        },
+                        "option_id": {
+                            "type": "string",
+                            "description": "Only for acp_permission_confirm. The ACP option id to approve."
+                        },
+                        "cancelled": {
+                            "type": "boolean",
+                            "description": "Only for acp_permission_confirm. Set true to cancel instead of selecting an option."
+                        }
+                    },
+                    "required": ["action", "task_conversation_id"]
+                }),
+            },
         ],
         Some("ui_interaction") => vec![
             BuiltinToolInfo {
@@ -995,7 +1043,7 @@ mod tests {
     #[test]
     fn test_get_tools_for_agent_command() {
         let tools = get_builtin_tools_for_command("aipp:agent");
-        assert_eq!(tools.len(), 4, "Agent command should have 4 tools");
+        assert_eq!(tools.len(), 6, "Agent command should have 6 tools");
     }
 
     #[test]
@@ -1026,6 +1074,33 @@ mod tests {
         let required = schema["required"].as_array().unwrap();
         assert!(required.iter().any(|r| r == "command"));
         assert!(required.iter().any(|r| r == "source_type"));
+    }
+
+    #[test]
+    fn test_agent_task_conversation_operation_tool_exists() {
+        let tools = get_builtin_tools_for_command("aipp:agent");
+        let operation_tool = tools.iter().find(|t| t.name == "task_conversation_operation");
+        assert!(operation_tool.is_some(), "task_conversation_operation tool should exist");
+    }
+
+    #[test]
+    fn test_agent_task_conversation_operation_tool_schema() {
+        let tools = get_builtin_tools_for_command("aipp:agent");
+        let operation_tool = tools
+            .iter()
+            .find(|t| t.name == "task_conversation_operation")
+            .unwrap();
+
+        let schema = &operation_tool.input_schema;
+        assert_eq!(schema["type"], "object");
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|r| r == "action"));
+        assert!(required.iter().any(|r| r == "task_conversation_id"));
+        let actions = schema["properties"]["action"]["enum"].as_array().unwrap();
+        assert!(actions.iter().any(|value| value == "read"));
+        assert!(actions.iter().any(|value| value == "reply_prompt"));
+        assert!(actions.iter().any(|value| value == "permission_confirm"));
+        assert!(actions.iter().any(|value| value == "acp_permission_confirm"));
     }
 
     #[test]

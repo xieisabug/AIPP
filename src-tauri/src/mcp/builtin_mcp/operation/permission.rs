@@ -254,26 +254,6 @@ impl PermissionManager {
 
         info!(request_id = %request_id, operation = %operation, path = %path, "Requesting permission from user");
 
-        if let Some(snapshot) = operation_state.get_permission_request(&request_id).await {
-            let auto_resolved = crate::api::butler_adjudication::start_operation_permission_auto_review(
-                self.app_handle.clone(),
-                snapshot,
-            )
-            .await;
-            if auto_resolved {
-                return match rx.await {
-                    Ok(decision) => {
-                        info!(request_id = %request_id, decision = ?decision, "Operation permission auto-resolved");
-                        Ok(decision)
-                    }
-                    Err(_) => {
-                        warn!(request_id = %request_id, "Operation permission auto-review resolved request but receiver closed");
-                        Err("Permission request was cancelled".to_string())
-                    }
-                };
-            }
-        }
-
         let delivered_to_feishu = if let Some(conversation_id) = conversation_id {
             let snapshot = operation_state.get_permission_request(&request_id).await;
             if let Some(snapshot) = snapshot {
