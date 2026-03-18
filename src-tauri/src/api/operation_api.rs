@@ -23,7 +23,10 @@ pub(crate) struct PermissionResolvedEvent {
     pub conversation_id: Option<i64>,
 }
 
-fn can_route_to_visible_butler_window(app_handle: &AppHandle, conversation_id: Option<i64>) -> bool {
+fn can_route_to_visible_butler_window(
+    app_handle: &AppHandle,
+    conversation_id: Option<i64>,
+) -> bool {
     let Some(conversation_id) = conversation_id else {
         return false;
     };
@@ -59,10 +62,7 @@ fn can_route_to_visible_butler_window(app_handle: &AppHandle, conversation_id: O
         return false;
     };
 
-    matches!(
-        conversation.conversation_kind.as_str(),
-        BUTLER_MAIN_KIND | BUTLER_TASK_KIND
-    )
+    matches!(conversation.conversation_kind.as_str(), BUTLER_MAIN_KIND | BUTLER_TASK_KIND)
 }
 
 pub(crate) fn emit_permission_request_event<T: Serialize>(

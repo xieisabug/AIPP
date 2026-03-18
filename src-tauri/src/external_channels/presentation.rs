@@ -221,9 +221,10 @@ fn extract_labeled_block(content: &str, prefix: &str) -> Option<String> {
 
 fn sanitize_plain_text(content: &str) -> Option<String> {
     let tool_comment_regex = Regex::new(r"(?s)<!--\s*MCP_TOOL_CALL:.*?-->").unwrap();
-    let file_attachment_regex =
-        Regex::new(r#"(?s)<fileattachment\b([^>]*)>.*?</fileattachment>|<fileattachment\b([^>]*)\s*/?>"#)
-            .unwrap();
+    let file_attachment_regex = Regex::new(
+        r#"(?s)<fileattachment\b([^>]*)>.*?</fileattachment>|<fileattachment\b([^>]*)\s*/?>"#,
+    )
+    .unwrap();
     let skill_attachment_regex = Regex::new(
         r#"(?s)<skillattachment\b([^>]*)>.*?</skillattachment>|<skillattachment\b([^>]*)\s*/?>"#,
     )
@@ -319,7 +320,10 @@ fn canonical_server_name(server_name: &str) -> String {
         .to_lowercase();
     if compact.contains("agent") {
         "agent".to_string()
-    } else if compact.contains("ui交互") || compact.contains("uiinteraction") || compact.contains("ui互动") {
+    } else if compact.contains("ui交互")
+        || compact.contains("uiinteraction")
+        || compact.contains("ui互动")
+    {
         "ui_interaction".to_string()
     } else if compact.contains("search") || compact.contains("搜索") {
         "search".to_string()
@@ -378,39 +382,33 @@ fn parse_tag_attributes(attributes: &str) -> HashMap<String, String> {
     attribute_regex
         .captures_iter(attributes)
         .filter_map(|captures| {
-            Some((
-                captures.get(1)?.as_str().to_string(),
-                captures.get(2)?.as_str().to_string(),
-            ))
+            Some((captures.get(1)?.as_str().to_string(), captures.get(2)?.as_str().to_string()))
         })
         .collect()
 }
 
 fn tag_attribute<'a>(attributes: &'a HashMap<String, String>, keys: &[&str]) -> Option<&'a str> {
-    keys.iter().find_map(|key| attributes.get(*key).map(String::as_str)).filter(|value| !value.trim().is_empty())
+    keys.iter()
+        .find_map(|key| attributes.get(*key).map(String::as_str))
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn basename_like(value: &str) -> String {
-    value
-        .rsplit(|ch| ch == '/' || ch == '\\')
-        .next()
-        .unwrap_or(value)
-        .trim()
-        .to_string()
+    value.rsplit(|ch| ch == '/' || ch == '\\').next().unwrap_or(value).trim().to_string()
 }
 
 fn looks_like_image(value: &str) -> bool {
     let lowered = value.to_lowercase();
-    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"].iter().any(|suffix| lowered.ends_with(suffix))
+    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"]
+        .iter()
+        .any(|suffix| lowered.ends_with(suffix))
 }
 
 fn looks_like_document(value: &str) -> bool {
     let lowered = value.to_lowercase();
-    [
-        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".md", ".csv", ".json",
-    ]
-    .iter()
-    .any(|suffix| lowered.ends_with(suffix))
+    [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".md", ".csv", ".json"]
+        .iter()
+        .any(|suffix| lowered.ends_with(suffix))
 }
 
 fn summarize_file_attachment(attributes: &str) -> String {
@@ -425,7 +423,9 @@ fn summarize_file_attachment(attributes: &str) -> String {
         tag_attribute(&attributes, &["attachment_type", "type"]).unwrap_or_default().to_lowercase();
     let kind = if attachment_type == "image" || looks_like_image(&display_name) {
         "图片附件"
-    } else if attachment_type == "file" || attachment_type == "document" || looks_like_document(&display_name)
+    } else if attachment_type == "file"
+        || attachment_type == "document"
+        || looks_like_document(&display_name)
     {
         "文件附件"
     } else {
@@ -452,7 +452,8 @@ fn summarize_generic_attachment(attributes: &str) -> String {
     )
     .map(basename_like)
     .unwrap_or_else(|| "未命名附件".to_string());
-    let attachment_type = tag_attribute(&attributes, &["type", "attachment_type"]).unwrap_or("附件");
+    let attachment_type =
+        tag_attribute(&attributes, &["type", "attachment_type"]).unwrap_or("附件");
     format!("[{}] {}", attachment_type, display_name)
 }
 
@@ -478,16 +479,20 @@ fn tool_result_content_items(tool_result: &ExternalToolResult) -> Option<&[Value
 }
 
 fn tool_result_content_text(tool_result: &ExternalToolResult) -> Option<&str> {
-    tool_result_content_items(tool_result)?.iter().find_map(|item| match item.get("type").and_then(Value::as_str) {
-        Some("text") => item.get("text").and_then(Value::as_str),
-        _ => None,
+    tool_result_content_items(tool_result)?.iter().find_map(|item| {
+        match item.get("type").and_then(Value::as_str) {
+            Some("text") => item.get("text").and_then(Value::as_str),
+            _ => None,
+        }
     })
 }
 
 fn tool_result_content_json(tool_result: &ExternalToolResult) -> Option<&Value> {
-    tool_result_content_items(tool_result)?.iter().find_map(|item| match item.get("type").and_then(Value::as_str) {
-        Some("json") => item.get("json"),
-        _ => None,
+    tool_result_content_items(tool_result)?.iter().find_map(|item| {
+        match item.get("type").and_then(Value::as_str) {
+            Some("json") => item.get("json"),
+            _ => None,
+        }
     })
 }
 
@@ -568,9 +573,7 @@ fn summarize_dynamic_mcp_servers(servers: &[Value]) -> String {
             .unwrap_or_else(|| "暂无摘要".to_string());
         let tools = json_array(server, "tools").unwrap_or(&[]);
         let tool_names = preview_list(
-            tools
-                .iter()
-                .filter_map(|tool| value_string(tool, "tool").map(ToString::to_string)),
+            tools.iter().filter_map(|tool| value_string(tool, "tool").map(ToString::to_string)),
             3,
         );
         let tool_segment = if tool_names.is_empty() {
@@ -619,16 +622,14 @@ fn summarize_todo_write(params: &Value) -> Option<String> {
     for todo in todos {
         let status = value_string(todo, "status").unwrap_or("pending");
         let content = value_string(todo, "content").unwrap_or("未命名任务");
-        let active_form = value_string(todo, "activeForm")
-            .or_else(|| value_string(todo, "active_form"));
+        let active_form =
+            value_string(todo, "activeForm").or_else(|| value_string(todo, "active_form"));
         let icon = match status {
             "completed" | "done" => {
                 completed += 1;
                 "✅"
             }
-            "in_progress" => {
-                "⏳"
-            }
+            "in_progress" => "⏳",
             "blocked" => "🚫",
             _ => "⬜",
         };
@@ -639,11 +640,7 @@ fn summarize_todo_write(params: &Value) -> Option<String> {
         todo_lines.push(line);
     }
 
-    let mut lines = vec![format!(
-        "📋 任务列表更新（{} 项，{} 完成）",
-        todos.len(),
-        completed
-    )];
+    let mut lines = vec![format!("📋 任务列表更新（{} 项，{} 完成）", todos.len(), completed)];
     lines.push(String::new());
     lines.extend(todo_lines);
     Some(lines.join("\n"))
@@ -679,11 +676,7 @@ fn summarize_preview_items(value: &Value, include_excerpt: bool) -> Option<Strin
     let file = &files[0];
     let title = value_string(file, "title").unwrap_or("未命名文件");
     let file_type = value_string(file, "type").unwrap_or("file");
-    let mut lines = vec![format!(
-        "{}「{}」",
-        preview_file_kind_label(file_type),
-        title
-    )];
+    let mut lines = vec![format!("{}「{}」", preview_file_kind_label(file_type), title)];
     if matches!(file_type, "markdown" | "text") {
         if let Some(language) = value_string(file, "language") {
             lines.push(format!("语言：{}", language));
@@ -762,10 +755,8 @@ fn summarize_execute_bash_result(tool_result: &ExternalToolResult) -> String {
 
 fn summarize_bash_output_result(tool_result: &ExternalToolResult) -> String {
     let params = tool_result_parameters(tool_result);
-    let bash_id = params
-        .as_ref()
-        .and_then(|value| value_string(value, "bash_id"))
-        .unwrap_or("未知任务");
+    let bash_id =
+        params.as_ref().and_then(|value| value_string(value, "bash_id")).unwrap_or("未知任务");
     let output = tool_result_content_text(tool_result)
         .map(|value| preview_multiline(value, 10, 260))
         .unwrap_or_else(|| tool_result_text_preview(tool_result, 260));
@@ -791,9 +782,8 @@ fn summarize_read_file_result(tool_result: &ExternalToolResult) -> Option<String
 fn summarize_write_file_result(tool_result: &ExternalToolResult) -> Option<String> {
     let params = tool_result_parameters(tool_result)?;
     let file_path = value_string(&params, "file_path").unwrap_or("未知文件");
-    let text = tool_result_content_text(tool_result)
-        .map(|v| preview_text(v, 140))
-        .unwrap_or_default();
+    let text =
+        tool_result_content_text(tool_result).map(|v| preview_text(v, 140)).unwrap_or_default();
     let mut lines = vec![format!("✏️ 已写入 {}", file_path)];
     if !text.is_empty() {
         lines.push(text);
@@ -804,9 +794,8 @@ fn summarize_write_file_result(tool_result: &ExternalToolResult) -> Option<Strin
 fn summarize_edit_file_result(tool_result: &ExternalToolResult) -> Option<String> {
     let params = tool_result_parameters(tool_result)?;
     let file_path = value_string(&params, "file_path").unwrap_or("未知文件");
-    let text = tool_result_content_text(tool_result)
-        .map(|v| preview_text(v, 140))
-        .unwrap_or_default();
+    let text =
+        tool_result_content_text(tool_result).map(|v| preview_text(v, 140)).unwrap_or_default();
     let mut lines = vec![format!("📝 已编辑 {}", file_path)];
     if !text.is_empty() {
         lines.push(text);
@@ -847,16 +836,14 @@ impl ToolPresenter for AgentToolPresenter {
                 let names = json_array(&tool_call.parameters, "names")
                     .map(|values| {
                         preview_list(
-                            values
-                                .iter()
-                                .filter_map(Value::as_str)
-                                .map(ToString::to_string),
+                            values.iter().filter_map(Value::as_str).map(ToString::to_string),
                             3,
                         )
                     })
                     .filter(|value| !value.is_empty())
                     .or_else(|| {
-                        value_string(&tool_call.parameters, "name").map(|value| preview_text(value, 80))
+                        value_string(&tool_call.parameters, "name")
+                            .map(|value| preview_text(value, 80))
                     })
                     .unwrap_or_else(|| "关键词".to_string());
                 Some(format!("🔧 加载工具说明：{}", names))
@@ -871,32 +858,48 @@ impl ToolPresenter for AgentToolPresenter {
                 tool_result_content_json(tool_result)
                     .and_then(|payload| json_array(payload, "servers"))
                     .map(summarize_dynamic_mcp_servers)
-                    .or_else(|| Some(format!("🔌 已加载工具集：{}", tool_result_text_preview(tool_result, 180))))
+                    .or_else(|| {
+                        Some(format!(
+                            "🔌 已加载工具集：{}",
+                            tool_result_text_preview(tool_result, 180)
+                        ))
+                    })
             }
-            Some("load_mcp_server") => {
-                Some(format!("❌ 未找到匹配的工具集：{}", tool_result_text_preview(tool_result, 180)))
-            }
+            Some("load_mcp_server") => Some(format!(
+                "❌ 未找到匹配的工具集：{}",
+                tool_result_text_preview(tool_result, 180)
+            )),
             Some("load_mcp_tool") if tool_result_effective_success(tool_result) => {
                 tool_result_content_json(tool_result)
                     .and_then(|payload| json_array(payload, "tools"))
                     .map(summarize_loaded_mcp_tools)
-                    .or_else(|| Some(format!("🔧 已加载工具说明：{}", tool_result_text_preview(tool_result, 180))))
+                    .or_else(|| {
+                        Some(format!(
+                            "🔧 已加载工具说明：{}",
+                            tool_result_text_preview(tool_result, 180)
+                        ))
+                    })
             }
             Some("load_mcp_tool") => {
                 Some(format!("❌ 工具说明加载失败：{}", tool_result_text_preview(tool_result, 180)))
             }
             Some("todo_write") if tool_result_effective_success(tool_result) => {
-                tool_result_parameters(tool_result)
-                    .as_ref()
-                    .and_then(summarize_todo_write)
-                    .or_else(|| Some(format!("📋 任务列表已同步：{}", tool_result_text_preview(tool_result, 180))))
+                tool_result_parameters(tool_result).as_ref().and_then(summarize_todo_write).or_else(
+                    || {
+                        Some(format!(
+                            "📋 任务列表已同步：{}",
+                            tool_result_text_preview(tool_result, 180)
+                        ))
+                    },
+                )
             }
             Some("todo_write") => {
                 Some(format!("❌ 任务列表更新失败：{}", tool_result_text_preview(tool_result, 180)))
             }
             Some("spawn_task_conversation") if tool_result_effective_success(tool_result) => {
-                summarize_spawn_task_result(tool_result)
-                    .or_else(|| Some(format!("✅ 子任务已创建：{}", tool_result_text_preview(tool_result, 180))))
+                summarize_spawn_task_result(tool_result).or_else(|| {
+                    Some(format!("✅ 子任务已创建：{}", tool_result_text_preview(tool_result, 180)))
+                })
             }
             Some("spawn_task_conversation") => {
                 Some(format!("❌ 子任务创建失败：{}", tool_result_text_preview(tool_result, 180)))
@@ -940,7 +943,12 @@ impl ToolPresenter for UiInteractionToolPresenter {
             }
             "preview_file" => summarize_preview_items(&tool_call.parameters, false)
                 .map(|summary| format!("👁 预览{}", summary))
-                .or_else(|| Some(format!("👁 预览 {} 个文件", value_len(&tool_call.parameters, "files").max(1)))),
+                .or_else(|| {
+                    Some(format!(
+                        "👁 预览 {} 个文件",
+                        value_len(&tool_call.parameters, "files").max(1)
+                    ))
+                }),
             _ => None,
         }
     }
@@ -957,7 +965,9 @@ impl ToolPresenter for UiInteractionToolPresenter {
                     .map(|summary| format!("👁 已展示{}", summary))
                     .or_else(|| Some("👁 预览内容已展示".to_string()))
             }
-            Some("preview_file") => Some(format!("❌ 预览展示失败：{}", tool_result_text_preview(tool_result, 180))),
+            Some("preview_file") => {
+                Some(format!("❌ 预览展示失败：{}", tool_result_text_preview(tool_result, 180)))
+            }
             _ => None,
         }
     }
@@ -982,10 +992,8 @@ impl ToolPresenter for SearchToolPresenter {
         match tool_result.tool_name.as_deref() {
             Some("search_web") if tool_result.success => {
                 let params = tool_result_parameters(tool_result);
-                let query = params
-                    .as_ref()
-                    .and_then(|p| value_string(p, "query"))
-                    .unwrap_or("搜索");
+                let query =
+                    params.as_ref().and_then(|p| value_string(p, "query")).unwrap_or("搜索");
                 if let Some(json) = tool_result_content_json(tool_result) {
                     if let Some(items) = json_array(json, "items") {
                         let mut lines = vec![format!("🔍 搜索完成：{}", preview_text(query, 80))];
@@ -998,7 +1006,11 @@ impl ToolPresenter for SearchToolPresenter {
                             if url.is_empty() {
                                 lines.push(format!("• {}", preview_text(title, 80)));
                             } else {
-                                lines.push(format!("• {} - {}", preview_text(title, 60), preview_text(url, 60)));
+                                lines.push(format!(
+                                    "• {} - {}",
+                                    preview_text(title, 60),
+                                    preview_text(url, 60)
+                                ));
                             }
                         }
                         if items.len() > 3 {
@@ -1007,25 +1019,27 @@ impl ToolPresenter for SearchToolPresenter {
                         return Some(lines.join("\n"));
                     }
                 }
-                Some(format!("🔍 搜索完成：{}\n{}", preview_text(query, 80), tool_result_text_preview(tool_result, 260)))
+                Some(format!(
+                    "🔍 搜索完成：{}\n{}",
+                    preview_text(query, 80),
+                    tool_result_text_preview(tool_result, 260)
+                ))
             }
             Some("search_web") => {
                 Some(format!("❌ 搜索失败：{}", tool_result_text_preview(tool_result, 180)))
             }
             Some("fetch_url") if tool_result.success => {
                 let params = tool_result_parameters(tool_result);
-                let url = params
-                    .as_ref()
-                    .and_then(|p| value_string(p, "url"))
-                    .unwrap_or("网页");
-                Some(format!("🌐 网页已抓取：{}\n{}", preview_text(url, 100), tool_result_text_preview(tool_result, 260)))
+                let url = params.as_ref().and_then(|p| value_string(p, "url")).unwrap_or("网页");
+                Some(format!(
+                    "🌐 网页已抓取：{}\n{}",
+                    preview_text(url, 100),
+                    tool_result_text_preview(tool_result, 260)
+                ))
             }
             Some("fetch_url") => {
                 let params = tool_result_parameters(tool_result);
-                let url = params
-                    .as_ref()
-                    .and_then(|p| value_string(p, "url"))
-                    .unwrap_or("网页");
+                let url = params.as_ref().and_then(|p| value_string(p, "url")).unwrap_or("网页");
                 Some(format!("❌ 网页抓取失败：{}", preview_text(url, 120)))
             }
             _ => None,
@@ -1046,9 +1060,8 @@ impl ToolPresenter for OperationToolPresenter {
                 .map(|path| format!("✏️ 写入 {}", path)),
             "edit_file" => value_string(&tool_call.parameters, "file_path")
                 .map(|path| format!("📝 编辑 {}", path)),
-            "list_directory" => {
-                value_string(&tool_call.parameters, "path").map(|path| format!("📂 列出目录 {}", path))
-            }
+            "list_directory" => value_string(&tool_call.parameters, "path")
+                .map(|path| format!("📂 列出目录 {}", path)),
             "execute_bash" => {
                 let description = value_string(&tool_call.parameters, "description");
                 let command = value_string(&tool_call.parameters, "command");
@@ -1080,7 +1093,11 @@ impl ToolPresenter for OperationToolPresenter {
             Some("read_file") => {
                 let path = params.as_ref().and_then(|p| value_string(p, "file_path"));
                 Some(match path {
-                    Some(path) => format!("❌ 读取失败 {}\n{}", path, tool_result_text_preview(tool_result, 180)),
+                    Some(path) => format!(
+                        "❌ 读取失败 {}\n{}",
+                        path,
+                        tool_result_text_preview(tool_result, 180)
+                    ),
                     None => format!("❌ 读取失败：{}", tool_result_text_preview(tool_result, 180)),
                 })
             }
@@ -1095,7 +1112,11 @@ impl ToolPresenter for OperationToolPresenter {
             Some("write_file") => {
                 let path = params.as_ref().and_then(|p| value_string(p, "file_path"));
                 Some(match path {
-                    Some(path) => format!("❌ 写入失败 {}\n{}", path, tool_result_text_preview(tool_result, 180)),
+                    Some(path) => format!(
+                        "❌ 写入失败 {}\n{}",
+                        path,
+                        tool_result_text_preview(tool_result, 180)
+                    ),
                     None => format!("❌ 写入失败：{}", tool_result_text_preview(tool_result, 180)),
                 })
             }
@@ -1110,7 +1131,11 @@ impl ToolPresenter for OperationToolPresenter {
             Some("edit_file") => {
                 let path = params.as_ref().and_then(|p| value_string(p, "file_path"));
                 Some(match path {
-                    Some(path) => format!("❌ 编辑失败 {}\n{}", path, tool_result_text_preview(tool_result, 180)),
+                    Some(path) => format!(
+                        "❌ 编辑失败 {}\n{}",
+                        path,
+                        tool_result_text_preview(tool_result, 180)
+                    ),
                     None => format!("❌ 编辑失败：{}", tool_result_text_preview(tool_result, 180)),
                 })
             }
@@ -1126,7 +1151,9 @@ impl ToolPresenter for OperationToolPresenter {
             Some("get_bash_output") if tool_result_effective_success(tool_result) => {
                 Some(summarize_bash_output_result(tool_result))
             }
-            Some("get_bash_output") => Some(format!("❌ 读取命令输出失败：{}", tool_result_text_preview(tool_result, 180))),
+            Some("get_bash_output") => {
+                Some(format!("❌ 读取命令输出失败：{}", tool_result_text_preview(tool_result, 180)))
+            }
             _ => None,
         }
     }
@@ -1157,8 +1184,7 @@ impl ToolPresenter for ArtifactToolPresenter {
                 let artifact_id = params
                     .as_ref()
                     .and_then(|p| {
-                        value_string(p, "artifactId")
-                            .or_else(|| value_string(p, "artifact_id"))
+                        value_string(p, "artifactId").or_else(|| value_string(p, "artifact_id"))
                     })
                     .unwrap_or("Artifact");
                 Some(format!("🎨 Artifact 已展示：{}", artifact_id))
@@ -1199,10 +1225,7 @@ impl ToolPresenter for FallbackToolPresenter {
         if summary.is_empty() {
             Some(format!("{} {}/{} {}", icon, server_name, tool_name, prefix))
         } else {
-            Some(format!(
-                "{} {}/{} {}\n{}",
-                icon, server_name, tool_name, prefix, summary
-            ))
+            Some(format!("{} {}/{} {}\n{}", icon, server_name, tool_name, prefix, summary))
         }
     }
 }
@@ -1237,7 +1260,12 @@ mod tests {
         }
     }
 
-    fn build_tool_result_message(tool: &str, server: &str, parameters: Value, result: Value) -> Message {
+    fn build_tool_result_message(
+        tool: &str,
+        server: &str,
+        parameters: Value,
+        result: Value,
+    ) -> Message {
         build_message(
             "tool_result",
             &format!(

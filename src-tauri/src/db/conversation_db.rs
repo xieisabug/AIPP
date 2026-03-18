@@ -75,9 +75,8 @@ fn ensure_column_exists(
     column_definition: &str,
 ) -> Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
-    let existing_columns = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let existing_columns =
+        stmt.query_map([], |row| row.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
     if existing_columns.iter().any(|existing| existing == column_name) {
         return Ok(());
     }

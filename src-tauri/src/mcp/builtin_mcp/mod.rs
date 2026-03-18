@@ -1,7 +1,7 @@
-use crate::db::mcp_db::MCPDatabase;
 use crate::api::ai::acp::{
     AcpPermissionOptionPayload, AcpPermissionRequestSnapshot, AcpPermissionState,
 };
+use crate::db::mcp_db::MCPDatabase;
 use crate::mcp::builtin_mcp::operation::state::PermissionRequestSnapshot;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -91,6 +91,14 @@ fn parse_builtin_parameters(parameters: &str) -> Result<serde_json::Value, Strin
     }
 }
 
+fn value_as_i64(value: &serde_json::Value) -> Option<i64> {
+    value.as_i64().or_else(|| value.as_str().and_then(|raw| raw.trim().parse::<i64>().ok()))
+}
+
+fn argument_i64(args: &serde_json::Value, key: &str) -> Option<i64> {
+    args.get(key).and_then(value_as_i64)
+}
+
 fn build_dynamic_mcp_server_tool_item(tool_name: &str, summary: &str) -> serde_json::Value {
     serde_json::json!({
         "tool": tool_name,
@@ -155,27 +163,15 @@ fn find_acp_permission_option<'a>(
     snapshot: &'a AcpPermissionRequestSnapshot,
     option_id: &str,
 ) -> Option<&'a AcpPermissionOptionPayload> {
-    snapshot
-        .event
-        .options
-        .iter()
-        .find(|option| option.option_id == option_id)
+    snapshot.event.options.iter().find(|option| option.option_id == option_id)
 }
 
 fn acp_permission_manual_review_reason(
     snapshot: &AcpPermissionRequestSnapshot,
     selected_option_id: Option<&str>,
 ) -> Option<String> {
-    if snapshot
-        .event
-        .title
-        .as_deref()
-        .is_some_and(contains_manual_review_command_keyword)
-        || snapshot
-            .event
-            .parameters
-            .as_deref()
-            .is_some_and(contains_manual_review_command_keyword)
+    if snapshot.event.title.as_deref().is_some_and(contains_manual_review_command_keyword)
+        || snapshot.event.parameters.as_deref().is_some_and(contains_manual_review_command_keyword)
     {
         return Some("ACP 请求内容包含 rm/删除类命令，必须由用户人工审核。".to_string());
     }
@@ -213,8 +209,8 @@ fn build_butler_review_payload(
 fn build_operation_permission_snapshot_payload(
     snapshot: &PermissionRequestSnapshot,
 ) -> Result<serde_json::Value, String> {
-    let mut value =
-        serde_json::to_value(snapshot).map_err(|e| format!("Failed to serialize operation permission snapshot: {e}"))?;
+    let mut value = serde_json::to_value(snapshot)
+        .map_err(|e| format!("Failed to serialize operation permission snapshot: {e}"))?;
     let manual_review_reason = operation_permission_manual_review_reason(snapshot);
     if let Some(object) = value.as_object_mut() {
         object.insert(
@@ -231,9 +227,10 @@ fn build_operation_permission_snapshot_payload(
 fn build_acp_permission_snapshot_payload(
     snapshot: &AcpPermissionRequestSnapshot,
 ) -> Result<serde_json::Value, String> {
-    let mut value =
-        serde_json::to_value(snapshot).map_err(|e| format!("Failed to serialize ACP permission snapshot: {e}"))?;
-    let persistent_option_present = snapshot.event.options.iter().any(|option| option.kind == "allow_always");
+    let mut value = serde_json::to_value(snapshot)
+        .map_err(|e| format!("Failed to serialize ACP permission snapshot: {e}"))?;
+    let persistent_option_present =
+        snapshot.event.options.iter().any(|option| option.kind == "allow_always");
     let manual_review_reason = acp_permission_manual_review_reason(snapshot, None);
     if let Some(object) = value.as_object_mut() {
         object.insert(
@@ -261,8 +258,7 @@ fn resolve_artifact_tool_conversation_id(
             .ok_or_else(|| "Artifact tools require conversation context".to_string());
     }
 
-    args.get("conversation_id")
-        .and_then(|v| v.as_i64())
+    argument_i64(args, "conversation_id")
         .or(conversation_id)
         .ok_or_else(|| "Artifact tools require conversation context".to_string())
 }
@@ -523,8 +519,9 @@ async fn resolve_accessible_butler_task_detail(
     use crate::api::butler_api::get_butler_task_detail;
     use crate::db::conversation_db::{ConversationDatabase, Repository};
 
-    let current_conversation_id = current_conversation_id
-        .ok_or_else(|| "task_conversation_operation requires Butler conversation context".to_string())?;
+    let current_conversation_id = current_conversation_id.ok_or_else(|| {
+        "task_conversation_operation requires Butler conversation context".to_string()
+    })?;
     let detail = get_butler_task_detail(app_handle.clone(), task_conversation_id).await?;
 
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
@@ -548,7 +545,9 @@ async fn resolve_accessible_butler_task_detail(
                 && current_conversation.parent_butler_conversation_id
                     != Some(detail.definition.butler_conversation_id)
             {
-                return Err("Target task conversation is outside the current Butler task scope".to_string());
+                return Err(
+                    "Target task conversation is outside the current Butler task scope".to_string()
+                );
             }
         }
         _ => {
@@ -588,6 +587,10 @@ async fn build_task_conversation_read_payload(
         .state::<AcpPermissionState>()
         .list_requests_for_conversation(detail.conversation.id)
         .await;
+    let ask_user_questions = app_handle
+        .state::<interaction::InteractionState>()
+        .list_requests_for_conversation(detail.conversation.id)
+        .await;
     let operation_permissions = operation_permissions
         .iter()
         .map(build_operation_permission_snapshot_payload)
@@ -606,6 +609,7 @@ async fn build_task_conversation_read_payload(
         "latest_messages": latest_messages,
         "pending_operation_permissions": operation_permissions,
         "pending_acp_permissions": acp_permissions,
+        "pending_ask_user_questions": ask_user_questions,
     }))
 }
 
@@ -657,7 +661,28 @@ async fn resolve_acp_permission_request_id(
     } else if pending.is_empty() {
         Err("No pending ACP permission exists for this task conversation".to_string())
     } else {
-        Err("Multiple pending ACP permissions exist; please specify request_id or review_code".to_string())
+        Err("Multiple pending ACP permissions exist; please specify request_id or review_code"
+            .to_string())
+    }
+}
+
+async fn resolve_ask_user_request_id(
+    app_handle: &AppHandle,
+    task_conversation_id: i64,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let state = app_handle.state::<interaction::InteractionState>();
+    if let Some(request_id) = args.get("request_id").and_then(|v| v.as_str()) {
+        return Ok(request_id.to_string());
+    }
+    let pending = state.list_requests_for_conversation(task_conversation_id).await;
+    if pending.len() == 1 {
+        Ok(pending[0].request_id.clone())
+    } else if pending.is_empty() {
+        Err("No pending ask_user_question exists for this task conversation".to_string())
+    } else {
+        Err("Multiple pending ask_user_question requests exist; please specify request_id"
+            .to_string())
     }
 }
 
@@ -1059,7 +1084,7 @@ pub async fn execute_aipp_builtin_tool(
                             .and_then(|v| v.as_str())
                             .map(|v| v.to_string()),
                         db_id: args.get("db_id").and_then(|v| v.as_str()).map(|v| v.to_string()),
-                        assistant_id: args.get("assistant_id").and_then(|v| v.as_i64()),
+                        assistant_id: argument_i64(&args, "assistant_id"),
                     };
                     match show_artifact(&app_handle, request) {
                         Ok(response) => serde_json::json!({
@@ -1289,7 +1314,7 @@ pub async fn execute_aipp_builtin_tool(
                 "spawn_task_conversation" => {
                     let butler_conversation_id = args
                         .get("butler_conversation_id")
-                        .and_then(|v| v.as_i64())
+                        .and_then(value_as_i64)
                         .or(conversation_id)
                         .ok_or_else(|| {
                             "spawn_task_conversation requires butler conversation context"
@@ -1308,9 +1333,7 @@ pub async fn execute_aipp_builtin_tool(
                         butler_conversation_id,
                         title: title.to_string(),
                         goal: goal.to_string(),
-                        executor_assistant_id: args
-                            .get("executor_assistant_id")
-                            .and_then(|v| v.as_i64()),
+                        executor_assistant_id: argument_i64(&args, "executor_assistant_id"),
                         executor_assistant_name: args
                             .get("executor_assistant_name")
                             .and_then(|v| v.as_str())
@@ -1345,10 +1368,10 @@ pub async fn execute_aipp_builtin_tool(
                     }
                 }
                 "task_conversation_operation" => {
-                    let task_conversation_id = args
-                        .get("task_conversation_id")
-                        .and_then(|v| v.as_i64())
-                        .ok_or_else(|| "Missing required parameter: task_conversation_id".to_string())?;
+                    let task_conversation_id =
+                        args.get("task_conversation_id").and_then(value_as_i64).ok_or_else(
+                            || "Missing required parameter: task_conversation_id".to_string(),
+                        )?;
                     let action = args
                         .get("action")
                         .and_then(|v| v.as_str())
@@ -1367,8 +1390,12 @@ pub async fn execute_aipp_builtin_tool(
                                 .and_then(|v| v.as_u64())
                                 .map(|v| v as usize)
                                 .unwrap_or(1);
-                            match build_task_conversation_read_payload(&app_handle, &detail, latest_count)
-                                .await
+                            match build_task_conversation_read_payload(
+                                &app_handle,
+                                &detail,
+                                latest_count,
+                            )
+                            .await
                             {
                                 Ok(payload) => serde_json::json!({
                                     "content": [{"type": "json", "json": payload}],
@@ -1400,11 +1427,13 @@ pub async fn execute_aipp_builtin_tool(
                                     .and_then(|v| v.as_str())
                                     .map(str::trim)
                                     .filter(|value| !value.is_empty())
-                                    .ok_or_else(|| "Missing required parameter: prompt".to_string())?;
-                                let assistant_id = detail
-                                    .conversation
-                                    .assistant_id
-                                    .ok_or_else(|| "Task conversation has no assigned assistant".to_string())?;
+                                    .ok_or_else(|| {
+                                        "Missing required parameter: prompt".to_string()
+                                    })?;
+                                let assistant_id =
+                                    detail.conversation.assistant_id.ok_or_else(|| {
+                                        "Task conversation has no assigned assistant".to_string()
+                                    })?;
                                 let window = resolve_butler_spawn_window(&app_handle)?;
                                 let app_handle_clone = app_handle.clone();
                                 let window_clone = window.clone();
@@ -1413,7 +1442,8 @@ pub async fn execute_aipp_builtin_tool(
                                     let task_conversation_id_for_spawn = task_conversation_id;
                                     tauri::async_runtime::block_on(async move {
                                         let request = AiRequest {
-                                            conversation_id: task_conversation_id_for_spawn.to_string(),
+                                            conversation_id: task_conversation_id_for_spawn
+                                                .to_string(),
                                             assistant_id,
                                             prompt: prompt_owned,
                                             model: None,
@@ -1475,10 +1505,10 @@ pub async fn execute_aipp_builtin_tool(
                             }
                         }
                         "permission_confirm" | "operate_confirm" => {
-                            let decision = args
-                                .get("decision")
-                                .and_then(|v| v.as_str())
-                                .ok_or_else(|| "Missing required parameter: decision".to_string())?;
+                            let decision =
+                                args.get("decision").and_then(|v| v.as_str()).ok_or_else(|| {
+                                    "Missing required parameter: decision".to_string()
+                                })?;
                             let request_id = resolve_operation_permission_request_id(
                                 &app_handle,
                                 task_conversation_id,
@@ -1489,7 +1519,9 @@ pub async fn execute_aipp_builtin_tool(
                                 .state::<OperationState>()
                                 .get_permission_request(&request_id)
                                 .await
-                                .ok_or_else(|| "Pending operation permission request not found".to_string())?;
+                                .ok_or_else(|| {
+                                    "Pending operation permission request not found".to_string()
+                                })?;
                             if decision == "allow_and_save" {
                                 serde_json::json!({
                                     "content": [{
@@ -1498,7 +1530,9 @@ pub async fn execute_aipp_builtin_tool(
                                     }],
                                     "isError": true
                                 })
-                            } else if let Some(reason) = operation_permission_manual_review_reason(&snapshot) {
+                            } else if let Some(reason) =
+                                operation_permission_manual_review_reason(&snapshot)
+                            {
                                 serde_json::json!({
                                     "content": [{
                                         "type": "text",
@@ -1543,12 +1577,12 @@ pub async fn execute_aipp_builtin_tool(
                                 &args,
                             )
                             .await?;
-                            let option_id =
-                                args.get("option_id").and_then(|v| v.as_str()).map(|v| v.to_string());
-                            let cancelled = args
-                                .get("cancelled")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
+                            let option_id = args
+                                .get("option_id")
+                                .and_then(|v| v.as_str())
+                                .map(|v| v.to_string());
+                            let cancelled =
+                                args.get("cancelled").and_then(|v| v.as_bool()).unwrap_or(false);
                             if !cancelled && option_id.is_none() {
                                 return Err(
                                     "acp_permission_confirm requires option_id or cancelled=true"
@@ -1559,7 +1593,9 @@ pub async fn execute_aipp_builtin_tool(
                                 .state::<AcpPermissionState>()
                                 .get_request(&request_id)
                                 .await
-                                .ok_or_else(|| "Pending ACP permission request not found".to_string())?;
+                                .ok_or_else(|| {
+                                    "Pending ACP permission request not found".to_string()
+                                })?;
                             if let Some(reason) =
                                 acp_permission_manual_review_reason(&snapshot, option_id.as_deref())
                             {
@@ -1602,6 +1638,65 @@ pub async fn execute_aipp_builtin_tool(
                                 }
                             }
                         }
+                        "ask_user_respond" => {
+                            let cancelled =
+                                args.get("cancelled").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let answers: Option<std::collections::HashMap<String, String>> =
+                                if cancelled {
+                                    None
+                                } else {
+                                    let raw = args
+                                    .get("answers")
+                                    .and_then(|v| v.as_object())
+                                    .ok_or_else(|| "ask_user_respond requires answers object or cancelled=true".to_string())?;
+                                    let map: std::collections::HashMap<String, String> = raw
+                                        .iter()
+                                        .map(|(k, v)| {
+                                            (k.clone(), v.as_str().unwrap_or("").to_string())
+                                        })
+                                        .collect();
+                                    if map.is_empty() {
+                                        return Err("answers object must not be empty".to_string());
+                                    }
+                                    Some(map)
+                                };
+
+                            let request_id = resolve_ask_user_request_id(
+                                &app_handle,
+                                task_conversation_id,
+                                &args,
+                            )
+                            .await?;
+
+                            match interaction::resolve_ask_user_question_response(
+                                &app_handle,
+                                &request_id,
+                                answers.clone(),
+                                cancelled,
+                            )
+                            .await
+                            {
+                                Ok(_) => serde_json::json!({
+                                    "content": [{
+                                        "type": "json",
+                                        "json": {
+                                            "status": "ask_user_responded",
+                                            "request_id": request_id,
+                                            "cancelled": cancelled,
+                                            "answers": answers
+                                        }
+                                    }],
+                                    "isError": false
+                                }),
+                                Err(e) => {
+                                    error!(error = %e, "task_conversation_operation ask_user_respond failed");
+                                    serde_json::json!({
+                                        "content": [{"type": "text", "text": e}],
+                                        "isError": true
+                                    })
+                                }
+                            }
+                        }
                         _ => serde_json::json!({
                             "content": [{"type": "text", "text": format!("Unknown task_conversation_operation action: {}", action)}],
                             "isError": true
@@ -1626,7 +1721,9 @@ pub async fn execute_aipp_builtin_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::ai::acp::{AcpPermissionOptionPayload, AcpPermissionRequestEvent, AcpPermissionRequestSnapshot};
+    use crate::api::ai::acp::{
+        AcpPermissionOptionPayload, AcpPermissionRequestEvent, AcpPermissionRequestSnapshot,
+    };
     use crate::mcp::builtin_mcp::operation::types::PermissionRequestEvent;
 
     #[test]
@@ -1692,6 +1789,36 @@ mod tests {
         let args = serde_json::json!({ "conversation_id": 999 });
         let resolved = resolve_artifact_tool_conversation_id("show_artifact", &args, Some(123))
             .expect("show_artifact should resolve");
+
+        assert_eq!(resolved, 999);
+    }
+
+    #[test]
+    fn value_as_i64_accepts_numeric_strings() {
+        assert_eq!(value_as_i64(&serde_json::json!(44)), Some(44));
+        assert_eq!(value_as_i64(&serde_json::json!("44")), Some(44));
+        assert_eq!(value_as_i64(&serde_json::json!(" 570 ")), Some(570));
+        assert_eq!(value_as_i64(&serde_json::json!("abc")), None);
+    }
+
+    #[test]
+    fn spawn_task_related_ids_accept_numeric_strings() {
+        let args = serde_json::json!({
+            "butler_conversation_id": "568",
+            "executor_assistant_id": "44",
+            "task_conversation_id": "570"
+        });
+
+        assert_eq!(argument_i64(&args, "butler_conversation_id"), Some(568));
+        assert_eq!(argument_i64(&args, "executor_assistant_id"), Some(44));
+        assert_eq!(argument_i64(&args, "task_conversation_id"), Some(570));
+    }
+
+    #[test]
+    fn show_artifact_accepts_string_conversation_override() {
+        let args = serde_json::json!({ "conversation_id": "999" });
+        let resolved = resolve_artifact_tool_conversation_id("show_artifact", &args, Some(123))
+            .expect("show_artifact should resolve string conversation ids");
 
         assert_eq!(resolved, 999);
     }

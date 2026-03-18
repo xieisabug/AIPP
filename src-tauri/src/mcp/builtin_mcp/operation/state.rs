@@ -270,7 +270,10 @@ impl OperationState {
         pending.remove(request_id);
     }
 
-    pub async fn get_permission_request(&self, request_id: &str) -> Option<PermissionRequestSnapshot> {
+    pub async fn get_permission_request(
+        &self,
+        request_id: &str,
+    ) -> Option<PermissionRequestSnapshot> {
         let pending = self.pending_permissions.lock().await;
         pending.get(request_id).map(|request| PermissionRequestSnapshot {
             conversation_id: request.conversation_id,

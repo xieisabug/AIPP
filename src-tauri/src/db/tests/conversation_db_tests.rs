@@ -510,12 +510,8 @@ fn test_try_mark_task_result_followup_dispatching_only_claims_once() {
     .unwrap();
 
     let repo = ButlerRepository::new(conn);
-    assert!(repo
-        .try_mark_task_result_followup_dispatching(201, Some(9101))
-        .unwrap());
-    assert!(!repo
-        .try_mark_task_result_followup_dispatching(201, Some(9102))
-        .unwrap());
+    assert!(repo.try_mark_task_result_followup_dispatching(201, Some(9101)).unwrap());
+    assert!(!repo.try_mark_task_result_followup_dispatching(201, Some(9102)).unwrap());
 
     let result = repo.get_task_result(201).unwrap().unwrap();
     assert_eq!(result.followup_status.as_deref(), Some("dispatching"));

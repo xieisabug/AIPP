@@ -980,8 +980,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let init_message_list =
         build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
-    let override_mcp_config =
-        enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
+    let override_mcp_config = enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
 
     // 收集 MCP 信息
     let mcp_info = collect_mcp_info_for_assistant(
@@ -1146,7 +1145,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             model_id,
             model_code.clone(),
             override_mcp_config.clone(), // preserve Butler MCP override config
-            tool_name_mapping.clone(), // 工具名称映射表
+            tool_name_mapping.clone(),   // 工具名称映射表
         )
         .await?;
     } else {
@@ -1234,8 +1233,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let init_message_list =
         build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
-    let override_mcp_config =
-        enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
+    let override_mcp_config = enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
 
     // 收集 MCP 信息
     let mcp_info = collect_mcp_info_for_assistant(

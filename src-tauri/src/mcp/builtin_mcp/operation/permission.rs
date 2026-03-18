@@ -1,9 +1,9 @@
+use crate::api::operation_api::{
+    emit_permission_request_event, OPERATION_PERMISSION_REQUEST_EVENT,
+};
 use crate::db::conversation_db::Repository;
 use crate::db::{
     assistant_db::AssistantDatabase, conversation_db::ConversationDatabase, mcp_db::MCPDatabase,
-};
-use crate::api::operation_api::{
-    emit_permission_request_event, OPERATION_PERMISSION_REQUEST_EVENT,
 };
 use crate::utils::path_utils::is_path_under_trusted;
 use std::path::{Component, Path, PathBuf};

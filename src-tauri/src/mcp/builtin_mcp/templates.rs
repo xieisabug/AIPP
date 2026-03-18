@@ -440,13 +440,13 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "task_conversation_operation".into(),
-                description: "Inspect and operate an existing butler task conversation. Use this to read the latest task messages, send a follow-up prompt to the task assistant, or confirm pending operation/ACP permissions when a task becomes blocked.".into(),
+                description: "Inspect and operate an existing butler task conversation. Use this to read the latest task messages, send a follow-up prompt to the task assistant, confirm pending operation/ACP permissions, or answer pending ask_user_question requests when a task becomes blocked.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["read", "reply_prompt", "permission_confirm", "operate_confirm", "acp_permission_confirm"],
+                            "enum": ["read", "reply_prompt", "permission_confirm", "operate_confirm", "acp_permission_confirm", "ask_user_respond"],
                             "description": "Action to perform on the target task conversation."
                         },
                         "task_conversation_id": {
@@ -463,7 +463,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "request_id": {
                             "type": "string",
-                            "description": "Optional. Exact pending permission request id."
+                            "description": "Optional. Exact pending permission or ask_user_question request id."
                         },
                         "review_code": {
                             "type": "string",
@@ -480,7 +480,12 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "cancelled": {
                             "type": "boolean",
-                            "description": "Only for acp_permission_confirm. Set true to cancel instead of selecting an option."
+                            "description": "Only for acp_permission_confirm or ask_user_respond. Set true to cancel instead of providing a response."
+                        },
+                        "answers": {
+                            "type": "object",
+                            "description": "Only for ask_user_respond. A JSON object mapping question header to selected option value or free-text answer.",
+                            "additionalProperties": { "type": "string" }
                         }
                     },
                     "required": ["action", "task_conversation_id"]
@@ -1086,10 +1091,8 @@ mod tests {
     #[test]
     fn test_agent_task_conversation_operation_tool_schema() {
         let tools = get_builtin_tools_for_command("aipp:agent");
-        let operation_tool = tools
-            .iter()
-            .find(|t| t.name == "task_conversation_operation")
-            .unwrap();
+        let operation_tool =
+            tools.iter().find(|t| t.name == "task_conversation_operation").unwrap();
 
         let schema = &operation_tool.input_schema;
         assert_eq!(schema["type"], "object");
