@@ -1,4 +1,8 @@
 use crate::db::mcp_db::MCPDatabase;
+use crate::api::ai::acp::{
+    AcpPermissionOptionPayload, AcpPermissionRequestSnapshot, AcpPermissionState,
+};
+use crate::mcp::builtin_mcp::operation::state::PermissionRequestSnapshot;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use tracing::{debug, error, instrument};
@@ -118,6 +122,133 @@ fn build_dynamic_mcp_loaded_tool_item(
         "description": description,
         "parameters": parameters,
     })
+}
+
+fn contains_manual_review_command_keyword(value: &str) -> bool {
+    let lowered = value.trim().to_ascii_lowercase();
+    if lowered.is_empty() {
+        return false;
+    }
+
+    if lowered.contains("remove-item") {
+        return true;
+    }
+
+    lowered
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+        .any(|token| matches!(token, "rm" | "rmdir"))
+}
+
+fn operation_permission_manual_review_reason(
+    snapshot: &PermissionRequestSnapshot,
+) -> Option<String> {
+    if contains_manual_review_command_keyword(&snapshot.event.operation)
+        || contains_manual_review_command_keyword(&snapshot.event.path)
+    {
+        Some("请求内容包含 rm/删除类命令，必须由用户人工审核。".to_string())
+    } else {
+        None
+    }
+}
+
+fn find_acp_permission_option<'a>(
+    snapshot: &'a AcpPermissionRequestSnapshot,
+    option_id: &str,
+) -> Option<&'a AcpPermissionOptionPayload> {
+    snapshot
+        .event
+        .options
+        .iter()
+        .find(|option| option.option_id == option_id)
+}
+
+fn acp_permission_manual_review_reason(
+    snapshot: &AcpPermissionRequestSnapshot,
+    selected_option_id: Option<&str>,
+) -> Option<String> {
+    if snapshot
+        .event
+        .title
+        .as_deref()
+        .is_some_and(contains_manual_review_command_keyword)
+        || snapshot
+            .event
+            .parameters
+            .as_deref()
+            .is_some_and(contains_manual_review_command_keyword)
+    {
+        return Some("ACP 请求内容包含 rm/删除类命令，必须由用户人工审核。".to_string());
+    }
+
+    if let Some(option_id) = selected_option_id {
+        if let Some(option) = find_acp_permission_option(snapshot, option_id) {
+            if option.kind == "allow_always" {
+                return Some("ACP 持久授权必须由用户人工审核。".to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn build_butler_review_payload(
+    manual_review_reason: Option<String>,
+    default_guidance: &str,
+) -> serde_json::Value {
+    let manual_review_required = manual_review_reason.is_some();
+    let guidance = if manual_review_required {
+        "总管家不得直接确认该请求，需等待用户在桌面端或飞书端人工审核。"
+    } else {
+        default_guidance
+    };
+
+    serde_json::json!({
+        "manual_review_required": manual_review_required,
+        "risk_level": if manual_review_required { "high" } else { "normal" },
+        "reason": manual_review_reason,
+        "guidance": guidance,
+    })
+}
+
+fn build_operation_permission_snapshot_payload(
+    snapshot: &PermissionRequestSnapshot,
+) -> Result<serde_json::Value, String> {
+    let mut value =
+        serde_json::to_value(snapshot).map_err(|e| format!("Failed to serialize operation permission snapshot: {e}"))?;
+    let manual_review_reason = operation_permission_manual_review_reason(snapshot);
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "butler_review".to_string(),
+            build_butler_review_payload(
+                manual_review_reason,
+                "如果请求与当前任务目标一致且风险可控，总管家可以确认；优先选择最小权限，不要使用 allow_and_save。",
+            ),
+        );
+    }
+    Ok(value)
+}
+
+fn build_acp_permission_snapshot_payload(
+    snapshot: &AcpPermissionRequestSnapshot,
+) -> Result<serde_json::Value, String> {
+    let mut value =
+        serde_json::to_value(snapshot).map_err(|e| format!("Failed to serialize ACP permission snapshot: {e}"))?;
+    let persistent_option_present = snapshot.event.options.iter().any(|option| option.kind == "allow_always");
+    let manual_review_reason = acp_permission_manual_review_reason(snapshot, None);
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "butler_review".to_string(),
+            build_butler_review_payload(
+                manual_review_reason,
+                if persistent_option_present {
+                    "若必须确认，优先选择一次性授权；allow_always 需要用户人工审核。"
+                } else {
+                    "如果请求与当前任务目标一致且风险可控，总管家可以确认；优先选择一次性授权。"
+                },
+            ),
+        );
+    }
+    Ok(value)
 }
 
 fn resolve_artifact_tool_conversation_id(
@@ -454,9 +585,17 @@ async fn build_task_conversation_read_payload(
         .list_permission_requests_for_conversation(detail.conversation.id)
         .await;
     let acp_permissions = app_handle
-        .state::<crate::api::ai::acp::AcpPermissionState>()
+        .state::<AcpPermissionState>()
         .list_requests_for_conversation(detail.conversation.id)
         .await;
+    let operation_permissions = operation_permissions
+        .iter()
+        .map(build_operation_permission_snapshot_payload)
+        .collect::<Result<Vec<_>, _>>()?;
+    let acp_permissions = acp_permissions
+        .iter()
+        .map(build_acp_permission_snapshot_payload)
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(serde_json::json!({
         "task": detail.task,
@@ -1346,31 +1485,54 @@ pub async fn execute_aipp_builtin_tool(
                                 &args,
                             )
                             .await?;
-                            match confirm_operation_permission(
-                                app_handle.clone(),
-                                request_id.clone(),
-                                decision.to_string(),
-                            )
-                            .await
-                            {
-                                Ok(result) => serde_json::json!({
+                            let snapshot = app_handle
+                                .state::<OperationState>()
+                                .get_permission_request(&request_id)
+                                .await
+                                .ok_or_else(|| "Pending operation permission request not found".to_string())?;
+                            if decision == "allow_and_save" {
+                                serde_json::json!({
                                     "content": [{
-                                        "type": "json",
-                                        "json": {
-                                            "status": "permission_confirmed",
-                                            "request_id": request_id,
-                                            "decision": decision,
-                                            "resolved": result
-                                        }
+                                        "type": "text",
+                                        "text": "Butler cannot use allow_and_save automatically. Persistent whitelist grants require explicit user review."
                                     }],
-                                    "isError": false
-                                }),
-                                Err(e) => {
-                                    error!(error = %e, "task_conversation_operation permission_confirm failed");
-                                    serde_json::json!({
-                                        "content": [{"type": "text", "text": e}],
-                                        "isError": true
-                                    })
+                                    "isError": true
+                                })
+                            } else if let Some(reason) = operation_permission_manual_review_reason(&snapshot) {
+                                serde_json::json!({
+                                    "content": [{
+                                        "type": "text",
+                                        "text": format!("This permission requires explicit user review and cannot be resolved by Butler automatically: {}", reason)
+                                    }],
+                                    "isError": true
+                                })
+                            } else {
+                                match confirm_operation_permission(
+                                    app_handle.clone(),
+                                    request_id.clone(),
+                                    decision.to_string(),
+                                )
+                                .await
+                                {
+                                    Ok(result) => serde_json::json!({
+                                        "content": [{
+                                            "type": "json",
+                                            "json": {
+                                                "status": "permission_confirmed",
+                                                "request_id": request_id,
+                                                "decision": decision,
+                                                "resolved": result
+                                            }
+                                        }],
+                                        "isError": false
+                                    }),
+                                    Err(e) => {
+                                        error!(error = %e, "task_conversation_operation permission_confirm failed");
+                                        serde_json::json!({
+                                            "content": [{"type": "text", "text": e}],
+                                            "isError": true
+                                        })
+                                    }
                                 }
                             }
                         }
@@ -1393,33 +1555,50 @@ pub async fn execute_aipp_builtin_tool(
                                         .to_string(),
                                 );
                             }
-                            match confirm_acp_permission(
-                                app_handle.clone(),
-                                request_id.clone(),
-                                option_id.clone(),
-                                Some(cancelled),
-                            )
-                            .await
+                            let snapshot = app_handle
+                                .state::<AcpPermissionState>()
+                                .get_request(&request_id)
+                                .await
+                                .ok_or_else(|| "Pending ACP permission request not found".to_string())?;
+                            if let Some(reason) =
+                                acp_permission_manual_review_reason(&snapshot, option_id.as_deref())
                             {
-                                Ok(result) => serde_json::json!({
+                                serde_json::json!({
                                     "content": [{
-                                        "type": "json",
-                                        "json": {
-                                            "status": "acp_permission_confirmed",
-                                            "request_id": request_id,
-                                            "option_id": option_id,
-                                            "cancelled": cancelled,
-                                            "resolved": result
-                                        }
+                                        "type": "text",
+                                        "text": format!("This ACP permission requires explicit user review and cannot be resolved by Butler automatically: {}", reason)
                                     }],
-                                    "isError": false
-                                }),
-                                Err(e) => {
-                                    error!(error = %e, "task_conversation_operation acp_permission_confirm failed");
-                                    serde_json::json!({
-                                        "content": [{"type": "text", "text": e}],
-                                        "isError": true
-                                    })
+                                    "isError": true
+                                })
+                            } else {
+                                match confirm_acp_permission(
+                                    app_handle.clone(),
+                                    request_id.clone(),
+                                    option_id.clone(),
+                                    Some(cancelled),
+                                )
+                                .await
+                                {
+                                    Ok(result) => serde_json::json!({
+                                        "content": [{
+                                            "type": "json",
+                                            "json": {
+                                                "status": "acp_permission_confirmed",
+                                                "request_id": request_id,
+                                                "option_id": option_id,
+                                                "cancelled": cancelled,
+                                                "resolved": result
+                                            }
+                                        }],
+                                        "isError": false
+                                    }),
+                                    Err(e) => {
+                                        error!(error = %e, "task_conversation_operation acp_permission_confirm failed");
+                                        serde_json::json!({
+                                            "content": [{"type": "text", "text": e}],
+                                            "isError": true
+                                        })
+                                    }
                                 }
                             }
                         }
@@ -1447,6 +1626,8 @@ pub async fn execute_aipp_builtin_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::ai::acp::{AcpPermissionOptionPayload, AcpPermissionRequestEvent, AcpPermissionRequestSnapshot};
+    use crate::mcp::builtin_mcp::operation::types::PermissionRequestEvent;
 
     #[test]
     fn dynamic_mcp_server_payload_is_compact() {
@@ -1513,5 +1694,86 @@ mod tests {
             .expect("show_artifact should resolve");
 
         assert_eq!(resolved, 999);
+    }
+
+    #[test]
+    fn operation_permission_with_rm_requires_manual_review() {
+        let snapshot = PermissionRequestSnapshot {
+            conversation_id: Some(1),
+            event: PermissionRequestEvent {
+                request_id: "req-1".to_string(),
+                operation: "execute_bash".to_string(),
+                path: "rm -rf /tmp/demo".to_string(),
+                conversation_id: Some(1),
+            },
+            review_code: "OP-REQ1".to_string(),
+            feishu_message_id: None,
+            allowed_open_id: None,
+            allowed_chat_id: None,
+        };
+
+        let reason = operation_permission_manual_review_reason(&snapshot);
+        assert!(reason.is_some());
+    }
+
+    #[test]
+    fn acp_permission_with_rm_requires_manual_review() {
+        let snapshot = AcpPermissionRequestSnapshot {
+            conversation_id: Some(1),
+            event: AcpPermissionRequestEvent {
+                request_id: "req-2".to_string(),
+                conversation_id: Some(1),
+                tool_call_id: "tool-1".to_string(),
+                title: Some("Run shell command".to_string()),
+                kind: Some("bash".to_string()),
+                parameters: Some("{\"command\":\"rm -rf /tmp/demo\"}".to_string()),
+                options: vec![AcpPermissionOptionPayload {
+                    option_id: "allow_once".to_string(),
+                    name: "Allow once".to_string(),
+                    kind: "allow_once".to_string(),
+                }],
+            },
+            review_code: "ACP-REQ2".to_string(),
+            feishu_message_id: None,
+            allowed_open_id: None,
+            allowed_chat_id: None,
+        };
+
+        let reason = acp_permission_manual_review_reason(&snapshot, Some("allow_once"));
+        assert!(reason.is_some());
+    }
+
+    #[test]
+    fn acp_persistent_allow_option_requires_manual_review() {
+        let snapshot = AcpPermissionRequestSnapshot {
+            conversation_id: Some(1),
+            event: AcpPermissionRequestEvent {
+                request_id: "req-3".to_string(),
+                conversation_id: Some(1),
+                tool_call_id: "tool-2".to_string(),
+                title: Some("Tool permission".to_string()),
+                kind: Some("tool".to_string()),
+                parameters: Some("{\"path\":\"/tmp/demo\"}".to_string()),
+                options: vec![
+                    AcpPermissionOptionPayload {
+                        option_id: "allow_once".to_string(),
+                        name: "Allow once".to_string(),
+                        kind: "allow_once".to_string(),
+                    },
+                    AcpPermissionOptionPayload {
+                        option_id: "allow_always".to_string(),
+                        name: "Allow always".to_string(),
+                        kind: "allow_always".to_string(),
+                    },
+                ],
+            },
+            review_code: "ACP-REQ3".to_string(),
+            feishu_message_id: None,
+            allowed_open_id: None,
+            allowed_chat_id: None,
+        };
+
+        let reason = acp_permission_manual_review_reason(&snapshot, Some("allow_always"));
+        assert!(reason.is_some());
     }
 }
