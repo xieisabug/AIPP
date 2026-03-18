@@ -2,6 +2,9 @@ use crate::db::conversation_db::Repository;
 use crate::db::{
     assistant_db::AssistantDatabase, conversation_db::ConversationDatabase, mcp_db::MCPDatabase,
 };
+use crate::api::operation_api::{
+    emit_permission_request_event, OPERATION_PERMISSION_REQUEST_EVENT,
+};
 use crate::utils::path_utils::is_path_under_trusted;
 use std::path::{Component, Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
@@ -255,7 +258,12 @@ impl PermissionManager {
 
         info!(request_id = %request_id, operation = %operation, path = %path, "Requesting permission from user");
 
-        if let Err(e) = self.app_handle.emit("operation-permission-request", &event) {
+        if let Err(e) = emit_permission_request_event(
+            &self.app_handle,
+            OPERATION_PERMISSION_REQUEST_EVENT,
+            conversation_id,
+            &event,
+        ) {
             operation_state.remove_permission_request(&request_id).await;
             warn!(error = %e, "Failed to emit permission request event");
             return Err("Failed to request permission".to_string());

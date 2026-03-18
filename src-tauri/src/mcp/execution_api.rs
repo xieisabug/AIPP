@@ -59,6 +59,16 @@ fn continuation_lock_registry() -> &'static ContinuationLockRegistry {
     CONTINUATION_LOCKS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
+fn pick_continuation_window(app_handle: &tauri::AppHandle) -> Option<tauri::Window> {
+    let windows = app_handle.webview_windows();
+    for label in ["butler_experiment", "chat_ui", "ask"] {
+        if let Some(window) = windows.get(label) {
+            return Some(window.as_ref().window());
+        }
+    }
+    None
+}
+
 fn pending_batch_continuation_registry() -> &'static PendingBatchContinuationRegistry {
     PENDING_BATCH_CONTINUATIONS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
@@ -1005,6 +1015,35 @@ async fn handle_tool_execution_result(
     }
 
     Ok(tool_call)
+}
+
+pub(crate) async fn finalize_tool_call_from_external_result(
+    app_handle: &tauri::AppHandle,
+    call_id: i64,
+    execution_result: std::result::Result<String, String>,
+) -> Result<(), String> {
+    let db = MCPDatabase::new(app_handle).map_err(|e| format!("初始化数据库失败: {}", e))?;
+    let tool_call =
+        db.get_mcp_tool_call(call_id).map_err(|e| format!("获取工具调用信息失败: {}", e))?;
+    let window = pick_continuation_window(app_handle)
+        .ok_or_else(|| "No available window to continue AskUserQuestion tool call".to_string())?;
+    let state = app_handle.state::<crate::AppState>();
+    let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+    let is_retry = tool_call.status == "failed";
+
+    handle_tool_execution_result(
+        app_handle,
+        &state,
+        &feature_config_state,
+        &window,
+        call_id,
+        tool_call,
+        execution_result,
+        is_retry,
+        true,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// 规范化从 LLM 返回的 parameters JSON，移除可能的 markdown 代码块包裹。

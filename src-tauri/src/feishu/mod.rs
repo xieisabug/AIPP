@@ -27,10 +27,12 @@ use crate::api::butler_api::{
     wait_for_butler_main_to_be_idle,
 };
 use crate::db::conversation_db::{ConversationDatabase, Repository};
+use crate::db::mcp_db::{MCPDatabase, MCPToolCall};
 use crate::db::system_db::{SecureConfigEntry, SystemDatabase};
 use crate::external_channels::presentation::{render_message_for_external_channel, RenderContext};
 use crate::mcp::builtin_mcp::interaction::{
-    resolve_ask_user_question_response, AskUserQuestionItem, AskUserQuestionRequestEvent,
+    resolve_ask_user_question_response, AskUserQuestionItem, AskUserQuestionRequest,
+    AskUserQuestionRequestEvent,
 };
 
 const EXPERIMENTAL_FEATURE_CODE: &str = "experimental";
@@ -222,19 +224,38 @@ struct IncomingTextEvent {
 }
 
 #[derive(Debug, Deserialize)]
-struct FeishuCardActionCallback {
-    event: FeishuCardActionEvent,
+#[serde(untagged)]
+enum FeishuCardActionCallback {
+    Event(FeishuCardActionEvent),
+    Envelope { event: FeishuCardActionEvent },
+}
+
+impl FeishuCardActionCallback {
+    fn event(&self) -> &FeishuCardActionEvent {
+        match self {
+            Self::Event(event) => event,
+            Self::Envelope { event } => event,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct FeishuCardActionEvent {
     operator: FeishuCardActionOperator,
     action: FeishuCardActionDetail,
+    #[serde(default)]
+    context: Option<FeishuCardActionContext>,
 }
 
 #[derive(Debug, Deserialize)]
 struct FeishuCardActionOperator {
     open_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuCardActionContext {
+    #[serde(default)]
+    open_message_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1150,8 +1171,9 @@ async fn handle_bot_menu_event(
 async fn handle_card_action_trigger(app_handle: &AppHandle, raw_event: &Value) -> Result<(), String> {
     let callback: FeishuCardActionCallback =
         serde_json::from_value(raw_event.clone()).map_err(|e| e.to_string())?;
+    let event = callback.event();
     let action_value = callback
-        .event
+        .event()
         .action
         .value
         .as_ref()
@@ -1166,18 +1188,196 @@ async fn handle_card_action_trigger(app_handle: &AppHandle, raw_event: &Value) -
         .unwrap_or("submit");
 
     if action == "cancel" {
-        resolve_ask_user_question_response(app_handle, request_id, None, true).await?;
+        match resolve_ask_user_question_response(app_handle, request_id, None, true).await {
+            Ok(_) => {}
+            Err(error) if is_missing_ask_user_request_error(&error) => {
+                if !try_recover_feishu_ask_user_resolution(app_handle, &callback, Err("User cancelled AskUserQuestion".to_string()))
+                    .await?
+                {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
         return Ok(());
     }
 
-    let answers = build_ask_user_answers_from_card_callback(app_handle, request_id, &callback).await?;
+    let answers = match build_ask_user_answers_from_card_callback(app_handle, request_id, &callback).await {
+        Ok(answers) => answers,
+        Err(error) if is_missing_ask_user_request_error(&error) => {
+            let form_value = callback
+                .event()
+                .action
+                .form_value
+                .as_ref()
+                .ok_or_else(|| "飞书卡片回调缺少 form_value".to_string())?;
+            if try_recover_feishu_ask_user_resolution(
+                app_handle,
+                &callback,
+                Ok(build_ask_user_question_tool_result(
+                    &recover_answers_from_callback_payload(app_handle, &callback, form_value).await?,
+                )),
+            )
+            .await?
+            {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     debug!(
         request_id,
-        operator_open_id = %callback.event.operator.open_id,
+        operator_open_id = %event.operator.open_id,
         "resolved AskUserQuestion from Feishu card callback"
     );
-    resolve_ask_user_question_response(app_handle, request_id, Some(answers), false).await?;
+    match resolve_ask_user_question_response(app_handle, request_id, Some(answers), false).await {
+        Ok(_) => {}
+        Err(error) if is_missing_ask_user_request_error(&error) => {
+            let form_value = callback
+                .event()
+                .action
+                .form_value
+                .as_ref()
+                .ok_or_else(|| "飞书卡片回调缺少 form_value".to_string())?;
+            if !try_recover_feishu_ask_user_resolution(
+                app_handle,
+                &callback,
+                Ok(build_ask_user_question_tool_result(
+                    &recover_answers_from_callback_payload(app_handle, &callback, form_value).await?,
+                )),
+            )
+            .await?
+            {
+                return Err(error);
+            }
+        }
+        Err(error) => return Err(error),
+    }
     Ok(())
+}
+
+fn is_missing_ask_user_request_error(error: &str) -> bool {
+    error.contains("AskUserQuestion request not found")
+}
+
+fn build_ask_user_question_tool_result(answers: &HashMap<String, String>) -> String {
+    json!([{
+        "type": "json",
+        "json": {
+            "answers": answers
+        }
+    }])
+    .to_string()
+}
+
+fn find_conversation_id_by_external_message(
+    app_handle: &AppHandle,
+    external_message_id: &str,
+) -> Result<Option<i64>, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT conversation_id
+         FROM external_channel_message_link
+         WHERE channel = ?1 AND external_message_id = ?2
+         LIMIT 1",
+        params![CHANNEL_FEISHU, external_message_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+fn find_latest_recoverable_ask_user_tool_call(
+    calls: &[MCPToolCall],
+) -> Option<&MCPToolCall> {
+    calls.iter().find(|call| {
+        call.tool_name == "ask_user_question"
+            && matches!(call.status.as_str(), "pending" | "executing")
+    })
+}
+
+async fn recover_answers_from_callback_payload(
+    app_handle: &AppHandle,
+    callback: &FeishuCardActionCallback,
+    form_value: &Map<String, Value>,
+) -> Result<HashMap<String, String>, String> {
+    let open_message_id = callback
+        .event()
+        .context
+        .as_ref()
+        .and_then(|context| context.open_message_id.clone())
+        .and_then(|value| normalize_optional_id(Some(value)))
+        .ok_or_else(|| "飞书卡片回调缺少 open_message_id，无法恢复 ask_user_question 状态".to_string())?;
+    let conversation_id = find_conversation_id_by_external_message(app_handle, &open_message_id)?
+        .ok_or_else(|| format!("未找到飞书消息 {} 关联的会话", open_message_id))?;
+    let mcp_db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let calls = mcp_db
+        .get_mcp_tool_calls_by_conversation(conversation_id)
+        .map_err(|e| e.to_string())?;
+    let tool_call = find_latest_recoverable_ask_user_tool_call(&calls).ok_or_else(|| {
+        format!(
+            "会话 {} 中没有可恢复的 ask_user_question 工具调用",
+            conversation_id
+        )
+    })?;
+    let request: AskUserQuestionRequest = serde_json::from_str(&tool_call.parameters)
+        .map_err(|e| format!("解析 ask_user_question 参数失败: {}", e))?;
+    map_ask_user_form_values_to_answers(&request.questions, form_value)
+}
+
+async fn try_recover_feishu_ask_user_resolution(
+    app_handle: &AppHandle,
+    callback: &FeishuCardActionCallback,
+    execution_result: Result<String, String>,
+) -> Result<bool, String> {
+    let open_message_id = callback
+        .event()
+        .context
+        .as_ref()
+        .and_then(|context| context.open_message_id.clone())
+        .and_then(|value| normalize_optional_id(Some(value)));
+    let Some(open_message_id) = open_message_id else {
+        return Ok(false);
+    };
+    let Some(conversation_id) = find_conversation_id_by_external_message(app_handle, &open_message_id)? else {
+        return Ok(false);
+    };
+    let mcp_db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let calls = mcp_db
+        .get_mcp_tool_calls_by_conversation(conversation_id)
+        .map_err(|e| e.to_string())?;
+
+    if let Some(tool_call) = find_latest_recoverable_ask_user_tool_call(&calls) {
+        crate::mcp::execution_api::finalize_tool_call_from_external_result(
+            app_handle,
+            tool_call.id,
+            execution_result,
+        )
+        .await?;
+        info!(
+            call_id = tool_call.id,
+            conversation_id,
+            open_message_id = %open_message_id,
+            "Recovered AskUserQuestion resolution from Feishu callback"
+        );
+        return Ok(true);
+    }
+
+    if calls.iter().any(|call| {
+        call.tool_name == "ask_user_question"
+            && matches!(call.status.as_str(), "success" | "failed")
+    }) {
+        debug!(
+            conversation_id,
+            open_message_id = %open_message_id,
+            "Ignore duplicate or stale Feishu AskUserQuestion callback"
+        );
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 async fn build_ask_user_answers_from_card_callback(
@@ -1193,7 +1393,7 @@ async fn build_ask_user_answers_from_card_callback(
         .await
         .ok_or_else(|| "AskUserQuestion request not found".to_string())?;
     let form_value = callback
-        .event
+        .event()
         .action
         .form_value
         .as_ref()
@@ -2483,26 +2683,31 @@ fn build_ask_user_question_card(event: &AskUserQuestionRequestEvent) -> Value {
     }
 
     form_elements.push(json!({
-        "tag": "action",
-        "actions": [
-            {
-                "tag": "button",
-                "type": "primary",
-                "text": { "tag": "plain_text", "content": "提交" },
-                "behaviors": [{ "type": "form_submit" }],
-                "value": { "action": "submit", "request_id": event.request_id }
-            },
-            {
-                "tag": "button",
-                "text": { "tag": "plain_text", "content": "取消" },
-                "value": { "action": "cancel", "request_id": event.request_id }
-            }
-        ]
+        "tag": "button",
+        "name": "ask_user_submit",
+        "type": "primary",
+        "text": { "tag": "plain_text", "content": "提交" },
+        "behaviors": [{
+            "type": "callback",
+            "value": { "action": "submit", "request_id": event.request_id }
+        }],
+        "form_action_type": "submit"
     }));
 
     elements.push(json!({
         "tag": "form",
+        "name": format!("ask_user_{}", event.request_id),
         "elements": form_elements
+    }));
+
+    elements.push(json!({
+        "tag": "button",
+        "name": "ask_user_cancel",
+        "text": { "tag": "plain_text", "content": "取消" },
+        "behaviors": [{
+            "type": "callback",
+            "value": { "action": "cancel", "request_id": event.request_id }
+        }]
     }));
 
     json!({
@@ -3106,7 +3311,26 @@ mod tests {
         let form_elements = form["elements"].as_array().expect("form elements should be array");
         assert!(form_elements.iter().any(|element| element["tag"] == "select_static"));
         assert!(form_elements.iter().any(|element| element["tag"] == "multi_select_static"));
-        assert_eq!(form_elements.last().expect("action should exist")["tag"], "action");
+        assert_eq!(form["name"], "ask_user_req-1");
+        let submit_button = form_elements
+            .last()
+            .expect("submit button should exist");
+        assert_eq!(submit_button["tag"], "button");
+        assert_eq!(submit_button["name"], "ask_user_submit");
+        assert_eq!(submit_button["form_action_type"], "submit");
+        assert_eq!(submit_button["behaviors"][0]["type"], "callback");
+        assert_eq!(submit_button["behaviors"][0]["value"]["action"], "submit");
+        assert_eq!(submit_button["behaviors"][0]["value"]["request_id"], "req-1");
+
+        let cancel_button = elements
+            .iter()
+            .find(|element| element["name"] == "ask_user_cancel")
+            .expect("cancel button should exist");
+        assert_eq!(cancel_button["tag"], "button");
+        assert_eq!(cancel_button["name"], "ask_user_cancel");
+        assert_eq!(cancel_button["behaviors"][0]["type"], "callback");
+        assert_eq!(cancel_button["behaviors"][0]["value"]["action"], "cancel");
+        assert_eq!(cancel_button["behaviors"][0]["value"]["request_id"], "req-1");
     }
 
     #[test]
@@ -3155,6 +3379,123 @@ mod tests {
             .expect("answers should map");
         assert_eq!(answers.get("选择一个模型"), Some(&"GPT-5.4".to_string()));
         assert_eq!(answers.get("选择输出格式"), Some(&"表格, 列表".to_string()));
+    }
+
+    #[test]
+    fn feishu_card_action_callback_parses_inner_event_payload() {
+        let raw_event = json!({
+            "operator": {
+                "open_id": "ou_test_user"
+            },
+            "context": {
+                "open_message_id": "om_test_message"
+            },
+            "action": {
+                "value": {
+                    "request_id": "req-1",
+                    "action": "submit"
+                },
+                "form_value": {
+                    "question_0": "GPT-5.4"
+                }
+            }
+        });
+
+        let callback: FeishuCardActionCallback =
+            serde_json::from_value(raw_event).expect("inner event payload should parse");
+
+        assert_eq!(callback.event().operator.open_id, "ou_test_user");
+        assert_eq!(
+            callback
+                .event()
+                .context
+                .as_ref()
+                .and_then(|context| context.open_message_id.as_deref()),
+            Some("om_test_message")
+        );
+        assert_eq!(
+            callback.event().action.value.as_ref().and_then(|value| value.get("request_id")).and_then(Value::as_str),
+            Some("req-1")
+        );
+    }
+
+    #[test]
+    fn feishu_card_action_callback_parses_enveloped_payload() {
+        let raw_event = json!({
+            "event": {
+                "operator": {
+                    "open_id": "ou_test_user"
+                },
+                "context": {
+                    "open_message_id": "om_test_message"
+                },
+                "action": {
+                    "value": {
+                        "request_id": "req-1",
+                        "action": "submit"
+                    },
+                    "form_value": {
+                        "question_0": "GPT-5.4"
+                    }
+                }
+            }
+        });
+
+        let callback: FeishuCardActionCallback =
+            serde_json::from_value(raw_event).expect("enveloped payload should parse");
+
+        assert_eq!(callback.event().operator.open_id, "ou_test_user");
+        assert_eq!(
+            callback
+                .event()
+                .context
+                .as_ref()
+                .and_then(|context| context.open_message_id.as_deref()),
+            Some("om_test_message")
+        );
+        assert_eq!(
+            callback.event().action.value.as_ref().and_then(|value| value.get("request_id")).and_then(Value::as_str),
+            Some("req-1")
+        );
+    }
+
+    #[test]
+    fn find_latest_recoverable_ask_user_tool_call_prefers_pending_or_executing() {
+        let base = crate::db::mcp_db::MCPToolCall {
+            id: 1,
+            conversation_id: 42,
+            message_id: None,
+            subtask_id: None,
+            server_id: 1,
+            server_name: "ui_interaction".to_string(),
+            tool_name: "ask_user_question".to_string(),
+            parameters: "{}".to_string(),
+            status: "success".to_string(),
+            result: None,
+            error: None,
+            created_time: "2026-03-18 00:00:00".to_string(),
+            started_time: None,
+            finished_time: None,
+            llm_call_id: None,
+            assistant_message_id: None,
+        };
+        let calls = vec![
+            crate::db::mcp_db::MCPToolCall {
+                id: 2,
+                status: "executing".to_string(),
+                ..base.clone()
+            },
+            crate::db::mcp_db::MCPToolCall {
+                id: 3,
+                tool_name: "preview_file".to_string(),
+                status: "pending".to_string(),
+                ..base.clone()
+            },
+        ];
+
+        let tool_call =
+            find_latest_recoverable_ask_user_tool_call(&calls).expect("tool call should exist");
+        assert_eq!(tool_call.id, 2);
     }
 
     #[test]

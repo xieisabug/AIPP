@@ -247,6 +247,7 @@ function ButlerExperimentWindow() {
         pendingRequest,
         isDialogOpen,
         decisionError,
+        isSubmitting,
         handleDecision,
     } = useOperationPermission({
         conversationId: conversationIdNumber,
@@ -256,6 +257,7 @@ function ButlerExperimentWindow() {
         pendingRequest: pendingAcpRequest,
         isDialogOpen: isAcpDialogOpen,
         decisionError: acpDecisionError,
+        isSubmitting: isAcpSubmitting,
         handleDecision: handleAcpDecision,
     } = useAcpPermission({
         conversationId: conversationIdNumber,
@@ -974,12 +976,14 @@ function ButlerExperimentWindow() {
                 <OperationPermissionDialog
                     request={pendingRequest}
                     isOpen={isDialogOpen}
+                    isSubmitting={isSubmitting}
                     errorMessage={decisionError}
                     onDecision={handleDecision}
                 />
                 <AcpPermissionDialog
                     request={pendingAcpRequest}
                     isOpen={isAcpDialogOpen}
+                    isSubmitting={isAcpSubmitting}
                     errorMessage={acpDecisionError}
                     onDecision={handleAcpDecision}
                 />

@@ -4,6 +4,7 @@
 use crate::api::ai::config::build_proxy_env_vars;
 use crate::api::ai::conversation::extract_tool_result;
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent, MessageUpdateEvent};
+use crate::api::operation_api::{emit_permission_request_event, ACP_PERMISSION_REQUEST_EVENT};
 use crate::db::assistant_db::AssistantModelConfig;
 use crate::db::conversation_db::ConversationDatabase;
 use crate::db::llm_db::LLMProviderConfig;
@@ -1769,7 +1770,12 @@ impl AcpClient for AcpTauriClient {
             options,
         };
 
-        if let Err(e) = self.app_handle.emit("acp-permission-request", &event) {
+        if let Err(e) = emit_permission_request_event(
+            &self.app_handle,
+            ACP_PERMISSION_REQUEST_EVENT,
+            Some(self.conversation_id),
+            &event,
+        ) {
             state.remove_request(&request_id).await;
             error!(error = %e, "ACP permission request emit failed");
             return Ok(acp::RequestPermissionResponse::new(

@@ -1,10 +1,99 @@
-use tauri::{AppHandle, Manager};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager};
 use tracing::{info, instrument, warn};
 
 use crate::api::ai::acp::{AcpPermissionDecision, AcpPermissionState};
 use crate::api::butler_api::emit_butler_task_permission_state_changed;
+use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::mcp::builtin_mcp::operation::types::PermissionDecision;
 use crate::mcp::builtin_mcp::OperationState;
+
+pub(crate) const OPERATION_PERMISSION_REQUEST_EVENT: &str = "operation-permission-request";
+pub(crate) const OPERATION_PERMISSION_RESOLVED_EVENT: &str = "operation-permission-resolved";
+pub(crate) const ACP_PERMISSION_REQUEST_EVENT: &str = "acp-permission-request";
+pub(crate) const ACP_PERMISSION_RESOLVED_EVENT: &str = "acp-permission-resolved";
+
+const BUTLER_WINDOW_LABEL: &str = "butler_experiment";
+const BUTLER_MAIN_KIND: &str = "butler_main";
+const BUTLER_TASK_KIND: &str = "butler_task";
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PermissionResolvedEvent {
+    pub request_id: String,
+    pub conversation_id: Option<i64>,
+}
+
+fn can_route_to_visible_butler_window(app_handle: &AppHandle, conversation_id: Option<i64>) -> bool {
+    let Some(conversation_id) = conversation_id else {
+        return false;
+    };
+    let Some(window) = app_handle.get_webview_window(BUTLER_WINDOW_LABEL) else {
+        return false;
+    };
+    #[cfg(desktop)]
+    if !window.is_visible().unwrap_or(false) {
+        return false;
+    }
+
+    let db = match ConversationDatabase::new(app_handle) {
+        Ok(db) => db,
+        Err(error) => {
+            warn!(conversation_id, error = %error, "Failed to open conversation database for permission routing");
+            return false;
+        }
+    };
+    let repo = match db.conversation_repo() {
+        Ok(repo) => repo,
+        Err(error) => {
+            warn!(conversation_id, error = %error, "Failed to open conversation repository for permission routing");
+            return false;
+        }
+    };
+    let Some(conversation) = (match repo.read(conversation_id) {
+        Ok(conversation) => conversation,
+        Err(error) => {
+            warn!(conversation_id, error = %error, "Failed to read conversation for permission routing");
+            return false;
+        }
+    }) else {
+        return false;
+    };
+
+    matches!(
+        conversation.conversation_kind.as_str(),
+        BUTLER_MAIN_KIND | BUTLER_TASK_KIND
+    )
+}
+
+pub(crate) fn emit_permission_request_event<T: Serialize>(
+    app_handle: &AppHandle,
+    event_name: &str,
+    conversation_id: Option<i64>,
+    payload: &T,
+) -> Result<(), String> {
+    if can_route_to_visible_butler_window(app_handle, conversation_id) {
+        if let Err(error) = app_handle.emit_to(BUTLER_WINDOW_LABEL, event_name, payload) {
+            warn!(
+                event_name,
+                conversation_id,
+                error = %error,
+                "Failed to emit permission request to Butler window, falling back to broadcast"
+            );
+        } else {
+            return Ok(());
+        }
+    }
+
+    app_handle.emit(event_name, payload).map_err(|error| error.to_string())
+}
+
+pub(crate) fn emit_permission_resolved_event(
+    app_handle: &AppHandle,
+    event_name: &str,
+    payload: &PermissionResolvedEvent,
+) -> Result<(), String> {
+    app_handle.emit(event_name, payload).map_err(|error| error.to_string())
+}
 
 /// 确认操作权限
 #[tauri::command]
@@ -37,6 +126,16 @@ pub async fn confirm_operation_permission(
     let resolved = state.resolve_permission_request(&request_id, decision).await;
 
     if let Some(resolution) = resolved {
+        if let Err(error) = emit_permission_resolved_event(
+            &app_handle,
+            OPERATION_PERMISSION_RESOLVED_EVENT,
+            &PermissionResolvedEvent {
+                request_id: request_id.clone(),
+                conversation_id: resolution.conversation_id,
+            },
+        ) {
+            warn!(request_id = %request_id, error = %error, "Failed to emit operation permission resolution event");
+        }
         if let Some(conversation_id) = resolution.conversation_id {
             emit_butler_task_permission_state_changed(
                 &app_handle,
@@ -85,6 +184,16 @@ pub async fn confirm_acp_permission(
     let resolved = state.resolve_request(&request_id, decision).await;
 
     if let Some(resolution) = resolved {
+        if let Err(error) = emit_permission_resolved_event(
+            &app_handle,
+            ACP_PERMISSION_RESOLVED_EVENT,
+            &PermissionResolvedEvent {
+                request_id: request_id.clone(),
+                conversation_id: resolution.conversation_id,
+            },
+        ) {
+            warn!(request_id = %request_id, error = %error, "Failed to emit ACP permission resolution event");
+        }
         if let Some(conversation_id) = resolution.conversation_id {
             emit_butler_task_permission_state_changed(&app_handle, conversation_id, "acp", false)
                 .await?;

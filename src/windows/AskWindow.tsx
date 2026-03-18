@@ -45,7 +45,7 @@ function AskWindow() {
     const [errorMessage, setErrorMessage] = useState<string>("");
     // 闪亮边框状态管理
     const [shouldShowShineBorder, setShouldShowShineBorder] = useState<boolean>(false);
-    const { pendingRequest, isDialogOpen, decisionError, handleDecision } = useOperationPermission({
+    const { pendingRequest, isDialogOpen, decisionError, isSubmitting, handleDecision } = useOperationPermission({
         conversationId: conversationId ? parseInt(conversationId, 10) : undefined,
     });
 
@@ -441,6 +441,7 @@ function AskWindow() {
                 <OperationPermissionDialog
                     request={pendingRequest}
                     isOpen={isDialogOpen}
+                    isSubmitting={isSubmitting}
                     onDecision={handleDecision}
                     errorMessage={decisionError}
                 />
