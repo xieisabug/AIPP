@@ -47,6 +47,7 @@ interface MessageItemProps {
     isLastMessage?: boolean; // 防泄露模式：是否为最后一条消息
     inlineInteractionItems?: InlineInteractionItem[];
     sentBatchToolResultMessageIds?: ReadonlySet<number>;
+    allowFeishuDebugResend?: boolean;
 }
 
 const MessageItem = React.memo<MessageItemProps>(
@@ -66,6 +67,7 @@ const MessageItem = React.memo<MessageItemProps>(
         isLastMessage = false,
         inlineInteractionItems,
         sentBatchToolResultMessageIds,
+        allowFeishuDebugResend = false,
     }) => {
         // 防泄露模式
         const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
@@ -221,8 +223,11 @@ const MessageItem = React.memo<MessageItemProps>(
             streamEvent?.tps,
         ]);
 
+        const canResendToFeishuDebug =
+            allowFeishuDebugResend && message.message_type === "response";
+
         const handleFeishuDebugResend = useCallback(async () => {
-            if (isFeishuDebugSending || message.message_type !== "response") {
+            if (isFeishuDebugSending || !canResendToFeishuDebug) {
                 return;
             }
 
@@ -257,7 +262,7 @@ const MessageItem = React.memo<MessageItemProps>(
             } finally {
                 setIsFeishuDebugSending(false);
             }
-        }, [isFeishuDebugSending, message.id, message.message_type]);
+        }, [canResendToFeishuDebug, isFeishuDebugSending, message.id]);
 
         // 渲染内容 - 根据用户消息类型和配置选择渲染方式
         const contentElement = useMemo(
@@ -344,7 +349,7 @@ const MessageItem = React.memo<MessageItemProps>(
                         onEdit={onMessageEdit}
                         onRegenerate={onMessageRegenerate}
                         onFork={onMessageFork}
-                        onResendToFeishuDebug={message.message_type === "response" ? handleFeishuDebugResend : undefined}
+                        onResendToFeishuDebug={canResendToFeishuDebug ? handleFeishuDebugResend : undefined}
                         isResendToFeishuDebugPending={isFeishuDebugSending}
                         tokenCount={message.token_count}
                         inputTokenCount={message.input_token_count}

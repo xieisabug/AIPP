@@ -246,11 +246,26 @@ pub enum AcpPermissionDecision {
 struct PendingAcpPermissionRequest {
     sender: oneshot::Sender<AcpPermissionDecision>,
     conversation_id: Option<i64>,
+    event: AcpPermissionRequestEvent,
+    review_code: String,
+    feishu_message_id: Option<String>,
+    allowed_open_id: Option<String>,
+    allowed_chat_id: Option<String>,
 }
 
 pub struct AcpPermissionResolution {
     pub conversation_id: Option<i64>,
     pub delivered: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AcpPermissionRequestSnapshot {
+    pub conversation_id: Option<i64>,
+    pub event: AcpPermissionRequestEvent,
+    pub review_code: String,
+    pub feishu_message_id: Option<String>,
+    pub allowed_open_id: Option<String>,
+    pub allowed_chat_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -263,14 +278,40 @@ impl AcpPermissionState {
         Self { pending_requests: TokioMutex::new(HashMap::new()) }
     }
 
+    fn build_review_code(request_id: &str) -> String {
+        let compact: String = request_id
+            .chars()
+            .filter(|value| value.is_ascii_alphanumeric())
+            .take(6)
+            .collect::<String>()
+            .to_ascii_uppercase();
+        if compact.is_empty() {
+            "ACP-UNKNOWN".to_string()
+        } else {
+            format!("ACP-{compact}")
+        }
+    }
+
     pub async fn store_request(
         &self,
-        request_id: String,
-        conversation_id: Option<i64>,
+        event: AcpPermissionRequestEvent,
         sender: oneshot::Sender<AcpPermissionDecision>,
     ) {
+        let request_id = event.request_id.clone();
+        let conversation_id = event.conversation_id;
         let mut pending = self.pending_requests.lock().await;
-        pending.insert(request_id, PendingAcpPermissionRequest { sender, conversation_id });
+        pending.insert(
+            request_id.clone(),
+            PendingAcpPermissionRequest {
+                sender,
+                conversation_id,
+                event,
+                review_code: Self::build_review_code(&request_id),
+                feishu_message_id: None,
+                allowed_open_id: None,
+                allowed_chat_id: None,
+            },
+        );
     }
 
     pub async fn resolve_request(
@@ -290,6 +331,55 @@ impl AcpPermissionState {
         pending.remove(request_id);
     }
 
+    pub async fn get_request(&self, request_id: &str) -> Option<AcpPermissionRequestSnapshot> {
+        let pending = self.pending_requests.lock().await;
+        pending.get(request_id).map(|request| AcpPermissionRequestSnapshot {
+            conversation_id: request.conversation_id,
+            event: request.event.clone(),
+            review_code: request.review_code.clone(),
+            feishu_message_id: request.feishu_message_id.clone(),
+            allowed_open_id: request.allowed_open_id.clone(),
+            allowed_chat_id: request.allowed_chat_id.clone(),
+        })
+    }
+
+    pub async fn find_request_by_review_code(
+        &self,
+        review_code: &str,
+    ) -> Option<AcpPermissionRequestSnapshot> {
+        let normalized = review_code.trim().to_ascii_uppercase();
+        let pending = self.pending_requests.lock().await;
+        pending.values().find_map(|request| {
+            if request.review_code == normalized {
+                Some(AcpPermissionRequestSnapshot {
+                    conversation_id: request.conversation_id,
+                    event: request.event.clone(),
+                    review_code: request.review_code.clone(),
+                    feishu_message_id: request.feishu_message_id.clone(),
+                    allowed_open_id: request.allowed_open_id.clone(),
+                    allowed_chat_id: request.allowed_chat_id.clone(),
+                })
+            } else {
+                None
+            }
+        })
+    }
+
+    pub async fn set_feishu_delivery(
+        &self,
+        request_id: &str,
+        feishu_message_id: Option<String>,
+        allowed_open_id: Option<String>,
+        allowed_chat_id: Option<String>,
+    ) {
+        let mut pending = self.pending_requests.lock().await;
+        if let Some(request) = pending.get_mut(request_id) {
+            request.feishu_message_id = feishu_message_id;
+            request.allowed_open_id = allowed_open_id;
+            request.allowed_chat_id = allowed_chat_id;
+        }
+    }
+
     pub async fn has_pending_permission_for_conversation(&self, conversation_id: i64) -> bool {
         let pending = self.pending_requests.lock().await;
         pending.values().any(|request| request.conversation_id == Some(conversation_id))
@@ -297,21 +387,21 @@ impl AcpPermissionState {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct AcpPermissionOptionPayload {
-    option_id: String,
-    name: String,
-    kind: String,
+pub(crate) struct AcpPermissionOptionPayload {
+    pub(crate) option_id: String,
+    pub(crate) name: String,
+    pub(crate) kind: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct AcpPermissionRequestEvent {
-    request_id: String,
-    conversation_id: Option<i64>,
-    tool_call_id: String,
-    title: Option<String>,
-    kind: Option<String>,
-    parameters: Option<String>,
-    options: Vec<AcpPermissionOptionPayload>,
+pub(crate) struct AcpPermissionRequestEvent {
+    pub(crate) request_id: String,
+    pub(crate) conversation_id: Option<i64>,
+    pub(crate) tool_call_id: String,
+    pub(crate) title: Option<String>,
+    pub(crate) kind: Option<String>,
+    pub(crate) parameters: Option<String>,
+    pub(crate) options: Vec<AcpPermissionOptionPayload>,
 }
 
 enum AcpSessionCommand {
@@ -1736,11 +1826,6 @@ impl AcpClient for AcpTauriClient {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
 
-        let state = self.app_handle.state::<AcpPermissionState>();
-        state
-            .store_request(request_id.clone(), Some(self.conversation_id), tx)
-            .await;
-
         let options = args
             .options
             .iter()
@@ -1770,17 +1855,75 @@ impl AcpClient for AcpTauriClient {
             options,
         };
 
+        let state = self.app_handle.state::<AcpPermissionState>();
+        state.store_request(event.clone(), tx).await;
+
+        if let Some(snapshot) = state.get_request(&request_id).await {
+            let auto_resolved = crate::api::butler_adjudication::start_acp_permission_auto_review(
+                self.app_handle.clone(),
+                snapshot,
+            )
+            .await;
+            if auto_resolved {
+                return match rx.await {
+                    Ok(AcpPermissionDecision::Selected(option_id)) => {
+                        Ok(acp::RequestPermissionResponse::new(
+                            acp::RequestPermissionOutcome::Selected(
+                                acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new(
+                                    option_id,
+                                )),
+                            ),
+                        ))
+                    }
+                    Ok(AcpPermissionDecision::Cancelled) | Err(_) => Ok(
+                        acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled),
+                    ),
+                };
+            }
+        }
+
+        let delivered_to_feishu = match state.get_request(&request_id).await {
+            Some(snapshot) => match crate::feishu::try_deliver_acp_permission_to_feishu(
+                &self.app_handle,
+                self.conversation_id,
+                &snapshot,
+            )
+            .await
+            {
+                Ok(delivered) => delivered,
+                Err(error) => {
+                    warn!(
+                        conversation_id = self.conversation_id,
+                        request_id = %request_id,
+                        error = %error,
+                        "failed to deliver ACP permission to Feishu"
+                    );
+                    false
+                }
+            },
+            None => false,
+        };
+
         if let Err(e) = emit_permission_request_event(
             &self.app_handle,
             ACP_PERMISSION_REQUEST_EVENT,
             Some(self.conversation_id),
             &event,
         ) {
-            state.remove_request(&request_id).await;
-            error!(error = %e, "ACP permission request emit failed");
-            return Ok(acp::RequestPermissionResponse::new(
-                acp::RequestPermissionOutcome::Cancelled,
-            ));
+            if delivered_to_feishu {
+                warn!(
+                    conversation_id = self.conversation_id,
+                    request_id = %request_id,
+                    error = %e,
+                    "ACP permission frontend emit failed, but Feishu delivery is active"
+                );
+            } else {
+                state.remove_request(&request_id).await;
+                error!(error = %e, "ACP permission request emit failed");
+                return Ok(acp::RequestPermissionResponse::new(
+                    acp::RequestPermissionOutcome::Cancelled,
+                ));
+            }
         }
 
         if let Err(error) = crate::api::butler_api::emit_butler_task_permission_state_changed(

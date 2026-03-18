@@ -5,7 +5,7 @@
 /// - Bash 进程状态管理
 /// - 权限请求处理
 use super::super::state::OperationState;
-use super::super::types::PermissionDecision;
+use super::super::types::{PermissionDecision, PermissionRequestEvent};
 
 /// 测试 OperationState 默认创建
 #[tokio::test]
@@ -159,8 +159,20 @@ async fn test_permission_request_handling() {
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     // 存储权限请求
-    state.store_permission_request(request_id.to_string(), Some(42), tx).await;
+    state
+        .store_permission_request(
+            PermissionRequestEvent {
+                request_id: request_id.to_string(),
+                operation: "read_file".to_string(),
+                path: "/tmp/example.txt".to_string(),
+                conversation_id: Some(42),
+            },
+            tx,
+        )
+        .await;
     assert!(state.has_pending_permission_for_conversation(42).await);
+    let snapshot = state.get_permission_request(request_id).await.expect("snapshot should exist");
+    assert_eq!(snapshot.review_code, "OP-PERMRE");
 
     // 在另一个任务中解决权限请求
     let state_clone = state.clone();

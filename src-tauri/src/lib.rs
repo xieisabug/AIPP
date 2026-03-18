@@ -84,13 +84,13 @@ use crate::api::skill_api::{
     toggle_assistant_skill, update_assistant_skill_config,
 };
 use crate::api::system_api::{
-    clear_butler_feishu_secret, copy_image_to_clipboard, debug_resend_message_to_feishu,
-    get_all_feature_config, get_autostart_state, get_bang_list, get_butler_feishu_runtime_status,
-    get_experimental_summary_task_status, get_selected_text_api, open_data_folder, open_image,
-    refresh_butler_feishu_runtime_command, resume_global_shortcut, save_butler_feishu_secret,
-    save_feature_config, set_autostart, set_shortcut_recording, suspend_global_shortcut,
-    trigger_assistant_summary_generation, trigger_conversation_summary_generation,
-    trigger_mcp_summary_generation,
+    clear_butler_feishu_secret, conversation_has_feishu_target, copy_image_to_clipboard,
+    debug_resend_message_to_feishu, get_all_feature_config, get_autostart_state, get_bang_list,
+    get_butler_feishu_runtime_status, get_experimental_summary_task_status,
+    get_selected_text_api, open_data_folder, open_image, refresh_butler_feishu_runtime_command,
+    resume_global_shortcut, save_butler_feishu_secret, save_feature_config, set_autostart,
+    set_shortcut_recording, suspend_global_shortcut, trigger_assistant_summary_generation,
+    trigger_conversation_summary_generation, trigger_mcp_summary_generation,
 };
 use crate::api::todo_api::get_todos;
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
@@ -687,6 +687,7 @@ pub fn run() {
             trigger_assistant_summary_generation,
             trigger_conversation_summary_generation,
             debug_resend_message_to_feishu,
+            conversation_has_feishu_target,
             open_data_folder,
             get_llm_providers,
             get_filtered_providers,

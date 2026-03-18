@@ -22,6 +22,7 @@ export interface MessageListProps {
     onToggleReasoningExpand: (messageId: number) => void;
     inlineInteractionItems?: InlineInteractionItem[];
     sentBatchToolResultMessageIds?: ReadonlySet<number>;
+    allowFeishuDebugResend?: boolean;
 }
 
 const MessageList: React.FC<MessageListProps> = ({
@@ -42,6 +43,7 @@ const MessageList: React.FC<MessageListProps> = ({
     onToggleReasoningExpand,
     inlineInteractionItems,
     sentBatchToolResultMessageIds,
+    allowFeishuDebugResend = false,
 }) => {
     const messageInlineInteractionMap = useMemo(() => {
         const map = new Map<number, InlineInteractionItem[]>();
@@ -119,6 +121,7 @@ const MessageList: React.FC<MessageListProps> = ({
                         isLastMessage={isLastMessage}
                         inlineInteractionItems={messageInlineInteractionMap.get(message.id)}
                         sentBatchToolResultMessageIds={sentBatchToolResultMessageIds}
+                        allowFeishuDebugResend={allowFeishuDebugResend}
                     />
                 ),
                 groupControl,
@@ -142,6 +145,7 @@ const MessageList: React.FC<MessageListProps> = ({
         onMessageFork,
         messageInlineInteractionMap,
         sentBatchToolResultMessageIds,
+        allowFeishuDebugResend,
     ]);
 
     // 优化版本控制组件的渲染

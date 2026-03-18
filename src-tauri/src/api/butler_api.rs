@@ -89,11 +89,11 @@ const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，是负责�
 "#;
 
 #[derive(Debug, Clone)]
-struct ButlerModelSelection {
-    raw_value: String,
-    model_code: String,
-    provider_id: i64,
-    display_name: String,
+pub(crate) struct ButlerModelSelection {
+    pub(crate) raw_value: String,
+    pub(crate) model_code: String,
+    pub(crate) provider_id: i64,
+    pub(crate) display_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,7 +237,7 @@ async fn build_butler_system_prompt(app_handle: &AppHandle) -> Result<String, St
     Ok(format!("{}\n\n{}", BUTLER_SYSTEM_PROMPT_BASE, assistant_directory_prompt))
 }
 
-async fn get_butler_model_selection(
+pub(crate) async fn get_butler_model_selection(
     app_handle: &AppHandle,
 ) -> Result<ButlerModelSelection, String> {
     let raw_value = get_experimental_config_value(app_handle, "butler_model_id")

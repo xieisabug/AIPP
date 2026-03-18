@@ -242,13 +242,6 @@ impl PermissionManager {
 
         // 创建 oneshot 通道等待用户响应
         let (tx, rx) = tokio::sync::oneshot::channel();
-
-        // 存储待处理请求
-        operation_state
-            .store_permission_request(request_id.clone(), conversation_id, tx)
-            .await;
-
-        // 发送事件到前端
         let event = PermissionRequestEvent {
             request_id: request_id.clone(),
             operation: operation.to_string(),
@@ -256,7 +249,58 @@ impl PermissionManager {
             conversation_id,
         };
 
+        // 存储待处理请求
+        operation_state.store_permission_request(event.clone(), tx).await;
+
         info!(request_id = %request_id, operation = %operation, path = %path, "Requesting permission from user");
+
+        if let Some(snapshot) = operation_state.get_permission_request(&request_id).await {
+            let auto_resolved = crate::api::butler_adjudication::start_operation_permission_auto_review(
+                self.app_handle.clone(),
+                snapshot,
+            )
+            .await;
+            if auto_resolved {
+                return match rx.await {
+                    Ok(decision) => {
+                        info!(request_id = %request_id, decision = ?decision, "Operation permission auto-resolved");
+                        Ok(decision)
+                    }
+                    Err(_) => {
+                        warn!(request_id = %request_id, "Operation permission auto-review resolved request but receiver closed");
+                        Err("Permission request was cancelled".to_string())
+                    }
+                };
+            }
+        }
+
+        let delivered_to_feishu = if let Some(conversation_id) = conversation_id {
+            let snapshot = operation_state.get_permission_request(&request_id).await;
+            if let Some(snapshot) = snapshot {
+                match crate::feishu::try_deliver_operation_permission_to_feishu(
+                    &self.app_handle,
+                    conversation_id,
+                    &snapshot,
+                )
+                .await
+                {
+                    Ok(delivered) => delivered,
+                    Err(error) => {
+                        warn!(
+                            request_id = %request_id,
+                            conversation_id,
+                            error = %error,
+                            "Failed to deliver operation permission to Feishu"
+                        );
+                        false
+                    }
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
 
         if let Err(e) = emit_permission_request_event(
             &self.app_handle,
@@ -264,9 +308,17 @@ impl PermissionManager {
             conversation_id,
             &event,
         ) {
-            operation_state.remove_permission_request(&request_id).await;
-            warn!(error = %e, "Failed to emit permission request event");
-            return Err("Failed to request permission".to_string());
+            if delivered_to_feishu {
+                warn!(
+                    request_id = %request_id,
+                    error = %e,
+                    "Operation permission frontend emit failed, but Feishu delivery is active"
+                );
+            } else {
+                operation_state.remove_permission_request(&request_id).await;
+                warn!(error = %e, "Failed to emit permission request event");
+                return Err("Failed to request permission".to_string());
+            }
         }
 
         if let Some(conversation_id) = conversation_id {
