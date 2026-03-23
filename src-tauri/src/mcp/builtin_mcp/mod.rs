@@ -11,6 +11,7 @@ pub mod agent;
 pub mod interaction;
 pub mod operation;
 pub mod search;
+pub mod superadmin;
 pub mod templates;
 
 pub use agent::{AgentHandler, TodoHandler, TodoState};
@@ -1734,6 +1735,9 @@ pub async fn execute_aipp_builtin_tool(
                     "isError": true
                 }),
             }
+        }
+        "superadmin" => {
+            superadmin::dispatch(&app_handle, &tool_name, &args, conversation_id).await
         }
         _ => serde_json::json!({
             "content": [{"type": "text", "text": format!("Unknown builtin command: {}", cmd_id)}],

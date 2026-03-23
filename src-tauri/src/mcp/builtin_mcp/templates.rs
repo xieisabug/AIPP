@@ -263,6 +263,15 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
             required_envs: vec![],
             default_timeout: Some(30000),
         },
+        BuiltinTemplateInfo {
+            id: "superadmin".into(),
+            name: "Super Admin 管理工具".into(),
+            description: "Butler 超级管理员工具集，提供对 AIPP 应用对象（助手、会话、任务、定时任务）的结构化管理能力。通过统一的 catalog/inspect/execute/batch 接口实现能力发现与执行。".into(),
+            command: "aipp:superadmin".into(),
+            transport_type: "stdio".into(),
+            required_envs: vec![],
+            default_timeout: Some(60000),
+        },
     ]
 }
 
@@ -870,6 +879,114 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                 }),
             },
         ],
+        Some("superadmin") => vec![
+            BuiltinToolInfo {
+                name: "superadmin_catalog".into(),
+                description: "查询 Super Admin 能力目录。支持按 domain、tag、risk_level 和关键词筛选，返回可执行 action 列表。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "关键词搜索（匹配 action_id、summary、description、tags）"
+                        },
+                        "domain": {
+                            "type": "string",
+                            "enum": ["assistant", "conversation", "task", "schedule"],
+                            "description": "按 domain 筛选"
+                        },
+                        "tag": {
+                            "type": "string",
+                            "description": "按 tag 筛选，如 'read'、'write'、'list'"
+                        },
+                        "risk_level": {
+                            "type": "integer",
+                            "enum": [0, 1, 2, 3],
+                            "description": "按风险等级筛选：0=safe, 1=low, 2=medium, 3=high"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "每页数量，默认 20，最大 100"
+                        },
+                        "cursor": {
+                            "type": "integer",
+                            "description": "分页游标（上一页返回的 next_cursor）"
+                        }
+                    }
+                }),
+            },
+            BuiltinToolInfo {
+                name: "superadmin_inspect".into(),
+                description: "查看指定 action 的完整详情，包括参数 schema、返回 schema、风险等级、审批策略等。先用 catalog 发现 action_id，再用 inspect 获取调用所需的完整信息。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action_id": {
+                            "type": "string",
+                            "description": "要查看的 action ID，如 'assistant.list'、'schedule.create'"
+                        }
+                    },
+                    "required": ["action_id"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "superadmin_execute".into(),
+                description: "执行单个 Super Admin action。调用前建议先 inspect 了解参数要求。risk_level >= 3 的 action 需要用户审批，可先用 dry_run=true 预览。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action_id": {
+                            "type": "string",
+                            "description": "要执行的 action ID"
+                        },
+                        "args": {
+                            "type": "object",
+                            "description": "action 参数，结构由 inspect 的 args_schema 定义"
+                        },
+                        "dry_run": {
+                            "type": "boolean",
+                            "description": "是否为预演模式（不实际执行），默认 false"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "执行原因，记入审计日志"
+                        }
+                    },
+                    "required": ["action_id", "args"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "superadmin_batch".into(),
+                description: "批量顺序执行多个 Super Admin action。默认遇到错误停止。适合组合操作如「创建助手→创建定时任务」。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "actions": {
+                            "type": "array",
+                            "description": "要执行的 action 列表，按顺序执行",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "action_id": { "type": "string", "description": "action ID" },
+                                    "args": { "type": "object", "description": "action 参数" },
+                                    "reason": { "type": "string", "description": "执行原因" }
+                                },
+                                "required": ["action_id", "args"]
+                            }
+                        },
+                        "dry_run": {
+                            "type": "boolean",
+                            "description": "是否为预演模式，默认 false"
+                        },
+                        "stop_on_error": {
+                            "type": "boolean",
+                            "description": "遇到错误是否停止，默认 true"
+                        }
+                    },
+                    "required": ["actions"]
+                }),
+            },
+        ],
         _ => vec![],
     }
 }
@@ -935,6 +1052,9 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
     }
 
     let _ = db.rebuild_dynamic_mcp_catalog();
+
+    // Initialize superadmin audit log table
+    super::superadmin::init_superadmin_tables(app_handle);
 
     Ok(())
 }
