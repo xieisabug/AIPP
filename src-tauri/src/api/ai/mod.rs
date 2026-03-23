@@ -1,6 +1,7 @@
 pub mod acp;
 pub mod chat;
 pub mod config;
+pub mod context_manager;
 pub mod conversation;
 pub mod events;
 pub mod summary;

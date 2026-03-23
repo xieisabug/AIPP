@@ -457,6 +457,10 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                             "type": "integer",
                             "description": "Only for read. Number of latest messages to return. Default 1, recommended 1-3."
                         },
+                        "verbose": {
+                            "type": "boolean",
+                            "description": "Only for read. When true returns full conversation, definition and result objects. Default false returns only essential status, latest messages and pending items to save context."
+                        },
                         "prompt": {
                             "type": "string",
                             "description": "Only for reply_prompt. The follow-up prompt to send into the task conversation."

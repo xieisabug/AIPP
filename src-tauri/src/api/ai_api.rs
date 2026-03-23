@@ -9,6 +9,7 @@ use crate::api::ai::chat::{
 use crate::api::ai::config::{
     get_network_proxy_from_config, get_request_timeout_from_config, ChatConfig, ConfigBuilder,
 };
+use crate::api::ai::context_manager::{self, budget::ContextBudget, CompactionContext};
 use crate::api::ai::conversation::{
     build_chat_request_from_messages, build_message_list_from_db, filter_messages_for_parent_group,
     init_conversation, BranchSelection, ChatRequestBuildResult, ToolCallStrategy, ToolConfig,
@@ -789,6 +790,35 @@ pub async fn ask_ai(
             has_available_tools,
             Some(conversation_id),
         );
+
+        // Context budget management with LLM compaction
+        let budget = ContextBudget::from_config(&_config_feature_map);
+        let is_butler = is_butler_system_assistant_name(&assistant_detail.assistant.name);
+        let compaction_ctx = CompactionContext {
+            client: &chat_config.client,
+            model_name: &chat_config.model_name,
+            conversation_id,
+            conversation_db: &conversation_db,
+            is_butler,
+            message_ids: vec![], // TODO: pass DB message IDs for persistence
+        };
+        let fit_result = context_manager::fit_to_budget_with_compaction(
+            init_message_list,
+            &budget,
+            &[],
+            compaction_ctx,
+        )
+        .await;
+        let init_message_list = fit_result.messages;
+        if fit_result.estimated_tokens > 0 {
+            debug!(
+                conversation_id,
+                estimated_tokens = fit_result.estimated_tokens,
+                compacted = fit_result.compacted,
+                "context budget fit result for ask_ai"
+            );
+        }
+
         let ChatRequestBuildResult { chat_request, tool_name_mapping } =
             build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
@@ -1124,6 +1154,12 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         if has_available_tools { ToolCallStrategy::Native } else { ToolCallStrategy::NonNative };
     let tool_config =
         build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id_i64));
+
+    // Context budget management
+    let budget = ContextBudget::from_config(&config_feature_map);
+    let fit_result = context_manager::fit_to_budget(init_message_list, &budget, &[]);
+    let init_message_list = fit_result.messages;
+
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
@@ -1366,6 +1402,12 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         if has_available_tools { ToolCallStrategy::Native } else { ToolCallStrategy::NonNative };
     let tool_config =
         build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id));
+
+    // Context budget management
+    let budget = ContextBudget::from_config(&config_feature_map);
+    let fit_result = context_manager::fit_to_budget(init_message_list, &budget, &[]);
+    let init_message_list = fit_result.messages;
+
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
@@ -1774,6 +1816,12 @@ pub async fn regenerate_ai(
         } else {
             None
         };
+
+        // Context budget management
+        let budget = ContextBudget::from_config(&_config_feature_map);
+        let fit_result = context_manager::fit_to_budget(init_message_list, &budget, &[]);
+        let init_message_list = fit_result.messages;
+
         let ChatRequestBuildResult { chat_request, tool_name_mapping } =
             build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 

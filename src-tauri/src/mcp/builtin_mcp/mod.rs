@@ -565,6 +565,7 @@ async fn build_task_conversation_read_payload(
     app_handle: &AppHandle,
     detail: &crate::api::butler_api::ButlerTaskDetailResponse,
     latest_count: usize,
+    verbose: bool,
 ) -> Result<serde_json::Value, String> {
     use crate::db::conversation_db::ConversationDatabase;
 
@@ -600,17 +601,33 @@ async fn build_task_conversation_read_payload(
         .map(build_acp_permission_snapshot_payload)
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(serde_json::json!({
-        "task": detail.task,
-        "conversation": detail.conversation,
-        "definition": detail.definition,
-        "result": detail.result,
-        "runtime_state": detail.runtime_state,
-        "latest_messages": latest_messages,
-        "pending_operation_permissions": operation_permissions,
-        "pending_acp_permissions": acp_permissions,
-        "pending_ask_user_questions": ask_user_questions,
-    }))
+    if verbose {
+        Ok(serde_json::json!({
+            "task": detail.task,
+            "conversation": detail.conversation,
+            "definition": detail.definition,
+            "result": detail.result,
+            "runtime_state": detail.runtime_state,
+            "latest_messages": latest_messages,
+            "pending_operation_permissions": operation_permissions,
+            "pending_acp_permissions": acp_permissions,
+            "pending_ask_user_questions": ask_user_questions,
+        }))
+    } else {
+        // Slim payload: only essential status + messages + pending items.
+        Ok(serde_json::json!({
+            "task_conversation_id": detail.task.task_conversation_id,
+            "title": detail.task.title,
+            "status": detail.task.status,
+            "is_running": detail.runtime_state.is_running,
+            "is_finalized": detail.task.is_finalized,
+            "last_summary": detail.task.last_summary,
+            "latest_messages": latest_messages,
+            "pending_operation_permissions": operation_permissions,
+            "pending_acp_permissions": acp_permissions,
+            "pending_ask_user_questions": ask_user_questions,
+        }))
+    }
 }
 
 async fn resolve_operation_permission_request_id(
@@ -1390,10 +1407,15 @@ pub async fn execute_aipp_builtin_tool(
                                 .and_then(|v| v.as_u64())
                                 .map(|v| v as usize)
                                 .unwrap_or(1);
+                            let verbose = args
+                                .get("verbose")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
                             match build_task_conversation_read_payload(
                                 &app_handle,
                                 &detail,
                                 latest_count,
+                                verbose,
                             )
                             .await
                             {
@@ -1438,56 +1460,60 @@ pub async fn execute_aipp_builtin_tool(
                                 let app_handle_clone = app_handle.clone();
                                 let window_clone = window.clone();
                                 let prompt_owned = prompt.to_string();
+                                // std::thread::spawn + block_on is intentional here to break
+                                // the recursive async cycle between execute_aipp_builtin_tool
+                                // and ask_ai (which invokes tools that call back into
+                                // execute_aipp_builtin_tool).
                                 std::thread::spawn(move || {
-                                    let task_conversation_id_for_spawn = task_conversation_id;
                                     tauri::async_runtime::block_on(async move {
-                                        let request = AiRequest {
-                                            conversation_id: task_conversation_id_for_spawn
-                                                .to_string(),
-                                            assistant_id,
-                                            prompt: prompt_owned,
-                                            model: None,
-                                            override_model_id: None,
-                                            temperature: None,
-                                            top_p: None,
-                                            max_tokens: None,
-                                            stream: Some(true),
-                                            attachment_list: None,
-                                        };
-                                        match ask_ai(
-                                            app_handle_clone.clone(),
-                                            app_handle_clone.state::<crate::AppState>(),
-                                            app_handle_clone.state::<crate::AcpSessionState>(),
-                                            app_handle_clone.state::<crate::FeatureConfigState>(),
-                                            app_handle_clone
-                                                .state::<crate::state::message_token::MessageTokenManager>(),
-                                            app_handle_clone.state::<
-                                                crate::state::activity_state::ConversationActivityManager,
-                                            >(),
-                                            window_clone,
-                                            request,
-                                            None,
-                                            None,
-                                            None,
-                                            None,
-                                            Some("internal".to_string()),
-                                        )
-                                        .await
-                                        {
-                                            Ok(_) => {
-                                                spawn_butler_task_watcher(
-                                                    app_handle_clone.clone(),
-                                                    task_conversation_id_for_spawn,
-                                                );
-                                            }
-                                            Err(error) => {
-                                                error!(
-                                                    task_conversation_id = task_conversation_id_for_spawn,
-                                                    error = %error,
-                                                    "task_conversation_operation reply_prompt failed"
-                                                );
-                                            }
+                                    let task_conversation_id_for_spawn = task_conversation_id;
+                                    let request = AiRequest {
+                                        conversation_id: task_conversation_id_for_spawn
+                                            .to_string(),
+                                        assistant_id,
+                                        prompt: prompt_owned,
+                                        model: None,
+                                        override_model_id: None,
+                                        temperature: None,
+                                        top_p: None,
+                                        max_tokens: None,
+                                        stream: Some(true),
+                                        attachment_list: None,
+                                    };
+                                    match ask_ai(
+                                        app_handle_clone.clone(),
+                                        app_handle_clone.state::<crate::AppState>(),
+                                        app_handle_clone.state::<crate::AcpSessionState>(),
+                                        app_handle_clone.state::<crate::FeatureConfigState>(),
+                                        app_handle_clone
+                                            .state::<crate::state::message_token::MessageTokenManager>(),
+                                        app_handle_clone.state::<
+                                            crate::state::activity_state::ConversationActivityManager,
+                                        >(),
+                                        window_clone,
+                                        request,
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        Some("internal".to_string()),
+                                    )
+                                    .await
+                                    {
+                                        Ok(_) => {
+                                            spawn_butler_task_watcher(
+                                                app_handle_clone.clone(),
+                                                task_conversation_id_for_spawn,
+                                            );
                                         }
+                                        Err(error) => {
+                                            error!(
+                                                task_conversation_id = task_conversation_id_for_spawn,
+                                                error = %error,
+                                                "task_conversation_operation reply_prompt failed"
+                                            );
+                                        }
+                                    }
                                     });
                                 });
 
