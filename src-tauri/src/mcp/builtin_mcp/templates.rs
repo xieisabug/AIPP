@@ -986,6 +986,58 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                     "required": ["actions"]
                 }),
             },
+            BuiltinToolInfo {
+                name: "superadmin_undo".into(),
+                description: "撤销之前执行的 Super Admin action。通过 audit_id 指定要撤销的操作，系统将从快照恢复数据。先用 superadmin_audit_query 查询可撤销的操作。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "audit_id": {
+                            "type": "string",
+                            "description": "要撤销的操作的 audit_id（从审计日志获取）"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "撤销原因，记入审计日志"
+                        }
+                    },
+                    "required": ["audit_id"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "superadmin_audit_query".into(),
+                description: "查询 Super Admin 操作审计日志。支持按 action、domain、成功状态筛选，可过滤出可撤销的操作。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action_id": {
+                            "type": "string",
+                            "description": "按 action_id 筛选"
+                        },
+                        "domain": {
+                            "type": "string",
+                            "enum": ["assistant", "conversation", "task", "schedule"],
+                            "description": "按 domain 筛选"
+                        },
+                        "success_only": {
+                            "type": "boolean",
+                            "description": "只显示成功的操作"
+                        },
+                        "undoable_only": {
+                            "type": "boolean",
+                            "description": "只显示可撤销的操作（有快照且未被撤销）"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "每页数量，默认 20，最大 100"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "分页偏移量"
+                        }
+                    }
+                }),
+            },
         ],
         _ => vec![],
     }
@@ -1052,6 +1104,30 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
     }
 
     let _ = db.rebuild_dynamic_mcp_catalog();
+
+    // Builtin tools already have human-written descriptions, so mark their
+    // summary_generated_at so they're discoverable via load_mcp_tool/load_mcp_server.
+    // (The catalog requires summary_generated_at IS NOT NULL for search.)
+    for tpl in &builtin_templates() {
+        let server_id = db.conn
+            .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1")?
+            .query_row([&tpl.command], |row| row.get::<_, i64>(0))
+            .optional()?;
+        if let Some(sid) = server_id {
+            let _ = db.conn.execute(
+                "UPDATE mcp_server_capability_epoch_catalog
+                 SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
+                 WHERE server_id = ?",
+                rusqlite::params![sid],
+            );
+            let _ = db.conn.execute(
+                "UPDATE mcp_tool_catalog
+                 SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
+                 WHERE server_id = ?",
+                rusqlite::params![sid],
+            );
+        }
+    }
 
     // Initialize superadmin audit log table
     super::superadmin::init_superadmin_tables(app_handle);

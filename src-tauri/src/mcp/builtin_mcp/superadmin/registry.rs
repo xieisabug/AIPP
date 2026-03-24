@@ -18,6 +18,27 @@ pub trait ActionHandler: Send + Sync {
         args: serde_json::Value,
         dry_run: bool,
     ) -> Result<serde_json::Value, String>;
+
+    /// Capture the entity state before mutation for undo support.
+    /// Returns None for read-only actions or when snapshot is not applicable.
+    async fn snapshot_before(
+        &self,
+        _app_handle: &AppHandle,
+        _args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Restore entity state from a before-snapshot (undo operation).
+    /// Returns Ok with a description of what was restored, or Err if undo is not supported.
+    async fn undo(
+        &self,
+        _app_handle: &AppHandle,
+        _snapshot: &serde_json::Value,
+        _original_args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        Err("Undo not supported for this action".to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------

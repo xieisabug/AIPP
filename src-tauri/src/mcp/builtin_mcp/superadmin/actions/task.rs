@@ -220,6 +220,44 @@ impl ActionHandler for TaskCancelHandler {
             "status": "cancelled",
         }))
     }
+
+    async fn snapshot_before(
+        &self,
+        app_handle: &AppHandle,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let task_conversation_id = args.get("task_conversation_id")?.as_i64()?;
+        let db = ConversationDatabase::new(app_handle).ok()?;
+        let repo = db.conversation_repo().ok()?;
+        let conv = repo.read(task_conversation_id).ok()??;
+        Some(json!({
+            "_type": "task.cancel",
+            "task_conversation_id": task_conversation_id,
+            "previous_status": conv.butler_task_status,
+        }))
+    }
+
+    async fn undo(
+        &self,
+        app_handle: &AppHandle,
+        snapshot: &serde_json::Value,
+        _original_args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let task_conversation_id = snapshot.get("task_conversation_id").and_then(|v| v.as_i64())
+            .ok_or("Missing task_conversation_id in snapshot")?;
+        let previous_status = snapshot.get("previous_status").and_then(|v| v.as_str());
+
+        let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+        let repo = db.conversation_repo().map_err(|e| e.to_string())?;
+        let mut conv = repo.read(task_conversation_id).map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Task conversation {} not found", task_conversation_id))?;
+
+        conv.butler_task_status = previous_status.map(|s| s.to_string());
+        conv.butler_task_finalized_at = None;
+        repo.update(&conv).map_err(|e| e.to_string())?;
+
+        Ok(json!({ "undone": true, "task_conversation_id": task_conversation_id, "restored_status": previous_status }))
+    }
 }
 
 // ---------------------------------------------------------------------------

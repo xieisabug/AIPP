@@ -55,6 +55,7 @@ pub async fn handle_execute(
                 Some(&err_msg),
                 false,
                 butler_conversation_id,
+                None,
             );
             return ExecuteResult {
                 success: false,
@@ -68,7 +69,17 @@ pub async fn handle_execute(
         }
     }
 
-    // 3. Execute via handler
+    // 3. Capture before-snapshot for write actions (risk > 0)
+    let before_snapshot = if meta.risk_level.0 > 0 && !request.dry_run {
+        registered
+            .handler
+            .snapshot_before(app_handle, &request.args)
+            .await
+    } else {
+        None
+    };
+
+    // 4. Execute via handler
     let handler_result = registered
         .handler
         .execute(app_handle, request.args.clone(), request.dry_run)
@@ -93,6 +104,7 @@ pub async fn handle_execute(
                 None,
                 false,
                 butler_conversation_id,
+                before_snapshot.as_ref(),
             );
 
             ExecuteResult {
@@ -122,6 +134,7 @@ pub async fn handle_execute(
                 Some(&err),
                 false,
                 butler_conversation_id,
+                None, // No snapshot for failed actions
             );
 
             ExecuteResult {
@@ -151,9 +164,11 @@ fn log_audit(
     error: Option<&str>,
     approval_used: bool,
     butler_conversation_id: Option<i64>,
+    before_snapshot: Option<&serde_json::Value>,
 ) {
     let args_json = serde_json::to_string(&request.args).ok();
     let result_json = result.and_then(|v| serde_json::to_string(v).ok());
+    let snapshot_json = before_snapshot.and_then(|v| serde_json::to_string(v).ok());
 
     // Best-effort audit logging – do not fail the action if audit DB write fails
     match ConversationDatabase::new(app_handle) {
@@ -174,6 +189,7 @@ fn log_audit(
                     error,
                     butler_conversation_id,
                     "butler",
+                    snapshot_json.as_deref(),
                 ) {
                     error!(error = %e, "Failed to write audit log");
                 }

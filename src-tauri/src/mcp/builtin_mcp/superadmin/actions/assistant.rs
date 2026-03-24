@@ -143,6 +143,28 @@ impl ActionHandler for AssistantCreateHandler {
 
         Ok(json!({ "assistant_id": new_id, "name": name }))
     }
+
+    async fn snapshot_before(
+        &self,
+        _app_handle: &AppHandle,
+        _args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        // Create action: snapshot records that nothing existed before
+        Some(json!({ "_type": "assistant.create", "existed": false }))
+    }
+
+    async fn undo(
+        &self,
+        app_handle: &AppHandle,
+        _snapshot: &serde_json::Value,
+        original_args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        // Undo create = delete the created assistant
+        // We need the result from the original execution to get the ID
+        // The original_args won't have the ID, but the result_json in audit has it.
+        // We'll handle this in the undo handler by passing result data.
+        Err("Undo for assistant.create requires the created assistant_id from the execution result. Use superadmin_execute with assistant.delete instead.".to_string())
+    }
 }
 
 #[async_trait]
@@ -195,6 +217,49 @@ impl ActionHandler for AssistantUpdatePromptHandler {
         Ok(json!({
             "assistant_id": assistant_id,
             "updated_fields": ["prompt"],
+        }))
+    }
+
+    async fn snapshot_before(
+        &self,
+        app_handle: &AppHandle,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let assistant_id = args.get("assistant_id")?.as_i64()?;
+        let db = AssistantDatabase::new(app_handle).ok()?;
+        let prompts = db.get_assistant_prompt(assistant_id).ok()?;
+        let old_prompt = prompts.first().map(|p| p.prompt.as_str()).unwrap_or("");
+        Some(json!({
+            "_type": "assistant.update_prompt",
+            "assistant_id": assistant_id,
+            "prompt": old_prompt,
+        }))
+    }
+
+    async fn undo(
+        &self,
+        app_handle: &AppHandle,
+        snapshot: &serde_json::Value,
+        _original_args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let assistant_id = snapshot.get("assistant_id").and_then(|v| v.as_i64())
+            .ok_or("Missing assistant_id in snapshot")?;
+        let old_prompt = snapshot.get("prompt").and_then(|v| v.as_str())
+            .ok_or("Missing prompt in snapshot")?;
+
+        let db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
+        let existing = db.get_assistant_prompt(assistant_id).map_err(|e| e.to_string())?;
+
+        if let Some(p) = existing.first() {
+            db.update_assistant_prompt(p.id, old_prompt).map_err(|e| e.to_string())?;
+        } else {
+            db.add_assistant_prompt(assistant_id, old_prompt).map_err(|e| e.to_string())?;
+        }
+
+        Ok(json!({
+            "undone": true,
+            "assistant_id": assistant_id,
+            "restored_prompt_length": old_prompt.len(),
         }))
     }
 }
@@ -254,6 +319,51 @@ impl ActionHandler for AssistantUpdateModelHandler {
             "model_code": model_code,
         }))
     }
+
+    async fn snapshot_before(
+        &self,
+        app_handle: &AppHandle,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let assistant_id = args.get("assistant_id")?.as_i64()?;
+        let db = AssistantDatabase::new(app_handle).ok()?;
+        let models = db.get_assistant_model(assistant_id).ok()?;
+        let model_info: Vec<serde_json::Value> = models.iter().map(|m| {
+            json!({ "id": m.id, "provider_id": m.provider_id, "model_code": m.model_code, "alias": m.alias })
+        }).collect();
+        Some(json!({
+            "_type": "assistant.update_model",
+            "assistant_id": assistant_id,
+            "models": model_info,
+        }))
+    }
+
+    async fn undo(
+        &self,
+        app_handle: &AppHandle,
+        snapshot: &serde_json::Value,
+        _original_args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let assistant_id = snapshot.get("assistant_id").and_then(|v| v.as_i64())
+            .ok_or("Missing assistant_id in snapshot")?;
+        let models = snapshot.get("models").and_then(|v| v.as_array())
+            .ok_or("Missing models in snapshot")?;
+
+        let db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
+
+        if let Some(old_model) = models.first() {
+            let provider_id = old_model.get("provider_id").and_then(|v| v.as_i64()).unwrap_or(0);
+            let model_code = old_model.get("model_code").and_then(|v| v.as_str()).unwrap_or("");
+            let alias = old_model.get("alias").and_then(|v| v.as_str()).unwrap_or(model_code);
+
+            let existing = db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?;
+            if let Some(m) = existing.first() {
+                db.update_assistant_model(m.id, provider_id, model_code, alias).map_err(|e| e.to_string())?;
+            }
+        }
+
+        Ok(json!({ "undone": true, "assistant_id": assistant_id, "restored": "model" }))
+    }
 }
 
 #[async_trait]
@@ -295,6 +405,44 @@ impl ActionHandler for AssistantUpdateMcpConfigHandler {
             "mcp_server_id": mcp_server_id,
             "is_enabled": is_enabled,
         }))
+    }
+
+    async fn snapshot_before(
+        &self,
+        app_handle: &AppHandle,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let assistant_id = args.get("assistant_id")?.as_i64()?;
+        let mcp_server_id = args.get("mcp_server_id")?.as_i64()?;
+        let db = AssistantDatabase::new(app_handle).ok()?;
+        let configs = db.get_assistant_mcp_configs(assistant_id).ok()?;
+        let old_config = configs.iter().find(|c| c.mcp_server_id == mcp_server_id);
+        Some(json!({
+            "_type": "assistant.update_mcp_config",
+            "assistant_id": assistant_id,
+            "mcp_server_id": mcp_server_id,
+            "was_enabled": old_config.map(|c| c.is_enabled),
+            "existed": old_config.is_some(),
+        }))
+    }
+
+    async fn undo(
+        &self,
+        app_handle: &AppHandle,
+        snapshot: &serde_json::Value,
+        _original_args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let assistant_id = snapshot.get("assistant_id").and_then(|v| v.as_i64())
+            .ok_or("Missing assistant_id in snapshot")?;
+        let mcp_server_id = snapshot.get("mcp_server_id").and_then(|v| v.as_i64())
+            .ok_or("Missing mcp_server_id in snapshot")?;
+        let was_enabled = snapshot.get("was_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
+        db.upsert_assistant_mcp_config(assistant_id, mcp_server_id, was_enabled)
+            .map_err(|e| e.to_string())?;
+
+        Ok(json!({ "undone": true, "assistant_id": assistant_id, "restored_enabled": was_enabled }))
     }
 }
 
@@ -346,6 +494,46 @@ impl ActionHandler for AssistantUpdateSkillConfigHandler {
             "is_enabled": is_enabled,
             "priority": priority,
         }))
+    }
+
+    async fn snapshot_before(
+        &self,
+        app_handle: &AppHandle,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let assistant_id = args.get("assistant_id")?.as_i64()?;
+        let skill_identifier = args.get("skill_identifier")?.as_str()?;
+        let skill_db = crate::db::skill_db::SkillDatabase::new(app_handle).ok()?;
+        let configs = skill_db.get_assistant_skill_configs(assistant_id).ok()?;
+        let old_config = configs.iter().find(|c| c.skill_identifier == skill_identifier);
+        Some(json!({
+            "_type": "assistant.update_skill_config",
+            "assistant_id": assistant_id,
+            "skill_identifier": skill_identifier,
+            "was_enabled": old_config.map(|c| c.is_enabled),
+            "was_priority": old_config.map(|c| c.priority),
+            "existed": old_config.is_some(),
+        }))
+    }
+
+    async fn undo(
+        &self,
+        app_handle: &AppHandle,
+        snapshot: &serde_json::Value,
+        _original_args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let assistant_id = snapshot.get("assistant_id").and_then(|v| v.as_i64())
+            .ok_or("Missing assistant_id in snapshot")?;
+        let skill_identifier = snapshot.get("skill_identifier").and_then(|v| v.as_str())
+            .ok_or("Missing skill_identifier in snapshot")?;
+        let was_enabled = snapshot.get("was_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        let was_priority = snapshot.get("was_priority").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+
+        let skill_db = crate::db::skill_db::SkillDatabase::new(app_handle).map_err(|e| e.to_string())?;
+        skill_db.upsert_assistant_skill_config(assistant_id, skill_identifier, was_enabled, was_priority)
+            .map_err(|e| e.to_string())?;
+
+        Ok(json!({ "undone": true, "assistant_id": assistant_id, "restored_enabled": was_enabled }))
     }
 }
 

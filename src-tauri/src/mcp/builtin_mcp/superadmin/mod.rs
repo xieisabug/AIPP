@@ -1,11 +1,13 @@
 pub mod actions;
 pub mod audit;
+pub mod audit_query;
 pub mod batch;
 pub mod catalog;
 pub mod execute;
 pub mod inspect;
 pub mod registry;
 pub mod types;
+pub mod undo;
 
 #[cfg(test)]
 mod tests;
@@ -37,6 +39,10 @@ pub fn init_superadmin_tables(app_handle: &AppHandle) {
                 if let Err(e) = audit::create_audit_table(&conn) {
                     error!(error = %e, "Failed to create superadmin_audit_log table");
                 }
+                // Migrate existing tables to add snapshot/undo columns
+                if let Err(e) = audit::migrate_audit_table(&conn) {
+                    error!(error = %e, "Failed to migrate superadmin_audit_log table");
+                }
             }
             Err(e) => {
                 error!(error = %e, "Failed to get connection for superadmin init");
@@ -54,7 +60,7 @@ pub fn init_superadmin_tables(app_handle: &AppHandle) {
 
 /// Dispatch a superadmin tool call.
 /// `tool_name` is one of: superadmin_catalog, superadmin_inspect,
-/// superadmin_execute, superadmin_batch.
+/// superadmin_execute, superadmin_batch, superadmin_undo, superadmin_audit_query.
 /// `args` is the parsed JSON parameters.
 /// `conversation_id` is the butler's conversation id (for audit).
 pub async fn dispatch(
@@ -126,6 +132,19 @@ pub async fn dispatch(
                 "content": [{"type": "json", "json": val}],
                 "isError": is_error
             })
+        }
+
+        "superadmin_undo" => {
+            let audit_id = match args.get("audit_id").and_then(|v| v.as_str()) {
+                Some(id) => id,
+                None => return error_response("Missing required parameter: audit_id"),
+            };
+            let reason = args.get("reason").and_then(|v| v.as_str());
+            undo::handle_undo(app_handle, registry, audit_id, reason, conversation_id).await
+        }
+
+        "superadmin_audit_query" => {
+            audit_query::handle_audit_query(app_handle, args).await
         }
 
         _ => error_response(&format!("Unknown superadmin tool: {}", tool_name)),

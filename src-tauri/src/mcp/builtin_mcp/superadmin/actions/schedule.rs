@@ -174,6 +174,14 @@ impl ActionHandler for ScheduleCreateHandler {
             "name": created.name,
         }))
     }
+
+    async fn snapshot_before(
+        &self,
+        _app_handle: &AppHandle,
+        _args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        Some(json!({ "_type": "schedule.create", "existed": false }))
+    }
 }
 
 #[async_trait]
@@ -230,6 +238,67 @@ impl ActionHandler for ScheduleUpdateHandler {
             "task_id": task_id,
             "updated_fields": "applied",
         }))
+    }
+
+    async fn snapshot_before(
+        &self,
+        app_handle: &AppHandle,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let task_id = args.get("task_id")?.as_i64()?;
+        let db = ScheduledTaskDatabase::new(app_handle).ok()?;
+        let task = db.read_task(task_id).ok()??;
+        Some(json!({
+            "_type": "schedule.update",
+            "task_id": task.id,
+            "name": task.name,
+            "is_enabled": task.is_enabled,
+            "schedule_type": task.schedule_type,
+            "interval_value": task.interval_value,
+            "interval_unit": task.interval_unit,
+            "start_time": task.start_time,
+            "task_prompt": task.task_prompt,
+            "notify_prompt": task.notify_prompt,
+        }))
+    }
+
+    async fn undo(
+        &self,
+        app_handle: &AppHandle,
+        snapshot: &serde_json::Value,
+        _original_args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let task_id = snapshot.get("task_id").and_then(|v| v.as_i64())
+            .ok_or("Missing task_id in snapshot")?;
+
+        let db = ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string())?;
+        let mut task = db.read_task(task_id).map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Task {} no longer exists", task_id))?;
+
+        // Restore all captured fields
+        if let Some(name) = snapshot.get("name").and_then(|v| v.as_str()) {
+            task.name = name.to_string();
+        }
+        if let Some(enabled) = snapshot.get("is_enabled").and_then(|v| v.as_bool()) {
+            task.is_enabled = enabled;
+        }
+        if let Some(prompt) = snapshot.get("task_prompt").and_then(|v| v.as_str()) {
+            task.task_prompt = prompt.to_string();
+        }
+        if let Some(notify) = snapshot.get("notify_prompt").and_then(|v| v.as_str()) {
+            task.notify_prompt = notify.to_string();
+        }
+        if let Some(val) = snapshot.get("interval_value").and_then(|v| v.as_i64()) {
+            task.interval_value = Some(val);
+        }
+        if let Some(unit) = snapshot.get("interval_unit").and_then(|v| v.as_str()) {
+            task.interval_unit = Some(unit.to_string());
+        }
+
+        task.updated_time = chrono::Utc::now();
+        db.update_task(&task).map_err(|e| e.to_string())?;
+
+        Ok(json!({ "undone": true, "task_id": task_id, "restored": "schedule config" }))
     }
 }
 
@@ -299,6 +368,76 @@ impl ActionHandler for ScheduleDeleteHandler {
         Ok(json!({
             "task_id": task_id,
             "deleted": true,
+        }))
+    }
+
+    async fn snapshot_before(
+        &self,
+        app_handle: &AppHandle,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let task_id = args.get("task_id")?.as_i64()?;
+        let db = ScheduledTaskDatabase::new(app_handle).ok()?;
+        let task = db.read_task(task_id).ok()??;
+        Some(json!({
+            "_type": "schedule.delete",
+            "task_id": task.id,
+            "name": task.name,
+            "is_enabled": task.is_enabled,
+            "schedule_type": task.schedule_type,
+            "interval_value": task.interval_value,
+            "interval_unit": task.interval_unit,
+            "start_time": task.start_time,
+            "week_days": task.week_days,
+            "month_days": task.month_days,
+            "assistant_id": task.assistant_id,
+            "task_prompt": task.task_prompt,
+            "notify_prompt": task.notify_prompt,
+        }))
+    }
+
+    async fn undo(
+        &self,
+        app_handle: &AppHandle,
+        snapshot: &serde_json::Value,
+        _original_args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        use crate::db::scheduled_task_db::ScheduledTask;
+        use chrono::Utc;
+
+        let name = snapshot.get("name").and_then(|v| v.as_str()).ok_or("Missing name in snapshot")?;
+        let schedule_type = snapshot.get("schedule_type").and_then(|v| v.as_str()).unwrap_or("interval");
+        let assistant_id = snapshot.get("assistant_id").and_then(|v| v.as_i64()).ok_or("Missing assistant_id")?;
+        let task_prompt = snapshot.get("task_prompt").and_then(|v| v.as_str()).unwrap_or("");
+
+        let task = ScheduledTask {
+            id: 0,
+            name: name.to_string(),
+            is_enabled: snapshot.get("is_enabled").and_then(|v| v.as_bool()).unwrap_or(false),
+            schedule_type: schedule_type.to_string(),
+            interval_value: snapshot.get("interval_value").and_then(|v| v.as_i64()),
+            interval_unit: snapshot.get("interval_unit").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            start_time: snapshot.get("start_time").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            week_days: snapshot.get("week_days").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            month_days: snapshot.get("month_days").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            run_at: None,
+            next_run_at: None,
+            last_run_at: None,
+            assistant_id,
+            task_prompt: task_prompt.to_string(),
+            notify_prompt: snapshot.get("notify_prompt").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            created_time: Utc::now(),
+            updated_time: Utc::now(),
+        };
+
+        let db = ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string())?;
+        let created = db.create_task(&task).map_err(|e| e.to_string())?;
+
+        Ok(json!({
+            "undone": true,
+            "new_task_id": created.id,
+            "name": created.name,
+            "note": "Scheduled task re-created from snapshot. Run logs from original task are not restored.",
         }))
     }
 }

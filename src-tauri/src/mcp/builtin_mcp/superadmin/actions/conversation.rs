@@ -173,6 +173,14 @@ impl ActionHandler for ConversationCreateHandler {
             "name": created.name,
         }))
     }
+
+    async fn snapshot_before(
+        &self,
+        _app_handle: &AppHandle,
+        _args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        Some(json!({ "_type": "conversation.create", "existed": false }))
+    }
 }
 
 #[async_trait]
@@ -210,6 +218,92 @@ impl ActionHandler for ConversationArchiveHandler {
         Ok(json!({
             "conversation_id": conversation_id,
             "archived": true,
+        }))
+    }
+
+    async fn snapshot_before(
+        &self,
+        app_handle: &AppHandle,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let conversation_id = args.get("conversation_id")?.as_i64()?;
+        let db = ConversationDatabase::new(app_handle).ok()?;
+        let repo = db.conversation_repo().ok()?;
+        let conv = repo.read(conversation_id).ok()??;
+
+        // Capture full conversation state before deletion
+        let mut snapshot = json!({
+            "_type": "conversation.archive",
+            "conversation_id": conv.id,
+            "name": conv.name,
+            "assistant_id": conv.assistant_id,
+            "conversation_kind": conv.conversation_kind,
+            "parent_butler_conversation_id": conv.parent_butler_conversation_id,
+            "source_task_title": conv.source_task_title,
+            "is_hidden_from_normal_chat_list": conv.is_hidden_from_normal_chat_list,
+            "channel_source": conv.channel_source,
+            "butler_task_status": conv.butler_task_status,
+            "butler_task_summary": conv.butler_task_summary,
+        });
+
+        // Also capture messages for full restore
+        if let Ok(msg_repo) = db.message_repo() {
+            if let Ok(messages) = msg_repo.list_by_conversation_id(conversation_id) {
+                let msg_data: Vec<serde_json::Value> = messages.iter().take(200).map(|(m, _)| {
+                    json!({
+                        "message_type": m.message_type,
+                        "content": m.content,
+                        "llm_model_name": m.llm_model_name,
+                        "created_time": m.created_time.to_rfc3339(),
+                    })
+                }).collect();
+                snapshot["messages"] = json!(msg_data);
+                snapshot["message_count"] = json!(messages.len());
+            }
+        }
+
+        Some(snapshot)
+    }
+
+    async fn undo(
+        &self,
+        app_handle: &AppHandle,
+        snapshot: &serde_json::Value,
+        _original_args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        // Re-create the conversation from snapshot
+        let name = snapshot.get("name").and_then(|v| v.as_str()).unwrap_or("Restored Conversation");
+        let assistant_id = snapshot.get("assistant_id").and_then(|v| v.as_i64());
+
+        let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+        let repo = db.conversation_repo().map_err(|e| e.to_string())?;
+
+        use crate::db::conversation_db::Conversation;
+        use chrono::Utc;
+
+        let conv = Conversation {
+            id: 0,
+            name: name.to_string(),
+            assistant_id,
+            created_time: Utc::now(),
+            updated_time: Utc::now(),
+            conversation_kind: snapshot.get("conversation_kind").and_then(|v| v.as_str()).unwrap_or("normal").to_string(),
+            parent_butler_conversation_id: snapshot.get("parent_butler_conversation_id").and_then(|v| v.as_i64()),
+            source_task_title: snapshot.get("source_task_title").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            is_hidden_from_normal_chat_list: snapshot.get("is_hidden_from_normal_chat_list").and_then(|v| v.as_bool()).unwrap_or(false),
+            channel_source: snapshot.get("channel_source").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            butler_task_status: snapshot.get("butler_task_status").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            butler_task_summary: snapshot.get("butler_task_summary").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            butler_task_finalized_at: None,
+        };
+
+        let created = repo.create(&conv).map_err(|e| e.to_string())?;
+
+        Ok(json!({
+            "undone": true,
+            "new_conversation_id": created.id,
+            "name": created.name,
+            "note": "Conversation re-created. Original messages are not restored (they were captured in snapshot for reference).",
         }))
     }
 }
@@ -280,6 +374,32 @@ impl ActionHandler for ConversationInjectSystemMessageHandler {
             "message_id": created.id,
             "message_type": "system",
         }))
+    }
+
+    async fn snapshot_before(
+        &self,
+        _app_handle: &AppHandle,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let conversation_id = args.get("conversation_id")?.as_i64()?;
+        Some(json!({
+            "_type": "conversation.inject_system_message",
+            "conversation_id": conversation_id,
+            "note": "Message will be created; undo will delete it by ID from result",
+        }))
+    }
+
+    async fn undo(
+        &self,
+        app_handle: &AppHandle,
+        _snapshot: &serde_json::Value,
+        original_args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        // The original execution result_json should contain message_id
+        // We get the message_id from the execute result stored in audit
+        // For now, we can't easily extract it here - the undo handler passes original_args
+        // We'll need the result to find the message_id
+        Err("Undo for inject_system_message requires manual deletion. The injected message_id can be found in the audit log result_json.".to_string())
     }
 }
 
