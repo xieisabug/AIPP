@@ -618,13 +618,18 @@ async fn run_feishu_relay_scope_worker(
         app_handle.state::<crate::state::activity_state::ConversationActivityManager>();
     let mut idle_checks = 0usize;
 
+    // Load the Feishu secret once before the loop to avoid opening SystemDatabase
+    // every 500ms. The secret rarely changes during a relay scope's lifetime.
+    let cached_secret = load_feishu_secret(app_handle)?
+        .unwrap_or_default();
+
     loop {
         let scope = load_relay_scope(app_handle, scope_id)?;
         if matches!(scope.status.as_str(), "completed" | "failed" | "superseded") {
             return Ok(());
         }
 
-        let fresh_config = load_runtime_config(app_handle).await?;
+        let fresh_config = load_runtime_config_inner(app_handle, Some(&cached_secret)).await?;
         if !fresh_config.butler_enabled || !fresh_config.enabled {
             return Err("飞书回发已被停用，跳过当前回发任务".to_string());
         }
@@ -776,6 +781,15 @@ fn load_feishu_secret(app_handle: &AppHandle) -> Result<Option<String>, String> 
 }
 
 async fn load_runtime_config(app_handle: &AppHandle) -> Result<FeishuRuntimeConfig, String> {
+    load_runtime_config_inner(app_handle, None).await
+}
+
+/// Inner version that accepts a pre-loaded secret to avoid repeated SystemDatabase opens
+/// in tight polling loops.
+async fn load_runtime_config_inner(
+    app_handle: &AppHandle,
+    cached_secret: Option<&str>,
+) -> Result<FeishuRuntimeConfig, String> {
     let feature_state = app_handle.state::<crate::FeatureConfigState>();
     let guard = feature_state.config_feature_map.lock().await;
     let experimental = guard.get(EXPERIMENTAL_FEATURE_CODE);
@@ -785,7 +799,10 @@ async fn load_runtime_config(app_handle: &AppHandle) -> Result<FeishuRuntimeConf
             .map(|config| config.value.clone())
             .unwrap_or_default()
     };
-    let app_secret = load_feishu_secret(app_handle)?.unwrap_or_default();
+    let app_secret = match cached_secret {
+        Some(s) => s.to_string(),
+        None => load_feishu_secret(app_handle)?.unwrap_or_default(),
+    };
     Ok(FeishuRuntimeConfig {
         butler_enabled: parse_bool_flag(&get("butler_experiment_enabled")),
         enabled: parse_bool_flag(&get("butler_feishu_enabled")),

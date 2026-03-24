@@ -137,6 +137,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
     const contextCompactionEnabled = isEnabledValue(form.watch("context_compaction_enabled"));
     const trustAllWorkspaces = isEnabledValue(form.watch("butler_trust_all_workspaces"));
     const [newTrustedPath, setNewTrustedPath] = useState("");
+    const [newTrustedDesc, setNewTrustedDesc] = useState("");
     const defaultDynamicEnabled = isEnabledValue(defaultValues?.dynamic_mcp_loading_enabled);
     const defaultAssistantSummaryEnabled = isEnabledValue(defaultValues?.assistant_summary_enabled);
     const defaultConversationSummaryEnabled = isEnabledValue(defaultValues?.conversation_summary_enabled);
@@ -325,27 +326,40 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
         triggerSummaryTask,
     ]);
 
-    // Trusted workspace path helpers
-    const trustedPathsRaw: string = form.watch("butler_trusted_workspaces") || "";
-    const trustedPaths = useMemo(
-        () => trustedPathsRaw.split("\n").map(s => s.trim()).filter(Boolean),
-        [trustedPathsRaw]
-    );
+    // Trusted workspace helpers — stored as JSON array [{path, description}]
+    type TrustedWorkspace = { path: string; description: string };
+    const trustedPathsRaw: string = form.watch("butler_trusted_workspaces") || "[]";
+    const trustedWorkspaces: TrustedWorkspace[] = useMemo(() => {
+        try {
+            const parsed = JSON.parse(trustedPathsRaw);
+            if (Array.isArray(parsed)) return parsed;
+        } catch {
+            // Legacy: plain newline-separated paths → migrate to JSON
+            const lines = trustedPathsRaw.split("\n").map(s => s.trim()).filter(Boolean);
+            if (lines.length > 0) return lines.map(p => ({ path: p, description: "" }));
+        }
+        return [];
+    }, [trustedPathsRaw]);
+    const setTrustedWorkspaces = useCallback((ws: TrustedWorkspace[]) => {
+        form.setValue("butler_trusted_workspaces", JSON.stringify(ws), { shouldDirty: true });
+    }, [form]);
     const handleAddTrustedPath = useCallback(() => {
         const trimmed = newTrustedPath.trim();
         if (!trimmed) return;
-        if (trustedPaths.includes(trimmed)) {
+        if (trustedWorkspaces.some(w => w.path === trimmed)) {
             toast.error("该路径已存在");
             return;
         }
-        const updated = [...trustedPaths, trimmed].join("\n");
-        form.setValue("butler_trusted_workspaces", updated, { shouldDirty: true });
+        setTrustedWorkspaces([...trustedWorkspaces, { path: trimmed, description: newTrustedDesc.trim() }]);
         setNewTrustedPath("");
-    }, [newTrustedPath, trustedPaths, form]);
+        setNewTrustedDesc("");
+    }, [newTrustedPath, newTrustedDesc, trustedWorkspaces, setTrustedWorkspaces]);
     const handleRemoveTrustedPath = useCallback((path: string) => {
-        const updated = trustedPaths.filter(p => p !== path).join("\n");
-        form.setValue("butler_trusted_workspaces", updated, { shouldDirty: true });
-    }, [trustedPaths, form]);
+        setTrustedWorkspaces(trustedWorkspaces.filter(w => w.path !== path));
+    }, [trustedWorkspaces, setTrustedWorkspaces]);
+    const handleUpdateDescription = useCallback((path: string, desc: string) => {
+        setTrustedWorkspaces(trustedWorkspaces.map(w => w.path === path ? { ...w, description: desc } : w));
+    }, [trustedWorkspaces, setTrustedWorkspaces]);
 
     const handleSave = useCallback(async () => {
         if (dynamicEnabled && !summarizerModelId) {
@@ -1131,49 +1145,65 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                     {!trustAllWorkspaces && (
                                         <div className={nestedGroupClassName}>
                                             <p className="text-sm text-muted-foreground">
-                                                配置可信工作区路径。在这些路径下的文件操作将自动放行，不弹出权限确认。
+                                                配置可信工作区路径及描述。在这些路径下的文件操作将自动放行，描述会注入到总管家的提示词中帮助 AI 理解工作区用途。
                                             </p>
                                             {/* 添加新路径 */}
-                                            <div className="flex items-center gap-2">
-                                                <FolderPicker
-                                                    value={newTrustedPath}
-                                                    onChange={setNewTrustedPath}
-                                                    placeholder="选择或输入可信目录路径"
+                                            <div className="space-y-2">
+                                                <div className="flex items-center gap-2">
+                                                    <FolderPicker
+                                                        value={newTrustedPath}
+                                                        onChange={setNewTrustedPath}
+                                                        placeholder="选择或输入可信目录路径"
+                                                    />
+                                                    <Button
+                                                        type="button"
+                                                        size="sm"
+                                                        onClick={handleAddTrustedPath}
+                                                        disabled={!newTrustedPath.trim()}
+                                                    >
+                                                        <Plus className="h-4 w-4 mr-1" />
+                                                        添加
+                                                    </Button>
+                                                </div>
+                                                <Input
+                                                    value={newTrustedDesc}
+                                                    onChange={(e) => setNewTrustedDesc(e.target.value)}
+                                                    placeholder="工作区描述（可选），例如：前端项目、Rust 后端代码仓库"
+                                                    className="text-sm"
                                                 />
-                                                <Button
-                                                    type="button"
-                                                    size="sm"
-                                                    onClick={handleAddTrustedPath}
-                                                    disabled={!newTrustedPath.trim()}
-                                                >
-                                                    <Plus className="h-4 w-4 mr-1" />
-                                                    添加
-                                                </Button>
                                             </div>
-                                            {/* 已有路径列表 */}
-                                            <div className="space-y-2 max-h-48 overflow-y-auto">
-                                                {trustedPaths.length === 0 ? (
+                                            {/* 已有工作区列表 */}
+                                            <div className="space-y-2 max-h-64 overflow-y-auto">
+                                                {trustedWorkspaces.length === 0 ? (
                                                     <div className="text-sm text-muted-foreground text-center py-3">
                                                         暂未配置可信工作区
                                                     </div>
                                                 ) : (
-                                                    trustedPaths.map((path) => (
+                                                    trustedWorkspaces.map((ws) => (
                                                         <div
-                                                            key={path}
-                                                            className="flex items-center justify-between p-2 bg-background rounded-md border"
+                                                            key={ws.path}
+                                                            className="p-2 bg-background rounded-md border space-y-1"
                                                         >
-                                                            <span className="text-sm font-mono break-all flex-1 mr-2">
-                                                                {path}
-                                                            </span>
-                                                            <Button
-                                                                type="button"
-                                                                variant="ghost"
-                                                                size="sm"
-                                                                onClick={() => handleRemoveTrustedPath(path)}
-                                                                className="text-destructive hover:text-destructive shrink-0"
-                                                            >
-                                                                <Trash2 className="h-4 w-4" />
-                                                            </Button>
+                                                            <div className="flex items-center justify-between">
+                                                                <span className="text-sm font-mono break-all flex-1 mr-2">
+                                                                    {ws.path}
+                                                                </span>
+                                                                <Button
+                                                                    type="button"
+                                                                    variant="ghost"
+                                                                    size="sm"
+                                                                    onClick={() => handleRemoveTrustedPath(ws.path)}
+                                                                    className="text-destructive hover:text-destructive shrink-0"
+                                                                >
+                                                                    <Trash2 className="h-4 w-4" />
+                                                                </Button>
+                                                            </div>
+                                                            <Input
+                                                                value={ws.description}
+                                                                onChange={(e) => handleUpdateDescription(ws.path, e.target.value)}
+                                                                placeholder="添加描述…"
+                                                                className="text-xs h-7"
+                                                            />
                                                         </div>
                                                     ))
                                                 )}

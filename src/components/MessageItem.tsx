@@ -74,9 +74,11 @@ const MessageItem = React.memo<MessageItemProps>(
         const shouldMaskContent = antiLeakageEnabled && !isRevealed && !isLastMessage;
 
         // 防泄露模式：获取实际显示的内容
+        // 流式消息优先使用 streamEvent.content（包含 MCP_TOOL_CALL_STREAMING 标记）
         const displayContent = useMemo(() => {
-            return shouldMaskContent ? maskContent(message.content) : message.content;
-        }, [shouldMaskContent, message.content, maskContent]);
+            const rawContent = (streamEvent && !streamEvent.is_done ? streamEvent.content : null) ?? message.content;
+            return shouldMaskContent ? maskContent(rawContent) : rawContent;
+        }, [shouldMaskContent, message.content, streamEvent, maskContent]);
 
         const { copyIconState, handleCopy } = useCopyHandler(displayContent);
         const { parseCustomTags } = useCustomTagParser();

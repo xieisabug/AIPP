@@ -283,7 +283,91 @@ async fn ensure_butler_enabled(app_handle: &AppHandle) -> Result<(), String> {
 
 async fn build_butler_system_prompt(app_handle: &AppHandle) -> Result<String, String> {
     let assistant_directory_prompt = build_butler_assistant_directory_prompt(app_handle).await?;
-    Ok(format!("{}\n\n{}", BUTLER_SYSTEM_PROMPT_BASE, assistant_directory_prompt))
+    let trusted_workspaces_prompt = build_butler_trusted_workspaces_prompt(app_handle).await;
+    Ok(format!(
+        "{}\n\n{}\n\n{}",
+        BUTLER_SYSTEM_PROMPT_BASE,
+        assistant_directory_prompt,
+        trusted_workspaces_prompt,
+    ))
+}
+
+/// Build a prompt section informing the Butler about trusted workspaces.
+async fn build_butler_trusted_workspaces_prompt(app_handle: &AppHandle) -> String {
+    let trust_all = get_experimental_config_value(app_handle, "butler_trust_all_workspaces")
+        .await
+        .map(|v| parse_bool_flag(&v))
+        .unwrap_or(false);
+
+    if trust_all {
+        return "可信工作区：当前已开启「信任任何工作区」，所有路径的文件操作均自动放行，无需权限确认。".to_string();
+    }
+
+    let raw = get_experimental_config_value(app_handle, "butler_trusted_workspaces")
+        .await
+        .unwrap_or_default();
+
+    let workspaces = parse_trusted_workspaces(&raw);
+
+    if workspaces.is_empty() {
+        return "可信工作区：当前未配置可信工作区，子任务在执行文件操作时可能需要权限确认。".to_string();
+    }
+
+    let list = workspaces
+        .iter()
+        .map(|(path, desc)| {
+            if desc.is_empty() {
+                format!("- {}", path)
+            } else {
+                format!("- {}（{}）", path, desc)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "可信工作区：\n以下路径已被标记为可信工作区，子任务在这些路径下的文件操作将自动放行，无需权限确认。派发任务时，建议优先使用这些目录作为工作目录。\n{}",
+        list
+    )
+}
+
+/// Parse trusted workspaces config value. Supports JSON array format
+/// `[{"path":"...","description":"..."}]` and legacy newline-separated plain paths.
+/// Returns Vec<(path, description)>.
+fn parse_trusted_workspaces(raw: &str) -> Vec<(String, String)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    // Try JSON array first
+    if trimmed.starts_with('[') {
+        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
+            let result: Vec<(String, String)> = arr
+                .iter()
+                .filter_map(|v| {
+                    let path = v.get("path")?.as_str()?.trim().to_string();
+                    if path.is_empty() { return None; }
+                    let desc = v.get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    Some((path, desc))
+                })
+                .collect();
+            if !result.is_empty() {
+                return result;
+            }
+        }
+    }
+
+    // Fallback: newline-separated plain paths
+    trimmed
+        .split('\n')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| (s.to_string(), String::new()))
+        .collect()
 }
 
 pub(crate) async fn get_butler_model_selection(

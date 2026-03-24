@@ -30,6 +30,7 @@ fn broadcast_mcp_tool_call_update(app_handle: &tauri::AppHandle, tool_call: &MCP
             call_id: tool_call.id,
             conversation_id: tool_call.conversation_id,
             status: tool_call.status.clone(),
+            llm_call_id: tool_call.llm_call_id.clone(),
             server_name: Some(tool_call.server_name.clone()),
             tool_name: Some(tool_call.tool_name.clone()),
             parameters: Some(tool_call.parameters.clone()),

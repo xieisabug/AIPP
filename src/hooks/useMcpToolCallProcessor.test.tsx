@@ -182,4 +182,232 @@ describe("useMcpToolCallProcessor MCP identity", () => {
         expect(screen.getAllByText("demo-tool")).toHaveLength(1);
         expect(screen.getAllByTestId("shine-border")).toHaveLength(1);
     });
+
+    it("renders streaming tool call markers with '生成中' badge", async () => {
+        const conversationId = 22;
+
+        mockInvokeHandler("get_mcp_tool_call", () => ({
+            id: 0,
+            conversation_id: conversationId,
+            message_id: 12,
+            server_id: 1,
+            server_name: "my-server",
+            tool_name: "my-tool",
+            parameters: '{}',
+            status: "pending",
+            created_time: "2024-01-01T00:00:00.000Z",
+        }));
+
+        const markdown =
+            'Some text before\n\n<!-- MCP_TOOL_CALL_STREAMING:{"server_name":"my-server","tool_name":"my-tool","fn_arguments":"{\\"key\\":\\"value\\"}","llm_call_id":"call_1"} -->\n';
+
+        render(
+            <ProcessorHarness
+                markdown={markdown}
+                conversationId={conversationId}
+                messageId={12}
+                mcpToolCallStates={new Map()}
+                shiningMcpCallId={null}
+            />,
+        );
+
+        // Should render the text before the marker
+        expect(screen.getByText("Some text before")).toBeInTheDocument();
+        // Should show "生成中" badge for streaming tool call
+        expect(await screen.findByText("生成中")).toBeInTheDocument();
+        // Should show the server and tool name
+        expect(screen.getByText("my-server")).toBeInTheDocument();
+        expect(screen.getByText("my-tool")).toBeInTheDocument();
+        // Should show shine border for streaming
+        expect(screen.getByTestId("shine-border")).toBeInTheDocument();
+    });
+
+    it("renders multiple streaming tool calls", async () => {
+        const conversationId = 23;
+
+        mockInvokeHandler("get_mcp_tool_call", () => ({
+            id: 0,
+            conversation_id: conversationId,
+            message_id: 13,
+            server_id: 1,
+            server_name: "server",
+            tool_name: "tool",
+            parameters: '{}',
+            status: "pending",
+            created_time: "2024-01-01T00:00:00.000Z",
+        }));
+
+        const markdown = [
+            '<!-- MCP_TOOL_CALL_STREAMING:{"server_name":"server-a","tool_name":"tool-a","fn_arguments":"{}","llm_call_id":"call_a"} -->',
+            '<!-- MCP_TOOL_CALL_STREAMING:{"server_name":"server-b","tool_name":"tool-b","fn_arguments":"{}","llm_call_id":"call_b"} -->',
+        ].join("\n");
+
+        render(
+            <ProcessorHarness
+                markdown={markdown}
+                conversationId={conversationId}
+                messageId={13}
+                mcpToolCallStates={new Map()}
+                shiningMcpCallId={null}
+            />,
+        );
+
+        expect(screen.getAllByText("生成中")).toHaveLength(2);
+        expect(screen.getByText("tool-a")).toBeInTheDocument();
+        expect(screen.getByText("tool-b")).toBeInTheDocument();
+    });
+
+    it("does not confuse MCP_TOOL_CALL_STREAMING with MCP_TOOL_CALL", async () => {
+        const conversationId = 24;
+        const callId = 301;
+
+        mockInvokeHandler("get_mcp_tool_call", () => ({
+            id: callId,
+            conversation_id: conversationId,
+            message_id: 14,
+            server_id: 1,
+            server_name: "server",
+            tool_name: "tool",
+            parameters: '{}',
+            status: "pending",
+            created_time: "2024-01-01T00:00:00.000Z",
+        }));
+
+        const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
+            [callId, {
+                call_id: callId,
+                conversation_id: conversationId,
+                status: "pending",
+                server_name: "real-server",
+                tool_name: "real-tool",
+                parameters: '{}',
+            }],
+        ]);
+
+        const markdown = [
+            '<!-- MCP_TOOL_CALL:{"call_id":301,"server_name":"real-server","tool_name":"real-tool","parameters":"{}"} -->',
+            '<!-- MCP_TOOL_CALL_STREAMING:{"server_name":"streaming-server","tool_name":"streaming-tool","fn_arguments":"{}","llm_call_id":"call_2"} -->',
+        ].join("\n");
+
+        render(
+            <ProcessorHarness
+                markdown={markdown}
+                conversationId={conversationId}
+                messageId={14}
+                mcpToolCallStates={mcpToolCallStates}
+                shiningMcpCallId={null}
+            />,
+        );
+
+        // Real tool call should show "待执行" (pending)
+        expect(await screen.findByText("待执行")).toBeInTheDocument();
+        // Streaming tool call should show "生成中"
+        expect(screen.getByText("生成中")).toBeInTheDocument();
+        // Both tool names should be present
+        expect(screen.getByText("real-tool")).toBeInTheDocument();
+        expect(screen.getByText("streaming-tool")).toBeInTheDocument();
+    });
+
+    it("transitions from streaming marker to real MCP_TOOL_CALL on rerender", async () => {
+        const conversationId = 25;
+        const resolvedCallId = 401;
+
+        mockInvokeHandler("get_mcp_tool_call", () => ({
+            id: resolvedCallId,
+            conversation_id: conversationId,
+            message_id: 15,
+            server_id: 1,
+            server_name: "my-server",
+            tool_name: "my-tool",
+            parameters: '{"key":"value"}',
+            status: "pending",
+            created_time: "2024-01-01T00:00:00.000Z",
+        }));
+
+        // Phase 1: Streaming marker (LLM is generating arguments)
+        const llmCallId = "call_x";
+        const streamingMarkdown =
+            `Hello\n\n<!-- MCP_TOOL_CALL_STREAMING:{"server_name":"my-server","tool_name":"my-tool","fn_arguments":"{\\"key\\":\\"val","llm_call_id":"${llmCallId}"} -->\n`;
+
+        const { rerender } = render(
+            <ProcessorHarness
+                markdown={streamingMarkdown}
+                conversationId={conversationId}
+                messageId={15}
+                mcpToolCallStates={new Map()}
+                shiningMcpCallId={null}
+            />,
+        );
+
+        // Should show streaming state
+        expect(await screen.findByText("生成中")).toBeInTheDocument();
+        expect(screen.getByText("my-tool")).toBeInTheDocument();
+        expect(screen.getAllByText("my-tool")).toHaveLength(1);
+
+        // Phase 2: Real MCP_TOOL_CALL marker replaces streaming
+        const finalMarkdown =
+            `Hello\n\n<!-- MCP_TOOL_CALL:{"call_id":401,"server_name":"my-server","tool_name":"my-tool","parameters":"{\\"key\\":\\"value\\"}","llm_call_id":"${llmCallId}"} -->\n`;
+
+        const mcpStates = new Map<number, MCPToolCallUpdateEvent>([
+            [resolvedCallId, {
+                call_id: resolvedCallId,
+                conversation_id: conversationId,
+                status: "pending",
+                server_name: "my-server",
+                tool_name: "my-tool",
+                parameters: '{"key":"value"}',
+            }],
+        ]);
+
+        rerender(
+            <ProcessorHarness
+                markdown={finalMarkdown}
+                conversationId={conversationId}
+                messageId={15}
+                mcpToolCallStates={mcpStates}
+                shiningMcpCallId={null}
+            />,
+        );
+
+        // Should now show "待执行" instead of "生成中"
+        expect(await screen.findByText("待执行")).toBeInTheDocument();
+        expect(screen.queryByText("生成中")).not.toBeInTheDocument();
+        expect(screen.getByText("my-tool")).toBeInTheDocument();
+        expect(screen.getAllByText("my-tool")).toHaveLength(1);
+    });
+
+    it("binds streaming markers to executing MCP state through llm_call_id before final marker arrives", async () => {
+        const conversationId = 26;
+        const resolvedCallId = 501;
+        const llmCallId = "call_bind_501";
+
+        const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
+            [resolvedCallId, {
+                call_id: resolvedCallId,
+                conversation_id: conversationId,
+                status: "executing",
+                llm_call_id: llmCallId,
+                server_name: "my-server",
+                tool_name: "my-tool",
+                parameters: '{"query":"bound-from-state"}',
+            }],
+        ]);
+
+        const markdown =
+            `Hello\n\n<!-- MCP_TOOL_CALL_STREAMING:{"server_name":"my-server","tool_name":"my-tool","fn_arguments":"{\\"query\\":\\"partial\\"}","llm_call_id":"${llmCallId}"} -->\n`;
+
+        render(
+            <ProcessorHarness
+                markdown={markdown}
+                conversationId={conversationId}
+                messageId={16}
+                mcpToolCallStates={mcpToolCallStates}
+                shiningMcpCallId={resolvedCallId}
+            />
+        );
+
+        expect(await screen.findByText("执行中")).toBeInTheDocument();
+        expect(screen.getByText(/bound-from-state/)).toBeInTheDocument();
+        expect(screen.getByTestId("shine-border")).toBeInTheDocument();
+    });
 });

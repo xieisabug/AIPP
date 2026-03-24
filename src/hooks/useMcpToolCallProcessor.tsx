@@ -29,6 +29,9 @@ interface ToolCallData {
     tool_name?: string;
     parameters?: string;
     call_id?: number;
+    llm_call_id?: string;
+    isStreaming?: boolean;  // 流式工具调用（参数可能不完整）
+    fn_arguments?: string;  // 流式工具调用的原始参数
 }
 
 interface ParsedMcpToolCallComment {
@@ -39,6 +42,7 @@ interface ParsedMcpToolCallComment {
 }
 
 const MCP_TOOL_CALL_KEY = "MCP_TOOL_CALL";
+const MCP_TOOL_CALL_STREAMING_KEY = "MCP_TOOL_CALL_STREAMING";
 
 function decodeJsonString(raw: string): string {
     try {
@@ -66,11 +70,14 @@ function normalizeToolCallData(raw: unknown): ToolCallData {
             : typeof callIdRaw === "string" && /^\d+$/.test(callIdRaw.trim())
                 ? Number.parseInt(callIdRaw.trim(), 10)
                 : undefined;
+    const llmCallIdRaw = value.llm_call_id;
     return {
         server_name: typeof value.server_name === "string" ? value.server_name : undefined,
         tool_name: typeof value.tool_name === "string" ? value.tool_name : undefined,
         parameters: typeof value.parameters === "string" ? value.parameters : undefined,
         call_id: callId,
+        llm_call_id: typeof llmCallIdRaw === "string" ? llmCallIdRaw : undefined,
+        fn_arguments: typeof value.fn_arguments === "string" ? value.fn_arguments : undefined,
     };
 }
 
@@ -97,6 +104,14 @@ function parsePartialToolCallPayload(rawPayload: string): ToolCallData {
     const callIdMatch = rawPayload.match(/"call_id"\s*:\s*(\d+)/);
     if (callIdMatch) {
         result.call_id = Number.parseInt(callIdMatch[1], 10);
+    }
+    const llmCallIdMatch = rawPayload.match(/"llm_call_id"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (llmCallIdMatch) {
+        result.llm_call_id = decodeJsonString(llmCallIdMatch[1]);
+    }
+    const fnArgsMatch = rawPayload.match(/"fn_arguments"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (fnArgsMatch) {
+        result.fn_arguments = decodeJsonString(fnArgsMatch[1]);
     }
     return result;
 }
@@ -162,7 +177,7 @@ function findJsonObjectEnd(content: string, startIndex: number): number | null {
 function findNextMcpToolCallStart(
     content: string,
     fromIndex: number,
-): { commentStart: number; payloadStart: number } | null {
+): { commentStart: number; payloadStart: number; isStreaming: boolean } | null {
     let cursor = fromIndex;
     while (cursor < content.length) {
         const commentStart = content.indexOf("<!--", cursor);
@@ -175,12 +190,22 @@ function findNextMcpToolCallStart(
             head += 1;
         }
 
-        if (!content.startsWith(MCP_TOOL_CALL_KEY, head)) {
+        // 优先检查更长的 STREAMING key（避免被短 key 误匹配）
+        let matchedKey: string | null = null;
+        let isStreaming = false;
+        if (content.startsWith(MCP_TOOL_CALL_STREAMING_KEY, head)) {
+            matchedKey = MCP_TOOL_CALL_STREAMING_KEY;
+            isStreaming = true;
+        } else if (content.startsWith(MCP_TOOL_CALL_KEY, head)) {
+            matchedKey = MCP_TOOL_CALL_KEY;
+        }
+
+        if (!matchedKey) {
             cursor = commentStart + 4;
             continue;
         }
 
-        let payloadStart = head + MCP_TOOL_CALL_KEY.length;
+        let payloadStart = head + matchedKey.length;
         while (payloadStart < content.length && /\s/.test(content[payloadStart])) {
             payloadStart += 1;
         }
@@ -191,7 +216,7 @@ function findNextMcpToolCallStart(
             payloadStart += 1;
         }
 
-        return { commentStart, payloadStart };
+        return { commentStart, payloadStart, isStreaming };
     }
 
     return null;
@@ -208,6 +233,7 @@ function extractMcpToolCallComments(content: string): ParsedMcpToolCallComment[]
         }
         const start = startInfo.commentStart;
         const payloadStart = startInfo.payloadStart;
+        const isStreaming = startInfo.isStreaming;
         let firstNonWhitespace = payloadStart;
         while (
             firstNonWhitespace < content.length &&
@@ -242,6 +268,15 @@ function extractMcpToolCallComments(content: string): ParsedMcpToolCallComment[]
                 const rawPayload = content.slice(payloadStart);
                 parsedData = parsePartialToolCallPayload(rawPayload);
                 end = content.length;
+            }
+        }
+
+        // 标记流式工具调用
+        if (isStreaming) {
+            parsedData.isStreaming = true;
+            // 流式标记中使用 fn_arguments 字段
+            if (!parsedData.parameters && parsedData.fn_arguments) {
+                parsedData.parameters = parsedData.fn_arguments;
             }
         }
 
@@ -456,6 +491,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             mcpCalls.map((match) => ({
                 complete: match.complete,
                 call_id: match.data.call_id,
+                llm_call_id: match.data.llm_call_id,
                 server_name: match.data.server_name,
                 tool_name: match.data.tool_name,
             })),
@@ -499,16 +535,18 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             const isLastCall = index === mcpCalls.length - 1;
             parts.push(
                 <McpToolCall
-                    key={`mcp-${data.call_id ?? `tmp-${index}-${match.start}`}`}
+                    key={`mcp-${data.llm_call_id ?? data.call_id ?? (data.isStreaming ? `streaming-${index}` : `tmp-${index}-${match.start}`)}`}
                     serverName={data.server_name}
                     toolName={data.tool_name}
                     parameters={data.parameters ?? "{}"}
+                    llmCallId={data.llm_call_id}
                     conversationId={conversationId}
                     messageId={messageId}
                     callId={data.call_id} // 传递 callId，如果存在的话
                     mcpToolCallStates={mcpToolCallStates} // 传递全局 MCP 状态
                     shiningMcpCallId={shiningMcpCallId}
                     isLastCall={isLastCall} // 是否是最后一个工具调用
+                    isStreaming={data.isStreaming} // 流式工具调用标记
                 />
             );
 

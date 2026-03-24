@@ -107,6 +107,7 @@ export interface MCPToolCallUpdateEvent {
     call_id: number;
     conversation_id: number;
     status: 'pending' | 'executing' | 'success' | 'failed' | 'unknown';
+    llm_call_id?: string;
     server_name?: string;
     tool_name?: string;
     parameters?: string;
@@ -283,6 +284,7 @@ export interface MCPToolCall {
     created_time: string;
     started_time?: string;
     finished_time?: string;
+    llm_call_id?: string;
 }
 
 export interface ConversationSearchHit {
