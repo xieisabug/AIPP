@@ -12,7 +12,17 @@ use std::path::{Component, Path, PathBuf};
 pub fn normalize_path_for_comparison(path: &Path) -> Option<PathBuf> {
     // 1. 先尝试 canonicalize（如果路径存在）
     if path.exists() {
-        return path.canonicalize().ok();
+        let canonical = path.canonicalize().ok()?;
+        // On Windows, canonicalize returns \\?\ extended-length prefix which
+        // breaks starts_with comparisons against non-canonical paths.
+        #[cfg(windows)]
+        {
+            let s = canonical.to_string_lossy();
+            if let Some(stripped) = s.strip_prefix(r"\\?\") {
+                return Some(PathBuf::from(stripped));
+            }
+        }
+        return Some(canonical);
     }
 
     // 2. 不存在的路径：手动规范化

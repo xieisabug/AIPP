@@ -620,7 +620,7 @@ async fn run_feishu_relay_scope_worker(
 
     loop {
         let scope = load_relay_scope(app_handle, scope_id)?;
-        if matches!(scope.status.as_str(), "completed" | "failed") {
+        if matches!(scope.status.as_str(), "completed" | "failed" | "superseded") {
             return Ok(());
         }
 
@@ -2121,6 +2121,29 @@ fn find_latest_message_id_by_type(
 fn create_relay_scope(app_handle: &AppHandle, new_scope: NewRelayScope<'_>) -> Result<i64, String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conn = db.get_connection().map_err(|e| e.to_string())?;
+
+    // Cancel all non-completed scopes for the same conversation to prevent
+    // race conditions where an old scope wakes up and duplicates messages
+    // sent by the new scope.
+    let superseded = conn
+        .execute(
+            "UPDATE external_channel_relay_scope
+             SET status = 'superseded', updated_time = CURRENT_TIMESTAMP
+             WHERE channel = ?1
+               AND conversation_id = ?2
+               AND COALESCE(status, '') NOT IN ('completed', 'failed', 'superseded')",
+            params![new_scope.channel, new_scope.conversation_id],
+        )
+        .map_err(|e| e.to_string())?;
+    if superseded > 0 {
+        info!(
+            conversation_id = new_scope.conversation_id,
+            superseded,
+            new_origin = new_scope.origin,
+            "superseded existing relay scopes before creating new scope"
+        );
+    }
+
     conn.execute(
         "INSERT INTO external_channel_relay_scope
             (channel, conversation_id, origin, external_chat_id, external_user_id,
@@ -2184,7 +2207,7 @@ fn find_active_relay_scope(
          WHERE channel = ?1
            AND conversation_id = ?2
            AND origin = ?3
-           AND COALESCE(status, '') NOT IN ('completed', 'failed')
+           AND COALESCE(status, '') NOT IN ('completed', 'failed', 'superseded')
          ORDER BY id DESC
          LIMIT 1",
         params![CHANNEL_FEISHU, conversation_id, origin],
@@ -2245,6 +2268,31 @@ fn mark_relay_scope_failed(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Cross-scope deduplication: check if a local message was already successfully
+/// delivered to the external channel by ANY scope (not just the current one).
+fn is_message_already_delivered(
+    app_handle: &AppHandle,
+    conversation_id: i64,
+    local_message_id: i64,
+) -> Result<bool, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM external_channel_message_delivery
+             WHERE conversation_id = ?1
+               AND local_message_id = ?2
+               AND status = 'sent'
+             LIMIT 1",
+            params![conversation_id, local_message_id],
+            |_| Ok(true),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(false);
+    Ok(exists)
 }
 
 fn record_scope_delivery(
@@ -2436,7 +2484,7 @@ async fn flush_feishu_relay_scope(
     scope_id: i64,
 ) -> Result<(), String> {
     let scope = load_relay_scope(app_handle, scope_id)?;
-    if scope.status == "completed" {
+    if matches!(scope.status.as_str(), "completed" | "superseded") {
         return Ok(());
     }
 
@@ -2448,6 +2496,22 @@ async fn flush_feishu_relay_scope(
     let mut last_processed_message_id = scope.last_delivered_local_message_id;
 
     for message in messages {
+        // Cross-scope dedup: skip if another scope already delivered this message
+        if is_message_already_delivered(app_handle, scope.conversation_id, message.id)? {
+            last_processed_message_id = message.id;
+            record_scope_delivery(
+                app_handle,
+                scope.id,
+                &scope.channel,
+                scope.conversation_id,
+                message.id,
+                None,
+                "skipped",
+                "already delivered by another scope",
+            )?;
+            continue;
+        }
+
         let rendered = render_message_for_external_channel(
             &message,
             &RenderContext { channel: &scope.channel, relay_origin: &scope.origin },

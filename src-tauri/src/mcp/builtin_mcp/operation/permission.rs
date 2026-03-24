@@ -59,7 +59,17 @@ impl PermissionManager {
             return None;
         }
         if path.exists() {
-            return path.canonicalize().ok();
+            let canonical = path.canonicalize().ok()?;
+            // On Windows, canonicalize returns \\?\ extended-length prefix which
+            // breaks starts_with comparisons against non-canonical paths.
+            #[cfg(windows)]
+            {
+                let s = canonical.to_string_lossy();
+                if let Some(stripped) = s.strip_prefix(r"\\?\") {
+                    return Some(PathBuf::from(stripped));
+                }
+            }
+            return Some(canonical);
         }
 
         // 非存在路径也做词法归一化，避免 `..` 绕过判断
@@ -224,13 +234,10 @@ impl PermissionManager {
         Self::is_path_in_trusted_dirs(path, &trusted_paths_raw)
     }
 
-    /// Pure path matching: check if `path` is under any of the trusted dirs (newline-separated).
+    /// Pure path matching: check if `path` is under any trusted dir.
+    /// Supports JSON array `[{"path":"...","description":"..."}]` and legacy newline-separated paths.
     fn is_path_in_trusted_dirs(path: &str, trusted_paths_raw: &str) -> bool {
-        let trusted_dirs: Vec<&str> = trusted_paths_raw
-            .split('\n')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let trusted_dirs = Self::extract_trusted_paths(trusted_paths_raw);
         if trusted_dirs.is_empty() {
             return false;
         }
@@ -247,7 +254,7 @@ impl PermissionManager {
         };
 
         for dir in &trusted_dirs {
-            let trusted = Path::new(dir);
+            let trusted = Path::new(dir.as_str());
             let trusted_normalized = if trusted.is_relative() {
                 trusted.canonicalize().ok()
             } else {
@@ -266,6 +273,36 @@ impl PermissionManager {
         }
 
         false
+    }
+
+    /// Extract path strings from trusted workspaces config value.
+    /// Supports JSON array `[{"path":"..."}]` and legacy newline-separated plain paths.
+    fn extract_trusted_paths(raw: &str) -> Vec<String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
+
+        if trimmed.starts_with('[') {
+            if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
+                let paths: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| {
+                        let p = v.get("path")?.as_str()?.trim().to_string();
+                        if p.is_empty() { None } else { Some(p) }
+                    })
+                    .collect();
+                if !paths.is_empty() {
+                    return paths;
+                }
+            }
+        }
+
+        trimmed
+            .split('\n')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
     }
 
     /// 检查路径是否在白名单内
@@ -584,20 +621,55 @@ impl PermissionManager {
 mod tests {
     use super::*;
 
+    // --- extract_trusted_paths tests ---
+
     #[test]
-    fn test_trusted_dirs_match_subpath() {
-        // On Windows use absolute Windows paths, on Unix use /tmp style
+    fn test_extract_json_format() {
+        let json = r#"[{"path":"C:\\proj1","description":"frontend"},{"path":"C:\\proj2","description":""}]"#;
+        let paths = PermissionManager::extract_trusted_paths(json);
+        assert_eq!(paths, vec!["C:\\proj1", "C:\\proj2"]);
+    }
+
+    #[test]
+    fn test_extract_legacy_newline_format() {
+        let raw = "C:\\proj1\nC:\\proj2\n";
+        let paths = PermissionManager::extract_trusted_paths(raw);
+        assert_eq!(paths, vec!["C:\\proj1", "C:\\proj2"]);
+    }
+
+    #[test]
+    fn test_extract_empty() {
+        assert!(PermissionManager::extract_trusted_paths("").is_empty());
+        assert!(PermissionManager::extract_trusted_paths("  ").is_empty());
+        assert!(PermissionManager::extract_trusted_paths("[]").is_empty());
+    }
+
+    #[test]
+    fn test_extract_json_skips_empty_paths() {
+        let json = r#"[{"path":"","description":"empty"},{"path":"C:\\ok","description":"valid"}]"#;
+        let paths = PermissionManager::extract_trusted_paths(json);
+        assert_eq!(paths, vec!["C:\\ok"]);
+    }
+
+    // --- is_path_in_trusted_dirs tests ---
+
+    #[test]
+    fn test_trusted_dirs_json_match() {
         #[cfg(windows)]
         {
-            let trusted = "C:\\Users\\admin\\projects";
-            let path = "C:\\Users\\admin\\projects\\myapp\\src\\main.rs";
-            assert!(PermissionManager::is_path_in_trusted_dirs(path, trusted));
+            let json = r#"[{"path":"C:\\Users\\admin\\projects","description":"my code"}]"#;
+            assert!(PermissionManager::is_path_in_trusted_dirs(
+                "C:\\Users\\admin\\projects\\myapp\\src\\main.rs",
+                json
+            ));
         }
         #[cfg(not(windows))]
         {
-            let trusted = "/home/user/projects";
-            let path = "/home/user/projects/myapp/src/main.rs";
-            assert!(PermissionManager::is_path_in_trusted_dirs(path, trusted));
+            let json = r#"[{"path":"/home/user/projects","description":"my code"}]"#;
+            assert!(PermissionManager::is_path_in_trusted_dirs(
+                "/home/user/projects/myapp/src/main.rs",
+                json
+            ));
         }
     }
 
@@ -605,117 +677,85 @@ mod tests {
     fn test_trusted_dirs_no_match_outside() {
         #[cfg(windows)]
         {
-            let trusted = "C:\\Users\\admin\\projects";
-            let path = "C:\\Users\\admin\\documents\\secret.txt";
-            assert!(!PermissionManager::is_path_in_trusted_dirs(path, trusted));
+            let json = r#"[{"path":"C:\\Users\\admin\\projects","description":""}]"#;
+            assert!(!PermissionManager::is_path_in_trusted_dirs(
+                "C:\\Users\\admin\\documents\\secret.txt",
+                json
+            ));
         }
         #[cfg(not(windows))]
         {
-            let trusted = "/home/user/projects";
-            let path = "/home/user/documents/secret.txt";
-            assert!(!PermissionManager::is_path_in_trusted_dirs(path, trusted));
+            let json = r#"[{"path":"/home/user/projects","description":""}]"#;
+            assert!(!PermissionManager::is_path_in_trusted_dirs(
+                "/home/user/documents/secret.txt",
+                json
+            ));
         }
     }
 
     #[test]
-    fn test_trusted_dirs_multiple_paths() {
+    fn test_trusted_dirs_multiple_json() {
         #[cfg(windows)]
         {
-            let trusted = "C:\\Users\\admin\\proj1\nC:\\Users\\admin\\proj2";
+            let json = r#"[{"path":"C:\\Users\\admin\\proj1","description":"fe"},{"path":"C:\\Users\\admin\\proj2","description":"be"}]"#;
             assert!(PermissionManager::is_path_in_trusted_dirs(
-                "C:\\Users\\admin\\proj2\\file.rs",
-                trusted
+                "C:\\Users\\admin\\proj2\\file.rs", json
             ));
             assert!(!PermissionManager::is_path_in_trusted_dirs(
-                "C:\\Users\\admin\\proj3\\file.rs",
-                trusted
+                "C:\\Users\\admin\\proj3\\file.rs", json
             ));
         }
         #[cfg(not(windows))]
         {
-            let trusted = "/home/user/proj1\n/home/user/proj2";
+            let json = r#"[{"path":"/home/user/proj1","description":"fe"},{"path":"/home/user/proj2","description":"be"}]"#;
             assert!(PermissionManager::is_path_in_trusted_dirs(
-                "/home/user/proj2/file.rs",
-                trusted
+                "/home/user/proj2/file.rs", json
             ));
             assert!(!PermissionManager::is_path_in_trusted_dirs(
-                "/home/user/proj3/file.rs",
-                trusted
+                "/home/user/proj3/file.rs", json
             ));
         }
     }
 
     #[test]
     fn test_trusted_dirs_empty_list() {
-        assert!(!PermissionManager::is_path_in_trusted_dirs(
-            "C:\\Users\\admin\\file.txt",
-            ""
-        ));
-        assert!(!PermissionManager::is_path_in_trusted_dirs(
-            "C:\\Users\\admin\\file.txt",
-            "\n\n  \n"
-        ));
-    }
-
-    #[test]
-    fn test_trusted_dirs_exact_match() {
-        #[cfg(windows)]
-        {
-            let trusted = "C:\\Users\\admin\\projects";
-            assert!(PermissionManager::is_path_in_trusted_dirs(
-                "C:\\Users\\admin\\projects",
-                trusted
-            ));
-        }
-        #[cfg(not(windows))]
-        {
-            let trusted = "/home/user/projects";
-            assert!(PermissionManager::is_path_in_trusted_dirs(
-                "/home/user/projects",
-                trusted
-            ));
-        }
+        assert!(!PermissionManager::is_path_in_trusted_dirs("C:\\file.txt", ""));
+        assert!(!PermissionManager::is_path_in_trusted_dirs("C:\\file.txt", "[]"));
+        assert!(!PermissionManager::is_path_in_trusted_dirs("C:\\file.txt", "\n\n  \n"));
     }
 
     #[test]
     fn test_trusted_dirs_prefix_attack_prevented() {
-        // "projectsXYZ" should NOT match trusted "projects"
         #[cfg(windows)]
         {
-            let trusted = "C:\\Users\\admin\\projects";
-            // Windows path normalization: "projects-evil" doesn't start_with "projects"
-            // because starts_with is component-based
+            let json = r#"[{"path":"C:\\Users\\admin\\projects","description":""}]"#;
             assert!(!PermissionManager::is_path_in_trusted_dirs(
-                "C:\\Users\\admin\\projects-evil\\malware.exe",
-                trusted
+                "C:\\Users\\admin\\projects-evil\\malware.exe", json
             ));
         }
         #[cfg(not(windows))]
         {
-            let trusted = "/home/user/projects";
+            let json = r#"[{"path":"/home/user/projects","description":""}]"#;
             assert!(!PermissionManager::is_path_in_trusted_dirs(
-                "/home/user/projects-evil/malware",
-                trusted
+                "/home/user/projects-evil/malware", json
             ));
         }
     }
 
     #[test]
-    fn test_trusted_dirs_trims_whitespace() {
+    fn test_trusted_dirs_legacy_format_still_works() {
         #[cfg(windows)]
         {
-            let trusted = "  C:\\Users\\admin\\proj1  \n  C:\\Users\\admin\\proj2  ";
+            let legacy = "C:\\Users\\admin\\proj1\nC:\\Users\\admin\\proj2";
             assert!(PermissionManager::is_path_in_trusted_dirs(
-                "C:\\Users\\admin\\proj1\\file.txt",
-                trusted
+                "C:\\Users\\admin\\proj1\\file.txt", legacy
             ));
         }
         #[cfg(not(windows))]
         {
-            let trusted = "  /home/user/proj1  \n  /home/user/proj2  ";
+            let legacy = "/home/user/proj1\n/home/user/proj2";
             assert!(PermissionManager::is_path_in_trusted_dirs(
-                "/home/user/proj1/file.txt",
-                trusted
+                "/home/user/proj1/file.txt", legacy
             ));
         }
     }
