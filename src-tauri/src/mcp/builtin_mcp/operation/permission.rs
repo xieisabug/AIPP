@@ -194,6 +194,80 @@ impl PermissionManager {
         }
     }
 
+    /// 检查路径是否在总管家可信工作区内（从 experimental_config 读取）
+    async fn is_butler_trusted_workspace(&self, path: &str) -> bool {
+        let feature_state = match self.app_handle.try_state::<crate::FeatureConfigState>() {
+            Some(s) => s,
+            None => return false,
+        };
+        let config_map = feature_state.config_feature_map.lock().await;
+        let experimental = match config_map.get("experimental") {
+            Some(m) => m,
+            None => return false,
+        };
+
+        // 若开启了信任所有工作区则直接放行
+        if let Some(cfg) = experimental.get("butler_trust_all_workspaces") {
+            if cfg.value == "true" {
+                info!(path = %path, "Path auto-allowed: butler_trust_all_workspaces is enabled");
+                return true;
+            }
+        }
+
+        // 检查可信工作区列表
+        let trusted_paths_raw = match experimental.get("butler_trusted_workspaces") {
+            Some(cfg) => cfg.value.clone(),
+            None => return false,
+        };
+        drop(config_map);
+
+        Self::is_path_in_trusted_dirs(path, &trusted_paths_raw)
+    }
+
+    /// Pure path matching: check if `path` is under any of the trusted dirs (newline-separated).
+    fn is_path_in_trusted_dirs(path: &str, trusted_paths_raw: &str) -> bool {
+        let trusted_dirs: Vec<&str> = trusted_paths_raw
+            .split('\n')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if trusted_dirs.is_empty() {
+            return false;
+        }
+
+        let target = Path::new(path);
+        let target_normalized = if target.is_relative() {
+            target.canonicalize().ok()
+        } else {
+            Self::normalize_absolute_path(target)
+        };
+        let target_abs = match target_normalized {
+            Some(p) => p,
+            None => return false,
+        };
+
+        for dir in &trusted_dirs {
+            let trusted = Path::new(dir);
+            let trusted_normalized = if trusted.is_relative() {
+                trusted.canonicalize().ok()
+            } else {
+                Self::normalize_absolute_path(trusted)
+            };
+            if let Some(trusted_abs) = trusted_normalized {
+                if target_abs.starts_with(&trusted_abs) {
+                    debug!(
+                        path = %target_abs.display(),
+                        trusted = %trusted_abs.display(),
+                        "Path is within butler trusted workspace"
+                    );
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
     /// 检查路径是否在白名单内
     pub fn is_path_allowed(&self, path: &str) -> bool {
         let whitelist = self.load_whitelist();
@@ -426,7 +500,16 @@ impl PermissionManager {
             return Ok(true);
         }
 
-        // 2. 检查会话信任路径列表
+        // 2. 总管家可信工作区自动放行
+        if self.is_butler_trusted_workspace(path).await {
+            debug!(
+                path = %path,
+                "Path auto-allowed for butler trusted workspace"
+            );
+            return Ok(true);
+        }
+
+        // 3. 检查会话信任路径列表
         if let Some(conv_id) = conversation_id {
             if self.is_path_in_conversation_trust_list(operation_state, conv_id, path).await {
                 debug!(
@@ -438,7 +521,7 @@ impl PermissionManager {
             }
         }
 
-        // 3. 检查助手工作区信任列表
+        // 4. 检查助手工作区信任列表
         if let Some(conv_id) = conversation_id {
             if let Some(assistant_id) = self.get_assistant_id_from_conversation(conv_id) {
                 if self.is_path_in_assistant_workspace(assistant_id, path) {
@@ -452,12 +535,12 @@ impl PermissionManager {
             }
         }
 
-        // 4. 检查全局白名单
+        // 5. 检查全局白名单
         if self.is_path_allowed(path) {
             return Ok(true);
         }
 
-        // 5. 请求用户权限
+        // 6. 请求用户权限
         let decision =
             self.request_permission(operation_state, operation, path, conversation_id).await?;
 
@@ -493,6 +576,163 @@ impl PermissionManager {
                 Ok(true)
             }
             PermissionDecision::Deny => Ok(false),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_trusted_dirs_match_subpath() {
+        // On Windows use absolute Windows paths, on Unix use /tmp style
+        #[cfg(windows)]
+        {
+            let trusted = "C:\\Users\\admin\\projects";
+            let path = "C:\\Users\\admin\\projects\\myapp\\src\\main.rs";
+            assert!(PermissionManager::is_path_in_trusted_dirs(path, trusted));
+        }
+        #[cfg(not(windows))]
+        {
+            let trusted = "/home/user/projects";
+            let path = "/home/user/projects/myapp/src/main.rs";
+            assert!(PermissionManager::is_path_in_trusted_dirs(path, trusted));
+        }
+    }
+
+    #[test]
+    fn test_trusted_dirs_no_match_outside() {
+        #[cfg(windows)]
+        {
+            let trusted = "C:\\Users\\admin\\projects";
+            let path = "C:\\Users\\admin\\documents\\secret.txt";
+            assert!(!PermissionManager::is_path_in_trusted_dirs(path, trusted));
+        }
+        #[cfg(not(windows))]
+        {
+            let trusted = "/home/user/projects";
+            let path = "/home/user/documents/secret.txt";
+            assert!(!PermissionManager::is_path_in_trusted_dirs(path, trusted));
+        }
+    }
+
+    #[test]
+    fn test_trusted_dirs_multiple_paths() {
+        #[cfg(windows)]
+        {
+            let trusted = "C:\\Users\\admin\\proj1\nC:\\Users\\admin\\proj2";
+            assert!(PermissionManager::is_path_in_trusted_dirs(
+                "C:\\Users\\admin\\proj2\\file.rs",
+                trusted
+            ));
+            assert!(!PermissionManager::is_path_in_trusted_dirs(
+                "C:\\Users\\admin\\proj3\\file.rs",
+                trusted
+            ));
+        }
+        #[cfg(not(windows))]
+        {
+            let trusted = "/home/user/proj1\n/home/user/proj2";
+            assert!(PermissionManager::is_path_in_trusted_dirs(
+                "/home/user/proj2/file.rs",
+                trusted
+            ));
+            assert!(!PermissionManager::is_path_in_trusted_dirs(
+                "/home/user/proj3/file.rs",
+                trusted
+            ));
+        }
+    }
+
+    #[test]
+    fn test_trusted_dirs_empty_list() {
+        assert!(!PermissionManager::is_path_in_trusted_dirs(
+            "C:\\Users\\admin\\file.txt",
+            ""
+        ));
+        assert!(!PermissionManager::is_path_in_trusted_dirs(
+            "C:\\Users\\admin\\file.txt",
+            "\n\n  \n"
+        ));
+    }
+
+    #[test]
+    fn test_trusted_dirs_exact_match() {
+        #[cfg(windows)]
+        {
+            let trusted = "C:\\Users\\admin\\projects";
+            assert!(PermissionManager::is_path_in_trusted_dirs(
+                "C:\\Users\\admin\\projects",
+                trusted
+            ));
+        }
+        #[cfg(not(windows))]
+        {
+            let trusted = "/home/user/projects";
+            assert!(PermissionManager::is_path_in_trusted_dirs(
+                "/home/user/projects",
+                trusted
+            ));
+        }
+    }
+
+    #[test]
+    fn test_trusted_dirs_prefix_attack_prevented() {
+        // "projectsXYZ" should NOT match trusted "projects"
+        #[cfg(windows)]
+        {
+            let trusted = "C:\\Users\\admin\\projects";
+            // Windows path normalization: "projects-evil" doesn't start_with "projects"
+            // because starts_with is component-based
+            assert!(!PermissionManager::is_path_in_trusted_dirs(
+                "C:\\Users\\admin\\projects-evil\\malware.exe",
+                trusted
+            ));
+        }
+        #[cfg(not(windows))]
+        {
+            let trusted = "/home/user/projects";
+            assert!(!PermissionManager::is_path_in_trusted_dirs(
+                "/home/user/projects-evil/malware",
+                trusted
+            ));
+        }
+    }
+
+    #[test]
+    fn test_trusted_dirs_trims_whitespace() {
+        #[cfg(windows)]
+        {
+            let trusted = "  C:\\Users\\admin\\proj1  \n  C:\\Users\\admin\\proj2  ";
+            assert!(PermissionManager::is_path_in_trusted_dirs(
+                "C:\\Users\\admin\\proj1\\file.txt",
+                trusted
+            ));
+        }
+        #[cfg(not(windows))]
+        {
+            let trusted = "  /home/user/proj1  \n  /home/user/proj2  ";
+            assert!(PermissionManager::is_path_in_trusted_dirs(
+                "/home/user/proj1/file.txt",
+                trusted
+            ));
+        }
+    }
+
+    #[test]
+    fn test_normalize_absolute_path_removes_dotdot() {
+        #[cfg(windows)]
+        {
+            let path = Path::new("C:\\Users\\admin\\projects\\..\\documents");
+            let normalized = PermissionManager::normalize_absolute_path(path).unwrap();
+            assert_eq!(normalized, PathBuf::from("C:\\Users\\admin\\documents"));
+        }
+        #[cfg(not(windows))]
+        {
+            let path = Path::new("/home/user/projects/../documents");
+            let normalized = PermissionManager::normalize_absolute_path(path).unwrap();
+            assert_eq!(normalized, PathBuf::from("/home/user/documents"));
         }
     }
 }

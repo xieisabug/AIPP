@@ -198,6 +198,12 @@ const FeatureAssistantConfig: React.FC = () => {
             butler_feishu_only_reply_feishu_originated: "false",
             butler_feishu_allowed_open_ids: "",
             butler_feishu_allowed_chat_ids: "",
+            context_compaction_enabled: "false",
+            context_max_input_tokens: "128000",
+            context_compaction_threshold: "0.80",
+            context_tail_ratio: "0.30",
+            butler_trust_all_workspaces: "false",
+            butler_trusted_workspaces: "",
         },
     });
 
@@ -313,6 +319,18 @@ const FeatureAssistantConfig: React.FC = () => {
                     experimentalConfig?.get("butler_feishu_allowed_open_ids") || "",
                 butler_feishu_allowed_chat_ids:
                     experimentalConfig?.get("butler_feishu_allowed_chat_ids") || "",
+                context_compaction_enabled:
+                    experimentalConfig?.get("context_compaction_enabled") || "false",
+                context_max_input_tokens:
+                    experimentalConfig?.get("context_max_input_tokens") || "128000",
+                context_compaction_threshold:
+                    experimentalConfig?.get("context_compaction_threshold") || "0.80",
+                context_tail_ratio:
+                    experimentalConfig?.get("context_tail_ratio") || "0.30",
+                butler_trust_all_workspaces:
+                    experimentalConfig?.get("butler_trust_all_workspaces") || "false",
+                butler_trusted_workspaces:
+                    experimentalConfig?.get("butler_trusted_workspaces") || "",
             });
 
             // 更新 preview 表单
@@ -504,6 +522,12 @@ const FeatureAssistantConfig: React.FC = () => {
                 String(v.butler_feishu_only_reply_feishu_originated),
             butler_feishu_allowed_open_ids: String(v.butler_feishu_allowed_open_ids || ""),
             butler_feishu_allowed_chat_ids: String(v.butler_feishu_allowed_chat_ids || ""),
+            context_compaction_enabled: String(v.context_compaction_enabled),
+            context_max_input_tokens: String(v.context_max_input_tokens || "128000"),
+            context_compaction_threshold: String(v.context_compaction_threshold || "0.80"),
+            context_tail_ratio: String(v.context_tail_ratio || "0.30"),
+            butler_trust_all_workspaces: String(v.butler_trust_all_workspaces),
+            butler_trusted_workspaces: String(v.butler_trusted_workspaces || ""),
         });
     }, [experimentalForm, saveFeatureConfig]);
 

@@ -135,13 +135,15 @@ pub async fn fit_to_budget_with_compaction(
         };
     }
 
-    // Need at least Head + 1 body msg + Tail to compact
-    let tail_count = budget.tail_preserve_count.min(messages.len().saturating_sub(1));
+    // Compute tail by walking backwards with a token budget
+    let tail_budget = budget.tail_token_budget();
     let head_count = if messages.first().map(|(t, _, _)| t.as_str()) == Some("system") {
         1
     } else {
         0
     };
+
+    let tail_count = compute_tail_count(&messages, db_token_counts, head_count, tail_budget);
     let body_end = messages.len().saturating_sub(tail_count);
 
     if body_end <= head_count {
@@ -233,6 +235,48 @@ pub async fn fit_to_budget_with_compaction(
     }
 }
 
+/// Walk backwards from the end of the message list, accumulating estimated tokens,
+/// until `tail_budget` is exhausted. Returns the number of tail messages to keep.
+/// Always keeps at least 1 recent message (the last user/assistant turn).
+fn compute_tail_count(
+    messages: &[MessageTuple],
+    db_token_counts: &[i32],
+    head_count: usize,
+    tail_budget: usize,
+) -> usize {
+    if messages.len() <= head_count {
+        return 0;
+    }
+    let candidate_range = head_count..messages.len();
+    let mut accumulated: usize = 0;
+    let mut count: usize = 0;
+
+    for i in (candidate_range.start..candidate_range.end).rev() {
+        let (_, content, attachments) = &messages[i];
+        let db_tok = db_token_counts.get(i).copied().unwrap_or(0);
+        let msg_tokens = estimate_message_tokens(content, db_tok);
+        let att_tokens: usize = attachments
+            .iter()
+            .map(|a| a.attachment_content.as_deref().map(estimate_by_content).unwrap_or(0))
+            .sum();
+        let total = msg_tokens + att_tokens;
+
+        // Always include at least 1 message
+        if count == 0 {
+            accumulated += total;
+            count += 1;
+            continue;
+        }
+
+        if accumulated + total > tail_budget {
+            break;
+        }
+        accumulated += total;
+        count += 1;
+    }
+    count
+}
+
 /// Estimate total tokens for a message list with optional DB token data.
 fn estimate_total(messages: &[MessageTuple], db_token_counts: &[i32]) -> usize {
     messages
@@ -318,6 +362,59 @@ mod tests {
         let tokens = estimate_total(&messages, &[]);
         // Content tokens + attachment tokens
         assert!(tokens > 100);
+    }
+
+    #[test]
+    fn compute_tail_always_keeps_at_least_one() {
+        let messages = vec![
+            msg("system", "sys"),
+            msg("user", &"x".repeat(200_000)), // huge single message
+        ];
+        let count = compute_tail_count(&messages, &[], 1, 100); // tiny budget
+        assert_eq!(count, 1, "must keep at least the last message");
+    }
+
+    #[test]
+    fn compute_tail_fits_multiple_small_messages() {
+        // Each short message ≈ 5-10 tokens
+        let messages = vec![
+            msg("system", "sys"),
+            msg("user", "hello"),
+            msg("assistant", "hi"),
+            msg("user", "how are you"),
+            msg("assistant", "fine"),
+            msg("user", "bye"),
+        ];
+        // Budget of 10000 tokens — all 5 non-system messages should fit
+        let count = compute_tail_count(&messages, &[], 1, 10_000);
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn compute_tail_respects_budget_limit() {
+        // Create messages where DB tokens make them large
+        let messages = vec![
+            msg("system", "sys"),
+            msg("user", "a"),     // will get 20000 from db
+            msg("assistant", "b"), // will get 20000 from db
+            msg("user", "c"),     // will get 20000 from db
+            msg("assistant", "d"), // will get 20000 from db
+        ];
+        let db_tokens = vec![0i32, 20_000, 20_000, 20_000, 20_000];
+        // Budget: 50000 — should fit last 2 messages (40000) but not 3 (60000)
+        let count = compute_tail_count(&messages, &db_tokens, 1, 50_000);
+        assert_eq!(count, 2, "should keep 2 messages within 50k budget");
+    }
+
+    #[test]
+    fn compute_tail_with_zero_budget_keeps_one() {
+        let messages = vec![
+            msg("system", "sys"),
+            msg("user", "hello"),
+            msg("assistant", "hi"),
+        ];
+        let count = compute_tail_count(&messages, &[], 1, 0);
+        assert_eq!(count, 1, "zero budget still keeps 1 message");
     }
 }
 
