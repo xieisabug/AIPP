@@ -1187,6 +1187,21 @@ pub async fn create_mcp_tool_call(
     broadcast_mcp_tool_call_update(&app_handle, &result);
     debug!(call_id = result.id, status = %result.status, "broadcasted pending status event after creation");
 
+    if let Err(error) =
+        crate::api::butler_api::emit_butler_task_pending_mcp_tool_attention(
+            &app_handle,
+            result.conversation_id,
+        )
+        .await
+    {
+        debug!(
+            conversation_id = result.conversation_id,
+            call_id = result.id,
+            error = %error,
+            "failed to refresh Butler pending MCP tool attention"
+        );
+    }
+
     Ok(result)
 }
 

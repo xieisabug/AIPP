@@ -1,7 +1,7 @@
 use crate::api::ai::acp::{
     AcpPermissionOptionPayload, AcpPermissionRequestSnapshot, AcpPermissionState,
 };
-use crate::db::mcp_db::MCPDatabase;
+use crate::db::mcp_db::{MCPDatabase, MCPToolCall};
 use crate::mcp::builtin_mcp::operation::state::PermissionRequestSnapshot;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -247,6 +247,135 @@ fn build_acp_permission_snapshot_payload(
         );
     }
     Ok(value)
+}
+
+fn tool_call_anchor_message_id(tool_call: &MCPToolCall) -> Option<i64> {
+    tool_call.assistant_message_id.or(tool_call.message_id)
+}
+
+fn build_pending_mcp_tool_call_payload(tool_call: &MCPToolCall) -> serde_json::Value {
+    let parameters = serde_json::from_str::<serde_json::Value>(&tool_call.parameters)
+        .unwrap_or_else(|_| serde_json::Value::String(tool_call.parameters.clone()));
+    serde_json::json!({
+        "tool_call_id": tool_call.id,
+        "llm_call_id": tool_call.llm_call_id,
+        "server_name": tool_call.server_name,
+        "tool_name": tool_call.tool_name,
+        "parameters": parameters,
+        "status": tool_call.status,
+        "message_id": tool_call.message_id,
+        "assistant_message_id": tool_call.assistant_message_id,
+        "created_time": tool_call.created_time,
+    })
+}
+
+fn build_pending_mcp_tool_calls_payload(tool_calls: &[MCPToolCall]) -> Vec<serde_json::Value> {
+    tool_calls.iter().map(build_pending_mcp_tool_call_payload).collect()
+}
+
+fn has_active_anchor_group_calls(tool_calls: &[MCPToolCall], target_call: &MCPToolCall) -> bool {
+    let anchor_message_id = tool_call_anchor_message_id(target_call);
+    tool_calls.iter().any(|tool_call| {
+        tool_call.id != target_call.id
+            && tool_call_anchor_message_id(tool_call) == anchor_message_id
+            && matches!(tool_call.status.as_str(), "pending" | "executing")
+    })
+}
+
+fn collect_anchor_group_tool_call_ids(
+    tool_calls: &[MCPToolCall],
+    anchor_message_id: Option<i64>,
+) -> Vec<i64> {
+    tool_calls
+        .iter()
+        .filter(|tool_call| tool_call_anchor_message_id(tool_call) == anchor_message_id)
+        .map(|tool_call| tool_call.id)
+        .collect()
+}
+
+async fn trigger_task_conversation_tool_batch_if_ready(
+    app_handle: &AppHandle,
+    window: tauri::Window,
+    task_conversation_id: i64,
+    anchor_message_id: Option<i64>,
+) -> Result<(), String> {
+    let all_tool_calls = MCPDatabase::new(app_handle)
+        .map_err(|e| e.to_string())?
+        .get_mcp_tool_calls_by_conversation(task_conversation_id)
+        .map_err(|e| e.to_string())?;
+    let same_anchor_tool_call_ids =
+        collect_anchor_group_tool_call_ids(&all_tool_calls, anchor_message_id);
+    if same_anchor_tool_call_ids.is_empty() {
+        return Ok(());
+    }
+
+    let has_active_calls = all_tool_calls.iter().any(|tool_call| {
+        tool_call_anchor_message_id(tool_call) == anchor_message_id
+            && matches!(tool_call.status.as_str(), "pending" | "executing")
+    });
+    if has_active_calls {
+        return Ok(());
+    }
+
+    crate::mcp::execution_api::trigger_conversation_continuation_batch(
+        app_handle,
+        app_handle.state::<crate::AppState>(),
+        app_handle.state::<crate::FeatureConfigState>(),
+        window,
+        task_conversation_id,
+        same_anchor_tool_call_ids,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+fn spawn_task_conversation_mcp_tool_execution(
+    app_handle: AppHandle,
+    window: tauri::Window,
+    task_conversation_id: i64,
+    pending_tool_call: MCPToolCall,
+) {
+    std::thread::spawn(move || {
+        tauri::async_runtime::block_on(async move {
+            let anchor_message_id = tool_call_anchor_message_id(&pending_tool_call);
+            match crate::mcp::execution_api::execute_mcp_tool_call(
+                app_handle.clone(),
+                app_handle.state::<crate::AppState>(),
+                app_handle.state::<crate::FeatureConfigState>(),
+                window.clone(),
+                pending_tool_call.id,
+                false,
+            )
+            .await
+            {
+                Ok(_) => {
+                    if let Err(error) = trigger_task_conversation_tool_batch_if_ready(
+                        &app_handle,
+                        window,
+                        task_conversation_id,
+                        anchor_message_id,
+                    )
+                    .await
+                    {
+                        error!(
+                            task_conversation_id,
+                            tool_call_id = pending_tool_call.id,
+                            error = %error,
+                            "failed to continue task conversation after dispatched MCP tool execution"
+                        );
+                    }
+                }
+                Err(error) => {
+                    error!(
+                        task_conversation_id,
+                        tool_call_id = pending_tool_call.id,
+                        error = %error,
+                        "task_conversation_operation background mcp_tool_execute failed"
+                    );
+                }
+            }
+        });
+    });
 }
 
 fn resolve_artifact_tool_conversation_id(
@@ -581,6 +710,13 @@ async fn build_task_conversation_read_payload(
     let start = messages.len().saturating_sub(latest_count);
     let latest_messages = messages.into_iter().skip(start).collect::<Vec<_>>();
 
+    let pending_mcp_tool_calls = MCPDatabase::new(app_handle)
+        .map_err(|e| e.to_string())?
+        .get_mcp_tool_calls_by_conversation(detail.conversation.id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|tool_call| tool_call.status == "pending")
+        .collect::<Vec<_>>();
     let operation_permissions = app_handle
         .state::<OperationState>()
         .list_permission_requests_for_conversation(detail.conversation.id)
@@ -597,6 +733,7 @@ async fn build_task_conversation_read_payload(
         .iter()
         .map(build_operation_permission_snapshot_payload)
         .collect::<Result<Vec<_>, _>>()?;
+    let pending_mcp_tool_calls = build_pending_mcp_tool_calls_payload(&pending_mcp_tool_calls);
     let acp_permissions = acp_permissions
         .iter()
         .map(build_acp_permission_snapshot_payload)
@@ -610,6 +747,7 @@ async fn build_task_conversation_read_payload(
             "result": detail.result,
             "runtime_state": detail.runtime_state,
             "latest_messages": latest_messages,
+            "pending_mcp_tool_calls": pending_mcp_tool_calls,
             "pending_operation_permissions": operation_permissions,
             "pending_acp_permissions": acp_permissions,
             "pending_ask_user_questions": ask_user_questions,
@@ -624,10 +762,52 @@ async fn build_task_conversation_read_payload(
             "is_finalized": detail.task.is_finalized,
             "last_summary": detail.task.last_summary,
             "latest_messages": latest_messages,
+            "pending_mcp_tool_calls": pending_mcp_tool_calls,
             "pending_operation_permissions": operation_permissions,
             "pending_acp_permissions": acp_permissions,
             "pending_ask_user_questions": ask_user_questions,
         }))
+    }
+}
+
+async fn resolve_pending_mcp_tool_call(
+    app_handle: &AppHandle,
+    task_conversation_id: i64,
+    args: &serde_json::Value,
+) -> Result<MCPToolCall, String> {
+    let pending_tool_calls = MCPDatabase::new(app_handle)
+        .map_err(|e| e.to_string())?
+        .get_mcp_tool_calls_by_conversation(task_conversation_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|tool_call| tool_call.status == "pending")
+        .collect::<Vec<_>>();
+
+    if let Some(tool_call_id) = args.get("tool_call_id").and_then(value_as_i64) {
+        return pending_tool_calls
+            .into_iter()
+            .find(|tool_call| tool_call.id == tool_call_id)
+            .ok_or_else(|| "Pending MCP tool call not found for this task conversation".to_string());
+    }
+
+    if let Some(llm_call_id) = args.get("llm_call_id").and_then(|value| value.as_str()) {
+        return pending_tool_calls
+            .into_iter()
+            .find(|tool_call| tool_call.llm_call_id.as_deref() == Some(llm_call_id))
+            .ok_or_else(|| {
+                "Pending MCP tool call matching llm_call_id was not found".to_string()
+            });
+    }
+
+    if pending_tool_calls.len() == 1 {
+        Ok(pending_tool_calls.into_iter().next().expect("single pending tool call"))
+    } else if pending_tool_calls.is_empty() {
+        Err("No pending MCP tool call exists for this task conversation".to_string())
+    } else {
+        Err(
+            "Multiple pending MCP tool calls exist; please specify tool_call_id or llm_call_id"
+                .to_string(),
+        )
     }
 }
 
@@ -1531,6 +1711,42 @@ pub async fn execute_aipp_builtin_tool(
                                 })
                             }
                         }
+                        "mcp_tool_execute" => {
+                            let pending_tool_call = resolve_pending_mcp_tool_call(
+                                &app_handle,
+                                task_conversation_id,
+                                &args,
+                            )
+                            .await?;
+                            let window = resolve_butler_spawn_window(&app_handle)?;
+                            let task_tool_calls = MCPDatabase::new(&app_handle)
+                                .map_err(|e| e.to_string())?
+                                .get_mcp_tool_calls_by_conversation(task_conversation_id)
+                                .map_err(|e| e.to_string())?;
+                            let same_anchor_tool_call_ids = collect_anchor_group_tool_call_ids(
+                                &task_tool_calls,
+                                tool_call_anchor_message_id(&pending_tool_call),
+                            );
+                            spawn_task_conversation_mcp_tool_execution(
+                                app_handle.clone(),
+                                window,
+                                task_conversation_id,
+                                pending_tool_call.clone(),
+                            );
+
+                            serde_json::json!({
+                                "content": [{
+                                    "type": "json",
+                                    "json": {
+                                        "status": "mcp_tool_execution_dispatched",
+                                        "tool_call_id": pending_tool_call.id,
+                                        "task_conversation_id": task_conversation_id,
+                                        "same_anchor_tool_call_ids": same_anchor_tool_call_ids,
+                                    }
+                                }],
+                                "isError": false
+                            })
+                        }
                         "permission_confirm" | "operate_confirm" => {
                             let decision =
                                 args.get("decision").and_then(|v| v.as_str()).ok_or_else(|| {
@@ -1754,6 +1970,7 @@ mod tests {
     use crate::api::ai::acp::{
         AcpPermissionOptionPayload, AcpPermissionRequestEvent, AcpPermissionRequestSnapshot,
     };
+    use crate::db::mcp_db::MCPToolCall;
     use crate::mcp::builtin_mcp::operation::types::PermissionRequestEvent;
 
     #[test]
@@ -1932,5 +2149,61 @@ mod tests {
 
         let reason = acp_permission_manual_review_reason(&snapshot, Some("allow_always"));
         assert!(reason.is_some());
+    }
+
+    fn build_mcp_tool_call(
+        id: i64,
+        status: &str,
+        message_id: Option<i64>,
+        assistant_message_id: Option<i64>,
+    ) -> MCPToolCall {
+        MCPToolCall {
+            id,
+            conversation_id: 77,
+            message_id,
+            subtask_id: None,
+            server_id: 1,
+            server_name: "search".to_string(),
+            tool_name: "web_fetch".to_string(),
+            parameters: r#"{"url":"https://example.com"}"#.to_string(),
+            status: status.to_string(),
+            result: None,
+            error: None,
+            created_time: "2026-01-01T00:00:00Z".to_string(),
+            started_time: None,
+            finished_time: None,
+            llm_call_id: Some(format!("llm-{}", id)),
+            assistant_message_id,
+        }
+    }
+
+    #[test]
+    fn pending_mcp_tool_payload_preserves_key_fields() {
+        let tool_call = build_mcp_tool_call(12, "pending", Some(31), Some(41));
+
+        let payload = build_pending_mcp_tool_call_payload(&tool_call);
+
+        assert_eq!(payload["tool_call_id"], 12);
+        assert_eq!(payload["llm_call_id"], "llm-12");
+        assert_eq!(payload["server_name"], "search");
+        assert_eq!(payload["tool_name"], "web_fetch");
+        assert_eq!(payload["parameters"]["url"], "https://example.com");
+        assert_eq!(payload["assistant_message_id"], 41);
+    }
+
+    #[test]
+    fn active_anchor_group_detection_ignores_other_batches() {
+        let target = build_mcp_tool_call(1, "success", Some(10), Some(100));
+        let sibling_pending = build_mcp_tool_call(2, "pending", Some(10), Some(100));
+        let other_anchor_pending = build_mcp_tool_call(3, "pending", Some(11), Some(101));
+
+        assert!(has_active_anchor_group_calls(
+            &[target.clone(), sibling_pending, other_anchor_pending],
+            &target
+        ));
+        assert!(!has_active_anchor_group_calls(
+            &[target.clone(), build_mcp_tool_call(4, "pending", Some(12), Some(102))],
+            &target
+        ));
     }
 }

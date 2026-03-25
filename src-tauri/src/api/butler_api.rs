@@ -71,7 +71,7 @@ const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，是负责�
 7. 汇总结果时，清楚标注来源，区分“已经确认的结论”和“仍需补充的信息”。
 8. 面对可能影响外部世界的行为时保持谨慎；如果系统要求审批或确认，遵循运行时约束，不要绕过。
 9. 系统会在子任务进入终态后，通过 `<butler_task_result>` 任务回流消息把结果重新送回你；收到后要把它视为内部执行回调，立即决定下一步，而不是等待用户再次催促。
-10. 当系统通过 `<butler_task_attention>` 提醒某个子任务出现权限请求、等待确认或其他阻塞时，你应优先使用 `task_conversation_operation` 查看该 task conversation 最新一条或少量最新消息，并直接执行确认或补充提示，而不是被动等待人工处理。
+10. 当系统通过 `<butler_task_attention>` 提醒某个子任务出现权限请求、待执行工具调用、等待确认或其他阻塞时，你应优先使用 `task_conversation_operation` 查看该 task conversation 最新一条或少量最新消息，并直接执行待处理工具、确认权限或补充提示，而不是被动等待人工处理。
 11. 阅读子任务上下文时默认最小化：先看最新 1 条消息和当前待处理权限，确有必要再扩大范围，不要把整个子任务历史一次性搬进主会话。
 12. 如果 `task_conversation_operation read` 返回的待处理权限里包含 `butler_review.manual_review_required=true`，你不得直接确认该请求，只能等待用户在桌面端或飞书端人工审核；典型例子包括带有 `rm`/删除类命令的请求。
 13. 即使没有 `manual_review_required=true`，你也必须保持安全优先：默认选择最小授权，不要自动使用 `allow_and_save`，也不要选择 ACP 的持久授权选项（如 `allow_always`）。
@@ -1222,6 +1222,66 @@ pub(crate) async fn emit_butler_task_permission_state_changed(
     Ok(())
 }
 
+pub(crate) async fn emit_butler_task_pending_mcp_tool_attention(
+    app_handle: &AppHandle,
+    task_conversation_id: i64,
+) -> Result<(), String> {
+    let operation_state = app_handle.state::<OperationState>();
+    if operation_state.has_pending_permission_for_conversation(task_conversation_id).await {
+        return Ok(());
+    }
+    let acp_permission_state = app_handle.state::<AcpPermissionState>();
+    if acp_permission_state.has_pending_permission_for_conversation(task_conversation_id).await {
+        return Ok(());
+    }
+
+    let pending_mcp_tool_call_count = MCPDatabase::new(app_handle)
+        .map_err(|e| e.to_string())?
+        .get_mcp_tool_calls_by_conversation(task_conversation_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|tool_call| tool_call.status == "pending")
+        .count();
+    if pending_mcp_tool_call_count == 0 {
+        return Ok(());
+    }
+
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
+    let butler_repo = db.butler_repo().map_err(|e| e.to_string())?;
+    let Some(conversation) =
+        conversation_repo.read(task_conversation_id).map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
+    if conversation.conversation_kind != BUTLER_KIND_TASK {
+        return Ok(());
+    }
+    let Some(definition) = butler_repo
+        .get_task_definition_by_task_conversation_id(task_conversation_id)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
+    let result = butler_repo.get_task_result(task_conversation_id).map_err(|e| e.to_string())?;
+    let task_item =
+        build_task_list_item(app_handle, conversation, &definition, result.as_ref()).await?;
+    let _ = app_handle.emit("butler_task_updated", task_item.clone());
+
+    emit_butler_notification(
+        app_handle,
+        definition.butler_conversation_id,
+        task_conversation_id,
+        "mcp_tool_pending",
+        format!("任务 {} 存在待执行工具调用", definition.title),
+        "请使用 task_conversation_operation read 查看 pending_mcp_tool_calls，并使用 mcp_tool_execute 继续推进。".to_string(),
+        "medium",
+    );
+    spawn_butler_task_attention_followup(app_handle, &task_item, &definition, "mcp_tool_pending");
+
+    Ok(())
+}
+
 /// Notify Butler main conversation that a sub-task is waiting on ask_user_question.
 pub(crate) async fn emit_butler_task_ask_user_attention(
     app_handle: &AppHandle,
@@ -1802,12 +1862,13 @@ fn build_butler_task_attention_system_message(
     definition: &ButlerTaskDefinition,
     attention_kind: &str,
     latest_message_excerpt: &str,
+    pending_mcp_tool_call_count: usize,
     operation_permission_count: usize,
     acp_permission_count: usize,
     ask_user_question_count: usize,
 ) -> String {
     format!(
-        "<butler_task_attention>\nattention_kind={attention_kind}\ntask_conversation_id={task_conversation_id}\ntitle={title}\ngoal={goal}\nstatus={status}\nexecutor_assistant_id={assistant_id}\nexecutor_assistant_name={assistant_name}\noperation_permission_count={operation_permission_count}\nacp_permission_count={acp_permission_count}\nask_user_question_count={ask_user_question_count}\nlatest_message_excerpt={latest_message_excerpt}\n</butler_task_attention>",
+        "<butler_task_attention>\nattention_kind={attention_kind}\ntask_conversation_id={task_conversation_id}\ntitle={title}\ngoal={goal}\nstatus={status}\nexecutor_assistant_id={assistant_id}\nexecutor_assistant_name={assistant_name}\npending_mcp_tool_call_count={pending_mcp_tool_call_count}\noperation_permission_count={operation_permission_count}\nacp_permission_count={acp_permission_count}\nask_user_question_count={ask_user_question_count}\nlatest_message_excerpt={latest_message_excerpt}\n</butler_task_attention>",
         attention_kind = attention_kind,
         task_conversation_id = task.task_conversation_id,
         title = definition.title,
@@ -1815,6 +1876,7 @@ fn build_butler_task_attention_system_message(
         status = task.status,
         assistant_id = definition.executor_assistant_id,
         assistant_name = task.executor_assistant_name,
+        pending_mcp_tool_call_count = pending_mcp_tool_call_count,
         operation_permission_count = operation_permission_count,
         acp_permission_count = acp_permission_count,
         ask_user_question_count = ask_user_question_count,
@@ -1827,7 +1889,7 @@ fn build_butler_task_attention_followup_prompt(
     attention_kind: &str,
 ) -> String {
     format!(
-        "系统任务提醒：任务《{title}》出现 {attention_kind}。这不是终端用户的新需求，而是子任务运行中的内部阻塞提醒。请优先使用 `task_conversation_operation` 查看该 task conversation 的最新消息与待处理权限，必要时直接确认权限或补充新的提示，然后再决定是否继续等待或向用户同步。",
+        "系统任务提醒：任务《{title}》出现 {attention_kind}。这不是终端用户的新需求，而是子任务运行中的内部阻塞提醒。请优先使用 `task_conversation_operation` 查看该 task conversation 的最新消息、待执行工具调用与待处理权限；如果存在 pending_mcp_tool_calls，优先使用 `mcp_tool_execute` 推进，再视情况确认权限或补充新的提示，然后再决定是否继续等待或向用户同步。",
         title = task.title,
         attention_kind = attention_kind,
     )
@@ -1883,6 +1945,13 @@ async fn enqueue_butler_task_attention_followup(
         .map(|message| trim_chars(message.content.trim(), 500))
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "无".to_string());
+    let pending_mcp_tool_call_count = MCPDatabase::new(&app_handle)
+        .map_err(|e| e.to_string())?
+        .get_mcp_tool_calls_by_conversation(task.task_conversation_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|tool_call| tool_call.status == "pending")
+        .count();
     let operation_permission_count = app_handle
         .state::<OperationState>()
         .list_permission_requests_for_conversation(task.task_conversation_id)
@@ -1909,6 +1978,7 @@ async fn enqueue_butler_task_attention_followup(
             &definition,
             &attention_kind,
             &latest_message_excerpt,
+            pending_mcp_tool_call_count,
             operation_permission_count,
             acp_permission_count,
             ask_user_question_count,
@@ -2492,7 +2562,8 @@ mod tests {
     use chrono::Utc;
 
     use super::{
-        build_batched_followup_prompt, build_butler_task_result_system_message,
+        build_batched_followup_prompt, build_butler_task_attention_system_message,
+        build_butler_task_result_system_message,
         cleanup_attention_debounce, cleanup_butler_main_continuation_lock,
         cleanup_butler_task_finalization_lock, find_latest_attention_message_id,
         find_latest_handoff_message_id, has_non_system_message_after,
@@ -2707,6 +2778,24 @@ mod tests {
 
         assert_eq!(find_latest_attention_message_id(&messages, 42), Some(3));
         assert_eq!(find_latest_attention_message_id(&messages, 12), Some(1));
+    }
+
+    #[test]
+    fn attention_system_message_includes_pending_mcp_tool_call_count() {
+        let message = build_butler_task_attention_system_message(
+            &build_task_list_item(42, "running", "Test Task"),
+            &build_task_definition(42),
+            "mcp_tool_pending",
+            "latest",
+            2,
+            1,
+            0,
+            0,
+        );
+
+        assert!(message.contains("attention_kind=mcp_tool_pending"));
+        assert!(message.contains("pending_mcp_tool_call_count=2"));
+        assert!(message.contains("operation_permission_count=1"));
     }
 
     // --- Test helpers for new tests ---

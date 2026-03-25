@@ -449,13 +449,13 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "task_conversation_operation".into(),
-                description: "Inspect and operate an existing butler task conversation. Use this to read the latest task messages, send a follow-up prompt to the task assistant, confirm pending operation/ACP permissions, or answer pending ask_user_question requests when a task becomes blocked.".into(),
+                description: "Inspect and operate an existing butler task conversation. Use this to read the latest task messages, execute pending MCP tool calls, send a follow-up prompt to the task assistant, confirm pending operation/ACP permissions, or answer pending ask_user_question requests when a task becomes blocked.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["read", "reply_prompt", "permission_confirm", "operate_confirm", "acp_permission_confirm", "ask_user_respond"],
+                            "enum": ["read", "reply_prompt", "mcp_tool_execute", "permission_confirm", "operate_confirm", "acp_permission_confirm", "ask_user_respond"],
                             "description": "Action to perform on the target task conversation."
                         },
                         "task_conversation_id": {
@@ -473,6 +473,14 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         "prompt": {
                             "type": "string",
                             "description": "Only for reply_prompt. The follow-up prompt to send into the task conversation."
+                        },
+                        "tool_call_id": {
+                            "type": "integer",
+                            "description": "Only for mcp_tool_execute. Optional exact pending MCP tool call id to execute."
+                        },
+                        "llm_call_id": {
+                            "type": "string",
+                            "description": "Only for mcp_tool_execute. Optional native LLM tool call id for the pending MCP tool call."
                         },
                         "request_id": {
                             "type": "string",
@@ -1302,6 +1310,7 @@ mod tests {
         let actions = schema["properties"]["action"]["enum"].as_array().unwrap();
         assert!(actions.iter().any(|value| value == "read"));
         assert!(actions.iter().any(|value| value == "reply_prompt"));
+        assert!(actions.iter().any(|value| value == "mcp_tool_execute"));
         assert!(actions.iter().any(|value| value == "permission_confirm"));
         assert!(actions.iter().any(|value| value == "acp_permission_confirm"));
     }
