@@ -23,7 +23,7 @@ pub mod system_db;
 #[cfg(test)]
 mod tests;
 
-const CURRENT_VERSION: &str = "0.0.10";
+const CURRENT_VERSION: &str = "0.0.11";
 
 pub(crate) fn get_db_path(app_handle: &tauri::AppHandle, db_name: &str) -> Result<PathBuf, String> {
     let app_dir = app_handle.path().app_data_dir().unwrap();
@@ -86,6 +86,7 @@ pub fn database_upgrade(
                     ("0.0.8", special_logic_0_0_8),
                     ("0.0.9", special_logic_0_0_9),
                     ("0.0.10", special_logic_0_0_10),
+                    ("0.0.11", special_logic_0_0_11),
                 ];
 
                 for (version_str, logic) in special_versions.iter() {
@@ -587,5 +588,18 @@ fn special_logic_0_0_10(
     mcp_db.create_tables().map_err(|e| e.to_string())?;
     mcp_db.rebuild_dynamic_mcp_catalog().map_err(|e| format!("重建 MCP 动态目录失败: {}", e))?;
     info!("special_logic_0_0_10 done: MCP 动态加载数据表初始化完成");
+    Ok(())
+}
+
+fn special_logic_0_0_11(
+    _system_db: &SystemDatabase,
+    llm_db: &LLMDatabase,
+    _assistant_db: &AssistantDatabase,
+    _conversation_db: &ConversationDatabase,
+    _app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    info!("special_logic_0_0_11: 初始化 llm_model_request_mode_preference 表");
+    llm_db.create_model_request_mode_preference_table().map_err(|e| e.to_string())?;
+    info!("special_logic_0_0_11 done: llm_model_request_mode_preference 表初始化完成");
     Ok(())
 }

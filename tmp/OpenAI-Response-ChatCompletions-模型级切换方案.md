@@ -1,217 +1,382 @@
-# OpenAI `Responses` / `Chat Completions` 模型级切换方案
+# OpenAI / Copilot `Responses` / `Chat Completions` 模型级请求方式切换方案
 
 ## 背景
 
-当前 AIPP 已经接入自定义 fork 的 `rust-genai`，而该 fork 实际已经支持 OpenAI `Responses API` 对应的 `OpenAIResp` 适配器。
+当前 AIPP 已接入自定义 fork 的 `rust-genai`：
 
-但 AIPP 现有实现中，`src-tauri/src/api/genai_client.rs` 会把 `openai` / `openai_api` 固定映射到 `AdapterKind::OpenAI`，导致运行时始终走 `Chat Completions` 路径，无法让用户显式指定某个模型走 `Responses`。
+- OpenAI 已有 `AdapterKind::OpenAI` 与 `AdapterKind::OpenAIResp`
+- AIPP 当前却仍把 `openai` / `openai_api` 固定映射到 `AdapterKind::OpenAI`
+- GitHub Copilot 当前映射到 `AdapterKind::Copilot`
 
-这会带来两个问题：
+新的产品诉求有两部分：
 
-- 不能利用 `genai` 已有的 `OpenAIResp` 能力。
-- 如果依赖模型名规则自动推断协议，容易误判，因为不同站点、不同兼容网关下，同名模型未必都应该走同一协议。
+- 不仅 OpenAI，GitHub Copilot 也要支持“模型级”的请求方式切换
+- 交互上希望直接在模型 tag 里切换，用紧凑的 `c` / `r` 图标表达当前请求方式，并放在删除按钮左侧
+
+这次需要把方案写得更准确，特别是：
+
+- 当前 `llm_model` 到底是不是稳定可持久化的载体
+- 如果把请求方式拆到独立表，究竟解决了什么、又没有解决什么
+- Copilot 端是否真的能像 OpenAI 一样直接切到 `responses`
+
+
+## 先说结论
+
+### 一、当前 `llm_model` 不是稳定的“模型偏好存储位”
+
+不是“只有改动的模型会删改”，而是存在两个明确的 **provider 级整批删除再重建** 路径：
+
+1. `fetch_model_list`
+   - 先 `delete_llm_model_by_provider(llm_provider_id)`
+   - 再把远程返回的模型整批重新插入 `llm_model`
+
+2. `update_selected_models`
+   - 先 `delete_llm_model_by_provider(llm_provider_id)`
+   - 再把用户勾选的模型重新插入 `llm_model`
+
+因此，**在当前实现不改的前提下**，如果把 `request_mode` 直接放进 `llm_model`，它会在“刷新模型列表”和“保存模型选择”这两个核心流程里被覆盖掉。
+
+### 二、拆到独立表并不是“没有问题”，但它确实解决了当前最核心的问题
+
+如果改成独立表，例如 `llm_model_request_mode_preference`：
+
+- 它**可以解决**当前 `llm_model` 被整批删光重建时，模型级请求方式被覆盖的问题
+- 但它**不会自动解决**以下问题：
+  - provider 删除时的偏好清理
+  - provider 导入导出时的偏好迁移
+  - 长期积累的“未选中模型偏好”是否要清理
+
+也就是说，拆表不是银弹；但在 **当前 `llm_model` 生命周期没有重构** 的前提下，它仍然是更稳的落地方式。
+
+### 三、Copilot 不能直接照搬 OpenAI 的实现
+
+OpenAI 之所以能切换，是因为 `genai` 已经有：
+
+- `AdapterKind::OpenAI`
+- `AdapterKind::OpenAIResp`
+
+但当前 `genai` 对 Copilot 只有：
+
+- `AdapterKind::Copilot`
+
+而且 Copilot adapter 当前 service URL 是写死到：
+
+- `/chat/completions`
+
+这意味着：
+
+- **OpenAI 的模型级切换可以直接接 AIPP 运行时 adapter 选择逻辑**
+- **Copilot 想支持 `responses`，需要先补 `genai` 层能力**，不能只改 AIPP 文档或 AIPP UI
 
 
 ## 核心目标
 
 本方案的目标是：
 
-- 不再依赖模型名称自动判断是否走 `Responses`。
-- 在“提供商配置页”的模型列表中，为每个模型提供一个可见、可改、可持久化的协议配置入口。
-- 配置粒度为“模型级”，而不是“提供商级”。
-- 保持业务调用入口不变，继续统一使用 `exec_chat` / `exec_chat_stream`。
-- 未配置的历史模型保持现有行为，不破坏线上兼容性。
+- 不再依赖模型名称自动推断请求方式
+- 由用户在“模型级”显式指定请求方式
+- 首期目标 provider 范围为：
+  - `openai`
+  - `openai_api`
+  - `github_copilot`
+- 前端用统一的 `c` / `r` 紧凑图标表达请求方式
+- 配置在应用重启、刷新模型列表、重新保存模型选择后仍保留
+- 业务层仍继续统一使用 `exec_chat` / `exec_chat_stream`
+- 请求方式不兼容时返回明确错误，不做静默回退
 
 
 ## 非目标
 
 本次不做以下事情：
 
-- 不引入自动按模型名猜测协议的逻辑。
-- 不把协议切换扩展到所有 provider；首期仅对 `openai` / `openai_api` 生效。
-- 不做失败后自动从 `responses` 静默回退到 `chat completions`。
-- 不改 `genai` 的外部调用方式，不新增 `exec_responses` 业务层接口。
+- 不引入按模型名猜测 `responses` 的逻辑
+- 不做 provider 级总开关
+- 不做失败后自动从 `responses` 回退到 `chat_completions`
+- 不为了这个功能顺手重写所有模型同步逻辑（除非明确决定走“把字段放进 `llm_model` 并顺带重构同步”那条更大方案）
+- 不把这个能力扩展到所有 provider
 
 
-## 当前现状
+## 当前实现现状
 
-### 1. `genai` 能力
+## 一、`llm_model` 的真实生命周期
 
-`genai` 当前支持：
+### 1. 远程获取模型列表时
 
-- `Client::exec_chat(...)`
-- `Client::exec_chat_stream(...)`
-- `AdapterKind::OpenAI`
-- `AdapterKind::OpenAIResp`
+`fetch_model_list` 当前行为是：
 
-也就是说，业务层不需要改成“分别调用两个 API”；只需要在运行时正确选择 adapter。
+1. 根据 provider 创建 client
+2. 远程调用 `client.all_models(...)`
+3. 删除该 provider 下所有 `llm_model`
+4. 重新插入远程返回的模型
 
-### 2. AIPP 当前问题
+这说明：
 
-当前 AIPP 的协议选择是 provider 导向的，而不是 model 导向的。
+- `llm_model` 不是“稳定 upsert”
+- 而是“远程列表快照”
 
-在 `genai_client.rs` 中：
+### 2. 模型选择弹窗确认保存时
 
-- `openai` / `openai_api` 会固定映射到 `AdapterKind::OpenAI`
-- 后续 `ServiceTargetResolver` 又会用这个固定 adapter 构造 `ModelIden`
+`update_selected_models` 当前行为也是：
 
-因此，即使 `genai` 支持 `OpenAIResp`，AIPP 运行时也不会选中它。
+1. 删除该 provider 下所有 `llm_model`
+2. 仅把 `is_selected = true` 的模型重新写回
 
-### 3. 模型列表存储现状
+这说明：
 
-当前 `llm_model` 表保存的是：
+- `llm_model` 同时还承担了“当前已启用模型集合”的角色
+- 用户一旦重新保存选择结果，所有旧行都会被替换
 
-- `name`
-- `llm_provider_id`
-- `code`
-- `description`
-- 多模态支持字段
+### 3. 手动添加 / 删除模型时
 
-但不保存“该模型请求协议”。
+这部分是单行增删：
 
-同时，当前 `update_selected_models` 的实现是：
+- `add_llm_model`：直接插入一条模型记录
+- `delete_llm_model`：按 `llm_provider_id + code` 删除一条模型记录
 
-- 先删掉该 provider 下所有模型
-- 再重建选中的模型
+所以当前 `llm_model` 的状态是三种写入路径并存：
 
-因此如果直接把协议字段硬塞进 `llm_model` 表，在批量更新时很容易丢失用户配置。
+- 整批重建（远程拉取）
+- 整批重建（模型选择确认）
+- 单项增删（手动输入）
 
-
-## 产品设计
-
-## 一、交互原则
-
-- 协议配置必须在“模型”旁边，而不是藏到 provider 高级配置里。
-- 用户在看到模型列表时，应该能直观看到每个模型当前使用的是哪种协议。
-- 修改协议不应影响“是否选中该模型”这个动作，二者是并列维度。
-- 手动添加的模型与远程拉取到的模型，都必须支持配置协议。
+这也是为什么它并不适合作为“稳定保存用户偏好”的唯一载体。
 
 
-## 二、协议枚举
+## 二、前端模型列表现状
 
-定义统一的协议值：
+### 1. `TagInput`
 
-- `chat_completions`
-- `responses`
+当前真正带删除按钮的 tag UI 在 `TagInput`：
 
-首期只在 OpenAI 类 provider 上展示这个能力：
+- tag 文本
+- 右侧一个 `X` 删除按钮
+
+因此你提到的“在 model tag 的删除按钮左侧放 `c` 或 `r` 按钮”，从现有 UI 结构上看，最自然的落点就是这套 tag 组件。
+
+### 2. `ReadOnlyModelList`
+
+当前 `ReadOnlyModelList` 只是展示 badge 文本，没有删除按钮，也没有请求方式入口。
+
+如果这次要统一体验，建议不要继续维持两套不同的 tag 表现，而是抽成一个共享的 tag 子组件：
+
+- 模型名
+- `c/r` 请求方式按钮
+- 可选的删除按钮（有删除能力时显示，无删除能力时隐藏）
+
+### 3. `ModelSelectionDialog`
+
+当前弹窗里每一行只有：
+
+- checkbox
+- 模型名
+- 多模态能力图标
+
+还没有请求方式切换入口。
+
+
+## 三、当前运行时路由现状
+
+### 1. OpenAI
+
+AIPP 现在把：
 
 - `openai`
 - `openai_api`
 
-其他 provider 暂不展示协议图标，也不写入协议配置。
+都固定映射到：
+
+- `AdapterKind::OpenAI`
+
+所以虽然 `genai` 已支持 `OpenAIResp`，AIPP 运行时并没有把用户配置接进去。
+
+### 2. Copilot
+
+AIPP 当前把：
+
+- `github_copilot`
+
+映射到：
+
+- `AdapterKind::Copilot`
+
+但当前 `genai` 的 Copilot adapter 只有一个 `Copilot` 适配器，并且 URL 仍然走：
+
+- `/chat/completions`
+
+因此 Copilot 的 `responses` 支持不能只在 AIPP 里“切个枚举”就完成。
 
 
-## 三、模型选择弹窗（`ModelSelectionDialog`）
+## 产品设计
 
-### 交互改造
+## 一、术语调整：用 `request_mode`，不再强行叫 protocol
 
-在每一行模型条目的右侧，新增一个协议图标入口。
+这里更准确的叫法建议改为：
 
-建议表现形式：
+- `request_mode`
 
-- 图标按钮 + Tooltip
-- 点击图标后弹出一个轻量菜单或 `Popover`
-- 可选项只有两个：
-  - `Chat Completions`
-  - `Responses`
+枚举值仍保持清晰可读：
 
-### 展示要求
+- `chat_completions`
+- `responses`
 
-每个模型行应同时包含：
+UI 上为了紧凑展示，可以只显示：
 
-- 复选框：控制该模型是否被保存/启用
+- `c`
+- `r`
+
+也就是说：
+
+- **存储值** 用完整枚举
+- **界面缩写** 用 `c/r`
+- **Tooltip** 再把完整含义说明白
+
+这样既满足交互紧凑，也避免概念过于模糊。
+
+
+## 二、核心交互原则
+
+- 请求方式入口必须跟着“模型”走，而不是藏到 provider 高级配置里
+- 请求方式切换和“是否选中该模型”是两个并列维度
+- tag 场景下优先使用最小可点击单元，不额外弹二级菜单
+- `c/r` 按钮与删除按钮尺寸一致，避免视觉失衡
+- Hover 时必须给出完整 Tooltip，避免只看 `c/r` 看不懂
+- 不支持该能力的 provider 不展示该入口
+
+
+## 三、模型 tag 交互（重点按你的要求调整）
+
+### 1. 统一 tag 结构
+
+建议所有“已保存模型”最终都复用同一个 tag 组件，内部结构为：
+
 - 模型名
-- 模态能力图标（视觉/音频/视频）
-- 协议图标
+- `c/r` 按钮
+- 删除按钮（如果当前场景允许删除）
 
-### 协议图标建议
+排列顺序：
 
-建议使用直观但不喧宾夺主的图标语义，例如：
+- `模型名` → `c/r` → `X`
 
-- `MessagesSquare` / `MessageCircle` 表示 `chat_completions`
-- `Workflow` / `Sparkles` / `Waypoints` 表示 `responses`
+也就是 **`c/r` 在删除按钮左侧**。
 
-也可以用统一图标配合不同颜色/Badge 文案，例如：
+### 2. `c/r` 按钮样式
 
-- `Chat` Badge
-- `Resp` Badge
+建议和当前删除按钮保持一致的点击体积：
 
-建议以 Tooltip 明确文案：
+- 同级小按钮
+- 与 `X` 按钮同高同宽
+- 视觉上不抢主标签文字
 
-- `当前协议：Chat Completions`
-- `当前协议：Responses`
+例如视觉目标可以理解为：
 
-### 默认行为
+- 跟 `X` 一样是一个小圆形 ghost 按钮
+- 中间不是图标，而是 `c` / `r`
 
-如果模型还没有显式配置协议，默认显示：
+### 3. 点击行为
 
-- `Chat Completions`
+你希望的是“点击后就在 `c` 和 `r` 里切换”，因此这里不建议再弹 `Popover` 或菜单，直接做成 toggle：
 
-注意：这个默认值只是“默认展示与默认保存值”，不是名称推断结果。
+- 当前是 `c`，点击后切到 `r`
+- 当前是 `r`，点击后切到 `c`
 
+优点是：
 
-## 四、已保存模型列表（`ReadOnlyModelList`）
+- 操作路径最短
+- 和 tag 的轻量交互风格一致
+- 用户能快速批量调整多个模型
 
-### 交互改造
+### 4. Tooltip 文案
 
-当前已保存模型列表只展示 badge 文本，不足以体现协议配置。
+Hover `c/r` 时，Tooltip 需要明确当前含义，例如：
 
-建议把每个模型 badge 升级为：
+- `当前请求方式：Chat Completions`
+- `当前请求方式：Responses`
+- 也可以补充次级提示：`点击切换为 Responses` / `点击切换为 Chat Completions`
 
-- 模型名
-- 协议小图标或协议缩写
-- 可点击后直接切换协议
+### 5. 删除与切换相互独立
 
-### 目的
+需要明确交互约束：
 
-这样用户不必每次都打开“获取模型列表/选择模型”弹窗才能修改协议。
-
-尤其对于：
-
-- 手动输入添加的模型
-- 已经保存到本地但远程列表暂时拉不到的模型
-
-都能保留直接修改入口。
-
-
-## 五、手动添加模型（`TagInputContainer`）
-
-当前支持用户手动输入 model code。
-
-这部分也必须支持协议配置，建议如下：
-
-- 新增的手动模型默认 `chat_completions`
-- 保存后在 `ReadOnlyModelList` 中立即显示协议图标
-- 用户可在保存后直接改协议
-
-这样可以避免在输入时增加复杂表单，降低交互阻力。
+- 点击 `c/r` 只切换请求方式
+- 点击 `X` 只删除模型
+- 二者都不应触发外层 tag 的其他行为
 
 
-## 数据设计
+## 四、`ModelSelectionDialog` 交互
 
-## 一、为什么不直接改 `llm_model`
+虽然你重点提的是 tag，但首次批量配置仍然发生在 `ModelSelectionDialog`，所以这里也要补入口。
 
-虽然从语义上看，协议偏好属于模型属性，但当前实现中 `llm_model` 会被“整批删除再重建”，直接把协议存进去会有两个风险：
+建议每一行模型右侧加入同样语义的 `c/r` 小按钮：
 
-- 批量更新模型时丢失用户协议选择
-- 未来如果远程拉取字段更新，也更容易误覆盖用户本地偏好
+- checkbox 控制是否选中
+- `c/r` 控制请求方式
+- 两者互不影响
 
-因此建议将协议配置单独存储。
+要求：
+
+- 点击 `c/r` 不触发行点击，不影响 checkbox
+- 全选 / 取消全选只修改 `is_selected`
+- 搜索过滤不丢失 `request_mode` 本地状态
 
 
-## 二、推荐表结构
+## 五、手动添加模型
 
-新增一张独立表，例如：
+手动输入添加模型时，建议如下：
 
-`llm_model_protocol_preference`
+- 新增模型默认 `chat_completions`
+- 如果本地已经存在该 `model_code` 的历史 `request_mode` 偏好，则优先恢复历史值
+- 添加成功后，tag 立即显示 `c/r` 按钮
+
+这样用户不用先去额外打开配置面板。
+
+
+## 数据设计：重新评估“放 `llm_model` 还是拆表”
+
+## 一、方案 A：直接把 `request_mode` 放进 `llm_model`
+
+### 优点
+
+- 语义上最直观：请求方式确实是模型级属性
+- 查询结构简单，不需要额外 join / merge
+- 如果未来模型导入导出本来就连 `llm_model` 一起走，这个字段天然也能跟着走
+
+### 当前阻塞点
+
+但要注意，**这些优点成立的前提，是 `llm_model` 本身必须是稳定 upsert，而不是整批重建**。
+
+如果坚持放进 `llm_model`，那么本次实现不能只加字段，至少还要同时做下面这些改造：
+
+1. 给 `llm_model` 增加 `request_mode`
+2. 给 `llm_model` 建立稳定唯一键（至少 `llm_provider_id + code`）
+3. 把 `fetch_model_list` 从“先删后插”改为“按 code 做 diff/upsert”
+4. 把 `update_selected_models` 从“先删后插”改为“按 code 保留已有行并更新选中状态/模型元数据”
+5. 明确远程模型消失、用户取消勾选、手动删除模型时，`request_mode` 应该保留还是清理
+
+### 结论
+
+所以：
+
+- **不是说永远不能放在 `llm_model`**
+- 而是 **在当前实现不重构的前提下，不适合直接放进去**
+- 如果产品愿意把“模型同步策略重构”为本次需求的一部分，那放进 `llm_model` 就重新变得合理
+
+换句话说：
+
+> 把 `request_mode` 放进 `llm_model` 是一条“更整洁但范围更大”的方案，前提是同步改掉当前 destructive sync。
+
+
+## 二、方案 B：拆到独立偏好表
+
+建议表名：
+
+- `llm_model_request_mode_preference`
 
 字段建议：
 
 - `id INTEGER PRIMARY KEY AUTOINCREMENT`
 - `llm_provider_id INTEGER NOT NULL`
 - `model_code TEXT NOT NULL`
-- `request_protocol TEXT NOT NULL DEFAULT 'chat_completions'`
+- `request_mode TEXT NOT NULL DEFAULT 'chat_completions'`
 - `created_time DATETIME DEFAULT CURRENT_TIMESTAMP`
 - `updated_time DATETIME DEFAULT CURRENT_TIMESTAMP`
 
@@ -219,364 +384,432 @@
 
 - `(llm_provider_id, model_code)`
 
+### 它真正解决了什么
 
-## 三、设计理由
+它解决的是：
 
-这样做的好处：
+- `fetch_model_list` 删除重建 `llm_model` 时，请求方式不被带走
+- `update_selected_models` 删除重建 `llm_model` 时，请求方式不被带走
+- 远程拉取模型元数据变化时，不会顺手覆盖用户的本地请求方式偏好
 
-- 协议偏好独立于远程模型同步结果
-- 即使 `update_selected_models` 删除并重建 `llm_model`，协议偏好也不会丢失
-- 手动添加模型、远程获取模型、本地历史模型都能统一处理
-- 后续如果要增加更多模型级网络偏好，也可以继续扩展这张表
+### 它没有自动解决什么
+
+它不会天然解决：
+
+1. **provider 删除清理**
+   - 需要在删除 provider 时一起删掉这张表里对应 provider 的数据
+
+2. **导入导出迁移**
+   - 当前 provider 导出只导出 `name / api_type / endpoint / api_key`
+   - 连模型列表本身都没有导出
+   - 所以不论 `request_mode` 放在 `llm_model` 还是独立表，当前导入导出都不会保留这部分信息
+
+3. **陈旧偏好回收**
+   - 某些模型长期未再出现时，是否需要 GC，要另定策略
+
+### 结论
+
+因此，更准确的结论应该是：
+
+> 独立表并不是“没有问题”，但它确实能解决当前架构下最核心的覆盖问题，而且改动面明显小于“顺带重构整个 `llm_model` 生命周期”。
+
+也就是说，**在当前版本里，独立表仍然是推荐方案**。
+
+
+## 三、推荐决策
+
+本次推荐采用：
+
+- **短中期：独立偏好表**
+- **长期：如果未来把 `llm_model` 同步逻辑彻底改为 diff/upsert，再评估是否回收合并**
+
+这比原文直接写“不要放到 `llm_model` 里”更准确。
+
+更准确的表达应该是：
+
+- **在当前 destructive sync 架构下，不建议放进 `llm_model`**
+- **如果愿意把 `llm_model` 的同步策略一起重构，那放进去也可以成立**
 
 
 ## 后端改造方案
 
 ## 一、数据库层
 
-### 1. 新增表
+### 1. 新增偏好表
 
-在 `src-tauri/src/db/llm_db.rs` 中新增建表逻辑。
+在 `src-tauri/src/db/llm_db.rs` 中新增：
+
+- `llm_model_request_mode_preference`
 
 ### 2. 新增数据库访问方法
 
-建议新增以下方法：
+建议新增：
 
-- `get_model_protocol_preference(llm_provider_id, model_code) -> Option<String>`
-- `set_model_protocol_preference(llm_provider_id, model_code, request_protocol)`
-- `list_model_protocol_preferences(llm_provider_id) -> Vec<...>`
+- `get_model_request_mode(llm_provider_id, model_code) -> Option<String>`
+- `list_model_request_modes(llm_provider_id) -> Vec<...>`
+- `upsert_model_request_mode(llm_provider_id, model_code, request_mode)`
+- `delete_model_request_modes_by_provider(llm_provider_id)`
 
-### 3. 数据库升级
+### 3. provider 删除联动清理
 
-在 `src-tauri/src/db/mod.rs` 增加新的版本升级逻辑：
+如果走独立表，必须把下面动作补齐：
 
-- 提升 `CURRENT_VERSION`
-- 增加对应 `special_logic_xxx`
-- 负责创建 `llm_model_protocol_preference`
+- `delete_llm_provider` 时，同时删除该 provider 的 request mode 偏好
+
+否则就会留下孤儿数据。
 
 ### 4. 历史兼容
 
-不需要为历史模型回填复杂规则。
+历史模型没有该配置时：
 
-默认即可：
+- 默认按 `chat_completions`
 
-- 未命中配置时，按 `chat_completions` 处理
+这保持现有行为不变。
 
 
 ## 二、API 层
 
-### 1. 扩展模型返回结构
+### 1. 扩展模型结构
 
-当前 `LlmModel` / `ModelForSelection` 需要补充一个字段：
+以下返回结构都要补充：
 
-- `request_protocol: String`
+- `LlmModel`
+- `ModelForSelection`
+- `ModelSelectionResponse.available_models[*]`
 
-适用接口：
+新增字段：
 
-- `get_llm_models`
-- `preview_model_list`
-- `update_selected_models`
+- `request_mode`
 
-### 2. 新增单模型更新接口
+### 2. 批量保存模型选择时
 
-建议增加 Tauri command：
+`update_selected_models` 应当：
 
-- `update_llm_model_protocol`
+1. 继续按当前逻辑更新 `llm_model`
+2. 对传入的每个模型 `upsert request_mode`
+
+注意这里建议：
+
+- **不要因为模型暂时未选中就删除其 request mode 偏好**
+
+因为 request mode 更像“该 provider 下该 model_code 的用户偏好”，而不是“当前是否启用”的状态。
+
+### 3. 单模型快速切换接口
+
+建议新增 Tauri command：
+
+- `update_llm_model_request_mode`
 
 入参：
 
 - `llm_provider_id`
 - `model_code`
-- `request_protocol`
+- `request_mode`
 
-用途：
+用于：
 
-- 在 `ReadOnlyModelList` 中快速切换单个模型协议
+- tag 中点击 `c/r` 后立即切换并持久化
 
-### 3. 批量保存接口
+### 4. 获取模型列表时合并偏好
 
-`update_selected_models` 在保存模型选择结果时，也要顺带保存每个模型的协议。
+以下接口返回模型时都要 merge 本地偏好：
 
-注意：
+- `get_llm_models`
+- `preview_model_list`
 
-- 先删除/重建 `llm_model`
-- 再逐条 upsert `llm_model_protocol_preference`
+如果命中偏好表：
 
-不要因为模型未选中就删除其协议偏好，除非产品上明确要这么做。
+- 返回已保存 `request_mode`
 
-建议首期策略：
+如果没命中：
 
-- 对未选中的模型，保留其协议偏好
-- 用户再次选回时，自动恢复之前的协议设置
+- 返回默认 `chat_completions`
 
 
-## 三、运行时协议选择
+## 三、运行时请求方式决策
 
-### 1. 改造原则
+## OpenAI 路径
 
-运行时仍保持统一调用：
+对 `openai` / `openai_api`：
 
-- `exec_chat`
-- `exec_chat_stream`
+- `chat_completions` -> `AdapterKind::OpenAI`
+- `responses` -> `AdapterKind::OpenAIResp`
 
-只改“如何决定 adapter kind”。
+这部分可以直接落地。
 
-### 2. 优先级设计
+## Copilot 路径
 
-对于 `openai` / `openai_api`：
+对 `github_copilot`：
 
-1. 先读取当前模型的 `request_protocol`
-2. 若为 `chat_completions`，使用 `AdapterKind::OpenAI`
-3. 若为 `responses`，使用 `AdapterKind::OpenAIResp`
-4. 若无配置，默认 `AdapterKind::OpenAI`
+- `chat_completions` -> 当前 `AdapterKind::Copilot`
+- `responses` -> **需要先补 `genai` 支持**
 
-对于其他 provider：
+### 为什么 Copilot 这里需要额外前置改造
 
-- 保持现有逻辑
+因为当前 `genai`：
 
-### 3. 落点
+- 没有 `AdapterKind::CopilotResp`
+- 现有 `Copilot` adapter 的 service URL 仍然走 `/chat/completions`
 
-建议在 `src-tauri/src/api/genai_client.rs` 收口。
+所以这里有两个可行实现方向：
 
-即新增一个“基于 provider + model + explicit protocol”的 adapter 决策函数，供：
+### 方案 1：在 `genai` 新增 `AdapterKind::CopilotResp`
 
-- `create_client_with_config`
-- `infer_adapter_kind_simple` 的相关调用链
+优点：
 
-统一使用。
+- 与 OpenAI 的 `OpenAI / OpenAIResp` 结构对称
+- AIPP 运行时映射更直观
 
-### 4. 明确不做静默回退
+缺点：
 
-如果用户把某模型配置成 `responses`，但目标站点不支持：
+- `genai` 需要新增 adapter kind 与对应实现
 
-- 应直接返回明确错误
-- 错误中尽量带上 endpoint / provider / model / protocol
+### 方案 2：保留 `AdapterKind::Copilot`，但让 Copilot adapter 内部支持 `request_mode`
 
-不要偷偷再试一次 `chat_completions`，否则会让用户难以理解真实行为。
+优点：
+
+- 不一定需要新增 enum variant
+- Copilot 的认证逻辑和公共行为可以复用更多
+
+缺点：
+
+- `genai` 需要把“请求方式”从 AIPP 透传进 adapter，侵入点未必比新增 variant 更小
+
+### 本方案建议
+
+文档层不强绑其中一种，但必须明确写清楚：
+
+> **Copilot 的 `responses` 支持需要包含 `genai` 依赖改造，这不是单纯的 AIPP UI/DB 改造。**
 
 
 ## 前端改造方案
 
-## 一、类型定义
+## 一、不要再只传 `string[] tags`
 
-以下前端类型要同步补充 `request_protocol`：
+当前 tag 组件基本都是：
 
-- `ModelForSelection`
-- `ModelSelectionResponse.available_models[*]`
-- `LLMModel`
+- `tags: string[]`
 
+但这次要在 tag 上展示和切换请求方式，仅靠字符串已经不够了，因为至少还需要：
 
-## 二、组件拆分建议
+- `model_code`
+- `display_name`
+- `request_mode`
+- 是否允许删除 / 是否允许切换
 
-### 1. 新增可复用协议选择组件
+因此建议引入一个共享前端类型，例如：
 
-建议抽一个小组件，例如：
+- `ModelTagItem`
 
-- `ModelRequestProtocolBadge`
-- 或 `ModelRequestProtocolToggle`
+字段建议：
 
-能力：
+- `code`
+- `name`
+- `request_mode`
+- `removable`
+- `switchable`
 
-- 展示当前协议
-- Tooltip 说明
+这样才能稳定地以 `model_code` 为 key 和更新目标，而不是拿显示名硬操作。
+
+## 二、抽共享组件
+
+建议抽两个共享组件：
+
+### 1. `ModelRequestModeToggle`
+
+职责：
+
+- 显示 `c` 或 `r`
+- Tooltip 展示完整含义
 - 点击切换
-- 仅在 OpenAI provider 下启用
+- 仅在支持的 provider 下启用
 
-这样可以复用于：
+### 2. `ModelTagBadge`
 
-- `ModelSelectionDialog`
+职责：
+
+- 展示模型名
+- 内嵌 `ModelRequestModeToggle`
+- 根据场景决定是否显示删除按钮
+
+这样可以同时复用于：
+
+- `TagInput`
 - `ReadOnlyModelList`
+- 甚至未来其他模型选择面板
 
-### 2. `ModelSelectionDialog`
+## 三、`TagInput`
 
-在每个模型行中增加协议组件。
+这是最贴近你要求的位置。
 
-交互上要注意：
+改造后每个 tag 结构应为：
 
-- 点击协议图标时不触发行点击，不影响 checkbox 勾选
-- 搜索过滤不影响协议状态
-- 全选/取消全选只改 `is_selected`，不改协议值
+- 文本：模型名
+- `c/r` 小按钮
+- `X` 小按钮
 
-### 3. `ReadOnlyModelList`
+其中：
 
-把只读 badge 变为“轻交互 badge”。
+- `c/r` 在 `X` 左侧
+- 二者尺寸一致
+- Tooltip 说明当前请求方式
+- 点击 `c/r` 后立即保存
 
-建议表现：
+## 四、`ReadOnlyModelList`
 
-- badge 主体显示模型名
-- 尾部带一个协议标识
-- 点击协议标识弹菜单切换
+当前 Copilot provider 使用的是 `ReadOnlyModelList`，所以这里也必须支持 `c/r`。
 
-### 4. `TagInputContainer`
+建议：
 
-无需在“输入时”增加协议字段。
+- 不再只是纯 badge 文本
+- 改用共享 `ModelTagBadge`
+- 如果当前列表不支持删除，就隐藏 `X`，但保留 `c/r`
 
-只需保证：
+这样 Copilot 的模型列表也能直接切换请求方式。
 
-- 手动添加后，刷新列表时能带回默认协议
-- 在已保存模型列表中可修改协议
+## 五、`ModelSelectionDialog`
 
+在每一行模型中加入：
 
-## 用户体验细节
+- checkbox
+- 模型名
+- 多模态图标
+- `c/r` 切换按钮
 
-## 一、为什么不用 provider 级开关
+并保证：
 
-因为同一个 provider 下可能存在多个模型，而这些模型未必都适合同一协议。
-
-例如：
-
-- 某些模型需要 `responses`
-- 某些模型继续用 `chat_completions`
-
-如果放在 provider 级，会导致：
-
-- 误伤其他模型
-- 用户难以理解为什么切了一个 provider，所有模型行为都变了
+- 切换请求方式不会影响 checkbox
+- 勾选状态不会重置请求方式
 
 
-## 二、为什么不能按名字猜
+## 用户体验与策略细节
 
-因为用户可能接的是：
+## 一、默认值
 
-- OpenAI 官方
-- OpenAI 兼容中转
-- 第三方站点
-- 私有网关
+未配置时默认：
 
-同样的模型名在不同站点上，支持的协议未必一致。
-
-所以“名称启发式”最多只能作为内部参考，不能作为产品行为的真实依据。
-
-
-## 三、为什么默认保守
-
-默认 `chat_completions` 的原因：
-
-- 与当前行为保持一致
-- 降低升级风险
-- 历史已有 provider / 模型不会突然改变请求路径
-
-
-## 四、图标显示范围
-
-首期只对 `openai` / `openai_api` 显示协议图标。
+- `chat_completions`
 
 原因：
 
-- 其他 provider 当前没有对应的双协议切换语义
-- 提前展示会制造误导
-- UI 上也更清晰，不会让所有模型列表都出现一个暂时无意义的开关
+- 与当前行为一致
+- 升级风险最低
+
+## 二、为什么不用 provider 级开关
+
+因为同一个 provider 下，不同模型完全可能需要不同请求方式。
+
+这点对：
+
+- OpenAI 兼容站点
+- Copilot 下不同能力模型
+
+都成立。
+
+## 三、为什么不能按名称猜
+
+同一个模型名在不同 endpoint / 网关 / 中转站上，支持的请求方式未必一致。
+
+因此：
+
+- 名称启发式不应成为产品行为依据
+
+## 四、请求方式错误时如何报错
+
+如果用户把模型切到 `responses`，但 provider 实际不支持：
+
+- 直接报错
+- 错误中尽量带上：
+  - provider
+  - model_code
+  - request_mode
+  - endpoint
+
+不要自动回退。
 
 
-## 风险与注意事项
+## 导入导出：这里要把问题讲清楚
 
-## 一、模型列表刷新
+当前 provider 导出只包含：
 
-当前刷新模型列表会重新拉远程模型并更新本地模型表。
+- `name`
+- `api_type`
+- `endpoint`
+- `api_key`
 
-要确保：
+并**不包含**：
 
-- 重新获取模型列表后，已有协议偏好能正确 merge 回 `available_models`
-- 不会因为远程返回结果变化而覆盖本地协议配置
+- 模型列表
+- 模型级 request mode
 
+所以这里要明确：
 
-## 二、手动模型与远程模型并存
+- 这不是“拆表才有的问题”
+- 就算把 `request_mode` 放进 `llm_model`，当前导入导出一样带不走
 
-有些用户会：
+因此文档里更准确的结论应该是：
 
-- 手动输入模型
-- 同时使用远程自动获取模型
-
-因此协议配置的主键必须使用：
-
-- `llm_provider_id + model_code`
-
-而不是显示名。
-
-
-## 三、错误处理
-
-当协议与实际站点不兼容时，要给出清晰错误提示，例如：
-
-- 当前模型配置为 `Responses`
-- 当前 endpoint 不支持该协议
-- 请在模型列表中切换为 `Chat Completions`
-
-这样用户能理解问题来源，不会以为是 API Key 或模型名错了。
-
-
-## 四、导入导出
-
-当前 provider 支持分享与导入。
-
-这次方案若首期不扩展导入导出，也可以接受，但需要明确：
-
-- 导出 provider 时，是否同时导出模型协议偏好
-
-建议最终纳入导出，否则用户迁移配置时会丢失这部分设置。
-
-如果首期先不做，也应在文档和代码里标记为后续补充项。
+- 如果首期不扩展导入导出，可以接受
+- 但应明确标注这是已知缺口
+- 后续若要支持 provider 迁移完整体验，应把模型列表与 request mode 一起纳入导出格式
 
 
 ## 推荐实施顺序
 
-### 第一阶段：数据与运行时
+### 第一阶段：先补能力判断与数据结构
 
-1. 新增协议偏好表
-2. 新增 DB 读写方法
+1. 明确引入 `request_mode`
+2. 新增偏好表与读写接口
 3. 扩展后端模型结构
-4. 在运行时接入协议选择
+4. 扩展前端共享类型
 
-目标：
+### 第二阶段：OpenAI 端先打通
 
-- 即使前端还没完全完成，后端能力已闭环
+1. 运行时把 OpenAI 模型映射到 `OpenAI / OpenAIResp`
+2. 在 tag 与选择弹窗里完成 `c/r` 切换
+3. 验证持久化与刷新后回填
 
+### 第三阶段：补 Copilot 底层能力
 
-### 第二阶段：模型选择弹窗
+1. 在 `genai` 中补齐 Copilot `responses` 支持
+2. 更新 AIPP 运行时映射
+3. 打通 Copilot 的 `r` 模式真实调用
 
-1. 在 `ModelSelectionDialog` 增加协议图标
-2. 支持批量保存模型选择 + 协议
+### 第四阶段：补导入导出与收尾文案
 
-目标：
-
-- 用户能从“获取模型列表”入口完成首次配置
-
-
-### 第三阶段：已保存模型快速修改
-
-1. 改造 `ReadOnlyModelList`
-2. 增加单模型协议更新接口
-
-目标：
-
-- 用户无需反复进入弹窗即可调协议
-
-
-### 第四阶段：补充导出导入与文案
-
-1. 评估 provider 分享/导入是否带出协议偏好
-2. 补充 Tooltip、错误文案、空态文案
+1. 决定是否导出模型列表与 request mode
+2. 补充 Tooltip / 错误文案
+3. 评估是否需要陈旧偏好清理策略
 
 
 ## 验收标准
 
 满足以下条件即可认为功能完成：
 
-- 在 OpenAI provider 的模型列表里，每个模型都能看到协议标识。
-- 用户可以为同一个 provider 下的不同模型分别设置 `chat_completions` 或 `responses`。
-- 模型协议设置在应用重启后仍然保留。
-- 刷新模型列表、重新获取远程模型时，不会丢失已有协议配置。
-- 运行时会严格按模型配置选择 `OpenAI` 或 `OpenAIResp`。
-- 未配置协议的历史模型继续保持当前行为，即默认 `chat_completions`。
-- 配置错误协议时，用户能收到明确错误，而不是静默回退。
+- 在支持的 provider（`openai` / `openai_api` / `github_copilot`）下，模型 UI 中可看到 `c/r` 请求方式按钮
+- 在 tag 场景中，`c/r` 按钮位于删除按钮左侧，且尺寸与删除按钮一致
+- Hover `c/r` 时能看到完整 Tooltip，明确当前请求方式
+- 点击 `c/r` 后可以直接在两种请求方式间切换
+- OpenAI 模型能按配置真实走 `Chat Completions` 或 `Responses`
+- Copilot 模型在底层能力补齐后，也能按配置真实切换请求方式
+- 刷新模型列表、重新保存模型选择、应用重启后，请求方式设置仍然保留
+- 未配置请求方式的历史模型保持默认 `chat_completions`
+- 配置错误时返回明确错误，不做静默回退
 
 
 ## 最终结论
 
-本方案的核心是：
+这次文档更新后，核心结论应该改成下面这版：
 
-- **不再用名称猜协议**
-- **把协议选择权交给用户**
-- **以模型级显式配置作为唯一可信来源**
+- **模型级显式配置仍然是对的**
+- **交互上用 tag 内 `c/r` 直切，放在删除按钮左侧，是最符合当前界面的方案**
+- **当前 `llm_model` 确实存在 provider 级整批删除重建，不是“只有改动模型才删改”**
+- **因此在不重构同步逻辑的前提下，`request_mode` 仍更适合拆到独立偏好表**
+- **但拆表并不是没有问题，它只是更精确地解决了“当前 destructive sync 会覆盖模型级偏好”这个核心问题**
+- **Copilot 要支持 `responses`，必须把 `genai` 底层能力一并纳入方案，不能假设 AIPP 侧单独改造就够了**
 
-从工程实现角度看，这也是对现有架构侵入最小、可解释性最强、后续可维护性最高的一种落地方式。
+相比原文，这个版本更准确地区分了：
+
+- 当前代码事实
+- 请求方式存储设计的边界
+- OpenAI 与 Copilot 在技术实现上的差异

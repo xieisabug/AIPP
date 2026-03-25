@@ -1,15 +1,18 @@
 import React, { useState, KeyboardEvent, ChangeEvent, useCallback, useEffect, useRef } from 'react';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
-import { Badge } from './ui/badge';
-import { X, Tag, ChevronDown, ChevronUp } from 'lucide-react';
+import { Tag, ChevronDown, ChevronUp } from 'lucide-react';
+import ModelTagBadge from './config/ModelTagBadge';
+import { ModelTagItem } from './config/llmModelTypes';
 
 // 定义TagInputProps接口
 interface TagInputProps {
-    tags: string[];
+    tags: ModelTagItem[];
     placeholder?: string;
     onAddTag: (tag: string) => void;
-    onRemoveTag: (index: number) => void;
+    onRemoveTag: (tag: ModelTagItem, index: number) => void;
+    onToggleRequestMode?: (tag: ModelTagItem, index: number) => void;
+    showRequestModeToggle?: boolean;
     isExpanded?: boolean;
     onExpandedChange?: (expanded: boolean) => void;
     onFetchModels?: () => void;
@@ -22,6 +25,8 @@ const TagInput: React.FC<TagInputProps> = ({
     placeholder, 
     onAddTag, 
     onRemoveTag, 
+    onToggleRequestMode,
+    showRequestModeToggle = false,
     isExpanded: externalIsExpanded,
     onExpandedChange,
     onFetchModels,
@@ -134,22 +139,18 @@ const TagInput: React.FC<TagInputProps> = ({
                                 style={{ minHeight: tags.length > 0 ? '60px' : undefined }}
                             >
                                 {tags.map((tag, index) => (
-                                <Badge
-                                    key={index}
-                                    variant="secondary"
-                                    className="bg-muted text-foreground border-border hover:bg-muted/80 transition-colors pl-3 pr-1 py-1 text-sm"
-                                >
-                                    <span className="mr-2">{tag}</span>
-                                    <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        className="h-4 w-4 p-0 hover:bg-muted-foreground/20 hover:text-foreground rounded-full ml-1"
-                                        onClick={() => onRemoveTag(index)}
-                                    >
-                                        <X className="h-3 w-3" />
-                                    </Button>
-                                </Badge>
-                            ))}
+                                    <ModelTagBadge
+                                        key={tag.code}
+                                        model={tag}
+                                        showRequestModeToggle={showRequestModeToggle}
+                                        onToggleRequestMode={
+                                            onToggleRequestMode
+                                                ? () => onToggleRequestMode(tag, index)
+                                                : undefined
+                                        }
+                                        onRemove={() => onRemoveTag(tag, index)}
+                                    />
+                                ))}
                         </div>
 
                         {/* 渐变遮罩效果和底部展开区域，当收起时显示 */}
@@ -204,7 +205,7 @@ const TagInput: React.FC<TagInputProps> = ({
                     className="focus:ring-primary focus:border-primary"
                 />
                 <p className="text-xs text-muted-foreground">
-                    输入模型名称后按回车键添加，或点击标签上的 × 删除模型
+                    输入模型名称后按回车键添加；支持的提供商可点击标签上的 c/r 切换请求接口，或点击 × 删除模型
                 </p>
             </div>
         </div>

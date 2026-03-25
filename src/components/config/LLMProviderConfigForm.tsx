@@ -26,29 +26,17 @@ import { Input } from "../ui/input";
 import { Trash2, ChevronDown, Share, Copy, Search, KeyRound, Edit, CheckCircle2, XCircle, Loader2, AlertTriangle } from "lucide-react";
 import { useCopilot } from "@/hooks/useCopilot";
 import { useAcpEnvironment } from "@/hooks/feature/useAcpEnvironment";
+import {
+    LLMModel,
+    ModelForSelection,
+    ModelSelectionResponse,
+    ModelTagItem,
+    toModelTagItem,
+} from "./llmModelTypes";
 
 interface LLMProviderConfig {
     name: string;
     value: string;
-}
-
-interface LLMModel {
-    name: string;
-}
-
-interface ModelForSelection {
-    name: string;
-    code: string;
-    description: string;
-    vision_support: boolean;
-    audio_support: boolean;
-    video_support: boolean;
-    is_selected: boolean;
-}
-
-interface ModelSelectionResponse {
-    available_models: ModelForSelection[];
-    missing_models: string[];
 }
 
 interface LLMProviderConfigFormProps {
@@ -78,7 +66,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     onShare,
     onRename,
 }) => {
-    const [tags, setTags] = useState<string[]>([]);
+    const [tags, setTags] = useState<ModelTagItem[]>([]);
     const [isModelListExpanded, setIsModelListExpanded] =
         useState<boolean>(false);
     const [isAdvancedConfigExpanded, setIsAdvancedConfigExpanded] =
@@ -242,8 +230,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         invoke<Array<LLMModel>>("get_llm_models", {
             llmProviderId: "" + id,
         }).then((modelList) => {
-            const newTags = modelList.map((model) => model.name);
-            // 调用子组件的方法，更新 tags
+            const newTags = modelList.map(toModelTagItem);
             setTags(newTags);
         });
     }, [defaultValues, form, id, isCopilotProvider]);
@@ -259,10 +246,10 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 });
 
                 // 更新本地标签显示
-                const selectedModelNames = selectedModels
+                const selectedModelTags = selectedModels
                     .filter((model) => model.is_selected)
-                    .map((model) => model.name);
-                setTags(selectedModelNames);
+                    .map(toModelTagItem);
+                setTags(selectedModelTags);
 
                 toast.success("模型列表更新成功");
             } catch (e) {
@@ -274,7 +261,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         [id],
     );
 
-    const onTagsChange = useCallback((newTags: string[]) => {
+    const onTagsChange = useCallback((newTags: ModelTagItem[]) => {
         setTags(newTags);
     }, []);
     // 定义稳定的 customRender，不再依赖父组件的状态或函数
@@ -282,6 +269,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         () => (
             <TagInputContainer
                 llmProviderId={id}
+                apiType={apiType}
                 tags={tags}
                 onTagsChange={onTagsChange}
                 isExpanded={isModelListExpanded}
@@ -292,7 +280,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 }}
             />
         ),
-        [id, tags, onTagsChange, isModelListExpanded],
+        [apiType, id, tags, onTagsChange, isModelListExpanded],
     );
 
     const renderProxyAdvancedConfig = useCallback(
@@ -493,6 +481,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         customRender: () => (
                             <ReadOnlyModelList
                                 llmProviderId={id}
+                                apiType={apiType}
                                 tags={tags}
                                 onTagsChange={onTagsChange}
                                 onFetchModels={(modelData) => {
@@ -961,6 +950,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 open={modelSelectionDialogOpen}
                 onOpenChange={setModelSelectionDialogOpen}
                 modelData={modelSelectionData}
+                apiType={apiType}
                 onConfirm={handleModelSelectionConfirm}
                 loading={isUpdatingModels}
             />

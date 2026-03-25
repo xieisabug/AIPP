@@ -119,6 +119,7 @@ fn create_test_model_detail() -> ModelDetail {
             vision_support: false,
             audio_support: false,
             video_support: false,
+            request_mode: "chat_completions".to_string(),
         },
         provider: LLMProvider {
             id: 1,

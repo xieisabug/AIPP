@@ -60,7 +60,8 @@ use crate::api::llm_api::{
     add_llm_model, add_llm_provider, delete_llm_model, delete_llm_provider, export_llm_provider,
     fetch_model_list, get_filtered_models_for_select, get_filtered_providers, get_llm_models,
     get_llm_provider_config, get_llm_providers, get_models_for_select, import_llm_provider,
-    preview_model_list, update_llm_provider, update_llm_provider_config, update_selected_models,
+    preview_model_list, update_llm_model_request_mode, update_llm_provider,
+    update_llm_provider_config, update_selected_models,
 };
 use crate::api::operation_api::{confirm_acp_permission, confirm_operation_permission};
 use crate::api::plugin_api::{
@@ -699,6 +700,7 @@ pub fn run() {
             get_llm_models,
             fetch_model_list,
             preview_model_list,
+            update_llm_model_request_mode,
             update_selected_models,
             get_models_for_select,
             get_filtered_models_for_select,

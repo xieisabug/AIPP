@@ -656,6 +656,7 @@ pub async fn ask_ai(
     let window_clone = window.clone(); // 在移动之前克隆
     let model_id = model_detail.model.id; // 提前获取模型ID
     let model_code = model_detail.model.code.clone(); // 提前获取模型代码
+    let model_request_mode = model_detail.model.request_mode.clone(); // 提前获取模型请求模式
     let model_configs = model_detail.configs.clone(); // 提前获取模型配置
     let provider_api_type = model_detail.provider.api_type.clone(); // 提前获取API类型
     let assistant_model_configs = assistant_detail.model_configs.clone(); // 提前获取助手模型配置
@@ -692,6 +693,7 @@ pub async fn ask_ai(
                 vision_support: false,      // 临时值
                 audio_support: false,       // 临时值
                 video_support: false,       // 临时值
+                request_mode: model_request_mode.clone(),
             },
             provider: crate::db::llm_db::LLMProvider {
                 id: 0,               // 临时值
@@ -735,6 +737,7 @@ pub async fn ask_ai(
             &model_configs,
             &model_code,
             &provider_api_type,
+            Some(&model_request_mode),
             network_proxy.as_deref(),
             proxy_enabled,
             Some(request_timeout),
@@ -1033,6 +1036,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let window_clone = window.clone();
     let model_id = model_detail.model.id;
     let model_code = model_detail.model.code.clone();
+    let model_request_mode = model_detail.model.request_mode.clone();
     let model_configs = model_detail.configs.clone();
     let provider_api_type = model_detail.provider.api_type.clone();
     let assistant_model_configs = assistant_detail.model_configs.clone();
@@ -1052,6 +1056,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             vision_support: false,
             audio_support: false,
             video_support: false,
+            request_mode: model_request_mode.clone(),
         },
         provider: crate::db::llm_db::LLMProvider {
             id: 0,
@@ -1096,6 +1101,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         &model_configs,
         &model_code,
         &provider_api_type,
+        Some(&model_request_mode),
         None,
         false,
         None,
@@ -1292,6 +1298,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let window_clone = window.clone();
     let model_id = model_detail.model.id;
     let model_code = model_detail.model.code.clone();
+    let model_request_mode = model_detail.model.request_mode.clone();
     let model_configs = model_detail.configs.clone();
     let provider_api_type = model_detail.provider.api_type.clone();
     let assistant_model_configs = assistant_detail.model_configs.clone();
@@ -1311,6 +1318,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
             vision_support: false,
             audio_support: false,
             video_support: false,
+            request_mode: model_request_mode.clone(),
         },
         provider: crate::db::llm_db::LLMProvider {
             id: 0,
@@ -1355,6 +1363,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         &model_configs,
         &model_code,
         &provider_api_type,
+        Some(&model_request_mode),
         None,
         false,
         None,
@@ -1675,6 +1684,7 @@ pub async fn regenerate_ai(
     let app_handle_clone = app_handle.clone(); // 添加这行
     let regenerate_model_id = model_detail.model.id; // 提前获取模型ID
     let regenerate_model_code = model_detail.model.code.clone(); // 提前获取模型代码
+    let regenerate_model_request_mode = model_detail.model.request_mode.clone(); // 提前获取模型请求模式
     let regenerate_model_configs = model_detail.configs.clone(); // 提前获取模型配置
     let regenerate_provider_api_type = model_detail.provider.api_type.clone(); // 提前获取API类型
     let regenerate_assistant_model_configs = assistant_detail.model_configs.clone(); // 提前获取助手模型配置
@@ -1708,6 +1718,7 @@ pub async fn regenerate_ai(
                 vision_support: false,      // 临时值
                 audio_support: false,       // 临时值
                 video_support: false,       // 临时值
+                request_mode: regenerate_model_request_mode.clone(),
             },
             provider: crate::db::llm_db::LLMProvider {
                 id: 0,               // 临时值
@@ -1753,6 +1764,7 @@ pub async fn regenerate_ai(
             &regenerate_model_configs,
             &regenerate_model_code,
             &regenerate_provider_api_type,
+            Some(&regenerate_model_request_mode),
             network_proxy.as_deref(),
             proxy_enabled,
             Some(request_timeout),

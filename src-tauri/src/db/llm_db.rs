@@ -3,6 +3,8 @@ use tracing::{debug, instrument, warn};
 
 use super::get_db_path;
 
+pub const DEFAULT_MODEL_REQUEST_MODE: &str = "chat_completions";
+
 #[derive(Debug)]
 pub struct LLMProvider {
     pub id: i64,
@@ -33,6 +35,7 @@ pub struct LLMModel {
     pub vision_support: bool,
     pub audio_support: bool,
     pub video_support: bool,
+    pub request_mode: String,
 }
 
 #[derive(Debug)]
@@ -95,6 +98,7 @@ impl LLMDatabase {
                 );",
             [],
         )?;
+        self.create_model_request_mode_preference_table()?;
 
         if let Err(err) = self.init_llm_provider() {
             warn!(error = ?err, "init_llm_provider failed (may already be initialized)");
@@ -213,6 +217,10 @@ impl LLMDatabase {
     pub fn delete_llm_provider(&self, id: i64) -> rusqlite::Result<()> {
         self.conn
             .execute("DELETE FROM llm_provider_config WHERE llm_provider_id = ?", params![id])?;
+        self.conn.execute(
+            "DELETE FROM llm_model_request_mode_preference WHERE llm_provider_id = ?",
+            params![id],
+        )?;
         self.conn.execute("DELETE FROM llm_model WHERE llm_provider_id = ?", params![id])?;
         self.conn.execute("DELETE FROM llm_provider WHERE id = ?", params![id])?;
         Ok(())
@@ -290,6 +298,80 @@ impl LLMDatabase {
         Ok(())
     }
 
+    #[instrument(level = "debug", skip(self), err)]
+    pub fn create_model_request_mode_preference_table(&self) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS llm_model_request_mode_preference (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    llm_provider_id INTEGER NOT NULL,
+                    model_code TEXT NOT NULL,
+                    request_mode TEXT NOT NULL DEFAULT 'chat_completions',
+                    created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (llm_provider_id, model_code),
+                    FOREIGN KEY (llm_provider_id) REFERENCES llm_provider(id)
+                );",
+            [],
+        )?;
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip(self), fields(llm_provider_id = llm_provider_id, model_code = model_code))]
+    pub fn get_model_request_mode(
+        &self,
+        llm_provider_id: i64,
+        model_code: &str,
+    ) -> rusqlite::Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT request_mode
+             FROM llm_model_request_mode_preference
+             WHERE llm_provider_id = ? AND model_code = ?",
+        )?;
+
+        stmt.query_row(params![llm_provider_id, model_code], |row| row.get(0))
+            .map(Some)
+            .or_else(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                _ => Err(err),
+            })
+    }
+
+    #[instrument(level = "debug", skip(self), fields(llm_provider_id = llm_provider_id))]
+    pub fn list_model_request_modes(
+        &self,
+        llm_provider_id: i64,
+    ) -> rusqlite::Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT model_code, request_mode
+             FROM llm_model_request_mode_preference
+             WHERE llm_provider_id = ?",
+        )?;
+        let rows = stmt.query_map([llm_provider_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    #[instrument(level = "debug", skip(self), fields(llm_provider_id = llm_provider_id, model_code = model_code, request_mode = request_mode))]
+    pub fn upsert_model_request_mode(
+        &self,
+        llm_provider_id: i64,
+        model_code: &str,
+        request_mode: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO llm_model_request_mode_preference (llm_provider_id, model_code, request_mode, updated_time)
+             VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+             ON CONFLICT(llm_provider_id, model_code)
+             DO UPDATE SET request_mode = excluded.request_mode, updated_time = CURRENT_TIMESTAMP",
+            params![llm_provider_id, model_code, request_mode],
+        )?;
+        Ok(())
+    }
+
     pub fn get_all_llm_models(
         &self,
     ) -> rusqlite::Result<Vec<(i64, String, i64, String, String, bool, bool, bool)>> {
@@ -357,6 +439,9 @@ impl LLMDatabase {
                     vision_support: row.get(5)?,
                     audio_support: row.get(6)?,
                     video_support: row.get(7)?,
+                    request_mode: self
+                        .get_model_request_mode(*provider_id, model_code)?
+                        .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string()),
                 })
             })?
             .next()
@@ -388,6 +473,9 @@ impl LLMDatabase {
                     vision_support: row.get(5)?,
                     audio_support: row.get(6)?,
                     video_support: row.get(7)?,
+                    request_mode: self
+                        .get_model_request_mode(row.get(2)?, &row.get::<_, String>(3)?)?
+                        .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string()),
                 })
             })?
             .next()
