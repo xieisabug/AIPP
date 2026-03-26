@@ -1117,7 +1117,8 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
     // summary_generated_at so they're discoverable via load_mcp_tool/load_mcp_server.
     // (The catalog requires summary_generated_at IS NOT NULL for search.)
     for tpl in &builtin_templates() {
-        let server_id = db.conn
+        let server_id = db
+            .conn
             .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1")?
             .query_row([&tpl.command], |row| row.get::<_, i64>(0))
             .optional()?;

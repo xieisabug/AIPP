@@ -37,11 +37,8 @@ fn catalog_pagination() {
 
     if first_page.total > 3 {
         assert!(first_page.next_cursor.is_some());
-        let second_request = CatalogRequest {
-            cursor: first_page.next_cursor,
-            limit: Some(3),
-            ..request.clone()
-        };
+        let second_request =
+            CatalogRequest { cursor: first_page.next_cursor, limit: Some(3), ..request.clone() };
         let second_page = handle_catalog(&registry, &second_request);
         assert!(!second_page.items.is_empty());
         // No overlap between pages

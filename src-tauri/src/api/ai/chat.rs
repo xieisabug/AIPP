@@ -2200,8 +2200,7 @@ async fn attempt_stream_chat(
                             fn_arguments = %tc.fn_arguments,
                             "received native tool call chunk"
                         );
-                        streaming_tool_calls
-                            .insert(tc.call_id.clone(), tc.clone());
+                        streaming_tool_calls.insert(tc.call_id.clone(), tc.clone());
 
                         // 确保 response 消息已创建（用于承载流式工具调用指示器）
                         if response_message_id.is_none() {
@@ -2236,12 +2235,11 @@ async fn attempt_stream_chat(
 
                         // 构建包含流式工具调用标记的显示内容
                         if let Some(msg_id) = response_message_id {
-                            let display_content =
-                                build_streaming_tool_call_display(
-                                    &response_content,
-                                    &streaming_tool_calls,
-                                    &tool_name_mapping,
-                                );
+                            let display_content = build_streaming_tool_call_display(
+                                &response_content,
+                                &streaming_tool_calls,
+                                &tool_name_mapping,
+                            );
                             debug!(
                                 message_id = msg_id,
                                 streaming_call_count = streaming_tool_calls.len(),
@@ -2264,8 +2262,7 @@ async fn attempt_stream_chat(
                                 .unwrap(),
                             };
                             let _ = window.emit(
-                                format!("conversation_event_{}", conversation_id)
-                                    .as_str(),
+                                format!("conversation_event_{}", conversation_id).as_str(),
                                 update_event,
                             );
                         }
@@ -2391,8 +2388,12 @@ async fn attempt_stream_chat(
                                                                 content: message.content.clone(),
                                                                 is_done: true,
                                                                 token_count: Some(total_tokens),
-                                                                input_token_count: Some(input_tokens),
-                                                                output_token_count: Some(output_tokens),
+                                                                input_token_count: Some(
+                                                                    input_tokens,
+                                                                ),
+                                                                output_token_count: Some(
+                                                                    output_tokens,
+                                                                ),
                                                                 ttft_ms: message.ttft_ms,
                                                                 tps,
                                                             },
@@ -2472,19 +2473,18 @@ async fn attempt_stream_chat(
                             }
                             if let Some(msg_id) = response_message_id {
                                 // Setup only: create DB records + UI hints + determine auto-run IDs (fast)
-                                if let Ok((_all_ids, exec_ids)) =
-                                    setup_captured_tool_calls(
-                                        &app_handle,
-                                        &conversation_db,
-                                        &window,
-                                        conversation_id,
-                                        msg_id,
-                                        &captured_tool_calls,
-                                        &mut response_content,
-                                        mcp_override_config.as_ref(),
-                                        &tool_name_mapping,
-                                    )
-                                    .await
+                                if let Ok((_all_ids, exec_ids)) = setup_captured_tool_calls(
+                                    &app_handle,
+                                    &conversation_db,
+                                    &window,
+                                    conversation_id,
+                                    msg_id,
+                                    &captured_tool_calls,
+                                    &mut response_content,
+                                    mcp_override_config.as_ref(),
+                                    &tool_name_mapping,
+                                )
+                                .await
                                 {
                                     let _ = persist_and_emit_update(
                                         &conversation_db,

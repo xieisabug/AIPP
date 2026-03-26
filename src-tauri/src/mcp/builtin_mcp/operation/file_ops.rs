@@ -285,11 +285,20 @@ impl FileOperations {
     }
 
     /// 普通目录列表
-    fn list_entries(path: &str, recursive: bool) -> Result<Vec<DirectoryEntry>, String> {
+    pub(super) fn list_entries(path: &str, recursive: bool) -> Result<Vec<DirectoryEntry>, String> {
+        let root_path = Path::new(path);
+        Self::list_entries_from_root(root_path, root_path, recursive)
+    }
+
+    fn list_entries_from_root(
+        root_path: &Path,
+        current_path: &Path,
+        recursive: bool,
+    ) -> Result<Vec<DirectoryEntry>, String> {
         let mut entries = Vec::new();
 
         let read_dir =
-            fs::read_dir(path).map_err(|e| format!("Failed to read directory: {}", e))?;
+            fs::read_dir(current_path).map_err(|e| format!("Failed to read directory: {}", e))?;
 
         for entry in read_dir {
             let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
@@ -297,7 +306,7 @@ impl FileOperations {
             let metadata = entry.metadata().ok();
 
             let dir_entry = DirectoryEntry {
-                name: entry.file_name().to_string_lossy().to_string(),
+                name: Self::build_directory_entry_name(root_path, &entry_path, recursive),
                 path: entry_path.to_string_lossy().to_string(),
                 is_directory: entry_path.is_dir(),
                 size: metadata
@@ -314,8 +323,7 @@ impl FileOperations {
 
             // 递归处理子目录
             if recursive && entry_path.is_dir() {
-                if let Ok(sub_entries) =
-                    Self::list_entries(&entry_path.to_string_lossy(), recursive)
+                if let Ok(sub_entries) = Self::list_entries_from_root(root_path, &entry_path, true)
                 {
                     entries.extend(sub_entries);
                 }
@@ -326,6 +334,24 @@ impl FileOperations {
         entries.sort_by(|a, b| b.modified.cmp(&a.modified));
 
         Ok(entries)
+    }
+
+    fn build_directory_entry_name(root_path: &Path, entry_path: &Path, recursive: bool) -> String {
+        if recursive {
+            if let Ok(relative_path) = entry_path.strip_prefix(root_path) {
+                let relative_name = relative_path
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+                    .join("/");
+
+                if !relative_name.is_empty() {
+                    return relative_name;
+                }
+            }
+        }
+
+        entry_path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default()
     }
 
     /// 使用 glob 模式列出文件

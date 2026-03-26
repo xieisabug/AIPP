@@ -87,9 +87,8 @@ impl ActionHandler for TaskGetHandler {
             .get_task_definition_by_task_conversation_id(task_conversation_id)
             .map_err(|e| e.to_string())?;
 
-        let task_result = butler_repo
-            .get_task_result(task_conversation_id)
-            .map_err(|e| e.to_string())?;
+        let task_result =
+            butler_repo.get_task_result(task_conversation_id).map_err(|e| e.to_string())?;
 
         let mut result = json!({
             "conversation_id": conversation.id,
@@ -137,15 +136,11 @@ impl ActionHandler for TaskSpawnHandler {
             .get("title")
             .and_then(|v| v.as_str())
             .ok_or("Missing required parameter: title")?;
-        let goal = args
-            .get("goal")
-            .and_then(|v| v.as_str())
-            .ok_or("Missing required parameter: goal")?;
+        let goal =
+            args.get("goal").and_then(|v| v.as_str()).ok_or("Missing required parameter: goal")?;
         let executor_assistant_id = args.get("executor_assistant_id").and_then(|v| v.as_i64());
-        let executor_assistant_name = args
-            .get("executor_assistant_name")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let executor_assistant_name =
+            args.get("executor_assistant_name").and_then(|v| v.as_str()).map(|s| s.to_string());
 
         if dry_run {
             return Ok(json!({
@@ -165,13 +160,11 @@ impl ActionHandler for TaskSpawnHandler {
         // agent tool in aipp:agent is the proper entry point.
         // This action provides a structured wrapper that documents the intent,
         // but for Phase 1 it delegates to the agent tool guidance.
-        Err(
-            "task.spawn is not directly executable in Phase 1. \
+        Err("task.spawn is not directly executable in Phase 1. \
              Use the existing aipp:agent spawn_task_conversation tool instead, \
              which handles window context and AI execution. \
              This action is registered for catalog/inspect discoverability."
-                .to_string(),
-        )
+            .to_string())
     }
 }
 
@@ -196,10 +189,7 @@ impl ActionHandler for TaskCancelHandler {
             .ok_or_else(|| format!("Task conversation not found: {}", task_conversation_id))?;
 
         if conversation.conversation_kind != "butler_task" {
-            return Err(format!(
-                "Conversation {} is not a butler task",
-                task_conversation_id
-            ));
+            return Err(format!("Conversation {} is not a butler task", task_conversation_id));
         }
 
         if dry_run {
@@ -243,20 +233,26 @@ impl ActionHandler for TaskCancelHandler {
         snapshot: &serde_json::Value,
         _original_args: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let task_conversation_id = snapshot.get("task_conversation_id").and_then(|v| v.as_i64())
+        let task_conversation_id = snapshot
+            .get("task_conversation_id")
+            .and_then(|v| v.as_i64())
             .ok_or("Missing task_conversation_id in snapshot")?;
         let previous_status = snapshot.get("previous_status").and_then(|v| v.as_str());
 
         let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
         let repo = db.conversation_repo().map_err(|e| e.to_string())?;
-        let mut conv = repo.read(task_conversation_id).map_err(|e| e.to_string())?
+        let mut conv = repo
+            .read(task_conversation_id)
+            .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Task conversation {} not found", task_conversation_id))?;
 
         conv.butler_task_status = previous_status.map(|s| s.to_string());
         conv.butler_task_finalized_at = None;
         repo.update(&conv).map_err(|e| e.to_string())?;
 
-        Ok(json!({ "undone": true, "task_conversation_id": task_conversation_id, "restored_status": previous_status }))
+        Ok(
+            json!({ "undone": true, "task_conversation_id": task_conversation_id, "restored_status": previous_status }),
+        )
     }
 }
 

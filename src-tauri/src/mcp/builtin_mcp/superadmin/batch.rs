@@ -34,13 +34,7 @@ pub async fn handle_batch(
             reason: item.reason.clone(),
         };
 
-        let result = handle_execute(
-            app_handle,
-            registry,
-            exec_req,
-            butler_conversation_id,
-        )
-        .await;
+        let result = handle_execute(app_handle, registry, exec_req, butler_conversation_id).await;
 
         let step = BatchStepResult {
             index,
@@ -71,9 +65,5 @@ pub async fn handle_batch(
         steps.push(step);
     }
 
-    BatchResponse {
-        steps,
-        all_succeeded,
-        stopped_at,
-    }
+    BatchResponse { steps, all_succeeded, stopped_at }
 }

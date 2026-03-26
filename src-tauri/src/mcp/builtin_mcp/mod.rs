@@ -787,16 +787,16 @@ async fn resolve_pending_mcp_tool_call(
         return pending_tool_calls
             .into_iter()
             .find(|tool_call| tool_call.id == tool_call_id)
-            .ok_or_else(|| "Pending MCP tool call not found for this task conversation".to_string());
+            .ok_or_else(|| {
+                "Pending MCP tool call not found for this task conversation".to_string()
+            });
     }
 
     if let Some(llm_call_id) = args.get("llm_call_id").and_then(|value| value.as_str()) {
         return pending_tool_calls
             .into_iter()
             .find(|tool_call| tool_call.llm_call_id.as_deref() == Some(llm_call_id))
-            .ok_or_else(|| {
-                "Pending MCP tool call matching llm_call_id was not found".to_string()
-            });
+            .ok_or_else(|| "Pending MCP tool call matching llm_call_id was not found".to_string());
     }
 
     if pending_tool_calls.len() == 1 {
@@ -804,10 +804,8 @@ async fn resolve_pending_mcp_tool_call(
     } else if pending_tool_calls.is_empty() {
         Err("No pending MCP tool call exists for this task conversation".to_string())
     } else {
-        Err(
-            "Multiple pending MCP tool calls exist; please specify tool_call_id or llm_call_id"
-                .to_string(),
-        )
+        Err("Multiple pending MCP tool calls exist; please specify tool_call_id or llm_call_id"
+            .to_string())
     }
 }
 
@@ -1588,10 +1586,8 @@ pub async fn execute_aipp_builtin_tool(
                                 .and_then(|v| v.as_u64())
                                 .map(|v| v as usize)
                                 .unwrap_or(1);
-                            let verbose = args
-                                .get("verbose")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
+                            let verbose =
+                                args.get("verbose").and_then(|v| v.as_bool()).unwrap_or(false);
                             match build_task_conversation_read_payload(
                                 &app_handle,
                                 &detail,
@@ -1647,21 +1643,21 @@ pub async fn execute_aipp_builtin_tool(
                                 // execute_aipp_builtin_tool).
                                 std::thread::spawn(move || {
                                     tauri::async_runtime::block_on(async move {
-                                    let task_conversation_id_for_spawn = task_conversation_id;
-                                    let request = AiRequest {
-                                        conversation_id: task_conversation_id_for_spawn
-                                            .to_string(),
-                                        assistant_id,
-                                        prompt: prompt_owned,
-                                        model: None,
-                                        override_model_id: None,
-                                        temperature: None,
-                                        top_p: None,
-                                        max_tokens: None,
-                                        stream: Some(true),
-                                        attachment_list: None,
-                                    };
-                                    match ask_ai(
+                                        let task_conversation_id_for_spawn = task_conversation_id;
+                                        let request = AiRequest {
+                                            conversation_id: task_conversation_id_for_spawn
+                                                .to_string(),
+                                            assistant_id,
+                                            prompt: prompt_owned,
+                                            model: None,
+                                            override_model_id: None,
+                                            temperature: None,
+                                            top_p: None,
+                                            max_tokens: None,
+                                            stream: Some(true),
+                                            attachment_list: None,
+                                        };
+                                        match ask_ai(
                                         app_handle_clone.clone(),
                                         app_handle_clone.state::<crate::AppState>(),
                                         app_handle_clone.state::<crate::AcpSessionState>(),
@@ -1952,9 +1948,7 @@ pub async fn execute_aipp_builtin_tool(
                 }),
             }
         }
-        "superadmin" => {
-            superadmin::dispatch(&app_handle, &tool_name, &args, conversation_id).await
-        }
+        "superadmin" => superadmin::dispatch(&app_handle, &tool_name, &args, conversation_id).await,
         _ => serde_json::json!({
             "content": [{"type": "text", "text": format!("Unknown builtin command: {}", cmd_id)}],
             "isError": true

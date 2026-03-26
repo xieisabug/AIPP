@@ -215,4 +215,46 @@ describe('useContextList', () => {
             );
         });
     });
+
+    it('keeps recursive directory hierarchy in list_directory preview content', async () => {
+        const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
+            [1, {
+                call_id: 1,
+                conversation_id: 1,
+                status: 'success',
+                tool_name: 'list_directory',
+                parameters: JSON.stringify({ path: '/workspace/src', recursive: true }),
+                result: JSON.stringify({
+                    content: [{ type: 'text', text: 'a/\na/b/\na/b/c/\na/b/c/d.md' }],
+                    isError: false,
+                    metadata: {
+                        path: '/workspace/src',
+                        total_count: 4,
+                    },
+                }),
+            }],
+        ]);
+
+        const { result } = renderHook(() =>
+            useContextList({
+                conversationId: 1,
+                userFiles: null,
+                mcpToolCallStates,
+                messages: [],
+                acpWorkingDirectory: null,
+            }),
+        );
+
+        await waitFor(() => {
+            expect(
+                result.current.contextItems.find((item) => item.type === 'list_directory')?.previewData,
+            ).toEqual(
+                expect.objectContaining({
+                    contentType: 'directory',
+                    content: 'a/\na/b/\na/b/c/\na/b/c/d.md',
+                    rawValue: '/workspace/src',
+                }),
+            );
+        });
+    });
 });

@@ -289,7 +289,11 @@ impl PermissionManager {
                     .iter()
                     .filter_map(|v| {
                         let p = v.get("path")?.as_str()?.trim().to_string();
-                        if p.is_empty() { None } else { Some(p) }
+                        if p.is_empty() {
+                            None
+                        } else {
+                            Some(p)
+                        }
                     })
                     .collect();
                 if !paths.is_empty() {
@@ -298,11 +302,7 @@ impl PermissionManager {
             }
         }
 
-        trimmed
-            .split('\n')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
+        trimmed.split('\n').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
     }
 
     /// 检查路径是否在白名单内
@@ -699,21 +699,19 @@ mod tests {
         {
             let json = r#"[{"path":"C:\\Users\\admin\\proj1","description":"fe"},{"path":"C:\\Users\\admin\\proj2","description":"be"}]"#;
             assert!(PermissionManager::is_path_in_trusted_dirs(
-                "C:\\Users\\admin\\proj2\\file.rs", json
+                "C:\\Users\\admin\\proj2\\file.rs",
+                json
             ));
             assert!(!PermissionManager::is_path_in_trusted_dirs(
-                "C:\\Users\\admin\\proj3\\file.rs", json
+                "C:\\Users\\admin\\proj3\\file.rs",
+                json
             ));
         }
         #[cfg(not(windows))]
         {
             let json = r#"[{"path":"/home/user/proj1","description":"fe"},{"path":"/home/user/proj2","description":"be"}]"#;
-            assert!(PermissionManager::is_path_in_trusted_dirs(
-                "/home/user/proj2/file.rs", json
-            ));
-            assert!(!PermissionManager::is_path_in_trusted_dirs(
-                "/home/user/proj3/file.rs", json
-            ));
+            assert!(PermissionManager::is_path_in_trusted_dirs("/home/user/proj2/file.rs", json));
+            assert!(!PermissionManager::is_path_in_trusted_dirs("/home/user/proj3/file.rs", json));
         }
     }
 
@@ -730,14 +728,16 @@ mod tests {
         {
             let json = r#"[{"path":"C:\\Users\\admin\\projects","description":""}]"#;
             assert!(!PermissionManager::is_path_in_trusted_dirs(
-                "C:\\Users\\admin\\projects-evil\\malware.exe", json
+                "C:\\Users\\admin\\projects-evil\\malware.exe",
+                json
             ));
         }
         #[cfg(not(windows))]
         {
             let json = r#"[{"path":"/home/user/projects","description":""}]"#;
             assert!(!PermissionManager::is_path_in_trusted_dirs(
-                "/home/user/projects-evil/malware", json
+                "/home/user/projects-evil/malware",
+                json
             ));
         }
     }
@@ -748,14 +748,16 @@ mod tests {
         {
             let legacy = "C:\\Users\\admin\\proj1\nC:\\Users\\admin\\proj2";
             assert!(PermissionManager::is_path_in_trusted_dirs(
-                "C:\\Users\\admin\\proj1\\file.txt", legacy
+                "C:\\Users\\admin\\proj1\\file.txt",
+                legacy
             ));
         }
         #[cfg(not(windows))]
         {
             let legacy = "/home/user/proj1\n/home/user/proj2";
             assert!(PermissionManager::is_path_in_trusted_dirs(
-                "/home/user/proj1/file.txt", legacy
+                "/home/user/proj1/file.txt",
+                legacy
             ));
         }
     }

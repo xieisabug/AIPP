@@ -71,19 +71,14 @@ pub async fn handle_execute(
 
     // 3. Capture before-snapshot for write actions (risk > 0)
     let before_snapshot = if meta.risk_level.0 > 0 && !request.dry_run {
-        registered
-            .handler
-            .snapshot_before(app_handle, &request.args)
-            .await
+        registered.handler.snapshot_before(app_handle, &request.args).await
     } else {
         None
     };
 
     // 4. Execute via handler
-    let handler_result = registered
-        .handler
-        .execute(app_handle, request.args.clone(), request.dry_run)
-        .await;
+    let handler_result =
+        registered.handler.execute(app_handle, request.args.clone(), request.dry_run).await;
 
     match handler_result {
         Ok(result_value) => {

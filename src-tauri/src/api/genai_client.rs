@@ -34,7 +34,11 @@ pub fn normalize_request_mode(request_mode: Option<&str>) -> &'static str {
 }
 
 /// 推断适配器类型
-pub fn infer_adapter_kind(model_name: &str, api_type: &str, request_mode: Option<&str>) -> AdapterKind {
+pub fn infer_adapter_kind(
+    model_name: &str,
+    api_type: &str,
+    request_mode: Option<&str>,
+) -> AdapterKind {
     let request_mode = normalize_request_mode(request_mode);
     debug!(
         model_name = %model_name,

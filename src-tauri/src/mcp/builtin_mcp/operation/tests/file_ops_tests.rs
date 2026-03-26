@@ -1,3 +1,4 @@
+use super::super::file_ops::FileOperations;
 /// 文件操作测试
 ///
 /// 使用临时目录和文件进行测试，确保：
@@ -288,6 +289,25 @@ fn test_list_directory_recursive() {
 
     let total = count_files(temp_dir.path());
     assert_eq!(total, 3); // root.txt, sub/, sub/nested.txt
+}
+
+/// 测试递归目录列表使用相对层级名称
+#[test]
+fn test_list_directory_recursive_preserves_relative_paths() {
+    let temp_dir = create_temp_dir();
+
+    let nested_dir = temp_dir.path().join("a").join("b").join("c");
+    fs::create_dir_all(&nested_dir).unwrap();
+    fs::write(nested_dir.join("d.md"), "nested").unwrap();
+
+    let entries = FileOperations::list_entries(&temp_dir.path().to_string_lossy(), true).unwrap();
+    let names: Vec<String> = entries.into_iter().map(|entry| entry.name).collect();
+
+    assert!(names.contains(&"a".to_string()));
+    assert!(names.contains(&"a/b".to_string()));
+    assert!(names.contains(&"a/b/c".to_string()));
+    assert!(names.contains(&"a/b/c/d.md".to_string()));
+    assert!(!names.contains(&"d.md".to_string()));
 }
 
 /// 测试 glob 模式匹配

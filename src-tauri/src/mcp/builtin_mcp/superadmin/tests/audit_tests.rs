@@ -70,7 +70,16 @@ fn query_by_domain() {
         "assistant.list",
         "assistant",
         RiskLevel::SAFE,
-        None, None, false, false, true, None, None, None, "butler", None,
+        None,
+        None,
+        false,
+        false,
+        true,
+        None,
+        None,
+        None,
+        "butler",
+        None,
     )
     .unwrap();
 
@@ -80,11 +89,21 @@ fn query_by_domain() {
         "schedule.list",
         "schedule",
         RiskLevel::SAFE,
-        None, None, false, false, true, None, None, None, "butler", None,
+        None,
+        None,
+        false,
+        false,
+        true,
+        None,
+        None,
+        None,
+        "butler",
+        None,
     )
     .unwrap();
 
-    let assistant_entries = query_audit_log(&conn, None, Some("assistant"), None, false, 10, 0).unwrap();
+    let assistant_entries =
+        query_audit_log(&conn, None, Some("assistant"), None, false, 10, 0).unwrap();
     assert_eq!(assistant_entries.len(), 1);
     assert_eq!(assistant_entries[0].domain, "assistant");
 
@@ -103,7 +122,16 @@ fn query_respects_limit() {
             &format!("test.action_{}", i),
             "test",
             RiskLevel::LOW,
-            None, None, false, false, true, None, None, None, "butler", None,
+            None,
+            None,
+            false,
+            false,
+            true,
+            None,
+            None,
+            None,
+            "butler",
+            None,
         )
         .unwrap();
     }
@@ -142,7 +170,8 @@ fn insert_failed_action() {
     )
     .unwrap();
 
-    let entries = query_audit_log(&conn, Some("schedule.delete"), None, None, false, 10, 0).unwrap();
+    let entries =
+        query_audit_log(&conn, Some("schedule.delete"), None, None, false, 10, 0).unwrap();
     assert_eq!(entries.len(), 1);
     assert!(!entries[0].success);
     assert_eq!(entries[0].error.as_deref(), Some("Approval required"));
@@ -171,7 +200,8 @@ fn insert_dry_run() {
     )
     .unwrap();
 
-    let entries = query_audit_log(&conn, Some("assistant.create"), None, None, false, 10, 0).unwrap();
+    let entries =
+        query_audit_log(&conn, Some("assistant.create"), None, None, false, 10, 0).unwrap();
     assert_eq!(entries.len(), 1);
     assert!(entries[0].dry_run);
 }
@@ -203,7 +233,10 @@ fn insert_with_snapshot() {
     .unwrap();
 
     let entry = get_audit_entry(&conn, &audit_id).unwrap().expect("should find entry");
-    assert_eq!(entry.before_snapshot_json.as_deref(), Some("{\"_type\":\"assistant.update_prompt\",\"assistant_id\":1,\"old_prompt\":\"old\"}"));
+    assert_eq!(
+        entry.before_snapshot_json.as_deref(),
+        Some("{\"_type\":\"assistant.update_prompt\",\"assistant_id\":1,\"old_prompt\":\"old\"}")
+    );
     assert!(!entry.is_undone);
     assert!(entry.undo_audit_id.is_none());
 }
@@ -215,10 +248,23 @@ fn mark_undone_and_verify() {
     let undo_id = generate_audit_id();
 
     insert_audit_log(
-        &conn, &audit_id, "assistant.update_prompt", "assistant",
-        RiskLevel::MEDIUM, None, None, false, false, true, None, None, None, "butler",
+        &conn,
+        &audit_id,
+        "assistant.update_prompt",
+        "assistant",
+        RiskLevel::MEDIUM,
+        None,
+        None,
+        false,
+        false,
+        true,
+        None,
+        None,
+        None,
+        "butler",
         Some("{\"old_prompt\":\"hello\"}"),
-    ).unwrap();
+    )
+    .unwrap();
 
     mark_audit_undone(&conn, &audit_id, &undo_id).unwrap();
 
@@ -233,30 +279,83 @@ fn query_undoable_only() {
 
     // Undoable: success, not dry_run, has snapshot, not undone
     insert_audit_log(
-        &conn, &generate_audit_id(), "assistant.update_prompt", "assistant",
-        RiskLevel::MEDIUM, None, None, false, false, true, None, None, None, "butler",
+        &conn,
+        &generate_audit_id(),
+        "assistant.update_prompt",
+        "assistant",
+        RiskLevel::MEDIUM,
+        None,
+        None,
+        false,
+        false,
+        true,
+        None,
+        None,
+        None,
+        "butler",
         Some("{\"snapshot\":true}"),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Not undoable: no snapshot
     insert_audit_log(
-        &conn, &generate_audit_id(), "assistant.list", "assistant",
-        RiskLevel::SAFE, None, None, false, false, true, None, None, None, "butler", None,
-    ).unwrap();
+        &conn,
+        &generate_audit_id(),
+        "assistant.list",
+        "assistant",
+        RiskLevel::SAFE,
+        None,
+        None,
+        false,
+        false,
+        true,
+        None,
+        None,
+        None,
+        "butler",
+        None,
+    )
+    .unwrap();
 
     // Not undoable: dry_run
     insert_audit_log(
-        &conn, &generate_audit_id(), "assistant.update_model", "assistant",
-        RiskLevel::MEDIUM, None, None, true, false, true, None, None, None, "butler",
+        &conn,
+        &generate_audit_id(),
+        "assistant.update_model",
+        "assistant",
+        RiskLevel::MEDIUM,
+        None,
+        None,
+        true,
+        false,
+        true,
+        None,
+        None,
+        None,
+        "butler",
         Some("{\"snapshot\":true}"),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Not undoable: failed
     insert_audit_log(
-        &conn, &generate_audit_id(), "assistant.create", "assistant",
-        RiskLevel::LOW, None, None, false, false, false, None, Some("err"), None, "butler",
+        &conn,
+        &generate_audit_id(),
+        "assistant.create",
+        "assistant",
+        RiskLevel::LOW,
+        None,
+        None,
+        false,
+        false,
+        false,
+        None,
+        Some("err"),
+        None,
+        "butler",
         Some("{\"snapshot\":true}"),
-    ).unwrap();
+    )
+    .unwrap();
 
     let undoable = query_audit_log(&conn, None, None, None, true, 50, 0).unwrap();
     assert_eq!(undoable.len(), 1);
@@ -287,9 +386,23 @@ fn query_with_offset() {
 
     for i in 0..5 {
         insert_audit_log(
-            &conn, &generate_audit_id(), &format!("test.action_{}", i), "test",
-            RiskLevel::LOW, None, None, false, false, true, None, None, None, "butler", None,
-        ).unwrap();
+            &conn,
+            &generate_audit_id(),
+            &format!("test.action_{}", i),
+            "test",
+            RiskLevel::LOW,
+            None,
+            None,
+            false,
+            false,
+            true,
+            None,
+            None,
+            None,
+            "butler",
+            None,
+        )
+        .unwrap();
     }
 
     let page1 = query_audit_log(&conn, None, None, None, false, 2, 0).unwrap();

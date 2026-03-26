@@ -91,10 +91,9 @@ pub async fn generate_summary(
     ];
 
     let chat_request = ChatRequest::new(messages);
-    let response = client
-        .exec_chat(model_name, chat_request, None)
-        .await
-        .map_err(|e| AppError::UnknownError(format!("context compaction LLM call failed: {}", e)))?;
+    let response = client.exec_chat(model_name, chat_request, None).await.map_err(|e| {
+        AppError::UnknownError(format!("context compaction LLM call failed: {}", e))
+    })?;
 
     let summary = response.first_text().unwrap_or("").to_string();
 
@@ -105,10 +104,7 @@ pub async fn generate_summary(
         format!("<context_summary>\n{}\n</context_summary>", summary)
     };
 
-    debug!(
-        summary_len = summary.len(),
-        "context compaction summary generated"
-    );
+    debug!(summary_len = summary.len(), "context compaction summary generated");
 
     Ok(summary)
 }

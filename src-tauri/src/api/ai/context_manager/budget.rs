@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use crate::db::system_db::FeatureConfig;
+use std::collections::HashMap;
 
 const EXPERIMENTAL_FEATURE_CODE: &str = "experimental";
 
@@ -54,7 +54,9 @@ impl ContextBudget {
     }
 
     /// Build a budget from the feature config map, falling back to defaults.
-    pub fn from_config(config_feature_map: &HashMap<String, HashMap<String, FeatureConfig>>) -> Self {
+    pub fn from_config(
+        config_feature_map: &HashMap<String, HashMap<String, FeatureConfig>>,
+    ) -> Self {
         let mut budget = Self::default();
 
         let Some(exp_map) = config_feature_map.get(EXPERIMENTAL_FEATURE_CODE) else {
@@ -62,12 +64,11 @@ impl ContextBudget {
         };
 
         if let Some(v) = exp_map.get("context_compaction_enabled") {
-            budget.enabled = v.value.trim().eq_ignore_ascii_case("true")
-                || v.value.trim() == "1";
+            budget.enabled = v.value.trim().eq_ignore_ascii_case("true") || v.value.trim() == "1";
         }
         // Accepts both legacy key and new key
-        if let Some(v) = exp_map.get("context_max_input_tokens")
-            .or_else(|| exp_map.get("context_window_size"))
+        if let Some(v) =
+            exp_map.get("context_max_input_tokens").or_else(|| exp_map.get("context_window_size"))
         {
             if let Ok(n) = v.value.trim().parse::<usize>() {
                 budget.context_window_size = n;
@@ -148,9 +149,18 @@ mod tests {
     #[test]
     fn from_config_overrides() {
         let mut exp = HashMap::new();
-        exp.insert("context_max_input_tokens".to_string(), make_fc("context_max_input_tokens", "200000"));
-        exp.insert("context_compaction_threshold".to_string(), make_fc("context_compaction_threshold", "0.90"));
-        exp.insert("context_compaction_enabled".to_string(), make_fc("context_compaction_enabled", "false"));
+        exp.insert(
+            "context_max_input_tokens".to_string(),
+            make_fc("context_max_input_tokens", "200000"),
+        );
+        exp.insert(
+            "context_compaction_threshold".to_string(),
+            make_fc("context_compaction_threshold", "0.90"),
+        );
+        exp.insert(
+            "context_compaction_enabled".to_string(),
+            make_fc("context_compaction_enabled", "false"),
+        );
         exp.insert("context_tail_ratio".to_string(), make_fc("context_tail_ratio", "0.40"));
         let mut config = HashMap::new();
         config.insert("experimental".to_string(), exp);

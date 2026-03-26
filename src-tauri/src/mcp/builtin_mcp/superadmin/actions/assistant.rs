@@ -62,9 +62,8 @@ impl ActionHandler for AssistantGetHandler {
         let assistant = db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
         let prompts = db.get_assistant_prompt(assistant_id).map_err(|e| e.to_string())?;
         let models = db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?;
-        let model_configs = db
-            .get_assistant_model_configs(assistant_id)
-            .map_err(|e| e.to_string())?;
+        let model_configs =
+            db.get_assistant_model_configs(assistant_id).map_err(|e| e.to_string())?;
 
         let prompt_text = prompts.first().map(|p| p.prompt.as_str()).unwrap_or("");
         let model_info: Vec<serde_json::Value> = models
@@ -109,17 +108,10 @@ impl ActionHandler for AssistantCreateHandler {
         args: serde_json::Value,
         dry_run: bool,
     ) -> Result<serde_json::Value, String> {
-        let name = args
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or("Missing required parameter: name")?;
-        let description = args
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let assistant_type = args
-            .get("assistant_type")
-            .and_then(|v| v.as_i64());
+        let name =
+            args.get("name").and_then(|v| v.as_str()).ok_or("Missing required parameter: name")?;
+        let description = args.get("description").and_then(|v| v.as_str()).unwrap_or("");
+        let assistant_type = args.get("assistant_type").and_then(|v| v.as_i64());
 
         if dry_run {
             return Ok(json!({
@@ -129,15 +121,13 @@ impl ActionHandler for AssistantCreateHandler {
         }
 
         let db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
-        let new_id = db
-            .add_assistant(name, description, assistant_type, true)
-            .map_err(|e| e.to_string())?;
+        let new_id =
+            db.add_assistant(name, description, assistant_type, true).map_err(|e| e.to_string())?;
 
         // If a prompt was provided, set it
         if let Some(prompt) = args.get("prompt").and_then(|v| v.as_str()) {
             if !prompt.is_empty() {
-                db.add_assistant_prompt(new_id, prompt)
-                    .map_err(|e| e.to_string())?;
+                db.add_assistant_prompt(new_id, prompt).map_err(|e| e.to_string())?;
             }
         }
 
@@ -190,9 +180,7 @@ impl ActionHandler for AssistantUpdatePromptHandler {
         let _ = db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
 
         if dry_run {
-            let old_prompts = db
-                .get_assistant_prompt(assistant_id)
-                .map_err(|e| e.to_string())?;
+            let old_prompts = db.get_assistant_prompt(assistant_id).map_err(|e| e.to_string())?;
             let old_text = old_prompts.first().map(|p| p.prompt.as_str()).unwrap_or("");
             return Ok(json!({
                 "dry_run": true,
@@ -202,16 +190,12 @@ impl ActionHandler for AssistantUpdatePromptHandler {
             }));
         }
 
-        let existing = db
-            .get_assistant_prompt(assistant_id)
-            .map_err(|e| e.to_string())?;
+        let existing = db.get_assistant_prompt(assistant_id).map_err(|e| e.to_string())?;
 
         if let Some(p) = existing.first() {
-            db.update_assistant_prompt(p.id, prompt)
-                .map_err(|e| e.to_string())?;
+            db.update_assistant_prompt(p.id, prompt).map_err(|e| e.to_string())?;
         } else {
-            db.add_assistant_prompt(assistant_id, prompt)
-                .map_err(|e| e.to_string())?;
+            db.add_assistant_prompt(assistant_id, prompt).map_err(|e| e.to_string())?;
         }
 
         Ok(json!({
@@ -242,10 +226,12 @@ impl ActionHandler for AssistantUpdatePromptHandler {
         snapshot: &serde_json::Value,
         _original_args: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let assistant_id = snapshot.get("assistant_id").and_then(|v| v.as_i64())
+        let assistant_id = snapshot
+            .get("assistant_id")
+            .and_then(|v| v.as_i64())
             .ok_or("Missing assistant_id in snapshot")?;
-        let old_prompt = snapshot.get("prompt").and_then(|v| v.as_str())
-            .ok_or("Missing prompt in snapshot")?;
+        let old_prompt =
+            snapshot.get("prompt").and_then(|v| v.as_str()).ok_or("Missing prompt in snapshot")?;
 
         let db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
         let existing = db.get_assistant_prompt(assistant_id).map_err(|e| e.to_string())?;
@@ -284,10 +270,7 @@ impl ActionHandler for AssistantUpdateModelHandler {
             .get("model_code")
             .and_then(|v| v.as_str())
             .ok_or("Missing required parameter: model_code")?;
-        let alias = args
-            .get("alias")
-            .and_then(|v| v.as_str())
-            .unwrap_or(model_code);
+        let alias = args.get("alias").and_then(|v| v.as_str()).unwrap_or(model_code);
 
         let db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
         let _ = db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
@@ -300,9 +283,7 @@ impl ActionHandler for AssistantUpdateModelHandler {
             }));
         }
 
-        let existing_models = db
-            .get_assistant_model(assistant_id)
-            .map_err(|e| e.to_string())?;
+        let existing_models = db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?;
 
         if let Some(m) = existing_models.first() {
             db.update_assistant_model(m.id, provider_id, model_code, alias)
@@ -344,9 +325,13 @@ impl ActionHandler for AssistantUpdateModelHandler {
         snapshot: &serde_json::Value,
         _original_args: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let assistant_id = snapshot.get("assistant_id").and_then(|v| v.as_i64())
+        let assistant_id = snapshot
+            .get("assistant_id")
+            .and_then(|v| v.as_i64())
             .ok_or("Missing assistant_id in snapshot")?;
-        let models = snapshot.get("models").and_then(|v| v.as_array())
+        let models = snapshot
+            .get("models")
+            .and_then(|v| v.as_array())
             .ok_or("Missing models in snapshot")?;
 
         let db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
@@ -358,7 +343,8 @@ impl ActionHandler for AssistantUpdateModelHandler {
 
             let existing = db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?;
             if let Some(m) = existing.first() {
-                db.update_assistant_model(m.id, provider_id, model_code, alias).map_err(|e| e.to_string())?;
+                db.update_assistant_model(m.id, provider_id, model_code, alias)
+                    .map_err(|e| e.to_string())?;
             }
         }
 
@@ -432,9 +418,13 @@ impl ActionHandler for AssistantUpdateMcpConfigHandler {
         snapshot: &serde_json::Value,
         _original_args: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let assistant_id = snapshot.get("assistant_id").and_then(|v| v.as_i64())
+        let assistant_id = snapshot
+            .get("assistant_id")
+            .and_then(|v| v.as_i64())
             .ok_or("Missing assistant_id in snapshot")?;
-        let mcp_server_id = snapshot.get("mcp_server_id").and_then(|v| v.as_i64())
+        let mcp_server_id = snapshot
+            .get("mcp_server_id")
+            .and_then(|v| v.as_i64())
             .ok_or("Missing mcp_server_id in snapshot")?;
         let was_enabled = snapshot.get("was_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -466,10 +456,7 @@ impl ActionHandler for AssistantUpdateSkillConfigHandler {
             .get("is_enabled")
             .and_then(|v| v.as_bool())
             .ok_or("Missing required parameter: is_enabled")?;
-        let priority = args
-            .get("priority")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as i32;
+        let priority = args.get("priority").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
 
         if dry_run {
             return Ok(json!({
@@ -522,15 +509,27 @@ impl ActionHandler for AssistantUpdateSkillConfigHandler {
         snapshot: &serde_json::Value,
         _original_args: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let assistant_id = snapshot.get("assistant_id").and_then(|v| v.as_i64())
+        let assistant_id = snapshot
+            .get("assistant_id")
+            .and_then(|v| v.as_i64())
             .ok_or("Missing assistant_id in snapshot")?;
-        let skill_identifier = snapshot.get("skill_identifier").and_then(|v| v.as_str())
+        let skill_identifier = snapshot
+            .get("skill_identifier")
+            .and_then(|v| v.as_str())
             .ok_or("Missing skill_identifier in snapshot")?;
         let was_enabled = snapshot.get("was_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-        let was_priority = snapshot.get("was_priority").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let was_priority =
+            snapshot.get("was_priority").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
 
-        let skill_db = crate::db::skill_db::SkillDatabase::new(app_handle).map_err(|e| e.to_string())?;
-        skill_db.upsert_assistant_skill_config(assistant_id, skill_identifier, was_enabled, was_priority)
+        let skill_db =
+            crate::db::skill_db::SkillDatabase::new(app_handle).map_err(|e| e.to_string())?;
+        skill_db
+            .upsert_assistant_skill_config(
+                assistant_id,
+                skill_identifier,
+                was_enabled,
+                was_priority,
+            )
             .map_err(|e| e.to_string())?;
 
         Ok(json!({ "undone": true, "assistant_id": assistant_id, "restored_enabled": was_enabled }))

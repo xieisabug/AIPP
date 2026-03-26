@@ -170,7 +170,8 @@ pub async fn get_llm_models(
 ) -> Result<Vec<LlmModel>, String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let models = db.get_llm_models(llm_provider_id).map_err(|e| e.to_string())?;
-    let provider_id_num = models.first().map(|(_, _, llm_provider_id, _, _, _, _, _)| *llm_provider_id);
+    let provider_id_num =
+        models.first().map(|(_, _, llm_provider_id, _, _, _, _, _)| *llm_provider_id);
     let request_mode_map = if let Some(provider_id_num) = provider_id_num {
         list_request_mode_map(&db, provider_id_num)?
     } else {
@@ -182,10 +183,10 @@ pub async fn get_llm_models(
         name,
         llm_provider_id,
         code,
-            description,
-            vision_support,
-            audio_support,
-            video_support,
+        description,
+        vision_support,
+        audio_support,
+        video_support,
     ) in models
     {
         let request_mode = request_mode_map

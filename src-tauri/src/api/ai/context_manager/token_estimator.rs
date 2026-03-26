@@ -68,10 +68,7 @@ pub fn estimate_total_tokens(
             let attachment_tokens: usize = attachments
                 .iter()
                 .map(|a| {
-                    a.attachment_content
-                        .as_deref()
-                        .map(|c| estimate_by_content(c))
-                        .unwrap_or(0)
+                    a.attachment_content.as_deref().map(|c| estimate_by_content(c)).unwrap_or(0)
                 })
                 .sum();
             content_tokens + attachment_tokens

@@ -24,14 +24,8 @@ impl ActionHandler for ConversationListHandler {
         args: serde_json::Value,
         _dry_run: bool,
     ) -> Result<serde_json::Value, String> {
-        let page = args
-            .get("page")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(1) as u32;
-        let page_size = args
-            .get("page_size")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(20) as u32;
+        let page = args.get("page").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+        let page_size = args.get("page_size").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
 
         let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
         let repo = db.conversation_repo().map_err(|e| e.to_string())?;
@@ -68,14 +62,10 @@ impl ActionHandler for ConversationGetHandler {
             .get("conversation_id")
             .and_then(|v| v.as_i64())
             .ok_or("Missing required parameter: conversation_id")?;
-        let include_messages = args
-            .get("include_messages")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let message_limit = args
-            .get("message_limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(50) as usize;
+        let include_messages =
+            args.get("include_messages").and_then(|v| v.as_bool()).unwrap_or(true);
+        let message_limit =
+            args.get("message_limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
 
         let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
         let repo = db.conversation_repo().map_err(|e| e.to_string())?;
@@ -97,9 +87,8 @@ impl ActionHandler for ConversationGetHandler {
 
         if include_messages {
             let msg_repo = db.message_repo().map_err(|e| e.to_string())?;
-            let messages_with_attachments = msg_repo
-                .list_by_conversation_id(conversation_id)
-                .map_err(|e| e.to_string())?;
+            let messages_with_attachments =
+                msg_repo.list_by_conversation_id(conversation_id).map_err(|e| e.to_string())?;
 
             let messages: Vec<serde_json::Value> = messages_with_attachments
                 .iter()
@@ -131,10 +120,7 @@ impl ActionHandler for ConversationCreateHandler {
         args: serde_json::Value,
         dry_run: bool,
     ) -> Result<serde_json::Value, String> {
-        let name = args
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("New Conversation");
+        let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("New Conversation");
         let assistant_id = args.get("assistant_id").and_then(|v| v.as_i64());
 
         if dry_run {
@@ -249,14 +235,18 @@ impl ActionHandler for ConversationArchiveHandler {
         // Also capture messages for full restore
         if let Ok(msg_repo) = db.message_repo() {
             if let Ok(messages) = msg_repo.list_by_conversation_id(conversation_id) {
-                let msg_data: Vec<serde_json::Value> = messages.iter().take(200).map(|(m, _)| {
-                    json!({
-                        "message_type": m.message_type,
-                        "content": m.content,
-                        "llm_model_name": m.llm_model_name,
-                        "created_time": m.created_time.to_rfc3339(),
+                let msg_data: Vec<serde_json::Value> = messages
+                    .iter()
+                    .take(200)
+                    .map(|(m, _)| {
+                        json!({
+                            "message_type": m.message_type,
+                            "content": m.content,
+                            "llm_model_name": m.llm_model_name,
+                            "created_time": m.created_time.to_rfc3339(),
+                        })
                     })
-                }).collect();
+                    .collect();
                 snapshot["messages"] = json!(msg_data);
                 snapshot["message_count"] = json!(messages.len());
             }
@@ -287,13 +277,34 @@ impl ActionHandler for ConversationArchiveHandler {
             assistant_id,
             created_time: Utc::now(),
             updated_time: Utc::now(),
-            conversation_kind: snapshot.get("conversation_kind").and_then(|v| v.as_str()).unwrap_or("normal").to_string(),
-            parent_butler_conversation_id: snapshot.get("parent_butler_conversation_id").and_then(|v| v.as_i64()),
-            source_task_title: snapshot.get("source_task_title").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            is_hidden_from_normal_chat_list: snapshot.get("is_hidden_from_normal_chat_list").and_then(|v| v.as_bool()).unwrap_or(false),
-            channel_source: snapshot.get("channel_source").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            butler_task_status: snapshot.get("butler_task_status").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            butler_task_summary: snapshot.get("butler_task_summary").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            conversation_kind: snapshot
+                .get("conversation_kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("normal")
+                .to_string(),
+            parent_butler_conversation_id: snapshot
+                .get("parent_butler_conversation_id")
+                .and_then(|v| v.as_i64()),
+            source_task_title: snapshot
+                .get("source_task_title")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            is_hidden_from_normal_chat_list: snapshot
+                .get("is_hidden_from_normal_chat_list")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            channel_source: snapshot
+                .get("channel_source")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            butler_task_status: snapshot
+                .get("butler_task_status")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            butler_task_summary: snapshot
+                .get("butler_task_summary")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             butler_task_finalized_at: None,
         };
 

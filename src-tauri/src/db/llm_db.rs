@@ -328,12 +328,12 @@ impl LLMDatabase {
              WHERE llm_provider_id = ? AND model_code = ?",
         )?;
 
-        stmt.query_row(params![llm_provider_id, model_code], |row| row.get(0))
-            .map(Some)
-            .or_else(|err| match err {
+        stmt.query_row(params![llm_provider_id, model_code], |row| row.get(0)).map(Some).or_else(
+            |err| match err {
                 rusqlite::Error::QueryReturnedNoRows => Ok(None),
                 _ => Err(err),
-            })
+            },
+        )
     }
 
     #[instrument(level = "debug", skip(self), fields(llm_provider_id = llm_provider_id))]

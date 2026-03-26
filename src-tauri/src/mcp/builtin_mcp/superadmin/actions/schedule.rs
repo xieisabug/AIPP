@@ -101,10 +101,8 @@ impl ActionHandler for ScheduleCreateHandler {
         args: serde_json::Value,
         dry_run: bool,
     ) -> Result<serde_json::Value, String> {
-        let name = args
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or("Missing required parameter: name")?;
+        let name =
+            args.get("name").and_then(|v| v.as_str()).ok_or("Missing required parameter: name")?;
         let schedule_type = args
             .get("schedule_type")
             .and_then(|v| v.as_str())
@@ -130,18 +128,10 @@ impl ActionHandler for ScheduleCreateHandler {
         }
 
         let interval_value = args.get("interval_value").and_then(|v| v.as_i64());
-        let interval_unit = args
-            .get("interval_unit")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let start_time = args
-            .get("start_time")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let notify_prompt = args
-            .get("notify_prompt")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let interval_unit =
+            args.get("interval_unit").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let start_time = args.get("start_time").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let notify_prompt = args.get("notify_prompt").and_then(|v| v.as_str()).unwrap_or("");
 
         use crate::db::scheduled_task_db::ScheduledTask;
         use chrono::Utc;
@@ -268,11 +258,15 @@ impl ActionHandler for ScheduleUpdateHandler {
         snapshot: &serde_json::Value,
         _original_args: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let task_id = snapshot.get("task_id").and_then(|v| v.as_i64())
+        let task_id = snapshot
+            .get("task_id")
+            .and_then(|v| v.as_i64())
             .ok_or("Missing task_id in snapshot")?;
 
         let db = ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string())?;
-        let mut task = db.read_task(task_id).map_err(|e| e.to_string())?
+        let mut task = db
+            .read_task(task_id)
+            .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Task {} no longer exists", task_id))?;
 
         // Restore all captured fields
@@ -326,12 +320,10 @@ impl ActionHandler for ScheduleRunNowHandler {
         // NOTE: Running a scheduled task immediately requires FeatureConfigState
         // and triggers async AI execution. The existing run_scheduled_task_now
         // Tauri command is the proper entry point.
-        Err(
-            "schedule.run_now is not directly executable in Phase 1. \
+        Err("schedule.run_now is not directly executable in Phase 1. \
              Use the existing run_scheduled_task_now Tauri command instead. \
              This action is registered for catalog/inspect discoverability."
-                .to_string(),
-        )
+            .to_string())
     }
 }
 
@@ -405,9 +397,12 @@ impl ActionHandler for ScheduleDeleteHandler {
         use crate::db::scheduled_task_db::ScheduledTask;
         use chrono::Utc;
 
-        let name = snapshot.get("name").and_then(|v| v.as_str()).ok_or("Missing name in snapshot")?;
-        let schedule_type = snapshot.get("schedule_type").and_then(|v| v.as_str()).unwrap_or("interval");
-        let assistant_id = snapshot.get("assistant_id").and_then(|v| v.as_i64()).ok_or("Missing assistant_id")?;
+        let name =
+            snapshot.get("name").and_then(|v| v.as_str()).ok_or("Missing name in snapshot")?;
+        let schedule_type =
+            snapshot.get("schedule_type").and_then(|v| v.as_str()).unwrap_or("interval");
+        let assistant_id =
+            snapshot.get("assistant_id").and_then(|v| v.as_i64()).ok_or("Missing assistant_id")?;
         let task_prompt = snapshot.get("task_prompt").and_then(|v| v.as_str()).unwrap_or("");
 
         let task = ScheduledTask {
@@ -416,7 +411,10 @@ impl ActionHandler for ScheduleDeleteHandler {
             is_enabled: snapshot.get("is_enabled").and_then(|v| v.as_bool()).unwrap_or(false),
             schedule_type: schedule_type.to_string(),
             interval_value: snapshot.get("interval_value").and_then(|v| v.as_i64()),
-            interval_unit: snapshot.get("interval_unit").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            interval_unit: snapshot
+                .get("interval_unit")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             start_time: snapshot.get("start_time").and_then(|v| v.as_str()).map(|s| s.to_string()),
             week_days: snapshot.get("week_days").and_then(|v| v.as_str()).map(|s| s.to_string()),
             month_days: snapshot.get("month_days").and_then(|v| v.as_str()).map(|s| s.to_string()),
@@ -425,7 +423,11 @@ impl ActionHandler for ScheduleDeleteHandler {
             last_run_at: None,
             assistant_id,
             task_prompt: task_prompt.to_string(),
-            notify_prompt: snapshot.get("notify_prompt").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            notify_prompt: snapshot
+                .get("notify_prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             created_time: Utc::now(),
             updated_time: Utc::now(),
         };

@@ -12,8 +12,8 @@ pub mod undo;
 #[cfg(test)]
 mod tests;
 
-use std::sync::LazyLock;
 use serde_json::json;
+use std::sync::LazyLock;
 use tauri::AppHandle;
 use tracing::{debug, error};
 
@@ -89,9 +89,7 @@ pub async fn dispatch(
                 None => return error_response("Missing required parameter: action_id"),
             };
             match inspect::handle_inspect(registry, action_id) {
-                Ok(response) => {
-                    json_response(&serde_json::to_value(response).unwrap_or(json!({})))
-                }
+                Ok(response) => json_response(&serde_json::to_value(response).unwrap_or(json!({}))),
                 Err(e) => error_response(&e),
             }
         }
@@ -124,8 +122,7 @@ pub async fn dispatch(
                     return error_response(&format!("Invalid batch parameters: {}", e));
                 }
             };
-            let result =
-                batch::handle_batch(app_handle, registry, request, conversation_id).await;
+            let result = batch::handle_batch(app_handle, registry, request, conversation_id).await;
             let is_error = !result.all_succeeded;
             let val = serde_json::to_value(&result).unwrap_or(json!({}));
             json!({
@@ -143,9 +140,7 @@ pub async fn dispatch(
             undo::handle_undo(app_handle, registry, audit_id, reason, conversation_id).await
         }
 
-        "superadmin_audit_query" => {
-            audit_query::handle_audit_query(app_handle, args).await
-        }
+        "superadmin_audit_query" => audit_query::handle_audit_query(app_handle, args).await,
 
         _ => error_response(&format!("Unknown superadmin tool: {}", tool_name)),
     }

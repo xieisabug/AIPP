@@ -620,8 +620,7 @@ async fn run_feishu_relay_scope_worker(
 
     // Load the Feishu secret once before the loop to avoid opening SystemDatabase
     // every 500ms. The secret rarely changes during a relay scope's lifetime.
-    let cached_secret = load_feishu_secret(app_handle)?
-        .unwrap_or_default();
+    let cached_secret = load_feishu_secret(app_handle)?.unwrap_or_default();
 
     loop {
         let scope = load_relay_scope(app_handle, scope_id)?;

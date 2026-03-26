@@ -286,9 +286,7 @@ async fn build_butler_system_prompt(app_handle: &AppHandle) -> Result<String, St
     let trusted_workspaces_prompt = build_butler_trusted_workspaces_prompt(app_handle).await;
     Ok(format!(
         "{}\n\n{}\n\n{}",
-        BUTLER_SYSTEM_PROMPT_BASE,
-        assistant_directory_prompt,
-        trusted_workspaces_prompt,
+        BUTLER_SYSTEM_PROMPT_BASE, assistant_directory_prompt, trusted_workspaces_prompt,
     ))
 }
 
@@ -310,7 +308,8 @@ async fn build_butler_trusted_workspaces_prompt(app_handle: &AppHandle) -> Strin
     let workspaces = parse_trusted_workspaces(&raw);
 
     if workspaces.is_empty() {
-        return "可信工作区：当前未配置可信工作区，子任务在执行文件操作时可能需要权限确认。".to_string();
+        return "可信工作区：当前未配置可信工作区，子任务在执行文件操作时可能需要权限确认。"
+            .to_string();
     }
 
     let list = workspaces
@@ -346,8 +345,11 @@ fn parse_trusted_workspaces(raw: &str) -> Vec<(String, String)> {
                 .iter()
                 .filter_map(|v| {
                     let path = v.get("path")?.as_str()?.trim().to_string();
-                    if path.is_empty() { return None; }
-                    let desc = v.get("description")
+                    if path.is_empty() {
+                        return None;
+                    }
+                    let desc = v
+                        .get("description")
                         .and_then(|d| d.as_str())
                         .unwrap_or("")
                         .trim()
@@ -2563,11 +2565,10 @@ mod tests {
 
     use super::{
         build_batched_followup_prompt, build_butler_task_attention_system_message,
-        build_butler_task_result_system_message,
-        cleanup_attention_debounce, cleanup_butler_main_continuation_lock,
-        cleanup_butler_task_finalization_lock, find_latest_attention_message_id,
-        find_latest_handoff_message_id, has_non_system_message_after,
-        parse_task_conversation_id_from_attention_message,
+        build_butler_task_result_system_message, cleanup_attention_debounce,
+        cleanup_butler_main_continuation_lock, cleanup_butler_task_finalization_lock,
+        find_latest_attention_message_id, find_latest_handoff_message_id,
+        has_non_system_message_after, parse_task_conversation_id_from_attention_message,
         parse_task_conversation_id_from_handoff_message, trim_chars, try_claim_attention_debounce,
         try_decide_butler_task_terminal_state, update_butler_task_watcher_state,
         ButlerTaskListItem, FollowupBatchEntry, Message, STATUS_CANCELLED, STATUS_FAILED,

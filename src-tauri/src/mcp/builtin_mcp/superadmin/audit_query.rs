@@ -21,15 +21,8 @@ pub async fn handle_audit_query(
     let action_id = args.get("action_id").and_then(|v| v.as_str());
     let domain = args.get("domain").and_then(|v| v.as_str());
     let success_only = args.get("success_only").and_then(|v| v.as_bool());
-    let undoable_only = args
-        .get("undoable_only")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(20)
-        .min(100) as usize;
+    let undoable_only = args.get("undoable_only").and_then(|v| v.as_bool()).unwrap_or(false);
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20).min(100) as usize;
     let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
     // Open DB
@@ -49,7 +42,15 @@ pub async fn handle_audit_query(
     };
 
     // Query
-    match audit::query_audit_log(&conn, action_id, domain, success_only, undoable_only, limit, offset) {
+    match audit::query_audit_log(
+        &conn,
+        action_id,
+        domain,
+        success_only,
+        undoable_only,
+        limit,
+        offset,
+    ) {
         Ok(entries) => {
             let results: Vec<serde_json::Value> = entries
                 .iter()
@@ -94,12 +95,15 @@ pub async fn handle_audit_query(
                     // Include result preview for successful actions
                     if e.success {
                         if let Some(ref result_str) = e.result_json {
-                            if let Ok(result_val) = serde_json::from_str::<serde_json::Value>(result_str) {
+                            if let Ok(result_val) =
+                                serde_json::from_str::<serde_json::Value>(result_str)
+                            {
                                 let compact = result_val.to_string();
                                 if compact.len() <= 200 {
                                     entry["result_preview"] = result_val;
                                 } else {
-                                    entry["result_preview"] = json!(format!("{}...", &compact[..197]));
+                                    entry["result_preview"] =
+                                        json!(format!("{}...", &compact[..197]));
                                 }
                             }
                         }

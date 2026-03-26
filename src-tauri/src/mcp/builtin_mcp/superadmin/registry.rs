@@ -62,23 +62,14 @@ pub struct ActionRegistry {
 
 impl ActionRegistry {
     pub fn new() -> Self {
-        Self {
-            actions: HashMap::new(),
-            domain_index: HashMap::new(),
-        }
+        Self { actions: HashMap::new(), domain_index: HashMap::new() }
     }
 
     pub fn register(&mut self, meta: ActionMeta, handler: Box<dyn ActionHandler>) {
         let action_id = meta.action_id.clone();
         let domain = meta.domain.clone();
-        self.actions.insert(
-            action_id.clone(),
-            RegisteredAction { meta, handler },
-        );
-        self.domain_index
-            .entry(domain)
-            .or_default()
-            .push(action_id);
+        self.actions.insert(action_id.clone(), RegisteredAction { meta, handler });
+        self.domain_index.entry(domain).or_default().push(action_id);
     }
 
     pub fn get(&self, action_id: &str) -> Option<&RegisteredAction> {
@@ -174,6 +165,8 @@ pub fn build_registry() -> ActionRegistry {
 
     actions::assistant::register(&mut registry);
     actions::conversation::register(&mut registry);
+    actions::mcp::register(&mut registry);
+    actions::llm::register(&mut registry);
     actions::task::register(&mut registry);
     actions::schedule::register(&mut registry);
 

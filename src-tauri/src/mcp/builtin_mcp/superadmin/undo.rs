@@ -85,11 +85,8 @@ pub async fn handle_undo(
             return error_result(&format!("Failed to parse before_snapshot: {}", e));
         }
     };
-    let original_args: serde_json::Value = entry
-        .args_json
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or(json!({}));
+    let original_args: serde_json::Value =
+        entry.args_json.as_deref().and_then(|s| serde_json::from_str(s).ok()).unwrap_or(json!({}));
 
     // 5. Get the handler from registry
     let registered = match registry.get(&entry.action_id) {
@@ -103,10 +100,7 @@ pub async fn handle_undo(
     };
 
     // 6. Call handler.undo()
-    let undo_result = registered
-        .handler
-        .undo(app_handle, &snapshot, &original_args)
-        .await;
+    let undo_result = registered.handler.undo(app_handle, &snapshot, &original_args).await;
 
     let undo_audit_id = audit::generate_audit_id();
 

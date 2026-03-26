@@ -58,7 +58,9 @@ pub fn store_compaction_summary(
         .message_repo()
         .map_err(|e| AppError::UnknownError(format!("DB error: {}", e)))?
         .create_without_touch_conversation(&message)
-        .map_err(|e| AppError::UnknownError(format!("Failed to store compaction summary: {}", e)))?;
+        .map_err(|e| {
+            AppError::UnknownError(format!("Failed to store compaction summary: {}", e))
+        })?;
 
     debug!(summary_message_id = created.id, "compaction summary stored");
     Ok(created.id)
@@ -155,10 +157,10 @@ mod tests {
         let summary = "<!-- compacted_range: 2..4 -->\n<context_summary>summary</context_summary>";
         let messages = vec![
             (1, "system".into(), "system prompt".into()),
-            (2, "user".into(), "old user msg".into()),       // compacted
-            (3, "response".into(), "old response".into()),    // compacted
-            (4, "user".into(), "old user msg 2".into()),      // compacted
-            (5, "system".into(), summary.to_string()),        // summary itself
+            (2, "user".into(), "old user msg".into()), // compacted
+            (3, "response".into(), "old response".into()), // compacted
+            (4, "user".into(), "old user msg 2".into()), // compacted
+            (5, "system".into(), summary.to_string()), // summary itself
             (6, "user".into(), "recent msg".into()),
             (7, "response".into(), "recent response".into()),
         ];
@@ -168,10 +170,8 @@ mod tests {
 
     #[test]
     fn filter_no_summary_keeps_all() {
-        let messages = vec![
-            (1, "system".into(), "prompt".into()),
-            (2, "user".into(), "hello".into()),
-        ];
+        let messages =
+            vec![(1, "system".into(), "prompt".into()), (2, "user".into(), "hello".into())];
         let kept = apply_compaction_filter(&messages);
         assert_eq!(kept, vec![0, 1]);
     }
@@ -181,7 +181,7 @@ mod tests {
         let summary = "<!-- compacted_range: 1..10 -->\n<context_summary>s</context_summary>";
         let messages = vec![
             (0, "system".into(), "dynamic inject".into()), // id=0, always kept
-            (5, "user".into(), "compacted".into()),         // in range
+            (5, "user".into(), "compacted".into()),        // in range
             (11, "system".into(), summary.to_string()),
         ];
         let kept = apply_compaction_filter(&messages);

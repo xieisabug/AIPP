@@ -4,8 +4,8 @@ pub mod persistence;
 pub mod summarizer;
 pub mod token_estimator;
 
-use budget::ContextBudget;
 use crate::db::conversation_db::{ConversationDatabase, MessageAttachment};
+use budget::ContextBudget;
 use genai::Client;
 use token_estimator::{estimate_by_content, estimate_message_tokens};
 use tracing::{debug, info, warn};
@@ -49,11 +49,7 @@ pub fn fit_to_budget(
     db_token_counts: &[i32],
 ) -> FitResult {
     if !budget.enabled {
-        return FitResult {
-            estimated_tokens: 0,
-            compacted: false,
-            messages,
-        };
+        return FitResult { estimated_tokens: 0, compacted: false, messages };
     }
 
     let estimated_tokens = estimate_total(messages.as_slice(), db_token_counts);
@@ -84,11 +80,7 @@ pub fn fit_to_budget(
         );
     }
 
-    FitResult {
-        estimated_tokens,
-        compacted: false,
-        messages,
-    }
+    FitResult { estimated_tokens, compacted: false, messages }
 }
 
 /// Fit a message list into the given context budget, performing LLM-based
@@ -109,11 +101,7 @@ pub async fn fit_to_budget_with_compaction(
     ctx: CompactionContext<'_>,
 ) -> FitResult {
     if !budget.enabled {
-        return FitResult {
-            estimated_tokens: 0,
-            compacted: false,
-            messages,
-        };
+        return FitResult { estimated_tokens: 0, compacted: false, messages };
     }
 
     let estimated_tokens = estimate_total(messages.as_slice(), db_token_counts);
@@ -128,20 +116,13 @@ pub async fn fit_to_budget_with_compaction(
 
     // Not over threshold — pass through
     if estimated_tokens <= trigger {
-        return FitResult {
-            estimated_tokens,
-            compacted: false,
-            messages,
-        };
+        return FitResult { estimated_tokens, compacted: false, messages };
     }
 
     // Compute tail by walking backwards with a token budget
     let tail_budget = budget.tail_token_budget();
-    let head_count = if messages.first().map(|(t, _, _)| t.as_str()) == Some("system") {
-        1
-    } else {
-        0
-    };
+    let head_count =
+        if messages.first().map(|(t, _, _)| t.as_str()) == Some("system") { 1 } else { 0 };
 
     let tail_count = compute_tail_count(&messages, db_token_counts, head_count, tail_budget);
     let body_end = messages.len().saturating_sub(tail_count);
@@ -153,11 +134,7 @@ pub async fn fit_to_budget_with_compaction(
             message_count = messages.len(),
             "over threshold but not enough messages to compact"
         );
-        return FitResult {
-            estimated_tokens,
-            compacted: false,
-            messages,
-        };
+        return FitResult { estimated_tokens, compacted: false, messages };
     }
 
     info!(
@@ -183,11 +160,7 @@ pub async fn fit_to_budget_with_compaction(
         Ok(s) => s,
         Err(e) => {
             warn!(error = %e, "LLM summary generation failed, passing through uncompacted");
-            return FitResult {
-                estimated_tokens,
-                compacted: false,
-                messages,
-            };
+            return FitResult { estimated_tokens, compacted: false, messages };
         }
     };
 
@@ -228,11 +201,7 @@ pub async fn fit_to_budget_with_compaction(
         "context compaction complete"
     );
 
-    FitResult {
-        estimated_tokens: compacted_tokens,
-        compacted: true,
-        messages: compacted,
-    }
+    FitResult { estimated_tokens: compacted_tokens, compacted: true, messages: compacted }
 }
 
 /// Walk backwards from the end of the message list, accumulating estimated tokens,
@@ -288,10 +257,7 @@ fn estimate_total(messages: &[MessageTuple], db_token_counts: &[i32]) -> usize {
             let attachment_tokens: usize = attachments
                 .iter()
                 .map(|a| {
-                    a.attachment_content
-                        .as_deref()
-                        .map(|c| estimate_by_content(c))
-                        .unwrap_or(0)
+                    a.attachment_content.as_deref().map(|c| estimate_by_content(c)).unwrap_or(0)
                 })
                 .sum();
             content_tokens + attachment_tokens
@@ -325,10 +291,7 @@ mod tests {
     #[test]
     fn fit_disabled_skips_estimation() {
         let messages = vec![msg("user", "x".repeat(1_000_000).as_str())];
-        let budget = ContextBudget {
-            enabled: false,
-            ..Default::default()
-        };
+        let budget = ContextBudget { enabled: false, ..Default::default() };
         let result = fit_to_budget(messages, &budget, &[]);
         assert!(!result.compacted);
         assert_eq!(result.estimated_tokens, 0);
@@ -395,9 +358,9 @@ mod tests {
         // Create messages where DB tokens make them large
         let messages = vec![
             msg("system", "sys"),
-            msg("user", "a"),     // will get 20000 from db
+            msg("user", "a"),      // will get 20000 from db
             msg("assistant", "b"), // will get 20000 from db
-            msg("user", "c"),     // will get 20000 from db
+            msg("user", "c"),      // will get 20000 from db
             msg("assistant", "d"), // will get 20000 from db
         ];
         let db_tokens = vec![0i32, 20_000, 20_000, 20_000, 20_000];
@@ -408,13 +371,8 @@ mod tests {
 
     #[test]
     fn compute_tail_with_zero_budget_keeps_one() {
-        let messages = vec![
-            msg("system", "sys"),
-            msg("user", "hello"),
-            msg("assistant", "hi"),
-        ];
+        let messages = vec![msg("system", "sys"), msg("user", "hello"), msg("assistant", "hi")];
         let count = compute_tail_count(&messages, &[], 1, 0);
         assert_eq!(count, 1, "zero budget still keeps 1 message");
     }
 }
-

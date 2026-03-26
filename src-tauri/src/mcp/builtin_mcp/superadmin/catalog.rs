@@ -28,15 +28,7 @@ pub fn handle_catalog(registry: &ActionRegistry, request: &CatalogRequest) -> Ca
         })
         .collect();
 
-    let next_cursor = if cursor + limit < total {
-        Some(cursor + limit)
-    } else {
-        None
-    };
+    let next_cursor = if cursor + limit < total { Some(cursor + limit) } else { None };
 
-    CatalogResponse {
-        items: page,
-        total,
-        next_cursor,
-    }
+    CatalogResponse { items: page, total, next_cursor }
 }
