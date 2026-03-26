@@ -5,6 +5,9 @@ on:
         tags: [v\d+\.\d+\.\d+]
     workflow_dispatch:
 
+env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
     create-release:
         permissions:
@@ -16,7 +19,7 @@ jobs:
             release_body: "${{ steps.changelog.outputs.changelog }}"
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
               with:
                   fetch-depth: 0
 
@@ -124,7 +127,7 @@ jobs:
 
         runs-on: ${{ matrix.os }}
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
 
             - name: Get version
               id: get_version
@@ -142,7 +145,7 @@ jobs:
                   version: 10
 
             - name: Setup Node.js
-              uses: actions/setup-node@v4
+              uses: actions/setup-node@v5
               with:
                   node-version: 22
                   cache: 'pnpm'
@@ -151,11 +154,6 @@ jobs:
               uses: dtolnay/rust-toolchain@stable
               with:
                   targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-
-            - name: Install Protoc
-              uses: arduino/setup-protoc@v3
-              with:
-                  repo-token: ${{ secrets.GITHUB_TOKEN }}
 
             - name: Install dependencies
               run: pnpm install
@@ -193,7 +191,7 @@ jobs:
             version: ${{ steps.get_version.outputs.version }}
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
 
             - name: Get version
               id: get_version
@@ -207,7 +205,7 @@ jobs:
 
             - name: Get release assets and signatures
               id: get_assets
-              uses: actions/github-script@v6
+              uses: actions/github-script@v8
               env:
                   release_id: ${{ needs.create-release.outputs.release_id }}
               with:
@@ -372,7 +370,7 @@ jobs:
                 cat latest.json
 
             - name: Upload latest.json to Release
-              uses: actions/github-script@v6
+              uses: actions/github-script@v8
               env:
                   release_id: ${{ needs.create-release.outputs.release_id }}
               with:
@@ -412,7 +410,7 @@ jobs:
         steps:
             - name: publish release
               id: publish-release
-              uses: actions/github-script@v6
+              uses: actions/github-script@v8
               env:
                   release_id: ${{ needs.create-release.outputs.release_id }}
               with:
