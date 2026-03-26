@@ -60,7 +60,8 @@ use crate::api::llm_api::{
     add_llm_model, add_llm_provider, delete_llm_model, delete_llm_provider, export_llm_provider,
     fetch_model_list, get_filtered_models_for_select, get_filtered_providers, get_llm_models,
     get_llm_provider_config, get_llm_providers, get_models_for_select, import_llm_provider,
-    preview_model_list, update_llm_provider, update_llm_provider_config, update_selected_models,
+    preview_model_list, update_llm_model_request_mode, update_llm_provider,
+    update_llm_provider_config, update_selected_models,
 };
 use crate::api::operation_api::{confirm_acp_permission, confirm_operation_permission};
 use crate::api::plugin_api::{
@@ -84,13 +85,13 @@ use crate::api::skill_api::{
     toggle_assistant_skill, update_assistant_skill_config,
 };
 use crate::api::system_api::{
-    clear_butler_feishu_secret, copy_image_to_clipboard, debug_resend_message_to_feishu,
-    get_all_feature_config, get_autostart_state, get_bang_list, get_butler_feishu_runtime_status,
-    get_experimental_summary_task_status, get_selected_text_api, open_data_folder, open_image,
-    refresh_butler_feishu_runtime_command, resume_global_shortcut, save_butler_feishu_secret,
-    save_feature_config, set_autostart, set_shortcut_recording, suspend_global_shortcut,
-    trigger_assistant_summary_generation, trigger_conversation_summary_generation,
-    trigger_mcp_summary_generation,
+    clear_butler_feishu_secret, conversation_has_feishu_target, copy_image_to_clipboard,
+    debug_resend_message_to_feishu, get_all_feature_config, get_autostart_state, get_bang_list,
+    get_butler_feishu_runtime_status, get_experimental_summary_task_status, get_selected_text_api,
+    open_data_folder, open_image, refresh_butler_feishu_runtime_command, resume_global_shortcut,
+    save_butler_feishu_secret, save_feature_config, set_autostart, set_shortcut_recording,
+    suspend_global_shortcut, trigger_assistant_summary_generation,
+    trigger_conversation_summary_generation, trigger_mcp_summary_generation,
 };
 use crate::api::todo_api::get_todos;
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
@@ -580,6 +581,7 @@ pub fn run() {
 
             app.manage(initialize_state(&app_handle));
             app.manage(initialize_name_cache_state(&app_handle));
+            crate::api::butler_api::spawn_butler_task_reconciler(app_handle.clone());
             crate::mcp::summarizer::trigger_pending_mcp_catalog_summary_generation(
                 app_handle.clone(),
             );
@@ -686,6 +688,7 @@ pub fn run() {
             trigger_assistant_summary_generation,
             trigger_conversation_summary_generation,
             debug_resend_message_to_feishu,
+            conversation_has_feishu_target,
             open_data_folder,
             get_llm_providers,
             get_filtered_providers,
@@ -697,6 +700,7 @@ pub fn run() {
             get_llm_models,
             fetch_model_list,
             preview_model_list,
+            update_llm_model_request_mode,
             update_selected_models,
             get_models_for_select,
             get_filtered_models_for_select,

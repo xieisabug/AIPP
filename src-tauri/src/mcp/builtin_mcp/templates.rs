@@ -146,6 +146,56 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
                 placeholder: Some("15000".into()),
                 options: None,
             },
+            BuiltinTemplateEnvVar {
+                key: "WAIT_POLL_MS".into(),
+                label: "等待轮询间隔".into(),
+                required: false,
+                tip: Some("检查页面内容是否已经就绪的轮询间隔（毫秒）".into()),
+                field_type: "number".into(),
+                default_value: Some("250".into()),
+                placeholder: Some("250".into()),
+                options: None,
+            },
+            BuiltinTemplateEnvVar {
+                key: "MAX_CONCURRENT_PAGES".into(),
+                label: "最大并发页面数".into(),
+                required: false,
+                tip: Some("单个浏览器实例下允许同时活跃的页面数。超过该值的请求会排队等待页面槽位。".into()),
+                field_type: "number".into(),
+                default_value: Some("5".into()),
+                placeholder: Some("5".into()),
+                options: None,
+            },
+            BuiltinTemplateEnvVar {
+                key: "POOL_ACQUIRE_TIMEOUT_MS".into(),
+                label: "页面槽位等待超时".into(),
+                required: false,
+                tip: Some("当浏览器页面池已满时，等待可用页面槽位的最长时间（毫秒）".into()),
+                field_type: "number".into(),
+                default_value: Some("10000".into()),
+                placeholder: Some("10000".into()),
+                options: None,
+            },
+            BuiltinTemplateEnvVar {
+                key: "DEBUG_CAPTURE_EMPTY_ARTIFACTS".into(),
+                label: "保存空内容调试产物".into(),
+                required: false,
+                tip: Some("仅建议在开发调试时开启。当检测到空内容或疑似壳页时，会把原始 HTML、提取结果和元信息保存到本地目录。".into()),
+                field_type: "boolean".into(),
+                default_value: Some("false".into()),
+                placeholder: None,
+                options: None,
+            },
+            BuiltinTemplateEnvVar {
+                key: "DEBUG_ARTIFACT_DIR".into(),
+                label: "调试产物目录".into(),
+                required: false,
+                tip: Some("可选。覆盖默认的调试产物保存目录，仅在开启“保存空内容调试产物”时生效。".into()),
+                field_type: "text".into(),
+                default_value: None,
+                placeholder: Some("/path/to/search-debug".into()),
+                options: None,
+            },
         ],
         },
         // 操作工具
@@ -212,6 +262,15 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
             transport_type: "stdio".into(),
             required_envs: vec![],
             default_timeout: Some(30000),
+        },
+        BuiltinTemplateInfo {
+            id: "superadmin".into(),
+            name: "Super Admin 管理工具".into(),
+            description: "Butler 超级管理员工具集，提供对 AIPP 应用对象（助手、会话、任务、定时任务）的结构化管理能力。通过统一的 catalog/inspect/execute/batch 接口实现能力发现与执行。".into(),
+            command: "aipp:superadmin".into(),
+            transport_type: "stdio".into(),
+            required_envs: vec![],
+            default_timeout: Some(60000),
         },
     ]
 }
@@ -386,6 +445,71 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         }
                     },
                     "required": ["title", "goal"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "task_conversation_operation".into(),
+                description: "Inspect and operate an existing butler task conversation. Use this to read the latest task messages, execute pending MCP tool calls, send a follow-up prompt to the task assistant, confirm pending operation/ACP permissions, or answer pending ask_user_question requests when a task becomes blocked.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["read", "reply_prompt", "mcp_tool_execute", "permission_confirm", "operate_confirm", "acp_permission_confirm", "ask_user_respond"],
+                            "description": "Action to perform on the target task conversation."
+                        },
+                        "task_conversation_id": {
+                            "type": "integer",
+                            "description": "The task conversation id to inspect or operate."
+                        },
+                        "latest_count": {
+                            "type": "integer",
+                            "description": "Only for read. Number of latest messages to return. Default 1, recommended 1-3."
+                        },
+                        "verbose": {
+                            "type": "boolean",
+                            "description": "Only for read. When true returns full conversation, definition and result objects. Default false returns only essential status, latest messages and pending items to save context."
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Only for reply_prompt. The follow-up prompt to send into the task conversation."
+                        },
+                        "tool_call_id": {
+                            "type": "integer",
+                            "description": "Only for mcp_tool_execute. Optional exact pending MCP tool call id to execute."
+                        },
+                        "llm_call_id": {
+                            "type": "string",
+                            "description": "Only for mcp_tool_execute. Optional native LLM tool call id for the pending MCP tool call."
+                        },
+                        "request_id": {
+                            "type": "string",
+                            "description": "Optional. Exact pending permission or ask_user_question request id."
+                        },
+                        "review_code": {
+                            "type": "string",
+                            "description": "Optional. Human-friendly pending permission review code such as OP-XXXXXX or ACP-XXXXXX."
+                        },
+                        "decision": {
+                            "type": "string",
+                            "enum": ["allow", "allow_for_conversation", "allow_for_assistant", "allow_and_save", "deny"],
+                            "description": "Only for permission_confirm / operate_confirm."
+                        },
+                        "option_id": {
+                            "type": "string",
+                            "description": "Only for acp_permission_confirm. The ACP option id to approve."
+                        },
+                        "cancelled": {
+                            "type": "boolean",
+                            "description": "Only for acp_permission_confirm or ask_user_respond. Set true to cancel instead of providing a response."
+                        },
+                        "answers": {
+                            "type": "object",
+                            "description": "Only for ask_user_respond. A JSON object mapping question header to selected option value or free-text answer.",
+                            "additionalProperties": { "type": "string" }
+                        }
+                    },
+                    "required": ["action", "task_conversation_id"]
                 }),
             },
         ],
@@ -763,6 +887,166 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                 }),
             },
         ],
+        Some("superadmin") => vec![
+            BuiltinToolInfo {
+                name: "superadmin_catalog".into(),
+                description: "查询 Super Admin 能力目录。支持按 domain、tag、risk_level 和关键词筛选，返回可执行 action 列表。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "关键词搜索（匹配 action_id、summary、description、tags）"
+                        },
+                        "domain": {
+                            "type": "string",
+                            "enum": ["assistant", "conversation", "task", "schedule"],
+                            "description": "按 domain 筛选"
+                        },
+                        "tag": {
+                            "type": "string",
+                            "description": "按 tag 筛选，如 'read'、'write'、'list'"
+                        },
+                        "risk_level": {
+                            "type": "integer",
+                            "enum": [0, 1, 2, 3],
+                            "description": "按风险等级筛选：0=safe, 1=low, 2=medium, 3=high"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "每页数量，默认 20，最大 100"
+                        },
+                        "cursor": {
+                            "type": "integer",
+                            "description": "分页游标（上一页返回的 next_cursor）"
+                        }
+                    }
+                }),
+            },
+            BuiltinToolInfo {
+                name: "superadmin_inspect".into(),
+                description: "查看指定 action 的完整详情，包括参数 schema、返回 schema、风险等级、审批策略等。先用 catalog 发现 action_id，再用 inspect 获取调用所需的完整信息。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action_id": {
+                            "type": "string",
+                            "description": "要查看的 action ID，如 'assistant.list'、'schedule.create'"
+                        }
+                    },
+                    "required": ["action_id"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "superadmin_execute".into(),
+                description: "执行单个 Super Admin action。调用前建议先 inspect 了解参数要求。risk_level >= 3 的 action 需要用户审批，可先用 dry_run=true 预览。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action_id": {
+                            "type": "string",
+                            "description": "要执行的 action ID"
+                        },
+                        "args": {
+                            "type": "object",
+                            "description": "action 参数，结构由 inspect 的 args_schema 定义"
+                        },
+                        "dry_run": {
+                            "type": "boolean",
+                            "description": "是否为预演模式（不实际执行），默认 false"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "执行原因，记入审计日志"
+                        }
+                    },
+                    "required": ["action_id", "args"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "superadmin_batch".into(),
+                description: "批量顺序执行多个 Super Admin action。默认遇到错误停止。适合组合操作如「创建助手→创建定时任务」。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "actions": {
+                            "type": "array",
+                            "description": "要执行的 action 列表，按顺序执行",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "action_id": { "type": "string", "description": "action ID" },
+                                    "args": { "type": "object", "description": "action 参数" },
+                                    "reason": { "type": "string", "description": "执行原因" }
+                                },
+                                "required": ["action_id", "args"]
+                            }
+                        },
+                        "dry_run": {
+                            "type": "boolean",
+                            "description": "是否为预演模式，默认 false"
+                        },
+                        "stop_on_error": {
+                            "type": "boolean",
+                            "description": "遇到错误是否停止，默认 true"
+                        }
+                    },
+                    "required": ["actions"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "superadmin_undo".into(),
+                description: "撤销之前执行的 Super Admin action。通过 audit_id 指定要撤销的操作，系统将从快照恢复数据。先用 superadmin_audit_query 查询可撤销的操作。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "audit_id": {
+                            "type": "string",
+                            "description": "要撤销的操作的 audit_id（从审计日志获取）"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "撤销原因，记入审计日志"
+                        }
+                    },
+                    "required": ["audit_id"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "superadmin_audit_query".into(),
+                description: "查询 Super Admin 操作审计日志。支持按 action、domain、成功状态筛选，可过滤出可撤销的操作。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action_id": {
+                            "type": "string",
+                            "description": "按 action_id 筛选"
+                        },
+                        "domain": {
+                            "type": "string",
+                            "enum": ["assistant", "conversation", "task", "schedule"],
+                            "description": "按 domain 筛选"
+                        },
+                        "success_only": {
+                            "type": "boolean",
+                            "description": "只显示成功的操作"
+                        },
+                        "undoable_only": {
+                            "type": "boolean",
+                            "description": "只显示可撤销的操作（有快照且未被撤销）"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "每页数量，默认 20，最大 100"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "分页偏移量"
+                        }
+                    }
+                }),
+            },
+        ],
         _ => vec![],
     }
 }
@@ -828,6 +1112,34 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
     }
 
     let _ = db.rebuild_dynamic_mcp_catalog();
+
+    // Builtin tools already have human-written descriptions, so mark their
+    // summary_generated_at so they're discoverable via load_mcp_tool/load_mcp_server.
+    // (The catalog requires summary_generated_at IS NOT NULL for search.)
+    for tpl in &builtin_templates() {
+        let server_id = db
+            .conn
+            .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1")?
+            .query_row([&tpl.command], |row| row.get::<_, i64>(0))
+            .optional()?;
+        if let Some(sid) = server_id {
+            let _ = db.conn.execute(
+                "UPDATE mcp_server_capability_epoch_catalog
+                 SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
+                 WHERE server_id = ?",
+                rusqlite::params![sid],
+            );
+            let _ = db.conn.execute(
+                "UPDATE mcp_tool_catalog
+                 SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
+                 WHERE server_id = ?",
+                rusqlite::params![sid],
+            );
+        }
+    }
+
+    // Initialize superadmin audit log table
+    super::superadmin::init_superadmin_tables(app_handle);
 
     Ok(())
 }
@@ -945,7 +1257,7 @@ mod tests {
     #[test]
     fn test_get_tools_for_agent_command() {
         let tools = get_builtin_tools_for_command("aipp:agent");
-        assert_eq!(tools.len(), 4, "Agent command should have 4 tools");
+        assert_eq!(tools.len(), 6, "Agent command should have 6 tools");
     }
 
     #[test]
@@ -976,6 +1288,32 @@ mod tests {
         let required = schema["required"].as_array().unwrap();
         assert!(required.iter().any(|r| r == "command"));
         assert!(required.iter().any(|r| r == "source_type"));
+    }
+
+    #[test]
+    fn test_agent_task_conversation_operation_tool_exists() {
+        let tools = get_builtin_tools_for_command("aipp:agent");
+        let operation_tool = tools.iter().find(|t| t.name == "task_conversation_operation");
+        assert!(operation_tool.is_some(), "task_conversation_operation tool should exist");
+    }
+
+    #[test]
+    fn test_agent_task_conversation_operation_tool_schema() {
+        let tools = get_builtin_tools_for_command("aipp:agent");
+        let operation_tool =
+            tools.iter().find(|t| t.name == "task_conversation_operation").unwrap();
+
+        let schema = &operation_tool.input_schema;
+        assert_eq!(schema["type"], "object");
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|r| r == "action"));
+        assert!(required.iter().any(|r| r == "task_conversation_id"));
+        let actions = schema["properties"]["action"]["enum"].as_array().unwrap();
+        assert!(actions.iter().any(|value| value == "read"));
+        assert!(actions.iter().any(|value| value == "reply_prompt"));
+        assert!(actions.iter().any(|value| value == "mcp_tool_execute"));
+        assert!(actions.iter().any(|value| value == "permission_confirm"));
+        assert!(actions.iter().any(|value| value == "acp_permission_confirm"));
     }
 
     #[test]

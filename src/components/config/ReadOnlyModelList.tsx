@@ -1,34 +1,28 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Button } from '../ui/button';
-import { Badge } from '../ui/badge';
 import { Tag, ChevronDown, ChevronUp } from 'lucide-react';
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from 'sonner';
-
-interface ModelForSelection {
-    name: string;
-    code: string;
-    description: string;
-    vision_support: boolean;
-    audio_support: boolean;
-    video_support: boolean;
-    is_selected: boolean;
-}
-
-interface ModelSelectionResponse {
-    available_models: ModelForSelection[];
-    missing_models: string[];
-}
+import ModelTagBadge from './ModelTagBadge';
+import {
+    ModelSelectionResponse,
+    ModelTagItem,
+    supportsRequestModeToggle,
+    toModelTagItem,
+    toggleRequestMode,
+} from './llmModelTypes';
 
 interface ReadOnlyModelListProps {
     llmProviderId: string;
-    tags: string[];
-    onTagsChange: (tags: string[]) => void;
+    apiType: string;
+    tags: ModelTagItem[];
+    onTagsChange: (tags: ModelTagItem[]) => void;
     onFetchModels?: (modelData: ModelSelectionResponse) => void;
 }
 
 const ReadOnlyModelList: React.FC<ReadOnlyModelListProps> = ({
     llmProviderId,
+    apiType,
     tags,
     onTagsChange,
     onFetchModels
@@ -52,7 +46,7 @@ const ReadOnlyModelList: React.FC<ReadOnlyModelListProps> = ({
                 // 如果没有 onFetchModels 回调，直接更新选中的模型
                 const selectedModels = modelData.available_models
                     .filter(m => m.is_selected)
-                    .map(m => m.name);
+                    .map(toModelTagItem);
                 onTagsChange(selectedModels);
                 
                 if (modelData.available_models.length > 0) {
@@ -87,6 +81,23 @@ const ReadOnlyModelList: React.FC<ReadOnlyModelListProps> = ({
     const toggleExpansion = useCallback(() => {
         setIsExpanded(!isExpanded);
     }, [isExpanded]);
+
+    const handleToggleRequestMode = useCallback((tag: ModelTagItem, index: number) => {
+        const requestMode = toggleRequestMode(tag.request_mode);
+        invoke('update_llm_model_request_mode', {
+            llmProviderId: parseInt(llmProviderId),
+            modelCode: tag.code,
+            requestMode,
+        })
+            .then(() => {
+                const nextTags = [...tags];
+                nextTags[index] = { ...tag, request_mode: requestMode };
+                onTagsChange(nextTags);
+            })
+            .catch((e) => {
+                toast.error("切换请求接口失败: " + e);
+            });
+    }, [llmProviderId, onTagsChange, tags]);
 
     return (
         <div className="space-y-4">
@@ -146,13 +157,12 @@ const ReadOnlyModelList: React.FC<ReadOnlyModelListProps> = ({
                             style={{ minHeight: tags.length > 0 ? '60px' : undefined }}
                         >
                             {tags.map((tag, index) => (
-                                <Badge
-                                    key={index}
-                                    variant="secondary"
-                                    className="bg-muted text-foreground border-border hover:bg-muted/80 transition-colors px-3 py-1 text-sm"
-                                >
-                                    <span>{tag}</span>
-                                </Badge>
+                                <ModelTagBadge
+                                    key={tag.code}
+                                    model={tag}
+                                    showRequestModeToggle={supportsRequestModeToggle(apiType)}
+                                    onToggleRequestMode={() => handleToggleRequestMode(tag, index)}
+                                />
                             ))}
                         </div>
 
@@ -204,7 +214,12 @@ const ReadOnlyModelList: React.FC<ReadOnlyModelListProps> = ({
 export default React.memo(ReadOnlyModelList, (prevProps, nextProps) => {
     return (
         prevProps.llmProviderId === nextProps.llmProviderId &&
+        prevProps.apiType === nextProps.apiType &&
         prevProps.tags.length === nextProps.tags.length &&
-        prevProps.tags.every((tag, index) => tag === nextProps.tags[index])
+        prevProps.tags.every((tag, index) =>
+            tag.code === nextProps.tags[index]?.code &&
+            tag.name === nextProps.tags[index]?.name &&
+            tag.request_mode === nextProps.tags[index]?.request_mode
+        )
     );
 });

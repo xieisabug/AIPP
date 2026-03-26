@@ -5,6 +5,7 @@ use tokio::process::Child;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
+use super::types::{PermissionDecision, PermissionRequestEvent};
 use crate::utils::path_utils::is_path_under_trusted;
 
 /// 文件读取记录
@@ -30,9 +31,24 @@ pub struct BashProcessInfo {
     pub last_read_pos: usize,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PermissionRequestSnapshot {
+    pub conversation_id: Option<i64>,
+    pub event: PermissionRequestEvent,
+    pub review_code: String,
+    pub feishu_message_id: Option<String>,
+    pub allowed_open_id: Option<String>,
+    pub allowed_chat_id: Option<String>,
+}
+
 pub(crate) struct PendingPermissionRequest {
-    sender: tokio::sync::oneshot::Sender<super::types::PermissionDecision>,
+    sender: tokio::sync::oneshot::Sender<PermissionDecision>,
     conversation_id: Option<i64>,
+    event: PermissionRequestEvent,
+    review_code: String,
+    feishu_message_id: Option<String>,
+    allowed_open_id: Option<String>,
+    allowed_chat_id: Option<String>,
 }
 
 pub struct PermissionRequestResolution {
@@ -62,6 +78,20 @@ impl OperationState {
             bash_processes: Arc::new(Mutex::new(HashMap::new())),
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
             conversation_trusted_paths: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn build_permission_review_code(request_id: &str) -> String {
+        let compact: String = request_id
+            .chars()
+            .filter(|value| value.is_ascii_alphanumeric())
+            .take(6)
+            .collect::<String>()
+            .to_ascii_uppercase();
+        if compact.is_empty() {
+            "OP-UNKNOWN".to_string()
+        } else {
+            format!("OP-{compact}")
         }
     }
 
@@ -214,12 +244,24 @@ impl OperationState {
     /// 存储待处理的权限请求
     pub async fn store_permission_request(
         &self,
-        request_id: String,
-        conversation_id: Option<i64>,
-        sender: tokio::sync::oneshot::Sender<super::types::PermissionDecision>,
+        event: PermissionRequestEvent,
+        sender: tokio::sync::oneshot::Sender<PermissionDecision>,
     ) {
+        let request_id = event.request_id.clone();
+        let conversation_id = event.conversation_id;
         let mut pending = self.pending_permissions.lock().await;
-        pending.insert(request_id, PendingPermissionRequest { sender, conversation_id });
+        pending.insert(
+            request_id.clone(),
+            PendingPermissionRequest {
+                sender,
+                conversation_id,
+                event,
+                review_code: Self::build_permission_review_code(&request_id),
+                feishu_message_id: None,
+                allowed_open_id: None,
+                allowed_chat_id: None,
+            },
+        );
     }
 
     /// 移除待处理权限请求（用于事件发送失败等场景）
@@ -228,11 +270,82 @@ impl OperationState {
         pending.remove(request_id);
     }
 
+    pub async fn get_permission_request(
+        &self,
+        request_id: &str,
+    ) -> Option<PermissionRequestSnapshot> {
+        let pending = self.pending_permissions.lock().await;
+        pending.get(request_id).map(|request| PermissionRequestSnapshot {
+            conversation_id: request.conversation_id,
+            event: request.event.clone(),
+            review_code: request.review_code.clone(),
+            feishu_message_id: request.feishu_message_id.clone(),
+            allowed_open_id: request.allowed_open_id.clone(),
+            allowed_chat_id: request.allowed_chat_id.clone(),
+        })
+    }
+
+    pub async fn find_permission_request_by_review_code(
+        &self,
+        review_code: &str,
+    ) -> Option<PermissionRequestSnapshot> {
+        let normalized = review_code.trim().to_ascii_uppercase();
+        let pending = self.pending_permissions.lock().await;
+        pending.values().find_map(|request| {
+            if request.review_code == normalized {
+                Some(PermissionRequestSnapshot {
+                    conversation_id: request.conversation_id,
+                    event: request.event.clone(),
+                    review_code: request.review_code.clone(),
+                    feishu_message_id: request.feishu_message_id.clone(),
+                    allowed_open_id: request.allowed_open_id.clone(),
+                    allowed_chat_id: request.allowed_chat_id.clone(),
+                })
+            } else {
+                None
+            }
+        })
+    }
+
+    pub async fn set_permission_feishu_delivery(
+        &self,
+        request_id: &str,
+        feishu_message_id: Option<String>,
+        allowed_open_id: Option<String>,
+        allowed_chat_id: Option<String>,
+    ) {
+        let mut pending = self.pending_permissions.lock().await;
+        if let Some(request) = pending.get_mut(request_id) {
+            request.feishu_message_id = feishu_message_id;
+            request.allowed_open_id = allowed_open_id;
+            request.allowed_chat_id = allowed_chat_id;
+        }
+    }
+
+    pub async fn list_permission_requests_for_conversation(
+        &self,
+        conversation_id: i64,
+    ) -> Vec<PermissionRequestSnapshot> {
+        let pending = self.pending_permissions.lock().await;
+        pending
+            .values()
+            .filter(|request| request.conversation_id == Some(conversation_id))
+            .map(|request| PermissionRequestSnapshot {
+                conversation_id: request.conversation_id,
+                event: request.event.clone(),
+                review_code: request.review_code.clone(),
+                feishu_message_id: request.feishu_message_id.clone(),
+                allowed_open_id: request.allowed_open_id.clone(),
+                allowed_chat_id: request.allowed_chat_id.clone(),
+            })
+            .collect()
+    }
+
     /// 处理权限确认
     pub async fn resolve_permission_request(
         &self,
         request_id: &str,
-        decision: super::types::PermissionDecision,
+        decision: PermissionDecision,
     ) -> Option<PermissionRequestResolution> {
         let mut pending = self.pending_permissions.lock().await;
         pending.remove(request_id).map(|request| PermissionRequestResolution {

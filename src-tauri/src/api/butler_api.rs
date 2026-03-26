@@ -39,11 +39,29 @@ const STATUS_CANCELLED: &str = "cancelled";
 pub(crate) const BUTLER_SYSTEM_ASSISTANT_NAME: &str = "__aipp_internal_butler_system_assistant__";
 const BUTLER_SYSTEM_ASSISTANT_DESCRIPTION: &str = "AIPP 总管家系统保留助手，请勿展示给普通用户。";
 const TASK_RESULT_DETAIL_LIMIT: usize = 4000;
+const TASK_RESULT_STRUCTURED_OUTPUT_LIMIT: usize = 4000;
 type ButlerContinuationLockRegistry = Arc<Mutex<HashMap<i64, Arc<Mutex<()>>>>>;
 static BUTLER_MAIN_CONTINUATION_LOCKS: OnceLock<ButlerContinuationLockRegistry> = OnceLock::new();
+static BUTLER_TASK_FINALIZATION_LOCKS: OnceLock<ButlerContinuationLockRegistry> = OnceLock::new();
+const BUTLER_TASK_WATCHER_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const BUTLER_TASK_WATCHER_IDLE_OBSERVATIONS: usize = 2;
+const BUTLER_TASK_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
+const FOLLOWUP_STATUS_PENDING: &str = "pending";
+const FOLLOWUP_STATUS_DISPATCHING: &str = "dispatching";
+const FOLLOWUP_STATUS_HANDOFF_INJECTED: &str = "handoff_injected";
+const FOLLOWUP_STATUS_ENQUEUED: &str = "enqueued";
+/// Minimum interval between attention followup injections for the same task.
+const ATTENTION_DEBOUNCE_SECS: i64 = 10;
+/// Registry tracking the last attention followup timestamp per task_conversation_id.
+static ATTENTION_LAST_ENQUEUED: OnceLock<Arc<Mutex<HashMap<i64, DateTime<Utc>>>>> = OnceLock::new();
+
+fn attention_last_enqueued_registry() -> &'static Arc<Mutex<HashMap<i64, DateTime<Utc>>>> {
+    ATTENTION_LAST_ENQUEUED.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
 const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，是负责理解目标、拆解任务、选择执行助手、派发子任务、汇总结果并给出建议的内置系统角色，你的核心职责是总控、调度、判断和汇总。
 
-工作原则：
+## 工作原则
+
 1. 先理解用户真正目标，计划完成该任务所需的步骤并且调用todo工具记录；信息不足时先澄清。
 2. 只有在问题非常小、无需独立执行上下文时，才直接回答；凡是实现、修复、调研、撰写、整理、验证、运行这类可交付工作，默认应派发为子任务。
 3. 派发任务时，尽量写清任务标题、目标、约束、交付物和验收标准。
@@ -53,39 +71,42 @@ const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，是负责�
 7. 汇总结果时，清楚标注来源，区分“已经确认的结论”和“仍需补充的信息”。
 8. 面对可能影响外部世界的行为时保持谨慎；如果系统要求审批或确认，遵循运行时约束，不要绕过。
 9. 系统会在子任务进入终态后，通过 `<butler_task_result>` 任务回流消息把结果重新送回你；收到后要把它视为内部执行回调，立即决定下一步，而不是等待用户再次催促。
-10. 不可以产出非要求格式的结果，比如要求交互展示却只生成了代码让用户去手动执行（正确的做法应该是生成html文件或者Artifact），比如要求交付office文档格式Word、Excel、PowerPoint 却只输出了Markdown或者代码块（应该使用skills或者代码执行能力生成对应的文件），如果实在无法产出对应的文件，应该与用户确认后再生成其他降级的格式。
+10. 当系统通过 `<butler_task_attention>` 提醒某个子任务出现权限请求、待执行工具调用、等待确认或其他阻塞时，你应优先使用 `task_conversation_operation` 查看该 task conversation 最新一条或少量最新消息，并直接执行待处理工具、确认权限或补充提示，而不是被动等待人工处理。
+11. 阅读子任务上下文时默认最小化：先看最新 1 条消息和当前待处理权限，确有必要再扩大范围，不要把整个子任务历史一次性搬进主会话。
+12. 如果 `task_conversation_operation read` 返回的待处理权限里包含 `butler_review.manual_review_required=true`，你不得直接确认该请求，只能等待用户在桌面端或飞书端人工审核；典型例子包括带有 `rm`/删除类命令的请求。
+13. 即使没有 `manual_review_required=true`，你也必须保持安全优先：默认选择最小授权，不要自动使用 `allow_and_save`，也不要选择 ACP 的持久授权选项（如 `allow_always`）。
+14. 不可以产出非要求格式的结果，比如要求交互展示却只生成了代码让用户去手动执行（正确的做法应该是生成html文件或者Artifact），比如要求交付office文档格式Word、Excel、PowerPoint 却只输出了Markdown或者代码块（应该使用skills或者代码执行能力生成对应的文件），如果实在无法产出对应的文件，应该与用户确认后再生成其他降级的格式。
+15. 当 `<butler_task_attention>` 的 attention_kind 为 `ask_user_question` 时，说明子任务助手正在向你提问并等待回答。你应先使用 `task_conversation_operation read` 查看 `pending_ask_user_questions` 列表，理解问题内容后，使用 `task_conversation_operation` 的 `ask_user_respond` action 提供回答。回答应基于你已有的任务上下文和对话历史做出合理判断；如果确实无法判断，可以将问题转述给用户。
 
-能力使用规则：
+## 能力使用规则
 1. 系统会先在上下文中注入可派发助手目录，再注入当前可用的 MCP 工具与 Skills 目录，把它们当作运行时能力目录来使用。
 2. 仅基于当前上下文中实际注入的能力做决策，不要假设未注入的工具、技能或权限已经存在。
 3. 派工时优先参考“可派发助手目录”，按任务目标、能力匹配、MCP/Skills 依赖和产出风格来选择执行助手。
 4. 若用户要求“做、实现、修复、调研、整理、产出、推进”，优先先拆成子任务，再显式使用 `spawn_task_conversation` 创建新的任务对话。
-5. `spawn_task_conversation` 是你推进实质性工作的主要机制，不是可选装饰。
+5. `spawn_task_conversation` 与 `task_conversation_operation` 是你推进子任务的主要机制：前者用于创建任务，后者用于查看和操作已存在的任务会话， **这两个工具都不需要加载，可以直接使用**。
 6. 若任务更适合交给专门助手、专门工具链或独立上下文执行，优先拆解并派发。
 7. 必要时，可以加载 AIPP相关的 skills 来增强完成任务的能力，这些 skills 会让你对整个系统有更清晰的认识。
 8. 如果有类似准备资料、产出文件的任务，你可以使用文件系统来进行辅助，也可使用文件系统来辅助多个助手任务之间的协作。
 
-沟通风格：
+## 沟通风格
 - 直接、有判断、不说空话。
 - 先给结论，再给结构化说明。
 - 面向负责人视角表达：关注进度、风险、依赖、备选方案和下一步。
 - 不做表演式热情，不用空洞套话。
 
-结果归属规则：
+## 结果归属规则
 - 可以说“根据任务 A 的结果”或“执行助手 B 返回了如下结论”。
 - 不要把子任务产出描述成你亲自完成的工作。
-
-你的目标不是看起来忙，而是稳定地把事情推进到有结果、有判断、有下一步。
 
 当前的日期是 !cd
 "#;
 
 #[derive(Debug, Clone)]
-struct ButlerModelSelection {
-    raw_value: String,
-    model_code: String,
-    provider_id: i64,
-    display_name: String,
+pub(crate) struct ButlerModelSelection {
+    pub(crate) raw_value: String,
+    pub(crate) model_code: String,
+    pub(crate) provider_id: i64,
+    pub(crate) display_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,10 +195,56 @@ fn butler_main_continuation_lock_registry() -> &'static ButlerContinuationLockRe
     BUTLER_MAIN_CONTINUATION_LOCKS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
+fn butler_task_finalization_lock_registry() -> &'static ButlerContinuationLockRegistry {
+    BUTLER_TASK_FINALIZATION_LOCKS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
 pub(crate) async fn get_butler_main_continuation_lock(conversation_id: i64) -> Arc<Mutex<()>> {
     let registry = butler_main_continuation_lock_registry();
     let mut guard = registry.lock().await;
     guard.entry(conversation_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+}
+
+async fn get_butler_task_finalization_lock(conversation_id: i64) -> Arc<Mutex<()>> {
+    let registry = butler_task_finalization_lock_registry();
+    let mut guard = registry.lock().await;
+    guard.entry(conversation_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+}
+
+/// Remove finalization lock entry for a completed task to prevent memory leaks.
+async fn cleanup_butler_task_finalization_lock(task_conversation_id: i64) {
+    let registry = butler_task_finalization_lock_registry();
+    let mut guard = registry.lock().await;
+    guard.remove(&task_conversation_id);
+}
+
+/// Remove continuation lock entry for an archived/reset butler main conversation.
+pub(crate) async fn cleanup_butler_main_continuation_lock(conversation_id: i64) {
+    let registry = butler_main_continuation_lock_registry();
+    let mut guard = registry.lock().await;
+    guard.remove(&conversation_id);
+}
+
+/// Remove attention debounce entry for a completed task.
+async fn cleanup_attention_debounce(task_conversation_id: i64) {
+    let registry = attention_last_enqueued_registry();
+    let mut guard = registry.lock().await;
+    guard.remove(&task_conversation_id);
+}
+
+/// Check whether the attention followup for this task is being debounced.
+/// Returns true if enough time has elapsed and records the new timestamp.
+async fn try_claim_attention_debounce(task_conversation_id: i64) -> bool {
+    let registry = attention_last_enqueued_registry();
+    let mut guard = registry.lock().await;
+    let now = Utc::now();
+    if let Some(last) = guard.get(&task_conversation_id) {
+        if (now - *last).num_seconds() < ATTENTION_DEBOUNCE_SECS {
+            return false;
+        }
+    }
+    guard.insert(task_conversation_id, now);
+    true
 }
 
 fn parse_bool_flag(value: &str) -> bool {
@@ -216,10 +283,96 @@ async fn ensure_butler_enabled(app_handle: &AppHandle) -> Result<(), String> {
 
 async fn build_butler_system_prompt(app_handle: &AppHandle) -> Result<String, String> {
     let assistant_directory_prompt = build_butler_assistant_directory_prompt(app_handle).await?;
-    Ok(format!("{}\n\n{}", BUTLER_SYSTEM_PROMPT_BASE, assistant_directory_prompt))
+    let trusted_workspaces_prompt = build_butler_trusted_workspaces_prompt(app_handle).await;
+    Ok(format!(
+        "{}\n\n{}\n\n{}",
+        BUTLER_SYSTEM_PROMPT_BASE, assistant_directory_prompt, trusted_workspaces_prompt,
+    ))
 }
 
-async fn get_butler_model_selection(
+/// Build a prompt section informing the Butler about trusted workspaces.
+async fn build_butler_trusted_workspaces_prompt(app_handle: &AppHandle) -> String {
+    let trust_all = get_experimental_config_value(app_handle, "butler_trust_all_workspaces")
+        .await
+        .map(|v| parse_bool_flag(&v))
+        .unwrap_or(false);
+
+    if trust_all {
+        return "可信工作区：当前已开启「信任任何工作区」，所有路径的文件操作均自动放行，无需权限确认。".to_string();
+    }
+
+    let raw = get_experimental_config_value(app_handle, "butler_trusted_workspaces")
+        .await
+        .unwrap_or_default();
+
+    let workspaces = parse_trusted_workspaces(&raw);
+
+    if workspaces.is_empty() {
+        return "可信工作区：当前未配置可信工作区，子任务在执行文件操作时可能需要权限确认。"
+            .to_string();
+    }
+
+    let list = workspaces
+        .iter()
+        .map(|(path, desc)| {
+            if desc.is_empty() {
+                format!("- {}", path)
+            } else {
+                format!("- {}（{}）", path, desc)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "可信工作区：\n以下路径已被标记为可信工作区，子任务在这些路径下的文件操作将自动放行，无需权限确认。派发任务时，建议优先使用这些目录作为工作目录。\n{}",
+        list
+    )
+}
+
+/// Parse trusted workspaces config value. Supports JSON array format
+/// `[{"path":"...","description":"..."}]` and legacy newline-separated plain paths.
+/// Returns Vec<(path, description)>.
+fn parse_trusted_workspaces(raw: &str) -> Vec<(String, String)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    // Try JSON array first
+    if trimmed.starts_with('[') {
+        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
+            let result: Vec<(String, String)> = arr
+                .iter()
+                .filter_map(|v| {
+                    let path = v.get("path")?.as_str()?.trim().to_string();
+                    if path.is_empty() {
+                        return None;
+                    }
+                    let desc = v
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    Some((path, desc))
+                })
+                .collect();
+            if !result.is_empty() {
+                return result;
+            }
+        }
+    }
+
+    // Fallback: newline-separated plain paths
+    trimmed
+        .split('\n')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| (s.to_string(), String::new()))
+        .collect()
+}
+
+pub(crate) async fn get_butler_model_selection(
     app_handle: &AppHandle,
 ) -> Result<ButlerModelSelection, String> {
     let raw_value = get_experimental_config_value(app_handle, "butler_model_id")
@@ -519,6 +672,18 @@ pub(crate) fn resolve_butler_execution_window(app_handle: &AppHandle) -> Result<
     Err("No available window for butler continuation".to_string())
 }
 
+fn resolve_or_create_butler_execution_window(app_handle: &AppHandle) -> Result<Window, String> {
+    if let Ok(window) = resolve_butler_execution_window(app_handle) {
+        return Ok(window);
+    }
+
+    crate::window::create_chat_ui_window_hidden(app_handle);
+    app_handle
+        .get_webview_window("chat_ui")
+        .map(|window| window.as_ref().window())
+        .ok_or_else(|| "No available window for butler continuation".to_string())
+}
+
 pub(crate) async fn wait_for_butler_main_to_be_idle(app_handle: &AppHandle, conversation_id: i64) {
     let activity_manager =
         app_handle.state::<crate::state::activity_state::ConversationActivityManager>();
@@ -551,24 +716,24 @@ fn build_butler_task_result_system_message(
     };
     let summary =
         result.summary.as_deref().filter(|value| !value.trim().is_empty()).unwrap_or("无");
+    let structured_output_trimmed = result
+        .structured_output_json
+        .as_deref()
+        .map(|v| trim_chars(v, TASK_RESULT_STRUCTURED_OUTPUT_LIMIT))
+        .unwrap_or_else(|| "null".to_string());
 
     format!(
-        "<butler_task_result>\nstatus={status}\ncancel_requested={cancel_requested}\ntask_conversation_id={task_conversation_id}\nfinal_message_id={final_message_id}\ntitle={title}\ngoal={goal}\nexecutor_assistant_id={assistant_id}\nexecutor_assistant_name={assistant_name}\nresult_handling_mode={result_handling_mode}\nnotification_policy={notification_policy}\nhandoff_contract_json={handoff_contract_json}\nsummary={summary}\ndetail_excerpt={detail_excerpt}\npayload_json={payload_json}\nstructured_output_json={structured_output_json}\n</butler_task_result>",
+        "<butler_task_result>\nstatus={status}\ncancel_requested={cancel_requested}\ntask_conversation_id={task_conversation_id}\nfinal_message_id={final_message_id}\ntitle={title}\ngoal={goal}\nexecutor_assistant_name={assistant_name}\nsummary={summary}\ndetail_excerpt={detail_excerpt}\nstructured_output_json={structured_output_json}\n</butler_task_result>",
         status = task.status,
         cancel_requested = cancel_requested,
         task_conversation_id = task.task_conversation_id,
         final_message_id = result.final_message_id.map(|value| value.to_string()).unwrap_or_else(|| "null".to_string()),
         title = definition.title,
         goal = trim_chars(&definition.goal, 600),
-        assistant_id = definition.executor_assistant_id,
         assistant_name = task.executor_assistant_name,
-        result_handling_mode = definition.result_handling_mode.as_deref().unwrap_or("notify_only"),
-        notification_policy = definition.notification_policy.as_deref().unwrap_or("default"),
-        handoff_contract_json = definition.handoff_contract_json.as_deref().unwrap_or("null"),
         summary = summary,
         detail_excerpt = detail_text,
-        payload_json = result.payload_json.as_deref().unwrap_or("null"),
-        structured_output_json = result.structured_output_json.as_deref().unwrap_or("null"),
+        structured_output_json = structured_output_trimmed,
     )
 }
 
@@ -588,12 +753,287 @@ fn build_butler_task_result_followup_prompt(
     )
 }
 
-fn schedule_butler_main_followup(
+async fn enqueue_butler_main_followup(
+    app_handle: AppHandle,
+    task: ButlerTaskListItem,
+    definition: ButlerTaskDefinition,
+    result: ButlerTaskResult,
+    cancel_requested: bool,
+    inject_system_message: bool,
+) -> Result<(), String> {
+    let butler_conversation_id = definition.butler_conversation_id;
+    let continuation_lock = get_butler_main_continuation_lock(butler_conversation_id).await;
+    let _guard = continuation_lock.lock().await;
+    wait_for_butler_main_to_be_idle(&app_handle, butler_conversation_id).await;
+
+    let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
+    let butler_repo = db.butler_repo().map_err(|e| e.to_string())?;
+
+    // Collect the primary task first.
+    let mut followup_batch: Vec<FollowupBatchEntry> = vec![FollowupBatchEntry {
+        task: task.clone(),
+        definition: definition.clone(),
+        result,
+        cancel_requested,
+        inject_system_message,
+        handoff_message_id: None,
+    }];
+
+    // Collect additional tasks in PENDING followup state for the same butler
+    // conversation so we can inject all results in one go and trigger a single
+    // LLM continuation instead of one per task.
+    if let Ok(pending_ids) = conversation_repo.list_butler_task_conversation_ids_pending_followup()
+    {
+        for pending_task_id in pending_ids {
+            // Skip the primary task we already have.
+            if pending_task_id == task.task_conversation_id {
+                continue;
+            }
+            if let Ok(Some(extra)) = try_build_followup_batch_entry(
+                &app_handle,
+                &butler_repo,
+                &conversation_repo,
+                pending_task_id,
+                butler_conversation_id,
+            ) {
+                // Try to claim dispatch so no other thread picks it up.
+                if butler_repo
+                    .try_mark_task_result_followup_dispatching(
+                        pending_task_id,
+                        extra.result.handoff_message_id,
+                    )
+                    .unwrap_or(false)
+                {
+                    followup_batch.push(extra);
+                }
+            }
+        }
+    }
+
+    let mut first_handoff_message_id = followup_batch[0].result.handoff_message_id;
+    let followup_result: Result<(), String> = async {
+        let Some(main_conversation) =
+            conversation_repo.read(butler_conversation_id).map_err(|e| e.to_string())?
+        else {
+            return Err("总管家主会话不存在".to_string());
+        };
+        if main_conversation.conversation_kind != BUTLER_KIND_MAIN {
+            return Err("总管家主会话已归档，无法继续回流".to_string());
+        }
+        let assistant_id = main_conversation
+            .assistant_id
+            .ok_or_else(|| "总管家主会话缺少 assistant".to_string())?;
+
+        // Inject system messages for all tasks in the batch.
+        for entry in &mut followup_batch {
+            if entry.inject_system_message {
+                let handoff_system_message = build_butler_task_result_system_message(
+                    &entry.task,
+                    &entry.definition,
+                    &entry.result,
+                    entry.cancel_requested,
+                );
+                let handoff_message = add_message(
+                    &app_handle,
+                    None,
+                    butler_conversation_id,
+                    "system".to_string(),
+                    handoff_system_message,
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
+                    None,
+                    None,
+                )
+                .map_err(|e| e.to_string())?;
+                entry.handoff_message_id = Some(handoff_message.id);
+                butler_repo
+                    .update_task_result_followup_state(
+                        entry.task.task_conversation_id,
+                        FOLLOWUP_STATUS_HANDOFF_INJECTED,
+                        entry.handoff_message_id,
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        first_handoff_message_id = followup_batch[0].handoff_message_id;
+
+        // Build a single combined followup prompt.
+        let prompt = build_batched_followup_prompt(&followup_batch);
+
+        let window = resolve_or_create_butler_execution_window(&app_handle)?;
+        let ai_request = AiRequest {
+            conversation_id: butler_conversation_id.to_string(),
+            assistant_id,
+            prompt,
+            model: None,
+            override_model_id: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            stream: Some(true),
+            attachment_list: None,
+        };
+
+        ask_ai(
+            app_handle.clone(),
+            app_handle.state::<crate::AppState>(),
+            app_handle.state::<crate::AcpSessionState>(),
+            app_handle.state::<crate::FeatureConfigState>(),
+            app_handle.state::<crate::state::message_token::MessageTokenManager>(),
+            app_handle.state::<crate::state::activity_state::ConversationActivityManager>(),
+            window,
+            ai_request,
+            None,
+            None,
+            None,
+            None,
+            Some("internal".to_string()),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        for entry in &followup_batch {
+            butler_repo
+                .update_task_result_followup_state(
+                    entry.task.task_conversation_id,
+                    FOLLOWUP_STATUS_ENQUEUED,
+                    entry.handoff_message_id,
+                )
+                .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    }
+    .await;
+
+    if let Err(error) = followup_result {
+        for entry in &followup_batch {
+            let rollback_status = if entry.handoff_message_id.is_some() {
+                FOLLOWUP_STATUS_HANDOFF_INJECTED
+            } else {
+                FOLLOWUP_STATUS_PENDING
+            };
+            if let Err(rollback_error) = butler_repo.update_task_result_followup_state(
+                entry.task.task_conversation_id,
+                rollback_status,
+                entry.handoff_message_id,
+            ) {
+                warn!(
+                    task_conversation_id = entry.task.task_conversation_id,
+                    error = %rollback_error,
+                    "failed to rollback butler task follow-up state"
+                );
+            }
+        }
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+struct FollowupBatchEntry {
+    task: ButlerTaskListItem,
+    definition: ButlerTaskDefinition,
+    result: ButlerTaskResult,
+    cancel_requested: bool,
+    inject_system_message: bool,
+    handoff_message_id: Option<i64>,
+}
+
+fn try_build_followup_batch_entry(
+    app_handle: &AppHandle,
+    butler_repo: &crate::db::conversation_db::ButlerRepository,
+    conversation_repo: &crate::db::conversation_db::ConversationRepository,
+    task_conversation_id: i64,
+    expected_butler_conversation_id: i64,
+) -> Result<Option<FollowupBatchEntry>, String> {
+    let Some(definition) = butler_repo
+        .get_task_definition_by_task_conversation_id(task_conversation_id)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    if definition.butler_conversation_id != expected_butler_conversation_id {
+        return Ok(None);
+    }
+    let Some(result) =
+        butler_repo.get_task_result(task_conversation_id).map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    let Some(conversation) =
+        conversation_repo.read(task_conversation_id).map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    let cancel_requested = conversation.butler_task_status.as_deref() == Some(STATUS_CANCELLED);
+    let task_item = ButlerTaskListItem {
+        butler_conversation_id: definition.butler_conversation_id,
+        task_conversation_id,
+        title: definition.title.clone(),
+        goal: definition.goal.clone(),
+        status: conversation
+            .butler_task_status
+            .clone()
+            .unwrap_or_else(|| STATUS_SUCCEEDED.to_string()),
+        executor_assistant_id: definition.executor_assistant_id,
+        executor_assistant_name: crate::db::assistant_db::AssistantDatabase::new(app_handle)
+            .ok()
+            .and_then(|db| db.get_assistant(definition.executor_assistant_id).ok())
+            .map(|a| a.name)
+            .unwrap_or_default(),
+        last_summary: result.summary.clone(),
+        created_time: definition.created_time,
+        updated_time: conversation.updated_time,
+        finalized_at: conversation.butler_task_finalized_at,
+        is_finalized: conversation.butler_task_finalized_at.is_some(),
+        has_pending_permission: false,
+        is_running: false,
+    };
+    Ok(Some(FollowupBatchEntry {
+        task: task_item,
+        definition,
+        result,
+        cancel_requested,
+        inject_system_message: true,
+        handoff_message_id: None,
+    }))
+}
+
+fn build_batched_followup_prompt(batch: &[FollowupBatchEntry]) -> String {
+    if batch.len() == 1 {
+        return build_butler_task_result_followup_prompt(&batch[0].task, batch[0].cancel_requested);
+    }
+    let items: Vec<String> = batch
+        .iter()
+        .map(|entry| {
+            format!(
+                "- 任务《{title}》{status}{cancel_suffix}",
+                title = entry.task.title,
+                status = describe_task_terminal_status(&entry.task.status),
+                cancel_suffix =
+                    if entry.cancel_requested { "（伴随取消请求）" } else { "" },
+            )
+        })
+        .collect();
+    format!(
+        "系统批量任务回流：以下 {} 个子任务同时到达终态，对应的 <butler_task_result> 已注入上方。这不是终端用户的新需求，而是子任务回调。请逐一审阅每个结果，统一判断下一步。\n{}",
+        batch.len(),
+        items.join("\n"),
+    )
+}
+
+fn spawn_butler_main_followup(
     app_handle: &AppHandle,
     task: &ButlerTaskListItem,
     definition: &ButlerTaskDefinition,
     result: &ButlerTaskResult,
     cancel_requested: bool,
+    inject_system_message: bool,
 ) {
     let app_handle_clone = app_handle.clone();
     let task_clone = task.clone();
@@ -605,92 +1045,16 @@ fn schedule_butler_main_followup(
     let error_task_title = definition_clone.title.clone();
 
     std::thread::spawn(move || {
-        let app_handle_for_async = app_handle_clone.clone();
-        let task_for_async = task_clone.clone();
-        let definition_for_async = definition_clone.clone();
-        let result_for_async = result_clone.clone();
         let thread_result: Result<(), String> = tauri::async_runtime::block_on(async move {
-            let continuation_lock =
-                get_butler_main_continuation_lock(definition_for_async.butler_conversation_id)
-                    .await;
-            let _guard = continuation_lock.lock().await;
-            wait_for_butler_main_to_be_idle(
-                &app_handle_for_async,
-                definition_for_async.butler_conversation_id,
-            )
-            .await;
-
-            let db = ConversationDatabase::new(&app_handle_for_async).map_err(|e| e.to_string())?;
-            let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
-            let Some(main_conversation) = conversation_repo
-                .read(definition_for_async.butler_conversation_id)
-                .map_err(|e| e.to_string())?
-            else {
-                return Ok(());
-            };
-            if main_conversation.conversation_kind != BUTLER_KIND_MAIN {
-                return Ok(());
-            }
-            let assistant_id = main_conversation
-                .assistant_id
-                .ok_or_else(|| "总管家主会话缺少 assistant".to_string())?;
-
-            let handoff_system_message = build_butler_task_result_system_message(
-                &task_for_async,
-                &definition_for_async,
-                &result_for_async,
+            enqueue_butler_main_followup(
+                app_handle_clone.clone(),
+                task_clone,
+                definition_clone,
+                result_clone,
                 cancel_requested,
-            );
-            add_message(
-                &app_handle_for_async,
-                None,
-                definition_for_async.butler_conversation_id,
-                "system".to_string(),
-                handoff_system_message,
-                None,
-                None,
-                None,
-                None,
-                0,
-                None,
-                None,
-            )
-            .map_err(|e| e.to_string())?;
-
-            let window = resolve_butler_execution_window(&app_handle_for_async)?;
-            let ai_request = AiRequest {
-                conversation_id: definition_for_async.butler_conversation_id.to_string(),
-                assistant_id,
-                prompt: build_butler_task_result_followup_prompt(&task_for_async, cancel_requested),
-                model: None,
-                override_model_id: None,
-                temperature: None,
-                top_p: None,
-                max_tokens: None,
-                stream: Some(true),
-                attachment_list: None,
-            };
-
-            ask_ai(
-                app_handle_for_async.clone(),
-                app_handle_for_async.state::<crate::AppState>(),
-                app_handle_for_async.state::<crate::AcpSessionState>(),
-                app_handle_for_async.state::<crate::FeatureConfigState>(),
-                app_handle_for_async.state::<crate::state::message_token::MessageTokenManager>(),
-                app_handle_for_async
-                    .state::<crate::state::activity_state::ConversationActivityManager>(),
-                window,
-                ai_request,
-                None,
-                None,
-                None,
-                None,
-                Some("internal".to_string()),
+                inject_system_message,
             )
             .await
-            .map_err(|e| e.to_string())?;
-
-            Ok(())
         });
 
         if let Err(error) = thread_result {
@@ -711,6 +1075,51 @@ fn schedule_butler_main_followup(
             );
         }
     });
+}
+
+fn schedule_butler_main_followup(
+    app_handle: &AppHandle,
+    task: &ButlerTaskListItem,
+    definition: &ButlerTaskDefinition,
+    result: &ButlerTaskResult,
+    cancel_requested: bool,
+) {
+    let claim_result = (|| -> Result<bool, String> {
+        let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+        db.butler_repo()
+            .map_err(|e| e.to_string())?
+            .try_mark_task_result_followup_dispatching(
+                task.task_conversation_id,
+                result.handoff_message_id,
+            )
+            .map_err(|e| e.to_string())
+    })();
+
+    match claim_result {
+        Ok(true) => {
+            spawn_butler_main_followup(
+                app_handle,
+                task,
+                definition,
+                result,
+                cancel_requested,
+                true,
+            );
+        }
+        Ok(false) => {
+            debug!(
+                task_conversation_id = task.task_conversation_id,
+                "skip scheduling butler main follow-up because another dispatcher already claimed it"
+            );
+        }
+        Err(error) => {
+            warn!(
+                task_conversation_id = task.task_conversation_id,
+                error = %error,
+                "failed to claim butler main follow-up before scheduling"
+            );
+        }
+    }
 }
 
 fn dedupe_messages(
@@ -765,9 +1174,8 @@ pub(crate) async fn emit_butler_task_permission_state_changed(
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
     let butler_repo = db.butler_repo().map_err(|e| e.to_string())?;
-    let Some(conversation) = conversation_repo
-        .read(task_conversation_id)
-        .map_err(|e| e.to_string())?
+    let Some(conversation) =
+        conversation_repo.read(task_conversation_id).map_err(|e| e.to_string())?
     else {
         return Ok(());
     };
@@ -781,7 +1189,8 @@ pub(crate) async fn emit_butler_task_permission_state_changed(
         return Ok(());
     };
     let result = butler_repo.get_task_result(task_conversation_id).map_err(|e| e.to_string())?;
-    let task_item = build_task_list_item(app_handle, conversation, &definition, result.as_ref()).await?;
+    let task_item =
+        build_task_list_item(app_handle, conversation, &definition, result.as_ref()).await?;
     let _ = app_handle.emit("butler_task_updated", task_item.clone());
 
     let permission_label = format_permission_kind_label(permission_kind);
@@ -795,6 +1204,7 @@ pub(crate) async fn emit_butler_task_permission_state_changed(
             "请在总管家窗口中确认后继续执行。".to_string(),
             "medium",
         );
+        spawn_butler_task_attention_followup(app_handle, &task_item, &definition, permission_kind);
     } else {
         emit_butler_notification(
             app_handle,
@@ -810,6 +1220,108 @@ pub(crate) async fn emit_butler_task_permission_state_changed(
             "light",
         );
     }
+
+    Ok(())
+}
+
+pub(crate) async fn emit_butler_task_pending_mcp_tool_attention(
+    app_handle: &AppHandle,
+    task_conversation_id: i64,
+) -> Result<(), String> {
+    let operation_state = app_handle.state::<OperationState>();
+    if operation_state.has_pending_permission_for_conversation(task_conversation_id).await {
+        return Ok(());
+    }
+    let acp_permission_state = app_handle.state::<AcpPermissionState>();
+    if acp_permission_state.has_pending_permission_for_conversation(task_conversation_id).await {
+        return Ok(());
+    }
+
+    let pending_mcp_tool_call_count = MCPDatabase::new(app_handle)
+        .map_err(|e| e.to_string())?
+        .get_mcp_tool_calls_by_conversation(task_conversation_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|tool_call| tool_call.status == "pending")
+        .count();
+    if pending_mcp_tool_call_count == 0 {
+        return Ok(());
+    }
+
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
+    let butler_repo = db.butler_repo().map_err(|e| e.to_string())?;
+    let Some(conversation) =
+        conversation_repo.read(task_conversation_id).map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
+    if conversation.conversation_kind != BUTLER_KIND_TASK {
+        return Ok(());
+    }
+    let Some(definition) = butler_repo
+        .get_task_definition_by_task_conversation_id(task_conversation_id)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
+    let result = butler_repo.get_task_result(task_conversation_id).map_err(|e| e.to_string())?;
+    let task_item =
+        build_task_list_item(app_handle, conversation, &definition, result.as_ref()).await?;
+    let _ = app_handle.emit("butler_task_updated", task_item.clone());
+
+    emit_butler_notification(
+        app_handle,
+        definition.butler_conversation_id,
+        task_conversation_id,
+        "mcp_tool_pending",
+        format!("任务 {} 存在待执行工具调用", definition.title),
+        "请使用 task_conversation_operation read 查看 pending_mcp_tool_calls，并使用 mcp_tool_execute 继续推进。".to_string(),
+        "medium",
+    );
+    spawn_butler_task_attention_followup(app_handle, &task_item, &definition, "mcp_tool_pending");
+
+    Ok(())
+}
+
+/// Notify Butler main conversation that a sub-task is waiting on ask_user_question.
+pub(crate) async fn emit_butler_task_ask_user_attention(
+    app_handle: &AppHandle,
+    task_conversation_id: i64,
+) -> Result<(), String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
+    let butler_repo = db.butler_repo().map_err(|e| e.to_string())?;
+    let Some(conversation) =
+        conversation_repo.read(task_conversation_id).map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
+    if conversation.conversation_kind != BUTLER_KIND_TASK {
+        return Ok(());
+    }
+    let Some(definition) = butler_repo
+        .get_task_definition_by_task_conversation_id(task_conversation_id)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
+    let result = butler_repo.get_task_result(task_conversation_id).map_err(|e| e.to_string())?;
+    let task_item =
+        build_task_list_item(app_handle, conversation, &definition, result.as_ref()).await?;
+    let _ = app_handle.emit("butler_task_updated", task_item.clone());
+
+    emit_butler_notification(
+        app_handle,
+        definition.butler_conversation_id,
+        task_conversation_id,
+        "ask_user_question",
+        format!("任务 {} 需要你回答问题", definition.title),
+        "子任务助手向你提出了一个问题，请使用 task_conversation_operation read 查看并回答。"
+            .to_string(),
+        "medium",
+    );
+    spawn_butler_task_attention_followup(app_handle, &task_item, &definition, "ask_user_question");
 
     Ok(())
 }
@@ -836,12 +1348,9 @@ async fn build_task_list_item(
         .or_else(|| conversation.butler_task_summary.clone());
     let operation_state = app_handle.state::<OperationState>();
     let acp_permission_state = app_handle.state::<AcpPermissionState>();
-    let has_pending_permission = operation_state
-        .has_pending_permission_for_conversation(conversation.id)
-        .await
-        || acp_permission_state
-            .has_pending_permission_for_conversation(conversation.id)
-            .await;
+    let has_pending_permission =
+        operation_state.has_pending_permission_for_conversation(conversation.id).await
+            || acp_permission_state.has_pending_permission_for_conversation(conversation.id).await;
 
     Ok(ButlerTaskListItem {
         butler_conversation_id: definition.butler_conversation_id,
@@ -1047,6 +1556,8 @@ async fn record_terminal_task_state(
         evidence_json: Some("[]".to_string()),
         artifact_refs_json: Some("[]".to_string()),
         followup_suggestions_json: Some("[]".to_string()),
+        followup_status: Some(FOLLOWUP_STATUS_PENDING.to_string()),
+        handoff_message_id: None,
         final_message_id,
         created_time: existing_result.as_ref().map(|value| value.created_time).unwrap_or(now),
         updated_time: now,
@@ -1106,6 +1617,10 @@ async fn record_terminal_task_state(
         cancel_requested,
     );
 
+    // Clean up per-task lock and debounce entries now that the task reached terminal state.
+    cleanup_butler_task_finalization_lock(task_conversation_id).await;
+    cleanup_attention_debounce(task_conversation_id).await;
+
     debug!(
         task_conversation_id,
         butler_conversation_id = conversation.parent_butler_conversation_id,
@@ -1127,16 +1642,28 @@ fn find_latest_task_message<'a>(
     })
 }
 
-fn decide_butler_task_terminal_state(
+fn find_latest_terminal_response_message(
+    messages: &[Message],
+    require_finish_time: bool,
+) -> Option<&Message> {
+    messages.iter().rev().find(|message| {
+        message.message_type == "response"
+            && !message.content.trim().is_empty()
+            && !message.content.contains("<!-- MCP_TOOL_CALL:")
+            && (!require_finish_time || message.finish_time.is_some())
+    })
+}
+
+fn try_decide_butler_task_terminal_state(
     messages: &[Message],
     conversation_summary: Option<String>,
     cancel_requested: bool,
-) -> ButlerTaskTerminalDecision {
+) -> Option<ButlerTaskTerminalDecision> {
     let latest_error = find_latest_task_message(messages, "error", false);
 
     if cancel_requested {
-        if let Some(response) = find_latest_task_message(messages, "response", true) {
-            return ButlerTaskTerminalDecision {
+        if let Some(response) = find_latest_terminal_response_message(messages, true) {
+            return Some(ButlerTaskTerminalDecision {
                 status: STATUS_SUCCEEDED,
                 summary: normalize_summary(
                     Some(format!(
@@ -1148,14 +1675,14 @@ fn decide_butler_task_terminal_state(
                 detail_text: response.content.clone(),
                 final_message_id: Some(response.id),
                 cancel_requested: true,
-            };
+            });
         }
 
         let cancel_detail = latest_error
             .map(|error| error.content.clone())
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "任务已取消，未产出最终结果".to_string());
-        return ButlerTaskTerminalDecision {
+        return Some(ButlerTaskTerminalDecision {
             status: STATUS_CANCELLED,
             summary: normalize_summary(
                 Some(format!("任务已取消：{}", summarize_text(&cancel_detail))),
@@ -1164,40 +1691,44 @@ fn decide_butler_task_terminal_state(
             detail_text: cancel_detail,
             final_message_id: latest_error.map(|error| error.id),
             cancel_requested: true,
-        };
+        });
     }
 
-    let latest_response = find_latest_task_message(messages, "response", false);
+    let latest_response = find_latest_terminal_response_message(messages, false);
 
     match (latest_response, latest_error) {
-        (Some(response), Some(error)) if error.id > response.id => ButlerTaskTerminalDecision {
-            status: STATUS_FAILED,
-            summary: normalize_summary(Some(summarize_text(&error.content)), &error.content),
-            detail_text: error.content.clone(),
-            final_message_id: Some(error.id),
-            cancel_requested: false,
-        },
-        (Some(response), _) => ButlerTaskTerminalDecision {
+        (Some(response), Some(error)) if error.id > response.id => {
+            Some(ButlerTaskTerminalDecision {
+                status: STATUS_FAILED,
+                summary: normalize_summary(Some(summarize_text(&error.content)), &error.content),
+                detail_text: error.content.clone(),
+                final_message_id: Some(error.id),
+                cancel_requested: false,
+            })
+        }
+        (Some(response), _) => Some(ButlerTaskTerminalDecision {
             status: STATUS_SUCCEEDED,
             summary: normalize_summary(Some(summarize_text(&response.content)), &response.content),
             detail_text: response.content.clone(),
             final_message_id: Some(response.id),
             cancel_requested: false,
-        },
-        (_, Some(error)) => ButlerTaskTerminalDecision {
+        }),
+        (_, Some(error)) => Some(ButlerTaskTerminalDecision {
             status: STATUS_FAILED,
             summary: normalize_summary(Some(summarize_text(&error.content)), &error.content),
             detail_text: error.content.clone(),
             final_message_id: Some(error.id),
             cancel_requested: false,
-        },
-        _ => ButlerTaskTerminalDecision {
-            status: STATUS_FAILED,
-            summary: normalize_summary(conversation_summary, "任务结束，但未生成可用结果"),
-            detail_text: "任务结束，但未生成可用结果".to_string(),
-            final_message_id: None,
-            cancel_requested: false,
-        },
+        }),
+        _ => conversation_summary.filter(|summary| !summary.trim().is_empty()).map(|summary| {
+            ButlerTaskTerminalDecision {
+                status: STATUS_FAILED,
+                summary: normalize_summary(Some(summary), "任务结束，但未生成可用结果"),
+                detail_text: "任务结束，但未生成可用结果".to_string(),
+                final_message_id: None,
+                cancel_requested: false,
+            }
+        }),
     }
 }
 
@@ -1205,6 +1736,9 @@ pub(crate) async fn finalize_butler_task_if_ready(
     app_handle: &AppHandle,
     task_conversation_id: i64,
 ) -> Result<Option<ButlerTaskListItem>, String> {
+    let finalization_lock = get_butler_task_finalization_lock(task_conversation_id).await;
+    let _guard = finalization_lock.lock().await;
+
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
     let butler_repo = db.butler_repo().map_err(|e| e.to_string())?;
@@ -1242,11 +1776,13 @@ pub(crate) async fn finalize_butler_task_if_ready(
             .list_by_conversation_id(task_conversation_id)
             .map_err(|e| e.to_string())?,
     );
-    let decision = decide_butler_task_terminal_state(
+    let Some(decision) = try_decide_butler_task_terminal_state(
         &messages,
         conversation.butler_task_summary.clone(),
         conversation.butler_task_status.as_deref() == Some(STATUS_CANCELLED),
-    );
+    ) else {
+        return Ok(None);
+    };
 
     record_terminal_task_state(
         app_handle,
@@ -1261,6 +1797,354 @@ pub(crate) async fn finalize_butler_task_if_ready(
     .map(Some)
 }
 
+fn update_butler_task_watcher_state(
+    seen_running: &mut bool,
+    idle_checks: &mut usize,
+    is_running: bool,
+) -> bool {
+    if is_running {
+        *seen_running = true;
+        *idle_checks = 0;
+        return false;
+    }
+
+    if *seen_running {
+        *idle_checks += 1;
+        return *idle_checks >= BUTLER_TASK_WATCHER_IDLE_OBSERVATIONS;
+    }
+
+    false
+}
+
+fn parse_task_conversation_id_from_handoff_message(content: &str) -> Option<i64> {
+    if !content.contains("<butler_task_result>") {
+        return None;
+    }
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("task_conversation_id=")?.trim().parse::<i64>().ok())
+}
+
+fn find_latest_handoff_message_id(messages: &[Message], task_conversation_id: i64) -> Option<i64> {
+    messages.iter().rev().find_map(|message| {
+        (message.message_type == "system"
+            && parse_task_conversation_id_from_handoff_message(&message.content)
+                == Some(task_conversation_id))
+        .then_some(message.id)
+    })
+}
+
+fn parse_task_conversation_id_from_attention_message(content: &str) -> Option<i64> {
+    if !content.contains("<butler_task_attention>") {
+        return None;
+    }
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("task_conversation_id=")?.trim().parse::<i64>().ok())
+}
+
+fn find_latest_attention_message_id(
+    messages: &[Message],
+    task_conversation_id: i64,
+) -> Option<i64> {
+    messages.iter().rev().find_map(|message| {
+        (message.message_type == "system"
+            && parse_task_conversation_id_from_attention_message(&message.content)
+                == Some(task_conversation_id))
+        .then_some(message.id)
+    })
+}
+
+fn has_non_system_message_after(messages: &[Message], message_id: i64) -> bool {
+    messages.iter().any(|message| message.id > message_id && message.message_type != "system")
+}
+
+fn build_butler_task_attention_system_message(
+    task: &ButlerTaskListItem,
+    definition: &ButlerTaskDefinition,
+    attention_kind: &str,
+    latest_message_excerpt: &str,
+    pending_mcp_tool_call_count: usize,
+    operation_permission_count: usize,
+    acp_permission_count: usize,
+    ask_user_question_count: usize,
+) -> String {
+    format!(
+        "<butler_task_attention>\nattention_kind={attention_kind}\ntask_conversation_id={task_conversation_id}\ntitle={title}\ngoal={goal}\nstatus={status}\nexecutor_assistant_id={assistant_id}\nexecutor_assistant_name={assistant_name}\npending_mcp_tool_call_count={pending_mcp_tool_call_count}\noperation_permission_count={operation_permission_count}\nacp_permission_count={acp_permission_count}\nask_user_question_count={ask_user_question_count}\nlatest_message_excerpt={latest_message_excerpt}\n</butler_task_attention>",
+        attention_kind = attention_kind,
+        task_conversation_id = task.task_conversation_id,
+        title = definition.title,
+        goal = trim_chars(&definition.goal, 600),
+        status = task.status,
+        assistant_id = definition.executor_assistant_id,
+        assistant_name = task.executor_assistant_name,
+        pending_mcp_tool_call_count = pending_mcp_tool_call_count,
+        operation_permission_count = operation_permission_count,
+        acp_permission_count = acp_permission_count,
+        ask_user_question_count = ask_user_question_count,
+        latest_message_excerpt = latest_message_excerpt,
+    )
+}
+
+fn build_butler_task_attention_followup_prompt(
+    task: &ButlerTaskListItem,
+    attention_kind: &str,
+) -> String {
+    format!(
+        "系统任务提醒：任务《{title}》出现 {attention_kind}。这不是终端用户的新需求，而是子任务运行中的内部阻塞提醒。请优先使用 `task_conversation_operation` 查看该 task conversation 的最新消息、待执行工具调用与待处理权限；如果存在 pending_mcp_tool_calls，优先使用 `mcp_tool_execute` 推进，再视情况确认权限或补充新的提示，然后再决定是否继续等待或向用户同步。",
+        title = task.title,
+        attention_kind = attention_kind,
+    )
+}
+
+async fn enqueue_butler_task_attention_followup(
+    app_handle: AppHandle,
+    task: ButlerTaskListItem,
+    definition: ButlerTaskDefinition,
+    attention_kind: String,
+) -> Result<(), String> {
+    let continuation_lock =
+        get_butler_main_continuation_lock(definition.butler_conversation_id).await;
+    let _guard = continuation_lock.lock().await;
+    wait_for_butler_main_to_be_idle(&app_handle, definition.butler_conversation_id).await;
+
+    let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
+    let message_repo = db.message_repo().map_err(|e| e.to_string())?;
+    let Some(main_conversation) =
+        conversation_repo.read(definition.butler_conversation_id).map_err(|e| e.to_string())?
+    else {
+        return Err("总管家主会话不存在".to_string());
+    };
+    if main_conversation.conversation_kind != BUTLER_KIND_MAIN {
+        return Err("总管家主会话已归档，无法继续处理子任务提醒".to_string());
+    }
+    let assistant_id =
+        main_conversation.assistant_id.ok_or_else(|| "总管家主会话缺少 assistant".to_string())?;
+
+    let main_messages = dedupe_messages(
+        message_repo
+            .list_by_conversation_id(definition.butler_conversation_id)
+            .map_err(|e| e.to_string())?,
+    );
+    if let Some(existing_attention_message_id) =
+        find_latest_attention_message_id(&main_messages, task.task_conversation_id)
+    {
+        if !has_non_system_message_after(&main_messages, existing_attention_message_id) {
+            return Ok(());
+        }
+    }
+
+    let task_messages = dedupe_messages(
+        message_repo
+            .list_by_conversation_id(task.task_conversation_id)
+            .map_err(|e| e.to_string())?,
+    );
+    let latest_message_excerpt = task_messages
+        .iter()
+        .rev()
+        .find(|message| message.message_type != "system")
+        .map(|message| trim_chars(message.content.trim(), 500))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "无".to_string());
+    let pending_mcp_tool_call_count = MCPDatabase::new(&app_handle)
+        .map_err(|e| e.to_string())?
+        .get_mcp_tool_calls_by_conversation(task.task_conversation_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|tool_call| tool_call.status == "pending")
+        .count();
+    let operation_permission_count = app_handle
+        .state::<OperationState>()
+        .list_permission_requests_for_conversation(task.task_conversation_id)
+        .await
+        .len();
+    let acp_permission_count = app_handle
+        .state::<AcpPermissionState>()
+        .list_requests_for_conversation(task.task_conversation_id)
+        .await
+        .len();
+    let ask_user_question_count = app_handle
+        .state::<crate::mcp::builtin_mcp::interaction::InteractionState>()
+        .list_requests_for_conversation(task.task_conversation_id)
+        .await
+        .len();
+
+    add_message(
+        &app_handle,
+        None,
+        definition.butler_conversation_id,
+        "system".to_string(),
+        build_butler_task_attention_system_message(
+            &task,
+            &definition,
+            &attention_kind,
+            &latest_message_excerpt,
+            pending_mcp_tool_call_count,
+            operation_permission_count,
+            acp_permission_count,
+            ask_user_question_count,
+        ),
+        None,
+        None,
+        None,
+        None,
+        0,
+        None,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let window = resolve_or_create_butler_execution_window(&app_handle)?;
+    let ai_request = AiRequest {
+        conversation_id: definition.butler_conversation_id.to_string(),
+        assistant_id,
+        prompt: build_butler_task_attention_followup_prompt(&task, &attention_kind),
+        model: None,
+        override_model_id: None,
+        temperature: None,
+        top_p: None,
+        max_tokens: None,
+        stream: Some(true),
+        attachment_list: None,
+    };
+
+    ask_ai(
+        app_handle.clone(),
+        app_handle.state::<crate::AppState>(),
+        app_handle.state::<crate::AcpSessionState>(),
+        app_handle.state::<crate::FeatureConfigState>(),
+        app_handle.state::<crate::state::message_token::MessageTokenManager>(),
+        app_handle.state::<crate::state::activity_state::ConversationActivityManager>(),
+        window,
+        ai_request,
+        None,
+        None,
+        None,
+        None,
+        Some("internal".to_string()),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+fn spawn_butler_task_attention_followup(
+    app_handle: &AppHandle,
+    task: &ButlerTaskListItem,
+    definition: &ButlerTaskDefinition,
+    attention_kind: &str,
+) {
+    let app_handle_clone = app_handle.clone();
+    let task_clone = task.clone();
+    let definition_clone = definition.clone();
+    let attention_kind = attention_kind.to_string();
+    tauri::async_runtime::spawn(async move {
+        // Debounce: skip if we already enqueued an attention followup for this
+        // task within the last ATTENTION_DEBOUNCE_SECS seconds.
+        if !try_claim_attention_debounce(task_clone.task_conversation_id).await {
+            debug!(
+                task_conversation_id = task_clone.task_conversation_id,
+                attention_kind = %attention_kind,
+                "skipping attention followup due to debounce"
+            );
+            return;
+        }
+        if let Err(error) = enqueue_butler_task_attention_followup(
+            app_handle_clone,
+            task_clone.clone(),
+            definition_clone,
+            attention_kind.clone(),
+        )
+        .await
+        {
+            warn!(
+                task_conversation_id = task_clone.task_conversation_id,
+                attention_kind = %attention_kind,
+                error = %error,
+                "failed to enqueue butler task attention followup"
+            );
+        }
+    });
+}
+
+async fn ensure_butler_task_followup_if_needed(
+    app_handle: &AppHandle,
+    task_conversation_id: i64,
+) -> Result<bool, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
+    let butler_repo = db.butler_repo().map_err(|e| e.to_string())?;
+    let Some(conversation) =
+        conversation_repo.read(task_conversation_id).map_err(|e| e.to_string())?
+    else {
+        return Ok(false);
+    };
+    if conversation.conversation_kind != BUTLER_KIND_TASK {
+        return Ok(false);
+    }
+    let Some(definition) = butler_repo
+        .get_task_definition_by_task_conversation_id(task_conversation_id)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(false);
+    };
+    let Some(mut result) =
+        butler_repo.get_task_result(task_conversation_id).map_err(|e| e.to_string())?
+    else {
+        return Ok(false);
+    };
+    let followup_status = result.followup_status.as_deref().unwrap_or(FOLLOWUP_STATUS_ENQUEUED);
+    if followup_status == FOLLOWUP_STATUS_ENQUEUED || followup_status == FOLLOWUP_STATUS_DISPATCHING
+    {
+        return Ok(false);
+    }
+
+    let main_messages = dedupe_messages(
+        db.message_repo()
+            .map_err(|e| e.to_string())?
+            .list_by_conversation_id(definition.butler_conversation_id)
+            .map_err(|e| e.to_string())?,
+    );
+    let latest_handoff_message_id = result
+        .handoff_message_id
+        .or_else(|| find_latest_handoff_message_id(&main_messages, task_conversation_id));
+    result.handoff_message_id = latest_handoff_message_id;
+    let inject_system_message = latest_handoff_message_id.is_none();
+    if let Some(handoff_message_id) = latest_handoff_message_id {
+        if has_non_system_message_after(&main_messages, handoff_message_id) {
+            butler_repo
+                .update_task_result_followup_state(
+                    task_conversation_id,
+                    FOLLOWUP_STATUS_ENQUEUED,
+                    Some(handoff_message_id),
+                )
+                .map_err(|e| e.to_string())?;
+            return Ok(false);
+        }
+    }
+
+    if !butler_repo
+        .try_mark_task_result_followup_dispatching(task_conversation_id, latest_handoff_message_id)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(false);
+    }
+
+    let task_item =
+        build_task_list_item(app_handle, conversation, &definition, Some(&result)).await?;
+    spawn_butler_main_followup(
+        app_handle,
+        &task_item,
+        &definition,
+        &result,
+        task_item.status == STATUS_CANCELLED,
+        inject_system_message,
+    );
+    Ok(true)
+}
+
 pub(crate) fn spawn_butler_task_watcher(app_handle: AppHandle, task_conversation_id: i64) {
     tauri::async_runtime::spawn(async move {
         let activity_manager =
@@ -1268,22 +2152,82 @@ pub(crate) fn spawn_butler_task_watcher(app_handle: AppHandle, task_conversation
         let mut seen_running = false;
         let mut idle_checks = 0usize;
 
-        for _ in 0..600 {
+        loop {
             let runtime_state = activity_manager.get_runtime_state(task_conversation_id).await;
-            if runtime_state.is_running {
-                seen_running = true;
-                idle_checks = 0;
-            } else if seen_running {
-                idle_checks += 1;
-                if idle_checks >= 2 {
-                    break;
+            if update_butler_task_watcher_state(
+                &mut seen_running,
+                &mut idle_checks,
+                runtime_state.is_running,
+            ) {
+                match finalize_butler_task_if_ready(&app_handle, task_conversation_id).await {
+                    Ok(Some(_)) => return,
+                    Ok(None) => {
+                        idle_checks = 0;
+                    }
+                    Err(error) => {
+                        warn!(task_conversation_id, error = %error, "failed to finalize butler task");
+                        idle_checks = 0;
+                    }
                 }
             }
-            sleep(Duration::from_millis(500)).await;
+            sleep(BUTLER_TASK_WATCHER_POLL_INTERVAL).await;
         }
+    });
+}
 
-        if let Err(error) = finalize_butler_task_if_ready(&app_handle, task_conversation_id).await {
-            warn!(task_conversation_id, error = %error, "failed to finalize butler task");
+async fn reconcile_butler_tasks_once(app_handle: &AppHandle) -> Result<usize, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
+    let task_ids = conversation_repo
+        .list_reconcilable_butler_task_conversation_ids()
+        .map_err(|e| e.to_string())?;
+
+    let mut finalized_count = 0usize;
+    for task_conversation_id in task_ids {
+        match finalize_butler_task_if_ready(app_handle, task_conversation_id).await {
+            Ok(Some(_)) => finalized_count += 1,
+            Ok(None) => {}
+            Err(error) => {
+                warn!(
+                    task_conversation_id,
+                    error = %error,
+                    "failed to reconcile butler task"
+                );
+            }
+        }
+    }
+
+    let followup_task_ids = conversation_repo
+        .list_butler_task_conversation_ids_pending_followup()
+        .map_err(|e| e.to_string())?;
+    for task_conversation_id in followup_task_ids {
+        if let Err(error) =
+            ensure_butler_task_followup_if_needed(app_handle, task_conversation_id).await
+        {
+            warn!(
+                task_conversation_id,
+                error = %error,
+                "failed to reconcile butler task follow-up"
+            );
+        }
+    }
+
+    Ok(finalized_count)
+}
+
+pub(crate) fn spawn_butler_task_reconciler(app_handle: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match reconcile_butler_tasks_once(&app_handle).await {
+                Ok(finalized_count) if finalized_count > 0 => {
+                    debug!(finalized_count, "reconciled butler tasks");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(error = %error, "failed to run butler task reconciliation");
+                }
+            }
+            sleep(BUTLER_TASK_RECONCILE_INTERVAL).await;
         }
     });
 }
@@ -1482,8 +2426,12 @@ pub(crate) async fn spawn_butler_task_with_window(
 #[tauri::command]
 pub async fn load_butler_main_conversation(
     app_handle: tauri::AppHandle,
+    reconcile: Option<bool>,
 ) -> Result<ButlerMainLoadResponse, String> {
     let conversation = load_or_create_butler_main_internal(&app_handle).await?;
+    if reconcile.unwrap_or(false) {
+        reconcile_butler_tasks_once(&app_handle).await?;
+    }
     let model_selection = get_butler_model_selection(&app_handle).await?;
     let tasks = list_butler_tasks_internal(&app_handle, conversation.id).await?;
     Ok(ButlerMainLoadResponse {
@@ -1533,13 +2481,18 @@ pub async fn reset_butler_main_conversation(
         .map_err(|e| e.to_string())?;
 
     if let Some(previous_main_conversation_id) = previous_main_conversation_id {
+        cleanup_butler_main_continuation_lock(previous_main_conversation_id).await;
         conversation_repo
             .reassign_parent_butler_conversation(previous_main_conversation_id, new_conversation.id)
             .map_err(|e| e.to_string())?;
         butler_repo
             .reassign_task_definitions(previous_main_conversation_id, new_conversation.id)
             .map_err(|e| e.to_string())?;
-        inherit_latest_feishu_target(&app_handle, previous_main_conversation_id, new_conversation.id)?;
+        inherit_latest_feishu_target(
+            &app_handle,
+            previous_main_conversation_id,
+            new_conversation.id,
+        )?;
     }
 
     butler_repo
@@ -1611,9 +2564,17 @@ mod tests {
     use chrono::Utc;
 
     use super::{
-        decide_butler_task_terminal_state, Message, STATUS_CANCELLED, STATUS_FAILED,
-        STATUS_SUCCEEDED,
+        build_batched_followup_prompt, build_butler_task_attention_system_message,
+        build_butler_task_result_system_message, cleanup_attention_debounce,
+        cleanup_butler_main_continuation_lock, cleanup_butler_task_finalization_lock,
+        find_latest_attention_message_id, find_latest_handoff_message_id,
+        has_non_system_message_after, parse_task_conversation_id_from_attention_message,
+        parse_task_conversation_id_from_handoff_message, trim_chars, try_claim_attention_debounce,
+        try_decide_butler_task_terminal_state, update_butler_task_watcher_state,
+        ButlerTaskListItem, FollowupBatchEntry, Message, STATUS_CANCELLED, STATUS_FAILED,
+        STATUS_SUCCEEDED, TASK_RESULT_DETAIL_LIMIT, TASK_RESULT_STRUCTURED_OUTPUT_LIMIT,
     };
+    use crate::db::conversation_db::{ButlerTaskDefinition, ButlerTaskResult};
 
     fn build_message(id: i64, message_type: &str, content: &str, finished: bool) -> Message {
         let now = Utc::now();
@@ -1647,7 +2608,7 @@ mod tests {
             build_message(3, "error", "用户请求取消", true),
         ];
 
-        let decision = decide_butler_task_terminal_state(&messages, None, true);
+        let decision = try_decide_butler_task_terminal_state(&messages, None, true).unwrap();
 
         assert_eq!(decision.status, STATUS_SUCCEEDED);
         assert_eq!(decision.final_message_id, Some(2));
@@ -1662,7 +2623,7 @@ mod tests {
             build_message(2, "error", "任务在取消时被中断", true),
         ];
 
-        let decision = decide_butler_task_terminal_state(&messages, None, true);
+        let decision = try_decide_butler_task_terminal_state(&messages, None, true).unwrap();
 
         assert_eq!(decision.status, STATUS_CANCELLED);
         assert_eq!(decision.final_message_id, Some(2));
@@ -1677,10 +2638,493 @@ mod tests {
             build_message(2, "error", "最终报错", true),
         ];
 
-        let decision = decide_butler_task_terminal_state(&messages, None, false);
+        let decision = try_decide_butler_task_terminal_state(&messages, None, false).unwrap();
 
         assert_eq!(decision.status, STATUS_FAILED);
         assert_eq!(decision.final_message_id, Some(2));
         assert!(!decision.cancel_requested);
+    }
+
+    #[test]
+    fn non_cancelled_task_ignores_tool_call_scaffold_response() {
+        let messages = vec![build_message(
+            1,
+            "response",
+            "先查资料\n\n<!-- MCP_TOOL_CALL:{\"call_id\":42} -->",
+            true,
+        )];
+
+        let decision = try_decide_butler_task_terminal_state(&messages, None, false);
+
+        assert!(decision.is_none());
+    }
+
+    #[test]
+    fn watcher_attempts_finalization_after_two_idle_polls_once_running_seen() {
+        let mut seen_running = false;
+        let mut idle_checks = 0usize;
+
+        assert!(!update_butler_task_watcher_state(&mut seen_running, &mut idle_checks, true));
+        assert!(seen_running);
+        assert_eq!(idle_checks, 0);
+
+        assert!(!update_butler_task_watcher_state(&mut seen_running, &mut idle_checks, false));
+        assert_eq!(idle_checks, 1);
+        assert!(update_butler_task_watcher_state(&mut seen_running, &mut idle_checks, false));
+    }
+
+    #[test]
+    fn watcher_does_not_attempt_finalization_before_running_seen() {
+        let mut seen_running = false;
+        let mut idle_checks = 0usize;
+
+        assert!(!update_butler_task_watcher_state(&mut seen_running, &mut idle_checks, false));
+        assert!(!seen_running);
+        assert_eq!(idle_checks, 0);
+    }
+
+    #[test]
+    fn parses_handoff_message_task_id() {
+        let content =
+            "<butler_task_result>\nstatus=succeeded\ntask_conversation_id=560\n</butler_task_result>";
+        assert_eq!(parse_task_conversation_id_from_handoff_message(content), Some(560));
+    }
+
+    #[test]
+    fn finds_latest_matching_handoff_message() {
+        let messages = vec![
+            build_message(
+                1,
+                "system",
+                "<butler_task_result>\ntask_conversation_id=12\n</butler_task_result>",
+                true,
+            ),
+            build_message(
+                2,
+                "system",
+                "<butler_task_result>\ntask_conversation_id=42\n</butler_task_result>",
+                true,
+            ),
+            build_message(
+                3,
+                "system",
+                "<butler_task_result>\ntask_conversation_id=42\n</butler_task_result>",
+                true,
+            ),
+        ];
+
+        assert_eq!(find_latest_handoff_message_id(&messages, 42), Some(3));
+        assert_eq!(find_latest_handoff_message_id(&messages, 12), Some(1));
+    }
+
+    #[test]
+    fn detects_pending_followup_when_only_system_messages_exist_after_handoff() {
+        let messages = vec![
+            build_message(
+                10,
+                "system",
+                "<butler_task_result>\ntask_conversation_id=560\n</butler_task_result>",
+                true,
+            ),
+            build_message(11, "system", "other system", true),
+        ];
+
+        assert!(!has_non_system_message_after(&messages, 10));
+    }
+
+    #[test]
+    fn detects_started_followup_when_non_system_message_exists_after_handoff() {
+        let messages = vec![
+            build_message(
+                10,
+                "system",
+                "<butler_task_result>\ntask_conversation_id=560\n</butler_task_result>",
+                true,
+            ),
+            build_message(11, "user", "系统任务回流：任务《X》已完成", true),
+        ];
+
+        assert!(has_non_system_message_after(&messages, 10));
+    }
+
+    #[test]
+    fn parses_attention_message_task_id() {
+        let content =
+            "<butler_task_attention>\nattention_kind=operation\ntask_conversation_id=560\n</butler_task_attention>";
+        assert_eq!(parse_task_conversation_id_from_attention_message(content), Some(560));
+    }
+
+    #[test]
+    fn finds_latest_matching_attention_message() {
+        let messages = vec![
+            build_message(
+                1,
+                "system",
+                "<butler_task_attention>\ntask_conversation_id=12\n</butler_task_attention>",
+                true,
+            ),
+            build_message(
+                2,
+                "system",
+                "<butler_task_attention>\ntask_conversation_id=42\n</butler_task_attention>",
+                true,
+            ),
+            build_message(
+                3,
+                "system",
+                "<butler_task_attention>\ntask_conversation_id=42\n</butler_task_attention>",
+                true,
+            ),
+        ];
+
+        assert_eq!(find_latest_attention_message_id(&messages, 42), Some(3));
+        assert_eq!(find_latest_attention_message_id(&messages, 12), Some(1));
+    }
+
+    #[test]
+    fn attention_system_message_includes_pending_mcp_tool_call_count() {
+        let message = build_butler_task_attention_system_message(
+            &build_task_list_item(42, "running", "Test Task"),
+            &build_task_definition(42),
+            "mcp_tool_pending",
+            "latest",
+            2,
+            1,
+            0,
+            0,
+        );
+
+        assert!(message.contains("attention_kind=mcp_tool_pending"));
+        assert!(message.contains("pending_mcp_tool_call_count=2"));
+        assert!(message.contains("operation_permission_count=1"));
+    }
+
+    // --- Test helpers for new tests ---
+
+    fn build_task_list_item(
+        task_conversation_id: i64,
+        status: &str,
+        title: &str,
+    ) -> ButlerTaskListItem {
+        let now = Utc::now();
+        ButlerTaskListItem {
+            butler_conversation_id: 100,
+            task_conversation_id,
+            title: title.to_string(),
+            goal: "test goal".to_string(),
+            status: status.to_string(),
+            executor_assistant_id: 1,
+            executor_assistant_name: "TestAssistant".to_string(),
+            last_summary: None,
+            created_time: now,
+            updated_time: now,
+            finalized_at: None,
+            is_finalized: false,
+            has_pending_permission: false,
+            is_running: false,
+        }
+    }
+
+    fn build_task_definition(task_conversation_id: i64) -> ButlerTaskDefinition {
+        ButlerTaskDefinition {
+            id: 1,
+            butler_conversation_id: 100,
+            task_conversation_id,
+            title: "Test Task".to_string(),
+            goal: "Accomplish test goal".to_string(),
+            executor_assistant_id: 1,
+            executor_assistant_source: "manual".to_string(),
+            permission_template_source: None,
+            handoff_contract_json: None,
+            result_handling_mode: None,
+            notification_policy: None,
+            created_time: Utc::now(),
+        }
+    }
+
+    fn build_task_result(task_conversation_id: i64) -> ButlerTaskResult {
+        let now = Utc::now();
+        ButlerTaskResult {
+            id: 1,
+            task_conversation_id,
+            handoff_mode: None,
+            payload_json: None,
+            summary: Some("Task completed successfully".to_string()),
+            structured_output_json: None,
+            evidence_json: None,
+            artifact_refs_json: None,
+            followup_suggestions_json: None,
+            followup_status: None,
+            handoff_message_id: None,
+            final_message_id: Some(99),
+            created_time: now,
+            updated_time: now,
+        }
+    }
+
+    // --- trim_chars tests ---
+
+    #[test]
+    fn trim_chars_no_truncation() {
+        assert_eq!(trim_chars("hello", 10), "hello");
+    }
+
+    #[test]
+    fn trim_chars_exact_limit() {
+        assert_eq!(trim_chars("hello", 5), "hello");
+    }
+
+    #[test]
+    fn trim_chars_truncates_with_ellipsis() {
+        assert_eq!(trim_chars("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn trim_chars_handles_unicode() {
+        // 3 CJK characters, limit 2 → should truncate
+        assert_eq!(trim_chars("你好世界", 2), "你好...");
+    }
+
+    // --- try_claim_attention_debounce tests ---
+
+    #[tokio::test]
+    async fn attention_debounce_first_claim_succeeds() {
+        let task_id = 9999001;
+        // Ensure clean state
+        cleanup_attention_debounce(task_id).await;
+        assert!(try_claim_attention_debounce(task_id).await);
+        // Cleanup
+        cleanup_attention_debounce(task_id).await;
+    }
+
+    #[tokio::test]
+    async fn attention_debounce_rapid_second_claim_fails() {
+        let task_id = 9999002;
+        cleanup_attention_debounce(task_id).await;
+        assert!(try_claim_attention_debounce(task_id).await);
+        // Immediate second claim should be debounced
+        assert!(!try_claim_attention_debounce(task_id).await);
+        cleanup_attention_debounce(task_id).await;
+    }
+
+    #[tokio::test]
+    async fn attention_debounce_different_tasks_independent() {
+        let task_a = 9999003;
+        let task_b = 9999004;
+        cleanup_attention_debounce(task_a).await;
+        cleanup_attention_debounce(task_b).await;
+        assert!(try_claim_attention_debounce(task_a).await);
+        // Different task should not be debounced
+        assert!(try_claim_attention_debounce(task_b).await);
+        cleanup_attention_debounce(task_a).await;
+        cleanup_attention_debounce(task_b).await;
+    }
+
+    // --- cleanup tests ---
+
+    #[tokio::test]
+    async fn cleanup_attention_debounce_removes_entry() {
+        let task_id = 9999010;
+        cleanup_attention_debounce(task_id).await;
+        assert!(try_claim_attention_debounce(task_id).await);
+        // Clean up, then claim again — should succeed because entry was removed
+        cleanup_attention_debounce(task_id).await;
+        assert!(try_claim_attention_debounce(task_id).await);
+        cleanup_attention_debounce(task_id).await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_finalization_lock_removes_entry() {
+        use super::butler_task_finalization_lock_registry;
+        let task_id = 9999020;
+        // Insert a lock entry
+        {
+            let registry = butler_task_finalization_lock_registry();
+            let mut guard = registry.lock().await;
+            guard
+                .entry(task_id)
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())));
+            assert!(guard.contains_key(&task_id));
+        }
+        // Cleanup should remove it
+        cleanup_butler_task_finalization_lock(task_id).await;
+        {
+            let registry = butler_task_finalization_lock_registry();
+            let guard = registry.lock().await;
+            assert!(!guard.contains_key(&task_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_continuation_lock_removes_entry() {
+        use super::butler_main_continuation_lock_registry;
+        let conv_id = 9999030;
+        {
+            let registry = butler_main_continuation_lock_registry();
+            let mut guard = registry.lock().await;
+            guard
+                .entry(conv_id)
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())));
+            assert!(guard.contains_key(&conv_id));
+        }
+        cleanup_butler_main_continuation_lock(conv_id).await;
+        {
+            let registry = butler_main_continuation_lock_registry();
+            let guard = registry.lock().await;
+            assert!(!guard.contains_key(&conv_id));
+        }
+    }
+
+    // --- build_butler_task_result_system_message tests ---
+
+    #[test]
+    fn result_system_message_contains_key_fields() {
+        let task = build_task_list_item(10, STATUS_SUCCEEDED, "Research AI");
+        let definition = build_task_definition(10);
+        let result = build_task_result(10);
+        let msg = build_butler_task_result_system_message(&task, &definition, &result, false);
+
+        assert!(msg.starts_with("<butler_task_result>"));
+        assert!(msg.ends_with("</butler_task_result>"));
+        assert!(msg.contains("status=succeeded"));
+        assert!(msg.contains("cancel_requested=false"));
+        assert!(msg.contains("task_conversation_id=10"));
+        assert!(msg.contains("title=Test Task"));
+        assert!(msg.contains("executor_assistant_name=TestAssistant"));
+    }
+
+    #[test]
+    fn result_system_message_excludes_removed_fields() {
+        let task = build_task_list_item(10, STATUS_SUCCEEDED, "Research AI");
+        let definition = build_task_definition(10);
+        let result = build_task_result(10);
+        let msg = build_butler_task_result_system_message(&task, &definition, &result, false);
+
+        // These fields were removed as part of P2 slimming
+        assert!(!msg.contains("executor_assistant_id="));
+        assert!(!msg.contains("result_handling_mode="));
+        assert!(!msg.contains("notification_policy="));
+        assert!(!msg.contains("handoff_contract_json="));
+        assert!(!msg.contains("payload_json="));
+    }
+
+    #[test]
+    fn result_system_message_truncates_structured_output() {
+        let task = build_task_list_item(10, STATUS_SUCCEEDED, "Data Task");
+        let definition = build_task_definition(10);
+        let mut result = build_task_result(10);
+        // Create a very large structured output
+        let large_json =
+            format!("{{\"data\": \"{}\"}}", "x".repeat(TASK_RESULT_STRUCTURED_OUTPUT_LIMIT + 500));
+        result.structured_output_json = Some(large_json.clone());
+        let msg = build_butler_task_result_system_message(&task, &definition, &result, false);
+
+        // The full large_json should NOT appear
+        assert!(!msg.contains(&large_json));
+        // But a truncated version with "..." should
+        assert!(msg.contains("..."));
+        assert!(msg.contains("structured_output_json="));
+    }
+
+    #[test]
+    fn result_system_message_truncates_detail_excerpt() {
+        let task = build_task_list_item(10, STATUS_SUCCEEDED, "Long Task");
+        let definition = build_task_definition(10);
+        let mut result = build_task_result(10);
+        // Set summary to something big (detail_text falls back to summary)
+        result.summary = Some("y".repeat(TASK_RESULT_DETAIL_LIMIT + 500));
+        let msg = build_butler_task_result_system_message(&task, &definition, &result, false);
+
+        // detail_excerpt should be truncated
+        assert!(msg.contains("detail_excerpt="));
+        // The full long string should not appear
+        assert!(!msg.contains(&"y".repeat(TASK_RESULT_DETAIL_LIMIT + 500)));
+    }
+
+    // --- build_batched_followup_prompt tests ---
+
+    #[test]
+    fn batched_followup_single_task_uses_standard_prompt() {
+        let task = build_task_list_item(10, STATUS_SUCCEEDED, "Single Task");
+        let definition = build_task_definition(10);
+        let result = build_task_result(10);
+        let batch = vec![FollowupBatchEntry {
+            task,
+            definition,
+            result,
+            cancel_requested: false,
+            inject_system_message: true,
+            handoff_message_id: None,
+        }];
+        let prompt = build_batched_followup_prompt(&batch);
+        // Single task should use the standard prompt format
+        assert!(prompt.contains("系统任务回流：任务《Single Task》"));
+        assert!(!prompt.contains("批量"));
+    }
+
+    #[test]
+    fn batched_followup_multiple_tasks_uses_batch_prompt() {
+        let task_a = build_task_list_item(10, STATUS_SUCCEEDED, "Task A");
+        let task_b = build_task_list_item(11, STATUS_FAILED, "Task B");
+        let batch = vec![
+            FollowupBatchEntry {
+                task: task_a,
+                definition: build_task_definition(10),
+                result: build_task_result(10),
+                cancel_requested: false,
+                inject_system_message: true,
+                handoff_message_id: None,
+            },
+            FollowupBatchEntry {
+                task: task_b,
+                definition: {
+                    let mut d = build_task_definition(11);
+                    d.title = "Task B".to_string();
+                    d
+                },
+                result: build_task_result(11),
+                cancel_requested: true,
+                inject_system_message: true,
+                handoff_message_id: None,
+            },
+        ];
+        let prompt = build_batched_followup_prompt(&batch);
+        assert!(prompt.contains("系统批量任务回流"));
+        assert!(prompt.contains("2 个子任务"));
+        assert!(prompt.contains("任务《Task A》"));
+        assert!(prompt.contains("任务《Task B》"));
+        assert!(prompt.contains("（伴随取消请求）"));
+    }
+
+    #[test]
+    fn batched_followup_cancel_suffix_only_for_cancelled() {
+        let task_a = build_task_list_item(10, STATUS_SUCCEEDED, "OK Task");
+        let task_b = build_task_list_item(11, STATUS_CANCELLED, "Cancelled Task");
+        let batch = vec![
+            FollowupBatchEntry {
+                task: task_a,
+                definition: build_task_definition(10),
+                result: build_task_result(10),
+                cancel_requested: false,
+                inject_system_message: true,
+                handoff_message_id: None,
+            },
+            FollowupBatchEntry {
+                task: task_b,
+                definition: {
+                    let mut d = build_task_definition(11);
+                    d.title = "Cancelled Task".to_string();
+                    d
+                },
+                result: build_task_result(11),
+                cancel_requested: true,
+                inject_system_message: true,
+                handoff_message_id: None,
+            },
+        ];
+        let prompt = build_batched_followup_prompt(&batch);
+        // Count occurrences of cancel suffix
+        let cancel_count = prompt.matches("（伴随取消请求）").count();
+        assert_eq!(cancel_count, 1, "Only the cancelled task should have cancel suffix");
     }
 }

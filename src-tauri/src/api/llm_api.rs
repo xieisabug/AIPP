@@ -1,10 +1,11 @@
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::genai_client;
-use crate::db::llm_db::LLMDatabase;
+use crate::db::llm_db::{LLMDatabase, DEFAULT_MODEL_REQUEST_MODE};
 use crate::utils::share_utils::{decrypt_provider_data, encrypt_provider_data, ProviderShareData};
 use crate::FeatureConfigState;
 use genai::Modality;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use tauri::Manager;
 
 #[derive(Serialize, Deserialize)]
@@ -27,6 +28,7 @@ pub struct LlmModel {
     pub vision_support: bool,
     pub audio_support: bool,
     pub video_support: bool,
+    pub request_mode: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -37,6 +39,31 @@ pub struct LlmProviderConfig {
     pub value: String,
     pub append_location: Option<String>,
     pub is_addition: Option<bool>,
+}
+
+fn normalize_request_mode(request_mode: Option<&str>) -> &'static str {
+    match request_mode {
+        Some("responses") => "responses",
+        _ => DEFAULT_MODEL_REQUEST_MODE,
+    }
+}
+
+fn validate_request_mode(request_mode: &str) -> Result<(), String> {
+    match request_mode {
+        "chat_completions" | "responses" => Ok(()),
+        _ => Err(format!("Unsupported request_mode: {request_mode}")),
+    }
+}
+
+fn list_request_mode_map(
+    db: &LLMDatabase,
+    llm_provider_id: i64,
+) -> Result<HashMap<String, String>, String> {
+    Ok(db
+        .list_model_request_modes(llm_provider_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .collect())
 }
 
 #[tauri::command]
@@ -143,6 +170,13 @@ pub async fn get_llm_models(
 ) -> Result<Vec<LlmModel>, String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let models = db.get_llm_models(llm_provider_id).map_err(|e| e.to_string())?;
+    let provider_id_num =
+        models.first().map(|(_, _, llm_provider_id, _, _, _, _, _)| *llm_provider_id);
+    let request_mode_map = if let Some(provider_id_num) = provider_id_num {
+        list_request_mode_map(&db, provider_id_num)?
+    } else {
+        HashMap::new()
+    };
     let mut result = Vec::new();
     for (
         id,
@@ -155,6 +189,10 @@ pub async fn get_llm_models(
         video_support,
     ) in models
     {
+        let request_mode = request_mode_map
+            .get(&code)
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string());
         result.push(LlmModel {
             id,
             name,
@@ -164,6 +202,7 @@ pub async fn get_llm_models(
             vision_support,
             audio_support,
             video_support,
+            request_mode,
         });
     }
     Ok(result)
@@ -178,6 +217,7 @@ pub async fn fetch_model_list(
     let llm_provider = db.get_llm_provider(llm_provider_id).map_err(|e| e.to_string())?;
     let llm_provider_config =
         db.get_llm_provider_config(llm_provider_id).map_err(|e| e.to_string())?;
+    let request_mode_map = list_request_mode_map(&db, llm_provider_id)?;
 
     // 获取代理配置
     let feature_config_state = app_handle.state::<FeatureConfigState>();
@@ -190,6 +230,7 @@ pub async fn fetch_model_list(
         &llm_provider_config,
         "",
         &llm_provider.api_type,
+        None,
         network_proxy.as_deref(),
         proxy_enabled,
         None,
@@ -215,6 +256,10 @@ pub async fn fetch_model_list(
                     vision_support: model.supports_input_modality(&Modality::Image),
                     audio_support: model.supports_input_modality(&Modality::Audio),
                     video_support: model.supports_input_modality(&Modality::Video),
+                    request_mode: request_mode_map
+                        .get(&model.id.to_string())
+                        .cloned()
+                        .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string()),
                 };
 
                 db.add_llm_model(
@@ -245,12 +290,27 @@ pub async fn add_llm_model(
     app_handle: tauri::AppHandle,
     llm_provider_id: i64,
     code: String,
-) -> Result<(), String> {
+) -> Result<LlmModel, String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let code_str = code.as_str();
-    db.add_llm_model(code_str, llm_provider_id, code_str, code_str, false, false, false)
+    let code_str = code.clone();
+    db.add_llm_model(&code_str, llm_provider_id, &code_str, &code_str, false, false, false)
         .map_err(|e| e.to_string())?;
-    Ok(())
+    let request_mode = db
+        .get_model_request_mode(llm_provider_id, &code_str)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string());
+
+    Ok(LlmModel {
+        id: 0,
+        name: code.clone(),
+        llm_provider_id,
+        code,
+        description: code_str,
+        vision_support: false,
+        audio_support: false,
+        video_support: false,
+        request_mode,
+    })
 }
 
 #[tauri::command]
@@ -260,7 +320,7 @@ pub async fn delete_llm_model(
     code: String,
 ) -> Result<(), String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let _ = db.delete_llm_model(llm_provider_id, code);
+    db.delete_llm_model(llm_provider_id, code).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -280,6 +340,7 @@ pub struct ModelForSelection {
     pub vision_support: bool,
     pub audio_support: bool,
     pub video_support: bool,
+    pub request_mode: String,
     pub is_selected: bool, // 是否已在数据库中存在
 }
 
@@ -302,8 +363,9 @@ pub async fn preview_model_list(
     // 获取现有的模型列表
     let existing_models =
         db.get_llm_models(llm_provider_id.to_string()).map_err(|e| e.to_string())?;
-    let existing_model_codes: std::collections::HashSet<String> =
+    let existing_model_codes: HashSet<String> =
         existing_models.iter().map(|(_, _, _, code, _, _, _, _)| code.clone()).collect();
+    let request_mode_map = list_request_mode_map(&db, llm_provider_id)?;
 
     // 获取代理配置
     let feature_config_state = app_handle.state::<FeatureConfigState>();
@@ -322,6 +384,7 @@ pub async fn preview_model_list(
         &llm_provider_config,
         "",
         &llm_provider.api_type,
+        None,
         network_proxy.as_deref(),
         proxy_enabled,
         None,
@@ -337,13 +400,17 @@ pub async fn preview_model_list(
     match client.all_models(adapter_kind).await {
         Ok(models) => {
             let mut available_models = Vec::new();
-            let remote_model_codes: std::collections::HashSet<String> =
+            let remote_model_codes: HashSet<String> =
                 models.iter().map(|model| model.id.to_string()).collect();
 
             // 构建可选择的模型列表
             for model in &models {
                 let model_code = model.id.to_string();
                 let is_selected = existing_model_codes.contains(&model_code);
+                let request_mode = request_mode_map
+                    .get(&model_code)
+                    .cloned()
+                    .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string());
 
                 available_models.push(ModelForSelection {
                     name: model.name.to_string(),
@@ -352,6 +419,7 @@ pub async fn preview_model_list(
                     vision_support: model.supports_input_modality(&Modality::Image),
                     audio_support: model.supports_input_modality(&Modality::Audio),
                     video_support: model.supports_input_modality(&Modality::Video),
+                    request_mode,
                     is_selected,
                 });
             }
@@ -415,6 +483,14 @@ pub async fn update_selected_models(
     selected_models: Vec<ModelForSelection>,
 ) -> Result<(), String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let llm_provider = db.get_llm_provider(llm_provider_id).map_err(|e| e.to_string())?;
+    let supports_request_mode = genai_client::supports_model_request_mode(&llm_provider.api_type);
+
+    if supports_request_mode {
+        for model in &selected_models {
+            validate_request_mode(&model.request_mode)?;
+        }
+    }
 
     // 删除所有该提供商的现有模型
     db.delete_llm_model_by_provider(llm_provider_id).map_err(|e| e.to_string())?;
@@ -433,6 +509,44 @@ pub async fn update_selected_models(
         .map_err(|e| e.to_string())?;
     }
 
+    if supports_request_mode {
+        for model in &selected_models {
+            db.upsert_model_request_mode(
+                llm_provider_id,
+                &model.code,
+                normalize_request_mode(Some(&model.request_mode)),
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn update_llm_model_request_mode(
+    app_handle: tauri::AppHandle,
+    llm_provider_id: i64,
+    model_code: String,
+    request_mode: String,
+) -> Result<(), String> {
+    validate_request_mode(&request_mode)?;
+
+    let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let llm_provider = db.get_llm_provider(llm_provider_id).map_err(|e| e.to_string())?;
+    if !genai_client::supports_model_request_mode(&llm_provider.api_type) {
+        return Err(format!(
+            "Provider api_type={} does not support model request mode switching",
+            llm_provider.api_type
+        ));
+    }
+
+    db.upsert_model_request_mode(
+        llm_provider_id,
+        &model_code,
+        normalize_request_mode(Some(&request_mode)),
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

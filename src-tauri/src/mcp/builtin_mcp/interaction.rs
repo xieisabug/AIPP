@@ -484,6 +484,18 @@ impl InteractionState {
         pending_events.remove(request_id);
     }
 
+    pub async fn list_requests_for_conversation(
+        &self,
+        conversation_id: i64,
+    ) -> Vec<AskUserQuestionRequestEvent> {
+        let pending_events = self.pending_ask_user_events.lock().await;
+        pending_events
+            .values()
+            .filter(|event| event.conversation_id == Some(conversation_id))
+            .cloned()
+            .collect()
+    }
+
     pub async fn resolve_ask_user_request(
         &self,
         request_id: &str,
@@ -571,6 +583,20 @@ pub async fn request_ask_user_question(
             interaction_state.remove_ask_user_request(&request_id).await;
             warn!(request_id = %request_id, error = %e, "Failed to emit ask-user-question-request");
             return Err("Failed to emit AskUserQuestion event".to_string());
+        }
+    }
+
+    // Notify Butler main conversation if this is a Butler sub-task
+    if let Some(conversation_id) = conversation_id {
+        if let Err(error) =
+            crate::api::butler_api::emit_butler_task_ask_user_attention(app_handle, conversation_id)
+                .await
+        {
+            warn!(
+                conversation_id,
+                error = %error,
+                "Failed to send Butler attention for ask_user_question"
+            );
         }
     }
 

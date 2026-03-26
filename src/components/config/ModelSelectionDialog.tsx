@@ -9,26 +9,19 @@ import { Input } from '@/components/ui/input';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { AlertTriangle, Eye, Mic, Video, Search } from 'lucide-react';
 import { PinyinFilter } from '../../utils/pinyinFilter';
-
-interface ModelForSelection {
-    name: string;
-    code: string;
-    description: string;
-    vision_support: boolean;
-    audio_support: boolean;
-    video_support: boolean;
-    is_selected: boolean;
-}
-
-interface ModelSelectionResponse {
-    available_models: ModelForSelection[];
-    missing_models: string[];
-}
+import ModelRequestModeToggle from './ModelRequestModeToggle';
+import {
+    ModelForSelection,
+    ModelSelectionResponse,
+    supportsRequestModeToggle,
+    toggleRequestMode,
+} from './llmModelTypes';
 
 interface ModelSelectionDialogProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     modelData: ModelSelectionResponse | null;
+    apiType: string;
     onConfirm: (selectedModels: ModelForSelection[]) => void;
     loading: boolean;
 }
@@ -37,6 +30,7 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
     open,
     onOpenChange,
     modelData,
+    apiType,
     onConfirm,
     loading
 }) => {
@@ -82,6 +76,16 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
     const handleDeselectAll = () => {
         setSelectedModels(prev => 
             prev.map(model => ({ ...model, is_selected: false }))
+        );
+    };
+
+    const handleRequestModeToggle = (modelCode: string) => {
+        setSelectedModels(prev =>
+            prev.map(model =>
+                model.code === modelCode
+                    ? { ...model, request_mode: toggleRequestMode(model.request_mode) }
+                    : model
+            )
         );
     };
 
@@ -185,6 +189,12 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
                                                 </TooltipContent>
                                             </Tooltip>
                                             <div className="flex gap-1">
+                                                {supportsRequestModeToggle(apiType) && (
+                                                    <ModelRequestModeToggle
+                                                        requestMode={model.request_mode}
+                                                        onToggle={() => handleRequestModeToggle(model.code)}
+                                                    />
+                                                )}
                                                 {model.vision_support && (
                                                     <Eye className="h-3 w-3 text-blue-500" />
                                                 )}

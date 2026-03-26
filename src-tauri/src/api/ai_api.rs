@@ -9,6 +9,7 @@ use crate::api::ai::chat::{
 use crate::api::ai::config::{
     get_network_proxy_from_config, get_request_timeout_from_config, ChatConfig, ConfigBuilder,
 };
+use crate::api::ai::context_manager::{self, budget::ContextBudget, CompactionContext};
 use crate::api::ai::conversation::{
     build_chat_request_from_messages, build_message_list_from_db, filter_messages_for_parent_group,
     init_conversation, BranchSelection, ChatRequestBuildResult, ToolCallStrategy, ToolConfig,
@@ -655,6 +656,7 @@ pub async fn ask_ai(
     let window_clone = window.clone(); // 在移动之前克隆
     let model_id = model_detail.model.id; // 提前获取模型ID
     let model_code = model_detail.model.code.clone(); // 提前获取模型代码
+    let model_request_mode = model_detail.model.request_mode.clone(); // 提前获取模型请求模式
     let model_configs = model_detail.configs.clone(); // 提前获取模型配置
     let provider_api_type = model_detail.provider.api_type.clone(); // 提前获取API类型
     let assistant_model_configs = assistant_detail.model_configs.clone(); // 提前获取助手模型配置
@@ -691,6 +693,7 @@ pub async fn ask_ai(
                 vision_support: false,      // 临时值
                 audio_support: false,       // 临时值
                 video_support: false,       // 临时值
+                request_mode: model_request_mode.clone(),
             },
             provider: crate::db::llm_db::LLMProvider {
                 id: 0,               // 临时值
@@ -734,6 +737,7 @@ pub async fn ask_ai(
             &model_configs,
             &model_code,
             &provider_api_type,
+            Some(&model_request_mode),
             network_proxy.as_deref(),
             proxy_enabled,
             Some(request_timeout),
@@ -789,6 +793,35 @@ pub async fn ask_ai(
             has_available_tools,
             Some(conversation_id),
         );
+
+        // Context budget management with LLM compaction
+        let budget = ContextBudget::from_config(&_config_feature_map);
+        let is_butler = is_butler_system_assistant_name(&assistant_detail.assistant.name);
+        let compaction_ctx = CompactionContext {
+            client: &chat_config.client,
+            model_name: &chat_config.model_name,
+            conversation_id,
+            conversation_db: &conversation_db,
+            is_butler,
+            message_ids: vec![], // TODO: pass DB message IDs for persistence
+        };
+        let fit_result = context_manager::fit_to_budget_with_compaction(
+            init_message_list,
+            &budget,
+            &[],
+            compaction_ctx,
+        )
+        .await;
+        let init_message_list = fit_result.messages;
+        if fit_result.estimated_tokens > 0 {
+            debug!(
+                conversation_id,
+                estimated_tokens = fit_result.estimated_tokens,
+                compacted = fit_result.compacted,
+                "context budget fit result for ask_ai"
+            );
+        }
+
         let ChatRequestBuildResult { chat_request, tool_name_mapping } =
             build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
@@ -980,8 +1013,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let init_message_list =
         build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
-    let override_mcp_config =
-        enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
+    let override_mcp_config = enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
 
     // 收集 MCP 信息
     let mcp_info = collect_mcp_info_for_assistant(
@@ -1004,6 +1036,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let window_clone = window.clone();
     let model_id = model_detail.model.id;
     let model_code = model_detail.model.code.clone();
+    let model_request_mode = model_detail.model.request_mode.clone();
     let model_configs = model_detail.configs.clone();
     let provider_api_type = model_detail.provider.api_type.clone();
     let assistant_model_configs = assistant_detail.model_configs.clone();
@@ -1023,6 +1056,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             vision_support: false,
             audio_support: false,
             video_support: false,
+            request_mode: model_request_mode.clone(),
         },
         provider: crate::db::llm_db::LLMProvider {
             id: 0,
@@ -1067,6 +1101,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         &model_configs,
         &model_code,
         &provider_api_type,
+        Some(&model_request_mode),
         None,
         false,
         None,
@@ -1125,6 +1160,12 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         if has_available_tools { ToolCallStrategy::Native } else { ToolCallStrategy::NonNative };
     let tool_config =
         build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id_i64));
+
+    // Context budget management
+    let budget = ContextBudget::from_config(&config_feature_map);
+    let fit_result = context_manager::fit_to_budget(init_message_list, &budget, &[]);
+    let init_message_list = fit_result.messages;
+
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
@@ -1146,7 +1187,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             model_id,
             model_code.clone(),
             override_mcp_config.clone(), // preserve Butler MCP override config
-            tool_name_mapping.clone(), // 工具名称映射表
+            tool_name_mapping.clone(),   // 工具名称映射表
         )
         .await?;
     } else {
@@ -1234,8 +1275,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let init_message_list =
         build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
 
-    let override_mcp_config =
-        enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
+    let override_mcp_config = enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
 
     // 收集 MCP 信息
     let mcp_info = collect_mcp_info_for_assistant(
@@ -1258,6 +1298,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let window_clone = window.clone();
     let model_id = model_detail.model.id;
     let model_code = model_detail.model.code.clone();
+    let model_request_mode = model_detail.model.request_mode.clone();
     let model_configs = model_detail.configs.clone();
     let provider_api_type = model_detail.provider.api_type.clone();
     let assistant_model_configs = assistant_detail.model_configs.clone();
@@ -1277,6 +1318,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
             vision_support: false,
             audio_support: false,
             video_support: false,
+            request_mode: model_request_mode.clone(),
         },
         provider: crate::db::llm_db::LLMProvider {
             id: 0,
@@ -1321,6 +1363,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         &model_configs,
         &model_code,
         &provider_api_type,
+        Some(&model_request_mode),
         None,
         false,
         None,
@@ -1368,6 +1411,12 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         if has_available_tools { ToolCallStrategy::Native } else { ToolCallStrategy::NonNative };
     let tool_config =
         build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id));
+
+    // Context budget management
+    let budget = ContextBudget::from_config(&config_feature_map);
+    let fit_result = context_manager::fit_to_budget(init_message_list, &budget, &[]);
+    let init_message_list = fit_result.messages;
+
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 
@@ -1635,6 +1684,7 @@ pub async fn regenerate_ai(
     let app_handle_clone = app_handle.clone(); // 添加这行
     let regenerate_model_id = model_detail.model.id; // 提前获取模型ID
     let regenerate_model_code = model_detail.model.code.clone(); // 提前获取模型代码
+    let regenerate_model_request_mode = model_detail.model.request_mode.clone(); // 提前获取模型请求模式
     let regenerate_model_configs = model_detail.configs.clone(); // 提前获取模型配置
     let regenerate_provider_api_type = model_detail.provider.api_type.clone(); // 提前获取API类型
     let regenerate_assistant_model_configs = assistant_detail.model_configs.clone(); // 提前获取助手模型配置
@@ -1668,6 +1718,7 @@ pub async fn regenerate_ai(
                 vision_support: false,      // 临时值
                 audio_support: false,       // 临时值
                 video_support: false,       // 临时值
+                request_mode: regenerate_model_request_mode.clone(),
             },
             provider: crate::db::llm_db::LLMProvider {
                 id: 0,               // 临时值
@@ -1713,6 +1764,7 @@ pub async fn regenerate_ai(
             &regenerate_model_configs,
             &regenerate_model_code,
             &regenerate_provider_api_type,
+            Some(&regenerate_model_request_mode),
             network_proxy.as_deref(),
             proxy_enabled,
             Some(request_timeout),
@@ -1776,6 +1828,12 @@ pub async fn regenerate_ai(
         } else {
             None
         };
+
+        // Context budget management
+        let budget = ContextBudget::from_config(&_config_feature_map);
+        let fit_result = context_manager::fit_to_budget(init_message_list, &budget, &[]);
+        let init_message_list = fit_result.messages;
+
         let ChatRequestBuildResult { chat_request, tool_name_mapping } =
             build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
 

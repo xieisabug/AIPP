@@ -1,11 +1,13 @@
 use super::super::browser::BrowserManager;
 use super::super::engine_manager::SearchEngine;
+use super::super::engines::base::SearchEngineBase;
 use super::super::fingerprint::{FingerprintConfig, FingerprintManager, TimingConfig};
 use super::browser_pool::BrowserPool;
 use chromiumoxide_cdp::cdp::browser_protocol::{emulation, network, page as cdp_page};
 use futures::StreamExt;
-use rand::Rng;
+use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -31,6 +33,8 @@ pub struct FetchConfig {
     pub wait_selectors: Vec<String>,
     pub wait_timeout_ms: u64,
     pub wait_poll_ms: u64,
+    pub debug_capture_empty_artifacts: bool,
+    pub debug_artifact_dir: Option<String>,
     /// Kagi 会话链接，仅在使用 Kagi 搜索引擎时生效
     /// 格式如：https://kagi.com/search?token=xxxxx
     pub kagi_session_url: Option<String>,
@@ -47,9 +51,33 @@ impl Default for FetchConfig {
             wait_selectors: vec![],
             wait_timeout_ms: 15000,
             wait_poll_ms: 250,
+            debug_capture_empty_artifacts: false,
+            debug_artifact_dir: None,
             kagi_session_url: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HttpFetchResult {
+    requested_url: String,
+    final_url: String,
+    status: u16,
+    content_type: Option<String>,
+    body: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HttpContentAssessment {
+    visible_text_chars: usize,
+    markdown_chars: usize,
+    script_count: usize,
+    shell_marker_count: usize,
+    has_main_content_hint: bool,
+    javascript_shell: bool,
+    challenge_like: bool,
+    should_fallback_to_browser: bool,
+    reasons: Vec<String>,
 }
 
 pub struct ContentFetcher {
@@ -75,6 +103,106 @@ impl ContentFetcher {
         let timing_config = FingerprintManager::get_timing_config();
 
         Self { app_handle, config, fingerprint_manager, timing_config }
+    }
+
+    fn debug_capture_enabled(&self) -> bool {
+        cfg!(debug_assertions) && self.config.debug_capture_empty_artifacts
+    }
+
+    fn debug_artifact_base_dir(&self) -> PathBuf {
+        if let Some(dir) = &self.config.debug_artifact_dir {
+            return PathBuf::from(dir);
+        }
+
+        self.app_handle
+            .path()
+            .app_data_dir()
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join("data"))
+            .join("search-debug")
+    }
+
+    fn sanitize_artifact_segment(input: &str) -> String {
+        let sanitized: String = input
+            .chars()
+            .map(|ch| match ch {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
+                _ => '_',
+            })
+            .collect();
+        sanitized.trim_matches('_').to_string()
+    }
+
+    fn write_debug_bundle(
+        base_dir: PathBuf,
+        stage: &str,
+        url: &str,
+        reason: &str,
+        metadata: Value,
+        files: BTreeMap<&str, String>,
+    ) -> Result<PathBuf, String> {
+        let request_id = format!(
+            "{}_{}_{}",
+            chrono::Local::now().format("%Y%m%d_%H%M%S%.3f"),
+            Self::sanitize_artifact_segment(stage),
+            uuid::Uuid::new_v4().simple()
+        );
+        let capture_dir = base_dir.join(request_id);
+
+        fs::create_dir_all(&capture_dir)
+            .map_err(|e| format!("Failed to create search debug capture directory: {}", e))?;
+
+        let meta_path = capture_dir.join("meta.json");
+        let meta = json!({
+            "stage": stage,
+            "url": url,
+            "reason": reason,
+            "generated_at": chrono::Utc::now().to_rfc3339(),
+            "metadata": metadata,
+        });
+        fs::write(&meta_path, serde_json::to_vec_pretty(&meta).unwrap_or_default())
+            .map_err(|e| format!("Failed to write search debug metadata: {}", e))?;
+
+        for (file_name, content) in files {
+            if content.trim().is_empty() {
+                continue;
+            }
+
+            let file_path = capture_dir.join(file_name);
+            fs::write(&file_path, content).map_err(|e| {
+                format!("Failed to write search debug artifact {}: {}", file_name, e)
+            })?;
+        }
+
+        Ok(capture_dir)
+    }
+
+    fn maybe_capture_debug_bundle(
+        &self,
+        stage: &str,
+        url: &str,
+        reason: &str,
+        metadata: Value,
+        files: BTreeMap<&str, String>,
+    ) {
+        if !self.debug_capture_enabled() {
+            return;
+        }
+
+        match Self::write_debug_bundle(
+            self.debug_artifact_base_dir(),
+            stage,
+            url,
+            reason,
+            metadata,
+            files,
+        ) {
+            Ok(capture_dir) => {
+                info!(path = %capture_dir.display(), stage, reason, "Saved search debug artifacts");
+            }
+            Err(e) => {
+                warn!(error = %e, stage, %url, "Failed to save search debug artifacts");
+            }
+        }
     }
 
     /// 保存调试HTML到文件（仅在 DEBUG_SAVE_HTML 为 true 时生效）
@@ -114,7 +242,7 @@ impl ContentFetcher {
         url: &str,
         stage: &str,
     ) -> Result<(), String> {
-        let timeout_ms = self.config.wait_timeout_ms.max(30_000);
+        let timeout_ms = self.config.wait_timeout_ms.max(5_000);
         let timeout_duration = Duration::from_millis(timeout_ms);
         info!(%url, stage, timeout_ms, "Navigating with Chromium");
 
@@ -155,16 +283,29 @@ impl ContentFetcher {
         let selectors_json =
             serde_json::to_string(&self.config.wait_selectors).unwrap_or("[]".to_string());
         let script = format!(
-            "() => {{ const sels = {}; for (const s of sels) {{ if (document.querySelector(s)) return s; }} return null; }}",
+            "() => {{
+                const sels = {};
+                const bodyText = document.body?.innerText || '';
+                const textLen = bodyText.replace(/\\s+/g, ' ').trim().length;
+                for (const s of sels) {{
+                    if (document.querySelector(s)) return {{ selector: s, textLen }};
+                }}
+                if (document.readyState === 'complete' && textLen >= 120) {{
+                    return {{ selector: '__body_text__', textLen }};
+                }}
+                return null;
+            }}",
             selectors_json
         );
 
         let mut matched: Option<String> = None;
         loop {
             if let Ok(val) = page.evaluate(script.as_str()).await {
-                if let Some(Value::String(sel)) = val.value() {
-                    matched = Some(sel.clone());
-                    break;
+                if let Some(result) = val.value() {
+                    if let Some(sel) = result.get("selector").and_then(|value| value.as_str()) {
+                        matched = Some(sel.to_string());
+                        break;
+                    }
                 }
             }
 
@@ -420,8 +561,92 @@ impl ContentFetcher {
         }
     }
 
+    fn assess_http_content(html: &str) -> HttpContentAssessment {
+        let lower = html.to_lowercase();
+        let visible_text = SearchEngineBase::visible_text(html);
+        let markdown = SearchEngineBase::html_to_markdown(html);
+        let visible_text_chars = visible_text.chars().count();
+        let markdown_chars = markdown.chars().filter(|ch| !ch.is_whitespace()).count();
+        let script_count = lower.matches("<script").count();
+        let shell_marker_count = [
+            "id=\"__next\"",
+            "id='__next'",
+            "id=\"root\"",
+            "id='root'",
+            "id=\"app\"",
+            "id='app'",
+            "__next_data__",
+            "__nuxt__",
+            "window.__initial_state__",
+            "data-reactroot",
+        ]
+        .iter()
+        .filter(|marker| lower.contains(**marker))
+        .count();
+        let has_main_content_hint = [
+            "<main",
+            "<article",
+            "role=\"main\"",
+            "id=\"content\"",
+            "class=\"content",
+            "class=\"article",
+            "class=\"post",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker));
+        let javascript_shell = lower.contains("enable javascript")
+            || lower.contains("you need to enable javascript")
+            || lower.contains("javascript is required")
+            || lower.contains("please enable javascript");
+        let challenge_like = lower.contains("captcha")
+            || lower.contains("cf-chl")
+            || lower.contains("cloudflare")
+            || lower.contains("access denied")
+            || lower.contains("bot verification");
+
+        let mut reasons = Vec::new();
+        let shell_or_challenge = javascript_shell || challenge_like || shell_marker_count > 0;
+        if visible_text_chars == 0 {
+            reasons.push("visible_text_empty".to_string());
+        }
+        if markdown_chars == 0 {
+            reasons.push("markdown_empty".to_string());
+        }
+        if javascript_shell {
+            reasons.push("javascript_shell".to_string());
+        }
+        if challenge_like {
+            reasons.push("challenge_like".to_string());
+        }
+        if shell_marker_count > 0 {
+            reasons.push(format!("shell_markers:{}", shell_marker_count));
+        }
+        if script_count >= 6 {
+            reasons.push(format!("script_heavy:{}", script_count));
+        }
+
+        let should_fallback_to_browser = challenge_like
+            || javascript_shell
+            || (visible_text_chars == 0 && shell_or_challenge)
+            || (markdown_chars < 80 && shell_or_challenge)
+            || (visible_text_chars < 120 && script_count >= 6 && !has_main_content_hint)
+            || (markdown_chars < 40 && shell_marker_count >= 1);
+
+        HttpContentAssessment {
+            visible_text_chars,
+            markdown_chars,
+            script_count,
+            shell_marker_count,
+            has_main_content_hint,
+            javascript_shell,
+            challenge_like,
+            should_fallback_to_browser,
+            reasons,
+        }
+    }
+
     /// 使用HTTP直接请求
-    async fn fetch_with_http(&self, url: &str) -> Result<String, String> {
+    async fn fetch_with_http(&self, url: &str) -> Result<HttpFetchResult, String> {
         let user_agent = self.config.user_agent.as_deref().unwrap_or(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         );
@@ -449,6 +674,12 @@ impl ContentFetcher {
             .map_err(|e| format!("HTTP request error: {}", e))?;
 
         let status = resp.status();
+        let final_url = resp.url().to_string();
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_string());
         if !status.is_success() {
             return Err(format!("HTTP status {} when fetching {}", status.as_u16(), url));
         }
@@ -460,7 +691,13 @@ impl ContentFetcher {
             return Err("Empty response body".to_string());
         }
 
-        Ok(text)
+        Ok(HttpFetchResult {
+            requested_url: url.to_string(),
+            final_url,
+            status: status.as_u16(),
+            content_type,
+            body: text,
+        })
     }
 
     /// WebView兜底导航（不提取内容）
@@ -519,9 +756,9 @@ impl ContentFetcher {
 
         // 策略3: HTTP直接请求（兜底，适合静态内容）
         match self.fetch_with_http(url).await {
-            Ok(html) => {
-                info!(strategy = "http", bytes = html.len(), "Fetched content");
-                return Ok(html);
+            Ok(http_result) => {
+                info!(strategy = "http", bytes = http_result.body.len(), "Fetched content");
+                return Ok(http_result.body);
             }
             Err(e) => {
                 warn!(
@@ -535,6 +772,103 @@ impl ContentFetcher {
 
         // 策略4: WebView兜底（不提取内容，仅导航）
         self.fallback_webview_navigation(url).await
+    }
+
+    pub async fn fetch_content_http_first(
+        &mut self,
+        url: &str,
+        browser_manager: &BrowserManager,
+        browser_pool: Option<&BrowserPool>,
+    ) -> Result<String, String> {
+        info!(%url, "Starting content fetch with HTTP-first strategy");
+
+        match self.fetch_with_http(url).await {
+            Ok(http_result) => {
+                let assessment = Self::assess_http_content(&http_result.body);
+                if !assessment.should_fallback_to_browser {
+                    info!(
+                        strategy = "http",
+                        bytes = http_result.body.len(),
+                        visible_text_chars = assessment.visible_text_chars,
+                        markdown_chars = assessment.markdown_chars,
+                        "Fetched content via HTTP without browser fallback"
+                    );
+                    return Ok(http_result.body);
+                }
+
+                warn!(
+                    strategy = "http",
+                    %url,
+                    reasons = ?assessment.reasons,
+                    visible_text_chars = assessment.visible_text_chars,
+                    markdown_chars = assessment.markdown_chars,
+                    "HTTP content looks incomplete; falling back to browser"
+                );
+                self.maybe_capture_debug_bundle(
+                    "http_shell_detected",
+                    url,
+                    "http_content_requires_browser_fallback",
+                    json!({
+                        "http_result": http_result,
+                        "assessment": assessment,
+                    }),
+                    BTreeMap::from([
+                        ("http_raw.html", http_result.body.clone()),
+                        (
+                            "http_markdown.txt",
+                            SearchEngineBase::html_to_markdown(&http_result.body),
+                        ),
+                        ("visible_text.txt", SearchEngineBase::visible_text(&http_result.body)),
+                    ]),
+                );
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    timeout_like = Self::is_timeout_like(&e),
+                    strategy = "http",
+                    "HTTP-first fetch failed, falling back to browser"
+                );
+            }
+        }
+
+        match self.fetch_with_chromiumoxide(url, browser_manager, browser_pool).await {
+            Ok(html) => {
+                info!(
+                    strategy = "chromiumoxide",
+                    bytes = html.len(),
+                    "Fetched content after HTTP fallback"
+                );
+                Ok(html)
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    timeout_like = Self::is_timeout_like(&e),
+                    strategy = "chromiumoxide",
+                    "Browser fallback failed"
+                );
+                match self.fetch_with_headless_browser(url, browser_manager).await {
+                    Ok(html) => {
+                        info!(
+                            strategy = "headless",
+                            bytes = html.len(),
+                            "Fetched content after browser fallback"
+                        );
+                        Ok(html)
+                    }
+                    Err(headless_error) => {
+                        warn!(
+                            error = %headless_error,
+                            timeout_like = Self::is_timeout_like(&headless_error),
+                            strategy = "headless",
+                            "Headless fallback failed"
+                        );
+                        self.fallback_webview_navigation(url).await
+                    }
+                }
+            }
+        }
     }
 
     /// 使用Chromiumoxide抓取内容
@@ -663,6 +997,16 @@ impl ContentFetcher {
                 ?page_state,
                 "Empty HTML from Chromiumoxide"
             );
+            self.maybe_capture_debug_bundle(
+                "fetch_content_empty",
+                url,
+                "empty_html_from_chromiumoxide",
+                json!({
+                    "page_state": page_state,
+                    "wait_selectors": self.config.wait_selectors,
+                }),
+                BTreeMap::new(),
+            );
             return Err("Empty HTML from Chromiumoxide".to_string());
         }
 
@@ -675,7 +1019,7 @@ impl ContentFetcher {
         url: &str,
         pool: &BrowserPool,
     ) -> Result<String, String> {
-        let mut pooled_page = pool.acquire_page().await?;
+        let pooled_page = pool.acquire_page().await?;
         let page = pooled_page.page();
 
         let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
@@ -705,6 +1049,16 @@ impl ContentFetcher {
                 bytes = html.len(),
                 ?page_state,
                 "Empty HTML from Chromiumoxide (pooled)"
+            );
+            self.maybe_capture_debug_bundle(
+                "fetch_content_pooled_empty",
+                url,
+                "empty_html_from_chromiumoxide_pooled",
+                json!({
+                    "page_state": page_state,
+                    "wait_selectors": self.config.wait_selectors,
+                }),
+                BTreeMap::new(),
             );
             return Err("Empty HTML from Chromiumoxide (pooled)".to_string());
         }
@@ -1678,7 +2032,7 @@ impl ContentFetcher {
         search_engine: &SearchEngine,
         pool: &BrowserPool,
     ) -> Result<String, String> {
-        let mut pooled_page = pool.acquire_page().await?;
+        let pooled_page = pool.acquire_page().await?;
         let page = pooled_page.page();
 
         let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
@@ -1895,7 +2249,7 @@ impl ContentFetcher {
         search_url: &str,
         pool: &BrowserPool,
     ) -> Result<String, String> {
-        let mut pooled_page = pool.acquire_page().await?;
+        let pooled_page = pool.acquire_page().await?;
         let page = pooled_page.page();
 
         let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
@@ -1936,5 +2290,61 @@ impl ContentFetcher {
         Self::save_debug_html(&html, "kagi_session_search_pooled");
 
         Ok(html)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assess_http_content_detects_javascript_shell_pages() {
+        let html = r#"
+        <html>
+        <body>
+          <div id="__next"></div>
+          <script>window.__NEXT_DATA__ = {};</script>
+          <script src="/_next/static/chunk.js"></script>
+          <noscript>Please enable JavaScript to continue</noscript>
+        </body>
+        </html>
+        "#;
+
+        let assessment = ContentFetcher::assess_http_content(html);
+        assert!(assessment.should_fallback_to_browser);
+        assert!(assessment.javascript_shell);
+        assert!(assessment.shell_marker_count >= 1);
+    }
+
+    #[test]
+    fn assess_http_content_preserves_small_static_pages() {
+        let html = r#"<html><body><article><h1>Hello</h1><p>Small static page.</p></article></body></html>"#;
+
+        let assessment = ContentFetcher::assess_http_content(html);
+        assert!(!assessment.should_fallback_to_browser);
+        assert!(assessment.markdown_chars > 0);
+    }
+
+    #[test]
+    fn write_debug_bundle_persists_metadata_and_payloads() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let capture_dir = ContentFetcher::write_debug_bundle(
+            temp_dir.path().to_path_buf(),
+            "empty_markdown",
+            "https://example.com",
+            "markdown_empty",
+            json!({ "visible_text_chars": 0 }),
+            BTreeMap::from([
+                ("http_raw.html", "<html><body>raw</body></html>".to_string()),
+                ("markdown.txt", "".to_string()),
+                ("visible_text.txt", "raw".to_string()),
+            ]),
+        )
+        .expect("debug bundle should be written");
+
+        assert!(capture_dir.join("meta.json").exists());
+        assert!(capture_dir.join("http_raw.html").exists());
+        assert!(capture_dir.join("visible_text.txt").exists());
+        assert!(!capture_dir.join("markdown.txt").exists(), "empty artifacts should be skipped");
     }
 }

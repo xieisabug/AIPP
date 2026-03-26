@@ -6,16 +6,108 @@ pub struct SearchEngineBase;
 impl SearchEngineBase {
     /// 将HTML转换为Markdown格式
     pub fn html_to_markdown(html: &str) -> String {
-        // 基本的HTML到Markdown转换
-        let mut markdown = html.to_string();
+        let main_content = Self::extract_main_content(html);
+        let markdown = Self::normalize_markdown(Self::convert_html_tags_to_markdown(&main_content));
+        if Self::meaningful_text_len(&markdown) > 0 {
+            return markdown;
+        }
 
-        // 清理HTML，只保留主要内容相关的部分
-        markdown = Self::extract_main_content(&markdown);
+        let cleaned_body = Self::clean_html_body(html);
+        Self::normalize_markdown(Self::convert_html_tags_to_markdown(&cleaned_body))
+    }
 
-        // HTML标签转换为Markdown语法
-        markdown = Self::convert_html_tags_to_markdown(&markdown);
+    /// 提取HTML中的主要内容
+    pub fn extract_main_content(html: &str) -> String {
+        let cleaned_body = Self::clean_html_body(html);
+        let mut pruned_content = cleaned_body.clone();
 
-        // 清理多余的空白行
+        // 移除非核心内容：导航、页眉、页脚、侧边栏
+        let remove_patterns = [
+            r"(?is)<nav[^>]*>.*?</nav>",
+            r"(?is)<header[^>]*>.*?</header>",
+            r"(?is)<footer[^>]*>.*?</footer>",
+            r"(?is)<aside[^>]*>.*?</aside>",
+            r#"(?is)<div[^>]*class="[^"]*nav[^"]*"[^>]*>.*?</div>"#,
+            r#"(?is)<div[^>]*class="[^"]*header[^"]*"[^>]*>.*?</div>"#,
+            r#"(?is)<div[^>]*class="[^"]*footer[^"]*"[^>]*>.*?</div>"#,
+            r#"(?is)<div[^>]*class="[^"]*sidebar[^"]*"[^>]*>.*?</div>"#,
+        ];
+
+        for pattern in &remove_patterns {
+            if let Ok(re) = regex::Regex::new(pattern) {
+                pruned_content = re.replace_all(&pruned_content, "").to_string();
+            }
+        }
+
+        // 尝试提取主要内容区域；如果提取结果太短，回退到裁剪后的 body 内容
+        let main_patterns = [
+            r"(?is)<main[^>]*>(.*?)</main>",
+            r"(?is)<article[^>]*>(.*?)</article>",
+            r#"(?is)<div[^>]*id="?content"?[^>]*>(.*?)</div>"#,
+            r#"(?is)<div[^>]*class="[^"]*content[^"]*"[^>]*>(.*?)</div>"#,
+        ];
+
+        for pattern in &main_patterns {
+            if let Ok(re) = regex::Regex::new(pattern) {
+                if let Some(cap) = re.captures(&pruned_content) {
+                    if let Some(matched) = cap.get(1) {
+                        let candidate = matched.as_str().trim().to_string();
+                        if Self::meaningful_text_len(&candidate) >= 40 {
+                            return candidate;
+                        }
+                    }
+                }
+            }
+        }
+
+        if Self::meaningful_text_len(&pruned_content) > 0 {
+            return pruned_content;
+        }
+
+        cleaned_body
+    }
+
+    pub fn visible_text(html: &str) -> String {
+        let without_tags = regex::Regex::new(r"(?is)<[^>]+>")
+            .unwrap()
+            .replace_all(&Self::clean_html_body(html), " ")
+            .to_string();
+        Self::normalize_whitespace(&without_tags)
+    }
+
+    fn meaningful_text_len(content: &str) -> usize {
+        Self::normalize_whitespace(content)
+            .chars()
+            .filter(|ch| !ch.is_whitespace() && !ch.is_ascii_punctuation())
+            .count()
+    }
+
+    fn clean_html_body(html: &str) -> String {
+        let mut content = html.to_string();
+        let head_pattern = regex::Regex::new(r"(?is)<head[^>]*>.*?</head>").unwrap();
+        content = head_pattern.replace_all(&content, "").to_string();
+
+        let body_pattern = regex::Regex::new(r"(?is)<body[^>]*>(.*?)</body>").unwrap();
+        if let Some(cap) = body_pattern.captures(&content) {
+            if let Some(matched) = cap.get(1) {
+                content = matched.as_str().to_string();
+            }
+        }
+
+        let script_pattern = regex::Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap();
+        content = script_pattern.replace_all(&content, "").to_string();
+
+        let style_pattern = regex::Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap();
+        content = style_pattern.replace_all(&content, "").to_string();
+
+        let comment_pattern = regex::Regex::new(r"<!--.*?-->").unwrap();
+        content = comment_pattern.replace_all(&content, "").to_string();
+
+        let svg_pattern = regex::Regex::new(r"(?is)<svg[^>]*>.*?</svg>").unwrap();
+        svg_pattern.replace_all(&content, "<svg><!-- 图片 --></svg>").to_string()
+    }
+
+    fn normalize_markdown(markdown: String) -> String {
         let lines: Vec<&str> = markdown.lines().collect();
         let mut cleaned_lines = Vec::new();
         let mut prev_empty = false;
@@ -36,75 +128,8 @@ impl SearchEngineBase {
         cleaned_lines.join("\n").trim().to_string()
     }
 
-    /// 提取HTML中的主要内容
-    pub fn extract_main_content(html: &str) -> String {
-        let mut content = html.to_string();
-
-        // 只保留body内容，移除head
-        let head_pattern = regex::Regex::new(r"(?is)<head[^>]*>.*?</head>").unwrap();
-        content = head_pattern.replace_all(&content, "").to_string();
-
-        // 提取body内容，如果没有body则保留原内容
-        let body_pattern = regex::Regex::new(r"(?is)<body[^>]*>(.*?)</body>").unwrap();
-        if let Some(cap) = body_pattern.captures(&content) {
-            if let Some(matched) = cap.get(1) {
-                content = matched.as_str().to_string();
-            }
-        }
-
-        // 移除脚本和样式标签
-        let script_pattern = regex::Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap();
-        content = script_pattern.replace_all(&content, "").to_string();
-
-        let style_pattern = regex::Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap();
-        content = style_pattern.replace_all(&content, "").to_string();
-
-        // 移除注释
-        let comment_pattern = regex::Regex::new(r"<!--.*?-->").unwrap();
-        content = comment_pattern.replace_all(&content, "").to_string();
-
-        // 移除非核心内容：导航、页眉、页脚、侧边栏
-        let remove_patterns = [
-            r"(?is)<nav[^>]*>.*?</nav>",       // 导航栏
-            r"(?is)<header[^>]*>.*?</header>", // 页眉
-            r"(?is)<footer[^>]*>.*?</footer>", // 页脚
-            r"(?is)<aside[^>]*>.*?</aside>",   // 侧边栏
-            r#"(?is)<div[^>]*class="[^"]*nav[^"]*"[^>]*>.*?</div>"#,
-            r#"(?is)<div[^>]*class="[^"]*header[^"]*"[^>]*>.*?</div>"#,
-            r#"(?is)<div[^>]*class="[^"]*footer[^"]*"[^>]*>.*?</div>"#,
-            r#"(?is)<div[^>]*class="[^"]*sidebar[^"]*"[^>]*>.*?</div>"#,
-        ];
-
-        for pattern in &remove_patterns {
-            if let Ok(re) = regex::Regex::new(pattern) {
-                content = re.replace_all(&content, "").to_string();
-            }
-        }
-
-        // SVG特殊处理：保留标签但清空内容，添加图片注释
-        let svg_pattern = regex::Regex::new(r"(?is)<svg[^>]*>.*?</svg>").unwrap();
-        content = svg_pattern.replace_all(&content, "<svg><!-- 图片 --></svg>").to_string();
-
-        // 尝试提取主要内容区域
-        let main_patterns = [
-            r"(?is)<main[^>]*>(.*?)</main>",
-            r"(?is)<article[^>]*>(.*?)</article>",
-            r#"(?is)<div[^>]*id="?content"?[^>]*>(.*?)</div>"#,
-            r#"(?is)<div[^>]*class="[^"]*content[^"]*"[^>]*>(.*?)</div>"#,
-        ];
-
-        for pattern in &main_patterns {
-            if let Ok(re) = regex::Regex::new(pattern) {
-                if let Some(cap) = re.captures(&content) {
-                    if let Some(matched) = cap.get(1) {
-                        content = matched.as_str().to_string();
-                        break;
-                    }
-                }
-            }
-        }
-
-        content
+    fn normalize_whitespace(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     /// 将HTML标签转换为Markdown语法
@@ -343,10 +368,38 @@ mod tests {
         // SVG should be replaced with placeholder comment
         assert!(result.contains("Before SVG"));
         assert!(result.contains("After SVG"));
-        assert!(result.contains("<svg>") || result.contains("图片"));
+        assert!(
+            result.contains("<svg>") || result.contains("图片") || result.contains("[Svg Image]")
+        );
         // Should not contain SVG content
         assert!(!result.contains("circle"));
         assert!(!result.contains("yellow"));
+    }
+
+    #[test]
+    fn test_extract_main_content_falls_back_when_main_is_empty() {
+        let html = r#"
+        <body>
+        <main></main>
+        <div class="content"><p>Fallback body content</p></div>
+        </body>
+        "#;
+
+        let result = SearchEngineBase::html_to_markdown(html);
+        assert!(result.contains("Fallback body content"));
+    }
+
+    #[test]
+    fn test_visible_text_removes_tags_and_scripts() {
+        let html = r#"
+        <html>
+        <head><script>window.__NEXT_DATA__={};</script></head>
+        <body><main><h1>Hello</h1><p>World</p></main></body>
+        </html>
+        "#;
+
+        let result = SearchEngineBase::visible_text(html);
+        assert_eq!(result, "Hello World");
     }
 
     #[test]

@@ -426,6 +426,169 @@ fn normalize_tool_arguments_json(arguments: &serde_json::Value) -> String {
     }
 }
 
+/// 构建包含流式工具调用标记的显示内容。
+/// 将累积的流式工具调用以 `<!-- MCP_TOOL_CALL_STREAMING:... -->` 注释追加到实际
+/// 文本内容之后，供前端实时展示工具调用生成进度。
+fn build_streaming_tool_call_display(
+    response_content: &str,
+    streaming_tool_calls: &HashMap<String, ToolCall>,
+    tool_name_mapping: &ToolNameMapping,
+) -> String {
+    let mut display = response_content.to_string();
+    // 按 call_id 排序以保持确定性顺序
+    let mut sorted_calls: Vec<_> = streaming_tool_calls.values().collect();
+    sorted_calls.sort_by(|a, b| a.call_id.cmp(&b.call_id));
+    for tc in sorted_calls {
+        let (server_name, tool_name) = resolve_tool_name(&tc.fn_name, tool_name_mapping);
+        let params_str = normalize_tool_arguments_json(&tc.fn_arguments);
+        let marker = format!(
+            "\n\n<!-- MCP_TOOL_CALL_STREAMING:{} -->\n",
+            serde_json::json!({
+                "server_name": server_name,
+                "tool_name": tool_name,
+                "fn_arguments": params_str,
+                "llm_call_id": tc.call_id,
+            })
+        );
+        display.push_str(&marker);
+    }
+    display
+}
+
+/// 用于测试的公共模块
+#[cfg(test)]
+pub(crate) use self::tests::build_streaming_tool_call_display_pub;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 公开 build_streaming_tool_call_display 给测试模块使用
+    pub(crate) fn build_streaming_tool_call_display_pub(
+        response_content: &str,
+        streaming_tool_calls: &HashMap<String, ToolCall>,
+        tool_name_mapping: &ToolNameMapping,
+    ) -> String {
+        build_streaming_tool_call_display(response_content, streaming_tool_calls, tool_name_mapping)
+    }
+
+    #[test]
+    fn test_build_streaming_tool_call_display_empty() {
+        let mapping = ToolNameMapping::new();
+        let tool_calls = HashMap::new();
+        let result = build_streaming_tool_call_display("Hello world", &tool_calls, &mapping);
+        assert_eq!(result, "Hello world");
+    }
+
+    #[test]
+    fn test_build_streaming_tool_call_display_single_tool() {
+        let mapping = ToolNameMapping::new();
+        let mut tool_calls = HashMap::new();
+        tool_calls.insert(
+            "call_1".to_string(),
+            ToolCall {
+                call_id: "call_1".to_string(),
+                fn_name: "server__tool_name".to_string(),
+                fn_arguments: serde_json::json!({"key": "value"}),
+                thought_signatures: None,
+            },
+        );
+        let result = build_streaming_tool_call_display("Hello", &tool_calls, &mapping);
+        assert!(result.starts_with("Hello"));
+        assert!(result.contains("MCP_TOOL_CALL_STREAMING"));
+        assert!(result.contains("tool_name"));
+        assert!(result.contains("server"));
+    }
+
+    #[test]
+    fn test_build_streaming_tool_call_display_multiple_tools_sorted() {
+        let mapping = ToolNameMapping::new();
+        let mut tool_calls = HashMap::new();
+        tool_calls.insert(
+            "call_b".to_string(),
+            ToolCall {
+                call_id: "call_b".to_string(),
+                fn_name: "s1__tool_b".to_string(),
+                fn_arguments: serde_json::json!({}),
+                thought_signatures: None,
+            },
+        );
+        tool_calls.insert(
+            "call_a".to_string(),
+            ToolCall {
+                call_id: "call_a".to_string(),
+                fn_name: "s2__tool_a".to_string(),
+                fn_arguments: serde_json::json!({}),
+                thought_signatures: None,
+            },
+        );
+        let result = build_streaming_tool_call_display("", &tool_calls, &mapping);
+        // call_a should come before call_b (sorted by call_id)
+        let pos_a = result.find("call_a").unwrap();
+        let pos_b = result.find("call_b").unwrap();
+        assert!(pos_a < pos_b, "call_a should appear before call_b");
+    }
+
+    #[test]
+    fn test_build_streaming_tool_call_display_with_mapping() {
+        let mut mapping = ToolNameMapping::new();
+        mapping.insert(
+            "sanitized__mapped_tool".to_string(),
+            ("original_server".to_string(), "original_tool".to_string()),
+        );
+        let mut tool_calls = HashMap::new();
+        tool_calls.insert(
+            "call_1".to_string(),
+            ToolCall {
+                call_id: "call_1".to_string(),
+                fn_name: "sanitized__mapped_tool".to_string(),
+                fn_arguments: serde_json::json!({"arg": 42}),
+                thought_signatures: None,
+            },
+        );
+        let result = build_streaming_tool_call_display("text", &tool_calls, &mapping);
+        assert!(result.contains("original_server"));
+        assert!(result.contains("original_tool"));
+    }
+
+    #[test]
+    fn test_build_streaming_tool_call_display_partial_arguments() {
+        let mapping = ToolNameMapping::new();
+        let mut tool_calls = HashMap::new();
+        // Simulate partial arguments (not valid JSON object yet)
+        tool_calls.insert(
+            "call_1".to_string(),
+            ToolCall {
+                call_id: "call_1".to_string(),
+                fn_name: "server__tool".to_string(),
+                fn_arguments: serde_json::json!("partial"),
+                thought_signatures: None,
+            },
+        );
+        let result = build_streaming_tool_call_display("", &tool_calls, &mapping);
+        assert!(result.contains("MCP_TOOL_CALL_STREAMING"));
+        // Non-object arguments should be normalized to "{}"
+        assert!(result.contains("{}"));
+    }
+
+    #[test]
+    fn test_normalize_tool_arguments_json_object() {
+        let args = serde_json::json!({"key": "val"});
+        let result = normalize_tool_arguments_json(&args);
+        assert_eq!(result, r#"{"key":"val"}"#);
+    }
+
+    #[test]
+    fn test_normalize_tool_arguments_json_non_object() {
+        let args = serde_json::json!("string");
+        assert_eq!(normalize_tool_arguments_json(&args), "{}");
+        let args = serde_json::json!(42);
+        assert_eq!(normalize_tool_arguments_json(&args), "{}");
+        let args = serde_json::json!(null);
+        assert_eq!(normalize_tool_arguments_json(&args), "{}");
+    }
+}
+
 /// 统一处理捕获到的工具调用：创建DB记录、插入UI注释、更新消息、可选自动执行、可选向UI发事件
 async fn handle_captured_tool_calls_common(
     app_handle: &tauri::AppHandle,
@@ -633,7 +796,9 @@ async fn handle_captured_tool_calls_common(
 
 /// 并发处理捕获到的工具调用
 /// 返回: (所有工具调用ID, 需要执行的工具调用ID)
-async fn handle_captured_tool_calls_concurrent(
+/// 仅创建 DB 记录、UI hints 并确定 auto-run ID 列表，不执行工具。
+/// 流式场景使用此函数后将工具执行放到后台任务，避免阻塞消息收尾。
+async fn setup_captured_tool_calls(
     app_handle: &tauri::AppHandle,
     conversation_db: &ConversationDatabase,
     window: &tauri::Window,
@@ -644,8 +809,6 @@ async fn handle_captured_tool_calls_concurrent(
     mcp_override_config: Option<&crate::api::ai::types::McpOverrideConfig>,
     tool_name_mapping: &ToolNameMapping,
 ) -> anyhow::Result<(Vec<i64>, Vec<i64>)> {
-    use futures::future::join_all;
-
     // 第一步：为所有工具调用创建 DB 记录和 UI hints（保持原有顺序）
     let mut all_tool_call_ids = Vec::new();
     let mut tool_call_records: Vec<(i64, String, String)> = Vec::new(); // (id, server_name, tool_name)
@@ -702,39 +865,18 @@ async fn handle_captured_tool_calls_concurrent(
                 );
                 response_content.push_str(&ui_hint);
 
-                // 持久化内容并发出更新
+                // 持久化内容
                 if let Ok(Some(mut msg)) = conversation_db
                     .message_repo()
                     .context("failed to get message_repo for read")?
                     .read(response_message_id)
                 {
                     msg.content = response_content.clone();
-                    // 覆盖保存 tool_calls JSON（再次确保一致）
                     msg.tool_calls_json = serde_json::to_string(&captured_tool_calls).ok();
                     let _ = conversation_db
                         .message_repo()
                         .context("failed to get message_repo for update")?
                         .update(&msg);
-
-                    let update_event = crate::api::ai::events::ConversationEvent {
-                        r#type: "message_update".to_string(),
-                        data: serde_json::to_value(crate::api::ai::events::MessageUpdateEvent {
-                            message_id: response_message_id,
-                            message_type: "response".to_string(),
-                            content: response_content.clone(),
-                            is_done: false,
-                            token_count: None,
-                            input_token_count: None,
-                            output_token_count: None,
-                            ttft_ms: None,
-                            tps: None,
-                        })
-                        .unwrap(),
-                    };
-                    let _ = window.emit(
-                        format!("conversation_event_{}", conversation_id).as_str(),
-                        update_event,
-                    );
                 }
             }
             Err(e) => {
@@ -792,7 +934,91 @@ async fn handle_captured_tool_calls_concurrent(
         }
     }
 
-    // 第三步：并发执行所有 auto_run 的工具调用
+    Ok((all_tool_call_ids, auto_run_ids))
+}
+
+/// 并发执行指定的 auto-run 工具调用，并触发后续续写。
+/// 流式场景中在后台 tokio::spawn 中调用，非流式场景内联调用。
+async fn execute_and_continue_tool_calls(
+    app_handle: tauri::AppHandle,
+    window: tauri::Window,
+    conversation_id: i64,
+    exec_ids: Vec<i64>,
+) {
+    use futures::future::join_all;
+
+    let state = app_handle.state::<crate::AppState>();
+    let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+
+    let mut execute_futures = Vec::new();
+    for call_id in &exec_ids {
+        let future = crate::mcp::execution_api::execute_mcp_tool_call(
+            app_handle.clone(),
+            state.clone(),
+            feature_config_state.clone(),
+            window.clone(),
+            *call_id,
+            false, // 不触发续写（由批量续写统一处理）
+        );
+        execute_futures.push(future);
+    }
+
+    let results = join_all(execute_futures).await;
+
+    for (idx, result) in results.iter().enumerate() {
+        if let Err(e) = result {
+            warn!(
+                call_id = exec_ids[idx],
+                error = %e,
+                "Concurrent tool execution failed"
+            );
+        }
+    }
+
+    // 批量续写
+    if let Err(e) = crate::mcp::execution_api::trigger_conversation_continuation_batch(
+        &app_handle,
+        state,
+        feature_config_state,
+        window,
+        conversation_id,
+        exec_ids,
+    )
+    .await
+    {
+        warn!(error = %e, "batch continuation failed after concurrent tool execution");
+    }
+}
+
+/// 同步版本：创建 DB 记录 + UI hints + 执行（非流式场景使用）
+/// 不包含续写——续写由调用方负责。
+async fn handle_captured_tool_calls_concurrent(
+    app_handle: &tauri::AppHandle,
+    conversation_db: &ConversationDatabase,
+    window: &tauri::Window,
+    conversation_id: i64,
+    response_message_id: i64,
+    captured_tool_calls: &[genai::chat::ToolCall],
+    response_content: &mut String,
+    mcp_override_config: Option<&crate::api::ai::types::McpOverrideConfig>,
+    tool_name_mapping: &ToolNameMapping,
+) -> anyhow::Result<(Vec<i64>, Vec<i64>)> {
+    use futures::future::join_all;
+
+    let (all_ids, auto_run_ids) = setup_captured_tool_calls(
+        app_handle,
+        conversation_db,
+        window,
+        conversation_id,
+        response_message_id,
+        captured_tool_calls,
+        response_content,
+        mcp_override_config,
+        tool_name_mapping,
+    )
+    .await?;
+
+    // 非流式场景：内联执行（不含续写，由调用方处理）
     if !auto_run_ids.is_empty() {
         let state = app_handle.state::<crate::AppState>();
         let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
@@ -805,15 +1031,12 @@ async fn handle_captured_tool_calls_concurrent(
                 feature_config_state.clone(),
                 window.clone(),
                 *call_id,
-                false, // 不触发续写
+                false,
             );
             execute_futures.push(future);
         }
 
-        // 第四步：等待所有执行完成
         let results = join_all(execute_futures).await;
-
-        // 记录执行结果
         for (idx, result) in results.iter().enumerate() {
             if let Err(e) = result {
                 warn!(
@@ -825,8 +1048,7 @@ async fn handle_captured_tool_calls_concurrent(
         }
     }
 
-    // 第五步：返回 (所有工具ID, 需要执行的工具ID)
-    Ok((all_tool_call_ids, auto_run_ids))
+    Ok((all_ids, auto_run_ids))
 }
 
 /// 助手提及信息
@@ -1764,6 +1986,8 @@ async fn attempt_stream_chat(
     let mut reasoning_message_id: Option<i64> = None;
     let mut response_message_id: Option<i64> = None;
     let mut captured_tool_calls: Vec<ToolCall> = Vec::new();
+    // 流式工具调用追踪：在 ToolCallChunk 事件中累积，用于实时 UI 反馈
+    let mut streaming_tool_calls: HashMap<String, ToolCall> = HashMap::new();
 
     // Diagnostics: counters for stream content
     let mut response_chunk_count: usize = 0;
@@ -1967,6 +2191,81 @@ async fn attempt_stream_chat(
                     }
                     ChatStreamEvent::ToolCallChunk(tool_call_chunk) => {
                         debug!(?tool_call_chunk, "tool call chunk");
+
+                        // 累积流式工具调用数据
+                        let tc = &tool_call_chunk.tool_call;
+                        debug!(
+                            llm_call_id = %tc.call_id,
+                            fn_name = %tc.fn_name,
+                            fn_arguments = %tc.fn_arguments,
+                            "received native tool call chunk"
+                        );
+                        streaming_tool_calls.insert(tc.call_id.clone(), tc.clone());
+
+                        // 确保 response 消息已创建（用于承载流式工具调用指示器）
+                        if response_message_id.is_none() {
+                            // Use chrono::Utc::now() as fallback instead of stream_request_start_time
+                            // to ensure the response message is ordered AFTER the reasoning message.
+                            let actual_start_time = reasoning_end_time.unwrap_or_else(|| {
+                                let now = chrono::Utc::now();
+                                response_start_time.get_or_insert(now);
+                                response_start_time.unwrap()
+                            });
+                            response_start_time = Some(actual_start_time);
+
+                            if let Ok(new_id) = ensure_stream_message(
+                                &conversation_db,
+                                &window,
+                                conversation_id,
+                                "response",
+                                &response_content,
+                                llm_model_id,
+                                &llm_model_name,
+                                &generation_group_id,
+                                parent_group_id_override.clone(),
+                                Some(actual_start_time),
+                                response_first_token_time.clone(),
+                                None,
+                            )
+                            .await
+                            {
+                                response_message_id = Some(new_id);
+                            }
+                        }
+
+                        // 构建包含流式工具调用标记的显示内容
+                        if let Some(msg_id) = response_message_id {
+                            let display_content = build_streaming_tool_call_display(
+                                &response_content,
+                                &streaming_tool_calls,
+                                &tool_name_mapping,
+                            );
+                            debug!(
+                                message_id = msg_id,
+                                streaming_call_count = streaming_tool_calls.len(),
+                                display_len = display_content.len(),
+                                "emitting streaming tool call message update"
+                            );
+                            let update_event = ConversationEvent {
+                                r#type: "message_update".to_string(),
+                                data: serde_json::to_value(MessageUpdateEvent {
+                                    message_id: msg_id,
+                                    message_type: "response".to_string(),
+                                    content: display_content,
+                                    is_done: false,
+                                    token_count: None,
+                                    input_token_count: None,
+                                    output_token_count: None,
+                                    ttft_ms: None,
+                                    tps: None,
+                                })
+                                .unwrap(),
+                            };
+                            let _ = window.emit(
+                                format!("conversation_event_{}", conversation_id).as_str(),
+                                update_event,
+                            );
+                        }
                     }
                     ChatStreamEvent::End(end_event) => {
                         debug!(?end_event, "end event");
@@ -2075,33 +2374,41 @@ async fn attempt_stream_chat(
                                                     "Token usage and performance metrics captured and stored for streaming message"
                                                 );
 
-                                                // Send message_update event to notify frontend
-                                                let update_event = ConversationEvent {
-                                                    r#type: "message_update".to_string(),
-                                                    data: serde_json::to_value(
-                                                        MessageUpdateEvent {
-                                                            message_id: msg_id,
-                                                            message_type: target_message_type
-                                                                .to_string(),
-                                                            content: message.content.clone(),
-                                                            is_done: true,
-                                                            token_count: Some(total_tokens),
-                                                            input_token_count: Some(input_tokens),
-                                                            output_token_count: Some(output_tokens),
-                                                            ttft_ms: message.ttft_ms,
-                                                            tps,
-                                                        },
-                                                    )
-                                                    .unwrap(),
-                                                };
-                                                let _ = window.emit(
-                                                    format!(
-                                                        "conversation_event_{}",
-                                                        conversation_id
-                                                    )
-                                                    .as_str(),
-                                                    update_event,
-                                                );
+                                                // When tool calls are pending, defer is_done:true
+                                                // until after setup_captured_tool_calls appends
+                                                // MCP hints to avoid is_done flip-flop.
+                                                if captured_tool_calls.is_empty() {
+                                                    let update_event = ConversationEvent {
+                                                        r#type: "message_update".to_string(),
+                                                        data: serde_json::to_value(
+                                                            MessageUpdateEvent {
+                                                                message_id: msg_id,
+                                                                message_type: target_message_type
+                                                                    .to_string(),
+                                                                content: message.content.clone(),
+                                                                is_done: true,
+                                                                token_count: Some(total_tokens),
+                                                                input_token_count: Some(
+                                                                    input_tokens,
+                                                                ),
+                                                                output_token_count: Some(
+                                                                    output_tokens,
+                                                                ),
+                                                                ttft_ms: message.ttft_ms,
+                                                                tps,
+                                                            },
+                                                        )
+                                                        .unwrap(),
+                                                    };
+                                                    let _ = window.emit(
+                                                        format!(
+                                                            "conversation_event_{}",
+                                                            conversation_id
+                                                        )
+                                                        .as_str(),
+                                                        update_event,
+                                                    );
+                                                }
                                             }
                                             Err(e) => {
                                                 warn!(
@@ -2131,7 +2438,8 @@ async fn attempt_stream_chat(
                             "stream summary"
                         );
 
-                        // If native tool calls were captured, persist UI hints and DB records, and optionally auto-run
+                        // If native tool calls were captured, persist UI hints and DB records,
+                        // then spawn auto-run execution in background (non-blocking).
                         if !captured_tool_calls.is_empty() {
                             // Ensure we have a response message to attach UI hints
                             if response_message_id.is_none() {
@@ -2164,40 +2472,51 @@ async fn attempt_stream_chat(
                                 }
                             }
                             if let Some(msg_id) = response_message_id {
-                                // 使用并发处理函数，返回 (所有工具ID, 需要执行的工具ID)
-                                if let Ok((_all_ids, exec_ids)) =
-                                    handle_captured_tool_calls_concurrent(
-                                        &app_handle,
+                                // Setup only: create DB records + UI hints + determine auto-run IDs (fast)
+                                if let Ok((_all_ids, exec_ids)) = setup_captured_tool_calls(
+                                    &app_handle,
+                                    &conversation_db,
+                                    &window,
+                                    conversation_id,
+                                    msg_id,
+                                    &captured_tool_calls,
+                                    &mut response_content,
+                                    mcp_override_config.as_ref(),
+                                    &tool_name_mapping,
+                                )
+                                .await
+                                {
+                                    let _ = persist_and_emit_update(
                                         &conversation_db,
                                         &window,
                                         conversation_id,
                                         msg_id,
-                                        &captured_tool_calls,
-                                        &mut response_content,
-                                        mcp_override_config.as_ref(),
-                                        &tool_name_mapping,
-                                    )
-                                    .await
-                                {
-                                    // 批量续写：所有工具执行完成后统一触发
+                                        "response",
+                                        &response_content,
+                                        false,
+                                    );
+
+                                    // Spawn tool execution in background (non-blocking)
+                                    // Use std::thread::spawn + block_on to avoid Send
+                                    // requirement (execute_mcp_tool_call uses non-Send types).
                                     if !exec_ids.is_empty() {
                                         debug!(
                                             exec_ids = ?exec_ids,
-                                            "triggering batch continuation after concurrent tool execution"
+                                            "spawning background tool execution after stream end"
                                         );
-                                        let state = app_handle.state::<crate::AppState>();
-                                        let feature_config_state =
-                                            app_handle.state::<crate::FeatureConfigState>();
-                                        if let Err(e) = crate::mcp::execution_api::trigger_conversation_continuation_batch(
-                                            &app_handle,
-                                            state,
-                                            feature_config_state,
-                                            window.clone(),
-                                            conversation_id,
-                                            exec_ids,
-                                        ).await {
-                                            warn!(error = %e, "batch continuation failed after concurrent tool execution");
-                                        }
+                                        let app_bg = app_handle.clone();
+                                        let window_bg = window.clone();
+                                        std::thread::spawn(move || {
+                                            tauri::async_runtime::block_on(async move {
+                                                execute_and_continue_tool_calls(
+                                                    app_bg,
+                                                    window_bg,
+                                                    conversation_id,
+                                                    exec_ids,
+                                                )
+                                                .await;
+                                            });
+                                        });
                                     } else {
                                         debug!("no exec_ids, skipping batch continuation");
                                     }
@@ -2238,6 +2557,7 @@ async fn attempt_stream_chat(
                                 if let (Some(msg_id), Some(start_time)) =
                                     (response_message_id, response_start_time)
                                 {
+                                    let skip_mcp_detection = !captured_tool_calls.is_empty();
                                     if let Err(e) = super::conversation::handle_message_type_end(
                                         msg_id,
                                         "response",
@@ -2247,7 +2567,7 @@ async fn attempt_stream_chat(
                                         &window,
                                         conversation_id,
                                         &app_handle,
-                                        false, // allow MCP detection
+                                        skip_mcp_detection,
                                         mcp_override_config.as_ref(),
                                     )
                                     .await

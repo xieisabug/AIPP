@@ -40,6 +40,7 @@ pub struct MCPToolCallUpdateEvent {
     pub call_id: i64,
     pub conversation_id: i64,
     pub status: String, // pending, executing, success, failed
+    pub llm_call_id: Option<String>,
     pub server_name: Option<String>,
     pub tool_name: Option<String>,
     pub parameters: Option<String>,

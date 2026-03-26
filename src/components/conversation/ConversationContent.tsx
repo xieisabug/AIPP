@@ -25,6 +25,7 @@ export interface ConversationContentProps {
     onToggleReasoningExpand: (messageId: number) => void;
     inlineInteractionItems?: InlineInteractionItem[];
     sentBatchToolResultMessageIds?: ReadonlySet<number>;
+    allowFeishuDebugResend?: boolean;
     // NewChatComponent props
     selectedText: string;
     selectedAssistant: number;
@@ -52,6 +53,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     onToggleReasoningExpand,
     inlineInteractionItems,
     sentBatchToolResultMessageIds,
+    allowFeishuDebugResend = false,
     // NewChatComponent props
     selectedText,
     selectedAssistant,
@@ -80,6 +82,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
                         onToggleReasoningExpand={onToggleReasoningExpand}
                         inlineInteractionItems={inlineInteractionItems}
                         sentBatchToolResultMessageIds={sentBatchToolResultMessageIds}
+                        allowFeishuDebugResend={allowFeishuDebugResend}
                     />
                 </>
             </>

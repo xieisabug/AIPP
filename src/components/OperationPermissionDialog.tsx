@@ -46,6 +46,7 @@ export interface AcpPermissionRequest {
 interface OperationPermissionDialogProps {
     request: OperationPermissionRequest | null;
     isOpen: boolean;
+    isSubmitting?: boolean;
     onDecision: (
         requestId: string,
         decision: 'allow' | 'allow_for_conversation' | 'allow_for_assistant' | 'allow_and_save' | 'deny'
@@ -56,6 +57,7 @@ interface OperationPermissionDialogProps {
 interface AcpPermissionDialogProps {
     request: AcpPermissionRequest | null;
     isOpen: boolean;
+    isSubmitting?: boolean;
     onDecision: (requestId: string, optionId?: string, cancelled?: boolean) => void;
     errorMessage?: string | null;
 }
@@ -70,6 +72,7 @@ const operationLabels: Record<string, string> = {
 export function OperationPermissionDialog({
     request,
     isOpen,
+    isSubmitting = false,
     onDecision,
     errorMessage,
 }: OperationPermissionDialogProps) {
@@ -134,6 +137,7 @@ export function OperationPermissionDialog({
                         <Button
                             variant="outline"
                             onClick={handleDeny}
+                            disabled={isSubmitting}
                             className="flex w-full items-center justify-start gap-2 whitespace-normal text-left"
                         >
                             <ShieldAlert className="h-4 w-4 shrink-0" />
@@ -142,6 +146,7 @@ export function OperationPermissionDialog({
                         <Button
                             variant="outline"
                             onClick={handleAllow}
+                            disabled={isSubmitting}
                             className="flex w-full items-center justify-start gap-2 whitespace-normal text-left"
                         >
                             <Shield className="h-4 w-4 shrink-0" />
@@ -150,6 +155,7 @@ export function OperationPermissionDialog({
                         <Button
                             variant="outline"
                             onClick={handleAllowForConversation}
+                            disabled={isSubmitting}
                             className="flex w-full items-center justify-start gap-2 whitespace-normal text-left"
                         >
                             <Shield className="h-4 w-4 shrink-0" />
@@ -158,6 +164,7 @@ export function OperationPermissionDialog({
                         <Button
                             variant="outline"
                             onClick={handleAllowForAssistant}
+                            disabled={isSubmitting}
                             className="flex w-full items-center justify-start gap-2 whitespace-normal text-left"
                         >
                             <ShieldCheck className="h-4 w-4 shrink-0" />
@@ -165,6 +172,7 @@ export function OperationPermissionDialog({
                         </Button>
                         <Button
                             onClick={handleAllowAndSave}
+                            disabled={isSubmitting}
                             className="flex w-full items-center justify-start gap-2 whitespace-normal text-left sm:col-span-2"
                         >
                             <ShieldCheck className="h-4 w-4 shrink-0" />
@@ -194,6 +202,7 @@ const acpOptionStyle = (kind: string) => {
 export function AcpPermissionDialog({
     request,
     isOpen,
+    isSubmitting = false,
     onDecision,
     errorMessage,
 }: AcpPermissionDialogProps) {
@@ -249,6 +258,7 @@ export function AcpPermissionDialog({
                         <Button
                             variant="outline"
                             onClick={() => onDecision(request.request_id, undefined, true)}
+                            disabled={isSubmitting}
                             className="flex w-full items-center justify-start gap-2 whitespace-normal text-left"
                         >
                             <ShieldAlert className="h-4 w-4 shrink-0" />
@@ -259,6 +269,7 @@ export function AcpPermissionDialog({
                                 key={option.option_id}
                                 variant={acpOptionStyle(option.kind)}
                                 onClick={() => onDecision(request.request_id, option.option_id, false)}
+                                disabled={isSubmitting}
                                 className="flex w-full items-center justify-start gap-2 whitespace-normal text-left"
                             >
                                 {option.kind.startsWith("allow") ? (

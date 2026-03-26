@@ -47,6 +47,7 @@ interface MessageItemProps {
     isLastMessage?: boolean; // 防泄露模式：是否为最后一条消息
     inlineInteractionItems?: InlineInteractionItem[];
     sentBatchToolResultMessageIds?: ReadonlySet<number>;
+    allowFeishuDebugResend?: boolean;
 }
 
 const MessageItem = React.memo<MessageItemProps>(
@@ -66,15 +67,18 @@ const MessageItem = React.memo<MessageItemProps>(
         isLastMessage = false,
         inlineInteractionItems,
         sentBatchToolResultMessageIds,
+        allowFeishuDebugResend = false,
     }) => {
         // 防泄露模式
         const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
         const shouldMaskContent = antiLeakageEnabled && !isRevealed && !isLastMessage;
 
         // 防泄露模式：获取实际显示的内容
+        // 流式消息优先使用 streamEvent.content（包含 MCP_TOOL_CALL_STREAMING 标记）
         const displayContent = useMemo(() => {
-            return shouldMaskContent ? maskContent(message.content) : message.content;
-        }, [shouldMaskContent, message.content, maskContent]);
+            const rawContent = (streamEvent && !streamEvent.is_done ? streamEvent.content : null) ?? message.content;
+            return shouldMaskContent ? maskContent(rawContent) : rawContent;
+        }, [shouldMaskContent, message.content, streamEvent, maskContent]);
 
         const { copyIconState, handleCopy } = useCopyHandler(displayContent);
         const { parseCustomTags } = useCustomTagParser();
@@ -221,8 +225,11 @@ const MessageItem = React.memo<MessageItemProps>(
             streamEvent?.tps,
         ]);
 
+        const canResendToFeishuDebug =
+            allowFeishuDebugResend && message.message_type === "response";
+
         const handleFeishuDebugResend = useCallback(async () => {
-            if (isFeishuDebugSending || message.message_type !== "response") {
+            if (isFeishuDebugSending || !canResendToFeishuDebug) {
                 return;
             }
 
@@ -257,7 +264,7 @@ const MessageItem = React.memo<MessageItemProps>(
             } finally {
                 setIsFeishuDebugSending(false);
             }
-        }, [isFeishuDebugSending, message.id, message.message_type]);
+        }, [canResendToFeishuDebug, isFeishuDebugSending, message.id]);
 
         // 渲染内容 - 根据用户消息类型和配置选择渲染方式
         const contentElement = useMemo(
@@ -344,7 +351,7 @@ const MessageItem = React.memo<MessageItemProps>(
                         onEdit={onMessageEdit}
                         onRegenerate={onMessageRegenerate}
                         onFork={onMessageFork}
-                        onResendToFeishuDebug={message.message_type === "response" ? handleFeishuDebugResend : undefined}
+                        onResendToFeishuDebug={canResendToFeishuDebug ? handleFeishuDebugResend : undefined}
                         isResendToFeishuDebugPending={isFeishuDebugSending}
                         tokenCount={message.token_count}
                         inputTokenCount={message.input_token_count}

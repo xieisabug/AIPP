@@ -432,6 +432,7 @@ async fn generate_assistant_summary(
         &model_detail.configs,
         &model_detail.model.code,
         &model_detail.provider.api_type,
+        Some(&model_detail.model.request_mode),
         network_proxy.as_deref(),
         false,
         Some(request_timeout),

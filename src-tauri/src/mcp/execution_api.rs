@@ -59,6 +59,16 @@ fn continuation_lock_registry() -> &'static ContinuationLockRegistry {
     CONTINUATION_LOCKS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
+fn pick_continuation_window(app_handle: &tauri::AppHandle) -> Option<tauri::Window> {
+    let windows = app_handle.webview_windows();
+    for label in ["butler_experiment", "chat_ui", "ask"] {
+        if let Some(window) = windows.get(label) {
+            return Some(window.as_ref().window());
+        }
+    }
+    None
+}
+
 fn pending_batch_continuation_registry() -> &'static PendingBatchContinuationRegistry {
     PENDING_BATCH_CONTINUATIONS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
@@ -734,6 +744,7 @@ fn build_mcp_tool_call_update_event(tool_call: &MCPToolCall) -> ConversationEven
             call_id: tool_call.id,
             conversation_id: tool_call.conversation_id,
             status: tool_call.status.clone(),
+            llm_call_id: tool_call.llm_call_id.clone(),
             server_name: Some(tool_call.server_name.clone()),
             tool_name: Some(tool_call.tool_name.clone()),
             parameters: Some(tool_call.parameters.clone()),
@@ -1007,6 +1018,35 @@ async fn handle_tool_execution_result(
     Ok(tool_call)
 }
 
+pub(crate) async fn finalize_tool_call_from_external_result(
+    app_handle: &tauri::AppHandle,
+    call_id: i64,
+    execution_result: std::result::Result<String, String>,
+) -> Result<(), String> {
+    let db = MCPDatabase::new(app_handle).map_err(|e| format!("初始化数据库失败: {}", e))?;
+    let tool_call =
+        db.get_mcp_tool_call(call_id).map_err(|e| format!("获取工具调用信息失败: {}", e))?;
+    let window = pick_continuation_window(app_handle)
+        .ok_or_else(|| "No available window to continue AskUserQuestion tool call".to_string())?;
+    let state = app_handle.state::<crate::AppState>();
+    let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+    let is_retry = tool_call.status == "failed";
+
+    handle_tool_execution_result(
+        app_handle,
+        &state,
+        &feature_config_state,
+        &window,
+        call_id,
+        tool_call,
+        execution_result,
+        is_retry,
+        true,
+    )
+    .await
+    .map(|_| ())
+}
+
 /// 规范化从 LLM 返回的 parameters JSON，移除可能的 markdown 代码块包裹。
 fn normalize_parameters_json(parameters: &str) -> String {
     let trimmed = parameters.trim();
@@ -1146,6 +1186,20 @@ pub async fn create_mcp_tool_call(
     // 创建后立即广播 pending 状态事件，确保前端能及时显示工具调用
     broadcast_mcp_tool_call_update(&app_handle, &result);
     debug!(call_id = result.id, status = %result.status, "broadcasted pending status event after creation");
+
+    if let Err(error) = crate::api::butler_api::emit_butler_task_pending_mcp_tool_attention(
+        &app_handle,
+        result.conversation_id,
+    )
+    .await
+    {
+        debug!(
+            conversation_id = result.conversation_id,
+            call_id = result.id,
+            error = %error,
+            "failed to refresh Butler pending MCP tool attention"
+        );
+    }
 
     Ok(result)
 }

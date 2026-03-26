@@ -10,6 +10,7 @@ use tracing::{debug, info, warn};
 // 默认端点映射
 pub const DEFAULT_ENDPOINTS: &[(AdapterKind, &str)] = &[
     (AdapterKind::OpenAI, "https://api.openai.com/v1/"),
+    (AdapterKind::OpenAIResp, "https://api.openai.com/v1/"),
     (AdapterKind::Anthropic, "https://api.anthropic.com/"),
     (AdapterKind::Cohere, "https://api.cohere.ai/v1/"),
     (AdapterKind::Gemini, "https://generativelanguage.googleapis.com/v1beta/"),
@@ -18,14 +19,41 @@ pub const DEFAULT_ENDPOINTS: &[(AdapterKind, &str)] = &[
     (AdapterKind::DeepSeek, "https://api.deepseek.com/"),
     (AdapterKind::Ollama, "http://localhost:11434/v1/"),
     (AdapterKind::Copilot, "https://api.individual.githubcopilot.com"),
+    (AdapterKind::CopilotResp, "https://api.individual.githubcopilot.com"),
 ];
 
+pub fn supports_model_request_mode(api_type: &str) -> bool {
+    matches!(api_type.to_lowercase().as_str(), "openai" | "openai_api" | "github_copilot")
+}
+
+pub fn normalize_request_mode(request_mode: Option<&str>) -> &'static str {
+    match request_mode {
+        Some("responses") => "responses",
+        _ => "chat_completions",
+    }
+}
+
 /// 推断适配器类型
-pub fn infer_adapter_kind(model_name: &str, api_type: &str) -> AdapterKind {
-    debug!(model_name = %model_name, api_type = %api_type, "infer_adapter_kind called");
+pub fn infer_adapter_kind(
+    model_name: &str,
+    api_type: &str,
+    request_mode: Option<&str>,
+) -> AdapterKind {
+    let request_mode = normalize_request_mode(request_mode);
+    debug!(
+        model_name = %model_name,
+        api_type = %api_type,
+        request_mode = %request_mode,
+        "infer_adapter_kind called"
+    );
     match api_type.to_lowercase().as_str() {
-        "openai" => AdapterKind::OpenAI,
-        "openai_api" => AdapterKind::OpenAI,
+        "openai" | "openai_api" => {
+            if request_mode == "responses" {
+                AdapterKind::OpenAIResp
+            } else {
+                AdapterKind::OpenAI
+            }
+        }
         "anthropic" => AdapterKind::Anthropic,
         "cohere" => AdapterKind::Cohere,
         "gemini" => AdapterKind::Gemini,
@@ -33,7 +61,13 @@ pub fn infer_adapter_kind(model_name: &str, api_type: &str) -> AdapterKind {
         "xai" => AdapterKind::Xai,
         "deepseek" => AdapterKind::DeepSeek,
         "ollama" => AdapterKind::Ollama,
-        "github_copilot" => AdapterKind::Copilot, // Copilot 使用 OpenAI 兼容 API
+        "github_copilot" => {
+            if request_mode == "responses" {
+                AdapterKind::CopilotResp
+            } else {
+                AdapterKind::Copilot
+            }
+        }
         _ => {
             // 根据模型名称推断
             let model_lower = model_name.to_lowercase();
@@ -83,6 +117,7 @@ pub fn create_client_with_config(
     configs: &[crate::db::llm_db::LLMProviderConfig],
     model_name: &str,
     api_type: &str,
+    request_mode: Option<&str>,
     network_proxy: Option<&str>,
     proxy_enabled: bool,
     request_timeout: Option<u64>, // 超时时间（秒）
@@ -92,7 +127,7 @@ pub fn create_client_with_config(
         std::collections::HashMap<String, crate::db::system_db::FeatureConfig>,
     >,
 ) -> Result<Client, AppError> {
-    let adapter_kind = infer_adapter_kind(model_name, api_type);
+    let adapter_kind = infer_adapter_kind(model_name, api_type, request_mode);
 
     let mut api_key = String::new();
     let mut endpoint_opt: Option<String> = None;

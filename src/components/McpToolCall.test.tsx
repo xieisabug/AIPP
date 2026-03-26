@@ -140,4 +140,93 @@ describe("McpToolCall call_id binding", () => {
         expect(screen.getByText("待执行")).toBeInTheDocument();
         expect(screen.queryByTestId("shine-border")).not.toBeInTheDocument();
     });
+
+    it("renders streaming state with '生成中' badge and shine border", async () => {
+        const conversationId = 9;
+
+        render(
+            <McpToolCall
+                conversationId={conversationId}
+                messageId={14}
+                serverName="demo-server"
+                toolName="demo-tool"
+                parameters='{"partial":"args"}'
+                mcpToolCallStates={new Map()}
+                shiningMcpCallId={null}
+                isStreaming={true}
+            />
+        );
+
+        await flushEffects();
+
+        // Should show "生成中" badge
+        expect(screen.getByText("生成中")).toBeInTheDocument();
+        // Streaming state should show shine border
+        expect(screen.getByTestId("shine-border")).toBeInTheDocument();
+        // Should display server and tool name
+        expect(screen.getByText("demo-server")).toBeInTheDocument();
+        expect(screen.getByText("demo-tool")).toBeInTheDocument();
+    });
+
+    it("does not show execute button in streaming state", async () => {
+        const conversationId = 10;
+
+        render(
+            <McpToolCall
+                conversationId={conversationId}
+                messageId={15}
+                serverName="demo-server"
+                toolName="demo-tool"
+                parameters='{}'
+                mcpToolCallStates={new Map()}
+                shiningMcpCallId={null}
+                isStreaming={true}
+            />
+        );
+
+        await flushEffects();
+
+        // No execute/play button should be visible
+        expect(screen.queryByTitle("执行")).not.toBeInTheDocument();
+        expect(screen.queryByTitle("重新执行")).not.toBeInTheDocument();
+        expect(screen.queryByTitle("停止")).not.toBeInTheDocument();
+    });
+
+    it("binds a streaming placeholder to MCP state via llm_call_id", async () => {
+        const conversationId = 11;
+        const callId = 88;
+        const llmCallId = "call_stream_88";
+
+        const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
+            [callId, {
+                call_id: callId,
+                conversation_id: conversationId,
+                status: "executing",
+                llm_call_id: llmCallId,
+                server_name: "demo-server",
+                tool_name: "demo-tool",
+                parameters: "{\"query\":\"bound-from-state\"}",
+            }],
+        ]);
+
+        render(
+            <McpToolCall
+                conversationId={conversationId}
+                messageId={16}
+                serverName="demo-server"
+                toolName="demo-tool"
+                parameters='{"query":"partial"}'
+                llmCallId={llmCallId}
+                mcpToolCallStates={mcpToolCallStates}
+                shiningMcpCallId={callId}
+                isStreaming={true}
+            />
+        );
+
+        await flushEffects();
+
+        expect(screen.getByText("执行中")).toBeInTheDocument();
+        expect(screen.getByTestId("shine-border")).toBeInTheDocument();
+        expect(screen.getByText(/bound-from-state/)).toBeInTheDocument();
+    });
 });

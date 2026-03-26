@@ -132,6 +132,7 @@ interface ConversationUIProps {
     allowRename?: boolean;
     allowDelete?: boolean;
     headerExtraActions?: ReactNode;
+    allowFeishuDebugResend?: boolean;
 }
 
 const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
@@ -149,6 +150,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             allowRename = true,
             allowDelete = true,
             headerExtraActions,
+            allowFeishuDebugResend = false,
         },
         ref
     ) => {
@@ -927,6 +929,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onToggleReasoningExpand={toggleReasoningExpand}
                             inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
                             sentBatchToolResultMessageIds={sentBatchToolResultMessageIds}
+                            allowFeishuDebugResend={allowFeishuDebugResend}
                             // NewChatComponent props
                             selectedText={selectedText}
                             selectedAssistant={selectedAssistant}

@@ -55,13 +55,20 @@ function ChatUIWindow() {
     const conversationUIRef = useRef<ConversationUIRef>(null);
 
     // 操作权限对话框
-    const { pendingRequest, isDialogOpen, decisionError, handleDecision } = useOperationPermission({
+    const {
+        pendingRequest,
+        isDialogOpen,
+        decisionError,
+        isSubmitting,
+        handleDecision,
+    } = useOperationPermission({
         conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
     });
     const {
         pendingRequest: pendingAcpRequest,
         isDialogOpen: isAcpDialogOpen,
         decisionError: acpDecisionError,
+        isSubmitting: isAcpSubmitting,
         handleDecision: handleAcpDecision,
     } = useAcpPermission({
         conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
@@ -332,12 +339,14 @@ function ChatUIWindow() {
                     <OperationPermissionDialog
                         request={pendingRequest}
                         isOpen={isDialogOpen}
+                        isSubmitting={isSubmitting}
                         errorMessage={decisionError}
                         onDecision={handleDecision}
                     />
                     <AcpPermissionDialog
                         request={pendingAcpRequest}
                         isOpen={isAcpDialogOpen}
+                        isSubmitting={isAcpSubmitting}
                         errorMessage={acpDecisionError}
                         onDecision={handleAcpDecision}
                     />
@@ -383,12 +392,14 @@ function ChatUIWindow() {
                 <OperationPermissionDialog
                     request={pendingRequest}
                     isOpen={isDialogOpen}
+                    isSubmitting={isSubmitting}
                     errorMessage={decisionError}
                     onDecision={handleDecision}
                 />
                 <AcpPermissionDialog
                     request={pendingAcpRequest}
                     isOpen={isAcpDialogOpen}
+                    isSubmitting={isAcpSubmitting}
                     errorMessage={acpDecisionError}
                     onDecision={handleAcpDecision}
                 />

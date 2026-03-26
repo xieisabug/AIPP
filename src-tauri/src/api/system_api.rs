@@ -229,6 +229,14 @@ pub async fn debug_resend_message_to_feishu(
 }
 
 #[tauri::command]
+pub async fn conversation_has_feishu_target(
+    app_handle: tauri::AppHandle,
+    conversation_id: i64,
+) -> Result<bool, String> {
+    crate::feishu::conversation_has_feishu_target(&app_handle, conversation_id)
+}
+
+#[tauri::command]
 pub async fn open_data_folder(app: tauri::AppHandle) -> Result<(), String> {
     let app_dir = app.path().app_data_dir().unwrap();
     let db_path = app_dir.join("db");

@@ -343,6 +343,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 call_id: call.id,
                 conversation_id: call.conversation_id,
                 status: call.status,
+                llm_call_id: call.llm_call_id,
                 server_name: call.server_name,
                 tool_name: call.tool_name,
                 parameters: call.parameters,
@@ -731,6 +732,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     const merged: MCPToolCallUpdateEvent = {
                         ...(existing || mcpUpdateData),
                         ...mcpUpdateData,
+                        llm_call_id: mcpUpdateData.llm_call_id ?? existing?.llm_call_id,
                         server_name: mcpUpdateData.server_name ?? existing?.server_name,
                         tool_name: mcpUpdateData.tool_name ?? existing?.tool_name,
                         parameters: mcpUpdateData.parameters ?? existing?.parameters,

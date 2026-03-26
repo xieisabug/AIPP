@@ -14,6 +14,8 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { FolderPicker } from "@/components/config/FolderPicker";
+import { AlertTriangle, Plus, Trash2 } from "lucide-react";
 
 interface ExperimentalConfigFormProps {
     form: UseFormReturn<any>;
@@ -132,6 +134,10 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
     const feishuAppId = String(form.watch("butler_feishu_app_id") || "");
     const feishuAppSecret = String(form.watch("butler_feishu_app_secret") || "");
     const feishuBaseUrl = String(form.watch("butler_feishu_base_url") || "https://open.feishu.cn");
+    const contextCompactionEnabled = isEnabledValue(form.watch("context_compaction_enabled"));
+    const trustAllWorkspaces = isEnabledValue(form.watch("butler_trust_all_workspaces"));
+    const [newTrustedPath, setNewTrustedPath] = useState("");
+    const [newTrustedDesc, setNewTrustedDesc] = useState("");
     const defaultDynamicEnabled = isEnabledValue(defaultValues?.dynamic_mcp_loading_enabled);
     const defaultAssistantSummaryEnabled = isEnabledValue(defaultValues?.assistant_summary_enabled);
     const defaultConversationSummaryEnabled = isEnabledValue(defaultValues?.conversation_summary_enabled);
@@ -319,6 +325,41 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
         summaryTasks.mcp_running,
         triggerSummaryTask,
     ]);
+
+    // Trusted workspace helpers — stored as JSON array [{path, description}]
+    type TrustedWorkspace = { path: string; description: string };
+    const trustedPathsRaw: string = form.watch("butler_trusted_workspaces") || "[]";
+    const trustedWorkspaces: TrustedWorkspace[] = useMemo(() => {
+        try {
+            const parsed = JSON.parse(trustedPathsRaw);
+            if (Array.isArray(parsed)) return parsed;
+        } catch {
+            // Legacy: plain newline-separated paths → migrate to JSON
+            const lines = trustedPathsRaw.split("\n").map(s => s.trim()).filter(Boolean);
+            if (lines.length > 0) return lines.map(p => ({ path: p, description: "" }));
+        }
+        return [];
+    }, [trustedPathsRaw]);
+    const setTrustedWorkspaces = useCallback((ws: TrustedWorkspace[]) => {
+        form.setValue("butler_trusted_workspaces", JSON.stringify(ws), { shouldDirty: true });
+    }, [form]);
+    const handleAddTrustedPath = useCallback(() => {
+        const trimmed = newTrustedPath.trim();
+        if (!trimmed) return;
+        if (trustedWorkspaces.some(w => w.path === trimmed)) {
+            toast.error("该路径已存在");
+            return;
+        }
+        setTrustedWorkspaces([...trustedWorkspaces, { path: trimmed, description: newTrustedDesc.trim() }]);
+        setNewTrustedPath("");
+        setNewTrustedDesc("");
+    }, [newTrustedPath, newTrustedDesc, trustedWorkspaces, setTrustedWorkspaces]);
+    const handleRemoveTrustedPath = useCallback((path: string) => {
+        setTrustedWorkspaces(trustedWorkspaces.filter(w => w.path !== path));
+    }, [trustedWorkspaces, setTrustedWorkspaces]);
+    const handleUpdateDescription = useCallback((path: string, desc: string) => {
+        setTrustedWorkspaces(trustedWorkspaces.map(w => w.path === path ? { ...w, description: desc } : w));
+    }, [trustedWorkspaces, setTrustedWorkspaces]);
 
     const handleSave = useCallback(async () => {
         if (dynamicEnabled && !summarizerModelId) {
@@ -972,6 +1013,204 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                         </FormItem>
                                     )}
                                 />
+
+                                {/* ── 上下文压缩配置 ── */}
+                                <div className="space-y-3 pt-3 border-t border-border/50">
+                                    <p className="text-sm font-medium text-muted-foreground">上下文压缩</p>
+
+                                    <Controller
+                                        control={form.control}
+                                        name="context_compaction_enabled"
+                                        render={({ field }) => (
+                                            <FormItem className={toggleCardClassName}>
+                                                <div>
+                                                    <FormLabel className="text-base">自动上下文压缩</FormLabel>
+                                                    <p className="text-sm text-muted-foreground mt-1">
+                                                        当对话上下文接近模型窗口上限时，自动通过 LLM 摘要压缩历史消息。
+                                                    </p>
+                                                </div>
+                                                <FormControl>
+                                                    <Switch
+                                                        checked={isEnabledValue(field.value)}
+                                                        onCheckedChange={field.onChange}
+                                                    />
+                                                </FormControl>
+                                            </FormItem>
+                                        )}
+                                    />
+
+                                    {contextCompactionEnabled && (
+                                        <div className={nestedGroupClassName}>
+                                            <Controller
+                                                control={form.control}
+                                                name="context_max_input_tokens"
+                                                render={({ field }) => (
+                                                    <FormItem>
+                                                        <FormLabel>模型上下文窗口</FormLabel>
+                                                        <FormControl>
+                                                            <Input
+                                                                type="number"
+                                                                value={field.value || "128000"}
+                                                                onChange={field.onChange}
+                                                                placeholder="128000"
+                                                            />
+                                                        </FormControl>
+                                                        <FormDescription>
+                                                            模型的上下文窗口总大小（含输入与输出），系统会自动预留输出空间。
+                                                        </FormDescription>
+                                                    </FormItem>
+                                                )}
+                                            />
+                                            <Controller
+                                                control={form.control}
+                                                name="context_compaction_threshold"
+                                                render={({ field }) => (
+                                                    <FormItem>
+                                                        <FormLabel>压缩触发比例</FormLabel>
+                                                        <FormControl>
+                                                            <Input
+                                                                type="number"
+                                                                step="0.05"
+                                                                min="0.5"
+                                                                max="0.99"
+                                                                value={field.value || "0.80"}
+                                                                onChange={field.onChange}
+                                                                placeholder="0.80"
+                                                            />
+                                                        </FormControl>
+                                                        <FormDescription>
+                                                            当 Token 使用量达到此比例时触发自动压缩（0.5 ~ 0.99）。
+                                                        </FormDescription>
+                                                    </FormItem>
+                                                )}
+                                            />
+                                            <Controller
+                                                control={form.control}
+                                                name="context_tail_ratio"
+                                                render={({ field }) => (
+                                                    <FormItem>
+                                                        <FormLabel>尾部保留比例</FormLabel>
+                                                        <FormControl>
+                                                            <Input
+                                                                type="number"
+                                                                step="0.05"
+                                                                min="0.05"
+                                                                max="0.80"
+                                                                value={field.value || "0.30"}
+                                                                onChange={field.onChange}
+                                                                placeholder="0.30"
+                                                            />
+                                                        </FormControl>
+                                                        <FormDescription>
+                                                            为最近消息保留的上下文预算比例。系统按 Token 从最新消息往前自动计算保留条数，永远不会超出上下文容量（0.05 ~ 0.80）。
+                                                        </FormDescription>
+                                                    </FormItem>
+                                                )}
+                                            />
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* ── 可信工作区配置 ── */}
+                                <div className="space-y-3 pt-3 border-t border-border/50">
+                                    <p className="text-sm font-medium text-muted-foreground">可信工作区</p>
+
+                                    <Controller
+                                        control={form.control}
+                                        name="butler_trust_all_workspaces"
+                                        render={({ field }) => (
+                                            <FormItem className={toggleCardClassName}>
+                                                <div>
+                                                    <FormLabel className="text-base flex items-center gap-2">
+                                                        信任任何工作区
+                                                        <span className="inline-flex items-center gap-1 rounded-md bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
+                                                            <AlertTriangle className="h-3 w-3" />
+                                                            危险
+                                                        </span>
+                                                    </FormLabel>
+                                                    <p className="text-sm text-muted-foreground mt-1">
+                                                        开启后总管家对所有路径的文件操作将自动放行，不再弹出任何权限确认弹窗。仅建议在完全受信环境下使用。
+                                                    </p>
+                                                </div>
+                                                <FormControl>
+                                                    <Switch
+                                                        checked={isEnabledValue(field.value)}
+                                                        onCheckedChange={field.onChange}
+                                                    />
+                                                </FormControl>
+                                            </FormItem>
+                                        )}
+                                    />
+
+                                    {!trustAllWorkspaces && (
+                                        <div className={nestedGroupClassName}>
+                                            <p className="text-sm text-muted-foreground">
+                                                配置可信工作区路径及描述。在这些路径下的文件操作将自动放行，描述会注入到总管家的提示词中帮助 AI 理解工作区用途。
+                                            </p>
+                                            {/* 添加新路径 */}
+                                            <div className="space-y-2">
+                                                <div className="flex items-center gap-2">
+                                                    <FolderPicker
+                                                        value={newTrustedPath}
+                                                        onChange={setNewTrustedPath}
+                                                        placeholder="选择或输入可信目录路径"
+                                                    />
+                                                    <Button
+                                                        type="button"
+                                                        size="sm"
+                                                        onClick={handleAddTrustedPath}
+                                                        disabled={!newTrustedPath.trim()}
+                                                    >
+                                                        <Plus className="h-4 w-4 mr-1" />
+                                                        添加
+                                                    </Button>
+                                                </div>
+                                                <Input
+                                                    value={newTrustedDesc}
+                                                    onChange={(e) => setNewTrustedDesc(e.target.value)}
+                                                    placeholder="工作区描述（可选），例如：前端项目、Rust 后端代码仓库"
+                                                    className="text-sm"
+                                                />
+                                            </div>
+                                            {/* 已有工作区列表 */}
+                                            <div className="space-y-2 max-h-64 overflow-y-auto">
+                                                {trustedWorkspaces.length === 0 ? (
+                                                    <div className="text-sm text-muted-foreground text-center py-3">
+                                                        暂未配置可信工作区
+                                                    </div>
+                                                ) : (
+                                                    trustedWorkspaces.map((ws) => (
+                                                        <div
+                                                            key={ws.path}
+                                                            className="p-2 bg-background rounded-md border space-y-1"
+                                                        >
+                                                            <div className="flex items-center justify-between">
+                                                                <span className="text-sm font-mono break-all flex-1 mr-2">
+                                                                    {ws.path}
+                                                                </span>
+                                                                <Button
+                                                                    type="button"
+                                                                    variant="ghost"
+                                                                    size="sm"
+                                                                    onClick={() => handleRemoveTrustedPath(ws.path)}
+                                                                    className="text-destructive hover:text-destructive shrink-0"
+                                                                >
+                                                                    <Trash2 className="h-4 w-4" />
+                                                                </Button>
+                                                            </div>
+                                                            <Input
+                                                                value={ws.description}
+                                                                onChange={(e) => handleUpdateDescription(ws.path, e.target.value)}
+                                                                placeholder="添加描述…"
+                                                                className="text-xs h-7"
+                                                            />
+                                                        </div>
+                                                    ))
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
 
                                 <Controller
                                     control={form.control}

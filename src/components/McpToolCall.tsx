@@ -15,15 +15,17 @@ interface McpToolCallProps {
     serverName?: string;
     toolName?: string;
     parameters?: string;
+    llmCallId?: string;
     conversationId?: number;
     messageId?: number;
     callId?: number; // If provided, this is an existing call
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>; // Global MCP states
     shiningMcpCallId?: number | null;
     isLastCall?: boolean; // 是否是消息中的最后一个工具调用
+    isStreaming?: boolean; // 流式工具调用（LLM正在生成参数）
 }
 
-type ExecutionState = "idle" | "pending" | "executing" | "success" | "failed";
+type ExecutionState = "idle" | "pending" | "executing" | "success" | "failed" | "streaming";
 
 const JsonDisplay: React.FC<{ content: string; maxHeight?: string; className?: string }> = ({
     content,
@@ -50,6 +52,13 @@ const StatusIndicator: React.FC<{ state: ExecutionState }> = ({ state }) => {
     switch (state) {
         case "idle":
             return null;
+        case "streaming":
+            return (
+                <Badge variant="secondary" className="flex items-center gap-1 ml-3">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    生成中
+                </Badge>
+            );
         case "pending":
             return (
                 <Badge variant="outline" className="flex items-center gap-1 ml-3">
@@ -89,16 +98,29 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     serverName = "未知服务器",
     toolName = "未知工具",
     parameters = "{}",
+    llmCallId,
     conversationId,
     messageId,
     callId,
     mcpToolCallStates,
     shiningMcpCallId = null,
     isLastCall = true, // 默认为 true，向后兼容
+    isStreaming = false, // 默认非流式
 }) => {
     const [createdCallId, setCreatedCallId] = useState<number | null>(null);
-    const effectiveCallId = callId ?? createdCallId;
-    const metaOverride = effectiveCallId && mcpToolCallStates ? mcpToolCallStates.get(effectiveCallId) : undefined;
+    const matchedStateByLlmCallId = useMemo(() => {
+        if (!mcpToolCallStates || !llmCallId || callId || createdCallId) {
+            return undefined;
+        }
+        for (const state of mcpToolCallStates.values()) {
+            if (state.llm_call_id === llmCallId) {
+                return state;
+            }
+        }
+        return undefined;
+    }, [mcpToolCallStates, llmCallId, callId, createdCallId]);
+    const effectiveCallId = callId ?? createdCallId ?? matchedStateByLlmCallId?.call_id ?? null;
+    const metaOverride = (effectiveCallId && mcpToolCallStates ? mcpToolCallStates.get(effectiveCallId) : undefined) ?? matchedStateByLlmCallId;
     const effectiveServerName = metaOverride?.server_name ?? serverName;
     const effectiveToolName = metaOverride?.tool_name ?? toolName;
     const effectiveParameters = metaOverride?.parameters ?? parameters;
@@ -119,11 +141,11 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const displayToolName = maskedData.toolName;
     const displayParameters = maskedData.parameters;
 
-    const [executionState, setExecutionState] = useState<ExecutionState>("idle");
+    const [executionState, setExecutionState] = useState<ExecutionState>(isStreaming ? "streaming" : "idle");
     const [executionResult, setExecutionResult] = useState<string | null>(null);
     const [executionError, setExecutionError] = useState<string | null>(null);
-    // 默认展开：新工具调用默认展开，历史调用根据状态决定
-    const [isExpanded, setIsExpanded] = useState<boolean>(!callId);
+    // 默认展开：流式调用和新工具调用默认展开，历史调用根据状态决定
+    const [isExpanded, setIsExpanded] = useState<boolean>(isStreaming || !callId);
     // 自动收起定时器引用
     const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
     // 移除前端自动执行，避免与后端 detect_and_process_mcp_calls 的自动执行叠加
@@ -138,6 +160,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 messageId,
                 serverName,
                 toolName,
+                llmCallId,
                 knownIds: Array.from(mcpToolCallStates.keys()),
             });
             return;
@@ -188,7 +211,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 mapKeys: Array.from(mcpToolCallStates.keys()),
             });
         }
-    }, [mcpToolCallStates, effectiveCallId, conversationId, messageId, serverName, toolName]);
+    }, [mcpToolCallStates, effectiveCallId, conversationId, messageId, serverName, toolName, llmCallId]);
 
     // 检查执行状态
     const isFailed = executionState === "failed";
@@ -408,7 +431,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
 
     return (
         <div className="w-full max-w-[600px] my-1 p-2 border border-border rounded-md bg-card overflow-hidden relative">
-            {isRunning && (
+            {(isRunning || isStreaming) && (
                 <ShineBorder
                     shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}
                     borderWidth={DEFAULT_SHINE_BORDER_CONFIG.borderWidth}

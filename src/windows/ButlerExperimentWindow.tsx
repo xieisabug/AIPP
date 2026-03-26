@@ -230,6 +230,8 @@ function ButlerExperimentWindow() {
     const [taskAssistantId, setTaskAssistantId] = useState<string>("");
     const [loadError, setLoadError] = useState<string | null>(null);
     const [feishuStatus, setFeishuStatus] = useState<FeishuRuntimeStatus | null>(null);
+    const [isMainConversationFeishuBound, setIsMainConversationFeishuBound] =
+        useState(false);
 
     const conversationIdNumber = mainConversationId ? parseInt(mainConversationId, 10) : undefined;
     const permissionConversationIds = useMemo(() => {
@@ -247,6 +249,7 @@ function ButlerExperimentWindow() {
         pendingRequest,
         isDialogOpen,
         decisionError,
+        isSubmitting,
         handleDecision,
     } = useOperationPermission({
         conversationId: conversationIdNumber,
@@ -256,6 +259,7 @@ function ButlerExperimentWindow() {
         pendingRequest: pendingAcpRequest,
         isDialogOpen: isAcpDialogOpen,
         decisionError: acpDecisionError,
+        isSubmitting: isAcpSubmitting,
         handleDecision: handleAcpDecision,
     } = useAcpPermission({
         conversationId: conversationIdNumber,
@@ -346,15 +350,18 @@ function ButlerExperimentWindow() {
     const loadMainConversation = useCallback(async (options?: {
         showLoading?: boolean;
         silentError?: boolean;
+        reconcile?: boolean;
     }) => {
         const showLoading = options?.showLoading ?? false;
         const silentError = options?.silentError ?? false;
+        const reconcile = options?.reconcile ?? false;
         if (showLoading) {
             setLoadingMain(true);
         }
         try {
             const result = await invoke<ButlerMainLoadResponse>(
-                "load_butler_main_conversation"
+                "load_butler_main_conversation",
+                { reconcile }
             );
             applyMainConversationResult(result);
         } catch (error) {
@@ -424,6 +431,34 @@ function ButlerExperimentWindow() {
         [showFeishuStatus]
     );
 
+    const loadMainConversationFeishuBinding = useCallback(
+        async (conversationId: number, options?: { silent?: boolean }) => {
+            if (!showFeishuStatus) {
+                setIsMainConversationFeishuBound(false);
+                return;
+            }
+
+            const silent = options?.silent ?? false;
+            try {
+                const isBound = await invoke<boolean>("conversation_has_feishu_target", {
+                    conversationId,
+                    conversation_id: conversationId,
+                });
+                setIsMainConversationFeishuBound(isBound);
+            } catch (error) {
+                console.error(
+                    "[ButlerExperimentWindow] Failed to load Feishu binding state:",
+                    error
+                );
+                setIsMainConversationFeishuBound(false);
+                if (!silent) {
+                    toast.error("加载总管家飞书绑定状态失败");
+                }
+            }
+        },
+        [showFeishuStatus]
+    );
+
     useEffect(() => {
         void loadAssistants();
         void loadMainConversation({ showLoading: true });
@@ -462,12 +497,27 @@ function ButlerExperimentWindow() {
         if (!showFeishuStatus) {
             setFeishuStatus(null);
             setLoadingFeishuStatus(false);
+            setIsMainConversationFeishuBound(false);
             return;
         }
 
+        if (conversationIdNumber === undefined) {
+            setIsMainConversationFeishuBound(false);
+        }
+
         void loadFeishuStatus({ silent: true });
+        if (conversationIdNumber !== undefined) {
+            void loadMainConversationFeishuBinding(conversationIdNumber, {
+                silent: true,
+            });
+        }
         const intervalId = window.setInterval(() => {
             void loadFeishuStatus({ silent: true });
+            if (conversationIdNumber !== undefined) {
+                void loadMainConversationFeishuBinding(conversationIdNumber, {
+                    silent: true,
+                });
+            }
         }, 5000);
         const statusListener = listen<FeishuRuntimeStatus>(
             "butler_feishu_status_changed",
@@ -480,7 +530,12 @@ function ButlerExperimentWindow() {
             window.clearInterval(intervalId);
             statusListener.then((unlisten) => unlisten()).catch(console.warn);
         };
-    }, [loadFeishuStatus, showFeishuStatus]);
+    }, [
+        conversationIdNumber,
+        loadFeishuStatus,
+        loadMainConversationFeishuBinding,
+        showFeishuStatus,
+    ]);
 
     useEffect(() => {
         let mounted = true;
@@ -526,6 +581,11 @@ function ButlerExperimentWindow() {
                 void loadMainConversation({ silentError: true });
                 if (showFeishuStatus) {
                     void loadFeishuStatus({ silent: true });
+                    if (conversationIdNumber !== undefined) {
+                        void loadMainConversationFeishuBinding(conversationIdNumber, {
+                            silent: true,
+                        });
+                    }
                 }
                 if (selectedTaskId && isTaskDetailDialogOpen) {
                     void loadTaskDetail(selectedTaskId);
@@ -538,8 +598,10 @@ function ButlerExperimentWindow() {
             focusListener.then((unlisten) => unlisten()).catch(console.warn);
         };
     }, [
+        conversationIdNumber,
         isTaskDetailDialogOpen,
         loadFeishuStatus,
+        loadMainConversationFeishuBinding,
         loadMainConversation,
         loadTaskDetail,
         selectedTaskId,
@@ -809,7 +871,7 @@ function ButlerExperimentWindow() {
                         />
                         <IconButton
                             icon={<RefreshCw className="h-4 w-4 text-icon" />}
-                            onClick={() => void loadMainConversation()}
+                            onClick={() => void loadMainConversation({ reconcile: true })}
                             border
                             title="刷新任务台"
                             dataAippSlot="butler-task-refresh"
@@ -953,12 +1015,15 @@ function ButlerExperimentWindow() {
                                     pluginList={pluginList}
                                     hideHeader
                                     allowRename={false}
-                                    allowDelete={false}
-                                    inlineInteractionItems={inlineInteractionItems}
-                                    inlineInteractionVisible={hasInlineInteraction}
-                                />
-                            </div>
-                        </>
+                                     allowDelete={false}
+                                     inlineInteractionItems={inlineInteractionItems}
+                                     inlineInteractionVisible={hasInlineInteraction}
+                                     allowFeishuDebugResend={
+                                         showFeishuStatus && isMainConversationFeishuBound
+                                     }
+                                 />
+                             </div>
+                         </>
                     ) : (
                         <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                             {loadingMain
@@ -971,12 +1036,14 @@ function ButlerExperimentWindow() {
                 <OperationPermissionDialog
                     request={pendingRequest}
                     isOpen={isDialogOpen}
+                    isSubmitting={isSubmitting}
                     errorMessage={decisionError}
                     onDecision={handleDecision}
                 />
                 <AcpPermissionDialog
                     request={pendingAcpRequest}
                     isOpen={isAcpDialogOpen}
+                    isSubmitting={isAcpSubmitting}
                     errorMessage={acpDecisionError}
                     onDecision={handleAcpDecision}
                 />

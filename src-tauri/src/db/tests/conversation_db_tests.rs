@@ -8,6 +8,7 @@
 
 use super::test_helpers::*;
 use crate::db::conversation_db::*;
+use chrono::Utc;
 use rusqlite::Connection;
 
 // ============================================================================
@@ -358,6 +359,163 @@ fn test_list_by_parent_butler_conversation_id_includes_hidden_tasks() {
     let mut expected = vec![task_a.id, task_b.id];
     expected.sort_unstable();
     assert_eq!(task_ids, expected);
+}
+
+#[test]
+fn test_list_reconcilable_butler_task_conversation_ids_filters_terminal_tasks() {
+    let conn = create_test_db();
+
+    let mut running_task = build_test_conversation("Running Task", None);
+    running_task.conversation_kind = "butler_task".to_string();
+    running_task.butler_task_status = Some("running".to_string());
+
+    let mut cancelled_without_result = build_test_conversation("Cancelled Task", None);
+    cancelled_without_result.conversation_kind = "butler_task".to_string();
+    cancelled_without_result.butler_task_status = Some("cancelled".to_string());
+    cancelled_without_result.butler_task_finalized_at = Some(Utc::now());
+
+    let mut finished_task = build_test_conversation("Finished Task", None);
+    finished_task.conversation_kind = "butler_task".to_string();
+    finished_task.butler_task_status = Some("succeeded".to_string());
+    finished_task.butler_task_finalized_at = Some(Utc::now());
+
+    let running_task = conn
+        .execute(
+            "INSERT INTO conversation (
+                name, assistant_id, created_time, updated_time, conversation_kind,
+                parent_butler_conversation_id, source_task_title, is_hidden_from_normal_chat_list,
+                channel_source, butler_task_status, butler_task_summary, butler_task_finalized_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            (
+                &running_task.name,
+                &running_task.assistant_id,
+                &running_task.created_time.to_rfc3339(),
+                &running_task.updated_time.to_rfc3339(),
+                &running_task.conversation_kind,
+                &running_task.parent_butler_conversation_id,
+                &running_task.source_task_title,
+                &(running_task.is_hidden_from_normal_chat_list as i64),
+                &running_task.channel_source,
+                &running_task.butler_task_status,
+                &running_task.butler_task_summary,
+                &running_task.butler_task_finalized_at.map(|value| value.to_rfc3339()),
+            ),
+        )
+        .unwrap();
+    let running_task_id = conn.last_insert_rowid();
+
+    conn.execute(
+        "INSERT INTO conversation (
+            name, assistant_id, created_time, updated_time, conversation_kind,
+            parent_butler_conversation_id, source_task_title, is_hidden_from_normal_chat_list,
+            channel_source, butler_task_status, butler_task_summary, butler_task_finalized_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        (
+            &cancelled_without_result.name,
+            &cancelled_without_result.assistant_id,
+            &cancelled_without_result.created_time.to_rfc3339(),
+            &cancelled_without_result.updated_time.to_rfc3339(),
+            &cancelled_without_result.conversation_kind,
+            &cancelled_without_result.parent_butler_conversation_id,
+            &cancelled_without_result.source_task_title,
+            &(cancelled_without_result.is_hidden_from_normal_chat_list as i64),
+            &cancelled_without_result.channel_source,
+            &cancelled_without_result.butler_task_status,
+            &cancelled_without_result.butler_task_summary,
+            &cancelled_without_result.butler_task_finalized_at.map(|value| value.to_rfc3339()),
+        ),
+    )
+    .unwrap();
+    let cancelled_task_id = conn.last_insert_rowid();
+
+    conn.execute(
+        "INSERT INTO conversation (
+            name, assistant_id, created_time, updated_time, conversation_kind,
+            parent_butler_conversation_id, source_task_title, is_hidden_from_normal_chat_list,
+            channel_source, butler_task_status, butler_task_summary, butler_task_finalized_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        (
+            &finished_task.name,
+            &finished_task.assistant_id,
+            &finished_task.created_time.to_rfc3339(),
+            &finished_task.updated_time.to_rfc3339(),
+            &finished_task.conversation_kind,
+            &finished_task.parent_butler_conversation_id,
+            &finished_task.source_task_title,
+            &(finished_task.is_hidden_from_normal_chat_list as i64),
+            &finished_task.channel_source,
+            &finished_task.butler_task_status,
+            &finished_task.butler_task_summary,
+            &finished_task.butler_task_finalized_at.map(|value| value.to_rfc3339()),
+        ),
+    )
+    .unwrap();
+    let finished_task_id = conn.last_insert_rowid();
+
+    conn.execute(
+        "INSERT INTO butler_task_result (
+            task_conversation_id, handoff_mode, payload_json, summary, structured_output_json,
+            evidence_json, artifact_refs_json, followup_suggestions_json, final_message_id,
+            created_time, updated_time
+         ) VALUES (?1, NULL, NULL, ?2, NULL, NULL, NULL, NULL, NULL, ?3, ?3)",
+        (finished_task_id, "done", Utc::now().to_rfc3339()),
+    )
+    .unwrap();
+
+    let repo = ConversationRepository::new(conn);
+
+    let mut ids = repo.list_reconcilable_butler_task_conversation_ids().unwrap();
+    ids.sort_unstable();
+
+    assert_eq!(ids, vec![cancelled_task_id, running_task_id]);
+}
+
+#[test]
+fn test_list_butler_task_conversation_ids_pending_followup_only_returns_pending_rows() {
+    let conn = create_test_db();
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO butler_task_result (
+            task_conversation_id, handoff_mode, payload_json, summary, structured_output_json,
+            evidence_json, artifact_refs_json, followup_suggestions_json, followup_status,
+            handoff_message_id, final_message_id, created_time, updated_time
+         ) VALUES
+            (101, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'pending', NULL, NULL, ?1, ?1),
+            (102, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'handoff_injected', 9001, NULL, ?1, ?1),
+            (103, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'enqueued', 9002, NULL, ?1, ?1),
+            (104, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'dispatching', 9003, NULL, ?1, ?1)",
+        [&now],
+    )
+    .unwrap();
+
+    let repo = ConversationRepository::new(conn);
+    let ids = repo.list_butler_task_conversation_ids_pending_followup().unwrap();
+
+    assert_eq!(ids, vec![101, 102]);
+}
+
+#[test]
+fn test_try_mark_task_result_followup_dispatching_only_claims_once() {
+    let conn = create_test_db();
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO butler_task_result (
+            task_conversation_id, handoff_mode, payload_json, summary, structured_output_json,
+            evidence_json, artifact_refs_json, followup_suggestions_json, followup_status,
+            handoff_message_id, final_message_id, created_time, updated_time
+         ) VALUES (?1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'pending', NULL, NULL, ?2, ?2)",
+        (201, &now),
+    )
+    .unwrap();
+
+    let repo = ButlerRepository::new(conn);
+    assert!(repo.try_mark_task_result_followup_dispatching(201, Some(9101)).unwrap());
+    assert!(!repo.try_mark_task_result_followup_dispatching(201, Some(9102)).unwrap());
+
+    let result = repo.get_task_result(201).unwrap().unwrap();
+    assert_eq!(result.followup_status.as_deref(), Some("dispatching"));
+    assert_eq!(result.handoff_message_id, Some(9101));
 }
 
 /// 测试旧版 conversation 表升级时不会使用 SQLite 不支持的非静态默认值

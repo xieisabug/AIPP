@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
+use crate::api::ai::acp::{AcpPermissionRequestSnapshot, AcpPermissionState};
 use crate::api::ai::types::AiRequest;
 use crate::api::ai_api::ask_ai;
 use crate::api::butler_api::{
@@ -26,12 +27,16 @@ use crate::api::butler_api::{
     reset_butler_main_conversation, resolve_butler_execution_window,
     wait_for_butler_main_to_be_idle,
 };
+use crate::api::operation_api::{confirm_acp_permission, confirm_operation_permission};
 use crate::db::conversation_db::{ConversationDatabase, Repository};
+use crate::db::mcp_db::{MCPDatabase, MCPToolCall};
 use crate::db::system_db::{SecureConfigEntry, SystemDatabase};
 use crate::external_channels::presentation::{render_message_for_external_channel, RenderContext};
 use crate::mcp::builtin_mcp::interaction::{
-    resolve_ask_user_question_response, AskUserQuestionItem, AskUserQuestionRequestEvent,
+    resolve_ask_user_question_response, AskUserQuestionItem, AskUserQuestionRequest,
+    AskUserQuestionRequestEvent,
 };
+use crate::mcp::builtin_mcp::operation::state::PermissionRequestSnapshot;
 
 const EXPERIMENTAL_FEATURE_CODE: &str = "experimental";
 const FEISHU_SCOPE: &str = "butler_feishu";
@@ -222,19 +227,38 @@ struct IncomingTextEvent {
 }
 
 #[derive(Debug, Deserialize)]
-struct FeishuCardActionCallback {
-    event: FeishuCardActionEvent,
+#[serde(untagged)]
+enum FeishuCardActionCallback {
+    Event(FeishuCardActionEvent),
+    Envelope { event: FeishuCardActionEvent },
+}
+
+impl FeishuCardActionCallback {
+    fn event(&self) -> &FeishuCardActionEvent {
+        match self {
+            Self::Event(event) => event,
+            Self::Envelope { event } => event,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct FeishuCardActionEvent {
     operator: FeishuCardActionOperator,
     action: FeishuCardActionDetail,
+    #[serde(default)]
+    context: Option<FeishuCardActionContext>,
 }
 
 #[derive(Debug, Deserialize)]
 struct FeishuCardActionOperator {
     open_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuCardActionContext {
+    #[serde(default)]
+    open_message_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,7 +343,9 @@ fn normalize_optional_id(value: Option<String>) -> Option<String> {
 }
 
 fn select_receive_target(target: &ChannelLinkTarget) -> Option<(&'static str, &str)> {
-    if let Some(chat_id) = target.external_chat_id.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(chat_id) =
+        target.external_chat_id.as_deref().filter(|value| !value.trim().is_empty())
+    {
         return Some(("chat_id", chat_id));
     }
     target
@@ -353,6 +379,120 @@ fn truncate_text(value: &str, max_chars: usize) -> String {
     } else {
         truncated
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PermissionReplyCommand {
+    Operation { review_code: String, decision: &'static str },
+    AcpSelect { review_code: String, option_index: usize },
+    AcpCancel { review_code: String },
+}
+
+fn normalize_review_code(value: &str) -> String {
+    value.trim().to_ascii_uppercase()
+}
+
+fn parse_permission_reply_command(text: &str) -> Option<PermissionReplyCommand> {
+    let parts = text.split_whitespace().collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["批准一次" | "允许一次" | "批准" | "允许", review_code]
+            if review_code.starts_with("OP-") =>
+        {
+            Some(PermissionReplyCommand::Operation {
+                review_code: normalize_review_code(review_code),
+                decision: "allow",
+            })
+        }
+        ["本任务批准" | "本任务允许" | "对话批准" | "对话允许", review_code]
+            if review_code.starts_with("OP-") =>
+        {
+            Some(PermissionReplyCommand::Operation {
+                review_code: normalize_review_code(review_code),
+                decision: "allow_for_conversation",
+            })
+        }
+        ["助手批准" | "助手允许", review_code] if review_code.starts_with("OP-") => {
+            Some(PermissionReplyCommand::Operation {
+                review_code: normalize_review_code(review_code),
+                decision: "allow_for_assistant",
+            })
+        }
+        ["拒绝", review_code] if review_code.starts_with("OP-") => {
+            Some(PermissionReplyCommand::Operation {
+                review_code: normalize_review_code(review_code),
+                decision: "deny",
+            })
+        }
+        ["批准" | "允许", option_index, review_code] if review_code.starts_with("ACP-") => {
+            let option_index = option_index.parse::<usize>().ok()?;
+            if option_index == 0 {
+                return None;
+            }
+            Some(PermissionReplyCommand::AcpSelect {
+                review_code: normalize_review_code(review_code),
+                option_index,
+            })
+        }
+        ["取消", review_code] if review_code.starts_with("ACP-") => {
+            Some(PermissionReplyCommand::AcpCancel {
+                review_code: normalize_review_code(review_code),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn feishu_reply_matches_permission_context(
+    event: &IncomingTextEvent,
+    allowed_open_id: Option<&str>,
+    allowed_chat_id: Option<&str>,
+    feishu_message_id: Option<&str>,
+) -> bool {
+    if let Some(expected_open_id) = allowed_open_id {
+        if event.sender_open_id != expected_open_id {
+            return false;
+        }
+    }
+    if let Some(expected_chat_id) = allowed_chat_id {
+        if event.chat_id.as_deref() != Some(expected_chat_id) {
+            return false;
+        }
+    }
+    if event.chat_type != "p2p" {
+        if let Some(message_id) = feishu_message_id {
+            let replied_to_message = event.parent_id.as_deref() == Some(message_id)
+                || event.root_id.as_deref() == Some(message_id);
+            if !replied_to_message {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn build_operation_permission_fallback_text(request: &PermissionRequestSnapshot) -> String {
+    format!(
+        "权限审批 {review_code}\n操作：{operation}\n路径：{path}\n\n可回复：\n- 批准一次 {review_code}\n- 本任务批准 {review_code}\n- 助手批准 {review_code}\n- 拒绝 {review_code}",
+        review_code = request.review_code,
+        operation = request.event.operation,
+        path = truncate_text(&request.event.path, 220),
+    )
+}
+
+fn build_acp_permission_fallback_text(request: &AcpPermissionRequestSnapshot) -> String {
+    let mut lines = vec![format!(
+        "ACP 权限审批 {review_code}\n标题：{title}\n参数：{parameters}",
+        review_code = request.review_code,
+        title = request.event.title.as_deref().unwrap_or("未命名"),
+        parameters = truncate_text(request.event.parameters.as_deref().unwrap_or("无"), 220),
+    )];
+    lines.push(String::new());
+    lines.push("可回复：".to_string());
+    for (index, option) in request.event.options.iter().enumerate() {
+        lines.push(format!("- 批准 {} {} （{}）", index + 1, request.review_code, option.name));
+    }
+    lines.push(format!("- 取消 {}", request.review_code));
+    lines.join("\n")
 }
 
 fn build_status(config: &FeishuRuntimeConfig) -> FeishuRuntimeStatus {
@@ -436,7 +576,11 @@ where
     let _ = app_handle.emit("butler_feishu_status_changed", snapshot);
 }
 
-async fn spawn_feishu_relay_scope_worker(app_handle: &AppHandle, scope_id: i64, conversation_id: i64) {
+async fn spawn_feishu_relay_scope_worker(
+    app_handle: &AppHandle,
+    scope_id: i64,
+    conversation_id: i64,
+) {
     let state = app_handle.state::<FeishuButlerState>();
     let mut relay_workers = state.relay_workers.lock().await;
     if !relay_workers.insert(scope_id) {
@@ -474,13 +618,17 @@ async fn run_feishu_relay_scope_worker(
         app_handle.state::<crate::state::activity_state::ConversationActivityManager>();
     let mut idle_checks = 0usize;
 
+    // Load the Feishu secret once before the loop to avoid opening SystemDatabase
+    // every 500ms. The secret rarely changes during a relay scope's lifetime.
+    let cached_secret = load_feishu_secret(app_handle)?.unwrap_or_default();
+
     loop {
         let scope = load_relay_scope(app_handle, scope_id)?;
-        if matches!(scope.status.as_str(), "completed" | "failed") {
+        if matches!(scope.status.as_str(), "completed" | "failed" | "superseded") {
             return Ok(());
         }
 
-        let fresh_config = load_runtime_config(app_handle).await?;
+        let fresh_config = load_runtime_config_inner(app_handle, Some(&cached_secret)).await?;
         if !fresh_config.butler_enabled || !fresh_config.enabled {
             return Err("飞书回发已被停用，跳过当前回发任务".to_string());
         }
@@ -532,7 +680,9 @@ async fn run_feishu_relay_scope_worker(
                     status.status_text = "总管家正在持续回发飞书消息".to_string();
                     status.status_detail = Some(format!(
                         "飞书消息已受理；会话运行中={}，待完成任务={}，已回发到消息 {}",
-                        runtime_state.is_running, pending_tasks, scope.last_delivered_local_message_id
+                        runtime_state.is_running,
+                        pending_tasks,
+                        scope.last_delivered_local_message_id
                     ));
                 })
                 .await;
@@ -630,6 +780,15 @@ fn load_feishu_secret(app_handle: &AppHandle) -> Result<Option<String>, String> 
 }
 
 async fn load_runtime_config(app_handle: &AppHandle) -> Result<FeishuRuntimeConfig, String> {
+    load_runtime_config_inner(app_handle, None).await
+}
+
+/// Inner version that accepts a pre-loaded secret to avoid repeated SystemDatabase opens
+/// in tight polling loops.
+async fn load_runtime_config_inner(
+    app_handle: &AppHandle,
+    cached_secret: Option<&str>,
+) -> Result<FeishuRuntimeConfig, String> {
     let feature_state = app_handle.state::<crate::FeatureConfigState>();
     let guard = feature_state.config_feature_map.lock().await;
     let experimental = guard.get(EXPERIMENTAL_FEATURE_CODE);
@@ -639,7 +798,10 @@ async fn load_runtime_config(app_handle: &AppHandle) -> Result<FeishuRuntimeConf
             .map(|config| config.value.clone())
             .unwrap_or_default()
     };
-    let app_secret = load_feishu_secret(app_handle)?.unwrap_or_default();
+    let app_secret = match cached_secret {
+        Some(s) => s.to_string(),
+        None => load_feishu_secret(app_handle)?.unwrap_or_default(),
+    };
     Ok(FeishuRuntimeConfig {
         butler_enabled: parse_bool_flag(&get("butler_experiment_enabled")),
         enabled: parse_bool_flag(&get("butler_feishu_enabled")),
@@ -990,17 +1152,17 @@ async fn handle_payload(
     Ok(())
 }
 
-fn parse_bot_menu_click_event(raw_event: &Value) -> Result<Option<FeishuBotMenuClickEvent>, String> {
-    let event: FeishuBotMenuEvent = serde_json::from_value(raw_event.clone()).map_err(|e| e.to_string())?;
+fn parse_bot_menu_click_event(
+    raw_event: &Value,
+) -> Result<Option<FeishuBotMenuClickEvent>, String> {
+    let event: FeishuBotMenuEvent =
+        serde_json::from_value(raw_event.clone()).map_err(|e| e.to_string())?;
     let operator_open_id = event.operator.operator_id.open_id.trim().to_string();
     let event_key = event.event_key.trim().to_string();
     if operator_open_id.is_empty() || event_key.is_empty() {
         return Ok(None);
     }
-    Ok(Some(FeishuBotMenuClickEvent {
-        operator_open_id,
-        event_key,
-    }))
+    Ok(Some(FeishuBotMenuClickEvent { operator_open_id, event_key }))
 }
 
 async fn handle_bot_menu_event(
@@ -1017,7 +1179,9 @@ async fn handle_bot_menu_event(
         );
         return Ok(());
     };
-    if !config.allowed_open_ids.is_empty() && !config.allowed_open_ids.contains(&event.operator_open_id) {
+    if !config.allowed_open_ids.is_empty()
+        && !config.allowed_open_ids.contains(&event.operator_open_id)
+    {
         warn!(
             event_id = %header.event_id.as_deref().unwrap_or(""),
             operator_open_id = %event.operator_open_id,
@@ -1042,11 +1206,7 @@ async fn handle_bot_menu_event(
         "processing Feishu bot menu event"
     );
 
-    let event_id = header
-        .event_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let event_id = header.event_id.as_deref().map(str::trim).filter(|value| !value.is_empty());
     if let Some(event_id) = event_id {
         if external_message_exists(app_handle, CHANNEL_FEISHU, event_id)? {
             info!(event_id, "ignored duplicated Feishu bot menu event");
@@ -1139,45 +1299,288 @@ async fn handle_bot_menu_event(
         },
     )?;
 
-    set_feishu_runtime_ready_status(
-        app_handle,
-        "已处理飞书“新建会话”菜单事件，总管家上下文已重置",
-    )
-    .await;
+    set_feishu_runtime_ready_status(app_handle, "已处理飞书“新建会话”菜单事件，总管家上下文已重置")
+        .await;
     Ok(())
 }
 
-async fn handle_card_action_trigger(app_handle: &AppHandle, raw_event: &Value) -> Result<(), String> {
+async fn handle_card_action_trigger(
+    app_handle: &AppHandle,
+    raw_event: &Value,
+) -> Result<(), String> {
     let callback: FeishuCardActionCallback =
         serde_json::from_value(raw_event.clone()).map_err(|e| e.to_string())?;
+    let event = callback.event();
     let action_value = callback
-        .event
+        .event()
         .action
         .value
         .as_ref()
         .ok_or_else(|| "飞书卡片回调缺少 action.value".to_string())?;
+
+    if let Some(request_kind) = action_value.get("request_kind").and_then(Value::as_str) {
+        match request_kind {
+            "operation_permission" => {
+                let request_id = action_value
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "飞书操作权限卡片缺少 request_id".to_string())?;
+                let decision = action_value
+                    .get("decision")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "飞书操作权限卡片缺少 decision".to_string())?;
+                let state = app_handle.state::<crate::mcp::builtin_mcp::OperationState>();
+                let request = state
+                    .get_permission_request(request_id)
+                    .await
+                    .ok_or_else(|| "操作权限请求不存在或已处理".to_string())?;
+                if let Some(expected_open_id) = request.allowed_open_id.as_deref() {
+                    if event.operator.open_id != expected_open_id {
+                        return Err("当前飞书用户无权处理该操作权限请求".to_string());
+                    }
+                }
+                confirm_operation_permission(
+                    app_handle.clone(),
+                    request_id.to_string(),
+                    decision.to_string(),
+                )
+                .await?;
+                return Ok(());
+            }
+            "acp_permission" => {
+                let request_id = action_value
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "飞书 ACP 权限卡片缺少 request_id".to_string())?;
+                let state = app_handle.state::<AcpPermissionState>();
+                let request = state
+                    .get_request(request_id)
+                    .await
+                    .ok_or_else(|| "ACP 权限请求不存在或已处理".to_string())?;
+                if let Some(expected_open_id) = request.allowed_open_id.as_deref() {
+                    if event.operator.open_id != expected_open_id {
+                        return Err("当前飞书用户无权处理该 ACP 权限请求".to_string());
+                    }
+                }
+                let cancelled =
+                    action_value.get("cancelled").and_then(Value::as_bool).unwrap_or(false);
+                let option_id =
+                    action_value.get("option_id").and_then(Value::as_str).map(ToString::to_string);
+                confirm_acp_permission(
+                    app_handle.clone(),
+                    request_id.to_string(),
+                    option_id,
+                    Some(cancelled),
+                )
+                .await?;
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     let request_id = action_value
         .get("request_id")
         .and_then(Value::as_str)
         .ok_or_else(|| "飞书卡片回调缺少 request_id".to_string())?;
-    let action = action_value
-        .get("action")
-        .and_then(Value::as_str)
-        .unwrap_or("submit");
+    let action = action_value.get("action").and_then(Value::as_str).unwrap_or("submit");
 
     if action == "cancel" {
-        resolve_ask_user_question_response(app_handle, request_id, None, true).await?;
+        match resolve_ask_user_question_response(app_handle, request_id, None, true).await {
+            Ok(_) => {}
+            Err(error) if is_missing_ask_user_request_error(&error) => {
+                if !try_recover_feishu_ask_user_resolution(
+                    app_handle,
+                    &callback,
+                    Err("User cancelled AskUserQuestion".to_string()),
+                )
+                .await?
+                {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
         return Ok(());
     }
 
-    let answers = build_ask_user_answers_from_card_callback(app_handle, request_id, &callback).await?;
+    let answers =
+        match build_ask_user_answers_from_card_callback(app_handle, request_id, &callback).await {
+            Ok(answers) => answers,
+            Err(error) if is_missing_ask_user_request_error(&error) => {
+                let form_value = callback
+                    .event()
+                    .action
+                    .form_value
+                    .as_ref()
+                    .ok_or_else(|| "飞书卡片回调缺少 form_value".to_string())?;
+                if try_recover_feishu_ask_user_resolution(
+                    app_handle,
+                    &callback,
+                    Ok(build_ask_user_question_tool_result(
+                        &recover_answers_from_callback_payload(app_handle, &callback, form_value)
+                            .await?,
+                    )),
+                )
+                .await?
+                {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
     debug!(
         request_id,
-        operator_open_id = %callback.event.operator.open_id,
+        operator_open_id = %event.operator.open_id,
         "resolved AskUserQuestion from Feishu card callback"
     );
-    resolve_ask_user_question_response(app_handle, request_id, Some(answers), false).await?;
+    match resolve_ask_user_question_response(app_handle, request_id, Some(answers), false).await {
+        Ok(_) => {}
+        Err(error) if is_missing_ask_user_request_error(&error) => {
+            let form_value = callback
+                .event()
+                .action
+                .form_value
+                .as_ref()
+                .ok_or_else(|| "飞书卡片回调缺少 form_value".to_string())?;
+            if !try_recover_feishu_ask_user_resolution(
+                app_handle,
+                &callback,
+                Ok(build_ask_user_question_tool_result(
+                    &recover_answers_from_callback_payload(app_handle, &callback, form_value)
+                        .await?,
+                )),
+            )
+            .await?
+            {
+                return Err(error);
+            }
+        }
+        Err(error) => return Err(error),
+    }
     Ok(())
+}
+
+fn is_missing_ask_user_request_error(error: &str) -> bool {
+    error.contains("AskUserQuestion request not found")
+}
+
+fn build_ask_user_question_tool_result(answers: &HashMap<String, String>) -> String {
+    json!([{
+        "type": "json",
+        "json": {
+            "answers": answers
+        }
+    }])
+    .to_string()
+}
+
+fn find_conversation_id_by_external_message(
+    app_handle: &AppHandle,
+    external_message_id: &str,
+) -> Result<Option<i64>, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT conversation_id
+         FROM external_channel_message_link
+         WHERE channel = ?1 AND external_message_id = ?2
+         LIMIT 1",
+        params![CHANNEL_FEISHU, external_message_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+fn find_latest_recoverable_ask_user_tool_call(calls: &[MCPToolCall]) -> Option<&MCPToolCall> {
+    calls.iter().find(|call| {
+        call.tool_name == "ask_user_question"
+            && matches!(call.status.as_str(), "pending" | "executing")
+    })
+}
+
+async fn recover_answers_from_callback_payload(
+    app_handle: &AppHandle,
+    callback: &FeishuCardActionCallback,
+    form_value: &Map<String, Value>,
+) -> Result<HashMap<String, String>, String> {
+    let open_message_id = callback
+        .event()
+        .context
+        .as_ref()
+        .and_then(|context| context.open_message_id.clone())
+        .and_then(|value| normalize_optional_id(Some(value)))
+        .ok_or_else(|| {
+            "飞书卡片回调缺少 open_message_id，无法恢复 ask_user_question 状态".to_string()
+        })?;
+    let conversation_id =
+        find_conversation_id_by_external_message(app_handle, &open_message_id)?
+            .ok_or_else(|| format!("未找到飞书消息 {} 关联的会话", open_message_id))?;
+    let mcp_db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let calls =
+        mcp_db.get_mcp_tool_calls_by_conversation(conversation_id).map_err(|e| e.to_string())?;
+    let tool_call = find_latest_recoverable_ask_user_tool_call(&calls).ok_or_else(|| {
+        format!("会话 {} 中没有可恢复的 ask_user_question 工具调用", conversation_id)
+    })?;
+    let request: AskUserQuestionRequest = serde_json::from_str(&tool_call.parameters)
+        .map_err(|e| format!("解析 ask_user_question 参数失败: {}", e))?;
+    map_ask_user_form_values_to_answers(&request.questions, form_value)
+}
+
+async fn try_recover_feishu_ask_user_resolution(
+    app_handle: &AppHandle,
+    callback: &FeishuCardActionCallback,
+    execution_result: Result<String, String>,
+) -> Result<bool, String> {
+    let open_message_id = callback
+        .event()
+        .context
+        .as_ref()
+        .and_then(|context| context.open_message_id.clone())
+        .and_then(|value| normalize_optional_id(Some(value)));
+    let Some(open_message_id) = open_message_id else {
+        return Ok(false);
+    };
+    let Some(conversation_id) =
+        find_conversation_id_by_external_message(app_handle, &open_message_id)?
+    else {
+        return Ok(false);
+    };
+    let mcp_db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let calls =
+        mcp_db.get_mcp_tool_calls_by_conversation(conversation_id).map_err(|e| e.to_string())?;
+
+    if let Some(tool_call) = find_latest_recoverable_ask_user_tool_call(&calls) {
+        crate::mcp::execution_api::finalize_tool_call_from_external_result(
+            app_handle,
+            tool_call.id,
+            execution_result,
+        )
+        .await?;
+        info!(
+            call_id = tool_call.id,
+            conversation_id,
+            open_message_id = %open_message_id,
+            "Recovered AskUserQuestion resolution from Feishu callback"
+        );
+        return Ok(true);
+    }
+
+    if calls.iter().any(|call| {
+        call.tool_name == "ask_user_question"
+            && matches!(call.status.as_str(), "success" | "failed")
+    }) {
+        debug!(
+            conversation_id,
+            open_message_id = %open_message_id,
+            "Ignore duplicate or stale Feishu AskUserQuestion callback"
+        );
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 async fn build_ask_user_answers_from_card_callback(
@@ -1185,7 +1588,9 @@ async fn build_ask_user_answers_from_card_callback(
     request_id: &str,
     callback: &FeishuCardActionCallback,
 ) -> Result<HashMap<String, String>, String> {
-    let Some(interaction_state) = app_handle.try_state::<crate::mcp::builtin_mcp::interaction::InteractionState>() else {
+    let Some(interaction_state) =
+        app_handle.try_state::<crate::mcp::builtin_mcp::interaction::InteractionState>()
+    else {
         return Err("InteractionState not found".to_string());
     };
     let request = interaction_state
@@ -1193,7 +1598,7 @@ async fn build_ask_user_answers_from_card_callback(
         .await
         .ok_or_else(|| "AskUserQuestion request not found".to_string())?;
     let form_value = callback
-        .event
+        .event()
         .action
         .form_value
         .as_ref()
@@ -1213,22 +1618,16 @@ fn map_ask_user_form_values_to_answers(
             .ok_or_else(|| format!("飞书卡片回答缺少字段 {}", field_name))?;
         let answer = match raw_value {
             Value::String(value) => value.clone(),
-            Value::Array(items) => items
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(", "),
+            Value::Array(items) => {
+                items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
+            }
             Value::Object(map) => map
                 .get("value")
                 .and_then(Value::as_str)
                 .map(ToString::to_string)
                 .or_else(|| {
                     map.get("values").and_then(Value::as_array).map(|items| {
-                        items
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
                     })
                 })
                 .ok_or_else(|| format!("飞书卡片回答字段 {} 结构无效", field_name))?,
@@ -1290,12 +1689,203 @@ fn parse_incoming_text_event(
         chat_type,
         parent_id: event.message.parent_id,
         root_id: event.message.root_id,
-        has_mentions: event
-            .message
-            .mentions
-            .map(|mentions| !mentions.is_empty())
-            .unwrap_or(false),
+        has_mentions: event.message.mentions.map(|mentions| !mentions.is_empty()).unwrap_or(false),
     }))
+}
+
+async fn try_handle_pending_permission_reply(
+    app_handle: &AppHandle,
+    config: &FeishuRuntimeConfig,
+    event: &IncomingTextEvent,
+) -> Result<bool, String> {
+    let Some(command) = parse_permission_reply_command(&event.text) else {
+        return Ok(false);
+    };
+
+    match command {
+        PermissionReplyCommand::Operation { review_code, decision } => {
+            let state = app_handle.state::<crate::mcp::builtin_mcp::OperationState>();
+            let Some(request) = state.find_permission_request_by_review_code(&review_code).await
+            else {
+                let _ = reply_text_message(
+                    app_handle,
+                    config,
+                    &event.message_id,
+                    &format!("未找到待处理的操作权限审批单 {}", review_code),
+                )
+                .await;
+                return Ok(true);
+            };
+            if !feishu_reply_matches_permission_context(
+                event,
+                request.allowed_open_id.as_deref(),
+                request.allowed_chat_id.as_deref(),
+                request.feishu_message_id.as_deref(),
+            ) {
+                let _ = reply_text_message(
+                    app_handle,
+                    config,
+                    &event.message_id,
+                    &format!("你无权处理审批单 {}", review_code),
+                )
+                .await;
+                return Ok(true);
+            }
+            confirm_operation_permission(
+                app_handle.clone(),
+                request.event.request_id.clone(),
+                decision.to_string(),
+            )
+            .await?;
+            if let Some(conversation_id) = request.conversation_id {
+                insert_external_link(
+                    app_handle,
+                    ChannelLinkRecord {
+                        external_message_id: &event.message_id,
+                        external_chat_id: event.chat_id.as_deref(),
+                        external_user_id: Some(&event.sender_open_id),
+                        conversation_id,
+                        local_message_id: None,
+                        direction: "inbound",
+                        payload_type: "text",
+                    },
+                )?;
+            }
+            let confirmation_text = match decision {
+                "allow_for_conversation" => format!("已按“本任务信任”处理审批单 {}", review_code),
+                "allow_for_assistant" => format!("已按“助手工作区信任”处理审批单 {}", review_code),
+                "deny" => format!("已拒绝审批单 {}", review_code),
+                _ => format!("已允许一次审批单 {}", review_code),
+            };
+            let _ =
+                reply_text_message(app_handle, config, &event.message_id, &confirmation_text).await;
+            Ok(true)
+        }
+        PermissionReplyCommand::AcpCancel { review_code } => {
+            let state = app_handle.state::<AcpPermissionState>();
+            let Some(request) = state.find_request_by_review_code(&review_code).await else {
+                let _ = reply_text_message(
+                    app_handle,
+                    config,
+                    &event.message_id,
+                    &format!("未找到待处理的 ACP 审批单 {}", review_code),
+                )
+                .await;
+                return Ok(true);
+            };
+            if !feishu_reply_matches_permission_context(
+                event,
+                request.allowed_open_id.as_deref(),
+                request.allowed_chat_id.as_deref(),
+                request.feishu_message_id.as_deref(),
+            ) {
+                let _ = reply_text_message(
+                    app_handle,
+                    config,
+                    &event.message_id,
+                    &format!("你无权处理审批单 {}", review_code),
+                )
+                .await;
+                return Ok(true);
+            }
+            confirm_acp_permission(
+                app_handle.clone(),
+                request.event.request_id.clone(),
+                None,
+                Some(true),
+            )
+            .await?;
+            if let Some(conversation_id) = request.conversation_id {
+                insert_external_link(
+                    app_handle,
+                    ChannelLinkRecord {
+                        external_message_id: &event.message_id,
+                        external_chat_id: event.chat_id.as_deref(),
+                        external_user_id: Some(&event.sender_open_id),
+                        conversation_id,
+                        local_message_id: None,
+                        direction: "inbound",
+                        payload_type: "text",
+                    },
+                )?;
+            }
+            let _ = reply_text_message(
+                app_handle,
+                config,
+                &event.message_id,
+                &format!("已取消审批单 {}", review_code),
+            )
+            .await;
+            Ok(true)
+        }
+        PermissionReplyCommand::AcpSelect { review_code, option_index } => {
+            let state = app_handle.state::<AcpPermissionState>();
+            let Some(request) = state.find_request_by_review_code(&review_code).await else {
+                let _ = reply_text_message(
+                    app_handle,
+                    config,
+                    &event.message_id,
+                    &format!("未找到待处理的 ACP 审批单 {}", review_code),
+                )
+                .await;
+                return Ok(true);
+            };
+            if !feishu_reply_matches_permission_context(
+                event,
+                request.allowed_open_id.as_deref(),
+                request.allowed_chat_id.as_deref(),
+                request.feishu_message_id.as_deref(),
+            ) {
+                let _ = reply_text_message(
+                    app_handle,
+                    config,
+                    &event.message_id,
+                    &format!("你无权处理审批单 {}", review_code),
+                )
+                .await;
+                return Ok(true);
+            }
+            let Some(option) = request.event.options.get(option_index.saturating_sub(1)) else {
+                let _ = reply_text_message(
+                    app_handle,
+                    config,
+                    &event.message_id,
+                    &format!("审批单 {} 没有第 {} 个选项", review_code, option_index),
+                )
+                .await;
+                return Ok(true);
+            };
+            confirm_acp_permission(
+                app_handle.clone(),
+                request.event.request_id.clone(),
+                Some(option.option_id.clone()),
+                Some(false),
+            )
+            .await?;
+            if let Some(conversation_id) = request.conversation_id {
+                insert_external_link(
+                    app_handle,
+                    ChannelLinkRecord {
+                        external_message_id: &event.message_id,
+                        external_chat_id: event.chat_id.as_deref(),
+                        external_user_id: Some(&event.sender_open_id),
+                        conversation_id,
+                        local_message_id: None,
+                        direction: "inbound",
+                        payload_type: "text",
+                    },
+                )?;
+            }
+            let _ = reply_text_message(
+                app_handle,
+                config,
+                &event.message_id,
+                &format!("已按“{}”处理审批单 {}", option.name, review_code),
+            )
+            .await;
+            Ok(true)
+        }
+    }
 }
 
 async fn process_incoming_text_message(
@@ -1315,6 +1905,10 @@ async fn process_incoming_text_message(
         if !event.has_mentions && !replied_to_bot {
             return Ok(());
         }
+    }
+
+    if try_handle_pending_permission_reply(app_handle, config, event).await? {
+        return Ok(());
     }
 
     let state = app_handle.state::<FeishuButlerState>();
@@ -1417,7 +2011,8 @@ async fn process_incoming_text_message(
         status.connected = true;
         status.last_error = None;
         status.status_text = "飞书消息已受理，正在持续回发".to_string();
-        status.status_detail = Some("总管家会继续处理本轮消息，并把后续输出持续回发到飞书".to_string());
+        status.status_detail =
+            Some("总管家会继续处理本轮消息，并把后续输出持续回发到飞书".to_string());
     })
     .await;
     Ok(())
@@ -1542,6 +2137,29 @@ fn find_latest_message_id_by_type(
 fn create_relay_scope(app_handle: &AppHandle, new_scope: NewRelayScope<'_>) -> Result<i64, String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conn = db.get_connection().map_err(|e| e.to_string())?;
+
+    // Cancel all non-completed scopes for the same conversation to prevent
+    // race conditions where an old scope wakes up and duplicates messages
+    // sent by the new scope.
+    let superseded = conn
+        .execute(
+            "UPDATE external_channel_relay_scope
+             SET status = 'superseded', updated_time = CURRENT_TIMESTAMP
+             WHERE channel = ?1
+               AND conversation_id = ?2
+               AND COALESCE(status, '') NOT IN ('completed', 'failed', 'superseded')",
+            params![new_scope.channel, new_scope.conversation_id],
+        )
+        .map_err(|e| e.to_string())?;
+    if superseded > 0 {
+        info!(
+            conversation_id = new_scope.conversation_id,
+            superseded,
+            new_origin = new_scope.origin,
+            "superseded existing relay scopes before creating new scope"
+        );
+    }
+
     conn.execute(
         "INSERT INTO external_channel_relay_scope
             (channel, conversation_id, origin, external_chat_id, external_user_id,
@@ -1605,7 +2223,7 @@ fn find_active_relay_scope(
          WHERE channel = ?1
            AND conversation_id = ?2
            AND origin = ?3
-           AND COALESCE(status, '') NOT IN ('completed', 'failed')
+           AND COALESCE(status, '') NOT IN ('completed', 'failed', 'superseded')
          ORDER BY id DESC
          LIMIT 1",
         params![CHANNEL_FEISHU, conversation_id, origin],
@@ -1666,6 +2284,31 @@ fn mark_relay_scope_failed(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Cross-scope deduplication: check if a local message was already successfully
+/// delivered to the external channel by ANY scope (not just the current one).
+fn is_message_already_delivered(
+    app_handle: &AppHandle,
+    conversation_id: i64,
+    local_message_id: i64,
+) -> Result<bool, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM external_channel_message_delivery
+             WHERE conversation_id = ?1
+               AND local_message_id = ?2
+               AND status = 'sent'
+             LIMIT 1",
+            params![conversation_id, local_message_id],
+            |_| Ok(true),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(false);
+    Ok(exists)
 }
 
 fn record_scope_delivery(
@@ -1750,6 +2393,13 @@ fn find_latest_feishu_target(
     .map_err(|e| e.to_string())
 }
 
+pub(crate) fn conversation_has_feishu_target(
+    app_handle: &AppHandle,
+    conversation_id: i64,
+) -> Result<bool, String> {
+    Ok(find_latest_feishu_target(app_handle, conversation_id)?.is_some())
+}
+
 pub(crate) fn inherit_latest_feishu_target(
     app_handle: &AppHandle,
     source_conversation_id: i64,
@@ -1795,18 +2445,18 @@ fn find_scope_reply_anchor(
     let conn = db.get_connection().map_err(|e| e.to_string())?;
     let reply_to = conn
         .query_row(
-        "SELECT external_message_id
+            "SELECT external_message_id
          FROM external_channel_message_delivery
          WHERE scope_id = ?1
            AND status = 'sent'
            AND external_message_id IS NOT NULL
          ORDER BY local_message_id DESC, id DESC
          LIMIT 1",
-        params![scope_id],
-        |row| row.get::<_, String>(0),
-    )
-    .optional()
-    .map_err(|e| e.to_string())?;
+            params![scope_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
     Ok(normalize_optional_id(reply_to))
 }
 
@@ -1850,7 +2500,7 @@ async fn flush_feishu_relay_scope(
     scope_id: i64,
 ) -> Result<(), String> {
     let scope = load_relay_scope(app_handle, scope_id)?;
-    if scope.status == "completed" {
+    if matches!(scope.status.as_str(), "completed" | "superseded") {
         return Ok(());
     }
 
@@ -1862,6 +2512,22 @@ async fn flush_feishu_relay_scope(
     let mut last_processed_message_id = scope.last_delivered_local_message_id;
 
     for message in messages {
+        // Cross-scope dedup: skip if another scope already delivered this message
+        if is_message_already_delivered(app_handle, scope.conversation_id, message.id)? {
+            last_processed_message_id = message.id;
+            record_scope_delivery(
+                app_handle,
+                scope.id,
+                &scope.channel,
+                scope.conversation_id,
+                message.id,
+                None,
+                "skipped",
+                "already delivered by another scope",
+            )?;
+            continue;
+        }
+
         let rendered = render_message_for_external_channel(
             &message,
             &RenderContext { channel: &scope.channel, relay_origin: &scope.origin },
@@ -2372,10 +3038,8 @@ async fn send_message_request(
         config.base_url.trim_end_matches('/'),
         receive_id_type
     );
-    let mut payload_object = payload
-        .as_object()
-        .cloned()
-        .ok_or_else(|| "飞书发送消息 payload 格式非法".to_string())?;
+    let mut payload_object =
+        payload.as_object().cloned().ok_or_else(|| "飞书发送消息 payload 格式非法".to_string())?;
     payload_object.insert("receive_id".to_string(), Value::String(receive_id.to_string()));
     let response = client
         .post(url)
@@ -2440,6 +3104,191 @@ async fn send_interactive_card_to_target(
     }
 }
 
+async fn send_text_message_to_target(
+    app_handle: &AppHandle,
+    config: &FeishuRuntimeConfig,
+    target: &ChannelLinkTarget,
+    text: &str,
+) -> Result<String, String> {
+    let token = fetch_tenant_access_token(app_handle, config).await?;
+    let client = feishu_http_client(app_handle);
+    if let Some(reply_to_message_id) = target.reply_to_message_id.as_deref() {
+        send_reply_message_request(
+            &client,
+            config,
+            &token,
+            reply_to_message_id,
+            build_feishu_text_payload(text),
+        )
+        .await
+    } else if let Some((receive_id_type, receive_id)) = select_receive_target(target) {
+        send_message_request(
+            &client,
+            config,
+            &token,
+            receive_id_type,
+            receive_id,
+            build_feishu_text_payload(text),
+        )
+        .await
+    } else {
+        Err("当前对话没有可用的飞书发送目标，请先让该对话与飞书建立一次消息链路".to_string())
+    }
+}
+
+async fn send_permission_review_to_target(
+    app_handle: &AppHandle,
+    config: &FeishuRuntimeConfig,
+    target: &ChannelLinkTarget,
+    card: &Value,
+    fallback_text: &str,
+) -> Result<FeishuReplyOutcome, String> {
+    match send_interactive_card_to_target(app_handle, config, target, card).await {
+        Ok(message_id) => Ok(FeishuReplyOutcome {
+            message_id,
+            payload_type: "interactive",
+            interactive_error: None,
+            interactive_card: Some(card.clone()),
+        }),
+        Err(error) => {
+            warn!(error = %error, "failed to send permission review card, falling back to raw text");
+            let message_id =
+                send_text_message_to_target(app_handle, config, target, fallback_text).await?;
+            Ok(FeishuReplyOutcome {
+                message_id,
+                payload_type: "text",
+                interactive_error: Some(format!("发送飞书 interactive 卡片失败: {error}")),
+                interactive_card: Some(card.clone()),
+            })
+        }
+    }
+}
+
+fn build_operation_permission_card(request: &PermissionRequestSnapshot) -> Value {
+    let review_code = request.review_code.clone();
+    let request_id = request.event.request_id.clone();
+    json!({
+        "schema": "2.0",
+        "config": { "update_multi": true, "wide_screen_mode": true },
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": format!(
+                        "总管家收到一个操作权限请求。\n\n**审批号**：`{review_code}`\n**操作**：{operation}\n**路径**：`{path}`\n\n如果卡片按钮不可用，也可以直接回复：`批准一次 {review_code}` / `本任务批准 {review_code}` / `助手批准 {review_code}` / `拒绝 {review_code}`",
+                        review_code = review_code,
+                        operation = request.event.operation,
+                        path = truncate_text(&request.event.path, 220),
+                    ),
+                    "text_align": "left"
+                },
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "type": "primary",
+                            "text": { "tag": "plain_text", "content": "允许一次" },
+                            "value": {
+                                "request_kind": "operation_permission",
+                                "request_id": request_id,
+                                "decision": "allow"
+                            }
+                        },
+                        {
+                            "tag": "button",
+                            "text": { "tag": "plain_text", "content": "本任务信任" },
+                            "value": {
+                                "request_kind": "operation_permission",
+                                "request_id": request.event.request_id.clone(),
+                                "decision": "allow_for_conversation"
+                            }
+                        },
+                        {
+                            "tag": "button",
+                            "text": { "tag": "plain_text", "content": "助手工作区信任" },
+                            "value": {
+                                "request_kind": "operation_permission",
+                                "request_id": request.event.request_id.clone(),
+                                "decision": "allow_for_assistant"
+                            }
+                        },
+                        {
+                            "tag": "button",
+                            "type": "danger",
+                            "text": { "tag": "plain_text", "content": "拒绝" },
+                            "value": {
+                                "request_kind": "operation_permission",
+                                "request_id": request.event.request_id.clone(),
+                                "decision": "deny"
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+    })
+}
+
+fn build_acp_permission_card(request: &AcpPermissionRequestSnapshot) -> Value {
+    let request_id = request.event.request_id.clone();
+    let mut actions = request
+        .event
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            json!({
+                "tag": "button",
+                "type": if option.kind.starts_with("allow") { "primary" } else { "default" },
+                "text": {
+                    "tag": "plain_text",
+                    "content": format!("{} {}", index + 1, option.name)
+                },
+                "value": {
+                    "request_kind": "acp_permission",
+                    "request_id": request_id.clone(),
+                    "option_id": option.option_id.clone()
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    actions.push(json!({
+        "tag": "button",
+        "type": "danger",
+        "text": { "tag": "plain_text", "content": "取消" },
+        "value": {
+            "request_kind": "acp_permission",
+            "request_id": request.event.request_id.clone(),
+            "cancelled": true
+        }
+    }));
+
+    json!({
+        "schema": "2.0",
+        "config": { "update_multi": true, "wide_screen_mode": true },
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": format!(
+                        "总管家收到一个 ACP 权限请求。\n\n**审批号**：`{review_code}`\n**标题**：{title}\n**类型**：{kind}\n**参数**：`{parameters}`\n\n如果卡片按钮不可用，也可以直接回复：`批准 1 {review_code}`、`批准 2 {review_code}` 或 `取消 {review_code}`。",
+                        review_code = request.review_code,
+                        title = request.event.title.as_deref().unwrap_or("未命名"),
+                        kind = request.event.kind.as_deref().unwrap_or("unknown"),
+                        parameters = truncate_text(request.event.parameters.as_deref().unwrap_or("无"), 220),
+                    ),
+                    "text_align": "left"
+                },
+                {
+                    "tag": "action",
+                    "actions": actions
+                }
+            ]
+        }
+    })
+}
+
 fn build_ask_user_question_card(event: &AskUserQuestionRequestEvent) -> Value {
     let mut elements = Vec::new();
     elements.push(json!({
@@ -2483,26 +3332,31 @@ fn build_ask_user_question_card(event: &AskUserQuestionRequestEvent) -> Value {
     }
 
     form_elements.push(json!({
-        "tag": "action",
-        "actions": [
-            {
-                "tag": "button",
-                "type": "primary",
-                "text": { "tag": "plain_text", "content": "提交" },
-                "behaviors": [{ "type": "form_submit" }],
-                "value": { "action": "submit", "request_id": event.request_id }
-            },
-            {
-                "tag": "button",
-                "text": { "tag": "plain_text", "content": "取消" },
-                "value": { "action": "cancel", "request_id": event.request_id }
-            }
-        ]
+        "tag": "button",
+        "name": "ask_user_submit",
+        "type": "primary",
+        "text": { "tag": "plain_text", "content": "提交" },
+        "behaviors": [{
+            "type": "callback",
+            "value": { "action": "submit", "request_id": event.request_id }
+        }],
+        "form_action_type": "submit"
     }));
 
     elements.push(json!({
         "tag": "form",
+        "name": format!("ask_user_{}", event.request_id),
         "elements": form_elements
+    }));
+
+    elements.push(json!({
+        "tag": "button",
+        "name": "ask_user_cancel",
+        "text": { "tag": "plain_text", "content": "取消" },
+        "behaviors": [{
+            "type": "callback",
+            "value": { "action": "cancel", "request_id": event.request_id }
+        }]
     }));
 
     json!({
@@ -2510,6 +3364,108 @@ fn build_ask_user_question_card(event: &AskUserQuestionRequestEvent) -> Value {
         "config": { "update_multi": true, "wide_screen_mode": true },
         "body": { "elements": elements }
     })
+}
+
+pub(crate) async fn try_deliver_operation_permission_to_feishu(
+    app_handle: &AppHandle,
+    conversation_id: i64,
+    request: &PermissionRequestSnapshot,
+) -> Result<bool, String> {
+    let config = load_runtime_config(app_handle).await?;
+    if !config.butler_enabled || !config.enabled {
+        return Ok(false);
+    }
+
+    let Some(target) = find_latest_feishu_target(app_handle, conversation_id)? else {
+        return Ok(false);
+    };
+
+    let card = build_operation_permission_card(request);
+    let fallback_text = build_operation_permission_fallback_text(request);
+    let outcome =
+        send_permission_review_to_target(app_handle, &config, &target, &card, &fallback_text)
+            .await?;
+    if let Some(interactive_error) = outcome.interactive_error.as_deref() {
+        warn!(
+            request_id = %request.event.request_id,
+            error = %interactive_error,
+            "operation permission Feishu delivery fell back to text"
+        );
+    }
+
+    insert_external_link(
+        app_handle,
+        ChannelLinkRecord {
+            external_message_id: &outcome.message_id,
+            external_chat_id: target.external_chat_id.as_deref(),
+            external_user_id: target.external_user_id.as_deref(),
+            conversation_id,
+            local_message_id: None,
+            direction: "outbound",
+            payload_type: outcome.payload_type,
+        },
+    )?;
+    let state = app_handle.state::<crate::mcp::builtin_mcp::OperationState>();
+    state
+        .set_permission_feishu_delivery(
+            &request.event.request_id,
+            Some(outcome.message_id.clone()),
+            target.external_user_id.clone(),
+            target.external_chat_id.clone(),
+        )
+        .await;
+    Ok(true)
+}
+
+pub(crate) async fn try_deliver_acp_permission_to_feishu(
+    app_handle: &AppHandle,
+    conversation_id: i64,
+    request: &AcpPermissionRequestSnapshot,
+) -> Result<bool, String> {
+    let config = load_runtime_config(app_handle).await?;
+    if !config.butler_enabled || !config.enabled {
+        return Ok(false);
+    }
+
+    let Some(target) = find_latest_feishu_target(app_handle, conversation_id)? else {
+        return Ok(false);
+    };
+
+    let card = build_acp_permission_card(request);
+    let fallback_text = build_acp_permission_fallback_text(request);
+    let outcome =
+        send_permission_review_to_target(app_handle, &config, &target, &card, &fallback_text)
+            .await?;
+    if let Some(interactive_error) = outcome.interactive_error.as_deref() {
+        warn!(
+            request_id = %request.event.request_id,
+            error = %interactive_error,
+            "ACP permission Feishu delivery fell back to text"
+        );
+    }
+
+    insert_external_link(
+        app_handle,
+        ChannelLinkRecord {
+            external_message_id: &outcome.message_id,
+            external_chat_id: target.external_chat_id.as_deref(),
+            external_user_id: target.external_user_id.as_deref(),
+            conversation_id,
+            local_message_id: None,
+            direction: "outbound",
+            payload_type: outcome.payload_type,
+        },
+    )?;
+    let state = app_handle.state::<AcpPermissionState>();
+    state
+        .set_feishu_delivery(
+            &request.event.request_id,
+            Some(outcome.message_id.clone()),
+            target.external_user_id.clone(),
+            target.external_chat_id.clone(),
+        )
+        .await;
+    Ok(true)
 }
 
 pub(crate) async fn try_deliver_ask_user_question_to_feishu(
@@ -2526,7 +3482,8 @@ pub(crate) async fn try_deliver_ask_user_question_to_feishu(
         return Ok(false);
     };
     let card = build_ask_user_question_card(event);
-    let external_message_id = send_interactive_card_to_target(app_handle, &config, &target, &card).await?;
+    let external_message_id =
+        send_interactive_card_to_target(app_handle, &config, &target, &card).await?;
 
     insert_external_link(
         app_handle,
@@ -2541,7 +3498,8 @@ pub(crate) async fn try_deliver_ask_user_question_to_feishu(
         },
     )?;
 
-    if let Some(scope) = find_active_relay_scope(app_handle, conversation_id, RELAY_ORIGIN_FEISHU)? {
+    if let Some(scope) = find_active_relay_scope(app_handle, conversation_id, RELAY_ORIGIN_FEISHU)?
+    {
         mark_relay_scope_progress(
             app_handle,
             scope.id,
@@ -2643,7 +3601,9 @@ async fn send_markdown_message_to_target(
         .map(|(target_type, target_id)| (target_type.to_string(), target_id.to_string()));
 
     if let Some(card) = interactive_card.as_ref() {
-        let interactive_result = if let Some(reply_to_message_id) = target.reply_to_message_id.as_deref() {
+        let interactive_result = if let Some(reply_to_message_id) =
+            target.reply_to_message_id.as_deref()
+        {
             send_reply_message_request(
                 &client,
                 config,
@@ -2673,7 +3633,9 @@ async fn send_markdown_message_to_target(
                     payload_type: "interactive".to_string(),
                     delivery_mode: delivery_mode.to_string(),
                     reply_to_message_id: target.reply_to_message_id.clone(),
-                    target_type: selected_target.as_ref().map(|(target_type, _)| target_type.clone()),
+                    target_type: selected_target
+                        .as_ref()
+                        .map(|(target_type, _)| target_type.clone()),
                     target_id: selected_target.as_ref().map(|(_, target_id)| target_id.clone()),
                     rendered_text: markdown.to_string(),
                     interactive_error,
@@ -2707,7 +3669,9 @@ async fn send_markdown_message_to_target(
         )
         .await?
     } else {
-        return Err("当前对话没有可用的飞书发送目标，请先让该对话与飞书建立一次消息链路".to_string());
+        return Err(
+            "当前对话没有可用的飞书发送目标，请先让该对话与飞书建立一次消息链路".to_string()
+        );
     };
 
     Ok(FeishuDebugSendResult {
@@ -2747,10 +3711,12 @@ pub(crate) async fn resend_message_to_feishu_for_debug(
     .filter(|content| !content.trim().is_empty())
     .ok_or_else(|| "该消息没有可发送到飞书的可读内容".to_string())?;
 
-    let target = find_latest_feishu_target(app_handle, message.conversation_id)?.ok_or_else(|| {
-        "当前对话没有可用的飞书发送目标，请先让该对话与飞书建立一次消息链路".to_string()
-    })?;
-    let outcome = send_markdown_message_to_target(app_handle, &config, &target, &rendered_text).await?;
+    let target =
+        find_latest_feishu_target(app_handle, message.conversation_id)?.ok_or_else(|| {
+            "当前对话没有可用的飞书发送目标，请先让该对话与飞书建立一次消息链路".to_string()
+        })?;
+    let outcome =
+        send_markdown_message_to_target(app_handle, &config, &target, &rendered_text).await?;
 
     insert_external_link(
         app_handle,
@@ -3099,14 +4065,77 @@ mod tests {
         });
 
         let elements = card["body"]["elements"].as_array().expect("elements should be an array");
-        let form = elements
-            .iter()
-            .find(|element| element["tag"] == "form")
-            .expect("form should exist");
+        let form =
+            elements.iter().find(|element| element["tag"] == "form").expect("form should exist");
         let form_elements = form["elements"].as_array().expect("form elements should be array");
         assert!(form_elements.iter().any(|element| element["tag"] == "select_static"));
         assert!(form_elements.iter().any(|element| element["tag"] == "multi_select_static"));
-        assert_eq!(form_elements.last().expect("action should exist")["tag"], "action");
+        assert_eq!(form["name"], "ask_user_req-1");
+        let submit_button = form_elements.last().expect("submit button should exist");
+        assert_eq!(submit_button["tag"], "button");
+        assert_eq!(submit_button["name"], "ask_user_submit");
+        assert_eq!(submit_button["form_action_type"], "submit");
+        assert_eq!(submit_button["behaviors"][0]["type"], "callback");
+        assert_eq!(submit_button["behaviors"][0]["value"]["action"], "submit");
+        assert_eq!(submit_button["behaviors"][0]["value"]["request_id"], "req-1");
+
+        let cancel_button = elements
+            .iter()
+            .find(|element| element["name"] == "ask_user_cancel")
+            .expect("cancel button should exist");
+        assert_eq!(cancel_button["tag"], "button");
+        assert_eq!(cancel_button["name"], "ask_user_cancel");
+        assert_eq!(cancel_button["behaviors"][0]["type"], "callback");
+        assert_eq!(cancel_button["behaviors"][0]["value"]["action"], "cancel");
+        assert_eq!(cancel_button["behaviors"][0]["value"]["request_id"], "req-1");
+    }
+
+    #[test]
+    fn parse_permission_reply_command_supports_operation_variants() {
+        assert_eq!(
+            parse_permission_reply_command("批准一次 OP-ABC123"),
+            Some(PermissionReplyCommand::Operation {
+                review_code: "OP-ABC123".to_string(),
+                decision: "allow",
+            })
+        );
+        assert_eq!(
+            parse_permission_reply_command("本任务批准 OP-ABC123"),
+            Some(PermissionReplyCommand::Operation {
+                review_code: "OP-ABC123".to_string(),
+                decision: "allow_for_conversation",
+            })
+        );
+        assert_eq!(
+            parse_permission_reply_command("助手允许 OP-ABC123"),
+            Some(PermissionReplyCommand::Operation {
+                review_code: "OP-ABC123".to_string(),
+                decision: "allow_for_assistant",
+            })
+        );
+        assert_eq!(
+            parse_permission_reply_command("拒绝 OP-ABC123"),
+            Some(PermissionReplyCommand::Operation {
+                review_code: "OP-ABC123".to_string(),
+                decision: "deny",
+            })
+        );
+    }
+
+    #[test]
+    fn parse_permission_reply_command_supports_acp_variants() {
+        assert_eq!(
+            parse_permission_reply_command("批准 2 ACP-QWERTY"),
+            Some(PermissionReplyCommand::AcpSelect {
+                review_code: "ACP-QWERTY".to_string(),
+                option_index: 2,
+            })
+        );
+        assert_eq!(
+            parse_permission_reply_command("取消 ACP-QWERTY"),
+            Some(PermissionReplyCommand::AcpCancel { review_code: "ACP-QWERTY".to_string() })
+        );
+        assert_eq!(parse_permission_reply_command("批准 0 ACP-QWERTY"), None);
     }
 
     #[test]
@@ -3147,7 +4176,10 @@ mod tests {
             ("question_0".to_string(), Value::String("GPT-5.4".to_string())),
             (
                 "question_1".to_string(),
-                Value::Array(vec![Value::String("表格".to_string()), Value::String("列表".to_string())]),
+                Value::Array(vec![
+                    Value::String("表格".to_string()),
+                    Value::String("列表".to_string()),
+                ]),
             ),
         ]);
 
@@ -3155,6 +4187,135 @@ mod tests {
             .expect("answers should map");
         assert_eq!(answers.get("选择一个模型"), Some(&"GPT-5.4".to_string()));
         assert_eq!(answers.get("选择输出格式"), Some(&"表格, 列表".to_string()));
+    }
+
+    #[test]
+    fn feishu_card_action_callback_parses_inner_event_payload() {
+        let raw_event = json!({
+            "operator": {
+                "open_id": "ou_test_user"
+            },
+            "context": {
+                "open_message_id": "om_test_message"
+            },
+            "action": {
+                "value": {
+                    "request_id": "req-1",
+                    "action": "submit"
+                },
+                "form_value": {
+                    "question_0": "GPT-5.4"
+                }
+            }
+        });
+
+        let callback: FeishuCardActionCallback =
+            serde_json::from_value(raw_event).expect("inner event payload should parse");
+
+        assert_eq!(callback.event().operator.open_id, "ou_test_user");
+        assert_eq!(
+            callback
+                .event()
+                .context
+                .as_ref()
+                .and_then(|context| context.open_message_id.as_deref()),
+            Some("om_test_message")
+        );
+        assert_eq!(
+            callback
+                .event()
+                .action
+                .value
+                .as_ref()
+                .and_then(|value| value.get("request_id"))
+                .and_then(Value::as_str),
+            Some("req-1")
+        );
+    }
+
+    #[test]
+    fn feishu_card_action_callback_parses_enveloped_payload() {
+        let raw_event = json!({
+            "event": {
+                "operator": {
+                    "open_id": "ou_test_user"
+                },
+                "context": {
+                    "open_message_id": "om_test_message"
+                },
+                "action": {
+                    "value": {
+                        "request_id": "req-1",
+                        "action": "submit"
+                    },
+                    "form_value": {
+                        "question_0": "GPT-5.4"
+                    }
+                }
+            }
+        });
+
+        let callback: FeishuCardActionCallback =
+            serde_json::from_value(raw_event).expect("enveloped payload should parse");
+
+        assert_eq!(callback.event().operator.open_id, "ou_test_user");
+        assert_eq!(
+            callback
+                .event()
+                .context
+                .as_ref()
+                .and_then(|context| context.open_message_id.as_deref()),
+            Some("om_test_message")
+        );
+        assert_eq!(
+            callback
+                .event()
+                .action
+                .value
+                .as_ref()
+                .and_then(|value| value.get("request_id"))
+                .and_then(Value::as_str),
+            Some("req-1")
+        );
+    }
+
+    #[test]
+    fn find_latest_recoverable_ask_user_tool_call_prefers_pending_or_executing() {
+        let base = crate::db::mcp_db::MCPToolCall {
+            id: 1,
+            conversation_id: 42,
+            message_id: None,
+            subtask_id: None,
+            server_id: 1,
+            server_name: "ui_interaction".to_string(),
+            tool_name: "ask_user_question".to_string(),
+            parameters: "{}".to_string(),
+            status: "success".to_string(),
+            result: None,
+            error: None,
+            created_time: "2026-03-18 00:00:00".to_string(),
+            started_time: None,
+            finished_time: None,
+            llm_call_id: None,
+            assistant_message_id: None,
+        };
+        let calls = vec![
+            crate::db::mcp_db::MCPToolCall {
+                id: 2,
+                status: "executing".to_string(),
+                ..base.clone()
+            },
+            crate::db::mcp_db::MCPToolCall {
+                id: 3,
+                tool_name: "preview_file".to_string(),
+                status: "pending".to_string(),
+                ..base.clone()
+            },
+        ];
+
+        let tool_call =
+            find_latest_recoverable_ask_user_tool_call(&calls).expect("tool call should exist");
+        assert_eq!(tool_call.id, 2);
     }
 
     #[test]
@@ -3205,10 +4366,8 @@ mod tests {
             first_token_time: None,
             ttft_ms: None,
         };
-        let finished = crate::db::conversation_db::Message {
-            finish_time: Some(now),
-            ..streaming.clone()
-        };
+        let finished =
+            crate::db::conversation_db::Message { finish_time: Some(now), ..streaming.clone() };
         let tool_result = crate::db::conversation_db::Message {
             message_type: "tool_result".to_string(),
             finish_time: None,

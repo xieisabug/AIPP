@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { Dispatch, SetStateAction, useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -12,6 +12,16 @@ interface UseOperationPermissionOptions {
     conversationId?: number;
     /** 当前窗口可处理的一组会话 ID */
     conversationIds?: number[];
+}
+
+interface PermissionRequestBase {
+    request_id: string;
+    conversation_id?: number;
+}
+
+interface PermissionResolvedEvent {
+    request_id: string;
+    conversation_id?: number;
 }
 
 function shouldHandleConversationRequest(
@@ -31,61 +41,128 @@ function shouldHandleConversationRequest(
     return true;
 }
 
-export function useOperationPermission(options: UseOperationPermissionOptions = {}) {
-    const { conversationId, conversationIds } = options;
-    const [pendingRequest, setPendingRequest] = useState<OperationPermissionRequest | null>(null);
-    const [, setRequestQueue] = useState<OperationPermissionRequest[]>([]);
-    const [isDialogOpen, setIsDialogOpen] = useState(false);
-    const [decisionError, setDecisionError] = useState<string | null>(null);
+interface UsePermissionRequestQueueOptions {
+    conversationId?: number;
+    conversationIds?: number[];
+    requestEventName: string;
+    resolvedEventName: string;
+    logLabel: string;
+}
 
-    const shiftNextRequest = useCallback(() => {
+interface PermissionRequestQueueController<TRequest extends PermissionRequestBase> {
+    pendingRequest: TRequest | null;
+    isDialogOpen: boolean;
+    decisionError: string | null;
+    isSubmitting: boolean;
+    removeRequestById: (requestId: string) => void;
+    setDecisionError: Dispatch<SetStateAction<string | null>>;
+    setIsSubmitting: Dispatch<SetStateAction<boolean>>;
+}
+
+function usePermissionRequestQueue<TRequest extends PermissionRequestBase>(
+    options: UsePermissionRequestQueueOptions
+): PermissionRequestQueueController<TRequest> {
+    const {
+        conversationId,
+        conversationIds,
+        requestEventName,
+        resolvedEventName,
+        logLabel,
+    } = options;
+    const [requestQueue, setRequestQueue] = useState<TRequest[]>([]);
+    const [decisionError, setDecisionError] = useState<string | null>(null);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const pendingRequest = requestQueue[0] ?? null;
+    const isDialogOpen = pendingRequest !== null;
+
+    const removeRequestById = useCallback((requestId: string) => {
         setRequestQueue((prev) => {
-            const [, ...rest] = prev;
-            const next = rest[0] ?? null;
-            setPendingRequest(next);
-            setIsDialogOpen(rest.length > 0);
-            if (rest.length > 0) {
-                setDecisionError(null);
+            const removedIndex = prev.findIndex((item) => item.request_id === requestId);
+            if (removedIndex === -1) {
+                return prev;
             }
-            return rest;
+            if (removedIndex === 0) {
+                setDecisionError(null);
+                setIsSubmitting(false);
+            }
+            return prev.filter((item) => item.request_id !== requestId);
         });
     }, []);
 
     useEffect(() => {
-        const unsubscribe = listen<OperationPermissionRequest>(
-            "operation-permission-request",
-            (event) => {
-                const request = event.payload;
-
-                // 如果指定了 conversationId，只处理匹配的请求
-                // 如果请求没有 conversation_id，则显示给所有窗口
-                if (
-                    !shouldHandleConversationRequest(
-                        request.conversation_id,
-                        conversationId,
-                        conversationIds
-                    )
-                ) {
-                    return;
-                }
-
-                console.log("Received operation permission request:", request);
-                setRequestQueue((prev) => {
-                    const next = [...prev, request];
-                    if (next.length === 1) {
-                        setPendingRequest(request);
-                        setIsDialogOpen(true);
-                        setDecisionError(null);
-                    }
-                    return next;
-                });
+        const unsubscribe = listen<TRequest>(requestEventName, (event) => {
+            const request = event.payload;
+            if (
+                !shouldHandleConversationRequest(
+                    request.conversation_id,
+                    conversationId,
+                    conversationIds
+                )
+            ) {
+                return;
             }
-        );
+
+            console.log(`Received ${logLabel} request:`, request);
+            setRequestQueue((prev) => {
+                if (prev.some((item) => item.request_id === request.request_id)) {
+                    return prev;
+                }
+                if (prev.length === 0) {
+                    setDecisionError(null);
+                    setIsSubmitting(false);
+                }
+                return [...prev, request];
+            });
+        });
 
         return () => {
             unsubscribe.then((f) => f());
         };
-    }, [conversationId, conversationIds]);
+    }, [conversationId, conversationIds, logLabel, requestEventName]);
+
+    useEffect(() => {
+        const unsubscribe = listen<PermissionResolvedEvent>(resolvedEventName, (event) => {
+            const requestId = event.payload?.request_id;
+            if (!requestId) {
+                return;
+            }
+            console.log(`Received ${logLabel} resolution:`, event.payload);
+            removeRequestById(requestId);
+        });
+
+        return () => {
+            unsubscribe.then((f) => f());
+        };
+    }, [logLabel, removeRequestById, resolvedEventName]);
+
+    return {
+        pendingRequest,
+        isDialogOpen,
+        decisionError,
+        isSubmitting,
+        removeRequestById,
+        setDecisionError,
+        setIsSubmitting,
+    };
+}
+
+export function useOperationPermission(options: UseOperationPermissionOptions = {}) {
+    const { conversationId, conversationIds } = options;
+    const {
+        pendingRequest,
+        isDialogOpen,
+        decisionError,
+        isSubmitting,
+        removeRequestById,
+        setDecisionError,
+        setIsSubmitting,
+    } = usePermissionRequestQueue<OperationPermissionRequest>({
+        conversationId,
+        conversationIds,
+        requestEventName: "operation-permission-request",
+        resolvedEventName: "operation-permission-resolved",
+        logLabel: "operation permission",
+    });
 
     const handleDecision = useCallback(
         async (
@@ -97,9 +174,14 @@ export function useOperationPermission(options: UseOperationPermissionOptions = 
                 | "allow_and_save"
                 | "deny"
         ) => {
-            if (!pendingRequest || pendingRequest.request_id !== requestId) {
+            if (
+                !pendingRequest ||
+                pendingRequest.request_id !== requestId ||
+                isSubmitting
+            ) {
                 return;
             }
+            setIsSubmitting(true);
             try {
                 console.log("Sending permission decision:", { requestId, decision });
                 await invoke("confirm_operation_permission", {
@@ -107,22 +189,28 @@ export function useOperationPermission(options: UseOperationPermissionOptions = 
                     decision,
                 });
                 setDecisionError(null);
-                shiftNextRequest();
+                removeRequestById(requestId);
             } catch (error) {
                 const message = getErrorMessage(error) || "提交权限决策失败";
                 console.error("Failed to send permission decision:", message);
-                // 失败时直接关闭对话框，避免用户被卡住
                 setDecisionError(message);
-                shiftNextRequest();
+                setIsSubmitting(false);
             }
         },
-        [pendingRequest, shiftNextRequest]
+        [
+            isSubmitting,
+            pendingRequest,
+            removeRequestById,
+            setDecisionError,
+            setIsSubmitting,
+        ]
     );
 
     return {
         pendingRequest,
         isDialogOpen,
         decisionError,
+        isSubmitting,
         handleDecision,
     };
 }
@@ -134,60 +222,32 @@ interface UseAcpPermissionOptions {
 
 export function useAcpPermission(options: UseAcpPermissionOptions = {}) {
     const { conversationId, conversationIds } = options;
-    const [pendingRequest, setPendingRequest] = useState<AcpPermissionRequest | null>(null);
-    const [, setRequestQueue] = useState<AcpPermissionRequest[]>([]);
-    const [isDialogOpen, setIsDialogOpen] = useState(false);
-    const [decisionError, setDecisionError] = useState<string | null>(null);
-
-    const shiftNextRequest = useCallback(() => {
-        setRequestQueue((prev) => {
-            const [, ...rest] = prev;
-            const next = rest[0] ?? null;
-            setPendingRequest(next);
-            setIsDialogOpen(rest.length > 0);
-            if (rest.length > 0) {
-                setDecisionError(null);
-            }
-            return rest;
-        });
-    }, []);
-
-    useEffect(() => {
-        const unsubscribe = listen<AcpPermissionRequest>("acp-permission-request", (event) => {
-            const request = event.payload;
-
-            if (
-                !shouldHandleConversationRequest(
-                    request.conversation_id,
-                    conversationId,
-                    conversationIds
-                )
-            ) {
-                return;
-            }
-
-            console.log("Received ACP permission request:", request);
-            setRequestQueue((prev) => {
-                const next = [...prev, request];
-                if (next.length === 1) {
-                    setPendingRequest(request);
-                    setIsDialogOpen(true);
-                    setDecisionError(null);
-                }
-                return next;
-            });
-        });
-
-        return () => {
-            unsubscribe.then((f) => f());
-        };
-    }, [conversationId, conversationIds]);
+    const {
+        pendingRequest,
+        isDialogOpen,
+        decisionError,
+        isSubmitting,
+        removeRequestById,
+        setDecisionError,
+        setIsSubmitting,
+    } = usePermissionRequestQueue<AcpPermissionRequest>({
+        conversationId,
+        conversationIds,
+        requestEventName: "acp-permission-request",
+        resolvedEventName: "acp-permission-resolved",
+        logLabel: "ACP permission",
+    });
 
     const handleDecision = useCallback(
         async (requestId: string, optionId?: string, cancelled?: boolean) => {
-            if (!pendingRequest || pendingRequest.request_id !== requestId) {
+            if (
+                !pendingRequest ||
+                pendingRequest.request_id !== requestId ||
+                isSubmitting
+            ) {
                 return;
             }
+            setIsSubmitting(true);
             try {
                 console.log("Sending ACP permission decision:", { requestId, optionId, cancelled });
                 await invoke("confirm_acp_permission", {
@@ -196,20 +256,28 @@ export function useAcpPermission(options: UseAcpPermissionOptions = {}) {
                     cancelled: cancelled ?? false,
                 });
                 setDecisionError(null);
-                shiftNextRequest();
+                removeRequestById(requestId);
             } catch (error) {
                 const message = getErrorMessage(error) || "提交 ACP 权限决策失败";
                 console.error("Failed to send ACP permission decision:", message);
                 setDecisionError(message);
+                setIsSubmitting(false);
             }
         },
-        [pendingRequest, shiftNextRequest]
+        [
+            isSubmitting,
+            pendingRequest,
+            removeRequestById,
+            setDecisionError,
+            setIsSubmitting,
+        ]
     );
 
     return {
         pendingRequest,
         isDialogOpen,
         decisionError,
+        isSubmitting,
         handleDecision,
     };
 }
