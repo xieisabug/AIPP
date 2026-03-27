@@ -1,5 +1,5 @@
 import React from "react";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { MCPToolCallUpdateEvent } from "@/data/Conversation";
 import { useMcpToolCallProcessor } from "@/hooks/useMcpToolCallProcessor";
@@ -409,5 +409,69 @@ describe("useMcpToolCallProcessor MCP identity", () => {
         expect(await screen.findByText("执行中")).toBeInTheDocument();
         expect(screen.getByText(/bound-from-state/)).toBeInTheDocument();
         expect(screen.getByTestId("shine-border")).toBeInTheDocument();
+    });
+
+    it("renders preview_code streaming cards inline", async () => {
+        const conversationId = 27;
+        mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
+        const markdown =
+            '<!-- MCP_TOOL_CALL_STREAMING:{"server_name":"ui_interaction","tool_name":"preview_code","fn_arguments":"{\\"title\\":\\"compound_interest\\",\\"renderer\\":\\"html\\",\\"code\\":\\"<div>Loading</div>\\",\\"loading_messages\\":[\\"正在生成交互面板\\"]}","llm_call_id":"preview_call_1"} -->';
+
+        render(
+            <ProcessorHarness
+                markdown={markdown}
+                conversationId={conversationId}
+                messageId={18}
+                mcpToolCallStates={new Map()}
+                shiningMcpCallId={null}
+            />
+        );
+
+        expect(await screen.findByText("compound_interest")).toBeInTheDocument();
+        expect(screen.getByText("正在生成交互面板")).toBeInTheDocument();
+        const host = await screen.findByTestId("preview-code-host");
+        await waitFor(() => expect(host.shadowRoot?.textContent).toContain("Loading"));
+    });
+
+    it("keeps preview_code streaming markup when MCP state is already executing", async () => {
+        const conversationId = 28;
+        const resolvedCallId = 601;
+        const llmCallId = "preview_call_2";
+        mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
+
+        const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
+            [resolvedCallId, {
+                call_id: resolvedCallId,
+                conversation_id: conversationId,
+                status: "executing",
+                llm_call_id: llmCallId,
+                server_name: "ui_interaction",
+                tool_name: "preview_code",
+                parameters: JSON.stringify({
+                    title: "compound_interest",
+                    renderer: "html",
+                    code: "<div>Final Content</div>",
+                    loading_messages: ["正在生成交互面板"],
+                }),
+            }],
+        ]);
+
+        const markdown =
+            `<!-- MCP_TOOL_CALL_STREAMING:{"server_name":"ui_interaction","tool_name":"preview_code","fn_arguments":"{\\"title\\":\\"compound_interest\\",\\"renderer\\":\\"html\\",\\"code\\":\\"<div>Live Content</div>\\",\\"loading_messages\\":[\\"正在生成交互面板\\"]}","llm_call_id":"${llmCallId}"} -->`;
+
+        render(
+            <ProcessorHarness
+                markdown={markdown}
+                conversationId={conversationId}
+                messageId={19}
+                mcpToolCallStates={mcpToolCallStates}
+                shiningMcpCallId={resolvedCallId}
+            />
+        );
+
+        expect(await screen.findByText("等待交互")).toBeInTheDocument();
+        const host = await screen.findByTestId("preview-code-host");
+        await waitFor(() => expect(host.shadowRoot?.textContent).toContain("Live Content"));
+        expect(host.shadowRoot?.textContent).not.toContain("Final Content");
     });
 });

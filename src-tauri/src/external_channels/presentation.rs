@@ -949,6 +949,13 @@ impl ToolPresenter for UiInteractionToolPresenter {
                         value_len(&tool_call.parameters, "files").max(1)
                     ))
                 }),
+            "preview_code" => {
+                let title = value_string(&tool_call.parameters, "title")
+                    .map(|value| preview_text(value, 80))
+                    .unwrap_or_else(|| "内嵌交互界面".to_string());
+                let renderer = value_string(&tool_call.parameters, "renderer").unwrap_or("html");
+                Some(format!("🎨 展示内嵌 UI「{}」({})", title, renderer))
+            }
             _ => None,
         }
     }
@@ -967,6 +974,21 @@ impl ToolPresenter for UiInteractionToolPresenter {
             }
             Some("preview_file") => {
                 Some(format!("❌ 预览展示失败：{}", tool_result_text_preview(tool_result, 180)))
+            }
+            Some("preview_code") if tool_result_effective_success(tool_result) => {
+                let result = tool_result_content_json(tool_result);
+                let status = result
+                    .as_ref()
+                    .and_then(|value| value_string(value, "status"))
+                    .unwrap_or("submitted");
+                match status {
+                    "dismissed" => Some("🎨 内嵌 UI 已关闭".to_string()),
+                    "submitted" => Some("🎨 已收到内嵌 UI 提交结果".to_string()),
+                    other => Some(format!("🎨 内嵌 UI 已完成：{}", other)),
+                }
+            }
+            Some("preview_code") => {
+                Some(format!("❌ 内嵌 UI 处理失败：{}", tool_result_text_preview(tool_result, 180)))
             }
             _ => None,
         }

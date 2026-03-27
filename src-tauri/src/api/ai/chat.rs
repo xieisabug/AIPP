@@ -426,6 +426,83 @@ fn normalize_tool_arguments_json(arguments: &serde_json::Value) -> String {
     }
 }
 
+fn serialize_streaming_tool_arguments(arguments: &serde_json::Value) -> String {
+    match arguments {
+        serde_json::Value::Object(_) => arguments.to_string(),
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Null => String::new(),
+        _ => arguments.to_string(),
+    }
+}
+
+fn merge_streaming_text(existing: &mut String, incoming: &str) {
+    if incoming.is_empty() {
+        return;
+    }
+    if existing.is_empty() {
+        existing.push_str(incoming);
+        return;
+    }
+    if existing == incoming || existing.ends_with(incoming) {
+        return;
+    }
+    if incoming.starts_with(existing.as_str()) {
+        *existing = incoming.to_string();
+        return;
+    }
+    if existing.starts_with(incoming) {
+        return;
+    }
+    existing.push_str(incoming);
+}
+
+fn merge_streaming_tool_argument_value(
+    existing: &mut serde_json::Value,
+    incoming: &serde_json::Value,
+) {
+    match (existing, incoming) {
+        (serde_json::Value::String(existing_text), serde_json::Value::String(incoming_text)) => {
+            merge_streaming_text(existing_text, incoming_text);
+        }
+        (serde_json::Value::Object(existing_map), serde_json::Value::Object(incoming_map)) => {
+            for (key, incoming_value) in incoming_map {
+                match existing_map.get_mut(key) {
+                    Some(existing_value) => {
+                        merge_streaming_tool_argument_value(existing_value, incoming_value);
+                    }
+                    None => {
+                        existing_map.insert(key.clone(), incoming_value.clone());
+                    }
+                }
+            }
+        }
+        (existing_value @ serde_json::Value::Null, incoming_value) => {
+            *existing_value = incoming_value.clone();
+        }
+        (existing_value, incoming_value) => {
+            if existing_value != incoming_value {
+                *existing_value = incoming_value.clone();
+            }
+        }
+    }
+}
+
+fn merge_streaming_tool_call(existing: &mut ToolCall, incoming: &ToolCall) {
+    if !incoming.fn_name.is_empty()
+        && (existing.fn_name.is_empty()
+            || incoming.fn_name.starts_with(&existing.fn_name)
+            || incoming.fn_name.len() > existing.fn_name.len())
+    {
+        existing.fn_name = incoming.fn_name.clone();
+    }
+
+    merge_streaming_tool_argument_value(&mut existing.fn_arguments, &incoming.fn_arguments);
+
+    if incoming.thought_signatures.is_some() {
+        existing.thought_signatures = incoming.thought_signatures.clone();
+    }
+}
+
 /// 构建包含流式工具调用标记的显示内容。
 /// 将累积的流式工具调用以 `<!-- MCP_TOOL_CALL_STREAMING:... -->` 注释追加到实际
 /// 文本内容之后，供前端实时展示工具调用生成进度。
@@ -440,7 +517,7 @@ fn build_streaming_tool_call_display(
     sorted_calls.sort_by(|a, b| a.call_id.cmp(&b.call_id));
     for tc in sorted_calls {
         let (server_name, tool_name) = resolve_tool_name(&tc.fn_name, tool_name_mapping);
-        let params_str = normalize_tool_arguments_json(&tc.fn_arguments);
+        let params_str = serialize_streaming_tool_arguments(&tc.fn_arguments);
         let marker = format!(
             "\n\n<!-- MCP_TOOL_CALL_STREAMING:{} -->\n",
             serde_json::json!({
@@ -567,8 +644,7 @@ mod tests {
         );
         let result = build_streaming_tool_call_display("", &tool_calls, &mapping);
         assert!(result.contains("MCP_TOOL_CALL_STREAMING"));
-        // Non-object arguments should be normalized to "{}"
-        assert!(result.contains("{}"));
+        assert!(result.contains("partial"));
     }
 
     #[test]
@@ -586,6 +662,58 @@ mod tests {
         assert_eq!(normalize_tool_arguments_json(&args), "{}");
         let args = serde_json::json!(null);
         assert_eq!(normalize_tool_arguments_json(&args), "{}");
+    }
+
+    #[test]
+    fn test_serialize_streaming_tool_arguments_string() {
+        let args = serde_json::json!("partial");
+        assert_eq!(serialize_streaming_tool_arguments(&args), "partial");
+    }
+
+    #[test]
+    fn test_merge_streaming_tool_call_appends_string_deltas() {
+        let mut existing = ToolCall {
+            call_id: "call_1".to_string(),
+            fn_name: "ui_interaction__preview_code".to_string(),
+            fn_arguments: serde_json::json!("{\"code\":\"<div"),
+            thought_signatures: None,
+        };
+        let incoming = ToolCall {
+            call_id: "call_1".to_string(),
+            fn_name: "ui_interaction__preview_code".to_string(),
+            fn_arguments: serde_json::json!(">Loading</div>\"}"),
+            thought_signatures: None,
+        };
+
+        merge_streaming_tool_call(&mut existing, &incoming);
+
+        assert_eq!(
+            existing.fn_arguments,
+            serde_json::json!("{\"code\":\"<div>Loading</div>\"}")
+        );
+    }
+
+    #[test]
+    fn test_merge_streaming_tool_call_prefers_longer_accumulated_strings() {
+        let mut existing = ToolCall {
+            call_id: "call_1".to_string(),
+            fn_name: "ui_interaction__preview_code".to_string(),
+            fn_arguments: serde_json::json!("{\"code\":\"<div"),
+            thought_signatures: None,
+        };
+        let incoming = ToolCall {
+            call_id: "call_1".to_string(),
+            fn_name: "ui_interaction__preview_code".to_string(),
+            fn_arguments: serde_json::json!("{\"code\":\"<div>Loading"),
+            thought_signatures: None,
+        };
+
+        merge_streaming_tool_call(&mut existing, &incoming);
+
+        assert_eq!(
+            existing.fn_arguments,
+            serde_json::json!("{\"code\":\"<div>Loading")
+        );
     }
 }
 
@@ -2200,7 +2328,14 @@ async fn attempt_stream_chat(
                             fn_arguments = %tc.fn_arguments,
                             "received native tool call chunk"
                         );
-                        streaming_tool_calls.insert(tc.call_id.clone(), tc.clone());
+                        match streaming_tool_calls.entry(tc.call_id.clone()) {
+                            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                                merge_streaming_tool_call(entry.get_mut(), tc);
+                            }
+                            std::collections::hash_map::Entry::Vacant(entry) => {
+                                entry.insert(tc.clone());
+                            }
+                        }
 
                         // 确保 response 消息已创建（用于承载流式工具调用指示器）
                         if response_message_id.is_none() {

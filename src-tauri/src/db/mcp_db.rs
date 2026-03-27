@@ -1484,6 +1484,11 @@ impl MCPDatabase {
         Ok(())
     }
 
+    pub fn rebuild_dynamic_mcp_catalog_force(&self) -> rusqlite::Result<()> {
+        CATALOG_LAST_REBUILD_AT_MS.store(0, Ordering::Relaxed);
+        self.rebuild_dynamic_mcp_catalog()
+    }
+
     pub fn list_server_capability_catalog(
         &self,
     ) -> rusqlite::Result<Vec<MCPServerCapabilityEpochCatalog>> {

@@ -1,6 +1,7 @@
 import React, { useCallback, useState } from 'react';
 import ReactMarkdown, { Components } from 'react-markdown';
 import McpToolCall from '@/components/McpToolCall';
+import InlineCodePreviewCard from '@/components/InlineCodePreviewCard';
 import { MCPToolCallUpdateEvent } from '@/data/Conversation';
 import { customUrlTransform } from '@/constants/markdown';
 import { Button } from '@/components/ui/button';
@@ -533,22 +534,38 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             // 添加 MCP 工具调用组件
             // 只有最后一个工具调用在执行成功后才触发续写
             const isLastCall = index === mcpCalls.length - 1;
-            parts.push(
-                <McpToolCall
-                    key={`mcp-${data.llm_call_id ?? data.call_id ?? (data.isStreaming ? `streaming-${index}` : `tmp-${index}-${match.start}`)}`}
-                    serverName={data.server_name}
-                    toolName={data.tool_name}
-                    parameters={data.parameters ?? "{}"}
-                    llmCallId={data.llm_call_id}
-                    conversationId={conversationId}
-                    messageId={messageId}
-                    callId={data.call_id} // 传递 callId，如果存在的话
-                    mcpToolCallStates={mcpToolCallStates} // 传递全局 MCP 状态
-                    shiningMcpCallId={shiningMcpCallId}
-                    isLastCall={isLastCall} // 是否是最后一个工具调用
-                    isStreaming={data.isStreaming} // 流式工具调用标记
-                />
-            );
+            const toolCallKey = `mcp-${data.llm_call_id ?? data.call_id ?? (data.isStreaming ? `streaming-${index}` : `tmp-${index}-${match.start}`)}`;
+            if (data.tool_name === "preview_code") {
+                parts.push(
+                    <InlineCodePreviewCard
+                        key={toolCallKey}
+                        parameters={data.parameters ?? "{}"}
+                        llmCallId={data.llm_call_id}
+                        conversationId={conversationId}
+                        messageId={messageId}
+                        callId={data.call_id}
+                        mcpToolCallStates={mcpToolCallStates}
+                        isStreaming={data.isStreaming}
+                    />
+                );
+            } else {
+                parts.push(
+                    <McpToolCall
+                        key={toolCallKey}
+                        serverName={data.server_name}
+                        toolName={data.tool_name}
+                        parameters={data.parameters ?? "{}"}
+                        llmCallId={data.llm_call_id}
+                        conversationId={conversationId}
+                        messageId={messageId}
+                        callId={data.call_id} // 传递 callId，如果存在的话
+                        mcpToolCallStates={mcpToolCallStates} // 传递全局 MCP 状态
+                        shiningMcpCallId={shiningMcpCallId}
+                        isLastCall={isLastCall} // 是否是最后一个工具调用
+                        isStreaming={data.isStreaming} // 流式工具调用标记
+                    />
+                );
+            }
 
             if (data.call_id && inlineInteractionItems && inlineInteractionItems.length > 0) {
                 const matchedInlineItems = inlineInteractionItems.filter(

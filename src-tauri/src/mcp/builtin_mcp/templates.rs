@@ -655,6 +655,55 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                     "additionalProperties": false
                 }),
             },
+            BuiltinToolInfo {
+                name: "preview_code".into(),
+                description: "Render an inline interactive UI inside the chat message. Supports progressive generation, final HTML activation, and returning submit/close results back to the tool execution flow. For best streaming UX, emit CSS first, then visible HTML structure, and put scripts last so the card can progressively appear before final JS activation.".into(),
+                input_schema: serde_json::json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Stable title/identifier for the inline UI card."
+                        },
+                        "renderer": {
+                            "type": "string",
+                            "enum": ["html"],
+                            "description": "Renderer type. Phase 1 only supports html."
+                        },
+                        "code": {
+                            "type": "string",
+                            "description": "Inline HTML/CSS/JS snippet to render in the controlled host container. Prefer the order <style>...</style> then visible HTML markup, then <script>...</script>. Do not rely on JavaScript to create the initial DOM from scratch; scripts should enhance already-rendered elements and wire interactions after the final activation step."
+                        },
+                        "loading_messages": {
+                            "type": "array",
+                            "description": "Optional progressive disclosure status messages shown while the UI is still being generated.",
+                            "items": {
+                                "type": "string"
+                            },
+                            "maxItems": 8
+                        },
+                        "interaction_mode": {
+                            "type": "string",
+                            "enum": ["none", "submit_once"],
+                            "default": "submit_once",
+                            "description": "Interaction mode for the widget. submit_once allows one final payload submission; none is display-only except close."
+                        },
+                        "metadata": {
+                            "type": "object",
+                            "properties": {
+                                "origin": {
+                                    "type": "string",
+                                    "description": "Optional source marker."
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["title", "renderer", "code"],
+                    "additionalProperties": false
+                }),
+            },
         ],
         Some("search") => vec![
             BuiltinToolInfo {
@@ -1111,7 +1160,7 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
             .with_context(|| format!("Sync builtin server tools failed: {}", tpl.id))?;
     }
 
-    let _ = db.rebuild_dynamic_mcp_catalog();
+    let _ = db.rebuild_dynamic_mcp_catalog_force();
 
     // Builtin tools already have human-written descriptions, so mark their
     // summary_generated_at so they're discoverable via load_mcp_tool/load_mcp_server.
@@ -1129,12 +1178,12 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
                  WHERE server_id = ?",
                 rusqlite::params![sid],
             );
-            let _ = db.conn.execute(
-                "UPDATE mcp_tool_catalog
-                 SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
-                 WHERE server_id = ?",
-                rusqlite::params![sid],
-            );
+        let _ = db.conn.execute(
+            "UPDATE mcp_tool_catalog
+             SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
+             WHERE server_id = ?",
+            rusqlite::params![sid],
+        );
         }
     }
 
@@ -1203,6 +1252,27 @@ pub async fn add_or_update_aipp_builtin_server(
                 Some(&tool.input_schema.to_string()),
             )
             .with_context(|| format!("Upsert server tool failed: {}", tool.name))?;
+        }
+
+        let _ = db.rebuild_dynamic_mcp_catalog_force();
+
+        if let Ok(Some(sid)) = db.conn
+            .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1")?
+            .query_row([&tpl.command], |row| row.get::<_, i64>(0))
+            .optional()
+        {
+            let _ = db.conn.execute(
+                "UPDATE mcp_server_capability_epoch_catalog
+                 SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
+                 WHERE server_id = ?",
+                rusqlite::params![sid],
+            );
+            let _ = db.conn.execute(
+                "UPDATE mcp_tool_catalog
+                 SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
+                 WHERE server_id = ?",
+                rusqlite::params![sid],
+            );
         }
 
         Ok(server_id)

@@ -9,6 +9,7 @@ use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info, warn};
 
 type AskUserQuestionDecision = Result<HashMap<String, String>, String>;
+type PreviewCodeDecision = Result<PreviewCodeResponse, String>;
 pub const PREVIEW_FILE_RELAY_SCHEME: &str = "aipp-preview";
 const PREVIEW_FILE_RELAY_TTL_SECS: u64 = 10 * 60;
 const PREVIEW_FILE_RELAY_MAX_BYTES: u64 = 20 * 1024 * 1024;
@@ -111,6 +112,66 @@ pub struct PreviewFileMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewCodeMetadata {
+    pub origin: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewCodeRequest {
+    pub title: String,
+    pub renderer: String,
+    pub code: String,
+    #[serde(default, rename = "loadingMessages", alias = "loading_messages")]
+    pub loading_messages: Vec<String>,
+    #[serde(default, rename = "interactionMode", alias = "interaction_mode")]
+    pub interaction_mode: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<PreviewCodeMetadata>,
+}
+
+impl PreviewCodeRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.title.trim().is_empty() {
+            return Err("PreviewCode title cannot be empty".to_string());
+        }
+        if self.renderer.trim() != "html" {
+            return Err(format!(
+                "Unsupported preview_code renderer '{}'; only 'html' is currently supported",
+                self.renderer
+            ));
+        }
+        if self.code.trim().is_empty() {
+            return Err("PreviewCode code cannot be empty".to_string());
+        }
+        if self.loading_messages.len() > 8 {
+            return Err("PreviewCode loading_messages cannot exceed 8 items".to_string());
+        }
+        if self
+            .loading_messages
+            .iter()
+            .any(|message| message.trim().is_empty())
+        {
+            return Err("PreviewCode loading_messages cannot contain empty items".to_string());
+        }
+        match self.interaction_mode() {
+            "none" | "submit_once" => Ok(()),
+            other => Err(format!(
+                "Unsupported preview_code interaction_mode '{}'",
+                other
+            )),
+        }
+    }
+
+    pub fn interaction_mode(&self) -> &str {
+        self.interaction_mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("submit_once")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreviewFileRequest {
     pub files: Vec<PreviewFileItem>,
     #[serde(default, rename = "viewMode", alias = "view_mode")]
@@ -153,6 +214,29 @@ pub struct PreviewFileRequestEvent {
     pub view_mode: String,
     #[serde(default)]
     pub metadata: Option<PreviewFileMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewCodeRequestEvent {
+    pub request_id: String,
+    pub conversation_id: Option<i64>,
+    pub title: String,
+    pub renderer: String,
+    pub code: String,
+    #[serde(default, rename = "loadingMessages", alias = "loading_messages")]
+    pub loading_messages: Vec<String>,
+    #[serde(rename = "interactionMode")]
+    pub interaction_mode: String,
+    #[serde(default)]
+    pub metadata: Option<PreviewCodeMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewCodeResponse {
+    pub status: String,
+    pub request_id: String,
+    #[serde(default)]
+    pub payload: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -443,6 +527,8 @@ pub fn handle_preview_file_relay_request<R: tauri::Runtime>(
 pub struct InteractionState {
     pending_ask_user: Arc<Mutex<HashMap<String, oneshot::Sender<AskUserQuestionDecision>>>>,
     pending_ask_user_events: Arc<Mutex<HashMap<String, AskUserQuestionRequestEvent>>>,
+    pending_preview_code: Arc<Mutex<HashMap<String, oneshot::Sender<PreviewCodeDecision>>>>,
+    pending_preview_code_events: Arc<Mutex<HashMap<String, PreviewCodeRequestEvent>>>,
 }
 
 impl InteractionState {
@@ -450,6 +536,8 @@ impl InteractionState {
         Self {
             pending_ask_user: Arc::new(Mutex::new(HashMap::new())),
             pending_ask_user_events: Arc::new(Mutex::new(HashMap::new())),
+            pending_preview_code: Arc::new(Mutex::new(HashMap::new())),
+            pending_preview_code_events: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -506,6 +594,69 @@ impl InteractionState {
         drop(pending);
 
         let mut pending_events = self.pending_ask_user_events.lock().await;
+        pending_events.remove(request_id);
+        drop(pending_events);
+
+        if let Some(sender) = sender {
+            sender.send(decision).is_ok()
+        } else {
+            false
+        }
+    }
+
+    pub async fn store_preview_code_request(
+        &self,
+        event: PreviewCodeRequestEvent,
+        sender: oneshot::Sender<PreviewCodeDecision>,
+    ) {
+        let request_id = event.request_id.clone();
+        let mut pending = self.pending_preview_code.lock().await;
+        pending.insert(request_id, sender);
+        drop(pending);
+
+        let mut pending_events = self.pending_preview_code_events.lock().await;
+        pending_events.insert(event.request_id.clone(), event);
+    }
+
+    pub async fn get_preview_code_request(
+        &self,
+        request_id: &str,
+    ) -> Option<PreviewCodeRequestEvent> {
+        let pending_events = self.pending_preview_code_events.lock().await;
+        pending_events.get(request_id).cloned()
+    }
+
+    pub async fn remove_preview_code_request(&self, request_id: &str) {
+        let mut pending = self.pending_preview_code.lock().await;
+        pending.remove(request_id);
+        drop(pending);
+
+        let mut pending_events = self.pending_preview_code_events.lock().await;
+        pending_events.remove(request_id);
+    }
+
+    pub async fn list_preview_code_requests_for_conversation(
+        &self,
+        conversation_id: i64,
+    ) -> Vec<PreviewCodeRequestEvent> {
+        let pending_events = self.pending_preview_code_events.lock().await;
+        pending_events
+            .values()
+            .filter(|event| event.conversation_id == Some(conversation_id))
+            .cloned()
+            .collect()
+    }
+
+    pub async fn resolve_preview_code_request(
+        &self,
+        request_id: &str,
+        decision: PreviewCodeDecision,
+    ) -> bool {
+        let mut pending = self.pending_preview_code.lock().await;
+        let sender = pending.remove(request_id);
+        drop(pending);
+
+        let mut pending_events = self.pending_preview_code_events.lock().await;
         pending_events.remove(request_id);
         drop(pending_events);
 
@@ -640,6 +791,53 @@ pub fn emit_preview_file_request(
     Ok(request_id)
 }
 
+pub async fn request_preview_code(
+    app_handle: &AppHandle,
+    interaction_state: &InteractionState,
+    conversation_id: Option<i64>,
+    request: PreviewCodeRequest,
+) -> Result<PreviewCodeResponse, String> {
+    request.validate()?;
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let interaction_mode = request.interaction_mode().to_string();
+    let event = PreviewCodeRequestEvent {
+        request_id: request_id.clone(),
+        conversation_id,
+        title: request.title,
+        renderer: request.renderer,
+        code: request.code,
+        loading_messages: request.loading_messages,
+        interaction_mode,
+        metadata: request.metadata,
+    };
+
+    let (tx, rx) = oneshot::channel::<PreviewCodeDecision>();
+    interaction_state
+        .store_preview_code_request(event.clone(), tx)
+        .await;
+
+    info!(
+        request_id = %request_id,
+        conversation_id = ?conversation_id,
+        interaction_mode = %event.interaction_mode,
+        "Requesting PreviewCode interaction from frontend"
+    );
+
+    if let Err(e) = app_handle.emit("preview-code-request", &event) {
+        interaction_state.remove_preview_code_request(&request_id).await;
+        warn!(request_id = %request_id, error = %e, "Failed to emit preview-code-request");
+        return Err("Failed to emit PreviewCode event".to_string());
+    }
+
+    let result = match rx.await {
+        Ok(result) => result,
+        Err(_) => Err("PreviewCode request was cancelled".to_string()),
+    };
+    interaction_state.remove_preview_code_request(&request_id).await;
+    result
+}
+
 #[tauri::command]
 pub async fn prepare_preview_file_request_for_ui(
     app_handle: AppHandle,
@@ -650,6 +848,19 @@ pub async fn prepare_preview_file_request_for_ui(
     request.validate()?;
     rewrite_local_preview_urls(&app_handle, conversation_id, &mut request.files)?;
     Ok(request)
+}
+
+#[tauri::command]
+pub async fn list_preview_code_requests_for_conversation(
+    app_handle: AppHandle,
+    conversation_id: i64,
+) -> Result<Vec<PreviewCodeRequestEvent>, String> {
+    let state = app_handle
+        .try_state::<InteractionState>()
+        .ok_or_else(|| "InteractionState not found".to_string())?;
+    Ok(state
+        .list_preview_code_requests_for_conversation(conversation_id)
+        .await)
 }
 
 pub(crate) async fn resolve_ask_user_question_response(
@@ -683,6 +894,44 @@ pub(crate) async fn resolve_ask_user_question_response(
     }
 }
 
+pub(crate) async fn resolve_preview_code_response(
+    app_handle: &AppHandle,
+    request_id: &str,
+    payload: Option<serde_json::Value>,
+    dismissed: bool,
+) -> Result<bool, String> {
+    let state = app_handle
+        .try_state::<InteractionState>()
+        .ok_or_else(|| "InteractionState not found".to_string())?;
+
+    let decision = if dismissed {
+        Ok(PreviewCodeResponse {
+            status: "dismissed".to_string(),
+            request_id: request_id.to_string(),
+            payload: None,
+        })
+    } else {
+        let Some(payload) = payload else {
+            return Err("Missing preview_code payload".to_string());
+        };
+        Ok(PreviewCodeResponse {
+            status: "submitted".to_string(),
+            request_id: request_id.to_string(),
+            payload: Some(payload),
+        })
+    };
+
+    let resolved = state
+        .resolve_preview_code_request(request_id, decision)
+        .await;
+
+    if resolved {
+        Ok(true)
+    } else {
+        Err("PreviewCode request not found or already resolved".to_string())
+    }
+}
+
 #[tauri::command]
 pub async fn submit_ask_user_question_response(
     app_handle: AppHandle,
@@ -697,4 +946,53 @@ pub async fn submit_ask_user_question_response(
         cancelled.unwrap_or(false),
     )
     .await
+}
+
+#[tauri::command]
+pub async fn submit_preview_code_response(
+    app_handle: AppHandle,
+    request_id: String,
+    payload: Option<serde_json::Value>,
+    dismissed: Option<bool>,
+) -> Result<bool, String> {
+    resolve_preview_code_response(
+        &app_handle,
+        &request_id,
+        payload,
+        dismissed.unwrap_or(false),
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PreviewCodeRequest;
+
+    #[test]
+    fn preview_code_request_accepts_html_submit_once() {
+        let request = PreviewCodeRequest {
+            title: "compound_interest".to_string(),
+            renderer: "html".to_string(),
+            code: "<div>Hello</div>".to_string(),
+            loading_messages: vec!["正在生成交互面板".to_string()],
+            interaction_mode: Some("submit_once".to_string()),
+            metadata: None,
+        };
+
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn preview_code_request_rejects_unknown_renderer() {
+        let request = PreviewCodeRequest {
+            title: "bad".to_string(),
+            renderer: "markdown".to_string(),
+            code: "<div>Hello</div>".to_string(),
+            loading_messages: vec![],
+            interaction_mode: Some("submit_once".to_string()),
+            metadata: None,
+        };
+
+        assert!(request.validate().is_err());
+    }
 }

@@ -2391,8 +2391,9 @@ async fn execute_builtin_tool(
     let command = server.command.clone().unwrap_or_default();
     // 获取超时配置，使用服务器配置的超时或默认值
     let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
-    // AskUserQuestion 需要等待用户交互，不应受超时限制。
-    let wait_indefinitely = command == "aipp:ui_interaction" && tool_name == "ask_user_question";
+    // UI 交互工具需要等待用户操作，不应受超时限制。
+    let wait_indefinitely = command == "aipp:ui_interaction"
+        && matches!(tool_name, "ask_user_question" | "preview_code");
     let start = std::time::Instant::now();
 
     // 验证是否为内置工具调用

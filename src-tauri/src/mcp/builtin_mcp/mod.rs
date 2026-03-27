@@ -17,7 +17,8 @@ pub mod templates;
 pub use agent::{AgentHandler, TodoHandler, TodoState};
 pub use interaction::{
     handle_preview_file_relay_request, prepare_preview_file_request_for_ui,
-    submit_ask_user_question_response, InteractionState, PreviewFileRelayState,
+    list_preview_code_requests_for_conversation, submit_ask_user_question_response,
+    submit_preview_code_response, InteractionState, PreviewFileRelayState,
     PREVIEW_FILE_RELAY_SCHEME,
 };
 pub use operation::{OperationHandler, OperationState};
@@ -1348,6 +1349,37 @@ pub async fn execute_aipp_builtin_tool(
                     }),
                     Err(e) => {
                         error!(error = %e, "PreviewFile tool execution failed");
+                        serde_json::json!({
+                            "content": [{"type": "text", "text": e}],
+                            "isError": true
+                        })
+                    }
+                }
+            }
+            "preview_code" => {
+                use interaction::{request_preview_code, PreviewCodeRequest};
+
+                let request: PreviewCodeRequest = serde_json::from_value(args.clone())
+                    .map_err(|e| format!("Invalid PreviewCode parameters: {}", e))?;
+
+                let state = app_handle
+                    .try_state::<InteractionState>()
+                    .ok_or_else(|| "InteractionState not found".to_string())?;
+
+                match request_preview_code(
+                    &app_handle,
+                    state.inner(),
+                    conversation_id,
+                    request,
+                )
+                .await
+                {
+                    Ok(result) => serde_json::json!({
+                        "content": [{"type": "json", "json": result}],
+                        "isError": false
+                    }),
+                    Err(e) => {
+                        error!(error = %e, "PreviewCode tool execution failed");
                         serde_json::json!({
                             "content": [{"type": "text", "text": e}],
                             "isError": true

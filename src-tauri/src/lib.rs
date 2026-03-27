@@ -142,7 +142,8 @@ use crate::feishu::FeishuButlerState;
 use crate::mcp::builtin_mcp::{
     add_or_update_aipp_builtin_server, execute_aipp_builtin_tool,
     handle_preview_file_relay_request, init_builtin_mcp_servers, list_aipp_builtin_templates,
-    prepare_preview_file_request_for_ui, submit_ask_user_question_response, InteractionState,
+    list_preview_code_requests_for_conversation, prepare_preview_file_request_for_ui,
+    submit_ask_user_question_response, submit_preview_code_response, InteractionState,
     OperationState, PreviewFileRelayState, TodoState, PREVIEW_FILE_RELAY_SCHEME,
 };
 use crate::mcp::execution_api::{
@@ -862,7 +863,9 @@ pub fn run() {
             add_or_update_aipp_builtin_server,
             execute_aipp_builtin_tool,
             prepare_preview_file_request_for_ui,
+            list_preview_code_requests_for_conversation,
             submit_ask_user_question_response,
+            submit_preview_code_response,
             confirm_operation_permission,
             confirm_acp_permission,
             highlight_code,
