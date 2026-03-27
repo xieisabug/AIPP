@@ -27,7 +27,7 @@ interface FeatureItem {
     code: string;
 }
 
-const FeatureAssistantConfig: React.FC = () => {
+const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () => void }> = ({ subNav, onSubNavConsumed }) => {
     // 功能列表定义
     const featureList: FeatureItem[] = [
         {
@@ -96,6 +96,17 @@ const FeatureAssistantConfig: React.FC = () => {
     ];
 
     const [selectedFeature, setSelectedFeature] = useState<FeatureItem>(featureList[0]);
+
+    // 消费来自父组件的 subNav 导航指令
+    useEffect(() => {
+        if (subNav) {
+            const target = featureList.find(f => f.id === subNav);
+            if (target) {
+                setSelectedFeature(target);
+            }
+            onSubNavConsumed?.();
+        }
+    }, [subNav]);
 
     // 使用新的 hooks
     const { featureConfig, saveFeatureConfig, loading } = useFeatureConfig();

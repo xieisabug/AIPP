@@ -23,8 +23,9 @@ import {
     DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
+import { RadioGroup, RadioGroupItem } from "../ui/radio-group";
 import { Trash2, ChevronDown, Share, Copy, Search, KeyRound, Edit, CheckCircle2, XCircle, Loader2, AlertTriangle } from "lucide-react";
-import { useCopilot } from "@/hooks/useCopilot";
+import { useCopilot, type CopilotTokenScanResult } from "@/hooks/useCopilot";
 import { useAcpEnvironment } from "@/hooks/feature/useAcpEnvironment";
 import {
     LLMModel,
@@ -79,6 +80,9 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const [hasApiKey, setHasApiKey] = useState<boolean>(false);
     const [manualTokenDialogOpen, setManualTokenDialogOpen] = useState<boolean>(false);
     const [manualToken, setManualToken] = useState<string>("");
+    const [scanTokenDialogOpen, setScanTokenDialogOpen] = useState<boolean>(false);
+    const [scanCandidates, setScanCandidates] = useState<CopilotTokenScanResult[]>([]);
+    const [selectedScanCandidateId, setSelectedScanCandidateId] = useState<string>("");
     const [renameDialogOpen, setRenameDialogOpen] = useState<boolean>(false);
     const [newProviderName, setNewProviderName] = useState<string>("");
 
@@ -146,6 +150,11 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const form = useForm({
         defaultValues,
     });
+
+    const selectedScanCandidate = useMemo(
+        () => scanCandidates.find((candidate) => candidate.id === selectedScanCandidateId) ?? null,
+        [scanCandidates, selectedScanCandidateId],
+    );
 
     // 监听 proxy_enabled 字段变化
     const proxyEnabled = form.watch("proxy_enabled");
@@ -418,8 +427,15 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                                 variant="outline"
                                                 className="justify-start gap-2"
                                                 disabled={copilot.isAuthorizing}
-                                                onClick={() => {
-                                                    copilot.scanConfigAuth();
+                                                onClick={async () => {
+                                                    const candidates = await copilot.scanConfigAuth();
+                                                    if (candidates.length === 0) {
+                                                        return;
+                                                    }
+
+                                                    setScanCandidates(candidates);
+                                                    setSelectedScanCandidateId(candidates[0].id);
+                                                    setScanTokenDialogOpen(true);
                                                 }}
                                             >
                                                 <Search className="h-4 w-4" />
@@ -562,9 +578,9 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                 <Button
                                     variant="outline"
                                     size="sm"
-                                    onClick={() => {
-                                        // 打开配置窗口的预览配置页面
-                                        invoke("open_config_window_inner", { path: "preview" });
+                                    onClick={async () => {
+                                        const { emit } = await import("@tauri-apps/api/event");
+                                        await emit("config-navigate-to", { menu: "feature-assistant-config", subNav: "preview" });
                                     }}
                                 >
                                     前往安装 Bun
@@ -986,6 +1002,78 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                             disabled={!manualToken.trim()}
                         >
                             保存
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+            <Dialog
+                open={scanTokenDialogOpen}
+                onOpenChange={(open) => {
+                    setScanTokenDialogOpen(open);
+                    if (!open) {
+                        setScanCandidates([]);
+                        setSelectedScanCandidateId("");
+                    }
+                }}
+            >
+                <DialogContent className="sm:max-w-2xl">
+                    <DialogHeader>
+                        <DialogTitle>选择扫描到的 Copilot 授权</DialogTitle>
+                        <DialogDescription>
+                            下面列出了当前机器上扫描到的授权候选。仅展示前 5 位，后续内容已脱敏。请选择你想导入的 Token。
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="py-4">
+                        <RadioGroup
+                            value={selectedScanCandidateId}
+                            onValueChange={setSelectedScanCandidateId}
+                            className="space-y-2"
+                        >
+                            {scanCandidates.map((candidate) => (
+                                <label
+                                    key={candidate.id}
+                                    className="flex items-start gap-3 rounded-md border border-border px-3 py-3 cursor-pointer"
+                                >
+                                    <RadioGroupItem
+                                        value={candidate.id}
+                                        id={candidate.id}
+                                        className="mt-1"
+                                    />
+                                    <div className="space-y-1 text-sm min-w-0">
+                                        <div className="font-medium font-mono">
+                                            {candidate.maskedToken}
+                                        </div>
+                                        <div className="text-xs text-muted-foreground">
+                                            来源：{candidate.source}
+                                        </div>
+                                        <div className="text-xs text-muted-foreground break-all">
+                                            位置：{candidate.location}
+                                        </div>
+                                    </div>
+                                </label>
+                            ))}
+                        </RadioGroup>
+                    </div>
+                    <DialogFooter>
+                        <Button
+                            variant="outline"
+                            onClick={() => setScanTokenDialogOpen(false)}
+                        >
+                            取消
+                        </Button>
+                        <Button
+                            onClick={async () => {
+                                if (!selectedScanCandidate) {
+                                    toast.error("请先选择一个授权候选");
+                                    return;
+                                }
+
+                                await copilot.applyScannedTokenAuth(selectedScanCandidate);
+                                setScanTokenDialogOpen(false);
+                            }}
+                            disabled={!selectedScanCandidate || copilot.isAuthorizing}
+                        >
+                            导入所选 Token
                         </Button>
                     </DialogFooter>
                 </DialogContent>
