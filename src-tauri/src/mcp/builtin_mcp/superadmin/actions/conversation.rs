@@ -26,10 +26,14 @@ impl ActionHandler for ConversationListHandler {
     ) -> Result<serde_json::Value, String> {
         let page = args.get("page").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
         let page_size = args.get("page_size").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
+        let conversation_kind = args.get("conversation_kind").and_then(|v| v.as_str());
+        let search = args.get("search").and_then(|v| v.as_str());
 
         let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
         let repo = db.conversation_repo().map_err(|e| e.to_string())?;
-        let conversations = repo.list(page, page_size).map_err(|e| e.to_string())?;
+        let conversations = repo
+            .list_with_filters(page, page_size, conversation_kind, search)
+            .map_err(|e| e.to_string())?;
 
         let items: Vec<serde_json::Value> = conversations
             .iter()
@@ -424,7 +428,7 @@ pub fn register(registry: &mut ActionRegistry) {
             action_id: "conversation.list".into(),
             domain: "conversation".into(),
             summary: "列出会话".into(),
-            description: "分页列出 AIPP 中的对话，包含基本信息。".into(),
+            description: "分页列出 AIPP 中的对话，支持按会话类型过滤和模糊搜索标题/消息内容。不传 conversation_kind 默认只列出 normal 类型。".into(),
             risk_level: RiskLevel::SAFE,
             requires_approval: false,
             approval_policy: ApprovalPolicy::AutoAllow,
@@ -434,7 +438,9 @@ pub fn register(registry: &mut ActionRegistry) {
                 "type": "object",
                 "properties": {
                     "page": { "type": "integer", "description": "页码（默认 1）" },
-                    "page_size": { "type": "integer", "description": "每页数量（默认 20）" }
+                    "page_size": { "type": "integer", "description": "每页数量（默认 20）" },
+                    "conversation_kind": { "type": "string", "description": "会话类型过滤，如 normal、butler_main、butler_task、schedule（默认 normal）" },
+                    "search": { "type": "string", "description": "模糊搜索关键词，匹配会话标题和消息内容" }
                 },
                 "required": []
             }),

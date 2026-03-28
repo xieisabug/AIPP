@@ -223,6 +223,69 @@ impl ConversationRepository {
         rows.collect()
     }
 
+    /// List conversations with optional filters for conversation_kind and fuzzy search.
+    /// When `search` is provided, matches against conversation name and message content.
+    #[instrument(level = "debug", skip(self), fields(page = page, per_page = per_page, conversation_kind = ?conversation_kind, search = ?search))]
+    pub fn list_with_filters(
+        &self,
+        page: u32,
+        per_page: u32,
+        conversation_kind: Option<&str>,
+        search: Option<&str>,
+    ) -> Result<Vec<Conversation>> {
+        let offset = (page - 1) * per_page;
+        let kind = conversation_kind.unwrap_or("normal");
+        let search_pattern = search
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| format!("%{}%", s.trim()));
+
+        let sql = if search_pattern.is_some() {
+            "SELECT DISTINCT c.id, c.name, c.assistant_id, c.created_time, c.updated_time,
+                    c.conversation_kind, c.parent_butler_conversation_id, c.source_task_title,
+                    c.is_hidden_from_normal_chat_list, c.channel_source, c.butler_task_status,
+                    c.butler_task_summary, c.butler_task_finalized_at
+               FROM conversation c
+               LEFT JOIN message m ON m.conversation_id = c.id
+              WHERE c.conversation_kind = ?1
+                AND (c.name LIKE ?2 COLLATE NOCASE OR m.content LIKE ?2 COLLATE NOCASE)
+              ORDER BY c.updated_time DESC
+              LIMIT ?3 OFFSET ?4"
+        } else {
+            "SELECT id, name, assistant_id, created_time, updated_time, conversation_kind,
+                    parent_butler_conversation_id, source_task_title,
+                    is_hidden_from_normal_chat_list, channel_source, butler_task_status,
+                    butler_task_summary, butler_task_finalized_at
+               FROM conversation
+              WHERE conversation_kind = ?1
+              ORDER BY updated_time DESC
+              LIMIT ?3 OFFSET ?4"
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let like_val = search_pattern.unwrap_or_default();
+        let rows = stmt.query_map(
+            rusqlite::params![kind, like_val, per_page, offset],
+            |row| {
+                Ok(Conversation {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    assistant_id: row.get(2)?,
+                    created_time: get_required_datetime_from_row(row, 3, "created_time")?,
+                    updated_time: get_required_datetime_from_row(row, 4, "updated_time")?,
+                    conversation_kind: row.get(5)?,
+                    parent_butler_conversation_id: row.get(6)?,
+                    source_task_title: row.get(7)?,
+                    is_hidden_from_normal_chat_list: row.get(8)?,
+                    channel_source: row.get(9)?,
+                    butler_task_status: row.get(10)?,
+                    butler_task_summary: row.get(11)?,
+                    butler_task_finalized_at: get_datetime_from_row(row, 12)?,
+                })
+            },
+        )?;
+        rows.collect()
+    }
+
     #[instrument(level = "debug", skip(self), fields(parent_butler_conversation_id = parent_butler_conversation_id))]
     pub fn list_by_parent_butler_conversation_id(
         &self,
