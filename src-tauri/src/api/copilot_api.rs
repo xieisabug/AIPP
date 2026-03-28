@@ -119,15 +119,18 @@ pub async fn start_github_copilot_device_flow(
         "[Copilot] Device code obtained successfully"
     );
 
-    // 2. 自动打开浏览器
+    // 2. 自动打开浏览器（在阻塞线程中执行，避免阻塞 Tokio 运行时）
     let verification_url = device_response.verification_uri.clone();
     info!(url = %verification_url, "[Copilot] Opening browser for user authorization...");
 
-    if let Err(e) = open::that(&verification_url) {
-        warn!(error = ?e, "[Copilot] Failed to open browser automatically, user needs to open manually");
-    } else {
-        info!("[Copilot] Browser opened successfully");
-    }
+    let url_clone = verification_url.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = open::that(&url_clone) {
+            warn!(error = ?e, "[Copilot] Failed to open browser automatically, user needs to open manually");
+        } else {
+            info!("[Copilot] Browser opened successfully");
+        }
+    });
 
     let resp = CopilotDeviceFlowStartResponse {
         device_code: device_response.device_code,

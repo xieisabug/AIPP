@@ -429,7 +429,14 @@ async fn generate_assistant_summary(
     let network_proxy = get_network_proxy_from_config(config_map);
     let request_timeout = get_request_timeout_from_config(config_map);
     let client = crate::api::genai_client::create_client_with_config(
-        &model_detail.configs,
+        &crate::api::copilot_token_manager::prepare_provider_configs(
+            app_handle,
+            &model_detail.provider.api_type,
+            &model_detail.configs,
+            network_proxy.as_deref(),
+        )
+        .await
+        .map_err(|e| AppError::ProviderError(e))?,
         &model_detail.model.code,
         &model_detail.provider.api_type,
         Some(&model_detail.model.request_mode),

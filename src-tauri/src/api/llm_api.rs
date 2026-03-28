@@ -223,15 +223,29 @@ pub async fn fetch_model_list(
     let feature_config_state = app_handle.state::<FeatureConfigState>();
     let config_feature_map = feature_config_state.config_feature_map.lock().await;
     let network_proxy = get_network_proxy_from_config(&config_feature_map);
-    let proxy_enabled = network_proxy.is_some();
+    let proxy_enabled = llm_provider_config
+        .iter()
+        .find(|config| config.name == "proxy_enabled")
+        .and_then(|config| config.value.parse::<bool>().ok())
+        .unwrap_or(false);
+    let effective_network_proxy = proxy_enabled.then_some(network_proxy).flatten();
+
+    // 对 Copilot 类型进行 token exchange，替换 api_key/endpoint
+    let effective_configs = crate::api::copilot_token_manager::prepare_provider_configs(
+        &app_handle,
+        &llm_provider.api_type,
+        &llm_provider_config,
+        effective_network_proxy.as_deref(),
+    )
+    .await?;
 
     // 使用共用的客户端创建函数
     let client = genai_client::create_client_with_config(
-        &llm_provider_config,
+        &effective_configs,
         "",
         &llm_provider.api_type,
         None,
-        network_proxy.as_deref(),
+        effective_network_proxy.as_deref(),
         proxy_enabled,
         None,
         false,
@@ -371,21 +385,35 @@ pub async fn preview_model_list(
     let feature_config_state = app_handle.state::<FeatureConfigState>();
     let config_feature_map = feature_config_state.config_feature_map.lock().await;
     let network_proxy = get_network_proxy_from_config(&config_feature_map);
-    let proxy_enabled = network_proxy.is_some();
+    let proxy_enabled = llm_provider_config
+        .iter()
+        .find(|config| config.name == "proxy_enabled")
+        .and_then(|config| config.value.parse::<bool>().ok())
+        .unwrap_or(false);
+    let effective_network_proxy = proxy_enabled.then_some(network_proxy).flatten();
     tracing::info!(
         llm_provider_id,
-        ?network_proxy,
+        network_proxy = ?effective_network_proxy,
         proxy_enabled,
         "preview_model_list proxy config"
     );
 
+    // 对 Copilot 类型进行 token exchange，替换 api_key/endpoint
+    let effective_configs = crate::api::copilot_token_manager::prepare_provider_configs(
+        &app_handle,
+        &llm_provider.api_type,
+        &llm_provider_config,
+        effective_network_proxy.as_deref(),
+    )
+    .await?;
+
     // 使用共用的客户端创建函数
     let client = genai_client::create_client_with_config(
-        &llm_provider_config,
+        &effective_configs,
         "",
         &llm_provider.api_type,
         None,
-        network_proxy.as_deref(),
+        effective_network_proxy.as_deref(),
         proxy_enabled,
         None,
         false,

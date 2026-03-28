@@ -1178,12 +1178,12 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
                  WHERE server_id = ?",
                 rusqlite::params![sid],
             );
-        let _ = db.conn.execute(
-            "UPDATE mcp_tool_catalog
+            let _ = db.conn.execute(
+                "UPDATE mcp_tool_catalog
              SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
              WHERE server_id = ?",
-            rusqlite::params![sid],
-        );
+                rusqlite::params![sid],
+            );
         }
     }
 
@@ -1256,7 +1256,8 @@ pub async fn add_or_update_aipp_builtin_server(
 
         let _ = db.rebuild_dynamic_mcp_catalog_force();
 
-        if let Ok(Some(sid)) = db.conn
+        if let Ok(Some(sid)) = db
+            .conn
             .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1")?
             .query_row([&tpl.command], |row| row.get::<_, i64>(0))
             .optional()

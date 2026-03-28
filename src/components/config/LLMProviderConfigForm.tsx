@@ -884,16 +884,16 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 },
             },
             {
-                    key: "advanced_config",
-                    config: {
-                        type: "custom" as const,
-                        label: "",
-                        value: "",
-                        customRender: () =>
-                            renderProxyAdvancedConfig("启用后将使用全局网络代理配置进行模型请求"),
-                    },
+                key: "advanced_config",
+                config: {
+                    type: "custom" as const,
+                    label: "",
+                    value: "",
+                    customRender: () =>
+                        renderProxyAdvancedConfig("启用后将使用全局网络代理配置进行模型请求"),
                 },
-            ];
+            },
+        ];
     }, [apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode]);
 
     // 打开改名对话框

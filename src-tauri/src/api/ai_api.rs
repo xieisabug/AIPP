@@ -734,7 +734,14 @@ pub async fn ask_ai(
         }
 
         let client = genai_client::create_client_with_config(
-            &model_configs,
+            &crate::api::copilot_token_manager::prepare_provider_configs(
+                &app_handle_clone,
+                &provider_api_type,
+                &model_configs,
+                network_proxy.as_deref(),
+            )
+            .await
+            .map_err(|e| AppError::ProviderError(e))?,
             &model_code,
             &provider_api_type,
             Some(&model_request_mode),
@@ -1098,7 +1105,14 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     }
 
     let client = genai_client::create_client_with_config(
-        &model_configs,
+        &crate::api::copilot_token_manager::prepare_provider_configs(
+            &app_handle,
+            &provider_api_type,
+            &model_configs,
+            None,
+        )
+        .await
+        .map_err(|e| AppError::ProviderError(e))?,
         &model_code,
         &provider_api_type,
         Some(&model_request_mode),
@@ -1360,7 +1374,14 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     }
 
     let client = genai_client::create_client_with_config(
-        &model_configs,
+        &crate::api::copilot_token_manager::prepare_provider_configs(
+            &app_handle,
+            &provider_api_type,
+            &model_configs,
+            None,
+        )
+        .await
+        .map_err(|e| AppError::ProviderError(e))?,
         &model_code,
         &provider_api_type,
         Some(&model_request_mode),
@@ -1761,7 +1782,14 @@ pub async fn regenerate_ai(
         }
 
         let client = genai_client::create_client_with_config(
-            &regenerate_model_configs,
+            &crate::api::copilot_token_manager::prepare_provider_configs(
+                &app_handle_clone,
+                &regenerate_provider_api_type,
+                &regenerate_model_configs,
+                network_proxy.as_deref(),
+            )
+            .await
+            .map_err(|e| AppError::ProviderError(e))?,
             &regenerate_model_code,
             &regenerate_provider_api_type,
             Some(&regenerate_model_request_mode),

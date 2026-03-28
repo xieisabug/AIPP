@@ -8,6 +8,7 @@ pub mod conversation_api;
 pub mod copilot_api;
 #[cfg(desktop)]
 pub mod copilot_lsp;
+pub mod copilot_token_manager;
 pub mod export_api;
 pub mod genai_client;
 pub mod highlight_api;

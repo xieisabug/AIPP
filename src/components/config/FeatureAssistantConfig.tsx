@@ -262,14 +262,14 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                     // ConfigForm's model-select uses value format: `${model.code}%%${model.llm_provider_id}`
                     title_model: modelCode && providerId ? `${modelCode}%%${providerId}` : "",
                     title_summary_length: summaryConfig.get("title_summary_length") || summaryConfig.get("summary_length") || "100",
-                     title_prompt: summaryConfig.get("title_prompt") || summaryConfig.get("prompt") || "",
-                     // 表单自动填写
-                     form_autofill_enabled: summaryConfig.get("form_autofill_enabled") !== "false",
-                     form_autofill_model: summaryConfig.get("form_autofill_model") || "",
-                     // 记忆总结
-                     memory_summary_enabled: summaryConfig.get("memory_summary_enabled") !== "false",
-                     memory_summary_model: (() => {
-                         const model = summaryConfig.get("memory_summary_model") || "";
+                    title_prompt: summaryConfig.get("title_prompt") || summaryConfig.get("prompt") || "",
+                    // 表单自动填写
+                    form_autofill_enabled: summaryConfig.get("form_autofill_enabled") !== "false",
+                    form_autofill_model: summaryConfig.get("form_autofill_model") || "",
+                    // 记忆总结
+                    memory_summary_enabled: summaryConfig.get("memory_summary_enabled") !== "false",
+                    memory_summary_model: (() => {
+                        const model = summaryConfig.get("memory_summary_model") || "";
                         const providerId = summaryConfig.get("memory_summary_provider_id") || "";
                         return model && providerId ? `${model}%%${providerId}` : "";
                     })(),

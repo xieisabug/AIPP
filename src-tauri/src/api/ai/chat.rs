@@ -687,10 +687,7 @@ mod tests {
 
         merge_streaming_tool_call(&mut existing, &incoming);
 
-        assert_eq!(
-            existing.fn_arguments,
-            serde_json::json!("{\"code\":\"<div>Loading</div>\"}")
-        );
+        assert_eq!(existing.fn_arguments, serde_json::json!("{\"code\":\"<div>Loading</div>\"}"));
     }
 
     #[test]
@@ -710,10 +707,7 @@ mod tests {
 
         merge_streaming_tool_call(&mut existing, &incoming);
 
-        assert_eq!(
-            existing.fn_arguments,
-            serde_json::json!("{\"code\":\"<div>Loading")
-        );
+        assert_eq!(existing.fn_arguments, serde_json::json!("{\"code\":\"<div>Loading"));
     }
 }
 

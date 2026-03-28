@@ -16,8 +16,8 @@ pub mod templates;
 
 pub use agent::{AgentHandler, TodoHandler, TodoState};
 pub use interaction::{
-    handle_preview_file_relay_request, prepare_preview_file_request_for_ui,
-    list_preview_code_requests_for_conversation, submit_ask_user_question_response,
+    handle_preview_file_relay_request, list_preview_code_requests_for_conversation,
+    prepare_preview_file_request_for_ui, submit_ask_user_question_response,
     submit_preview_code_response, InteractionState, PreviewFileRelayState,
     PREVIEW_FILE_RELAY_SCHEME,
 };
@@ -1366,13 +1366,8 @@ pub async fn execute_aipp_builtin_tool(
                     .try_state::<InteractionState>()
                     .ok_or_else(|| "InteractionState not found".to_string())?;
 
-                match request_preview_code(
-                    &app_handle,
-                    state.inner(),
-                    conversation_id,
-                    request,
-                )
-                .await
+                match request_preview_code(&app_handle, state.inner(), conversation_id, request)
+                    .await
                 {
                     Ok(result) => serde_json::json!({
                         "content": [{"type": "json", "json": result}],

@@ -1751,7 +1751,14 @@ async fn execute_scheduled_task_inner(
         .unwrap_or(false);
 
     let client = create_client_with_config(
-        &model_detail.configs,
+        &crate::api::copilot_token_manager::prepare_provider_configs(
+            app_handle,
+            &model_detail.provider.api_type,
+            &model_detail.configs,
+            network_proxy.as_deref(),
+        )
+        .await
+        .map_err(|e| format!("Copilot token exchange failed: {}", e))?,
         &model_detail.model.code,
         &model_detail.provider.api_type,
         Some(&model_detail.model.request_mode),

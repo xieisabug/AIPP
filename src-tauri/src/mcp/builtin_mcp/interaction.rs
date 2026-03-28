@@ -146,19 +146,12 @@ impl PreviewCodeRequest {
         if self.loading_messages.len() > 8 {
             return Err("PreviewCode loading_messages cannot exceed 8 items".to_string());
         }
-        if self
-            .loading_messages
-            .iter()
-            .any(|message| message.trim().is_empty())
-        {
+        if self.loading_messages.iter().any(|message| message.trim().is_empty()) {
             return Err("PreviewCode loading_messages cannot contain empty items".to_string());
         }
         match self.interaction_mode() {
             "none" | "submit_once" => Ok(()),
-            other => Err(format!(
-                "Unsupported preview_code interaction_mode '{}'",
-                other
-            )),
+            other => Err(format!("Unsupported preview_code interaction_mode '{}'", other)),
         }
     }
 
@@ -813,9 +806,7 @@ pub async fn request_preview_code(
     };
 
     let (tx, rx) = oneshot::channel::<PreviewCodeDecision>();
-    interaction_state
-        .store_preview_code_request(event.clone(), tx)
-        .await;
+    interaction_state.store_preview_code_request(event.clone(), tx).await;
 
     info!(
         request_id = %request_id,
@@ -858,9 +849,7 @@ pub async fn list_preview_code_requests_for_conversation(
     let state = app_handle
         .try_state::<InteractionState>()
         .ok_or_else(|| "InteractionState not found".to_string())?;
-    Ok(state
-        .list_preview_code_requests_for_conversation(conversation_id)
-        .await)
+    Ok(state.list_preview_code_requests_for_conversation(conversation_id).await)
 }
 
 pub(crate) async fn resolve_ask_user_question_response(
@@ -921,9 +910,7 @@ pub(crate) async fn resolve_preview_code_response(
         })
     };
 
-    let resolved = state
-        .resolve_preview_code_request(request_id, decision)
-        .await;
+    let resolved = state.resolve_preview_code_request(request_id, decision).await;
 
     if resolved {
         Ok(true)
@@ -955,13 +942,8 @@ pub async fn submit_preview_code_response(
     payload: Option<serde_json::Value>,
     dismissed: Option<bool>,
 ) -> Result<bool, String> {
-    resolve_preview_code_response(
-        &app_handle,
-        &request_id,
-        payload,
-        dismissed.unwrap_or(false),
-    )
-    .await
+    resolve_preview_code_response(&app_handle, &request_id, payload, dismissed.unwrap_or(false))
+        .await
 }
 
 #[cfg(test)]
