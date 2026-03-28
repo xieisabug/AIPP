@@ -1,6 +1,7 @@
 import React, {
     useCallback,
     useEffect,
+    useLayoutEffect,
     useMemo,
     useRef,
     useState,
@@ -26,6 +27,7 @@ interface VirtualizedMessageListProps extends UseMessageListElementsProps {
 }
 
 const MAX_SCROLL_HIGHLIGHT_ATTEMPTS = 60;
+const NEAR_BOTTOM_PIN_PX = 96;
 
 interface VirtualizedRowProps {
     itemKey: string;
@@ -95,6 +97,12 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
     const [measuredHeights, setMeasuredHeights] = useState<Record<string, number>>(
         {},
     );
+    const previousLayoutRef = useRef<ReturnType<typeof buildVirtualizedLayout> | null>(
+        null,
+    );
+    const previousRenderKeysRef = useRef<string[]>([]);
+    const lastKnownScrollTopRef = useRef(0);
+    const userMovedAwayFromBottomRef = useRef(false);
 
     const layout = useMemo(
         () => buildVirtualizedLayout(renderItems, measuredHeights),
@@ -114,7 +122,21 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
             return;
         }
 
-        setScrollTop(container.scrollTop);
+        const nextScrollTop = container.scrollTop;
+        const previousScrollTop = lastKnownScrollTopRef.current;
+        if (nextScrollTop < previousScrollTop - 1) {
+            userMovedAwayFromBottomRef.current = true;
+        }
+        const distanceToBottom = Math.max(
+            0,
+            container.scrollHeight - nextScrollTop - container.clientHeight,
+        );
+        if (distanceToBottom <= 10) {
+            userMovedAwayFromBottomRef.current = false;
+        }
+        lastKnownScrollTopRef.current = nextScrollTop;
+
+        setScrollTop(nextScrollTop);
         setViewportHeight(container.clientHeight);
     }, [scrollContainerRef]);
 
@@ -153,15 +175,88 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
         });
     }, []);
 
-    useEffect(() => {
+    useLayoutEffect(() => {
+        const container = scrollContainerRef.current;
+        const previousLayout = previousLayoutRef.current;
+        const previousRenderKeys = previousRenderKeysRef.current;
+
+        previousLayoutRef.current = layout;
+        previousRenderKeysRef.current = renderItems.map((item) => item.key);
+
+        if (!container || !previousLayout) {
+            return;
+        }
         if (pendingScrollMessageId !== null) {
             return;
         }
 
-        requestAnimationFrame(() => {
-            smartScroll();
-        });
-    }, [layout.totalHeight, pendingScrollMessageId, smartScroll]);
+        const currentScrollTop = container.scrollTop;
+        const currentViewportHeight = container.clientHeight;
+        const previousVirtualMaxScrollTop = Math.max(
+            0,
+            previousLayout.totalHeight - currentViewportHeight,
+        );
+        const previousDistanceToBottom = Math.max(
+            0,
+            previousVirtualMaxScrollTop - currentScrollTop,
+        );
+        const currentMaxScrollTop = Math.max(
+            0,
+            container.scrollHeight - currentViewportHeight,
+        );
+        const currentDistanceToBottom = Math.max(
+            0,
+            currentMaxScrollTop - currentScrollTop,
+        );
+        const shouldPinBottom =
+            ((previousDistanceToBottom <= 10
+                && !userMovedAwayFromBottomRef.current)
+                || currentDistanceToBottom <= NEAR_BOTTOM_PIN_PX);
+
+        if (shouldPinBottom) {
+            userMovedAwayFromBottomRef.current = false;
+            const nextMaxScrollTop = currentMaxScrollTop;
+            if (Math.abs(nextMaxScrollTop - currentScrollTop) > 1) {
+                container.scrollTop = nextMaxScrollTop;
+                updateScrollMetrics();
+            }
+            return;
+        }
+
+        const anchorRange = findVisibleRange(
+            previousLayout,
+            currentScrollTop,
+            currentViewportHeight,
+            0,
+        );
+        const anchorIndex = anchorRange.startIndex;
+        const anchorKey = previousRenderKeys[anchorIndex];
+        if (!anchorKey) {
+            return;
+        }
+
+        const nextAnchorIndex = renderItems.findIndex(
+            (item) => item.key === anchorKey,
+        );
+        if (nextAnchorIndex < 0) {
+            return;
+        }
+
+        const offsetWithinViewport =
+            (previousLayout.tops[anchorIndex] ?? 0) - currentScrollTop;
+        const nextScrollTop =
+            (layout.tops[nextAnchorIndex] ?? 0) - offsetWithinViewport;
+        if (Math.abs(nextScrollTop - currentScrollTop) > 1) {
+            container.scrollTop = Math.max(0, nextScrollTop);
+            updateScrollMetrics();
+        }
+    }, [
+        layout,
+        pendingScrollMessageId,
+        renderItems,
+        scrollContainerRef,
+        updateScrollMetrics,
+    ]);
 
     useEffect(() => {
         if (pendingScrollMessageId === null) {

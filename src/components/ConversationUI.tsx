@@ -872,11 +872,20 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 // 在渲染和布局之后执行，避免时间竞态
                 requestAnimationFrame(() =>
                     requestAnimationFrame(() => {
+                        if (virtualizeMessages) {
+                            smartScroll(true, "smooth");
+                            return;
+                        }
                         scrollToUserMessage();
                     })
                 );
             }
-        }, [allDisplayMessages.length, scrollToUserMessage]);
+        }, [
+            allDisplayMessages.length,
+            scrollToUserMessage,
+            smartScroll,
+            virtualizeMessages,
+        ]);
 
         useEffect(() => {
             if (!inlineInteractionVisible) {
