@@ -40,6 +40,7 @@ pub(crate) const BUTLER_SYSTEM_ASSISTANT_NAME: &str = "__aipp_internal_butler_sy
 const BUTLER_SYSTEM_ASSISTANT_DESCRIPTION: &str = "AIPP 总管家系统保留助手，请勿展示给普通用户。";
 const TASK_RESULT_DETAIL_LIMIT: usize = 4000;
 const TASK_RESULT_STRUCTURED_OUTPUT_LIMIT: usize = 4000;
+const TASK_RESULT_SUMMARY_LIMIT: usize = 320;
 type ButlerContinuationLockRegistry = Arc<Mutex<HashMap<i64, Arc<Mutex<()>>>>>;
 static BUTLER_MAIN_CONTINUATION_LOCKS: OnceLock<ButlerContinuationLockRegistry> = OnceLock::new();
 static BUTLER_TASK_FINALIZATION_LOCKS: OnceLock<ButlerContinuationLockRegistry> = OnceLock::new();
@@ -77,6 +78,7 @@ const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，是负责�
 13. 即使没有 `manual_review_required=true`，你也必须保持安全优先：默认选择最小授权，不要自动使用 `allow_and_save`，也不要选择 ACP 的持久授权选项（如 `allow_always`）。
 14. 不可以产出非要求格式的结果，比如要求交互展示却只生成了代码让用户去手动执行（正确的做法应该是生成html文件或者Artifact），比如要求交付office文档格式Word、Excel、PowerPoint 却只输出了Markdown或者代码块（应该使用skills或者代码执行能力生成对应的文件），如果实在无法产出对应的文件，应该与用户确认后再生成其他降级的格式。
 15. 当 `<butler_task_attention>` 的 attention_kind 为 `ask_user_question` 时，说明子任务助手正在向你提问并等待回答。你应先使用 `task_conversation_operation read` 查看 `pending_ask_user_questions` 列表，理解问题内容后，使用 `task_conversation_operation` 的 `ask_user_respond` action 提供回答。回答应基于你已有的任务上下文和对话历史做出合理判断；如果确实无法判断，可以将问题转述给用户。
+16. 系统会在定时任务执行完成后，通过 `<butler_scheduled_task_result>` 回流消息把结果送回你；收到后应评估结果，决定是否需要汇报给用户、触发后续操作或安静归档。对于常规无异常的定时任务结果，简短记录即可，无需每次都打扰用户。
 
 ## 能力使用规则
 1. 系统会先在上下文中注入可派发助手目录，再注入当前可用的 MCP 工具与 Skills 目录，把它们当作运行时能力目录来使用。
@@ -87,6 +89,7 @@ const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，是负责�
 6. 若任务更适合交给专门助手、专门工具链或独立上下文执行，优先拆解并派发。
 7. 必要时，可以加载 AIPP相关的 skills 来增强完成任务的能力，这些 skills 会让你对整个系统有更清晰的认识。
 8. 如果有类似准备资料、产出文件的任务，你可以使用文件系统来进行辅助，也可使用文件系统来辅助多个助手任务之间的协作。
+9. `schedule_task` 工具可以直接创建、查看、修改和删除定时任务，无需通过 SuperAdmin 接口。适用于需要定期执行的监控、检查、汇总等场景。创建时自动绑定当前会话，执行结果会自动回流。
 
 ## 沟通风格
 - 直接、有判断、不说空话。
@@ -630,7 +633,7 @@ fn summarize_text(text: &str) -> String {
     let compact =
         text.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>().join(" ");
     let mut chars = compact.chars();
-    let summary: String = chars.by_ref().take(160).collect();
+    let summary: String = chars.by_ref().take(TASK_RESULT_SUMMARY_LIMIT).collect();
     if chars.next().is_some() {
         format!("{}...", summary)
     } else if summary.is_empty() {
@@ -672,7 +675,7 @@ pub(crate) fn resolve_butler_execution_window(app_handle: &AppHandle) -> Result<
     Err("No available window for butler continuation".to_string())
 }
 
-fn resolve_or_create_butler_execution_window(app_handle: &AppHandle) -> Result<Window, String> {
+pub(crate) fn resolve_or_create_butler_execution_window(app_handle: &AppHandle) -> Result<Window, String> {
     if let Ok(window) = resolve_butler_execution_window(app_handle) {
         return Ok(window);
     }

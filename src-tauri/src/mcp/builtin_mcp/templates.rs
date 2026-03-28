@@ -41,6 +41,31 @@ pub struct BuiltinToolInfo {
     pub input_schema: serde_json::Value,
 }
 
+/// Returns true if the entire builtin command (server) is butler-only.
+pub fn is_butler_only_builtin_command(command: &str) -> bool {
+    matches!(
+        super::builtin_command_id(command).as_deref(),
+        Some("superadmin")
+    )
+}
+
+/// Butler-only tool names within the `aipp:agent` command.
+const BUTLER_ONLY_AGENT_TOOLS: &[&str] = &[
+    "spawn_task_conversation",
+    "task_conversation_operation",
+    "schedule_task",
+];
+
+/// Returns true if the given tool from `aipp:agent` is butler-only.
+pub fn is_butler_only_agent_tool(tool_name: &str) -> bool {
+    BUTLER_ONLY_AGENT_TOOLS.contains(&tool_name)
+}
+
+/// Returns true if the conversation is in butler mode.
+pub fn is_butler_conversation_kind(kind: &str) -> bool {
+    kind == "butler_main" || kind == "butler_task"
+}
+
 fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
     vec![
         // Agent 工具
@@ -510,6 +535,81 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         }
                     },
                     "required": ["action", "task_conversation_id"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "schedule_task".into(),
+                description: "Manage scheduled tasks (定时任务) that run periodically or at a specific time. Use this to create, list, update, delete, enable, or disable scheduled tasks. Tasks created through this tool are automatically linked to the current butler conversation for result backflow.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["create", "list", "get", "update", "delete", "enable", "disable"],
+                            "description": "Action to perform. create: create new task; list: list all tasks owned by this butler; get: get task details + recent runs; update: modify task; delete: remove task; enable/disable: toggle task."
+                        },
+                        "task_id": {
+                            "type": "integer",
+                            "description": "Required for get/update/delete/enable/disable. The scheduled task ID."
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Task name. Required for create."
+                        },
+                        "schedule_type": {
+                            "type": "string",
+                            "enum": ["once", "interval"],
+                            "description": "Required for create. 'once' runs at a specific time, 'interval' runs repeatedly."
+                        },
+                        "interval_value": {
+                            "type": "integer",
+                            "description": "For interval type. The numeric interval value (e.g. 2 for 'every 2 hours')."
+                        },
+                        "interval_unit": {
+                            "type": "string",
+                            "enum": ["minute", "hour", "day", "week", "month"],
+                            "description": "For interval type. The time unit for the interval."
+                        },
+                        "start_time": {
+                            "type": "string",
+                            "description": "For day/week/month intervals. The time of day to run in HH:mm format (e.g. '14:30')."
+                        },
+                        "week_days": {
+                            "type": "array",
+                            "items": { "type": "integer" },
+                            "description": "For week intervals. Days of the week (0=Sun, 1=Mon, ..., 6=Sat)."
+                        },
+                        "month_days": {
+                            "type": "array",
+                            "items": { "type": "integer" },
+                            "description": "For month intervals. Days of the month (1-31)."
+                        },
+                        "run_at": {
+                            "type": "string",
+                            "description": "For 'once' type. The datetime to run at in 'YYYY-MM-DD HH:mm' format (local time)."
+                        },
+                        "assistant_id": {
+                            "type": "integer",
+                            "description": "The assistant to execute the task. Either assistant_id or assistant_name is required for create."
+                        },
+                        "assistant_name": {
+                            "type": "string",
+                            "description": "Assistant name to look up. Used when assistant_id is not known."
+                        },
+                        "task_prompt": {
+                            "type": "string",
+                            "description": "The prompt/instruction for the scheduled task. Required for create."
+                        },
+                        "notify_prompt": {
+                            "type": "string",
+                            "description": "Optional prompt to decide whether to notify the user after execution. If omitted, a sensible default is used."
+                        },
+                        "butler_conversation_id": {
+                            "type": "integer",
+                            "description": "Optional. Butler main conversation id. If omitted, the current conversation context is used."
+                        }
+                    },
+                    "required": ["action"]
                 }),
             },
         ],

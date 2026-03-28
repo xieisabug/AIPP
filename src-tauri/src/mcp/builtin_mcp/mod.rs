@@ -51,6 +51,17 @@ pub struct BuiltinExecutionResult {
     pub is_error: bool,
 }
 
+/// Look up conversation_kind for a given conversation_id.
+/// Scopes the Repository trait import to avoid conflicts.
+fn get_conversation_kind(app_handle: &AppHandle, conversation_id: i64) -> Option<String> {
+    use crate::db::conversation_db::Repository;
+    crate::db::conversation_db::ConversationDatabase::new(app_handle)
+        .ok()
+        .and_then(|db| db.conversation_repo().ok())
+        .and_then(|repo| repo.read(conversation_id).ok().flatten())
+        .map(|c| c.conversation_kind)
+}
+
 fn matches_keyword(value: &str, keyword: &str) -> bool {
     value.to_lowercase().contains(&keyword.to_lowercase())
 }
@@ -1395,6 +1406,21 @@ pub async fn execute_aipp_builtin_tool(
             };
             use crate::api::operation_api::{confirm_acp_permission, confirm_operation_permission};
             use agent::types::*;
+            use crate::mcp::builtin_mcp::templates::{is_butler_only_agent_tool, is_butler_conversation_kind};
+
+            // Runtime guard: butler-only agent tools require butler conversation
+            if is_butler_only_agent_tool(&tool_name) {
+                let is_butler_conv = conversation_id
+                    .and_then(|cid| get_conversation_kind(&app_handle, cid))
+                    .map(|kind| is_butler_conversation_kind(&kind))
+                    .unwrap_or(false);
+                if !is_butler_conv {
+                    return Ok(serde_json::to_string(&serde_json::json!({
+                        "content": [{"type": "text", "text": format!("Tool '{}' is only available in Butler conversations", tool_name)}],
+                        "isError": true
+                    })).unwrap());
+                }
+            }
 
             let handler = AgentHandler::new(app_handle.clone());
 
@@ -1969,13 +1995,271 @@ pub async fn execute_aipp_builtin_tool(
                         }),
                     }
                 }
+                "schedule_task" => {
+                    use crate::api::scheduled_task_api::{
+                        create_scheduled_task, delete_scheduled_task, list_scheduled_tasks,
+                        CreateScheduledTaskRequest, UpdateScheduledTaskRequest,
+                    };
+                    use crate::db::scheduled_task_db::ScheduledTaskDatabase;
+                    use crate::db::assistant_db::AssistantDatabase;
+
+                    let action = args
+                        .get("action")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let butler_cid = args
+                        .get("butler_conversation_id")
+                        .and_then(|v| v.as_i64())
+                        .or(conversation_id);
+
+                    match action {
+                        "create" => {
+                            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            if name.is_empty() {
+                                return Ok(r#"{"content":[{"type":"text","text":"缺少必要参数 name"}],"isError":true}"#.to_string());
+                            }
+                            let schedule_type = args.get("schedule_type").and_then(|v| v.as_str()).unwrap_or("interval").to_string();
+                            let task_prompt = args.get("task_prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            if task_prompt.is_empty() {
+                                return Ok(r#"{"content":[{"type":"text","text":"缺少必要参数 task_prompt"}],"isError":true}"#.to_string());
+                            }
+
+                            // Resolve assistant_id from assistant_name if needed
+                            let mut assistant_id = args.get("assistant_id").and_then(|v| v.as_i64()).unwrap_or(0);
+                            if assistant_id == 0 {
+                                if let Some(name_str) = args.get("assistant_name").and_then(|v| v.as_str()) {
+                                    if let Ok(db) = AssistantDatabase::new(&app_handle) {
+                                        if let Ok(assistants) = db.get_assistants() {
+                                            if let Some(found) = assistants.iter().find(|a| a.name == name_str) {
+                                                assistant_id = found.id;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if assistant_id == 0 {
+                                return Ok(r#"{"content":[{"type":"text","text":"无法确定执行助手，请提供 assistant_id 或有效的 assistant_name"}],"isError":true}"#.to_string());
+                            }
+
+                            let notify_prompt = args.get("notify_prompt").and_then(|v| v.as_str())
+                                .unwrap_or("如果任务结果包含重要信息或需要用户关注的内容则通知")
+                                .to_string();
+
+                            let request = CreateScheduledTaskRequest {
+                                name,
+                                is_enabled: true,
+                                schedule_type,
+                                interval_value: args.get("interval_value").and_then(|v| v.as_i64()),
+                                interval_unit: args.get("interval_unit").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                start_time: args.get("start_time").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                week_days: args.get("week_days").and_then(|v| v.as_array()).map(|arr| {
+                                    arr.iter().filter_map(|v| v.as_i64().map(|n| n as i32)).collect()
+                                }),
+                                month_days: args.get("month_days").and_then(|v| v.as_array()).map(|arr| {
+                                    arr.iter().filter_map(|v| v.as_i64().map(|n| n as i32)).collect()
+                                }),
+                                run_at: args.get("run_at").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                assistant_id,
+                                task_prompt,
+                                notify_prompt,
+                                butler_conversation_id: butler_cid,
+                            };
+
+                            match create_scheduled_task(app_handle.clone(), request).await {
+                                Ok(dto) => serde_json::json!({
+                                    "content": [{"type": "json", "json": dto}],
+                                    "isError": false
+                                }),
+                                Err(e) => serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("创建定时任务失败: {}", e)}],
+                                    "isError": true
+                                }),
+                            }
+                        }
+                        "list" => {
+                            if let Some(bcid) = butler_cid {
+                                match crate::api::scheduled_task_api::list_butler_scheduled_tasks(app_handle.clone(), bcid).await {
+                                    Ok(tasks) => serde_json::json!({
+                                        "content": [{"type": "json", "json": tasks}],
+                                        "isError": false
+                                    }),
+                                    Err(e) => serde_json::json!({
+                                        "content": [{"type": "text", "text": format!("列出定时任务失败: {}", e)}],
+                                        "isError": true
+                                    }),
+                                }
+                            } else {
+                                match list_scheduled_tasks(app_handle.clone()).await {
+                                    Ok(tasks) => serde_json::json!({
+                                        "content": [{"type": "json", "json": tasks}],
+                                        "isError": false
+                                    }),
+                                    Err(e) => serde_json::json!({
+                                        "content": [{"type": "text", "text": format!("列出定时任务失败: {}", e)}],
+                                        "isError": true
+                                    }),
+                                }
+                            }
+                        }
+                        "get" => {
+                            let task_id = match args.get("task_id").and_then(|v| v.as_i64()) {
+                                Some(id) => id,
+                                None => return Ok(r#"{"content":[{"type":"text","text":"缺少必要参数 task_id"}],"isError":true}"#.to_string()),
+                            };
+                            let db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+                            match db.read_task(task_id) {
+                                Ok(Some(task)) => {
+                                    let runs = db.list_runs_by_task(task_id, 5).unwrap_or_default();
+                                    let dto = crate::api::scheduled_task_api::to_dto(task);
+                                    serde_json::json!({
+                                        "content": [{"type": "json", "json": {
+                                            "task": dto,
+                                            "recent_runs": runs
+                                        }}],
+                                        "isError": false
+                                    })
+                                }
+                                Ok(None) => serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("定时任务 {} 不存在", task_id)}],
+                                    "isError": true
+                                }),
+                                Err(e) => serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("查询失败: {}", e)}],
+                                    "isError": true
+                                }),
+                            }
+                        }
+                        "update" => {
+                            let task_id = match args.get("task_id").and_then(|v| v.as_i64()) {
+                                Some(id) => id,
+                                None => return Ok(r#"{"content":[{"type":"text","text":"缺少必要参数 task_id"}],"isError":true}"#.to_string()),
+                            };
+                            let db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+                            let existing = match db.read_task(task_id) {
+                                Ok(Some(t)) => t,
+                                Ok(None) => return Ok(format!(r#"{{"content":[{{"type":"text","text":"定时任务 {} 不存在"}}],"isError":true}}"#, task_id)),
+                                Err(e) => return Ok(format!(r#"{{"content":[{{"type":"text","text":"查询失败: {}"}}],"isError":true}}"#, e)),
+                            };
+
+                            let mut new_assistant_id = args.get("assistant_id").and_then(|v| v.as_i64()).unwrap_or(existing.assistant_id);
+                            if let Some(name_str) = args.get("assistant_name").and_then(|v| v.as_str()) {
+                                if let Ok(adb) = AssistantDatabase::new(&app_handle) {
+                                    if let Ok(assistants) = adb.get_assistants() {
+                                        if let Some(found) = assistants.iter().find(|a| a.name == name_str) {
+                                            new_assistant_id = found.id;
+                                        }
+                                    }
+                                }
+                            }
+
+                            let request = UpdateScheduledTaskRequest {
+                                id: task_id,
+                                name: args.get("name").and_then(|v| v.as_str()).unwrap_or(&existing.name).to_string(),
+                                is_enabled: existing.is_enabled,
+                                schedule_type: args.get("schedule_type").and_then(|v| v.as_str()).unwrap_or(&existing.schedule_type).to_string(),
+                                interval_value: args.get("interval_value").and_then(|v| v.as_i64()).or(existing.interval_value),
+                                interval_unit: args.get("interval_unit").and_then(|v| v.as_str()).map(|s| s.to_string()).or(existing.interval_unit),
+                                start_time: args.get("start_time").and_then(|v| v.as_str()).map(|s| s.to_string()).or(existing.start_time),
+                                week_days: args.get("week_days").and_then(|v| v.as_array()).map(|arr| {
+                                    arr.iter().filter_map(|v| v.as_i64().map(|n| n as i32)).collect()
+                                }).or_else(|| crate::api::scheduled_task_api::parse_json_array(&existing.week_days)),
+                                month_days: args.get("month_days").and_then(|v| v.as_array()).map(|arr| {
+                                    arr.iter().filter_map(|v| v.as_i64().map(|n| n as i32)).collect()
+                                }).or_else(|| crate::api::scheduled_task_api::parse_json_array(&existing.month_days)),
+                                run_at: args.get("run_at").and_then(|v| v.as_str()).map(|s| s.to_string()).or_else(|| existing.run_at.map(|dt| dt.to_rfc3339())),
+                                assistant_id: new_assistant_id,
+                                task_prompt: args.get("task_prompt").and_then(|v| v.as_str()).unwrap_or(&existing.task_prompt).to_string(),
+                                notify_prompt: args.get("notify_prompt").and_then(|v| v.as_str()).unwrap_or(&existing.notify_prompt).to_string(),
+                            };
+
+                            match crate::api::scheduled_task_api::update_scheduled_task(app_handle.clone(), request).await {
+                                Ok(dto) => serde_json::json!({
+                                    "content": [{"type": "json", "json": dto}],
+                                    "isError": false
+                                }),
+                                Err(e) => serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("更新定时任务失败: {}", e)}],
+                                    "isError": true
+                                }),
+                            }
+                        }
+                        "delete" => {
+                            let task_id = match args.get("task_id").and_then(|v| v.as_i64()) {
+                                Some(id) => id,
+                                None => return Ok(r#"{"content":[{"type":"text","text":"缺少必要参数 task_id"}],"isError":true}"#.to_string()),
+                            };
+                            match delete_scheduled_task(app_handle.clone(), task_id).await {
+                                Ok(()) => serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("定时任务 {} 已删除", task_id)}],
+                                    "isError": false
+                                }),
+                                Err(e) => serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("删除定时任务失败: {}", e)}],
+                                    "isError": true
+                                }),
+                            }
+                        }
+                        "enable" | "disable" => {
+                            let task_id = match args.get("task_id").and_then(|v| v.as_i64()) {
+                                Some(id) => id,
+                                None => return Ok(r#"{"content":[{"type":"text","text":"缺少必要参数 task_id"}],"isError":true}"#.to_string()),
+                            };
+                            let db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+                            match db.read_task(task_id) {
+                                Ok(Some(mut task)) => {
+                                    task.is_enabled = action == "enable";
+                                    task.updated_time = chrono::Utc::now();
+                                    match db.update_task(&task) {
+                                        Ok(()) => {
+                                            let state_str = if action == "enable" { "已启用" } else { "已禁用" };
+                                            serde_json::json!({
+                                                "content": [{"type": "text", "text": format!("定时任务 {} {}", task_id, state_str)}],
+                                                "isError": false
+                                            })
+                                        }
+                                        Err(e) => serde_json::json!({
+                                            "content": [{"type": "text", "text": format!("操作失败: {}", e)}],
+                                            "isError": true
+                                        }),
+                                    }
+                                }
+                                Ok(None) => serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("定时任务 {} 不存在", task_id)}],
+                                    "isError": true
+                                }),
+                                Err(e) => serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("查询失败: {}", e)}],
+                                    "isError": true
+                                }),
+                            }
+                        }
+                        _ => serde_json::json!({
+                            "content": [{"type": "text", "text": format!("Unknown schedule_task action: {}", action)}],
+                            "isError": true
+                        }),
+                    }
+                }
                 _ => serde_json::json!({
                     "content": [{"type": "text", "text": format!("Unknown agent tool: {}", tool_name)}],
                     "isError": true
                 }),
             }
         }
-        "superadmin" => superadmin::dispatch(&app_handle, &tool_name, &args, conversation_id).await,
+        "superadmin" => {
+            // Runtime guard: superadmin tools require butler conversation
+            let is_butler_conv = conversation_id
+                .and_then(|cid| get_conversation_kind(&app_handle, cid))
+                .map(|kind| templates::is_butler_conversation_kind(&kind))
+                .unwrap_or(false);
+            if !is_butler_conv {
+                serde_json::json!({
+                    "content": [{"type": "text", "text": format!("Tool '{}' is only available in Butler conversations", tool_name)}],
+                    "isError": true
+                })
+            } else {
+                superadmin::dispatch(&app_handle, &tool_name, &args, conversation_id).await
+            }
+        }
         _ => serde_json::json!({
             "content": [{"type": "text", "text": format!("Unknown builtin command: {}", cmd_id)}],
             "isError": true

@@ -1,11 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, once } from "@tauri-apps/api/event";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
     Bot,
     Check,
+    ChevronDown,
+    ChevronRight,
+    Clock,
     ExternalLink,
     Loader2,
     PauseCircle,
@@ -75,6 +77,19 @@ function safeParseJson<T>(value?: string | null): T | null {
     } catch {
         return null;
     }
+}
+
+interface ButlerScheduledTask {
+    id: number;
+    name: string;
+    isEnabled: boolean;
+    scheduleType: "once" | "interval";
+    intervalValue?: number | null;
+    intervalUnit?: string | null;
+    startTime?: string | null;
+    nextRunAt?: string | null;
+    lastRunAt?: string | null;
+    taskPrompt: string;
 }
 
 function sortTasks(tasks: ButlerTaskListItem[]): ButlerTaskListItem[] {
@@ -209,6 +224,9 @@ function ButlerExperimentWindow() {
     const showFeishuStatus = butlerExperimentEnabled && feishuEnabled;
 
     const conversationUIRef = useRef<ConversationUIRef>(null);
+    const latestTaskDetailRequestRef = useRef(0);
+    const selectedTaskIdRef = useRef<number | null>(null);
+    const isTaskDetailDialogOpenRef = useRef(false);
     const [pluginList, setPluginList] = useState<any[]>([]);
     const [assistants, setAssistants] = useState<AssistantListItem[]>([]);
     const [mainConversationId, setMainConversationId] = useState<string>("");
@@ -232,6 +250,8 @@ function ButlerExperimentWindow() {
     const [feishuStatus, setFeishuStatus] = useState<FeishuRuntimeStatus | null>(null);
     const [isMainConversationFeishuBound, setIsMainConversationFeishuBound] =
         useState(false);
+    const [scheduledTasks, setScheduledTasks] = useState<ButlerScheduledTask[]>([]);
+    const [isScheduledTasksExpanded, setIsScheduledTasksExpanded] = useState(false);
 
     const conversationIdNumber = mainConversationId ? parseInt(mainConversationId, 10) : undefined;
     const permissionConversationIds = useMemo(() => {
@@ -382,6 +402,7 @@ function ButlerExperimentWindow() {
     }, [applyMainConversationResult]);
 
     const loadTaskDetail = useCallback(async (taskConversationId: number) => {
+        const requestId = ++latestTaskDetailRequestRef.current;
         setLoadingTaskDetail(true);
         try {
             const detail = await invoke<ButlerTaskDetailResponse>(
@@ -390,14 +411,56 @@ function ButlerExperimentWindow() {
                     taskConversationId,
                 }
             );
+            if (requestId !== latestTaskDetailRequestRef.current) {
+                return;
+            }
             setSelectedTaskDetail(detail);
         } catch (error) {
+            if (requestId !== latestTaskDetailRequestRef.current) {
+                return;
+            }
             console.error("[ButlerExperimentWindow] Failed to load task detail:", error);
             toast.error("加载任务详情失败");
         } finally {
-            setLoadingTaskDetail(false);
+            if (requestId === latestTaskDetailRequestRef.current) {
+                setLoadingTaskDetail(false);
+            }
         }
     }, []);
+
+    const closeTaskDetail = useCallback(() => {
+        latestTaskDetailRequestRef.current += 1;
+        setIsTaskDetailDialogOpen(false);
+        setSelectedTaskId(null);
+        setSelectedTaskDetail(null);
+        setLoadingTaskDetail(false);
+    }, []);
+
+    useEffect(() => {
+        selectedTaskIdRef.current = selectedTaskId;
+    }, [selectedTaskId]);
+
+    useEffect(() => {
+        isTaskDetailDialogOpenRef.current = isTaskDetailDialogOpen;
+    }, [isTaskDetailDialogOpen]);
+
+    useEffect(() => {
+        if (!isTaskDetailDialogOpen) {
+            return;
+        }
+
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === "Escape") {
+                event.preventDefault();
+                closeTaskDetail();
+            }
+        };
+
+        window.addEventListener("keydown", handleKeyDown);
+        return () => {
+            window.removeEventListener("keydown", handleKeyDown);
+        };
+    }, [closeTaskDetail, isTaskDetailDialogOpen]);
 
     const loadFeishuStatus = useCallback(
         async (options?: { silent?: boolean }) => {
@@ -459,10 +522,49 @@ function ButlerExperimentWindow() {
         [showFeishuStatus]
     );
 
+    const loadButlerScheduledTasks = useCallback(async () => {
+        if (!mainConversationId) return;
+        try {
+            const result = await invoke<ButlerScheduledTask[]>("list_butler_scheduled_tasks", {
+                butlerConversationId: parseInt(mainConversationId, 10),
+            });
+            setScheduledTasks(result);
+        } catch (error) {
+            console.error("[ButlerExperimentWindow] Failed to load scheduled tasks:", error);
+        }
+    }, [mainConversationId]);
+
+    const loadTaskList = useCallback(
+        async (options?: { silentError?: boolean }) => {
+            if (!mainConversationId) {
+                return;
+            }
+
+            const silentError = options?.silentError ?? false;
+            try {
+                const result = await invoke<ButlerTaskListItem[]>("list_butler_tasks", {
+                    butlerConversationId: parseInt(mainConversationId, 10),
+                });
+                setLoadError(null);
+                setTasks(sortTasks(result));
+            } catch (error) {
+                console.error("[ButlerExperimentWindow] Failed to load task list:", error);
+                if (!silentError) {
+                    toast.error("加载任务列表失败");
+                }
+            }
+        },
+        [mainConversationId]
+    );
+
     useEffect(() => {
         void loadAssistants();
         void loadMainConversation({ showLoading: true });
     }, [loadAssistants, loadMainConversation]);
+
+    useEffect(() => {
+        void loadButlerScheduledTasks();
+    }, [loadButlerScheduledTasks]);
 
     useEffect(() => {
         if (assistants.length === 0) {
@@ -475,14 +577,6 @@ function ButlerExperimentWindow() {
             setTaskAssistantId(String(assistants[0].id));
         }
     }, [assistants, taskAssistantId]);
-
-    useEffect(() => {
-        if (!selectedTaskId) {
-            setSelectedTaskDetail(null);
-            return;
-        }
-        void loadTaskDetail(selectedTaskId);
-    }, [loadTaskDetail, selectedTaskId]);
 
     useEffect(() => {
         const unlisten = listen("feature_config_changed", () => {
@@ -572,41 +666,33 @@ function ButlerExperimentWindow() {
             setTaskGoal("");
             setIsStatsDialogOpen(false);
             setIsTaskDialogOpen(false);
-            setIsTaskDetailDialogOpen(false);
-            setSelectedTaskId(null);
-            setSelectedTaskDetail(null);
-        });
-        const focusListener = getCurrentWebviewWindow().onFocusChanged(({ payload }) => {
-            if (payload) {
-                void loadMainConversation({ silentError: true });
-                if (showFeishuStatus) {
-                    void loadFeishuStatus({ silent: true });
-                    if (conversationIdNumber !== undefined) {
-                        void loadMainConversationFeishuBinding(conversationIdNumber, {
-                            silent: true,
-                        });
-                    }
-                }
-                if (selectedTaskId && isTaskDetailDialogOpen) {
-                    void loadTaskDetail(selectedTaskId);
-                }
-            }
+            closeTaskDetail();
         });
 
         return () => {
             unlistenHidden.then((unlisten) => unlisten()).catch(console.warn);
-            focusListener.then((unlisten) => unlisten()).catch(console.warn);
         };
-    }, [
-        conversationIdNumber,
-        isTaskDetailDialogOpen,
-        loadFeishuStatus,
-        loadMainConversationFeishuBinding,
-        loadMainConversation,
-        loadTaskDetail,
-        selectedTaskId,
-        showFeishuStatus,
-    ]);
+    }, [closeTaskDetail]);
+
+    useEffect(() => {
+        if (conversationIdNumber === undefined) {
+            return;
+        }
+
+        const intervalId = window.setInterval(() => {
+            void loadTaskList({ silentError: true });
+            if (
+                selectedTaskIdRef.current &&
+                isTaskDetailDialogOpenRef.current
+            ) {
+                void loadTaskDetail(selectedTaskIdRef.current);
+            }
+        }, 1000);
+
+        return () => {
+            window.clearInterval(intervalId);
+        };
+    }, [conversationIdNumber, loadTaskDetail, loadTaskList]);
 
     useEffect(() => {
         if (!conversationIdNumber) {
@@ -625,7 +711,7 @@ function ButlerExperimentWindow() {
                     return;
                 }
                 setTasks((current) => upsertTask(current, payload));
-                if (selectedTaskId === payload.task_conversation_id) {
+                if (selectedTaskIdRef.current === payload.task_conversation_id) {
                     void loadTaskDetail(payload.task_conversation_id);
                 }
             }),
@@ -636,7 +722,7 @@ function ButlerExperimentWindow() {
                         return;
                     }
                     setTasks((current) => upsertTask(current, payload.task));
-                    if (selectedTaskId === payload.task.task_conversation_id) {
+                    if (selectedTaskIdRef.current === payload.task.task_conversation_id) {
                         void loadTaskDetail(payload.task.task_conversation_id);
                     }
                 }
@@ -656,7 +742,7 @@ function ButlerExperimentWindow() {
                 listener.then((unlisten) => unlisten()).catch(console.warn);
             });
         };
-    }, [conversationIdNumber, loadTaskDetail, selectedTaskId]);
+    }, [conversationIdNumber, loadTaskDetail]);
 
     const handleResetMainConversation = useCallback(async () => {
         setResettingMainConversation(true);
@@ -665,9 +751,7 @@ function ButlerExperimentWindow() {
                 "reset_butler_main_conversation"
             );
             applyMainConversationResult(result);
-            setSelectedTaskId(null);
-            setSelectedTaskDetail(null);
-            setIsTaskDetailDialogOpen(false);
+            closeTaskDetail();
             toast.success("已重开新的总管家主会话");
         } catch (error) {
             console.error("[ButlerExperimentWindow] Failed to reset main conversation:", error);
@@ -677,7 +761,7 @@ function ButlerExperimentWindow() {
         } finally {
             setResettingMainConversation(false);
         }
-    }, [applyMainConversationResult]);
+    }, [applyMainConversationResult, closeTaskDetail]);
 
     const handleOpenSettings = useCallback(() => {
         void invoke("open_config_window").catch((error) => {
@@ -770,8 +854,11 @@ function ButlerExperimentWindow() {
 
     const handleOpenTaskDetail = useCallback((taskConversationId: number) => {
         setSelectedTaskId(taskConversationId);
+        setSelectedTaskDetail(null);
+        setLoadingTaskDetail(true);
         setIsTaskDetailDialogOpen(true);
-    }, []);
+        void loadTaskDetail(taskConversationId);
+    }, [loadTaskDetail]);
 
     useAppShortcuts("butler", {
         new: () => {
@@ -797,6 +884,10 @@ function ButlerExperimentWindow() {
             ""
         );
     }, [selectedTaskDetail]);
+
+    const selectedTaskSummary = selectedTaskDetail?.result?.summary ||
+        selectedTaskDetail?.task.last_summary ||
+        "";
 
     return (
         <AntiLeakageProvider enabled={antiLeakageEnabled}>
@@ -878,7 +969,7 @@ function ButlerExperimentWindow() {
                         />
                     </div>
 
-                    <ScrollArea className="min-h-0 flex-1" data-aipp-slot="butler-task-list-scroll">
+                    <div className="min-h-0 flex-1 overflow-y-auto" data-aipp-slot="butler-task-list-scroll">
                         <div className="space-y-2 p-3">
                             {tasks.length === 0 ? (
                                 <div className="space-y-3 rounded-xl border border-dashed border-border p-4 text-sm text-muted-foreground">
@@ -911,12 +1002,11 @@ function ButlerExperimentWindow() {
                                 <button
                                     key={task.task_conversation_id}
                                     type="button"
-                                    className={`w-full rounded-xl p-3 text-left transition-colors ${
-                                        isTaskDetailDialogOpen &&
+                                    className={`w-full rounded-xl p-3 text-left transition-colors ${isTaskDetailDialogOpen &&
                                         selectedTaskId === task.task_conversation_id
-                                            ? "bg-primary/8 ring-1 ring-primary"
-                                            : "hover:bg-muted/40"
-                                    }`}
+                                        ? "bg-primary/8 ring-1 ring-primary"
+                                        : "hover:bg-muted/40"
+                                        }`}
                                     onClick={() =>
                                         handleOpenTaskDetail(task.task_conversation_id)
                                     }
@@ -948,7 +1038,58 @@ function ButlerExperimentWindow() {
                                 </button>
                             ))}
                         </div>
-                    </ScrollArea>
+                    </div>
+
+                    {scheduledTasks.length > 0 && (
+                        <div className="border-t border-border" data-aipp-slot="butler-scheduled-tasks">
+                            <button
+                                type="button"
+                                className="flex w-full items-center gap-2 px-4 py-2.5 text-xs font-medium text-muted-foreground hover:bg-muted/40 transition-colors"
+                                onClick={() => setIsScheduledTasksExpanded(prev => !prev)}
+                            >
+                                {isScheduledTasksExpanded ? (
+                                    <ChevronDown className="h-3.5 w-3.5" />
+                                ) : (
+                                    <ChevronRight className="h-3.5 w-3.5" />
+                                )}
+                                <Clock className="h-3.5 w-3.5" />
+                                定时任务
+                                <Badge variant="secondary" className="ml-auto text-[10px] px-1.5 py-0">
+                                    {scheduledTasks.length}
+                                </Badge>
+                            </button>
+                            {isScheduledTasksExpanded && (
+                                <div className="px-3 pb-3 space-y-1.5 max-h-[200px] overflow-y-auto">
+                                    {scheduledTasks.map((st) => (
+                                        <div
+                                            key={st.id}
+                                            className="rounded-lg border border-border/50 px-3 py-2 text-xs"
+                                        >
+                                            <div className="flex items-center justify-between gap-2">
+                                                <span className="font-medium truncate">{st.name}</span>
+                                                <Badge
+                                                    variant={st.isEnabled ? "default" : "secondary"}
+                                                    className="text-[10px] px-1.5 py-0"
+                                                >
+                                                    {st.isEnabled ? "运行中" : "已暂停"}
+                                                </Badge>
+                                            </div>
+                                            <div className="mt-1 text-muted-foreground truncate">
+                                                {st.taskPrompt.length > 60
+                                                    ? st.taskPrompt.slice(0, 60) + "…"
+                                                    : st.taskPrompt}
+                                            </div>
+                                            {st.nextRunAt && (
+                                                <div className="mt-1 text-[11px] text-muted-foreground">
+                                                    下次执行：{formatTime(st.nextRunAt)}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </div>
 
                 <div
@@ -1015,15 +1156,15 @@ function ButlerExperimentWindow() {
                                     pluginList={pluginList}
                                     hideHeader
                                     allowRename={false}
-                                     allowDelete={false}
-                                     inlineInteractionItems={inlineInteractionItems}
-                                     inlineInteractionVisible={hasInlineInteraction}
-                                     allowFeishuDebugResend={
-                                         showFeishuStatus && isMainConversationFeishuBound
-                                     }
-                                 />
-                             </div>
-                         </>
+                                    allowDelete={false}
+                                    inlineInteractionItems={inlineInteractionItems}
+                                    inlineInteractionVisible={hasInlineInteraction}
+                                    allowFeishuDebugResend={
+                                        showFeishuStatus && isMainConversationFeishuBound
+                                    }
+                                />
+                            </div>
+                        </>
                     ) : (
                         <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                             {loadingMain
@@ -1047,174 +1188,194 @@ function ButlerExperimentWindow() {
                     errorMessage={acpDecisionError}
                     onDecision={handleAcpDecision}
                 />
-                <Dialog
-                    open={isTaskDetailDialogOpen}
-                    onOpenChange={(open) => {
-                        setIsTaskDetailDialogOpen(open);
-                        if (!open) {
-                            setSelectedTaskId(null);
-                            setSelectedTaskDetail(null);
-                        }
-                    }}
-                >
-                    <DialogContent className="max-w-4xl">
-                        <DialogHeader>
-                            <DialogTitle>任务详情</DialogTitle>
-                            <DialogDescription>
-                                查看任务状态、目标、摘要与最终输出。
-                            </DialogDescription>
-                        </DialogHeader>
-                        {!selectedTaskId ? (
-                            <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">
-                                请选择一个任务。
-                            </div>
-                        ) : loadingTaskDetail && !selectedTaskDetail ? (
-                            <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                                正在加载详情...
-                            </div>
-                        ) : selectedTaskDetail ? (
-                            <div className="flex max-h-[75vh] flex-col overflow-hidden">
-                                <div className="space-y-3">
-                                    <div className="flex items-start justify-between gap-2">
-                                        <div>
-                                            <div className="font-medium">
-                                                {selectedTaskDetail.task.title}
-                                            </div>
-                                            <div className="mt-1 text-xs text-muted-foreground">
-                                                执行助手：
-                                                {selectedTaskDetail.task.executor_assistant_name}
-                                            </div>
-                                        </div>
-                                        <Badge
-                                            variant={getStatusVariant(
-                                                selectedTaskDetail.task.status
-                                            )}
-                                        >
-                                            {getStatusLabel(selectedTaskDetail.task.status)}
-                                        </Badge>
+                {isTaskDetailDialogOpen ? (
+                    <div
+                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+                        onClick={closeTaskDetail}
+                    >
+                        <div
+                            role="dialog"
+                            aria-modal="true"
+                            aria-labelledby="butler-task-detail-title"
+                            className="flex max-h-[85vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border bg-background shadow-lg"
+                            onClick={(event) => event.stopPropagation()}
+                        >
+                            <div className="flex items-start justify-between gap-4 border-b px-6 py-4">
+                                <div>
+                                    <div
+                                        id="butler-task-detail-title"
+                                        className="text-lg font-semibold"
+                                    >
+                                        任务详情
                                     </div>
-                                    <div className="flex flex-wrap gap-2">
-                                        <Button
-                                            type="button"
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={() =>
-                                                void loadTaskDetail(selectedTaskId)
-                                            }
-                                        >
-                                            <RefreshCw className="mr-2 h-4 w-4" />
-                                            刷新
-                                        </Button>
-                                        <Button
-                                            type="button"
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={() =>
-                                                void handleOpenTaskConversation(
-                                                    selectedTaskDetail.task
-                                                        .task_conversation_id
-                                                )
-                                            }
-                                        >
-                                            <ExternalLink className="mr-2 h-4 w-4" />
-                                            打开任务会话
-                                        </Button>
-                                        {selectedTaskDetail.task.is_running ? (
-                                            <Button
-                                                type="button"
-                                                variant="outline"
-                                                size="sm"
-                                                onClick={() =>
-                                                    void handleCancelTask(
-                                                        selectedTaskDetail.task
-                                                            .task_conversation_id
-                                                    )
-                                                }
-                                            >
-                                                <PauseCircle className="mr-2 h-4 w-4" />
-                                                取消任务
-                                            </Button>
-                                        ) : null}
-                                    </div>
+                                    <p className="text-sm text-muted-foreground">
+                                        查看任务状态、目标与结果摘要。
+                                    </p>
                                 </div>
+                                <button
+                                    type="button"
+                                    className="rounded-sm p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                                    onClick={closeTaskDetail}
+                                    aria-label="关闭任务详情"
+                                >
+                                    <X className="h-4 w-4" />
+                                </button>
+                            </div>
 
-                                <Separator className="my-4" />
-
-                                <ScrollArea className="min-h-0 flex-1 pr-2">
-                                    <div className="space-y-4">
-                                        <div>
-                                            <div className="mb-1 text-xs font-medium text-muted-foreground">
-                                                运行状态
-                                            </div>
-                                            <div className="text-sm">
-                                                {selectedTaskDetail.runtime_state.phase}
-                                            </div>
-                                        </div>
-                                        <div>
-                                            <div className="mb-1 text-xs font-medium text-muted-foreground">
-                                                创建时间
-                                            </div>
-                                            <div className="text-sm">
-                                                {formatTime(
-                                                    selectedTaskDetail.task.created_time
-                                                )}
-                                            </div>
-                                        </div>
-                                        <div>
-                                            <div className="mb-1 text-xs font-medium text-muted-foreground">
-                                                完成时间
-                                            </div>
-                                            <div className="text-sm">
-                                                {formatTime(
-                                                    selectedTaskDetail.task.finalized_at
-                                                )}
-                                            </div>
-                                        </div>
-                                        <div>
-                                            <div className="mb-1 text-xs font-medium text-muted-foreground">
-                                                任务目标
-                                            </div>
-                                            <div className="whitespace-pre-wrap rounded-md border bg-muted/20 p-3 text-sm">
-                                                {selectedTaskDetail.definition.goal}
-                                            </div>
-                                        </div>
-                                        <div>
-                                            <div className="mb-1 text-xs font-medium text-muted-foreground">
-                                                结果摘要
-                                            </div>
-                                            <div className="whitespace-pre-wrap rounded-md border bg-muted/20 p-3 text-sm">
-                                                {selectedTaskDetail.result?.summary ||
-                                                    selectedTaskDetail.task.last_summary ||
-                                                    "暂无摘要"}
-                                            </div>
-                                        </div>
-                                        <div>
-                                            <div className="mb-1 text-xs font-medium text-muted-foreground">
-                                                最终输出
-                                            </div>
-                                            <div className="rounded-md border bg-muted/20 p-3 text-sm">
-                                                {selectedTaskOutput ? (
-                                                    <UnifiedMarkdown>
-                                                        {selectedTaskOutput}
-                                                    </UnifiedMarkdown>
-                                                ) : (
-                                                    <span className="text-muted-foreground">
-                                                        暂无可展示的最终输出
-                                                    </span>
-                                                )}
-                                            </div>
-                                        </div>
+                            <div className="min-h-0 flex-1 px-6 py-4">
+                                {!selectedTaskId ? (
+                                    <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">
+                                        请选择一个任务。
                                     </div>
-                                </ScrollArea>
+                                ) : loadingTaskDetail && !selectedTaskDetail ? (
+                                    <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
+                                        <Loader2 className="h-4 w-4 animate-spin" />
+                                        正在加载详情...
+                                    </div>
+                                ) : selectedTaskDetail ? (
+                                    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+                                        <div className="space-y-3">
+                                            <div className="flex items-start justify-between gap-2">
+                                                <div>
+                                                    <div className="font-medium">
+                                                        {selectedTaskDetail.task.title}
+                                                    </div>
+                                                    <div className="mt-1 text-xs text-muted-foreground">
+                                                        执行助手：
+                                                        {selectedTaskDetail.task.executor_assistant_name}
+                                                    </div>
+                                                </div>
+                                                <Badge
+                                                    variant={getStatusVariant(
+                                                        selectedTaskDetail.task.status
+                                                    )}
+                                                >
+                                                    {getStatusLabel(selectedTaskDetail.task.status)}
+                                                </Badge>
+                                            </div>
+                                            <div className="flex flex-wrap gap-2">
+                                                <Button
+                                                    type="button"
+                                                    variant="outline"
+                                                    size="sm"
+                                                    onClick={() =>
+                                                        void loadTaskDetail(selectedTaskId)
+                                                    }
+                                                >
+                                                    <RefreshCw className="mr-2 h-4 w-4" />
+                                                    刷新
+                                                </Button>
+                                                <Button
+                                                    type="button"
+                                                    variant="outline"
+                                                    size="sm"
+                                                    onClick={() =>
+                                                        void handleOpenTaskConversation(
+                                                            selectedTaskDetail.task
+                                                                .task_conversation_id
+                                                        )
+                                                    }
+                                                >
+                                                    <ExternalLink className="mr-2 h-4 w-4" />
+                                                    打开任务会话
+                                                </Button>
+                                                {selectedTaskDetail.task.is_running ? (
+                                                    <Button
+                                                        type="button"
+                                                        variant="outline"
+                                                        size="sm"
+                                                        onClick={() =>
+                                                            void handleCancelTask(
+                                                                selectedTaskDetail.task
+                                                                    .task_conversation_id
+                                                            )
+                                                        }
+                                                    >
+                                                        <PauseCircle className="mr-2 h-4 w-4" />
+                                                        取消任务
+                                                    </Button>
+                                                ) : null}
+                                            </div>
+                                        </div>
+
+                                        <Separator className="my-4" />
+
+                                        <ScrollArea className="min-h-0 flex-1 pr-2">
+                                            <div className="space-y-4">
+                                                <div>
+                                                    <div className="mb-1 text-xs font-medium text-muted-foreground">
+                                                        运行状态
+                                                    </div>
+                                                    <div className="text-sm">
+                                                        {selectedTaskDetail.runtime_state.phase}
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <div className="mb-1 text-xs font-medium text-muted-foreground">
+                                                        创建时间
+                                                    </div>
+                                                    <div className="text-sm">
+                                                        {formatTime(
+                                                            selectedTaskDetail.task.created_time
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <div className="mb-1 text-xs font-medium text-muted-foreground">
+                                                        完成时间
+                                                    </div>
+                                                    <div className="text-sm">
+                                                        {formatTime(
+                                                            selectedTaskDetail.task.finalized_at
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <div className="mb-1 text-xs font-medium text-muted-foreground">
+                                                        任务目标
+                                                    </div>
+                                                    <div className="whitespace-pre-wrap rounded-md border bg-muted/20 p-3 text-sm">
+                                                        {selectedTaskDetail.definition.goal}
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <div className="mb-1 text-xs font-medium text-muted-foreground">
+                                                        结果摘要
+                                                    </div>
+                                                    <div className="whitespace-pre-wrap rounded-md border bg-muted/20 p-3 text-sm">
+                                                        {selectedTaskSummary || "暂无摘要"}
+                                                    </div>
+                                                </div>
+                                                {!selectedTaskSummary ? (
+                                                    <div>
+                                                        <div className="mb-1 text-xs font-medium text-muted-foreground">
+                                                            最终输出
+                                                        </div>
+                                                        <div className="rounded-md border bg-muted/20 p-3 text-sm">
+                                                            {selectedTaskOutput ? (
+                                                                <UnifiedMarkdown>
+                                                                    {selectedTaskOutput}
+                                                                </UnifiedMarkdown>
+                                                            ) : (
+                                                                <span className="text-muted-foreground">
+                                                                    暂无可展示的最终输出
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                ) : null}
+                                            </div>
+                                        </ScrollArea>
+                                    </div>
+                                ) : (
+                                    <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">
+                                        暂无任务详情。
+                                    </div>
+                                )}
                             </div>
-                        ) : (
-                            <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">
-                                暂无任务详情。
-                            </div>
-                        )}
-                    </DialogContent>
-                </Dialog>
+                        </div>
+                    </div>
+                ) : null}
                 <Dialog open={isTaskDialogOpen} onOpenChange={setIsTaskDialogOpen}>
                     <DialogContent>
                         <DialogHeader>

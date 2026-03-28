@@ -73,9 +73,9 @@ use crate::api::plugin_api::{
     uninstall_plugin,
 };
 use crate::api::scheduled_task_api::{
-    create_scheduled_task, delete_scheduled_task, list_scheduled_task_logs,
-    list_scheduled_task_runs, list_scheduled_tasks, run_scheduled_task_now,
-    stop_scheduled_task_run, update_scheduled_task,
+    create_scheduled_task, delete_scheduled_task, list_butler_scheduled_tasks,
+    list_scheduled_task_logs, list_scheduled_task_runs, list_scheduled_tasks,
+    run_scheduled_task_now, stop_scheduled_task_run, update_scheduled_task,
 };
 use crate::api::skill_api::{
     bulk_update_assistant_skills, cleanup_orphaned_skill_configs, delete_skill,
@@ -917,6 +917,7 @@ pub fn run() {
             download_and_install_update_with_proxy,
             get_app_version,
             list_scheduled_tasks,
+            list_butler_scheduled_tasks,
             create_scheduled_task,
             update_scheduled_task,
             delete_scheduled_task,
