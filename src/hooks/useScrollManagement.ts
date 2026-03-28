@@ -14,7 +14,14 @@ export interface UseScrollManagementReturn {
     scrollToUserMessage: () => void;
 }
 
-export function useScrollManagement(): UseScrollManagementReturn {
+interface UseScrollManagementOptions {
+    disableTailObservation?: boolean;
+}
+
+export function useScrollManagement(
+    options: UseScrollManagementOptions = {},
+): UseScrollManagementReturn {
+    const { disableTailObservation = false } = options;
     // 滚动相关状态和逻辑
     const messagesEndRef = useRef<HTMLDivElement | null>(null);
     const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -172,11 +179,13 @@ export function useScrollManagement(): UseScrollManagementReturn {
 
         // 优先观察最后一组容器，其次观察最后一条消息元素
         const lastReplyContainer = container.querySelector('#last-reply-container') as HTMLElement | null;
-        const messageItems = container.querySelectorAll('[data-message-item]');
+        const messageItems = disableTailObservation
+            ? []
+            : container.querySelectorAll('[data-message-item]');
         const lastMessageItem = (messageItems.length > 0
             ? (messageItems[messageItems.length - 1] as HTMLElement)
             : null);
-        const observed: Element | null = lastReplyContainer || lastMessageItem || container.lastElementChild;
+        const observed: Element | null = lastReplyContainer || lastMessageItem || (disableTailObservation ? null : container.lastElementChild);
 
         if (observed) {
             resizeObserverRef.current = new ResizeObserver(() => {
@@ -187,7 +196,7 @@ export function useScrollManagement(): UseScrollManagementReturn {
 
         // 回退：若 ResizeObserver 未触发，下一帧也滚动一次
         requestAnimationFrame(() => scrollToBottom());
-    }, [hasRecentUserScrollIntent, queuePendingSmartScroll, scheduleAutoScrollRelease]);
+    }, [disableTailObservation, hasRecentUserScrollIntent, queuePendingSmartScroll, scheduleAutoScrollRelease]);
 
     smartScrollRef.current = smartScroll;
 

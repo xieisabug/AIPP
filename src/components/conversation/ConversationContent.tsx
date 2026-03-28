@@ -1,5 +1,6 @@
 import React, { memo } from "react";
 import MessageList from "./MessageList";
+import VirtualizedMessageList from "./VirtualizedMessageList";
 import NewChatComponent from "../NewChatComponent";
 import { Message, StreamEvent } from "../../data/Conversation";
 import { AssistantListItem } from "../../data/Assistant";
@@ -26,6 +27,12 @@ export interface ConversationContentProps {
     inlineInteractionItems?: InlineInteractionItem[];
     sentBatchToolResultMessageIds?: ReadonlySet<number>;
     allowFeishuDebugResend?: boolean;
+    virtualizeMessages?: boolean;
+    scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
+    pendingScrollMessageId?: number | null;
+    clearPendingScrollMessageId?: (messageId: number | null) => void;
+    setShiningMessageIds?: React.Dispatch<React.SetStateAction<Set<number>>>;
+    smartScroll?: (forceScroll?: boolean, behaviorOverride?: ScrollBehavior) => void;
     // NewChatComponent props
     selectedText: string;
     selectedAssistant: number;
@@ -54,6 +61,12 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     inlineInteractionItems,
     sentBatchToolResultMessageIds,
     allowFeishuDebugResend = false,
+    virtualizeMessages = false,
+    scrollContainerRef,
+    pendingScrollMessageId = null,
+    clearPendingScrollMessageId,
+    setShiningMessageIds,
+    smartScroll,
     // NewChatComponent props
     selectedText,
     selectedAssistant,
@@ -64,26 +77,66 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
         return (
             <>
                 <>
-                    <MessageList
-                        allDisplayMessages={allDisplayMessages}
-                        streamingMessages={streamingMessages}
-                        shiningMessageIds={shiningMessageIds}
-                        shiningMcpCallId={shiningMcpCallId}
-                        reasoningExpandStates={reasoningExpandStates}
-                        mcpToolCallStates={mcpToolCallStates}
-                        generationGroups={generationGroups}
-                        selectedVersions={selectedVersions}
-                        getGenerationGroupControl={getGenerationGroupControl}
-                        handleGenerationVersionChange={handleGenerationVersionChange}
-                        onCodeRun={onCodeRun}
-                        onMessageRegenerate={onMessageRegenerate}
-                        onMessageEdit={onMessageEdit}
-                        onMessageFork={onMessageFork}
-                        onToggleReasoningExpand={onToggleReasoningExpand}
-                        inlineInteractionItems={inlineInteractionItems}
-                        sentBatchToolResultMessageIds={sentBatchToolResultMessageIds}
-                        allowFeishuDebugResend={allowFeishuDebugResend}
-                    />
+                    {virtualizeMessages
+                        && scrollContainerRef
+                        && clearPendingScrollMessageId
+                        && setShiningMessageIds
+                        && smartScroll ? (
+                        <VirtualizedMessageList
+                            allDisplayMessages={allDisplayMessages}
+                            streamingMessages={streamingMessages}
+                            shiningMessageIds={shiningMessageIds}
+                            shiningMcpCallId={shiningMcpCallId}
+                            reasoningExpandStates={reasoningExpandStates}
+                            mcpToolCallStates={mcpToolCallStates}
+                            generationGroups={generationGroups}
+                            selectedVersions={selectedVersions}
+                            getGenerationGroupControl={getGenerationGroupControl}
+                            handleGenerationVersionChange={handleGenerationVersionChange}
+                            onCodeRun={onCodeRun}
+                            onMessageRegenerate={onMessageRegenerate}
+                            onMessageEdit={onMessageEdit}
+                            onMessageFork={onMessageFork}
+                            onToggleReasoningExpand={onToggleReasoningExpand}
+                            inlineInteractionItems={inlineInteractionItems}
+                            sentBatchToolResultMessageIds={
+                                sentBatchToolResultMessageIds
+                            }
+                            allowFeishuDebugResend={allowFeishuDebugResend}
+                            scrollContainerRef={scrollContainerRef}
+                            pendingScrollMessageId={pendingScrollMessageId}
+                            clearPendingScrollMessageId={
+                                clearPendingScrollMessageId
+                            }
+                            setShiningMessageIds={setShiningMessageIds}
+                            smartScroll={smartScroll}
+                        />
+                    ) : (
+                        <MessageList
+                            allDisplayMessages={allDisplayMessages}
+                            streamingMessages={streamingMessages}
+                            shiningMessageIds={shiningMessageIds}
+                            shiningMcpCallId={shiningMcpCallId}
+                            reasoningExpandStates={reasoningExpandStates}
+                            mcpToolCallStates={mcpToolCallStates}
+                            generationGroups={generationGroups}
+                            selectedVersions={selectedVersions}
+                            getGenerationGroupControl={getGenerationGroupControl}
+                            handleGenerationVersionChange={
+                                handleGenerationVersionChange
+                            }
+                            onCodeRun={onCodeRun}
+                            onMessageRegenerate={onMessageRegenerate}
+                            onMessageEdit={onMessageEdit}
+                            onMessageFork={onMessageFork}
+                            onToggleReasoningExpand={onToggleReasoningExpand}
+                            inlineInteractionItems={inlineInteractionItems}
+                            sentBatchToolResultMessageIds={
+                                sentBatchToolResultMessageIds
+                            }
+                            allowFeishuDebugResend={allowFeishuDebugResend}
+                        />
+                    )}
                 </>
             </>
         );

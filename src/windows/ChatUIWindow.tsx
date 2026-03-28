@@ -327,6 +327,7 @@ function ChatUIWindow() {
                             onConversationChange={handleConversationChange}
                             inlineInteractionItems={inlineInteractionItems}
                             inlineInteractionVisible={hasInlineInteraction}
+                            virtualizeMessages
                         />
                     </div>
 
@@ -379,6 +380,7 @@ function ChatUIWindow() {
                         onChangeConversationId={setSelectedConversation}
                         inlineInteractionItems={inlineInteractionItems}
                         inlineInteractionVisible={hasInlineInteraction}
+                        virtualizeMessages
                     />
                 </div>
 

@@ -1162,6 +1162,7 @@ function ButlerExperimentWindow() {
                                     allowFeishuDebugResend={
                                         showFeishuStatus && isMainConversationFeishuBound
                                     }
+                                    virtualizeMessages
                                 />
                             </div>
                         </>

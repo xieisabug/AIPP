@@ -133,6 +133,7 @@ interface ConversationUIProps {
     allowDelete?: boolean;
     headerExtraActions?: ReactNode;
     allowFeishuDebugResend?: boolean;
+    virtualizeMessages?: boolean;
 }
 
 const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
@@ -151,6 +152,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             allowDelete = true,
             headerExtraActions,
             allowFeishuDebugResend = false,
+            virtualizeMessages = false,
         },
         ref
     ) => {
@@ -337,7 +339,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             handleUserScrollIntent,
             smartScroll,
             scrollToUserMessage,
-        } = useScrollManagement();
+        } = useScrollManagement({
+            disableTailObservation: virtualizeMessages,
+        });
         const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
 
         // 使用 useMemo 稳定 options 对象，避免频繁触发 useConversationEvents 内部的 useEffect
@@ -832,6 +836,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 按消息 ID 定位滚动（用于搜索结果）
         useEffect(() => {
+            if (virtualizeMessages) {
+                return;
+            }
             if (pendingScrollMessageId === null) {
                 return;
             }
@@ -851,7 +858,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 setShiningMessageIds,
                 clearPendingScrollMessageId: setPendingScrollMessageId,
             });
-        }, [pendingScrollMessageId, allDisplayMessages.length, scrollContainerRef, setShiningMessageIds]);
+        }, [
+            pendingScrollMessageId,
+            allDisplayMessages.length,
+            scrollContainerRef,
+            setShiningMessageIds,
+            virtualizeMessages,
+        ]);
 
         useEffect(() => {
             const lastMessage = allDisplayMessages[allDisplayMessages.length - 1];
@@ -930,6 +943,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
                             sentBatchToolResultMessageIds={sentBatchToolResultMessageIds}
                             allowFeishuDebugResend={allowFeishuDebugResend}
+                            virtualizeMessages={virtualizeMessages}
+                            scrollContainerRef={scrollContainerRef}
+                            pendingScrollMessageId={pendingScrollMessageId}
+                            clearPendingScrollMessageId={setPendingScrollMessageId}
+                            setShiningMessageIds={setShiningMessageIds}
+                            smartScroll={smartScroll}
                             // NewChatComponent props
                             selectedText={selectedText}
                             selectedAssistant={selectedAssistant}
