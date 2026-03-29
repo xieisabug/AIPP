@@ -524,6 +524,56 @@ pub struct InteractionState {
     pending_preview_code_events: Arc<Mutex<HashMap<String, PreviewCodeRequestEvent>>>,
 }
 
+#[derive(Clone, Copy)]
+enum InteractionCleanupKind {
+    AskUser,
+    PreviewCode,
+}
+
+struct PendingInteractionCleanup {
+    interaction_state: InteractionState,
+    request_id: Option<String>,
+    kind: InteractionCleanupKind,
+}
+
+impl PendingInteractionCleanup {
+    fn new(
+        interaction_state: &InteractionState,
+        request_id: String,
+        kind: InteractionCleanupKind,
+    ) -> Self {
+        Self {
+            interaction_state: interaction_state.clone(),
+            request_id: Some(request_id),
+            kind,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.request_id = None;
+    }
+}
+
+impl Drop for PendingInteractionCleanup {
+    fn drop(&mut self) {
+        let Some(request_id) = self.request_id.take() else {
+            return;
+        };
+        let interaction_state = self.interaction_state.clone();
+        let kind = self.kind;
+        tauri::async_runtime::spawn(async move {
+            match kind {
+                InteractionCleanupKind::AskUser => {
+                    interaction_state.remove_ask_user_request(&request_id).await;
+                }
+                InteractionCleanupKind::PreviewCode => {
+                    interaction_state.remove_preview_code_request(&request_id).await;
+                }
+            }
+        });
+    }
+}
+
 impl InteractionState {
     pub fn new() -> Self {
         Self {
@@ -685,6 +735,11 @@ pub async fn request_ask_user_question(
 
     let (tx, rx) = oneshot::channel::<AskUserQuestionDecision>();
     interaction_state.store_ask_user_request(event.clone(), tx).await;
+    let mut cleanup_guard = PendingInteractionCleanup::new(
+        interaction_state,
+        request_id.clone(),
+        InteractionCleanupKind::AskUser,
+    );
 
     info!(
         request_id = %request_id,
@@ -703,6 +758,7 @@ pub async fn request_ask_user_question(
             Ok(delivered) => delivered,
             Err(error) => {
                 interaction_state.remove_ask_user_request(&request_id).await;
+                cleanup_guard.disarm();
                 warn!(
                     request_id = %request_id,
                     conversation_id,
@@ -725,6 +781,7 @@ pub async fn request_ask_user_question(
             );
         } else {
             interaction_state.remove_ask_user_request(&request_id).await;
+            cleanup_guard.disarm();
             warn!(request_id = %request_id, error = %e, "Failed to emit ask-user-question-request");
             return Err("Failed to emit AskUserQuestion event".to_string());
         }
@@ -749,6 +806,7 @@ pub async fn request_ask_user_question(
         Err(_) => Err("AskUserQuestion request was cancelled".to_string()),
     };
     interaction_state.remove_ask_user_request(&request_id).await;
+    cleanup_guard.disarm();
     result
 }
 
@@ -805,11 +863,32 @@ pub async fn request_preview_code(
         metadata: request.metadata,
     };
 
+    let interaction_mode = event.interaction_mode.clone();
+
+    if interaction_mode == "none" {
+        if let Err(e) = app_handle.emit("preview-code-request", &event) {
+            warn!(request_id = %request_id, error = %e, "Failed to emit preview-code-request");
+            return Err("Failed to emit PreviewCode event".to_string());
+        }
+
+        return Ok(PreviewCodeResponse {
+            status: "displayed".to_string(),
+            request_id,
+            payload: None,
+        });
+    }
+
     let (tx, rx) = oneshot::channel::<PreviewCodeDecision>();
     interaction_state.store_preview_code_request(event.clone(), tx).await;
+    let mut cleanup_guard = PendingInteractionCleanup::new(
+        interaction_state,
+        request_id.clone(),
+        InteractionCleanupKind::PreviewCode,
+    );
 
     if let Err(e) = app_handle.emit("preview-code-request", &event) {
         interaction_state.remove_preview_code_request(&request_id).await;
+        cleanup_guard.disarm();
         warn!(request_id = %request_id, error = %e, "Failed to emit preview-code-request");
         return Err("Failed to emit PreviewCode event".to_string());
     }
@@ -819,6 +898,7 @@ pub async fn request_preview_code(
         Err(_) => Err("PreviewCode request was cancelled".to_string()),
     };
     interaction_state.remove_preview_code_request(&request_id).await;
+    cleanup_guard.disarm();
     result
 }
 

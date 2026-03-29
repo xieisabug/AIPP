@@ -101,5 +101,31 @@ describe("InlineCodePreviewCard", () => {
         expect(screen.queryByText("预览已收起。")).not.toBeInTheDocument();
         expect(host).not.toHaveClass("hidden");
     });
+
+    it("does not render a manual dismiss action for display-only previews", async () => {
+        mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
+
+        render(
+            <InlineCodePreviewCard
+                parameters={JSON.stringify({
+                    title: "display_only",
+                    renderer: "html",
+                    code: "<div>Display Only</div>",
+                    interaction_mode: "none",
+                })}
+                conversationId={5}
+                messageId={13}
+                mcpToolCallStates={new Map()}
+                isStreaming={false}
+            />
+        );
+
+        expect(await screen.findByText("display_only")).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "关闭并继续" })).not.toBeInTheDocument();
+        expect(invoke).not.toHaveBeenCalledWith(
+            "submit_preview_code_response",
+            expect.anything()
+        );
+    });
 });
 
