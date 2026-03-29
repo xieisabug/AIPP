@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, once } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import {
     Bot,
@@ -13,6 +14,7 @@ import {
     PauseCircle,
     Plus,
     RefreshCw,
+    Settings,
     X,
 } from "lucide-react";
 
@@ -51,6 +53,13 @@ import {
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select";
+import { ExperimentalConfigForm } from "@/components/config/feature/forms/ExperimentalConfigForm";
+import {
+    buildExperimentalConfigFormValues,
+    EXPERIMENTAL_CONFIG_DEFAULT_VALUES,
+    ExperimentalConfigFormState,
+    saveExperimentalConfigValues,
+} from "@/components/config/feature/forms/experimentalConfigShared";
 import { ConversationStatsDialog } from "@/components/token-statistics";
 import { AssistantListItem } from "@/data/Assistant";
 import {
@@ -59,6 +68,7 @@ import {
     ButlerTaskDetailResponse,
     ButlerTaskListItem,
     ButlerTaskResultAvailableEvent,
+    PaginatedButlerTasksResponse,
 } from "@/data/Butler";
 import { useAskUserQuestion, usePreviewFile } from "@/hooks/useInlineInteraction";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
@@ -102,6 +112,8 @@ function sortTasks(tasks: ButlerTaskListItem[]): ButlerTaskListItem[] {
         return right.task_conversation_id - left.task_conversation_id;
     });
 }
+
+const TASK_PAGE_SIZE = 20;
 
 function upsertTask(
     tasks: ButlerTaskListItem[],
@@ -177,6 +189,10 @@ interface FeishuRuntimeStatus {
     status_text: string;
 }
 
+interface ButlerMainConversationEvent {
+    conversation_id: number;
+}
+
 function getFeishuStatusVariant(
     status?: FeishuRuntimeStatus | null
 ): "default" | "destructive" | "secondary" | "outline" {
@@ -213,7 +229,13 @@ function getFeishuStatusIcon(
 
 function ButlerExperimentWindow() {
     useTheme("butler_experiment");
-    const { getConfigValue, loadFeatureConfig } = useFeatureConfig();
+    const {
+        featureConfig,
+        getConfigValue,
+        loadFeatureConfig,
+        loading: loadingFeatureConfig,
+        saveFeatureConfig,
+    } = useFeatureConfig();
     const antiLeakageEnabled = getConfigValue("anti_leakage", "enabled") === "true";
     const butlerExperimentEnabled =
         getConfigValue("experimental", "butler_experiment_enabled") === "true";
@@ -227,6 +249,8 @@ function ButlerExperimentWindow() {
     const latestTaskDetailRequestRef = useRef(0);
     const selectedTaskIdRef = useRef<number | null>(null);
     const isTaskDetailDialogOpenRef = useRef(false);
+    const resettingMainConversationRef = useRef(false);
+    const mainConversationIdRef = useRef("");
     const [pluginList, setPluginList] = useState<any[]>([]);
     const [assistants, setAssistants] = useState<AssistantListItem[]>([]);
     const [mainConversationId, setMainConversationId] = useState<string>("");
@@ -241,6 +265,7 @@ function ButlerExperimentWindow() {
     const [resettingMainConversation, setResettingMainConversation] = useState(false);
     const [loadingFeishuStatus, setLoadingFeishuStatus] = useState(false);
     const [isStatsDialogOpen, setIsStatsDialogOpen] = useState(false);
+    const [isSettingsDialogOpen, setIsSettingsDialogOpen] = useState(false);
     const [isTaskDialogOpen, setIsTaskDialogOpen] = useState(false);
     const [isTaskDetailDialogOpen, setIsTaskDetailDialogOpen] = useState(false);
     const [taskTitle, setTaskTitle] = useState("");
@@ -252,6 +277,12 @@ function ButlerExperimentWindow() {
         useState(false);
     const [scheduledTasks, setScheduledTasks] = useState<ButlerScheduledTask[]>([]);
     const [isScheduledTasksExpanded, setIsScheduledTasksExpanded] = useState(false);
+    const [totalTasks, setTotalTasks] = useState(0);
+    const [loadingMoreTasks, setLoadingMoreTasks] = useState(false);
+    const [hasMoreTasks, setHasMoreTasks] = useState(false);
+    const butlerSettingsForm = useForm<ExperimentalConfigFormState>({
+        defaultValues: { ...EXPERIMENTAL_CONFIG_DEFAULT_VALUES },
+    });
 
     const conversationIdNumber = mainConversationId ? parseInt(mainConversationId, 10) : undefined;
     const permissionConversationIds = useMemo(() => {
@@ -359,6 +390,8 @@ function ButlerExperimentWindow() {
         setMainConversationId(String(result.conversation.id));
         setMainModelDisplayName(result.model_display_name);
         setTasks(nextTasks);
+        setTotalTasks(result.total_tasks);
+        setHasMoreTasks(nextTasks.length < result.total_tasks);
         setSelectedTaskId((current) => {
             if (current && nextTasks.some((task) => task.task_conversation_id === current)) {
                 return current;
@@ -439,6 +472,14 @@ function ButlerExperimentWindow() {
     useEffect(() => {
         selectedTaskIdRef.current = selectedTaskId;
     }, [selectedTaskId]);
+
+    useEffect(() => {
+        resettingMainConversationRef.current = resettingMainConversation;
+    }, [resettingMainConversation]);
+
+    useEffect(() => {
+        mainConversationIdRef.current = mainConversationId;
+    }, [mainConversationId]);
 
     useEffect(() => {
         isTaskDetailDialogOpenRef.current = isTaskDetailDialogOpen;
@@ -534,27 +575,46 @@ function ButlerExperimentWindow() {
         }
     }, [mainConversationId]);
 
-    const loadTaskList = useCallback(
-        async (options?: { silentError?: boolean }) => {
-            if (!mainConversationId) {
-                return;
-            }
-
-            const silentError = options?.silentError ?? false;
-            try {
-                const result = await invoke<ButlerTaskListItem[]>("list_butler_tasks", {
+    const loadMoreTasks = useCallback(async () => {
+        if (loadingMoreTasks || !hasMoreTasks || !mainConversationId) {
+            return;
+        }
+        setLoadingMoreTasks(true);
+        try {
+            const result = await invoke<PaginatedButlerTasksResponse>(
+                "list_butler_tasks_paginated",
+                {
                     butlerConversationId: parseInt(mainConversationId, 10),
-                });
-                setLoadError(null);
-                setTasks(sortTasks(result));
-            } catch (error) {
-                console.error("[ButlerExperimentWindow] Failed to load task list:", error);
-                if (!silentError) {
-                    toast.error("加载任务列表失败");
+                    limit: TASK_PAGE_SIZE,
+                    offset: tasks.length,
                 }
+            );
+            setTasks((current) => {
+                const existingIds = new Set(
+                    current.map((t) => t.task_conversation_id)
+                );
+                const newTasks = result.tasks.filter(
+                    (t) => !existingIds.has(t.task_conversation_id)
+                );
+                return sortTasks([...current, ...newTasks]);
+            });
+            setTotalTasks(result.total);
+            setHasMoreTasks(tasks.length + result.tasks.length < result.total);
+        } catch (error) {
+            console.error("[ButlerExperimentWindow] Failed to load more tasks:", error);
+        } finally {
+            setLoadingMoreTasks(false);
+        }
+    }, [loadingMoreTasks, hasMoreTasks, mainConversationId, tasks.length]);
+
+    const handleTaskListScroll = useCallback(
+        (e: React.UIEvent<HTMLDivElement>) => {
+            const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+            if (scrollHeight - scrollTop - clientHeight < 100) {
+                void loadMoreTasks();
             }
         },
-        [mainConversationId]
+        [loadMoreTasks]
     );
 
     useEffect(() => {
@@ -675,12 +735,32 @@ function ButlerExperimentWindow() {
     }, [closeTaskDetail]);
 
     useEffect(() => {
+        const unlistenReset = listen<ButlerMainConversationEvent>(
+            "butler_main_reset",
+            ({ payload }) => {
+                const nextConversationId = String(payload.conversation_id);
+                if (resettingMainConversationRef.current) {
+                    return;
+                }
+                if (nextConversationId === mainConversationIdRef.current) {
+                    return;
+                }
+                closeTaskDetail();
+                void loadMainConversation();
+            }
+        );
+
+        return () => {
+            unlistenReset.then((unlisten) => unlisten()).catch(console.warn);
+        };
+    }, [closeTaskDetail, loadMainConversation]);
+
+    useEffect(() => {
         if (conversationIdNumber === undefined) {
             return;
         }
 
         const intervalId = window.setInterval(() => {
-            void loadTaskList({ silentError: true });
             if (
                 selectedTaskIdRef.current &&
                 isTaskDetailDialogOpenRef.current
@@ -692,7 +772,7 @@ function ButlerExperimentWindow() {
         return () => {
             window.clearInterval(intervalId);
         };
-    }, [conversationIdNumber, loadTaskDetail, loadTaskList]);
+    }, [conversationIdNumber, loadTaskDetail]);
 
     useEffect(() => {
         if (!conversationIdNumber) {
@@ -704,7 +784,15 @@ function ButlerExperimentWindow() {
                 if (payload.butler_conversation_id !== conversationIdNumber) {
                     return;
                 }
-                setTasks((current) => upsertTask(current, payload));
+                setTasks((current) => {
+                    const isNew = !current.some(
+                        (t) => t.task_conversation_id === payload.task_conversation_id
+                    );
+                    if (isNew) {
+                        setTotalTasks((prev) => prev + 1);
+                    }
+                    return upsertTask(current, payload);
+                });
             }),
             listen<ButlerTaskListItem>("butler_task_updated", ({ payload }) => {
                 if (payload.butler_conversation_id !== conversationIdNumber) {
@@ -745,6 +833,7 @@ function ButlerExperimentWindow() {
     }, [conversationIdNumber, loadTaskDetail]);
 
     const handleResetMainConversation = useCallback(async () => {
+        resettingMainConversationRef.current = true;
         setResettingMainConversation(true);
         try {
             const result = await invoke<ButlerMainLoadResponse>(
@@ -759,16 +848,26 @@ function ButlerExperimentWindow() {
                 error instanceof Error ? error.message : "重开总管家主会话失败"
             );
         } finally {
+            resettingMainConversationRef.current = false;
             setResettingMainConversation(false);
         }
     }, [applyMainConversationResult, closeTaskDetail]);
 
     const handleOpenSettings = useCallback(() => {
-        void invoke("open_config_window").catch((error) => {
-            console.error("[ButlerExperimentWindow] Failed to open config window:", error);
-            toast.error("打开设置失败");
-        });
-    }, []);
+        loadFeatureConfig()
+            .then((latestConfig) => {
+                butlerSettingsForm.reset(buildExperimentalConfigFormValues(latestConfig));
+                setIsSettingsDialogOpen(true);
+            })
+            .catch((error) => {
+                console.error("[ButlerExperimentWindow] Failed to load settings:", error);
+                toast.error("加载总管家设置失败");
+            });
+    }, [butlerSettingsForm, loadFeatureConfig]);
+
+    const handleSaveButlerSettings = useCallback(async () => {
+        await saveExperimentalConfigValues(saveFeatureConfig, butlerSettingsForm.getValues());
+    }, [butlerSettingsForm, saveFeatureConfig]);
 
     const handleToggleSidebar = useCallback(() => {
         conversationUIRef.current?.toggleSidebar();
@@ -860,6 +959,13 @@ function ButlerExperimentWindow() {
         void loadTaskDetail(taskConversationId);
     }, [loadTaskDetail]);
 
+    useEffect(() => {
+        if (loadingFeatureConfig) {
+            return;
+        }
+        butlerSettingsForm.reset(buildExperimentalConfigFormValues(featureConfig));
+    }, [butlerSettingsForm, featureConfig, loadingFeatureConfig]);
+
     useAppShortcuts("butler", {
         new: () => {
             if (!mainConversationId || resettingMainConversation) {
@@ -945,7 +1051,7 @@ function ButlerExperimentWindow() {
                                 </p>
                             )}
                         </div>
-                        <Badge variant="secondary">{tasks.length}</Badge>
+                        <Badge variant="secondary">{totalTasks}</Badge>
                     </div>
 
                     <div
@@ -969,7 +1075,7 @@ function ButlerExperimentWindow() {
                         />
                     </div>
 
-                    <div className="min-h-0 flex-1 overflow-y-auto" data-aipp-slot="butler-task-list-scroll">
+                    <div className="min-h-0 flex-1 overflow-y-auto" data-aipp-slot="butler-task-list-scroll" onScroll={handleTaskListScroll}>
                         <div className="space-y-2 p-3">
                             {tasks.length === 0 ? (
                                 <div className="space-y-3 rounded-xl border border-dashed border-border p-4 text-sm text-muted-foreground">
@@ -1037,6 +1143,12 @@ function ButlerExperimentWindow() {
                                     </div>
                                 </button>
                             ))}
+                            {loadingMoreTasks && (
+                                <div className="flex items-center justify-center py-3">
+                                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                                    <span className="ml-2 text-xs text-muted-foreground">加载更多…</span>
+                                </div>
+                            )}
                         </div>
                     </div>
 
@@ -1108,7 +1220,7 @@ function ButlerExperimentWindow() {
                                 <Button
                                     type="button"
                                     variant="outline"
-                                    onClick={() => void invoke("open_config_window")}
+                                    onClick={handleOpenSettings}
                                 >
                                     打开设置
                                 </Button>
@@ -1130,6 +1242,13 @@ function ButlerExperimentWindow() {
                                         conversationId={mainConversationId}
                                         externalOpen={isStatsDialogOpen}
                                         onExternalOpenChange={setIsStatsDialogOpen}
+                                    />
+                                    <IconButton
+                                        icon={<Settings className="h-4 w-4 text-icon" />}
+                                        onClick={handleOpenSettings}
+                                        border
+                                        title="总管家设置"
+                                        dataAippSlot="butler-main-open-settings"
                                     />
                                     <IconButton
                                         icon={
@@ -1189,6 +1308,26 @@ function ButlerExperimentWindow() {
                     errorMessage={acpDecisionError}
                     onDecision={handleAcpDecision}
                 />
+                <Dialog
+                    open={isSettingsDialogOpen}
+                    onOpenChange={setIsSettingsDialogOpen}
+                >
+                    <DialogContent className="flex max-h-[90vh] w-[50vw] min-w-[50vw] max-w-none flex-col overflow-hidden p-0">
+                        <DialogHeader className="border-b px-6 py-4">
+                            <DialogTitle>总管家实验设置</DialogTitle>
+                            <DialogDescription>
+                                在当前工作台内调整 Butler 相关实验配置，包括模型、上下文压缩、可信工作区和飞书接入。
+                            </DialogDescription>
+                        </DialogHeader>
+                        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+                            <ExperimentalConfigForm
+                                form={butlerSettingsForm}
+                                onSave={handleSaveButlerSettings}
+                                scope="butler"
+                            />
+                        </div>
+                    </DialogContent>
+                </Dialog>
                 {isTaskDetailDialogOpen ? (
                     <div
                         className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"

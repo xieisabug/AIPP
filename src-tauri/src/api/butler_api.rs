@@ -145,6 +145,13 @@ pub struct ButlerMainLoadResponse {
     pub model_id: String,
     pub model_display_name: String,
     pub tasks: Vec<ButlerTaskListItem>,
+    pub total_tasks: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaginatedButlerTasksResponse {
+    pub tasks: Vec<ButlerTaskListItem>,
+    pub total: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1405,6 +1412,48 @@ async fn list_butler_tasks_internal(
     Ok(tasks)
 }
 
+const DEFAULT_TASK_PAGE_SIZE: i64 = 20;
+
+async fn list_butler_tasks_paginated_internal(
+    app_handle: &AppHandle,
+    butler_conversation_id: i64,
+    limit: i64,
+    offset: i64,
+) -> Result<PaginatedButlerTasksResponse, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
+    let butler_repo = db.butler_repo().map_err(|e| e.to_string())?;
+
+    let total = conversation_repo
+        .count_butler_task_conversations(butler_conversation_id)
+        .map_err(|e| e.to_string())?;
+
+    let task_conversations = conversation_repo
+        .list_butler_task_conversations_paginated(butler_conversation_id, limit, offset)
+        .map_err(|e| e.to_string())?;
+
+    let task_ids: Vec<i64> = task_conversations.iter().map(|c| c.id).collect();
+    let definitions =
+        butler_repo.list_task_definitions(butler_conversation_id).map_err(|e| e.to_string())?;
+    let definition_map: HashMap<i64, ButlerTaskDefinition> = definitions
+        .into_iter()
+        .filter(|d| task_ids.contains(&d.task_conversation_id))
+        .map(|d| (d.task_conversation_id, d))
+        .collect();
+
+    let mut tasks = Vec::new();
+    for conversation in task_conversations {
+        if let Some(definition) = definition_map.get(&conversation.id) {
+            let result = butler_repo.get_task_result(conversation.id).map_err(|e| e.to_string())?;
+            tasks.push(
+                build_task_list_item(app_handle, conversation, definition, result.as_ref()).await?,
+            );
+        }
+    }
+
+    Ok(PaginatedButlerTasksResponse { tasks, total })
+}
+
 pub(crate) async fn load_or_create_butler_main_internal(
     app_handle: &AppHandle,
 ) -> Result<Conversation, String> {
@@ -2436,12 +2485,19 @@ pub async fn load_butler_main_conversation(
         reconcile_butler_tasks_once(&app_handle).await?;
     }
     let model_selection = get_butler_model_selection(&app_handle).await?;
-    let tasks = list_butler_tasks_internal(&app_handle, conversation.id).await?;
+    let paginated = list_butler_tasks_paginated_internal(
+        &app_handle,
+        conversation.id,
+        DEFAULT_TASK_PAGE_SIZE,
+        0,
+    )
+    .await?;
     Ok(ButlerMainLoadResponse {
         conversation,
         model_id: model_selection.raw_value,
         model_display_name: model_selection.display_name,
-        tasks,
+        tasks: paginated.tasks,
+        total_tasks: paginated.total,
     })
 }
 
@@ -2504,14 +2560,21 @@ pub async fn reset_butler_main_conversation(
     butler_repo.touch_main_state(BUTLER_MAIN_SLOT).map_err(|e| e.to_string())?;
 
     let model_selection = get_butler_model_selection(&app_handle).await?;
-    let tasks = list_butler_tasks_internal(&app_handle, new_conversation.id).await?;
+    let paginated = list_butler_tasks_paginated_internal(
+        &app_handle,
+        new_conversation.id,
+        DEFAULT_TASK_PAGE_SIZE,
+        0,
+    )
+    .await?;
     let _ = app_handle.emit("butler_main_reset", json!({ "conversation_id": new_conversation.id }));
 
     Ok(ButlerMainLoadResponse {
         conversation: new_conversation,
         model_id: model_selection.raw_value,
         model_display_name: model_selection.display_name,
-        tasks,
+        tasks: paginated.tasks,
+        total_tasks: paginated.total,
     })
 }
 
@@ -2521,6 +2584,18 @@ pub async fn list_butler_tasks(
     butler_conversation_id: i64,
 ) -> Result<Vec<ButlerTaskListItem>, String> {
     list_butler_tasks_internal(&app_handle, butler_conversation_id).await
+}
+
+#[tauri::command]
+pub async fn list_butler_tasks_paginated(
+    app_handle: tauri::AppHandle,
+    butler_conversation_id: i64,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<PaginatedButlerTasksResponse, String> {
+    let limit = limit.unwrap_or(DEFAULT_TASK_PAGE_SIZE).clamp(1, 100);
+    let offset = offset.unwrap_or(0).max(0);
+    list_butler_tasks_paginated_internal(&app_handle, butler_conversation_id, limit, offset).await
 }
 
 #[tauri::command]

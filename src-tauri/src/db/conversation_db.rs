@@ -320,6 +320,58 @@ impl ConversationRepository {
         rows.collect()
     }
 
+    pub fn count_butler_task_conversations(
+        &self,
+        parent_butler_conversation_id: i64,
+    ) -> Result<i64> {
+        self.conn.query_row(
+            "SELECT COUNT(*)
+             FROM conversation
+             WHERE parent_butler_conversation_id = ?1
+               AND conversation_kind = 'butler_task'",
+            params![parent_butler_conversation_id],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn list_butler_task_conversations_paginated(
+        &self,
+        parent_butler_conversation_id: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Conversation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, assistant_id, created_time, updated_time, conversation_kind,
+                    parent_butler_conversation_id, source_task_title,
+                    is_hidden_from_normal_chat_list, channel_source, butler_task_status,
+                    butler_task_summary, butler_task_finalized_at
+             FROM conversation
+             WHERE parent_butler_conversation_id = ?1
+               AND conversation_kind = 'butler_task'
+             ORDER BY updated_time DESC, id DESC
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows =
+            stmt.query_map(params![parent_butler_conversation_id, limit, offset], |row| {
+                Ok(Conversation {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    assistant_id: row.get(2)?,
+                    created_time: get_required_datetime_from_row(row, 3, "created_time")?,
+                    updated_time: get_required_datetime_from_row(row, 4, "updated_time")?,
+                    conversation_kind: row.get(5)?,
+                    parent_butler_conversation_id: row.get(6)?,
+                    source_task_title: row.get(7)?,
+                    is_hidden_from_normal_chat_list: row.get(8)?,
+                    channel_source: row.get(9)?,
+                    butler_task_status: row.get(10)?,
+                    butler_task_summary: row.get(11)?,
+                    butler_task_finalized_at: get_datetime_from_row(row, 12)?,
+                })
+            })?;
+        rows.collect()
+    }
+
     #[instrument(level = "debug", skip(self))]
     pub fn list_reconcilable_butler_task_conversation_ids(&self) -> Result<Vec<i64>> {
         let mut stmt = self.conn.prepare(

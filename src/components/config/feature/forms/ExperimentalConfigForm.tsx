@@ -20,6 +20,7 @@ import { AlertTriangle, Plus, Trash2 } from "lucide-react";
 interface ExperimentalConfigFormProps {
     form: UseFormReturn<any>;
     onSave: () => Promise<void>;
+    scope?: "all" | "butler";
 }
 
 interface MCPSummaryProgressPayload {
@@ -102,7 +103,11 @@ const readSummaryEnabledState = (values?: Record<string, unknown>): SummaryEnabl
     conversation: isEnabledValue(values?.conversation_summary_enabled),
 });
 
-export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ form, onSave }) => {
+export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
+    form,
+    onSave,
+    scope = "all",
+}) => {
     const [isSaving, setIsSaving] = useState(false);
     const [summaryProgress, setSummaryProgress] = useState<MCPSummaryProgressPayload | null>(null);
     const [assistantSummaryProgress, setAssistantSummaryProgress] =
@@ -360,17 +365,18 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
     const handleUpdateDescription = useCallback((path: string, desc: string) => {
         setTrustedWorkspaces(trustedWorkspaces.map(w => w.path === path ? { ...w, description: desc } : w));
     }, [trustedWorkspaces, setTrustedWorkspaces]);
+    const showSummarySection = scope === "all";
 
     const handleSave = useCallback(async () => {
-        if (dynamicEnabled && !summarizerModelId) {
+        if (showSummarySection && dynamicEnabled && !summarizerModelId) {
             toast.error("请先选择 MCP 总结 AI 模型后再保存");
             return;
         }
-        if (assistantSummaryEnabled && !assistantSummarizerModelId) {
+        if (showSummarySection && assistantSummaryEnabled && !assistantSummarizerModelId) {
             toast.error("请先选择助手总结 AI 模型后再保存");
             return;
         }
-        if (conversationSummaryEnabled && !conversationSummaryModel) {
+        if (showSummarySection && conversationSummaryEnabled && !conversationSummaryModel) {
             toast.error("请先选择对话总结模型后再保存");
             return;
         }
@@ -436,6 +442,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
         feishuStatus?.secret_configured,
         form,
         onSave,
+        showSummarySection,
         summarizerModelId,
     ]);
 
@@ -520,50 +527,61 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
 
     const saveDisabled =
         isSaving
-        || (dynamicEnabled && !summarizerModelId)
-        || (assistantSummaryEnabled && !assistantSummarizerModelId)
-        || (conversationSummaryEnabled && !conversationSummaryModel)
+        || (showSummarySection && dynamicEnabled && !summarizerModelId)
+        || (showSummarySection && assistantSummaryEnabled && !assistantSummarizerModelId)
+        || (showSummarySection && conversationSummaryEnabled && !conversationSummaryModel)
         || (butlerEnabled && !butlerModelId)
         || (butlerEnabled && feishuEnabled && !feishuAppId.trim())
         || (butlerEnabled && feishuEnabled && !feishuAppSecret.trim() && !feishuStatus?.secret_configured);
 
     return (
         <Form {...form}>
-            <Card className="shadow-none border-l-4 border-l-primary bottom-space">
-                <CardHeader>
-                    <CardTitle className="text-lg font-semibold">实验性功能</CardTitle>
-                    <p className="text-sm text-muted-foreground">新能力可能存在兼容风险，请按需启用。</p>
-                </CardHeader>
+            <Card
+                className={
+                    showSummarySection
+                        ? "bottom-space border-l-4 border-l-primary shadow-none"
+                        : "border-0 shadow-none"
+                }
+            >
+                {showSummarySection ? (
+                    <CardHeader>
+                        <CardTitle className="text-lg font-semibold">实验性功能</CardTitle>
+                        <p className="text-sm text-muted-foreground">
+                            新能力可能存在兼容风险，请按需启用。
+                        </p>
+                    </CardHeader>
+                ) : null}
                 <CardContent className="space-y-6">
-                    <div className="space-y-4">
-                        <div>
-                            <h3 className="text-sm font-medium">摘要与动态加载</h3>
-                            <p className="mt-1 text-sm text-muted-foreground">
-                                将相关实验能力放在一起，先开关、后选模型、再手动触发；首次从关闭切到开启后，保存会自动在后台补跑一次。
-                            </p>
-                        </div>
-
+                    {showSummarySection ? (
                         <div className="space-y-4">
-                            <Controller
-                                control={form.control}
-                                name="dynamic_mcp_loading_enabled"
-                                render={({ field }) => (
-                                    <FormItem className={toggleCardClassName}>
-                                        <div>
-                                            <FormLabel className="text-base">MCP 动态加载（实验）</FormLabel>
-                                            <p className="mt-1 text-sm text-muted-foreground">
-                                                开启后采用 MCP 目录摘要 + 按需加载模式。
-                                            </p>
-                                        </div>
-                                        <FormControl>
-                                            <Switch
-                                                checked={isEnabledValue(field.value)}
-                                                onCheckedChange={field.onChange}
-                                            />
-                                        </FormControl>
-                                    </FormItem>
-                                )}
-                            />
+                            <div>
+                                <h3 className="text-sm font-medium">摘要与动态加载</h3>
+                                <p className="mt-1 text-sm text-muted-foreground">
+                                    将相关实验能力放在一起，先开关、后选模型、再手动触发；首次从关闭切到开启后，保存会自动在后台补跑一次。
+                                </p>
+                            </div>
+
+                            <div className="space-y-4">
+                                <Controller
+                                    control={form.control}
+                                    name="dynamic_mcp_loading_enabled"
+                                    render={({ field }) => (
+                                        <FormItem className={toggleCardClassName}>
+                                            <div>
+                                                <FormLabel className="text-base">MCP 动态加载（实验）</FormLabel>
+                                                <p className="mt-1 text-sm text-muted-foreground">
+                                                    开启后采用 MCP 目录摘要 + 按需加载模式。
+                                                </p>
+                                            </div>
+                                            <FormControl>
+                                                <Switch
+                                                    checked={isEnabledValue(field.value)}
+                                                    onCheckedChange={field.onChange}
+                                                />
+                                            </FormControl>
+                                        </FormItem>
+                                    )}
+                                />
 
                             {dynamicEnabled && (
                                 <div className={nestedGroupClassName}>
@@ -886,8 +904,9 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                     </div>
                                 </div>
                             )}
+                            </div>
                         </div>
-                    </div>
+                    ) : null}
 
                     <div className="space-y-4">
                         <div>
@@ -1495,13 +1514,13 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                         >
                             {isSaving ? "保存中..." : "保存配置"}
                         </Button>
-                        {dynamicEnabled && !summarizerModelId && (
+                        {showSummarySection && dynamicEnabled && !summarizerModelId && (
                             <p className="text-sm text-destructive mt-2">请先选择 MCP 总结 AI 模型</p>
                         )}
-                        {assistantSummaryEnabled && !assistantSummarizerModelId && (
+                        {showSummarySection && assistantSummaryEnabled && !assistantSummarizerModelId && (
                             <p className="text-sm text-destructive mt-2">请先选择助手总结 AI 模型</p>
                         )}
-                        {conversationSummaryEnabled && !conversationSummaryModel && (
+                        {showSummarySection && conversationSummaryEnabled && !conversationSummaryModel && (
                             <p className="text-sm text-destructive mt-2">请先选择对话总结模型</p>
                         )}
                         {butlerEnabled && feishuEnabled && !feishuAppId.trim() && (

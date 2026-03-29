@@ -60,6 +60,12 @@ export interface ButlerMainLoadResponse {
     model_id: string;
     model_display_name: string;
     tasks: ButlerTaskListItem[];
+    total_tasks: number;
+}
+
+export interface PaginatedButlerTasksResponse {
+    tasks: ButlerTaskListItem[];
+    total: number;
 }
 
 export interface SpawnButlerTaskRequest {
