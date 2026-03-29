@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { MCPToolCall } from "@/data/MCPToolCall";
 import { MCPToolCallUpdateEvent } from "@/data/Conversation";
 import { getErrorMessage } from "@/utils/error";
@@ -14,7 +13,7 @@ import {
     PreviewCodeRequestEvent,
 } from "@/utils/previewCode";
 import { createPreviewCodeRuntime } from "@/utils/previewCodeRuntime";
-import { CheckCircle, Loader2, Sparkles, XCircle } from "lucide-react";
+import { CheckCircle, ChevronDown, ChevronUp, Loader2, Sparkles, XCircle } from "lucide-react";
 
 interface InlineCodePreviewCardProps {
     parameters: string;
@@ -51,6 +50,7 @@ export default function InlineCodePreviewCard({
     const [runtimeError, setRuntimeError] = useState<string | null>(null);
     const [interactionError, setInteractionError] = useState<string | null>(null);
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [isCollapsed, setIsCollapsed] = useState(false);
     const [optimisticResult, setOptimisticResult] = useState<ReturnType<typeof parsePreviewCodeToolResult> | null>(null);
 
     const matchedStateByLlmCallId = useMemo(() => {
@@ -97,6 +97,7 @@ export default function InlineCodePreviewCard({
         setOptimisticResult(null);
         setInteractionError(null);
         setRuntimeError(null);
+        setIsCollapsed(false);
     }, [conversationId, requestSignature]);
 
     useEffect(() => {
@@ -205,7 +206,7 @@ export default function InlineCodePreviewCard({
         }
 
         const bridgeId =
-            `preview-code-${effectiveCallId ?? llmCallId ?? messageId ?? "transient"}`;
+            `preview-code-${llmCallId ?? messageId ?? effectiveCallId ?? "transient"}`;
         runtimeRef.current.update({
             code: previewRequest.code,
             isFinal: !isStreaming,
@@ -327,31 +328,6 @@ export default function InlineCodePreviewCard({
         );
     }, [previewRequest]);
 
-    const handleCloseClick = async () => {
-        if (!resolvedRequestId) {
-            setInteractionError("preview_code 尚未绑定 request_id，请稍后重试");
-            return;
-        }
-        setIsSubmitting(true);
-        setInteractionError(null);
-        try {
-            await invoke("submit_preview_code_response", {
-                requestId: resolvedRequestId,
-                request_id: resolvedRequestId,
-                payload: null,
-                dismissed: true,
-            });
-            setOptimisticResult({
-                status: "dismissed",
-                request_id: resolvedRequestId,
-            });
-        } catch (error) {
-            setInteractionError(getErrorMessage(error));
-        } finally {
-            setIsSubmitting(false);
-        }
-    };
-
     const statusBadge = (() => {
         switch (displayState) {
             case "streaming":
@@ -363,12 +339,7 @@ export default function InlineCodePreviewCard({
                 );
             case "pending":
             case "executing":
-                return (
-                    <Badge variant="secondary" className="flex items-center gap-1">
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                        等待交互
-                    </Badge>
-                );
+                return null;
             case "submitted":
                 return (
                     <Badge className="flex items-center gap-1 bg-success text-success-foreground border-success-border">
@@ -400,31 +371,38 @@ export default function InlineCodePreviewCard({
         }
     })();
 
-    const contentHidden = displayState === "dismissed";
+    const previewHidden = displayState === "dismissed" || isCollapsed;
+    const toggleButtonLabel = isCollapsed ? "展开" : "收起";
 
     return (
-        <Card className="border-border/80">
-            <CardHeader className="space-y-3">
+        <div className="space-y-3 py-2">
+            <div className="space-y-3">
                 <div className="flex items-start justify-between gap-3">
                     <div className="space-y-1">
-                        <CardTitle className="text-sm">
+                        <div className="text-sm font-medium">
                             {previewRequest?.title || "inline_preview"}
-                        </CardTitle>
+                        </div>
                         <div className="text-xs text-muted-foreground">
                             preview_code · {previewRequest?.renderer || "html"}
                         </div>
                     </div>
                     <div className="flex items-center gap-2">
                         {statusBadge}
-                        {displayState !== "submitted" && (
+                        {displayState !== "dismissed" && (
                             <Button
                                 type="button"
                                 variant="ghost"
                                 size="sm"
-                                onClick={handleCloseClick}
-                                disabled={isSubmitting || !resolvedRequestId}
+                                onClick={() => setIsCollapsed((current) => !current)}
+                                disabled={isSubmitting}
+                                aria-expanded={!isCollapsed}
                             >
-                                关闭
+                                {isCollapsed ? (
+                                    <ChevronDown className="h-3.5 w-3.5" />
+                                ) : (
+                                    <ChevronUp className="h-3.5 w-3.5" />
+                                )}
+                                {toggleButtonLabel}
                             </Button>
                         )}
                     </div>
@@ -432,8 +410,8 @@ export default function InlineCodePreviewCard({
                 {loadingMessage && (displayState === "streaming" || displayState === "executing" || displayState === "pending") && (
                     <div className="text-xs text-muted-foreground">{loadingMessage}</div>
                 )}
-            </CardHeader>
-            <CardContent className="space-y-3">
+            </div>
+            <div className="space-y-3">
                 {runtimeError && (
                     <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
                         {runtimeError}
@@ -444,25 +422,28 @@ export default function InlineCodePreviewCard({
                         {interactionError}
                     </div>
                 )}
-                {!contentHidden && (
-                    <div
-                        ref={hostRef}
-                        data-testid="preview-code-host"
-                        className="rounded-md border bg-background min-h-[96px] p-4 overflow-hidden"
-                    />
-                )}
+                <div
+                    ref={hostRef}
+                    data-testid="preview-code-host"
+                    className={previewHidden ? "hidden min-h-[96px] overflow-hidden bg-transparent" : "min-h-[96px] overflow-hidden bg-transparent"}
+                />
                 {toolResult?.status === "submitted" && toolResult.payload !== undefined && (
                     <pre className="rounded-md bg-muted p-3 text-xs whitespace-pre-wrap break-words">
                         {JSON.stringify(toolResult.payload, null, 2)}
                     </pre>
                 )}
-                {contentHidden && (
-                    <div className="rounded-md border border-dashed px-3 py-4 text-sm text-muted-foreground">
+                {isCollapsed && displayState !== "dismissed" && (
+                    <div className="text-sm text-muted-foreground">
+                        预览已收起。
+                    </div>
+                )}
+                {displayState === "dismissed" && (
+                    <div className="text-sm text-muted-foreground">
                         该内嵌 UI 已关闭。
                     </div>
                 )}
-            </CardContent>
-        </Card>
+            </div>
+        </div>
     );
 }
 

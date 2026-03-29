@@ -75,27 +75,12 @@ function getScriptLoadRegistry(): Record<string, Promise<void> | undefined> {
     return window.__AIPP_PREVIEW_CODE_SCRIPT_LOADS__;
 }
 
-function buildScopedBridgeExpression(bridgeId: string): string {
-    return `window.__AIPP_PREVIEW_CODE_BRIDGES__[${JSON.stringify(bridgeId)}]`;
-}
-
-function rewriteBridgeReferences(scriptContent: string, bridgeId: string): string {
-    const scopedBridge = buildScopedBridgeExpression(bridgeId);
-    return scriptContent
-        .replaceAll("window.aippPreviewCode", scopedBridge)
-        .replaceAll("globalThis.aippPreviewCode", scopedBridge);
-}
-
-function rewriteInlineBridgeReferences(root: ParentNode, bridgeId: string) {
-    const elements = "querySelectorAll" in root ? root.querySelectorAll("*") : [];
-    elements.forEach((element) => {
-        for (const attribute of Array.from(element.attributes)) {
-            if (!attribute.name.startsWith("on")) {
-                continue;
-            }
-            element.setAttribute(attribute.name, rewriteBridgeReferences(attribute.value, bridgeId));
-        }
-    });
+function getLiveBridgeOrThrow(bridgeId: string): PreviewCodeBridge {
+    const bridge = getBridgeRegistry()[bridgeId];
+    if (!bridge) {
+        throw new Error(`preview_code bridge is unavailable: ${bridgeId}`);
+    }
+    return bridge;
 }
 
 function rewriteStyleSelectors(styleContent: string): string {
@@ -179,16 +164,138 @@ function createPreviewDocumentFacade(shadowRoot: ShadowRoot, host: HTMLElement) 
     };
 }
 
-async function executeScripts(
+type PreviewWindow = Window & Record<string, unknown>;
+
+interface PreviewScriptEnvironment {
+    previewWindow: PreviewWindow;
+    previewDocument: ReturnType<typeof createPreviewDocumentFacade>;
+}
+
+function createPreviewScriptEnvironment(
     shadowRoot: ShadowRoot,
     host: HTMLElement,
-    bridgeId: string,
-    bridge: PreviewCodeBridge,
-    scripts: Array<{ src: string | null; type: string | null; content: string }>
-) {
+    bridge: PreviewCodeBridge
+): PreviewScriptEnvironment {
     const previewDocument = createPreviewDocumentFacade(shadowRoot, host);
     const bridgeRegistry = getBridgeRegistry();
+    const previewWindow = Object.create(window) as PreviewWindow;
 
+    Object.defineProperty(previewWindow, "document", {
+        configurable: true,
+        value: previewDocument,
+    });
+    Object.defineProperty(previewWindow, "window", {
+        configurable: true,
+        value: previewWindow,
+    });
+    Object.defineProperty(previewWindow, "self", {
+        configurable: true,
+        value: previewWindow,
+    });
+    Object.defineProperty(previewWindow, "globalThis", {
+        configurable: true,
+        value: previewWindow,
+    });
+    Object.defineProperty(previewWindow, "aippPreviewCode", {
+        configurable: true,
+        writable: true,
+        value: bridge,
+    });
+    Object.defineProperty(previewWindow, "__AIPP_PREVIEW_CODE_BRIDGES__", {
+        configurable: true,
+        writable: true,
+        value: bridgeRegistry,
+    });
+
+    return {
+        previewWindow,
+        previewDocument,
+    };
+}
+
+function collectExportedSymbolNames(scriptContent: string): string[] {
+    const names = new Set<string>();
+    const patterns = [
+        /(?:^|[;\n\r]\s*)(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g,
+        /(?:^|[;\n\r]\s*)class\s+([A-Za-z_$][\w$]*)\s*/g,
+        /(?:^|[;\n\r]\s*)(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/g,
+    ];
+
+    patterns.forEach((pattern) => {
+        for (const match of scriptContent.matchAll(pattern)) {
+            const name = match[1];
+            if (name) {
+                names.add(name);
+            }
+        }
+    });
+
+    return Array.from(names);
+}
+
+function appendWindowExports(scriptContent: string): string {
+    const names = collectExportedSymbolNames(scriptContent);
+    if (names.length === 0) {
+        return scriptContent;
+    }
+
+    const exportStatements = names
+        .map((name) => `if (typeof ${name} !== "undefined") { window[${JSON.stringify(name)}] = ${name}; }`)
+        .join("\n");
+    return `${scriptContent}\n${exportStatements}`;
+}
+
+function bindInlineEventHandlers(
+    root: ParentNode,
+    environment: PreviewScriptEnvironment,
+    host: HTMLElement,
+    shadowRoot: ShadowRoot
+) {
+    const elements = "querySelectorAll" in root ? root.querySelectorAll("*") : [];
+    elements.forEach((element) => {
+        for (const attribute of Array.from(element.attributes)) {
+            if (!attribute.name.startsWith("on")) {
+                continue;
+            }
+
+            const eventName = attribute.name.slice(2);
+            const handlerRunner = new Function(
+                "event",
+                "window",
+                "document",
+                "host",
+                "shadowRoot",
+                "aippPreviewCode",
+                `with(window){ ${attribute.value} }`
+            );
+
+            element.removeAttribute(attribute.name);
+            element.addEventListener(eventName, (event) => {
+                const result = handlerRunner.call(
+                    environment.previewWindow,
+                    event,
+                    environment.previewWindow,
+                    environment.previewDocument,
+                    host,
+                    shadowRoot,
+                    environment.previewWindow.aippPreviewCode
+                );
+
+                if (result === false) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                }
+            });
+        }
+    });
+}
+
+async function executeScripts(
+    host: HTMLElement,
+    shadowRoot: ShadowRoot,
+    environment: PreviewScriptEnvironment,
+    scripts: Array<{ src: string | null; type: string | null; content: string }>
+) {
     for (const script of scripts) {
         if (script.src) {
             await ensureExternalScriptLoaded(script.src, script.type);
@@ -197,20 +304,6 @@ async function executeScripts(
         if (!script.content.trim()) {
             continue;
         }
-        const previewWindow = Object.create(window) as Window &
-            Record<string, unknown>;
-        Object.defineProperty(previewWindow, "document", {
-            configurable: true,
-            value: previewDocument,
-        });
-        Object.defineProperty(previewWindow, "aippPreviewCode", {
-            configurable: true,
-            value: bridge,
-        });
-        Object.defineProperty(previewWindow, "__AIPP_PREVIEW_CODE_BRIDGES__", {
-            configurable: true,
-            value: bridgeRegistry,
-        });
 
         const scriptRunner = new Function(
             "window",
@@ -219,9 +312,17 @@ async function executeScripts(
             "host",
             "shadowRoot",
             "aippPreviewCode",
-            rewriteBridgeReferences(script.content, bridgeId)
+            appendWindowExports(script.content)
         );
-        scriptRunner(previewWindow, previewDocument, previewWindow, host, shadowRoot, bridge);
+        scriptRunner.call(
+            environment.previewWindow,
+            environment.previewWindow,
+            environment.previewDocument,
+            environment.previewWindow,
+            host,
+            shadowRoot,
+            environment.previewWindow.aippPreviewCode
+        );
     }
 }
 
@@ -230,6 +331,10 @@ export function createPreviewCodeRuntime(host: HTMLElement): PreviewCodeRuntimeC
     let scheduledFrame: ScheduledFrameHandle | null = null;
     let latestUpdate: PreviewCodeRuntimeUpdate | null = null;
     let lastFinalSignature: string | null = null;
+    let lastBridgeId: string | null = null;
+    let lastRenderedCode: string | null = null;
+    let lastScripts: Array<{ src: string | null; type: string | null; content: string }> = [];
+    let lastEnvironment: PreviewScriptEnvironment | null = null;
     const shadowRoot = host.shadowRoot ?? host.attachShadow({ mode: "open" });
     const mountPoint = document.createElement("div");
     mountPoint.className = "aipp-preview-code-root";
@@ -243,18 +348,34 @@ export function createPreviewCodeRuntime(host: HTMLElement): PreviewCodeRuntimeC
         const { code, isFinal, bridgeId, bridge, onError } = latestUpdate;
         const registry = getBridgeRegistry();
         registry[bridgeId] = bridge;
+        const liveBridge: PreviewCodeBridge = {
+            submit: (payload?: unknown) => getLiveBridgeOrThrow(bridgeId).submit(payload),
+            close: () => getLiveBridgeOrThrow(bridgeId).close(),
+            emitEvent: (name: string, payload?: unknown) =>
+                getLiveBridgeOrThrow(bridgeId).emitEvent(name, payload),
+        };
 
         try {
-            const template = document.createElement("template");
-            template.innerHTML = code;
-            rewriteInlineBridgeReferences(template.content, bridgeId);
-            normalizeStyleNodes(template.content);
-            const scripts = collectScriptNodes(template.content);
-            mountPoint.replaceChildren(template.content.cloneNode(true));
+            if (!lastEnvironment || lastRenderedCode !== code || lastBridgeId !== bridgeId) {
+                const template = document.createElement("template");
+                template.innerHTML = code;
+                normalizeStyleNodes(template.content);
+                lastScripts = collectScriptNodes(template.content);
+                mountPoint.replaceChildren(template.content.cloneNode(true));
+                lastEnvironment = createPreviewScriptEnvironment(shadowRoot, host, liveBridge);
+                bindInlineEventHandlers(mountPoint, lastEnvironment, host, shadowRoot);
+                if (lastBridgeId !== null && lastBridgeId !== bridgeId) {
+                    lastFinalSignature = null;
+                }
+                lastBridgeId = bridgeId;
+                lastRenderedCode = code;
+            } else {
+                lastEnvironment.previewWindow.aippPreviewCode = liveBridge;
+            }
 
             if (isFinal && lastFinalSignature !== code) {
                 lastFinalSignature = code;
-                void executeScripts(shadowRoot, host, bridgeId, bridge, scripts).catch((error) => {
+                void executeScripts(host, shadowRoot, lastEnvironment, lastScripts).catch((error) => {
                     const message =
                         error instanceof Error
                             ? error.message
@@ -293,6 +414,10 @@ export function createPreviewCodeRuntime(host: HTMLElement): PreviewCodeRuntimeC
                 const registry = getBridgeRegistry();
                 delete registry[latestUpdate.bridgeId];
             }
+            lastBridgeId = null;
+            lastRenderedCode = null;
+            lastScripts = [];
+            lastEnvironment = null;
             shadowRoot.replaceChildren();
         },
     };

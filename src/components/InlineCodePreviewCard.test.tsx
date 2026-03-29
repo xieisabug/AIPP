@@ -61,27 +61,14 @@ describe("InlineCodePreviewCard", () => {
         expect(host.querySelector("style")).toBeNull();
     });
 
-    it("submits a dismissed result when close is clicked after request recovery", async () => {
-        const requestId = "preview-req-1";
-        mockInvokeHandler("list_preview_code_requests_for_conversation", () => [
-            {
-                request_id: requestId,
-                conversation_id: 2,
-                title: "close_me",
-                renderer: "html",
-                code: "<div>Closable</div>",
-                interactionMode: "submit_once",
-                loadingMessages: [],
-            },
-        ]);
-        mockInvokeHandler("submit_preview_code_response", () => true);
-
+    it("toggles collapse locally without dismissing the preview request", async () => {
+        mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
         render(
             <InlineCodePreviewCard
                 parameters={JSON.stringify({
-                    title: "close_me",
+                    title: "collapse_me",
                     renderer: "html",
-                    code: "<div>Closable</div>",
+                    code: "<div>Collapsible</div>",
                     interaction_mode: "submit_once",
                 })}
                 conversationId={2}
@@ -92,19 +79,24 @@ describe("InlineCodePreviewCard", () => {
         );
 
         const user = userEvent.setup();
-        const closeButton = await screen.findByRole("button", { name: "关闭" });
-        await waitFor(() => expect(closeButton).toBeEnabled());
-        await user.click(closeButton);
+        const toggleButton = await screen.findByRole("button", { name: "收起" });
+        const host = await screen.findByTestId("preview-code-host");
+        await waitFor(() => expect(host.shadowRoot?.textContent).toContain("Collapsible"));
+        expect(host).not.toHaveClass("hidden");
 
-        await waitFor(() =>
-            expect(invoke).toHaveBeenCalledWith("submit_preview_code_response", {
-                requestId,
-                request_id: requestId,
-                payload: null,
-                dismissed: true,
-            })
+        await user.click(toggleButton);
+        expect(await screen.findByRole("button", { name: "展开" })).toBeInTheDocument();
+        expect(await screen.findByText("预览已收起。")).toBeInTheDocument();
+        expect(host).toHaveClass("hidden");
+        expect(invoke).not.toHaveBeenCalledWith(
+            "submit_preview_code_response",
+            expect.anything()
         );
-        expect(await screen.findByText("该内嵌 UI 已关闭。")).toBeInTheDocument();
+
+        await user.click(screen.getByRole("button", { name: "展开" }));
+        expect(await screen.findByRole("button", { name: "收起" })).toBeInTheDocument();
+        expect(screen.queryByText("预览已收起。")).not.toBeInTheDocument();
+        expect(host).not.toHaveClass("hidden");
     });
 });
 

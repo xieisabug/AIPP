@@ -469,7 +469,7 @@ describe("useMcpToolCallProcessor MCP identity", () => {
             />
         );
 
-        expect(await screen.findByText("等待交互")).toBeInTheDocument();
+        expect(screen.queryByText("等待交互")).not.toBeInTheDocument();
         const host = await screen.findByTestId("preview-code-host");
         await waitFor(() => expect(host.shadowRoot?.textContent).toContain("Live Content"));
         expect(host.shadowRoot?.textContent).not.toContain("Final Content");
