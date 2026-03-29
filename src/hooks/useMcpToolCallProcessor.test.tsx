@@ -474,4 +474,27 @@ describe("useMcpToolCallProcessor MCP identity", () => {
         await waitFor(() => expect(host.shadowRoot?.textContent).toContain("Live Content"));
         expect(host.shadowRoot?.textContent).not.toContain("Final Content");
     });
+
+    it("renders preview_code source fallback when Rust snapshot says DOM is not yet paintable", async () => {
+        const conversationId = 29;
+        mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
+        const markdown =
+            '<!-- MCP_TOOL_CALL_STREAMING:{"server_name":"ui_interaction","tool_name":"preview_code","fn_arguments":"{\\"title\\":\\"script_only\\",\\"renderer\\":\\"html\\",\\"code\\":\\"<script>console.log(\\\\\\"boot\\\\\\")</script>\\"}","llm_call_id":"preview_call_fallback","preview_state":{"title":"script_only","renderer":"html","code":"<script>console.log(\\"boot\\")</script>","loadingMessages":["正在生成交互面板"],"interactionMode":"submit_once","hasRenderableDom":false,"containsScript":true,"renderableHtml":"","sourceExcerpt":"<script>console.log(\\"boot\\")</script>"}} -->';
+
+        render(
+            <ProcessorHarness
+                markdown={markdown}
+                conversationId={conversationId}
+                messageId={20}
+                mcpToolCallStates={new Map()}
+                shiningMcpCallId={null}
+            />
+        );
+
+        expect(await screen.findByText("script_only")).toBeInTheDocument();
+        expect(
+            screen.getByText("正在生成可渲染预览，先展示当前代码片段。")
+        ).toBeInTheDocument();
+        expect(screen.getByText(/console\.log\("boot"\)/)).toBeInTheDocument();
+    });
 });

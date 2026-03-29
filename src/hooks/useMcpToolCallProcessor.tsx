@@ -9,6 +9,7 @@ import { Send, Loader2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import type { InlineInteractionItem } from '@/components/ConversationUI';
 import { getErrorMessage } from '@/utils/error';
+import { parsePreviewCodeStreamingState, type PreviewCodeStreamingState } from '@/utils/previewCode';
 
 interface McpProcessorOptions {
     remarkPlugins: readonly any[];
@@ -33,6 +34,7 @@ interface ToolCallData {
     llm_call_id?: string;
     isStreaming?: boolean;  // 流式工具调用（参数可能不完整）
     fn_arguments?: string;  // 流式工具调用的原始参数
+    preview_state?: PreviewCodeStreamingState;
 }
 
 interface ParsedMcpToolCallComment {
@@ -79,6 +81,7 @@ function normalizeToolCallData(raw: unknown): ToolCallData {
         call_id: callId,
         llm_call_id: typeof llmCallIdRaw === "string" ? llmCallIdRaw : undefined,
         fn_arguments: typeof value.fn_arguments === "string" ? value.fn_arguments : undefined,
+        preview_state: parsePreviewCodeStreamingState(value.preview_state) ?? undefined,
     };
 }
 
@@ -546,6 +549,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
                         callId={data.call_id}
                         mcpToolCallStates={mcpToolCallStates}
                         isStreaming={data.isStreaming}
+                        streamingPreviewState={data.preview_state}
                     />
                 );
             } else {

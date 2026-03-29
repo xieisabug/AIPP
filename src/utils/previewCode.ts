@@ -18,6 +18,13 @@ export interface PreviewCodeRequestEvent extends PreviewCodeRequest {
     conversation_id?: number;
 }
 
+export interface PreviewCodeStreamingState extends PreviewCodeRequest {
+    hasRenderableDom: boolean;
+    containsScript: boolean;
+    renderableHtml: string;
+    sourceExcerpt: string;
+}
+
 export interface PreviewCodeToolResult {
     status: string;
     request_id?: string;
@@ -119,6 +126,35 @@ function normalizePreviewCodeRecord(record: Record<string, unknown>): PreviewCod
             metadataRecord && typeof metadataRecord.origin === "string"
                 ? { origin: metadataRecord.origin }
                 : undefined,
+    };
+}
+
+export function parsePreviewCodeStreamingState(raw: unknown): PreviewCodeStreamingState | null {
+    if (!raw || typeof raw !== "object") {
+        return null;
+    }
+    const record = raw as Record<string, unknown>;
+    const request = normalizePreviewCodeRecord(record);
+    if (!request) {
+        return null;
+    }
+
+    const trimmedCode = request.code.trim();
+    const sourceExcerpt =
+        typeof record.sourceExcerpt === "string"
+            ? record.sourceExcerpt
+            : trimmedCode.length > 600
+              ? `${trimmedCode.slice(0, 600)}…`
+              : trimmedCode;
+    const renderableHtml =
+        typeof record.renderableHtml === "string" ? record.renderableHtml : request.code;
+
+    return {
+        ...request,
+        hasRenderableDom: record.hasRenderableDom === true,
+        containsScript: record.containsScript === true,
+        renderableHtml,
+        sourceExcerpt,
     };
 }
 

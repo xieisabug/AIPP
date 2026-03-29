@@ -29,6 +29,11 @@ describe("previewCodeRuntime", () => {
         document.body.appendChild(host);
         const runtime = createPreviewCodeRuntime(host);
 
+        expect(host.shadowRoot?.querySelector(".aipp-preview-code-shell")).not.toBeNull();
+        expect(host.shadowRoot?.querySelector("style")?.textContent).toContain(
+            "@keyframes aipp-preview-code-enter"
+        );
+
         runtime.update({
             code: "<div>chunk-1</div>",
             isFinal: false,
@@ -52,10 +57,15 @@ describe("previewCodeRuntime", () => {
             bridge,
         });
 
-        expect(host.shadowRoot?.textContent ?? "").toBe("");
+        expect(
+            host.shadowRoot?.querySelector(".aipp-preview-code-root")?.textContent ?? ""
+        ).toBe("");
 
         vi.advanceTimersByTime(6);
         expect(host.shadowRoot?.textContent).toContain("chunk-3");
+        expect(
+            host.shadowRoot?.querySelector(".aipp-preview-code-shell")?.getAttribute("data-streaming")
+        ).toBe("true");
 
         runtime.update({
             code: "<div>chunk-4</div>",

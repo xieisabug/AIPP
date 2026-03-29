@@ -26,6 +26,81 @@ declare global {
 }
 
 const PREVIEW_CODE_FRAME_MS = 16;
+const PREVIEW_CODE_RUNTIME_STYLES = `
+:host {
+    display: block;
+    min-height: inherit;
+    color: inherit;
+}
+
+.aipp-preview-code-shell {
+    position: relative;
+    min-height: inherit;
+    overflow: clip;
+}
+
+.aipp-preview-code-root {
+    min-height: inherit;
+}
+
+.aipp-preview-code-root > :where(:not(style):not(script)) {
+    animation: aipp-preview-code-enter 240ms cubic-bezier(0.22, 1, 0.36, 1);
+    transform-origin: top center;
+    will-change: opacity, transform, filter;
+}
+
+.aipp-preview-code-shell[data-streaming="true"]::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(
+        120deg,
+        transparent 0%,
+        rgba(148, 163, 184, 0.08) 38%,
+        rgba(148, 163, 184, 0.18) 50%,
+        rgba(148, 163, 184, 0.08) 62%,
+        transparent 100%
+    );
+    opacity: 0.55;
+    transform: translateX(-55%);
+    animation: aipp-preview-code-sheen 1.8s ease-in-out infinite;
+}
+
+@keyframes aipp-preview-code-enter {
+    from {
+        opacity: 0;
+        transform: translateY(10px) scale(0.985);
+        filter: blur(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+        filter: blur(0);
+    }
+}
+
+@keyframes aipp-preview-code-sheen {
+    from {
+        transform: translateX(-55%);
+    }
+    to {
+        transform: translateX(55%);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .aipp-preview-code-root > :where(:not(style):not(script)) {
+        animation: none;
+    }
+
+    .aipp-preview-code-shell[data-streaming="true"]::after {
+        animation: none;
+        opacity: 0.18;
+        transform: none;
+    }
+}
+`;
 const ALLOWED_EXTERNAL_SCRIPT_ORIGINS = new Set([
     "https://cdn.jsdelivr.net",
     "https://unpkg.com",
@@ -336,9 +411,15 @@ export function createPreviewCodeRuntime(host: HTMLElement): PreviewCodeRuntimeC
     let lastScripts: Array<{ src: string | null; type: string | null; content: string }> = [];
     let lastEnvironment: PreviewScriptEnvironment | null = null;
     const shadowRoot = host.shadowRoot ?? host.attachShadow({ mode: "open" });
+    const styleElement = document.createElement("style");
+    styleElement.textContent = PREVIEW_CODE_RUNTIME_STYLES;
+    const shell = document.createElement("div");
+    shell.className = "aipp-preview-code-shell";
+    shell.dataset.streaming = "false";
     const mountPoint = document.createElement("div");
     mountPoint.className = "aipp-preview-code-root";
-    shadowRoot.replaceChildren(mountPoint);
+    shell.appendChild(mountPoint);
+    shadowRoot.replaceChildren(styleElement, shell);
 
     const applyLatest = () => {
         if (disposed || !latestUpdate) {
@@ -346,6 +427,7 @@ export function createPreviewCodeRuntime(host: HTMLElement): PreviewCodeRuntimeC
         }
 
         const { code, isFinal, bridgeId, bridge, onError } = latestUpdate;
+        shell.dataset.streaming = (!isFinal).toString();
         const registry = getBridgeRegistry();
         registry[bridgeId] = bridge;
         const liveBridge: PreviewCodeBridge = {
@@ -375,13 +457,15 @@ export function createPreviewCodeRuntime(host: HTMLElement): PreviewCodeRuntimeC
 
             if (isFinal && lastFinalSignature !== code) {
                 lastFinalSignature = code;
-                void executeScripts(host, shadowRoot, lastEnvironment, lastScripts).catch((error) => {
-                    const message =
-                        error instanceof Error
-                            ? error.message
-                            : "Failed to execute preview_code scripts";
-                    onError?.(message);
-                });
+                void executeScripts(host, shadowRoot, lastEnvironment, lastScripts)
+                    .then(() => undefined)
+                    .catch((error) => {
+                        const message =
+                            error instanceof Error
+                                ? error.message
+                                : "Failed to execute preview_code scripts";
+                        onError?.(message);
+                    });
             } else if (!isFinal) {
                 lastFinalSignature = null;
             }

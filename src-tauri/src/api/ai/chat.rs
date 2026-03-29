@@ -16,6 +16,8 @@ use anyhow::Context as _;
 use futures::StreamExt;
 use genai::chat::ChatStreamEvent;
 use genai::chat::{ChatOptions, ChatRequest, ToolCall};
+use scraper::{Html, Selector};
+use serde::Serialize;
 use genai::Client;
 use serde_json;
 use std::collections::HashMap;
@@ -362,7 +364,7 @@ async fn ensure_stream_message(
         })
         .unwrap(),
     };
-    let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
+    window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event)?;
 
     // 设置 Assistant 消息的活动状态（闪亮边框）
     if message_type == "response" || message_type == "reasoning" {
@@ -413,7 +415,7 @@ fn persist_and_emit_update(
         })
         .unwrap(),
     };
-    let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+    window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event)?;
 
     Ok(())
 }
@@ -433,6 +435,205 @@ fn serialize_streaming_tool_arguments(arguments: &serde_json::Value) -> String {
         serde_json::Value::Null => String::new(),
         _ => arguments.to_string(),
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewCodeStreamingState {
+    title: String,
+    renderer: String,
+    code: String,
+    loading_messages: Vec<String>,
+    interaction_mode: String,
+    has_renderable_dom: bool,
+    contains_script: bool,
+    renderable_html: String,
+    source_excerpt: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PreviewCodeFragmentAnalysis {
+    has_renderable_dom: bool,
+    contains_script: bool,
+}
+
+fn decode_json_string_fragment(raw: &str) -> String {
+    serde_json::from_str::<String>(&format!("\"{}\"", raw)).unwrap_or_else(|_| {
+        raw.replace("\\n", "\n")
+            .replace("\\r", "\r")
+            .replace("\\t", "\t")
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\")
+    })
+}
+
+fn extract_partial_string_field(raw: &str, field_names: &[&str]) -> Option<String> {
+    for field_name in field_names {
+        let exact = regex::Regex::new(
+            format!(r#""{}"\s*:\s*"((?:\\.|[^"\\])*)""#, regex::escape(field_name)).as_str(),
+        )
+        .ok()
+        .and_then(|re| re.captures(raw))
+        .and_then(|caps| caps.get(1).map(|capture| decode_json_string_fragment(capture.as_str())));
+        if exact.is_some() {
+            return exact;
+        }
+
+        let partial = regex::Regex::new(
+            format!(r#""{}"\s*:\s*"([\s\S]*)$"#, regex::escape(field_name)).as_str(),
+        )
+        .ok()
+        .and_then(|re| re.captures(raw))
+        .and_then(|caps| caps.get(1).map(|capture| decode_json_string_fragment(capture.as_str())));
+        if partial.is_some() {
+            return partial;
+        }
+    }
+    None
+}
+
+fn extract_partial_string_array_field(raw: &str, field_names: &[&str]) -> Vec<String> {
+    for field_name in field_names {
+        let Some(captures) = regex::Regex::new(
+            format!(r#""{}"\s*:\s*\[([\s\S]*?)(?:\]|$)"#, regex::escape(field_name)).as_str(),
+        )
+        .ok()
+        .and_then(|re| re.captures(raw))
+        else {
+            continue;
+        };
+        let Some(items_raw) = captures.get(1).map(|capture| capture.as_str()) else {
+            continue;
+        };
+        let mut items = Vec::new();
+        if let Ok(item_regex) = regex::Regex::new(r#""((?:\\.|[^"\\])*)""#) {
+            for captures in item_regex.captures_iter(items_raw) {
+                if let Some(value) = captures.get(1) {
+                    items.push(decode_json_string_fragment(value.as_str()));
+                }
+            }
+        }
+        return items;
+    }
+    Vec::new()
+}
+
+fn analyze_preview_code_fragment(code: &str) -> PreviewCodeFragmentAnalysis {
+    let trimmed = code.trim();
+    if trimmed.is_empty() {
+        return PreviewCodeFragmentAnalysis::default();
+    }
+
+    let fragment = Html::parse_fragment(trimmed);
+    let contains_script = trimmed.to_ascii_lowercase().contains("<script");
+    let has_renderable_element = Selector::parse("*")
+        .ok()
+        .map(|selector| {
+            fragment.select(&selector).any(|element| {
+                !matches!(
+                    element.value().name(),
+                    "html" | "head" | "body" | "script" | "style" | "meta" | "link" | "title"
+                )
+            })
+        })
+        .unwrap_or(false);
+    let has_visible_text = !fragment.root_element().text().collect::<String>().trim().is_empty();
+
+    PreviewCodeFragmentAnalysis {
+        has_renderable_dom: has_renderable_element || has_visible_text,
+        contains_script,
+    }
+}
+
+fn build_preview_source_excerpt(code: &str, max_chars: usize) -> String {
+    let trimmed = code.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let excerpt: String = trimmed.chars().take(max_chars).collect();
+    if trimmed.chars().count() > max_chars {
+        format!("{}…", excerpt)
+    } else {
+        excerpt
+    }
+}
+
+fn extract_preview_code_streaming_state(
+    arguments: &serde_json::Value,
+) -> Option<PreviewCodeStreamingState> {
+    let raw_arguments = serialize_streaming_tool_arguments(arguments);
+    let object = arguments.as_object();
+
+    let title = object
+        .and_then(|record| record.get("title").and_then(|value| value.as_str()))
+        .map(str::to_string)
+        .or_else(|| extract_partial_string_field(&raw_arguments, &["title"]))
+        .unwrap_or_else(|| "inline_preview".to_string());
+    let renderer = object
+        .and_then(|record| record.get("renderer").and_then(|value| value.as_str()))
+        .map(str::to_string)
+        .or_else(|| extract_partial_string_field(&raw_arguments, &["renderer"]))
+        .unwrap_or_else(|| "html".to_string());
+    let code = object
+        .and_then(|record| record.get("code").and_then(|value| value.as_str()))
+        .map(str::to_string)
+        .or_else(|| extract_partial_string_field(&raw_arguments, &["code"]))
+        .unwrap_or_default();
+    let interaction_mode = object
+        .and_then(|record| {
+            record
+                .get("interaction_mode")
+                .or_else(|| record.get("interactionMode"))
+                .and_then(|value| value.as_str())
+        })
+        .map(str::to_string)
+        .or_else(|| {
+            extract_partial_string_field(&raw_arguments, &["interaction_mode", "interactionMode"])
+        })
+        .unwrap_or_else(|| "submit_once".to_string());
+    let loading_messages = object
+        .and_then(|record| {
+            record
+                .get("loading_messages")
+                .or_else(|| record.get("loadingMessages"))
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::trim))
+                        .filter(|item| !item.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+        })
+        .unwrap_or_else(|| {
+            extract_partial_string_array_field(
+                &raw_arguments,
+                &["loading_messages", "loadingMessages"],
+            )
+        });
+
+    if title.trim().is_empty() && code.trim().is_empty() && loading_messages.is_empty() {
+        return None;
+    }
+
+    let analysis = analyze_preview_code_fragment(&code);
+
+    Some(PreviewCodeStreamingState {
+        title,
+        renderer,
+        code: code.clone(),
+        loading_messages,
+        interaction_mode,
+        has_renderable_dom: analysis.has_renderable_dom,
+        contains_script: analysis.contains_script,
+        renderable_html: if analysis.has_renderable_dom {
+            code.clone()
+        } else {
+            String::new()
+        },
+        source_excerpt: build_preview_source_excerpt(&code, 600),
+    })
 }
 
 fn merge_streaming_text(existing: &mut String, incoming: &str) {
@@ -518,14 +719,25 @@ fn build_streaming_tool_call_display(
     for tc in sorted_calls {
         let (server_name, tool_name) = resolve_tool_name(&tc.fn_name, tool_name_mapping);
         let params_str = serialize_streaming_tool_arguments(&tc.fn_arguments);
+        let mut marker_payload = serde_json::json!({
+            "server_name": server_name,
+            "tool_name": tool_name,
+            "fn_arguments": params_str,
+            "llm_call_id": tc.call_id,
+        });
+        if server_name == "ui_interaction" && tool_name == "preview_code" {
+            if let Some(preview_state) = extract_preview_code_streaming_state(&tc.fn_arguments) {
+                if let Some(marker_object) = marker_payload.as_object_mut() {
+                    marker_object.insert(
+                        "preview_state".to_string(),
+                        serde_json::to_value(preview_state).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+            }
+        }
         let marker = format!(
             "\n\n<!-- MCP_TOOL_CALL_STREAMING:{} -->\n",
-            serde_json::json!({
-                "server_name": server_name,
-                "tool_name": tool_name,
-                "fn_arguments": params_str,
-                "llm_call_id": tc.call_id,
-            })
+            marker_payload
         );
         display.push_str(&marker);
     }
@@ -645,6 +857,59 @@ mod tests {
         let result = build_streaming_tool_call_display("", &tool_calls, &mapping);
         assert!(result.contains("MCP_TOOL_CALL_STREAMING"));
         assert!(result.contains("partial"));
+    }
+
+    #[test]
+    fn test_build_streaming_tool_call_display_preview_code_includes_preview_state() {
+        let mapping = ToolNameMapping::new();
+        let mut tool_calls = HashMap::new();
+        tool_calls.insert(
+            "call_preview".to_string(),
+            ToolCall {
+                call_id: "call_preview".to_string(),
+                fn_name: "ui_interaction__preview_code".to_string(),
+                fn_arguments: serde_json::json!({
+                    "title": "compound_interest",
+                    "renderer": "html",
+                    "code": "<div>Live Content</div><script>console.log('ready')</script>",
+                    "loading_messages": ["正在生成交互面板"],
+                    "interaction_mode": "submit_once"
+                }),
+                thought_signatures: None,
+            },
+        );
+
+        let result = build_streaming_tool_call_display("", &tool_calls, &mapping);
+        assert!(result.contains("\"preview_state\""));
+        assert!(result.contains("\"hasRenderableDom\":true"));
+        assert!(result.contains("\"containsScript\":true"));
+        assert!(result.contains("\"title\":\"compound_interest\""));
+    }
+
+    #[test]
+    fn test_build_streaming_tool_call_display_preview_code_marks_script_only_as_not_renderable() {
+        let mapping = ToolNameMapping::new();
+        let mut tool_calls = HashMap::new();
+        tool_calls.insert(
+            "call_preview".to_string(),
+            ToolCall {
+                call_id: "call_preview".to_string(),
+                fn_name: "ui_interaction__preview_code".to_string(),
+                fn_arguments: serde_json::json!({
+                    "title": "script_only",
+                    "renderer": "html",
+                    "code": "<script>console.log('boot')</script>",
+                    "loading_messages": ["正在生成交互面板"],
+                    "interaction_mode": "submit_once"
+                }),
+                thought_signatures: None,
+            },
+        );
+
+        let result = build_streaming_tool_call_display("", &tool_calls, &mapping);
+        assert!(result.contains("\"preview_state\""));
+        assert!(result.contains("\"hasRenderableDom\":false"));
+        assert!(result.contains("\"sourceExcerpt\":\"<script>console.log('boot')</script>\""));
     }
 
     #[test]
@@ -810,10 +1075,8 @@ async fn handle_captured_tool_calls_common(
                         })
                         .unwrap(),
                     };
-                    let _ = window.emit(
-                        format!("conversation_event_{}", conversation_id).as_str(),
-                        update_event,
-                    );
+                    let _ =
+                        window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
                 }
 
                 // 自动执行（若配置）
@@ -903,7 +1166,10 @@ async fn handle_captured_tool_calls_common(
                     });
                     let _ = window.emit(
                         format!("conversation_event_{}", conversation_id).as_str(),
-                        tool_call_event,
+                        ConversationEvent {
+                            r#type: "tool_call".to_string(),
+                            data: tool_call_event["data"].clone(),
+                        },
                     );
                 }
             }
@@ -2237,7 +2503,10 @@ async fn attempt_stream_chat(
                                         let _ = window.emit(
                                             format!("conversation_event_{}", conversation_id)
                                                 .as_str(),
-                                            group_merge_event,
+                                            ConversationEvent {
+                                                r#type: "group_merge".to_string(),
+                                                data: group_merge_event["data"].clone(),
+                                            },
                                         );
                                         group_merge_event_emitted = true;
                                     }
@@ -2316,6 +2585,8 @@ async fn attempt_stream_chat(
 
                         // 累积流式工具调用数据
                         let tc = &tool_call_chunk.tool_call;
+                        let (stream_server_name, stream_tool_name) =
+                            resolve_tool_name(&tc.fn_name, &tool_name_mapping);
                         debug!(
                             llm_call_id = %tc.call_id,
                             fn_name = %tc.fn_name,

@@ -57,7 +57,10 @@ describe("InlineCodePreviewCard", () => {
         await waitFor(() =>
             expect(host.shadowRoot?.textContent).toContain("Scoped UI")
         );
-        expect(host.shadowRoot?.querySelector("style")?.textContent).toContain(":host");
+        const shadowStyles = Array.from(host.shadowRoot?.querySelectorAll("style") ?? []).map(
+            (style) => style.textContent ?? ""
+        );
+        expect(shadowStyles.some((text) => text.includes(":host"))).toBe(true);
         expect(host.querySelector("style")).toBeNull();
     });
 

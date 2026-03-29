@@ -3,7 +3,10 @@ import { emit } from "@tauri-apps/api/event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MCPToolCall } from "@/data/MCPToolCall";
 import type { ConversationRuntimePhase, ShineTarget } from "@/data/Conversation";
-import { useConversationEvents } from "@/hooks/useConversationEvents";
+import {
+    shouldFlushStreamingMessageImmediately,
+    useConversationEvents,
+} from "@/hooks/useConversationEvents";
 import {
     clearAllMockHandlers,
     mockInvokeHandler,
@@ -756,5 +759,24 @@ describe("useConversationEvents MCP completion reconciliation", () => {
         expect(result.current.activityFocus).toEqual({ focus_type: "none" });
         expect(result.current.runtimeState?.phase).toBe("idle");
         expect(result.current.runtimeState?.is_running).toBe(false);
+    });
+});
+
+describe("useConversationEvents preview_code flush policy", () => {
+    it("flushes preview_code streaming markers immediately", () => {
+        expect(
+            shouldFlushStreamingMessageImmediately(
+                '<!-- MCP_TOOL_CALL_STREAMING:{"tool_name":"preview_code"} -->'
+            )
+        ).toBe(true);
+    });
+
+    it("keeps non-preview streaming markers on transition path", () => {
+        expect(
+            shouldFlushStreamingMessageImmediately(
+                '<!-- MCP_TOOL_CALL_STREAMING:{"tool_name":"demo_tool"} -->'
+            )
+        ).toBe(false);
+        expect(shouldFlushStreamingMessageImmediately("plain text")).toBe(false);
     });
 });

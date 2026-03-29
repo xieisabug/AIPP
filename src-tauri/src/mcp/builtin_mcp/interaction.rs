@@ -808,13 +808,6 @@ pub async fn request_preview_code(
     let (tx, rx) = oneshot::channel::<PreviewCodeDecision>();
     interaction_state.store_preview_code_request(event.clone(), tx).await;
 
-    info!(
-        request_id = %request_id,
-        conversation_id = ?conversation_id,
-        interaction_mode = %event.interaction_mode,
-        "Requesting PreviewCode interaction from frontend"
-    );
-
     if let Err(e) = app_handle.emit("preview-code-request", &event) {
         interaction_state.remove_preview_code_request(&request_id).await;
         warn!(request_id = %request_id, error = %e, "Failed to emit preview-code-request");

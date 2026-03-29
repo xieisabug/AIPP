@@ -9,6 +9,7 @@ import { getErrorMessage } from "@/utils/error";
 import {
     buildPreviewCodeSignature,
     parsePreviewCodeRequestLoose,
+    type PreviewCodeStreamingState,
     parsePreviewCodeToolResult,
     PreviewCodeRequestEvent,
 } from "@/utils/previewCode";
@@ -23,6 +24,7 @@ interface InlineCodePreviewCardProps {
     callId?: number;
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>;
     isStreaming?: boolean;
+    streamingPreviewState?: PreviewCodeStreamingState;
 }
 
 type DisplayState =
@@ -42,6 +44,7 @@ export default function InlineCodePreviewCard({
     callId,
     mcpToolCallStates,
     isStreaming = false,
+    streamingPreviewState,
 }: InlineCodePreviewCardProps) {
     const hostRef = useRef<HTMLDivElement | null>(null);
     const runtimeRef = useRef<ReturnType<typeof createPreviewCodeRuntime> | null>(null);
@@ -73,10 +76,12 @@ export default function InlineCodePreviewCard({
     const effectiveParameters = isStreaming
         ? parameters
         : stateOverride?.parameters ?? persistedToolCall?.parameters ?? parameters;
-    const previewRequest = useMemo(
-        () => parsePreviewCodeRequestLoose(effectiveParameters),
-        [effectiveParameters]
-    );
+    const previewRequest = useMemo(() => {
+        if (isStreaming && streamingPreviewState) {
+            return streamingPreviewState;
+        }
+        return parsePreviewCodeRequestLoose(effectiveParameters);
+    }, [effectiveParameters, isStreaming, streamingPreviewState]);
     const requestSignature = useMemo(
         () =>
             buildPreviewCodeSignature(
@@ -207,8 +212,12 @@ export default function InlineCodePreviewCard({
 
         const bridgeId =
             `preview-code-${llmCallId ?? messageId ?? effectiveCallId ?? "transient"}`;
+        const renderCode =
+            isStreaming && streamingPreviewState
+                ? streamingPreviewState.renderableHtml
+                : previewRequest.code;
         runtimeRef.current.update({
-            code: previewRequest.code,
+            code: renderCode,
             isFinal: !isStreaming,
             bridgeId,
             bridge: {
@@ -265,9 +274,7 @@ export default function InlineCodePreviewCard({
                         setIsSubmitting(false);
                     }
                 },
-                emitEvent: (name: string, payload?: unknown) => {
-                    console.debug("[preview_code:event]", { name, payload, bridgeId });
-                },
+                emitEvent: (_name: string, _payload?: unknown) => undefined,
             },
             onError: setRuntimeError,
         });
@@ -278,6 +285,7 @@ export default function InlineCodePreviewCard({
         messageId,
         isStreaming,
         resolvedRequestId,
+        streamingPreviewState,
     ]);
 
     const toolResult =
@@ -327,6 +335,18 @@ export default function InlineCodePreviewCard({
             ] ?? previewRequest.loadingMessages[0]
         );
     }, [previewRequest]);
+    const shouldShowStreamingFallback =
+        isStreaming && !!streamingPreviewState && !streamingPreviewState.hasRenderableDom;
+    const sourceExcerpt = useMemo(() => {
+        if (streamingPreviewState?.sourceExcerpt?.trim()) {
+            return streamingPreviewState.sourceExcerpt.trim();
+        }
+        const code = previewRequest?.code?.trim();
+        if (!code) {
+            return null;
+        }
+        return code.length > 600 ? `${code.slice(0, 600)}…` : code;
+    }, [previewRequest?.code, streamingPreviewState?.sourceExcerpt]);
 
     const statusBadge = (() => {
         switch (displayState) {
@@ -372,6 +392,7 @@ export default function InlineCodePreviewCard({
     })();
 
     const previewHidden = displayState === "dismissed" || isCollapsed;
+    const hostHidden = previewHidden || shouldShowStreamingFallback;
     const toggleButtonLabel = isCollapsed ? "展开" : "收起";
 
     return (
@@ -425,8 +446,18 @@ export default function InlineCodePreviewCard({
                 <div
                     ref={hostRef}
                     data-testid="preview-code-host"
-                    className={previewHidden ? "hidden min-h-[96px] overflow-hidden bg-transparent" : "min-h-[96px] overflow-hidden bg-transparent"}
+                    className={hostHidden ? "hidden min-h-[96px] overflow-hidden bg-transparent" : "min-h-[96px] overflow-hidden bg-transparent"}
                 />
+                {shouldShowStreamingFallback && !previewHidden && sourceExcerpt && (
+                    <div className="rounded-md border border-border/70 bg-muted/40 px-3 py-3 space-y-2">
+                        <div className="text-xs text-muted-foreground">
+                            正在生成可渲染预览，先展示当前代码片段。
+                        </div>
+                        <pre className="text-xs whitespace-pre-wrap break-words text-foreground/80">
+                            {sourceExcerpt}
+                        </pre>
+                    </div>
+                )}
                 {toolResult?.status === "submitted" && toolResult.payload !== undefined && (
                     <pre className="rounded-md bg-muted p-3 text-xs whitespace-pre-wrap break-words">
                         {JSON.stringify(toolResult.payload, null, 2)}

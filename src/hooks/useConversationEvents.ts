@@ -41,6 +41,11 @@ const MCP_POLL_MAX_INTERVAL_MS = 3000;
 
 type McpRefreshResult = "success" | "failed" | "stale";
 
+export function shouldFlushStreamingMessageImmediately(content: string): boolean {
+    return content.includes("MCP_TOOL_CALL_STREAMING")
+        && content.includes('"tool_name":"preview_code"');
+}
+
 export function useConversationEvents(options: UseConversationEventsOptions) {
     // 流式消息状态管理，存储正在流式传输的消息
     const [streamingMessages, setStreamingMessages] = useState<
@@ -675,14 +680,21 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                             });
                         }, 1000); // 1秒后清理
                     } else {
-                        // 使用 startTransition 将流式消息更新标记为低优先级，保持界面响应性
-                        startTransition(() => {
+                        const applyStreamingUpdate = () => {
                             updateStreamingMessagesState((prev) => {
                                 const newMap = new Map(prev);
                                 newMap.set(streamEvent.message_id, streamEvent);
                                 return newMap;
                             });
-                        });
+                        };
+                        if (shouldFlushStreamingMessageImmediately(messageUpdateData.content)) {
+                            applyStreamingUpdate();
+                        } else {
+                            // 使用 startTransition 将普通流式消息更新标记为低优先级，保持界面响应性
+                            startTransition(() => {
+                                applyStreamingUpdate();
+                            });
+                        }
                     }
                 }
 
