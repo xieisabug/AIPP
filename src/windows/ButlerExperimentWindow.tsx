@@ -1393,6 +1393,7 @@ function ButlerExperimentWindow() {
                     existingFeishuEnabled={feishuEnabled}
                     existingFeishuAppId={getConfigValue("experimental", "butler_feishu_app_id") || ""}
                     existingFeishuBaseUrl={getConfigValue("experimental", "butler_feishu_base_url") || "https://open.feishu.cn"}
+                    initialValues={buildExperimentalConfigFormValues(featureConfig)}
                     saveFeatureConfig={saveFeatureConfig}
                     onComplete={handleOnboardingComplete}
                 />

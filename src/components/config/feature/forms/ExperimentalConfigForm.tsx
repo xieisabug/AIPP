@@ -1579,6 +1579,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                     existingFeishuEnabled={feishuEnabled}
                     existingFeishuAppId={feishuAppId}
                     existingFeishuBaseUrl={feishuBaseUrl}
+                    initialValues={form.getValues()}
                     saveFeatureConfig={saveFeatureConfigProp}
                     onComplete={() => {
                         onConfigRefresh?.();

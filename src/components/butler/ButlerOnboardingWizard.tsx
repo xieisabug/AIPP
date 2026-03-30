@@ -11,6 +11,7 @@ import {
     DialogTitle,
 } from "@/components/ui/dialog";
 import { useModels } from "@/hooks/useModels";
+import { saveExperimentalConfigValues } from "@/components/config/feature/forms/experimentalConfigShared";
 import {
     useButlerOnboarding,
     type TrustedWorkspace,
@@ -32,6 +33,7 @@ interface ButlerOnboardingWizardProps {
     existingFeishuEnabled?: boolean;
     existingFeishuAppId?: string;
     existingFeishuBaseUrl?: string;
+    initialValues?: Record<string, unknown>;
     saveFeatureConfig: (featureCode: string, config: Record<string, unknown>) => Promise<unknown>;
     onComplete: () => void;
 }
@@ -46,6 +48,7 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
     existingFeishuEnabled,
     existingFeishuAppId,
     existingFeishuBaseUrl,
+    initialValues,
     saveFeatureConfig,
     onComplete,
 }) => {
@@ -74,6 +77,7 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
         isLastStep,
         isStepValid,
     } = useButlerOnboarding({
+        isOpen: open,
         existingModelId,
         existingDisplayName,
         existingTrustAll,
@@ -96,7 +100,8 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
     const handleSave = useCallback(async () => {
         setSaving(true);
         try {
-            await saveFeatureConfig("experimental", {
+            await saveExperimentalConfigValues(saveFeatureConfig, {
+                ...(initialValues || {}),
                 butler_experiment_enabled: "true",
                 butler_model_id: state.modelId,
                 butler_display_name: state.displayName || "总管家",
@@ -122,7 +127,7 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
         } finally {
             setSaving(false);
         }
-    }, [state, saveFeatureConfig, onOpenChange, onComplete]);
+    }, [initialValues, onComplete, onOpenChange, saveFeatureConfig, state]);
 
     const handleNext = useCallback(() => {
         if (isLastStep) {

@@ -53,6 +53,7 @@ const initialState: OnboardingState = {
 };
 
 interface UseButlerOnboardingOptions {
+    isOpen?: boolean;
     existingModelId?: string;
     existingDisplayName?: string;
     existingTrustAll?: boolean;
@@ -63,7 +64,7 @@ interface UseButlerOnboardingOptions {
 }
 
 export function useButlerOnboarding(options: UseButlerOnboardingOptions = {}) {
-    const [state, setState] = useState<OnboardingState>(() => ({
+    const buildStateFromOptions = useCallback((): OnboardingState => ({
         ...initialState,
         modelId: options.existingModelId || "",
         displayName: options.existingDisplayName || "总管家",
@@ -72,7 +73,23 @@ export function useButlerOnboarding(options: UseButlerOnboardingOptions = {}) {
         feishuEnabled: options.existingFeishuEnabled || false,
         feishuAppId: options.existingFeishuAppId || "",
         feishuBaseUrl: options.existingFeishuBaseUrl || "https://open.feishu.cn",
-    }));
+    }), [
+        options.existingDisplayName,
+        options.existingFeishuAppId,
+        options.existingFeishuBaseUrl,
+        options.existingFeishuEnabled,
+        options.existingModelId,
+        options.existingTrustAll,
+        options.existingTrustedWorkspaces,
+    ]);
+    const [state, setState] = useState<OnboardingState>(buildStateFromOptions);
+
+    useEffect(() => {
+        if (!options.isOpen) {
+            return;
+        }
+        setState(buildStateFromOptions());
+    }, [buildStateFromOptions, options.isOpen]);
 
     // Step 1 setters
     const setModelId = useCallback((modelId: string) => {
