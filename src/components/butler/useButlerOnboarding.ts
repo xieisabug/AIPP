@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -64,6 +64,7 @@ interface UseButlerOnboardingOptions {
 }
 
 export function useButlerOnboarding(options: UseButlerOnboardingOptions = {}) {
+    const wasOpenRef = useRef(false);
     const buildStateFromOptions = useCallback((): OnboardingState => ({
         ...initialState,
         modelId: options.existingModelId || "",
@@ -85,7 +86,10 @@ export function useButlerOnboarding(options: UseButlerOnboardingOptions = {}) {
     const [state, setState] = useState<OnboardingState>(buildStateFromOptions);
 
     useEffect(() => {
-        if (!options.isOpen) {
+        const isOpen = !!options.isOpen;
+        const justOpened = isOpen && !wasOpenRef.current;
+        wasOpenRef.current = isOpen;
+        if (!justOpened) {
             return;
         }
         setState(buildStateFromOptions());

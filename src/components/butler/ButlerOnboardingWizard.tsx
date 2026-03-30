@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { CheckCircle2, ChevronLeft, ChevronRight } from "lucide-react";
@@ -53,6 +53,7 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
     onComplete,
 }) => {
     const [saving, setSaving] = useState(false);
+    const initialValuesRef = useRef<Record<string, unknown>>(initialValues || {});
 
     const {
         state,
@@ -97,11 +98,17 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
         [models]
     );
 
-    const handleSave = useCallback(async () => {
+    useEffect(() => {
+        if (open) {
+            initialValuesRef.current = initialValues || {};
+        }
+    }, [initialValues, open]);
+
+    const persistWizard = useCallback(async (closeAfterSave: boolean) => {
         setSaving(true);
         try {
             await saveExperimentalConfigValues(saveFeatureConfig, {
-                ...(initialValues || {}),
+                ...initialValuesRef.current,
                 butler_experiment_enabled: "true",
                 butler_model_id: state.modelId,
                 butler_display_name: state.displayName || "总管家",
@@ -111,31 +118,62 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
                 butler_feishu_app_id: state.feishuAppId,
                 butler_feishu_base_url: state.feishuBaseUrl,
             });
+            initialValuesRef.current = {
+                ...initialValuesRef.current,
+                butler_experiment_enabled: "true",
+                butler_model_id: state.modelId,
+                butler_display_name: state.displayName || "总管家",
+                butler_trust_all_workspaces: String(state.trustAllWorkspaces),
+                butler_trusted_workspaces: JSON.stringify(state.trustedWorkspaces),
+                butler_feishu_enabled: String(state.feishuEnabled),
+                butler_feishu_app_id: state.feishuAppId,
+                butler_feishu_base_url: state.feishuBaseUrl,
+            };
 
             // Save Feishu secret separately if provided
-            if (state.feishuEnabled && state.feishuAppSecret) {
+            if (state.feishuEnabled && state.feishuAppSecret.trim()) {
                 await invoke("save_butler_feishu_secret", {
-                    secret: state.feishuAppSecret,
+                    appSecret: state.feishuAppSecret.trim(),
+                    app_secret: state.feishuAppSecret.trim(),
                 });
             }
+            await invoke("refresh_butler_feishu_runtime_command");
 
-            toast.success("总管家配置已保存");
-            onOpenChange(false);
-            onComplete();
+            if (closeAfterSave) {
+                toast.success("总管家配置已保存");
+                onOpenChange(false);
+                onComplete();
+            } else {
+                toast.success("当前步骤已保存");
+            }
+            return true;
         } catch (err) {
             toast.error(`保存失败: ${err}`);
+            return false;
         } finally {
             setSaving(false);
         }
-    }, [initialValues, onComplete, onOpenChange, saveFeatureConfig, state]);
+    }, [onComplete, onOpenChange, saveFeatureConfig, state]);
 
-    const handleNext = useCallback(() => {
+    const handleNext = useCallback(async () => {
         if (isLastStep) {
-            void handleSave();
+            await persistWizard(true);
         } else {
+            const saved = await persistWizard(false);
+            if (!saved) {
+                return;
+            }
             goNext();
         }
-    }, [isLastStep, handleSave, goNext]);
+    }, [goNext, isLastStep, persistWizard]);
+
+    const handleSkip = useCallback(async () => {
+        const saved = await persistWizard(false);
+        if (!saved) {
+            return;
+        }
+        goNext();
+    }, [goNext, persistWizard]);
 
     const currentStepValid = isStepValid(state.currentStep);
 
@@ -270,14 +308,14 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
                         {canGoNext && state.currentStep > 0 && (
                             <Button
                                 variant="ghost"
-                                onClick={goNext}
+                                onClick={() => void handleSkip()}
                                 disabled={saving}
                             >
                                 跳过
                             </Button>
                         )}
                         <Button
-                            onClick={handleNext}
+                            onClick={() => void handleNext()}
                             disabled={
                                 (state.currentStep === 0 && !currentStepValid) || saving
                             }

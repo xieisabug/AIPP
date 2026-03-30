@@ -1566,16 +1566,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                     existingModelId={butlerModelId}
                     existingDisplayName={String(form.watch("butler_display_name") || "总管家")}
                     existingTrustAll={trustAllWorkspaces}
-                    existingTrustedWorkspaces={(() => {
-                        const raw = String(form.watch("butler_trusted_workspaces") || "");
-                        if (!raw) return [];
-                        try {
-                            const parsed = JSON.parse(raw);
-                            return Array.isArray(parsed) ? parsed : [];
-                        } catch {
-                            return [];
-                        }
-                    })()}
+                    existingTrustedWorkspaces={trustedWorkspaces}
                     existingFeishuEnabled={feishuEnabled}
                     existingFeishuAppId={feishuAppId}
                     existingFeishuBaseUrl={feishuBaseUrl}
