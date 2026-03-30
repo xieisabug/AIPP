@@ -1,5 +1,5 @@
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
-use rusqlite::params;
+use crate::db::connection::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;

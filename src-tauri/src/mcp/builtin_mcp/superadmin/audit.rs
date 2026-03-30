@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use crate::db::connection::{self, params, Connection};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 use uuid::Uuid;
@@ -38,7 +38,7 @@ pub struct AuditLogEntry {
 // DB helpers
 // ---------------------------------------------------------------------------
 
-pub fn create_audit_table(conn: &Connection) -> rusqlite::Result<()> {
+pub fn create_audit_table(conn: &Connection) -> connection::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS superadmin_audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,11 +70,11 @@ pub fn create_audit_table(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 /// Migrate the audit table to add snapshot/undo columns if they don't exist.
-pub fn migrate_audit_table(conn: &Connection) -> rusqlite::Result<()> {
+pub fn migrate_audit_table(conn: &Connection) -> connection::Result<()> {
     // Check if columns exist by querying table info
     let has_snapshot: bool = conn
         .prepare("SELECT COUNT(*) FROM pragma_table_info('superadmin_audit_log') WHERE name = 'before_snapshot_json'")?
-        .query_row([], |row| row.get::<_, i64>(0))
+        .query_row((), |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
 
@@ -109,7 +109,7 @@ pub fn insert_audit_log(
     butler_conversation_id: Option<i64>,
     source: &str,
     before_snapshot_json: Option<&str>,
-) -> rusqlite::Result<i64> {
+) -> connection::Result<i64> {
     conn.execute(
         "INSERT INTO superadmin_audit_log
             (audit_id, action_id, domain, risk_level, args_json, reason,
@@ -141,7 +141,7 @@ pub fn mark_audit_undone(
     conn: &Connection,
     original_audit_id: &str,
     undo_audit_id: &str,
-) -> rusqlite::Result<()> {
+) -> connection::Result<()> {
     conn.execute(
         "UPDATE superadmin_audit_log SET is_undone = 1, undo_audit_id = ?1 WHERE audit_id = ?2",
         params![undo_audit_id, original_audit_id],
@@ -153,7 +153,7 @@ pub fn mark_audit_undone(
 pub fn get_audit_entry(
     conn: &Connection,
     audit_id: &str,
-) -> rusqlite::Result<Option<AuditLogEntry>> {
+) -> connection::Result<Option<AuditLogEntry>> {
     let mut stmt = conn.prepare(
         "SELECT id, audit_id, action_id, domain, risk_level, args_json, reason,
                 dry_run, approval_used, success, result_json, error,
@@ -176,7 +176,7 @@ pub fn query_audit_log(
     undoable_only: bool,
     limit: usize,
     offset: usize,
-) -> rusqlite::Result<Vec<AuditLogEntry>> {
+) -> connection::Result<Vec<AuditLogEntry>> {
     let mut sql = String::from(
         "SELECT id, audit_id, action_id, domain, risk_level, args_json, reason,
                 dry_run, approval_used, success, result_json, error,
@@ -184,37 +184,34 @@ pub fn query_audit_log(
                 before_snapshot_json, is_undone, undo_audit_id
          FROM superadmin_audit_log WHERE 1=1",
     );
-    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut param_values: Vec<libsql::Value> = Vec::new();
 
     if let Some(aid) = action_id {
         sql.push_str(" AND action_id = ?");
-        param_values.push(Box::new(aid.to_string()));
+        param_values.push(libsql::Value::from(aid.to_string()));
     }
     if let Some(d) = domain {
         sql.push_str(" AND domain = ?");
-        param_values.push(Box::new(d.to_string()));
+        param_values.push(libsql::Value::from(d.to_string()));
     }
     if let Some(s) = success_only {
         sql.push_str(" AND success = ?");
-        param_values.push(Box::new(s as i32));
+        param_values.push(libsql::Value::from(s as i32));
     }
     if undoable_only {
         // Only show successful write ops with snapshots that haven't been undone
         sql.push_str(" AND success = 1 AND is_undone = 0 AND before_snapshot_json IS NOT NULL AND dry_run = 0");
     }
     sql.push_str(" ORDER BY created_time DESC LIMIT ? OFFSET ?");
-    param_values.push(Box::new(limit as i64));
-    param_values.push(Box::new(offset as i64));
-
-    let params_ref: Vec<&dyn rusqlite::types::ToSql> =
-        param_values.iter().map(|p| p.as_ref()).collect();
+    param_values.push(libsql::Value::from(limit as i64));
+    param_values.push(libsql::Value::from(offset as i64));
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params_ref.as_slice(), map_audit_row)?;
+    let rows = stmt.query_map(param_values, map_audit_row)?;
     rows.collect()
 }
 
-fn map_audit_row(row: &rusqlite::Row) -> rusqlite::Result<AuditLogEntry> {
+fn map_audit_row(row: &connection::Row) -> connection::Result<AuditLogEntry> {
     Ok(AuditLogEntry {
         id: row.get(0)?,
         audit_id: row.get(1)?,

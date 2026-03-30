@@ -4,7 +4,7 @@ use assistant_db::AssistantDatabase;
 use conversation_db::ConversationDatabase;
 use llm_db::LLMDatabase;
 use mcp_db::MCPDatabase;
-use rusqlite::params;
+use connection::params;
 use scheduled_task_db::ScheduledTaskDatabase;
 use semver::Version;
 use system_db::SystemDatabase;
@@ -12,12 +12,14 @@ use tauri::Manager;
 use tracing::{debug, error, info, instrument, warn};
 
 pub mod assistant_db;
+pub mod connection;
 pub mod conversation_db;
 pub mod llm_db;
 pub mod mcp_db;
 pub mod plugin_db;
 pub mod scheduled_task_db;
 pub mod skill_db;
+pub mod sync_manager;
 pub mod system_db;
 
 #[cfg(test)]
@@ -144,7 +146,7 @@ fn special_logic_0_0_2(
     // 开始事务
     assistant_db
         .conn
-        .execute("BEGIN TRANSACTION;", [])
+        .execute("BEGIN TRANSACTION;", ())
         .map_err(|e| format!("添加字段model_code失败: {}", e.to_string()))?;
 
     // 添加新字段
@@ -152,18 +154,18 @@ fn special_logic_0_0_2(
         .conn
         .execute(
             "ALTER TABLE assistant_model ADD COLUMN provider_id INTEGER NOT NULL DEFAULT 0;",
-            [],
+            (),
         )
         .map_err(|e| format!("添加字段provider_id失败: {}", e.to_string()))?;
     assistant_db
         .conn
-        .execute("ALTER TABLE assistant_model ADD COLUMN model_code TEXT NOT NULL DEFAULT '';", [])
+        .execute("ALTER TABLE assistant_model ADD COLUMN model_code TEXT NOT NULL DEFAULT '';", ())
         .map_err(|e| format!("添加字段model_code失败: {}", e.to_string()))?;
     assistant_db
         .conn
         .execute(
             "ALTER TABLE assistant_model_config ADD COLUMN value_type TEXT NOT NULL DEFAULT 'float';",
-            [],
+            (),
         )
         .map_err(|e| format!("添加字段value_type失败: {}", e.to_string()))?;
 
@@ -171,14 +173,14 @@ fn special_logic_0_0_2(
         .conn
         .execute(
             "UPDATE assistant_model_config SET value_type = 'boolean' WHERE name = 'stream';",
-            [],
+            (),
         )
         .map_err(|e| format!("更新stream类型失败: {}", e.to_string()))?;
     assistant_db
         .conn
         .execute(
             "UPDATE assistant_model_config SET value_type = 'number' WHERE name = 'max_tokens';",
-            [],
+            (),
         )
         .map_err(|e| format!("更新max_tokens类型失败: {}", e.to_string()))?;
 
@@ -188,7 +190,7 @@ fn special_logic_0_0_2(
         .prepare("SELECT model_id FROM assistant_model")
         .map_err(|e| format!("查询助手模型失败: {}", e.to_string()))?;
     let model_ids_iter = stmt
-        .query_map([], |row| row.get::<_, i64>(0))
+        .query_map((), |row| row.get::<_, i64>(0))
         .map_err(|e| format!("助手模型id转i64失败: {}", e.to_string()))?;
 
     for model_id_result in model_ids_iter {
@@ -201,7 +203,7 @@ fn special_logic_0_0_2(
                 .conn
                 .execute(
                     "UPDATE assistant_model SET provider_id = ?, model_code = ? WHERE model_id = ?;",
-                    params![model.provider.id, model.model.code, model_id],
+                    params![model.provider.id, model.model.code.clone(), model_id],
                 )
                 .map_err(|e| format!("更新助手模型失败: {}", e.to_string()))?;
         } else {
@@ -213,13 +215,13 @@ fn special_logic_0_0_2(
     // 删除旧字段
     assistant_db
         .conn
-        .execute("ALTER TABLE assistant_model DROP COLUMN model_id;", [])
+        .execute("ALTER TABLE assistant_model DROP COLUMN model_id;", ())
         .map_err(|e| format!("删除model_id字段失败: {}", e.to_string()))?;
 
     // 提交事务
     assistant_db
         .conn
-        .execute("COMMIT;", [])
+        .execute("COMMIT;", ())
         .map_err(|e| format!("事务提交失败: {}", e.to_string()))?;
     info!("special_logic_0_0_2 done");
     Ok(())
@@ -240,7 +242,7 @@ fn special_logic_0_0_4(
         .map_err(|e| format!("打开数据库连接失败: {}", e.to_string()))?;
 
     // 开始事务
-    conn.execute("BEGIN TRANSACTION;", [])
+    conn.execute("BEGIN TRANSACTION;", ())
         .map_err(|e| format!("开始事务失败: {}", e.to_string()))?;
 
     // 查询所有废弃的assistant类型消息
@@ -249,7 +251,7 @@ fn special_logic_0_0_4(
         .map_err(|e| format!("查询废弃消息失败: {}", e.to_string()))?;
 
     let deprecated_messages = stmt
-        .query_map([], |row| {
+        .query_map((), |row| {
             Ok((
                 row.get::<_, i64>(0)?,    // id
                 row.get::<_, String>(1)?, // content
@@ -269,7 +271,7 @@ fn special_logic_0_0_4(
             .map_err(|e| format!("查询对应reasoning消息失败: {}", e.to_string()))?;
 
         let reasoning_exists =
-            reasoning_stmt.query_row([message_id, message_id], |_| Ok(())).is_ok();
+            reasoning_stmt.query_row(params![message_id, message_id], |_| Ok(())).is_ok();
 
         if reasoning_exists {
             // 如果有reasoning消息，生成一个generation_group_id来关联它们
@@ -278,7 +280,7 @@ fn special_logic_0_0_4(
             // 更新reasoning消息的generation_group_id
             conn.execute(
                 "UPDATE message SET generation_group_id = ? WHERE message_type = 'reasoning' AND conversation_id = (SELECT conversation_id FROM message WHERE id = ?) AND ABS(julianday(created_time) - julianday((SELECT created_time FROM message WHERE id = ?))) < 0.001",
-                params![generation_group_id, message_id, message_id],
+                params![generation_group_id.clone(), message_id, message_id],
             )
             .map_err(|e| format!("更新reasoning消息generation_group_id失败: {}", e.to_string()))?;
 
@@ -301,7 +303,7 @@ fn special_logic_0_0_4(
 
     // 验证清理结果
     let remaining_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM message WHERE message_type = 'assistant'", [], |row| {
+        .query_row("SELECT COUNT(*) FROM message WHERE message_type = 'assistant'", (), |row| {
             row.get(0)
         })
         .map_err(|e| format!("验证清理结果失败: {}", e.to_string()))?;
@@ -311,7 +313,7 @@ fn special_logic_0_0_4(
     }
 
     // 提交事务
-    conn.execute("COMMIT;", []).map_err(|e| format!("事务提交失败: {}", e.to_string()))?;
+    conn.execute("COMMIT;", ()).map_err(|e| format!("事务提交失败: {}", e.to_string()))?;
 
     info!("special_logic_0_0_4 done: 废弃的assistant消息类型已清理完成");
     Ok(())
@@ -332,11 +334,11 @@ fn special_logic_0_0_3(
         .map_err(|e| format!("打开数据库连接失败: {}", e.to_string()))?;
 
     // 开始事务
-    conn.execute("BEGIN TRANSACTION;", [])
+    conn.execute("BEGIN TRANSACTION;", ())
         .map_err(|e| format!("开始事务失败: {}", e.to_string()))?;
 
     // 添加 generation_group_id 字段
-    conn.execute("ALTER TABLE message ADD COLUMN generation_group_id TEXT;", [])
+    conn.execute("ALTER TABLE message ADD COLUMN generation_group_id TEXT;", ())
         .map_err(|e| format!("添加 generation_group_id 字段失败: {}", e.to_string()))?;
 
     // 更新现有数据：为reasoning和response消息配对生成generation_group_id
@@ -351,7 +353,7 @@ fn special_logic_0_0_3(
         .map_err(|e| format!("准备查询消息失败: {}", e.to_string()))?;
 
     let message_rows = stmt
-        .query_map([], |row| {
+        .query_map((), |row| {
             Ok((
                 row.get::<_, i64>(0)?,    // id
                 row.get::<_, i64>(1)?,    // conversation_id
@@ -400,7 +402,7 @@ fn special_logic_0_0_3(
                         // 更新reasoning消息
                         conn.execute(
                             "UPDATE message SET generation_group_id = ? WHERE id = ?",
-                            params![generation_group_id, current_msg.0],
+                            params![generation_group_id.clone(), current_msg.0],
                         )
                         .map_err(|e| {
                             format!("更新reasoning消息generation_group_id失败: {}", e.to_string())
@@ -452,7 +454,7 @@ fn special_logic_0_0_3(
     }
 
     // 提交事务
-    conn.execute("COMMIT;", []).map_err(|e| format!("事务提交失败: {}", e.to_string()))?;
+    conn.execute("COMMIT;", ()).map_err(|e| format!("事务提交失败: {}", e.to_string()))?;
 
     info!("special_logic_0_0_3 done: generation_group_id 字段添加完成，现有数据已更新");
     Ok(())

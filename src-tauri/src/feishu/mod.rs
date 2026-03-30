@@ -11,7 +11,7 @@ use futures::FutureExt;
 use openlark_client::ws_client::{EventDispatcherHandler, LarkWsClient};
 use pulldown_cmark::{Options as MarkdownOptions, Parser as MarkdownParser};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
-use rusqlite::{params, OptionalExtension};
+use crate::db::connection::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter, Manager};

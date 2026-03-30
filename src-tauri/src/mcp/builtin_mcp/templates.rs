@@ -1,6 +1,6 @@
 use crate::db::mcp_db::MCPDatabase;
 use anyhow::{Context, Result};
-use rusqlite::OptionalExtension;
+use crate::db::connection::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tracing::{error, instrument};
@@ -1213,7 +1213,7 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
         // 检查是否已存在该内置工具集（通过 command 匹配）
         let exists = db.conn
             .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1 AND is_deletable = 0")?
-            .query_row([&tpl.command], |row| row.get::<_, i64>(0))
+            .query_row(params![tpl.command.clone()], |row| row.get::<_, i64>(0))
             .optional()?;
 
         let server_id = if let Some(server_id) = exists {
@@ -1269,20 +1269,20 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
         let server_id = db
             .conn
             .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1")?
-            .query_row([&tpl.command], |row| row.get::<_, i64>(0))
+            .query_row(params![tpl.command.clone()], |row| row.get::<_, i64>(0))
             .optional()?;
         if let Some(sid) = server_id {
             let _ = db.conn.execute(
                 "UPDATE mcp_server_capability_epoch_catalog
                  SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
                  WHERE server_id = ?",
-                rusqlite::params![sid],
+                params![sid],
             );
             let _ = db.conn.execute(
                 "UPDATE mcp_tool_catalog
              SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
              WHERE server_id = ?",
-                rusqlite::params![sid],
+                params![sid],
             );
         }
     }
@@ -1359,20 +1359,20 @@ pub async fn add_or_update_aipp_builtin_server(
         if let Ok(Some(sid)) = db
             .conn
             .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1")?
-            .query_row([&tpl.command], |row| row.get::<_, i64>(0))
+            .query_row(params![tpl.command.clone()], |row| row.get::<_, i64>(0))
             .optional()
         {
             let _ = db.conn.execute(
                 "UPDATE mcp_server_capability_epoch_catalog
                  SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
                  WHERE server_id = ?",
-                rusqlite::params![sid],
+                params![sid],
             );
             let _ = db.conn.execute(
                 "UPDATE mcp_tool_catalog
                  SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
                  WHERE server_id = ?",
-                rusqlite::params![sid],
+                params![sid],
             );
         }
 
