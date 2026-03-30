@@ -11,6 +11,73 @@ use tracing::{debug, error, info, warn};
 #[cfg(desktop)]
 const SCREEN_MARGIN_RATIO: f64 = 0.9;
 
+/// 将隐藏的目标窗口重新定位到来源窗口所在的显示器上（居中）。
+/// 仅当目标窗口不可见时才会执行重定位，避免干扰用户手动放置的窗口。
+#[cfg(desktop)]
+fn reposition_to_source_monitor(
+    app: &AppHandle,
+    target: &tauri::WebviewWindow,
+    source: &tauri::WebviewWindow,
+) {
+    // 已可见的窗口不做重定位，尊重用户手动放置
+    if target.is_visible().unwrap_or(true) {
+        return;
+    }
+
+    let monitors_cache = app.available_monitors().unwrap_or_default();
+
+    // 定位来源窗口所在显示器
+    let source_monitor = source
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| {
+            source.outer_position().ok().and_then(|pos| {
+                monitors_cache
+                    .iter()
+                    .find(|m| {
+                        let mp = m.position();
+                        let ms = m.size();
+                        pos.x >= mp.x
+                            && pos.x < mp.x + ms.width as i32
+                            && pos.y >= mp.y
+                            && pos.y < mp.y + ms.height as i32
+                    })
+                    .cloned()
+            })
+        });
+
+    let Some(monitor) = source_monitor else {
+        return;
+    };
+
+    let scale = monitor.scale_factor() as f64;
+    let screen_width = monitor.size().width as f64 / scale;
+    let screen_height = monitor.size().height as f64 / scale;
+
+    // 获取目标窗口的当前尺寸（逻辑像素）
+    let target_size = target
+        .outer_size()
+        .unwrap_or(tauri::PhysicalSize::new(800, 600));
+    let target_width = target_size.width as f64 / scale;
+    let target_height = target_size.height as f64 / scale;
+
+    let monitor_pos_x = monitor.position().x as f64 / scale;
+    let monitor_pos_y = monitor.position().y as f64 / scale;
+
+    let center_x = (monitor_pos_x + (screen_width - target_width) / 2.0).round();
+    let center_y = (monitor_pos_y + (screen_height - target_height) / 2.0).round();
+
+    let _ = target.set_position(LogicalPosition::new(center_x, center_y));
+    debug!(
+        target_label = %target.label(),
+        source_label = %source.label(),
+        x = %center_x,
+        y = %center_y,
+        "Repositioned window to source monitor"
+    );
+}
+
 // 获取合适的窗口大小和位置
 #[cfg(desktop)]
 fn get_window_size_and_position(
@@ -553,8 +620,30 @@ pub fn create_artifact_preview_window(app: &AppHandle) {
     }
 }
 
+/// Show the artifact preview window (without monitor repositioning).
+/// Used by Rust-side callers that don't have a source window context.
+pub async fn open_artifact_preview_window_inner(app_handle: AppHandle) {
+    if app_handle.get_webview_window("artifact_preview").is_none() {
+        debug!("Creating artifact preview window");
+        create_artifact_preview_window(&app_handle);
+    } else if let Some(window) = app_handle.get_webview_window("artifact_preview") {
+        debug!("Showing artifact preview window");
+        #[cfg(desktop)]
+        {
+            if window.is_minimized().unwrap_or(false) {
+                let _ = window.unminimize();
+            }
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+}
+
 #[tauri::command]
-pub async fn open_artifact_preview_window(app_handle: AppHandle) -> Result<(), String> {
+pub async fn open_artifact_preview_window(
+    app_handle: AppHandle,
+    source_window: tauri::WebviewWindow,
+) -> Result<(), String> {
     if app_handle.get_webview_window("artifact_preview").is_none() {
         debug!("Creating artifact preview window");
 
@@ -563,6 +652,7 @@ pub async fn open_artifact_preview_window(app_handle: AppHandle) -> Result<(), S
         debug!("Showing artifact preview window");
         #[cfg(desktop)]
         {
+            reposition_to_source_monitor(&app_handle, &window, &source_window);
             if window.is_minimized().unwrap_or(false) {
                 window.unminimize().unwrap();
             }
@@ -574,11 +664,15 @@ pub async fn open_artifact_preview_window(app_handle: AppHandle) -> Result<(), S
 }
 
 #[tauri::command]
-pub async fn open_config_window(app_handle: AppHandle) -> Result<(), String> {
+pub async fn open_config_window(
+    app_handle: AppHandle,
+    source_window: tauri::WebviewWindow,
+) -> Result<(), String> {
     if let Some(window) = app_handle.get_webview_window("config") {
         debug!("Showing config window");
         #[cfg(desktop)]
         {
+            reposition_to_source_monitor(&app_handle, &window, &source_window);
             if window.is_minimized().unwrap_or(false) {
                 window.unminimize().unwrap();
             }
@@ -594,11 +688,15 @@ pub async fn open_config_window(app_handle: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn open_chat_ui_window(app_handle: AppHandle) -> Result<(), String> {
+pub async fn open_chat_ui_window(
+    app_handle: AppHandle,
+    source_window: tauri::WebviewWindow,
+) -> Result<(), String> {
     if let Some(window) = app_handle.get_webview_window("chat_ui") {
         debug!("Showing chat_ui window");
         #[cfg(desktop)]
         {
+            reposition_to_source_monitor(&app_handle, &window, &source_window);
             if window.is_minimized().unwrap_or(false) {
                 window.unminimize().unwrap();
             }
@@ -625,11 +723,15 @@ pub async fn open_chat_ui_window(app_handle: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn open_butler_experiment_window(app_handle: AppHandle) -> Result<(), String> {
+pub async fn open_butler_experiment_window(
+    app_handle: AppHandle,
+    source_window: tauri::WebviewWindow,
+) -> Result<(), String> {
     if let Some(window) = app_handle.get_webview_window("butler_experiment") {
         debug!("Showing butler_experiment window");
         #[cfg(desktop)]
         {
+            reposition_to_source_monitor(&app_handle, &window, &source_window);
             if window.is_minimized().unwrap_or(false) {
                 window.unminimize().unwrap();
             }
@@ -654,7 +756,10 @@ pub async fn open_butler_experiment_window(app_handle: AppHandle) -> Result<(), 
 }
 
 #[tauri::command]
-pub async fn open_plugin_window(app_handle: AppHandle) -> Result<(), String> {
+pub async fn open_plugin_window(
+    app_handle: AppHandle,
+    source_window: tauri::WebviewWindow,
+) -> Result<(), String> {
     if app_handle.get_webview_window("plugin").is_none() {
         debug!("Creating window");
 
@@ -663,6 +768,7 @@ pub async fn open_plugin_window(app_handle: AppHandle) -> Result<(), String> {
         debug!("Showing window");
         #[cfg(desktop)]
         {
+            reposition_to_source_monitor(&app_handle, &window, &source_window);
             if window.is_minimized().unwrap_or(false) {
                 window.unminimize().unwrap();
             }
@@ -914,7 +1020,10 @@ fn create_artifact_window(app_handle: &AppHandle, artifact: &ArtifactCollection)
 
 /// Open artifact collections management window
 #[tauri::command]
-pub async fn open_artifact_collections_window(app_handle: AppHandle) -> Result<(), String> {
+pub async fn open_artifact_collections_window(
+    app_handle: AppHandle,
+    source_window: tauri::WebviewWindow,
+) -> Result<(), String> {
     if app_handle.get_webview_window("artifact_collections").is_none() {
         debug!("Creating artifact collections window");
         create_artifact_collections_window(&app_handle);
@@ -922,6 +1031,7 @@ pub async fn open_artifact_collections_window(app_handle: AppHandle) -> Result<(
         debug!("Showing artifact collections window");
         #[cfg(desktop)]
         {
+            reposition_to_source_monitor(&app_handle, &window, &source_window);
             if window.is_minimized().unwrap_or(false) {
                 window.unminimize().unwrap();
             }
@@ -1013,11 +1123,15 @@ fn create_schedule_window_with_visibility(app_handle: &AppHandle, visible: bool)
 
 /// Open schedule window
 #[tauri::command]
-pub async fn open_schedule_window(app_handle: AppHandle) -> Result<(), String> {
+pub async fn open_schedule_window(
+    app_handle: AppHandle,
+    source_window: tauri::WebviewWindow,
+) -> Result<(), String> {
     if let Some(window) = app_handle.get_webview_window("schedule") {
         debug!("Showing schedule window");
         #[cfg(desktop)]
         {
+            reposition_to_source_monitor(&app_handle, &window, &source_window);
             if window.is_minimized().unwrap_or(false) {
                 window.unminimize().unwrap();
             }
@@ -1190,11 +1304,15 @@ fn create_sidebar_window(app_handle: &AppHandle) {
 
 /// Open sidebar window
 #[tauri::command]
-pub async fn open_sidebar_window(app_handle: AppHandle) -> Result<(), String> {
+pub async fn open_sidebar_window(
+    app_handle: AppHandle,
+    source_window: tauri::WebviewWindow,
+) -> Result<(), String> {
     if let Some(window) = app_handle.get_webview_window("sidebar") {
         debug!("Showing sidebar window");
         #[cfg(desktop)]
         {
+            reposition_to_source_monitor(&app_handle, &window, &source_window);
             if window.is_minimized().unwrap_or(false) {
                 window.unminimize().unwrap();
             }
