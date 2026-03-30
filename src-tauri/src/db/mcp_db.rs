@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use crate::db::connection::{params, params_from_iter, Connection, DbError, OptionalExtension, Result, Row};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -146,7 +146,7 @@ static CATALOG_LAST_REBUILD_AT_MS: AtomicU64 = AtomicU64::new(0);
 
 impl MCPDatabase {
     #[instrument(level = "trace", skip(app_handle))]
-    pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
+    pub fn new(app_handle: &tauri::AppHandle) -> Result<Self> {
         let db_path = get_db_path(app_handle, "mcp.db");
         let conn = Connection::open(db_path.unwrap())?;
         conn.execute_batch(
@@ -179,20 +179,20 @@ impl MCPDatabase {
         CATALOG_REBUILD_LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
-        matches!(
-            err,
-            rusqlite::Error::SqliteFailure(sqlite_err, _)
-                if matches!(
-                    sqlite_err.code,
-                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                )
-        )
+    fn is_sqlite_busy(err: &DbError) -> bool {
+        match err {
+            DbError::LibSql(libsql::Error::SqliteFailure(code, _))
+                if *code == 5 /* SQLITE_BUSY */ || *code == 6 /* SQLITE_LOCKED */ =>
+            {
+                true
+            }
+            _ => false,
+        }
     }
 
-    fn retry_if_busy<T, F>(&self, mut operation: F) -> rusqlite::Result<T>
+    fn retry_if_busy<T, F>(&self, mut operation: F) -> Result<T>
     where
-        F: FnMut() -> rusqlite::Result<T>,
+        F: FnMut() -> Result<T>,
     {
         let mut attempt = 0usize;
         loop {
@@ -208,7 +208,7 @@ impl MCPDatabase {
         }
     }
 
-    pub fn create_tables(&self) -> rusqlite::Result<()> {
+    pub fn create_tables(&self) -> Result<()> {
         // Create MCP servers table
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS mcp_server (
@@ -227,7 +227,7 @@ impl MCPDatabase {
                 is_deletable BOOLEAN NOT NULL DEFAULT 1,
                 created_time DATETIME DEFAULT CURRENT_TIMESTAMP
             );",
-            [],
+            (),
         )?;
 
         // Create MCP server tools table
@@ -244,7 +244,7 @@ impl MCPDatabase {
                 FOREIGN KEY (server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
                 UNIQUE(server_id, tool_name)
             );",
-            [],
+            (),
         )?;
 
         // Create MCP server resources table
@@ -260,7 +260,7 @@ impl MCPDatabase {
                 FOREIGN KEY (server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
                 UNIQUE(server_id, resource_uri)
             );",
-            [],
+            (),
         )?;
 
         // Create MCP server prompts table
@@ -276,7 +276,7 @@ impl MCPDatabase {
                 FOREIGN KEY (server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
                 UNIQUE(server_id, prompt_name)
             );",
-            [],
+            (),
         )?;
 
         // Create MCP tool calls history table
@@ -299,7 +299,7 @@ impl MCPDatabase {
                 assistant_message_id INTEGER,
                 FOREIGN KEY (server_id) REFERENCES mcp_server(id) ON DELETE CASCADE
             );",
-            [],
+            (),
         )?;
 
         self.migrate_mcp_tool_call_table()?;
@@ -310,7 +310,7 @@ impl MCPDatabase {
         Ok(())
     }
 
-    fn create_dynamic_loading_tables(&self) -> rusqlite::Result<()> {
+    fn create_dynamic_loading_tables(&self) -> Result<()> {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS mcp_server_capability_epoch_catalog (
                 server_id INTEGER PRIMARY KEY,
@@ -319,7 +319,7 @@ impl MCPDatabase {
                 summary TEXT NOT NULL DEFAULT '',
                 summary_generated_at DATETIME
             )",
-            [],
+            (),
         )?;
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS mcp_tool_catalog (
@@ -333,15 +333,15 @@ impl MCPDatabase {
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 summary_generated_at DATETIME
             )",
-            [],
+            (),
         )?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_mcp_tool_catalog_server_tool_name ON mcp_tool_catalog(server_id, tool_name)",
-            [],
+            (),
         )?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_mcp_tool_catalog_schema_hash ON mcp_tool_catalog(schema_hash)",
-            [],
+            (),
         )?;
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS conversation_mcp_loaded_tool (
@@ -359,23 +359,23 @@ impl MCPDatabase {
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(conversation_id, tool_id)
             )",
-            [],
+            (),
         )?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_conversation_mcp_loaded_tool_conversation ON conversation_mcp_loaded_tool(conversation_id)",
-            [],
+            (),
         )?;
         Ok(())
     }
 
     /// Migrate existing mcp_tool_call table to add new columns
-    fn migrate_mcp_tool_call_table(&self) -> rusqlite::Result<()> {
+    fn migrate_mcp_tool_call_table(&self) -> Result<()> {
         // Check if columns exist
         let columns_result = self.conn.prepare("PRAGMA table_info(mcp_tool_call)");
 
         match columns_result {
             Ok(mut stmt) => {
-                let column_info = stmt.query_map([], |row| {
+                let column_info = stmt.query_map((), |row| {
                     Ok(row.get::<_, String>(1)?) // column name is at index 1
                 })?;
 
@@ -401,17 +401,17 @@ impl MCPDatabase {
                 // Add missing columns
                 if !has_llm_call_id {
                     self.conn
-                        .execute("ALTER TABLE mcp_tool_call ADD COLUMN llm_call_id TEXT", [])?;
+                        .execute("ALTER TABLE mcp_tool_call ADD COLUMN llm_call_id TEXT", ())?;
                 }
                 if !has_assistant_message_id {
                     self.conn.execute(
                         "ALTER TABLE mcp_tool_call ADD COLUMN assistant_message_id INTEGER",
-                        [],
+                        (),
                     )?;
                 }
                 if !has_subtask_id {
                     self.conn
-                        .execute("ALTER TABLE mcp_tool_call ADD COLUMN subtask_id INTEGER", [])?;
+                        .execute("ALTER TABLE mcp_tool_call ADD COLUMN subtask_id INTEGER", ())?;
                 }
             }
             Err(_) => {
@@ -422,12 +422,12 @@ impl MCPDatabase {
         Ok(())
     }
 
-    fn migrate_mcp_server_table(&self) -> rusqlite::Result<()> {
+    fn migrate_mcp_server_table(&self) -> Result<()> {
         if let Ok(mut stmt) = self.conn.prepare("PRAGMA table_info(mcp_server)") {
             let mut has_headers = false;
             let mut has_is_deletable = false;
             let mut has_proxy_enabled = false;
-            let cols = stmt.query_map([], |row| Ok(row.get::<_, String>(1)?))?;
+            let cols = stmt.query_map((), |row| Ok(row.get::<_, String>(1)?))?;
             for c in cols {
                 if let Ok(name) = c {
                     if name == "headers" {
@@ -442,20 +442,20 @@ impl MCPDatabase {
                 }
             }
             if !has_headers {
-                let _ = self.conn.execute("ALTER TABLE mcp_server ADD COLUMN headers TEXT", []);
+                let _ = self.conn.execute("ALTER TABLE mcp_server ADD COLUMN headers TEXT", ());
             }
             if !has_is_deletable {
                 // 添加 is_deletable 字段，默认为 1（可删除）
                 let _ = self.conn.execute(
                     "ALTER TABLE mcp_server ADD COLUMN is_deletable BOOLEAN NOT NULL DEFAULT 1",
-                    [],
+                    (),
                 );
             }
             if !has_proxy_enabled {
                 // 添加 proxy_enabled 字段，默认为 0（不使用代理）
                 let _ = self.conn.execute(
                     "ALTER TABLE mcp_server ADD COLUMN proxy_enabled BOOLEAN NOT NULL DEFAULT 0",
-                    [],
+                    (),
                 );
             }
         }
@@ -463,13 +463,13 @@ impl MCPDatabase {
     }
 
     #[instrument(level = "trace", skip(self))]
-    pub fn get_mcp_servers(&self) -> rusqlite::Result<Vec<MCPServer>> {
+    pub fn get_mcp_servers(&self) -> Result<Vec<MCPServer>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, COALESCE(is_builtin, 0), COALESCE(is_deletable, 1), COALESCE(proxy_enabled, 0), created_time \
              FROM mcp_server ORDER BY created_time DESC"
         )?;
 
-        let servers = stmt.query_map([], |row| {
+        let servers = stmt.query_map((), |row| {
             Ok(MCPServer {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -497,7 +497,7 @@ impl MCPDatabase {
     }
 
     #[instrument(level = "trace", skip(self), fields(id))]
-    pub fn get_mcp_server(&self, id: i64) -> rusqlite::Result<MCPServer> {
+    pub fn get_mcp_server(&self, id: i64) -> Result<MCPServer> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, COALESCE(is_builtin, 0), COALESCE(is_deletable, 1), COALESCE(proxy_enabled, 0), created_time \
              FROM mcp_server WHERE id = ?"
@@ -528,7 +528,7 @@ impl MCPDatabase {
 
         match server {
             Some(server) => Ok(server),
-            None => Err(rusqlite::Error::QueryReturnedNoRows),
+            None => Err(DbError::QueryReturnedNoRows),
         }
     }
 
@@ -536,7 +536,7 @@ impl MCPDatabase {
     pub fn get_mcp_servers_with_tools_by_ids(
         &self,
         server_ids: &[i64],
-    ) -> rusqlite::Result<Vec<(MCPServer, Vec<MCPServerTool>)>> {
+    ) -> Result<Vec<(MCPServer, Vec<MCPServerTool>)>> {
         if server_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -550,7 +550,7 @@ impl MCPDatabase {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let servers_iter =
-            stmt.query_map(rusqlite::params_from_iter(server_ids.iter()), |row| {
+            stmt.query_map(params_from_iter(server_ids.iter().copied()), |row| {
                 Ok(MCPServer {
                     id: row.get(0)?,
                     name: row.get(1)?,
@@ -587,7 +587,7 @@ impl MCPDatabase {
         );
         let mut tool_stmt = self.conn.prepare(&tools_sql)?;
         let tools_iter = tool_stmt.query_map(
-            rusqlite::params_from_iter(servers.iter().map(|s| s.id)),
+            params_from_iter(servers.iter().map(|s| s.id)),
             |row| {
                 Ok(MCPServerTool {
                     id: row.get(0)?,
@@ -631,7 +631,7 @@ impl MCPDatabase {
         is_enabled: bool,
         is_builtin: bool,
         proxy_enabled: bool,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<()> {
         self.conn.execute(
             "UPDATE mcp_server SET name = ?, description = ?, transport_type = ?, command = ?, environment_variables = ?, headers = ?, url = ?, timeout = ?, is_long_running = ?, is_enabled = ?, is_builtin = ?, proxy_enabled = ? WHERE id = ?",
             params![name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, is_builtin, proxy_enabled, id],
@@ -639,13 +639,13 @@ impl MCPDatabase {
         Ok(())
     }
 
-    pub fn delete_mcp_server(&self, id: i64) -> rusqlite::Result<()> {
+    pub fn delete_mcp_server(&self, id: i64) -> Result<()> {
         // Cascade delete will handle tools and resources
         self.conn.execute("DELETE FROM mcp_server WHERE id = ?", params![id])?;
         Ok(())
     }
 
-    pub fn toggle_mcp_server(&self, id: i64, is_enabled: bool) -> rusqlite::Result<()> {
+    pub fn toggle_mcp_server(&self, id: i64, is_enabled: bool) -> Result<()> {
         self.conn.execute(
             "UPDATE mcp_server SET is_enabled = ? WHERE id = ?",
             params![is_enabled, id],
@@ -669,7 +669,7 @@ impl MCPDatabase {
         is_builtin: bool,
         is_deletable: bool,
         proxy_enabled: bool,
-    ) -> rusqlite::Result<i64> {
+    ) -> Result<i64> {
         // First try to get existing server by name
         let existing_id = self
             .conn
@@ -690,7 +690,7 @@ impl MCPDatabase {
             }
             None => {
                 // Insert new server
-                let mut stmt = self.conn.prepare(
+                let stmt = self.conn.prepare(
                     "INSERT INTO mcp_server (name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, is_builtin, is_deletable, proxy_enabled)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 )?;
@@ -716,7 +716,7 @@ impl MCPDatabase {
         }
     }
 
-    pub fn get_mcp_server_tools(&self, server_id: i64) -> rusqlite::Result<Vec<MCPServerTool>> {
+    pub fn get_mcp_server_tools(&self, server_id: i64) -> Result<Vec<MCPServerTool>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, server_id, tool_name, tool_description, is_enabled, is_auto_run, parameters 
              FROM mcp_server_tool WHERE server_id = ? ORDER BY tool_name"
@@ -746,7 +746,7 @@ impl MCPDatabase {
         &self,
         server_id: i64,
         keep_names: &[String],
-    ) -> rusqlite::Result<usize> {
+    ) -> Result<usize> {
         if keep_names.is_empty() {
             // 如果没有需要保留的工具，直接删除该服务器下所有工具
             let rows = self
@@ -766,13 +766,13 @@ impl MCPDatabase {
         }
         sql.push(')');
 
-        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1 + keep_names.len());
-        params_vec.push(&server_id);
+        let mut params_vec: Vec<libsql::Value> = Vec::with_capacity(1 + keep_names.len());
+        params_vec.push(libsql::Value::from(server_id));
         for name in keep_names {
-            params_vec.push(name);
+            params_vec.push(libsql::Value::from(name.as_str()));
         }
 
-        let rows = self.conn.execute(&sql, params_vec.as_slice())?;
+        let rows = self.conn.execute(&sql, params_from_iter(params_vec))?;
         Ok(rows as usize)
     }
 
@@ -781,7 +781,7 @@ impl MCPDatabase {
         id: i64,
         is_enabled: bool,
         is_auto_run: bool,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<()> {
         self.conn.execute(
             "UPDATE mcp_server_tool SET is_enabled = ?, is_auto_run = ? WHERE id = ?",
             params![is_enabled, is_auto_run, id],
@@ -800,7 +800,7 @@ impl MCPDatabase {
         tool_name: &str,
         tool_description: Option<&str>,
         parameters: Option<&str>,
-    ) -> rusqlite::Result<i64> {
+    ) -> Result<i64> {
         // First try to get existing tool by server_id and tool_name
         let existing_tool = self.conn.prepare(
             "SELECT id, is_enabled, is_auto_run FROM mcp_server_tool WHERE server_id = ? AND tool_name = ?"
@@ -819,7 +819,7 @@ impl MCPDatabase {
             }
             None => {
                 // Insert new tool with default settings
-                let mut stmt = self.conn.prepare(
+                let stmt = self.conn.prepare(
                     "INSERT INTO mcp_server_tool (server_id, tool_name, tool_description, is_enabled, is_auto_run, parameters) 
                      VALUES (?, ?, ?, ?, ?, ?)"
                 )?;
@@ -841,7 +841,7 @@ impl MCPDatabase {
     pub fn get_mcp_server_resources(
         &self,
         server_id: i64,
-    ) -> rusqlite::Result<Vec<MCPServerResource>> {
+    ) -> Result<Vec<MCPServerResource>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, server_id, resource_uri, resource_name, resource_type, resource_description 
              FROM mcp_server_resource WHERE server_id = ? ORDER BY resource_name"
@@ -870,7 +870,7 @@ impl MCPDatabase {
         &self,
         server_id: i64,
         keep_uris: &[String],
-    ) -> rusqlite::Result<usize> {
+    ) -> Result<usize> {
         if keep_uris.is_empty() {
             let rows = self.conn.execute(
                 "DELETE FROM mcp_server_resource WHERE server_id = ?",
@@ -890,13 +890,13 @@ impl MCPDatabase {
         }
         sql.push(')');
 
-        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1 + keep_uris.len());
-        params_vec.push(&server_id);
+        let mut params_vec: Vec<libsql::Value> = Vec::with_capacity(1 + keep_uris.len());
+        params_vec.push(libsql::Value::from(server_id));
         for uri in keep_uris {
-            params_vec.push(uri);
+            params_vec.push(libsql::Value::from(uri.as_str()));
         }
 
-        let rows = self.conn.execute(&sql, params_vec.as_slice())?;
+        let rows = self.conn.execute(&sql, params_from_iter(params_vec))?;
         Ok(rows as usize)
     }
 
@@ -907,7 +907,7 @@ impl MCPDatabase {
         resource_name: &str,
         resource_type: &str,
         resource_description: Option<&str>,
-    ) -> rusqlite::Result<i64> {
+    ) -> Result<i64> {
         // First try to get existing resource by server_id and resource_uri
         let existing_id = self
             .conn
@@ -926,7 +926,7 @@ impl MCPDatabase {
             }
             None => {
                 // Insert new resource
-                let mut stmt = self.conn.prepare(
+                let stmt = self.conn.prepare(
                     "INSERT INTO mcp_server_resource (server_id, resource_uri, resource_name, resource_type, resource_description) 
                      VALUES (?, ?, ?, ?, ?)"
                 )?;
@@ -944,7 +944,7 @@ impl MCPDatabase {
         }
     }
 
-    pub fn get_mcp_server_prompts(&self, server_id: i64) -> rusqlite::Result<Vec<MCPServerPrompt>> {
+    pub fn get_mcp_server_prompts(&self, server_id: i64) -> Result<Vec<MCPServerPrompt>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, server_id, prompt_name, prompt_description, is_enabled, arguments 
              FROM mcp_server_prompt WHERE server_id = ? ORDER BY prompt_name",
@@ -973,7 +973,7 @@ impl MCPDatabase {
         &self,
         server_id: i64,
         keep_names: &[String],
-    ) -> rusqlite::Result<usize> {
+    ) -> Result<usize> {
         if keep_names.is_empty() {
             let rows = self
                 .conn
@@ -992,17 +992,17 @@ impl MCPDatabase {
         }
         sql.push(')');
 
-        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1 + keep_names.len());
-        params_vec.push(&server_id);
+        let mut params_vec: Vec<libsql::Value> = Vec::with_capacity(1 + keep_names.len());
+        params_vec.push(libsql::Value::from(server_id));
         for name in keep_names {
-            params_vec.push(name);
+            params_vec.push(libsql::Value::from(name.as_str()));
         }
 
-        let rows = self.conn.execute(&sql, params_vec.as_slice())?;
+        let rows = self.conn.execute(&sql, params_from_iter(params_vec))?;
         Ok(rows as usize)
     }
 
-    pub fn update_mcp_server_prompt(&self, id: i64, is_enabled: bool) -> rusqlite::Result<()> {
+    pub fn update_mcp_server_prompt(&self, id: i64, is_enabled: bool) -> Result<()> {
         self.conn.execute(
             "UPDATE mcp_server_prompt SET is_enabled = ? WHERE id = ?",
             params![is_enabled, id],
@@ -1016,7 +1016,7 @@ impl MCPDatabase {
         prompt_name: &str,
         prompt_description: Option<&str>,
         arguments: Option<&str>,
-    ) -> rusqlite::Result<i64> {
+    ) -> Result<i64> {
         // First try to get existing prompt by server_id and prompt_name
         let existing_prompt = self.conn.prepare(
             "SELECT id, is_enabled FROM mcp_server_prompt WHERE server_id = ? AND prompt_name = ?"
@@ -1035,7 +1035,7 @@ impl MCPDatabase {
             }
             None => {
                 // Insert new prompt with default settings
-                let mut stmt = self.conn.prepare(
+                let stmt = self.conn.prepare(
                     "INSERT INTO mcp_server_prompt (server_id, prompt_name, prompt_description, is_enabled, arguments) 
                      VALUES (?, ?, ?, ?, ?)"
                 )?;
@@ -1067,8 +1067,8 @@ impl MCPDatabase {
         server_name: &str,
         tool_name: &str,
         parameters: &str,
-    ) -> rusqlite::Result<MCPToolCall> {
-        let mut stmt = self.conn.prepare(
+    ) -> Result<MCPToolCall> {
+        let stmt = self.conn.prepare(
             "INSERT INTO mcp_tool_call (conversation_id, message_id, server_id, server_name, tool_name, parameters)
              VALUES (?, ?, ?, ?, ?, ?)"
         )?;
@@ -1103,8 +1103,8 @@ impl MCPDatabase {
         parameters: &str,
         llm_call_id: Option<&str>,
         assistant_message_id: Option<i64>,
-    ) -> rusqlite::Result<MCPToolCall> {
-        let mut stmt = self.conn.prepare(
+    ) -> Result<MCPToolCall> {
+        let stmt = self.conn.prepare(
             "INSERT INTO mcp_tool_call (conversation_id, message_id, server_id, server_name, tool_name, parameters, llm_call_id, assistant_message_id, subtask_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )?;
@@ -1127,8 +1127,8 @@ impl MCPDatabase {
         self.get_mcp_tool_call(id)
     }
 
-    pub fn get_mcp_tool_call(&self, id: i64) -> rusqlite::Result<MCPToolCall> {
-        let mut stmt = self.conn.prepare(
+    pub fn get_mcp_tool_call(&self, id: i64) -> Result<MCPToolCall> {
+        let stmt = self.conn.prepare(
             "SELECT id, conversation_id, message_id, server_id, server_name, tool_name, 
              parameters, status, result, error, created_time, started_time, finished_time, llm_call_id, assistant_message_id, subtask_id
              FROM mcp_tool_call WHERE id = ?"
@@ -1163,7 +1163,7 @@ impl MCPDatabase {
         status: &str,
         result: Option<&str>,
         error: Option<&str>,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<()> {
         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
         match status {
@@ -1171,7 +1171,7 @@ impl MCPDatabase {
                 self.retry_if_busy(|| {
                     self.conn.execute(
                         "UPDATE mcp_tool_call SET status = ?, started_time = ? WHERE id = ?",
-                        params![status, &now, id],
+                        params![status, now.clone(), id],
                     )?;
                     Ok(())
                 })?;
@@ -1180,7 +1180,7 @@ impl MCPDatabase {
                 self.retry_if_busy(|| {
                     self.conn.execute(
                         "UPDATE mcp_tool_call SET status = ?, result = ?, error = ?, finished_time = ? WHERE id = ?",
-                        params![status, result, error, &now, id],
+                        params![status, result, error, now.clone(), id],
                     )?;
                     Ok(())
                 })?;
@@ -1205,7 +1205,7 @@ impl MCPDatabase {
         server_name: &str,
         tool_name: &str,
         parameters: &str,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<()> {
         self.conn.execute(
             "UPDATE mcp_tool_call SET server_name = ?, tool_name = ?, parameters = ? WHERE id = ?",
             params![server_name, tool_name, parameters, id],
@@ -1216,13 +1216,13 @@ impl MCPDatabase {
     /// Try to transition a tool call to executing state only if it is currently pending/failed and not yet started.
     /// Returns true if the transition happened, false if another executor already took it.
     #[instrument(level = "trace", skip(self), fields(id))]
-    pub fn mark_mcp_tool_call_executing_if_pending(&self, id: i64) -> rusqlite::Result<bool> {
+    pub fn mark_mcp_tool_call_executing_if_pending(&self, id: i64) -> Result<bool> {
         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
         // 允许从 pending/failed 进入 executing；对于 failed 的重试，覆盖 started_time 即可
         let rows = self.retry_if_busy(|| {
             self.conn.execute(
                 "UPDATE mcp_tool_call SET status = 'executing', started_time = ? WHERE id = ? AND status IN ('pending', 'failed')",
-                params![&now, id],
+                params![now.clone(), id],
             )
         })?;
         Ok(rows > 0)
@@ -1231,7 +1231,7 @@ impl MCPDatabase {
     pub fn get_mcp_tool_calls_by_conversation(
         &self,
         conversation_id: i64,
-    ) -> rusqlite::Result<Vec<MCPToolCall>> {
+    ) -> Result<Vec<MCPToolCall>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, conversation_id, message_id, server_id, server_name, tool_name, 
              parameters, status, result, error, created_time, started_time, finished_time, llm_call_id, assistant_message_id, subtask_id
@@ -1271,7 +1271,7 @@ impl MCPDatabase {
     pub fn get_mcp_tool_calls_by_message(
         &self,
         message_id: i64,
-    ) -> rusqlite::Result<Vec<MCPToolCall>> {
+    ) -> Result<Vec<MCPToolCall>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, conversation_id, message_id, server_id, server_name, tool_name,
              parameters, status, result, error, created_time, started_time, finished_time,
@@ -1307,7 +1307,7 @@ impl MCPDatabase {
         Ok(result)
     }
 
-    pub fn rebuild_dynamic_mcp_catalog(&self) -> rusqlite::Result<()> {
+    pub fn rebuild_dynamic_mcp_catalog(&self) -> Result<()> {
         let now_ms = Self::now_millis();
         if now_ms.saturating_sub(CATALOG_LAST_REBUILD_AT_MS.load(Ordering::Relaxed))
             < CATALOG_REBUILD_MIN_INTERVAL_MS
@@ -1329,13 +1329,13 @@ impl MCPDatabase {
         let now = Self::now_string();
         self.conn.execute(
             "DELETE FROM mcp_server_capability_epoch_catalog WHERE server_id NOT IN (SELECT id FROM mcp_server)",
-            [],
+            (),
         )?;
         self.conn.execute(
             "DELETE FROM mcp_tool_catalog
              WHERE server_id NOT IN (SELECT id FROM mcp_server)
                 OR tool_id NOT IN (SELECT id FROM mcp_server_tool)",
-            [],
+            (),
         )?;
         let mut server_stmt = self.conn.prepare(
             "SELECT id, name, description
@@ -1343,10 +1343,10 @@ impl MCPDatabase {
              WHERE is_enabled = 1 OR command = 'aipp:dynamic_mcp'",
         )?;
         let servers: Vec<(i64, String, String)> = server_stmt
-            .query_map([], |row| {
+            .query_map((), |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         for (server_id, server_name, server_description) in servers {
             let existing_epoch = self
@@ -1365,7 +1365,7 @@ impl MCPDatabase {
                 .query_map(params![server_id], |row| {
                     Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
                 })?
-                .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+                .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>()?;
 
             let mut tool_stmt = self.conn.prepare(
                 "SELECT id, tool_name, COALESCE(tool_description, ''), parameters
@@ -1381,7 +1381,7 @@ impl MCPDatabase {
                         row.get::<_, Option<String>>(3)?,
                     ))
                 })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+                .collect::<std::result::Result<Vec<_>, _>>()?;
 
             let mut changed = false;
             let mut current_tool_ids = std::collections::HashSet::new();
@@ -1427,7 +1427,7 @@ impl MCPDatabase {
                         WHEN excluded.epoch != mcp_server_capability_epoch_catalog.epoch THEN NULL
                         ELSE mcp_server_capability_epoch_catalog.summary_generated_at
                     END",
-                params![server_id, next_epoch, now, summary],
+                params![server_id, next_epoch, now.clone(), summary],
             )?;
 
             for (tool_id, tool_name, tool_summary, parameters) in tools.iter() {
@@ -1462,12 +1462,12 @@ impl MCPDatabase {
                     params![
                         tool_id,
                         server_id,
-                        tool_name,
+                        tool_name.clone(),
                         summary,
                         keywords,
                         schema_hash,
                         next_epoch,
-                        now
+                        now.clone()
                     ],
                 )?;
             }
@@ -1484,14 +1484,14 @@ impl MCPDatabase {
         Ok(())
     }
 
-    pub fn rebuild_dynamic_mcp_catalog_force(&self) -> rusqlite::Result<()> {
+    pub fn rebuild_dynamic_mcp_catalog_force(&self) -> Result<()> {
         CATALOG_LAST_REBUILD_AT_MS.store(0, Ordering::Relaxed);
         self.rebuild_dynamic_mcp_catalog()
     }
 
     pub fn list_server_capability_catalog(
         &self,
-    ) -> rusqlite::Result<Vec<MCPServerCapabilityEpochCatalog>> {
+    ) -> Result<Vec<MCPServerCapabilityEpochCatalog>> {
         let mut stmt = self.conn.prepare(
             "SELECT c.server_id, s.name, c.epoch, c.last_refresh_at, c.summary, c.summary_generated_at
              FROM mcp_server_capability_epoch_catalog c
@@ -1499,7 +1499,7 @@ impl MCPDatabase {
              WHERE s.is_enabled = 1 OR s.command = 'aipp:dynamic_mcp'
              ORDER BY s.name",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map((), |row| {
             Ok(MCPServerCapabilityEpochCatalog {
                 server_id: row.get(0)?,
                 server_name: row.get(1)?,
@@ -1519,7 +1519,7 @@ impl MCPDatabase {
     pub fn list_tool_catalog(
         &self,
         server_id: Option<i64>,
-    ) -> rusqlite::Result<Vec<MCPToolCatalogEntry>> {
+    ) -> Result<Vec<MCPToolCatalogEntry>> {
         let sql = if server_id.is_some() {
             "SELECT c.tool_id, c.server_id, s.name, c.tool_name, c.summary, c.keywords_json, c.schema_hash,
                     c.capability_epoch, c.updated_at, c.summary_generated_at, s.is_enabled, t.is_enabled
@@ -1537,7 +1537,7 @@ impl MCPDatabase {
              ORDER BY s.name, c.tool_name"
         };
         let mut stmt = self.conn.prepare(sql)?;
-        let mapper = |row: &rusqlite::Row<'_>| {
+        let mapper = |row: &Row| {
             Ok(MCPToolCatalogEntry {
                 tool_id: row.get(0)?,
                 server_id: row.get(1)?,
@@ -1556,7 +1556,7 @@ impl MCPDatabase {
         let rows = if let Some(sid) = server_id {
             stmt.query_map(params![sid], mapper)?
         } else {
-            stmt.query_map([], mapper)?
+            stmt.query_map((), mapper)?
         };
         let mut result = Vec::new();
         for row in rows {
@@ -1569,7 +1569,7 @@ impl MCPDatabase {
         &self,
         server_id: i64,
         summary: &str,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<()> {
         let now = Self::now_string();
         self.conn.execute(
             "UPDATE mcp_server_capability_epoch_catalog
@@ -1580,13 +1580,13 @@ impl MCPDatabase {
         Ok(())
     }
 
-    pub fn update_tool_catalog_summary(&self, tool_id: i64, summary: &str) -> rusqlite::Result<()> {
+    pub fn update_tool_catalog_summary(&self, tool_id: i64, summary: &str) -> Result<()> {
         let now = Self::now_string();
         self.conn.execute(
             "UPDATE mcp_tool_catalog
              SET summary = ?, summary_generated_at = ?, updated_at = ?
              WHERE tool_id = ?",
-            params![summary, now, now, tool_id],
+            params![summary, now.clone(), now, tool_id],
         )?;
         Ok(())
     }
@@ -1596,9 +1596,9 @@ impl MCPDatabase {
         conversation_id: i64,
         tool_id: i64,
         source: Option<&str>,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<()> {
         let now = Self::now_string();
-        let mut stmt = self.conn.prepare(
+        let stmt = self.conn.prepare(
             "SELECT c.schema_hash, c.capability_epoch, s.name, t.tool_name
              FROM mcp_tool_catalog c
              JOIN mcp_server s ON s.id = c.server_id
@@ -1619,7 +1619,7 @@ impl MCPDatabase {
         let (schema_hash, capability_epoch, server_name, tool_name) = if let Some(v) = row {
             v
         } else {
-            let mut fallback = self.conn.prepare(
+            let fallback = self.conn.prepare(
                 "SELECT s.name, t.tool_name, t.parameters
                  FROM mcp_server_tool t
                  JOIN mcp_server s ON s.id = t.server_id
@@ -1648,13 +1648,13 @@ impl MCPDatabase {
                 params![
                     conversation_id,
                     tool_id,
-                    &server_name,
-                    &tool_name,
-                    &schema_hash,
+                    server_name.clone(),
+                    tool_name.clone(),
+                    schema_hash.clone(),
                     capability_epoch,
                     source,
-                    &now,
-                    &now
+                    now.clone(),
+                    now.clone()
                 ],
             )?;
             Ok(())
@@ -1665,7 +1665,7 @@ impl MCPDatabase {
     pub fn refresh_conversation_loaded_tool_statuses(
         &self,
         conversation_id: i64,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<()> {
         let now = Self::now_string();
         let mut stmt = self.conn.prepare(
             "SELECT id, tool_id, loaded_schema_hash
@@ -1676,7 +1676,7 @@ impl MCPDatabase {
             .query_map(params![conversation_id], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         for (id, tool_id, loaded_schema_hash) in rows {
             let tool_row = self
@@ -1740,7 +1740,7 @@ impl MCPDatabase {
                      loaded_server_name = COALESCE(?, loaded_server_name),
                      loaded_tool_name = COALESCE(?, loaded_tool_name)
                  WHERE id = ?",
-                params![status, invalid_reason, now, server_name, tool_name, id],
+                params![status, invalid_reason, now.clone(), server_name, tool_name, id],
             )?;
         }
 
@@ -1752,7 +1752,7 @@ impl MCPDatabase {
         conversation_id: i64,
         server_id: i64,
         tool_name: &str,
-    ) -> rusqlite::Result<bool> {
+    ) -> Result<bool> {
         let found = self
             .conn
             .prepare(
@@ -1773,7 +1773,7 @@ impl MCPDatabase {
     pub fn get_valid_loaded_tools_for_conversation(
         &self,
         conversation_id: i64,
-    ) -> rusqlite::Result<Vec<ConversationLoadedMCPToolResolved>> {
+    ) -> Result<Vec<ConversationLoadedMCPToolResolved>> {
         self.refresh_conversation_loaded_tool_statuses(conversation_id)?;
         let mut stmt = self.conn.prepare(
             "SELECT c.id, c.conversation_id, c.tool_id, t.server_id, s.name, t.tool_name,
@@ -1809,7 +1809,7 @@ impl MCPDatabase {
     pub fn get_conversation_loaded_mcp_tools(
         &self,
         conversation_id: i64,
-    ) -> rusqlite::Result<Vec<ConversationLoadedMCPTool>> {
+    ) -> Result<Vec<ConversationLoadedMCPTool>> {
         self.refresh_conversation_loaded_tool_statuses(conversation_id)?;
         let mut stmt = self.conn.prepare(
             "SELECT c.id, c.conversation_id, c.tool_id, c.loaded_server_name, c.loaded_tool_name,
