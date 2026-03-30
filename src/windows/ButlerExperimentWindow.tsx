@@ -15,6 +15,7 @@ import {
     Plus,
     RefreshCw,
     Settings,
+    Wand2,
     X,
 } from "lucide-react";
 
@@ -61,6 +62,8 @@ import {
     saveExperimentalConfigValues,
 } from "@/components/config/feature/forms/experimentalConfigShared";
 import { ConversationStatsDialog } from "@/components/token-statistics";
+import { ButlerOnboardingWizard } from "@/components/butler/ButlerOnboardingWizard";
+import type { TrustedWorkspace } from "@/components/butler/useButlerOnboarding";
 import { AssistantListItem } from "@/data/Assistant";
 import {
     ButlerMainLoadResponse,
@@ -280,6 +283,8 @@ function ButlerExperimentWindow() {
     const [totalTasks, setTotalTasks] = useState(0);
     const [loadingMoreTasks, setLoadingMoreTasks] = useState(false);
     const [hasMoreTasks, setHasMoreTasks] = useState(false);
+    const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
+    const onboardingAutoTriggeredRef = useRef(false);
     const butlerSettingsForm = useForm<ExperimentalConfigFormState>({
         defaultValues: { ...EXPERIMENTAL_CONFIG_DEFAULT_VALUES },
     });
@@ -966,6 +971,49 @@ function ButlerExperimentWindow() {
         butlerSettingsForm.reset(buildExperimentalConfigFormValues(featureConfig));
     }, [butlerSettingsForm, featureConfig, loadingFeatureConfig]);
 
+    // Auto-trigger onboarding when butler_model_id is not set
+    const butlerModelId = getConfigValue("experimental", "butler_model_id") || "";
+    useEffect(() => {
+        if (loadingFeatureConfig || onboardingAutoTriggeredRef.current) {
+            return;
+        }
+        if (butlerExperimentEnabled && !butlerModelId) {
+            onboardingAutoTriggeredRef.current = true;
+            setIsOnboardingOpen(true);
+        }
+    }, [loadingFeatureConfig, butlerExperimentEnabled, butlerModelId]);
+
+    const handleOpenOnboarding = useCallback(() => {
+        setIsOnboardingOpen(true);
+    }, []);
+
+    const handleOnboardingComplete = useCallback(() => {
+        void loadFeatureConfig();
+    }, [loadFeatureConfig]);
+
+    // Parse existing trusted workspaces for onboarding wizard
+    const existingTrustedWorkspaces = useMemo((): TrustedWorkspace[] => {
+        const raw = getConfigValue("experimental", "butler_trusted_workspaces") || "";
+        if (!raw) return [];
+        try {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) {
+                return parsed.filter(
+                    (item: unknown): item is TrustedWorkspace =>
+                        typeof item === "object" && item !== null && "path" in item
+                );
+            }
+        } catch {
+            // Legacy format: newline-separated paths
+            return raw
+                .split("\n")
+                .map((line: string) => line.trim())
+                .filter(Boolean)
+                .map((p: string) => ({ path: p, description: "" }));
+        }
+        return [];
+    }, [getConfigValue]);
+
     useAppShortcuts("butler", {
         new: () => {
             if (!mainConversationId || resettingMainConversation) {
@@ -1244,6 +1292,13 @@ function ButlerExperimentWindow() {
                                         onExternalOpenChange={setIsStatsDialogOpen}
                                     />
                                     <IconButton
+                                        icon={<Wand2 className="h-4 w-4 text-icon" />}
+                                        onClick={handleOpenOnboarding}
+                                        border
+                                        title="设置向导"
+                                        dataAippSlot="butler-main-open-onboarding"
+                                    />
+                                    <IconButton
                                         icon={<Settings className="h-4 w-4 text-icon" />}
                                         onClick={handleOpenSettings}
                                         border
@@ -1328,6 +1383,19 @@ function ButlerExperimentWindow() {
                         </div>
                     </DialogContent>
                 </Dialog>
+                <ButlerOnboardingWizard
+                    open={isOnboardingOpen}
+                    onOpenChange={setIsOnboardingOpen}
+                    existingModelId={butlerModelId}
+                    existingDisplayName={butlerDisplayName}
+                    existingTrustAll={getConfigValue("experimental", "butler_trust_all_workspaces") === "true"}
+                    existingTrustedWorkspaces={existingTrustedWorkspaces}
+                    existingFeishuEnabled={feishuEnabled}
+                    existingFeishuAppId={getConfigValue("experimental", "butler_feishu_app_id") || ""}
+                    existingFeishuBaseUrl={getConfigValue("experimental", "butler_feishu_base_url") || "https://open.feishu.cn"}
+                    saveFeatureConfig={saveFeatureConfig}
+                    onComplete={handleOnboardingComplete}
+                />
                 {isTaskDetailDialogOpen ? (
                     <div
                         className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"

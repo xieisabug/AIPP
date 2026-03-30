@@ -15,12 +15,17 @@ import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { FolderPicker } from "@/components/config/FolderPicker";
-import { AlertTriangle, Plus, Trash2 } from "lucide-react";
+import { ButlerOnboardingWizard } from "@/components/butler/ButlerOnboardingWizard";
+import { AlertTriangle, Plus, Trash2, Wand2 } from "lucide-react";
 
 interface ExperimentalConfigFormProps {
     form: UseFormReturn<any>;
     onSave: () => Promise<void>;
     scope?: "all" | "butler";
+    /** When provided, enables the onboarding wizard button inside the butler section. */
+    saveFeatureConfig?: (featureCode: string, config: Record<string, unknown>) => Promise<unknown>;
+    /** Called after the onboarding wizard saves config so the parent can refresh. */
+    onConfigRefresh?: () => void;
 }
 
 interface MCPSummaryProgressPayload {
@@ -107,8 +112,11 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
     form,
     onSave,
     scope = "all",
+    saveFeatureConfig: saveFeatureConfigProp,
+    onConfigRefresh,
 }) => {
     const [isSaving, setIsSaving] = useState(false);
+    const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
     const [summaryProgress, setSummaryProgress] = useState<MCPSummaryProgressPayload | null>(null);
     const [assistantSummaryProgress, setAssistantSummaryProgress] =
         useState<AssistantSummaryProgressPayload | null>(null);
@@ -939,6 +947,25 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
 
                         {butlerEnabled && (
                             <div className={nestedGroupClassName}>
+                                {saveFeatureConfigProp && (
+                                    <div className="flex items-center gap-3 rounded-lg border border-primary/30 bg-primary/5 p-3">
+                                        <div className="flex-1 space-y-0.5">
+                                            <p className="text-sm font-medium">引导配置</p>
+                                            <p className="text-xs text-muted-foreground">
+                                                通过分步向导快速完成总管家的模型、环境、工作区和飞书配置。
+                                            </p>
+                                        </div>
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => setIsOnboardingOpen(true)}
+                                        >
+                                            <Wand2 className="h-4 w-4 mr-1.5" />
+                                            开始引导
+                                        </Button>
+                                    </div>
+                                )}
                                 <Controller
                                     control={form.control}
                                     name="butler_model_id"
@@ -1532,6 +1559,32 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                     </div>
                 </CardContent>
             </Card>
+            {saveFeatureConfigProp && (
+                <ButlerOnboardingWizard
+                    open={isOnboardingOpen}
+                    onOpenChange={setIsOnboardingOpen}
+                    existingModelId={butlerModelId}
+                    existingDisplayName={String(form.watch("butler_display_name") || "总管家")}
+                    existingTrustAll={trustAllWorkspaces}
+                    existingTrustedWorkspaces={(() => {
+                        const raw = String(form.watch("butler_trusted_workspaces") || "");
+                        if (!raw) return [];
+                        try {
+                            const parsed = JSON.parse(raw);
+                            return Array.isArray(parsed) ? parsed : [];
+                        } catch {
+                            return [];
+                        }
+                    })()}
+                    existingFeishuEnabled={feishuEnabled}
+                    existingFeishuAppId={feishuAppId}
+                    existingFeishuBaseUrl={feishuBaseUrl}
+                    saveFeatureConfig={saveFeatureConfigProp}
+                    onComplete={() => {
+                        onConfigRefresh?.();
+                    }}
+                />
+            )}
         </Form>
     );
 };

@@ -65,6 +65,10 @@ interface FeatureFormRendererProps {
     onSaveNetwork: () => Promise<void>;
     onSaveShortcuts: () => Promise<void>;
     onSaveExperimental: () => Promise<void>;
+    /** Passed through to ExperimentalConfigForm for the onboarding wizard. */
+    saveFeatureConfig?: (featureCode: string, config: Record<string, unknown>) => Promise<unknown>;
+    /** Called when onboarding wizard finishes to refresh config. */
+    onConfigRefresh?: () => void;
 }
 
 export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
@@ -76,6 +80,8 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
     onSaveNetwork,
     onSaveShortcuts,
     onSaveExperimental,
+    saveFeatureConfig,
+    onConfigRefresh,
 }) => {
     switch (selectedFeature.id) {
         case "display":
@@ -160,6 +166,8 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
                 <ExperimentalConfigForm
                     form={forms.experimentalForm}
                     onSave={onSaveExperimental}
+                    saveFeatureConfig={saveFeatureConfig}
+                    onConfigRefresh={onConfigRefresh}
                 />
             );
         case "about":

@@ -115,7 +115,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
     }, [subNav]);
 
     // 使用新的 hooks
-    const { featureConfig, saveFeatureConfig, loading } = useFeatureConfig();
+    const { featureConfig, saveFeatureConfig, loadFeatureConfig, loading } = useFeatureConfig();
     const versionManager = useVersionManager();
     const defaultAppShortcutValues = useMemo(() => {
         const values: Record<string, string> = {};
@@ -416,6 +416,10 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
         await saveExperimentalConfigValues(saveFeatureConfig, experimentalForm.getValues());
     }, [experimentalForm, saveFeatureConfig]);
 
+    const handleOnboardingRefresh = useCallback(() => {
+        void loadFeatureConfig();
+    }, [loadFeatureConfig]);
+
     // 下拉菜单选项
     const selectOptions: SelectOption[] = useMemo(
         () =>
@@ -484,9 +488,11 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                 onSaveNetwork={handleSaveNetworkConfig}
                 onSaveShortcuts={handleSaveShortcutsConfig}
                 onSaveExperimental={handleSaveExperimentalConfig}
+                saveFeatureConfig={saveFeatureConfig}
+                onConfigRefresh={handleOnboardingRefresh}
             />
         </div>
-    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, otherForm, experimentalForm, aboutForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig, handleSaveExperimentalConfig]);
+    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, otherForm, experimentalForm, aboutForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig, handleSaveExperimentalConfig, saveFeatureConfig, handleOnboardingRefresh]);
 
     return (
         <ConfigPageLayout
