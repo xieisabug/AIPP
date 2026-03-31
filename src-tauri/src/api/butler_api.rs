@@ -682,7 +682,9 @@ pub(crate) fn resolve_butler_execution_window(app_handle: &AppHandle) -> Result<
     Err("No available window for butler continuation".to_string())
 }
 
-pub(crate) fn resolve_or_create_butler_execution_window(app_handle: &AppHandle) -> Result<Window, String> {
+pub(crate) fn resolve_or_create_butler_execution_window(
+    app_handle: &AppHandle,
+) -> Result<Window, String> {
     if let Ok(window) = resolve_butler_execution_window(app_handle) {
         return Ok(window);
     }

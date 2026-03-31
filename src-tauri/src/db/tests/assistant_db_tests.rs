@@ -10,7 +10,7 @@
 //! 所有测试使用 `Connection::open_in_memory()` 创建内存数据库
 
 use crate::db::assistant_db::*;
-use rusqlite::Connection;
+use crate::db::connection::{Connection, DbError};
 
 // ============================================================================
 // 测试辅助函数
@@ -32,7 +32,7 @@ fn create_assistant_test_db() -> Connection {
             is_addition BOOLEAN NOT NULL DEFAULT 0,
             created_time DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
-        [],
+        (),
     )
     .unwrap();
 
@@ -47,7 +47,7 @@ fn create_assistant_test_db() -> Connection {
             created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (assistant_id) REFERENCES assistant(id) ON DELETE CASCADE
         )",
-        [],
+        (),
     )
     .unwrap();
 
@@ -60,7 +60,7 @@ fn create_assistant_test_db() -> Connection {
             created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (assistant_id) REFERENCES assistant(id) ON DELETE CASCADE
         )",
-        [],
+        (),
     )
     .unwrap();
 
@@ -77,7 +77,7 @@ fn create_assistant_test_db() -> Connection {
             FOREIGN KEY (assistant_id) REFERENCES assistant(id) ON DELETE CASCADE,
             UNIQUE(assistant_id, assistant_model_id, name)
         )",
-        [],
+        (),
     )
     .unwrap();
 
@@ -92,7 +92,7 @@ fn create_assistant_test_db() -> Connection {
             updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (assistant_id) REFERENCES assistant(id) ON DELETE CASCADE
         )",
-        [],
+        (),
     )
     .unwrap();
 
@@ -346,7 +346,7 @@ fn test_assistant_read_nonexistent() {
     let result = db.get_assistant(999);
     assert!(result.is_err());
     match result {
-        Err(rusqlite::Error::QueryReturnedNoRows) => {}
+        Err(DbError::QueryReturnedNoRows) => {}
         _ => panic!("Expected QueryReturnedNoRows error"),
     }
 }

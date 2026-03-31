@@ -16,9 +16,9 @@ use anyhow::Context as _;
 use futures::StreamExt;
 use genai::chat::ChatStreamEvent;
 use genai::chat::{ChatOptions, ChatRequest, ToolCall};
+use genai::Client;
 use scraper::{Html, Selector};
 use serde::Serialize;
-use genai::Client;
 use serde_json;
 use std::collections::HashMap;
 use tauri::{Emitter, Manager};
@@ -498,8 +498,7 @@ fn extract_partial_string_array_field(raw: &str, field_names: &[&str]) -> Vec<St
             format!(r#""{}"\s*:\s*\[([\s\S]*?)(?:\]|$)"#, regex::escape(field_name)).as_str(),
         )
         .ok()
-        .and_then(|re| re.captures(raw))
-        else {
+        .and_then(|re| re.captures(raw)) else {
             continue;
         };
         let Some(items_raw) = captures.get(1).map(|capture| capture.as_str()) else {
@@ -627,11 +626,7 @@ fn extract_preview_code_streaming_state(
         interaction_mode,
         has_renderable_dom: analysis.has_renderable_dom,
         contains_script: analysis.contains_script,
-        renderable_html: if analysis.has_renderable_dom {
-            code.clone()
-        } else {
-            String::new()
-        },
+        renderable_html: if analysis.has_renderable_dom { code.clone() } else { String::new() },
         source_excerpt: build_preview_source_excerpt(&code, 600),
     })
 }
@@ -735,10 +730,7 @@ fn build_streaming_tool_call_display(
                 }
             }
         }
-        let marker = format!(
-            "\n\n<!-- MCP_TOOL_CALL_STREAMING:{} -->\n",
-            marker_payload
-        );
+        let marker = format!("\n\n<!-- MCP_TOOL_CALL_STREAMING:{} -->\n", marker_payload);
         display.push_str(&marker);
     }
     display
@@ -1075,8 +1067,10 @@ async fn handle_captured_tool_calls_common(
                         })
                         .unwrap(),
                     };
-                    let _ =
-                        window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+                    let _ = window.emit(
+                        format!("conversation_event_{}", conversation_id).as_str(),
+                        update_event,
+                    );
                 }
 
                 // 自动执行（若配置）

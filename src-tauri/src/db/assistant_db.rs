@@ -1,6 +1,6 @@
+use super::connection::{params, params_from_iter, Connection, DbError, OptionalExtension, Result};
 use super::get_db_path;
 use crate::utils::path_utils::is_path_under_trusted;
-use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tracing::{debug, error, instrument};
@@ -94,7 +94,7 @@ pub struct AssistantDatabase {
 }
 
 impl AssistantDatabase {
-    pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
+    pub fn new(app_handle: &tauri::AppHandle) -> Result<Self> {
         let db_path = get_db_path(app_handle, "assistant.db");
         let conn = Connection::open(db_path.unwrap())?;
 
@@ -105,7 +105,7 @@ impl AssistantDatabase {
     }
 
     #[instrument(level = "debug", skip(self), err)]
-    pub fn create_tables(&self) -> rusqlite::Result<()> {
+    pub fn create_tables(&self) -> Result<()> {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS assistant (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,7 +115,7 @@ impl AssistantDatabase {
                 is_addition BOOLEAN NOT NULL DEFAULT 0,
                 created_time DATETIME DEFAULT CURRENT_TIMESTAMP
             );",
-            [],
+            (),
         )?;
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS assistant_model (
@@ -125,7 +125,7 @@ impl AssistantDatabase {
                 model_code TEXT NOT NULL,
                 alias TEXT
             );",
-            [],
+            (),
         )?;
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS assistant_prompt (
@@ -135,7 +135,7 @@ impl AssistantDatabase {
                 created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (assistant_id) REFERENCES assistant(id)
             );",
-            [],
+            (),
         )?;
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS assistant_model_config (
@@ -147,7 +147,7 @@ impl AssistantDatabase {
                 value_type TEXT default 'float' not null,
                 FOREIGN KEY (assistant_id) REFERENCES assistant(id)
             );",
-            [],
+            (),
         )?;
         // 在创建唯一索引之前清理历史重复数据，保留 (assistant_id, name) 下最小 id 的记录
         let _ = self.conn.execute(
@@ -155,12 +155,12 @@ impl AssistantDatabase {
              WHERE id NOT IN (
                SELECT MIN(id) FROM assistant_model_config GROUP BY assistant_id, name
              );",
-            [],
+            (),
         );
         // 为常见查询语义增加唯一索引，防止同一助手下同名配置被重复插入
         self.conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_assistant_model_config_unique ON assistant_model_config(assistant_id, name);",
-            [],
+            (),
         )?;
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS assistant_prompt_param (
@@ -173,7 +173,7 @@ impl AssistantDatabase {
                 FOREIGN KEY (assistant_id) REFERENCES assistant(id),
                 FOREIGN KEY (assistant_prompt_id) REFERENCES assistant_prompt(id)
             );",
-            [],
+            (),
         )?;
 
         // Create assistant MCP configuration table
@@ -187,7 +187,7 @@ impl AssistantDatabase {
                 FOREIGN KEY (assistant_id) REFERENCES assistant(id) ON DELETE CASCADE,
                 UNIQUE(assistant_id, mcp_server_id)
             );",
-            [],
+            (),
         )?;
 
         // Create assistant MCP tool configuration table
@@ -202,7 +202,7 @@ impl AssistantDatabase {
                 FOREIGN KEY (assistant_id) REFERENCES assistant(id) ON DELETE CASCADE,
                 UNIQUE(assistant_id, mcp_tool_id)
             );",
-            [],
+            (),
         )?;
 
         // Create assistant workspace table for trusted paths
@@ -215,7 +215,7 @@ impl AssistantDatabase {
                 FOREIGN KEY (assistant_id) REFERENCES assistant(id) ON DELETE CASCADE,
                 UNIQUE(assistant_id, path)
             );",
-            [],
+            (),
         )?;
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS assistant_summary (
@@ -228,11 +228,11 @@ impl AssistantDatabase {
                 updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (assistant_id) REFERENCES assistant(id) ON DELETE CASCADE
             );",
-            [],
+            (),
         )?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_assistant_summary_assistant ON assistant_summary(assistant_id);",
-            [],
+            (),
         )?;
 
         if let Err(err) = self.init_assistant() {
@@ -265,7 +265,7 @@ impl AssistantDatabase {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, description, assistant_type, is_addition, created_time FROM assistant WHERE assistant_type = ? ORDER BY created_time DESC",
         )?;
-        let rows = stmt.query_map([assistant_type], |row| {
+        let rows = stmt.query_map(params![assistant_type], |row| {
             Ok(Assistant {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -275,7 +275,7 @@ impl AssistantDatabase {
                 created_time: row.get(5)?,
             })
         })?;
-        let assistants: Vec<Assistant> = rows.collect::<Result<Vec<_>>>()?;
+        let assistants: Vec<Assistant> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(assistants)
     }
 
@@ -450,7 +450,7 @@ impl AssistantDatabase {
     #[instrument(level = "debug", skip(self))]
     pub fn get_assistants(&self) -> Result<Vec<Assistant>> {
         let mut stmt = self.conn.prepare("SELECT id, name, description, assistant_type, is_addition, created_time FROM assistant")?;
-        let assistant_iter = stmt.query_map(params![], |row| {
+        let assistant_iter = stmt.query_map((), |row| {
             Ok(Assistant {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -486,7 +486,7 @@ impl AssistantDatabase {
             return Ok(assistant?);
         }
 
-        Err(rusqlite::Error::QueryReturnedNoRows)
+        Err(DbError::QueryReturnedNoRows)
     }
 
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
@@ -607,7 +607,7 @@ impl AssistantDatabase {
         // 1) 初始化默认助手（幂等）
         self.conn.execute(
             "INSERT OR IGNORE INTO assistant (id, name, description, is_addition) VALUES (1, '快速使用助手', '快捷键呼出的快速使用助手', 0)",
-            [],
+            (),
         )?;
 
         // 2) 默认 prompt：仅当该助手没有任何 prompt 时再插入
@@ -751,14 +751,14 @@ impl AssistantDatabase {
         ",
         )?;
         let servers: Vec<(i64, String, Option<String>)> = server_stmt
-            .query_map([], |row| {
+            .query_map((), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
                 ))
             })?
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         if servers.is_empty() {
             return Ok(Vec::new());
@@ -778,10 +778,10 @@ impl AssistantDatabase {
         server_config_params.extend(servers.iter().map(|(id, _, _)| *id));
 
         let server_configs: std::collections::HashMap<i64, bool> = server_config_stmt
-            .query_map(rusqlite::params_from_iter(server_config_params), |row| {
+            .query_map(params_from_iter(server_config_params), |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
             })?
-            .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
+            .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>()?;
 
         // 3. 获取所有工具信息（一次性获取所有服务器的工具）
         let tools_sql = format!(
@@ -794,7 +794,7 @@ impl AssistantDatabase {
 
         let mut tools_stmt = self.mcp_conn.prepare(&tools_sql)?;
         let all_tools: Vec<(i64, i64, String, String, String)> = tools_stmt
-            .query_map(rusqlite::params_from_iter(servers.iter().map(|(id, _, _)| *id)), |row| {
+            .query_map(params_from_iter(servers.iter().map(|(id, _, _)| *id)), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
@@ -803,7 +803,7 @@ impl AssistantDatabase {
                     row.get::<_, String>(4)?,
                 ))
             })?
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         // 4. 批量获取工具配置状态
         let mut tool_configs: std::collections::HashMap<i64, (bool, bool)> =
@@ -823,10 +823,10 @@ impl AssistantDatabase {
             tool_config_params.extend(all_tools.iter().map(|(id, _, _, _, _)| *id));
 
             tool_configs = tool_config_stmt
-                .query_map(rusqlite::params_from_iter(tool_config_params), |row| {
+                .query_map(params_from_iter(tool_config_params), |row| {
                     Ok((row.get::<_, i64>(0)?, (row.get::<_, bool>(1)?, row.get::<_, bool>(2)?)))
                 })?
-                .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
+                .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>()?;
         }
 
         // 5. 组织数据结构
@@ -964,7 +964,7 @@ impl AssistantDatabase {
              FROM assistant_summary
              ORDER BY updated_time DESC, id DESC",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map((), |row| {
             Ok(AssistantSummary {
                 id: row.get(0)?,
                 assistant_id: row.get(1)?,
@@ -997,8 +997,7 @@ impl AssistantDatabase {
                 updated_time = CURRENT_TIMESTAMP",
             params![assistant_id, summary, tags_json, source_hash],
         )?;
-        self.get_assistant_summary(assistant_id)?
-            .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
+        self.get_assistant_summary(assistant_id)?.ok_or_else(|| DbError::QueryReturnedNoRows)
     }
 
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]

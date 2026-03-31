@@ -4,7 +4,7 @@
 //! They are discovered by scanning file system. Only the assistant-skill
 //! association (which skills an assistant can use) is stored here.
 
-use rusqlite::{params, Connection};
+use crate::db::connection::{params, Connection, Result};
 use tracing::instrument;
 
 use crate::db::get_db_path;
@@ -16,14 +16,14 @@ pub struct SkillDatabase {
 
 impl SkillDatabase {
     #[instrument(level = "trace", skip(app_handle))]
-    pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
+    pub fn new(app_handle: &tauri::AppHandle) -> Result<Self> {
         let db_path = get_db_path(app_handle, "assistant.db");
         let conn = Connection::open(db_path.unwrap())?;
         Ok(SkillDatabase { conn })
     }
 
     /// Create skill-related tables
-    pub fn create_tables(&self) -> rusqlite::Result<()> {
+    pub fn create_tables(&self) -> Result<()> {
         // Assistant skill configuration table
         // Uses skill_identifier (string) instead of foreign key because
         // skills are file-based and can be deleted outside the app
@@ -38,14 +38,14 @@ impl SkillDatabase {
                 FOREIGN KEY (assistant_id) REFERENCES assistant(id) ON DELETE CASCADE,
                 UNIQUE(assistant_id, skill_identifier)
             );",
-            [],
+            (),
         )?;
 
         // Create index for faster lookups
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_assistant_skill_config_assistant 
              ON assistant_skill_config(assistant_id);",
-            [],
+            (),
         )?;
 
         Ok(())
@@ -56,7 +56,7 @@ impl SkillDatabase {
     pub fn get_assistant_skill_configs(
         &self,
         assistant_id: i64,
-    ) -> rusqlite::Result<Vec<AssistantSkillConfig>> {
+    ) -> Result<Vec<AssistantSkillConfig>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, assistant_id, skill_identifier, is_enabled, priority, created_time
              FROM assistant_skill_config
@@ -64,7 +64,7 @@ impl SkillDatabase {
              ORDER BY priority ASC, created_time ASC",
         )?;
 
-        let configs = stmt.query_map([assistant_id], |row| {
+        let configs = stmt.query_map(params![assistant_id], |row| {
             Ok(AssistantSkillConfig {
                 id: row.get(0)?,
                 assistant_id: row.get(1)?,
@@ -87,7 +87,7 @@ impl SkillDatabase {
     pub fn get_enabled_skill_configs(
         &self,
         assistant_id: i64,
-    ) -> rusqlite::Result<Vec<AssistantSkillConfig>> {
+    ) -> Result<Vec<AssistantSkillConfig>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, assistant_id, skill_identifier, is_enabled, priority, created_time
              FROM assistant_skill_config
@@ -95,7 +95,7 @@ impl SkillDatabase {
              ORDER BY priority ASC, created_time ASC",
         )?;
 
-        let configs = stmt.query_map([assistant_id], |row| {
+        let configs = stmt.query_map(params![assistant_id], |row| {
             Ok(AssistantSkillConfig {
                 id: row.get(0)?,
                 assistant_id: row.get(1)?,
@@ -121,7 +121,7 @@ impl SkillDatabase {
         skill_identifier: &str,
         is_enabled: bool,
         priority: i32,
-    ) -> rusqlite::Result<i64> {
+    ) -> Result<i64> {
         // Check if config exists
         let existing_id: Option<i64> = self
             .conn
@@ -158,7 +158,7 @@ impl SkillDatabase {
 
     /// Update skill config enabled status
     #[instrument(level = "trace", skip(self), fields(id, is_enabled))]
-    pub fn update_skill_config_enabled(&self, id: i64, is_enabled: bool) -> rusqlite::Result<()> {
+    pub fn update_skill_config_enabled(&self, id: i64, is_enabled: bool) -> Result<()> {
         self.conn.execute(
             "UPDATE assistant_skill_config SET is_enabled = ? WHERE id = ?",
             params![is_enabled, id],
@@ -168,7 +168,7 @@ impl SkillDatabase {
 
     /// Update skill config priority
     #[instrument(level = "trace", skip(self), fields(id, priority))]
-    pub fn update_skill_config_priority(&self, id: i64, priority: i32) -> rusqlite::Result<()> {
+    pub fn update_skill_config_priority(&self, id: i64, priority: i32) -> Result<()> {
         self.conn.execute(
             "UPDATE assistant_skill_config SET priority = ? WHERE id = ?",
             params![priority, id],
@@ -178,17 +178,14 @@ impl SkillDatabase {
 
     /// Delete a skill config
     #[instrument(level = "trace", skip(self), fields(id))]
-    pub fn delete_skill_config(&self, id: i64) -> rusqlite::Result<()> {
+    pub fn delete_skill_config(&self, id: i64) -> Result<()> {
         self.conn.execute("DELETE FROM assistant_skill_config WHERE id = ?", params![id])?;
         Ok(())
     }
 
     /// Delete skill config by identifier (for cleanup when skill is removed)
     #[instrument(level = "trace", skip(self), fields(skill_identifier))]
-    pub fn delete_skill_configs_by_identifier(
-        &self,
-        skill_identifier: &str,
-    ) -> rusqlite::Result<usize> {
+    pub fn delete_skill_configs_by_identifier(&self, skill_identifier: &str) -> Result<usize> {
         let rows = self.conn.execute(
             "DELETE FROM assistant_skill_config WHERE skill_identifier = ?",
             params![skill_identifier],
@@ -203,9 +200,9 @@ impl SkillDatabase {
         &self,
         assistant_id: i64,
         configs: &[(String, bool, i32)], // (skill_identifier, is_enabled, priority)
-    ) -> rusqlite::Result<()> {
+    ) -> Result<()> {
         // Start transaction
-        self.conn.execute("BEGIN TRANSACTION", [])?;
+        self.conn.execute("BEGIN TRANSACTION", ())?;
 
         // Delete existing configs for this assistant
         self.conn.execute(
@@ -221,21 +218,21 @@ impl SkillDatabase {
         )?;
 
         for (skill_identifier, is_enabled, priority) in configs {
-            stmt.execute(params![assistant_id, skill_identifier, is_enabled, priority])?;
+            stmt.execute(params![assistant_id, skill_identifier.clone(), *is_enabled, *priority])?;
         }
 
         // Commit transaction
-        self.conn.execute("COMMIT", [])?;
+        self.conn.execute("COMMIT", ())?;
 
         Ok(())
     }
 
     /// Get all unique skill identifiers that are configured (for validation)
-    pub fn get_all_configured_skill_identifiers(&self) -> rusqlite::Result<Vec<String>> {
+    pub fn get_all_configured_skill_identifiers(&self) -> Result<Vec<String>> {
         let mut stmt =
             self.conn.prepare("SELECT DISTINCT skill_identifier FROM assistant_skill_config")?;
 
-        let identifiers = stmt.query_map([], |row| row.get(0))?;
+        let identifiers = stmt.query_map((), |row| row.get(0))?;
 
         let mut result = Vec::new();
         for id in identifiers {
@@ -247,12 +244,12 @@ impl SkillDatabase {
     /// Migration: Remove old ClaudeCodeAgents and ClaudeCodeRules skill configs
     /// This should be called once when upgrading to the new skills system
     #[instrument(level = "trace", skip(self))]
-    pub fn migrate_claude_code_skills(&self) -> rusqlite::Result<usize> {
+    pub fn migrate_claude_code_skills(&self) -> Result<usize> {
         let rows = self.conn.execute(
             "DELETE FROM assistant_skill_config
              WHERE skill_identifier LIKE 'claude_code_agents:%'
              OR skill_identifier LIKE 'claude_code_rules:%'",
-            [],
+            (),
         )?;
         Ok(rows)
     }
@@ -261,7 +258,7 @@ impl SkillDatabase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
+    use crate::db::connection::Connection;
 
     fn create_test_db() -> SkillDatabase {
         let conn = Connection::open_in_memory().unwrap();
@@ -272,12 +269,12 @@ mod tests {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL
             )",
-            [],
+            (),
         )
         .unwrap();
 
         // Insert a test assistant
-        conn.execute("INSERT INTO assistant (name) VALUES ('Test Assistant')", []).unwrap();
+        conn.execute("INSERT INTO assistant (name) VALUES ('Test Assistant')", ()).unwrap();
 
         let db = SkillDatabase { conn };
         db.create_tables().unwrap();

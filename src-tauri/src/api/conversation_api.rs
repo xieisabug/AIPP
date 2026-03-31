@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
 use crate::{
+    db::connection::params,
     db::conversation_db::{
         ConversationDatabase, Message, MessageAttachment, MessageDetail, Repository,
     },
@@ -617,7 +618,7 @@ pub async fn search_conversations(
         .map_err(|e| e.to_string())?;
 
     let rows = stmt
-        .query_map((&search_value, max_rows, offset_rows), |row| {
+        .query_map(params![search_value.clone(), max_rows, offset_rows], |row| {
             let assistant_id: Option<i64> = row.get(2)?;
             let assistant_name = assistant_id
                 .and_then(|id| assistant_name_cache.get(&id).cloned())

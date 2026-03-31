@@ -1,6 +1,6 @@
+use crate::db::connection::{params, OptionalExtension};
 use crate::db::mcp_db::MCPDatabase;
 use anyhow::{Context, Result};
-use crate::db::connection::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tracing::{error, instrument};
@@ -43,18 +43,12 @@ pub struct BuiltinToolInfo {
 
 /// Returns true if the entire builtin command (server) is butler-only.
 pub fn is_butler_only_builtin_command(command: &str) -> bool {
-    matches!(
-        super::builtin_command_id(command).as_deref(),
-        Some("superadmin")
-    )
+    matches!(super::builtin_command_id(command).as_deref(), Some("superadmin"))
 }
 
 /// Butler-only tool names within the `aipp:agent` command.
-const BUTLER_ONLY_AGENT_TOOLS: &[&str] = &[
-    "spawn_task_conversation",
-    "task_conversation_operation",
-    "schedule_task",
-];
+const BUTLER_ONLY_AGENT_TOOLS: &[&str] =
+    &["spawn_task_conversation", "task_conversation_operation", "schedule_task"];
 
 /// Returns true if the given tool from `aipp:agent` is butler-only.
 pub fn is_butler_only_agent_tool(tool_name: &str) -> bool {

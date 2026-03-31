@@ -1,5 +1,5 @@
+use crate::db::connection::{params, params_from_iter, Connection, Result, Row};
 use crate::db::get_db_path;
-use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -46,7 +46,7 @@ pub struct ArtifactsDatabase {
 }
 
 impl ArtifactsDatabase {
-    pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
+    pub fn new(app_handle: &tauri::AppHandle) -> Result<Self> {
         let db_path = get_db_path(app_handle, "artifacts.db");
         let conn = Connection::open(db_path.unwrap())?;
 
@@ -55,12 +55,12 @@ impl ArtifactsDatabase {
 
     /// Create an in-memory database for testing
     #[cfg(test)]
-    pub fn new_in_memory() -> rusqlite::Result<Self> {
+    pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         Ok(ArtifactsDatabase { conn })
     }
 
-    pub fn create_tables(&self) -> rusqlite::Result<()> {
+    pub fn create_tables(&self) -> Result<()> {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS artifacts_collection (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,25 +76,25 @@ impl ArtifactsDatabase {
                 db_id TEXT,
                 assistant_id INTEGER
             );",
-            [],
+            (),
         )?;
 
         // Create index for faster searching
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_artifacts_collection_type ON artifacts_collection(artifact_type);",
-            [],
+            (),
         )?;
 
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_artifacts_collection_name ON artifacts_collection(name);",
-            [],
+            (),
         )?;
 
         // Migrate: add db_id and assistant_id columns if they don't exist
-        let _ = self.conn.execute("ALTER TABLE artifacts_collection ADD COLUMN db_id TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE artifacts_collection ADD COLUMN db_id TEXT", ());
         let _ = self
             .conn
-            .execute("ALTER TABLE artifacts_collection ADD COLUMN assistant_id INTEGER", []);
+            .execute("ALTER TABLE artifacts_collection ADD COLUMN assistant_id INTEGER", ());
 
         Ok(())
     }
@@ -135,7 +135,7 @@ impl ArtifactsDatabase {
 
         let mut stmt = self.conn.prepare(query)?;
 
-        let row_mapper = |row: &rusqlite::Row| {
+        let row_mapper = |row: &Row| {
             Ok(ArtifactCollection {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -153,9 +153,9 @@ impl ArtifactsDatabase {
         };
 
         let rows = if let Some(type_filter) = artifact_type {
-            stmt.query_map([type_filter], row_mapper)?
+            stmt.query_map(params![type_filter], row_mapper)?
         } else {
-            stmt.query_map([], row_mapper)?
+            stmt.query_map((), row_mapper)?
         };
 
         let mut artifacts = Vec::new();
@@ -174,7 +174,7 @@ impl ArtifactsDatabase {
              WHERE id = ?"
         )?;
 
-        let mut rows = stmt.query_map([id], |row| {
+        let mut rows = stmt.query_map(params![id], |row| {
             Ok(ArtifactCollection {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -209,22 +209,25 @@ impl ArtifactsDatabase {
              ORDER BY use_count DESC, last_used_time DESC, created_time DESC"
         )?;
 
-        let rows = stmt.query_map([&search_pattern, &search_pattern, &search_pattern], |row| {
-            Ok(ArtifactCollection {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                icon: row.get(2)?,
-                description: row.get(3)?,
-                artifact_type: row.get(4)?,
-                code: row.get(5)?,
-                tags: row.get(6)?,
-                created_time: row.get(7)?,
-                last_used_time: row.get(8)?,
-                use_count: row.get(9)?,
-                db_id: row.get(10)?,
-                assistant_id: row.get(11)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![search_pattern.clone(), search_pattern.clone(), search_pattern],
+            |row| {
+                Ok(ArtifactCollection {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    icon: row.get(2)?,
+                    description: row.get(3)?,
+                    artifact_type: row.get(4)?,
+                    code: row.get(5)?,
+                    tags: row.get(6)?,
+                    created_time: row.get(7)?,
+                    last_used_time: row.get(8)?,
+                    use_count: row.get(9)?,
+                    db_id: row.get(10)?,
+                    assistant_id: row.get(11)?,
+                })
+            },
+        )?;
 
         let mut artifacts = Vec::new();
         for artifact_result in rows {
@@ -264,43 +267,35 @@ impl ArtifactsDatabase {
         let query =
             format!("UPDATE artifacts_collection SET {} WHERE id = ?", set_clauses.join(", "));
 
-        let mut stmt = self.conn.prepare(&query)?;
-
-        let mut idx = 1;
+        let mut param_values: Vec<libsql::Value> = Vec::new();
         if let Some(ref name) = update.name {
-            stmt.raw_bind_parameter(idx, name)?;
-            idx += 1;
+            param_values.push(libsql::Value::from(name.clone()));
         }
         if let Some(ref icon) = update.icon {
-            stmt.raw_bind_parameter(idx, icon)?;
-            idx += 1;
+            param_values.push(libsql::Value::from(icon.clone()));
         }
         if let Some(ref description) = update.description {
-            stmt.raw_bind_parameter(idx, description)?;
-            idx += 1;
+            param_values.push(libsql::Value::from(description.clone()));
         }
         if let Some(ref tags) = update.tags {
-            stmt.raw_bind_parameter(idx, tags)?;
-            idx += 1;
+            param_values.push(libsql::Value::from(tags.clone()));
         }
         if let Some(ref db_id) = update.db_id {
-            stmt.raw_bind_parameter(idx, db_id)?;
-            idx += 1;
+            param_values.push(libsql::Value::from(db_id.clone()));
         }
         if let Some(assistant_id) = update.assistant_id {
-            stmt.raw_bind_parameter(idx, assistant_id)?;
-            idx += 1;
+            param_values.push(libsql::Value::from(assistant_id));
         }
-        stmt.raw_bind_parameter(idx, update.id)?;
+        param_values.push(libsql::Value::from(update.id));
 
-        stmt.raw_execute()?;
+        self.conn.execute(&query, params_from_iter(param_values))?;
         Ok(())
     }
 
     /// Delete artifact by ID
     pub fn delete_artifact(&self, id: i64) -> Result<bool> {
         let rows_affected =
-            self.conn.execute("DELETE FROM artifacts_collection WHERE id = ?", [id])?;
+            self.conn.execute("DELETE FROM artifacts_collection WHERE id = ?", params![id])?;
 
         Ok(rows_affected > 0)
     }
@@ -311,7 +306,7 @@ impl ArtifactsDatabase {
             "UPDATE artifacts_collection 
              SET use_count = use_count + 1, last_used_time = CURRENT_TIMESTAMP 
              WHERE id = ?",
-            [id],
+            params![id],
         )?;
 
         Ok(())
@@ -321,11 +316,11 @@ impl ArtifactsDatabase {
     pub fn get_statistics(&self) -> Result<(i64, i64)> {
         let total_count: i64 =
             self.conn
-                .query_row("SELECT COUNT(*) FROM artifacts_collection", [], |row| row.get(0))?;
+                .query_row("SELECT COUNT(*) FROM artifacts_collection", (), |row| row.get(0))?;
 
         let total_uses: i64 = self.conn.query_row(
             "SELECT COALESCE(SUM(use_count), 0) FROM artifacts_collection",
-            [],
+            (),
             |row| row.get(0),
         )?;
 

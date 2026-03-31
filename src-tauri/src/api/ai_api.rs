@@ -284,7 +284,7 @@ fn build_tool_config(
     conversation_id: Option<i64>,
 ) -> Option<ToolConfig> {
     use crate::mcp::builtin_mcp::templates::{
-        is_butler_only_builtin_command, is_butler_only_agent_tool, is_butler_conversation_kind,
+        is_butler_conversation_kind, is_butler_only_agent_tool, is_butler_only_builtin_command,
     };
 
     if !enable_tools {
@@ -318,7 +318,8 @@ fn build_tool_config(
         let mut filtered = Vec::new();
         for server in &mcp_info.enabled_servers {
             // Skip entire server if butler-only and not butler
-            if !is_butler && server.command.as_deref().map_or(false, is_butler_only_builtin_command) {
+            if !is_butler && server.command.as_deref().map_or(false, is_butler_only_builtin_command)
+            {
                 continue;
             }
             let mut tools = Vec::new();
@@ -349,12 +350,15 @@ fn build_tool_config(
         // Non-dynamic mode: filter butler-only tools
         let mut filtered = Vec::new();
         for server in &mcp_info.enabled_servers {
-            if !is_butler && server.command.as_deref().map_or(false, is_butler_only_builtin_command) {
+            if !is_butler && server.command.as_deref().map_or(false, is_butler_only_builtin_command)
+            {
                 continue;
             }
             let is_agent_server = server.command.as_deref() == Some("aipp:agent");
             if !is_butler && is_agent_server {
-                let tools: Vec<_> = server.tools.iter()
+                let tools: Vec<_> = server
+                    .tools
+                    .iter()
                     .filter(|t| !is_butler_only_agent_tool(&t.name))
                     .cloned()
                     .collect();
@@ -460,7 +464,7 @@ pub async fn ask_ai(
     // Filter butler-only tools for non-butler conversations
     let mcp_info = {
         use crate::mcp::builtin_mcp::templates::{
-            is_butler_only_builtin_command, is_butler_only_agent_tool, is_butler_conversation_kind,
+            is_butler_conversation_kind, is_butler_only_agent_tool, is_butler_only_builtin_command,
         };
         let is_butler = processed_request
             .conversation_id
@@ -487,13 +491,14 @@ pub async fn ask_ai(
                     if server.command.as_deref() == Some("aipp:agent") {
                         server.tools.retain(|t| !is_butler_only_agent_tool(&t.name));
                     }
-                    if server.tools.is_empty() { None } else { Some(server) }
+                    if server.tools.is_empty() {
+                        None
+                    } else {
+                        Some(server)
+                    }
                 })
                 .collect();
-            MCPInfoForAssistant {
-                enabled_servers: filtered_servers,
-                ..mcp_info
-            }
+            MCPInfoForAssistant { enabled_servers: filtered_servers, ..mcp_info }
         }
     };
 
@@ -1121,7 +1126,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     // Filter butler-only tools for non-butler conversations
     let mcp_info = {
         use crate::mcp::builtin_mcp::templates::{
-            is_butler_only_builtin_command, is_butler_only_agent_tool, is_butler_conversation_kind,
+            is_butler_conversation_kind, is_butler_only_agent_tool, is_butler_only_builtin_command,
         };
         let is_butler_conv = ConversationDatabase::new(&app_handle)
             .ok()
@@ -1142,13 +1147,14 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
                     if server.command.as_deref() == Some("aipp:agent") {
                         server.tools.retain(|t| !is_butler_only_agent_tool(&t.name));
                     }
-                    if server.tools.is_empty() { None } else { Some(server) }
+                    if server.tools.is_empty() {
+                        None
+                    } else {
+                        Some(server)
+                    }
                 })
                 .collect();
-            MCPInfoForAssistant {
-                enabled_servers: filtered_servers,
-                ..mcp_info
-            }
+            MCPInfoForAssistant { enabled_servers: filtered_servers, ..mcp_info }
         }
     };
     let is_native_toolcall = mcp_info.use_native_toolcall;
@@ -1424,7 +1430,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     // Filter butler-only tools for non-butler conversations
     let mcp_info = {
         use crate::mcp::builtin_mcp::templates::{
-            is_butler_only_builtin_command, is_butler_only_agent_tool, is_butler_conversation_kind,
+            is_butler_conversation_kind, is_butler_only_agent_tool, is_butler_only_builtin_command,
         };
         let is_butler_conv = ConversationDatabase::new(&app_handle)
             .ok()
@@ -1445,19 +1451,20 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
                     if server.command.as_deref() == Some("aipp:agent") {
                         server.tools.retain(|t| !is_butler_only_agent_tool(&t.name));
                     }
-                    if server.tools.is_empty() { None } else { Some(server) }
+                    if server.tools.is_empty() {
+                        None
+                    } else {
+                        Some(server)
+                    }
                 })
                 .collect();
-            MCPInfoForAssistant {
-                enabled_servers: filtered_servers,
-                ..mcp_info
-            }
+            MCPInfoForAssistant { enabled_servers: filtered_servers, ..mcp_info }
         }
     };
     let is_native_toolcall = mcp_info.use_native_toolcall;
 
     // Get model details
-    let llm_db= LLMDatabase::new(&app_handle).map_err(AppError::from)?;
+    let llm_db = LLMDatabase::new(&app_handle).map_err(AppError::from)?;
     let provider_id = &assistant_detail.model[0].provider_id;
     let model_code = &assistant_detail.model[0].model_code;
     let model_detail = llm_db

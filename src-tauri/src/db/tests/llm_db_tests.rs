@@ -9,8 +9,8 @@
 //! ## 测试隔离
 //! 所有测试使用 `Connection::open_in_memory()` 创建内存数据库
 
+use crate::db::connection::{Connection, DbError};
 use crate::db::llm_db::*;
-use rusqlite::Connection;
 
 // ============================================================================
 // 测试辅助函数
@@ -33,7 +33,7 @@ fn create_llm_test_db() -> Connection {
             is_enabled BOOLEAN NOT NULL DEFAULT 0,
             created_time DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
-        [],
+        (),
     )
     .unwrap();
 
@@ -51,7 +51,7 @@ fn create_llm_test_db() -> Connection {
             created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (llm_provider_id) REFERENCES llm_provider(id)
         )",
-        [],
+        (),
     )
     .unwrap();
 
@@ -66,7 +66,7 @@ fn create_llm_test_db() -> Connection {
             is_addition BOOLEAN NOT NULL DEFAULT 0,
             created_time DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
-        [],
+        (),
     )
     .unwrap();
 
@@ -320,7 +320,7 @@ fn test_llm_provider_read_nonexistent() {
     let result = db.get_llm_provider(999);
     assert!(result.is_err());
     match result {
-        Err(rusqlite::Error::QueryReturnedNoRows) => {}
+        Err(DbError::QueryReturnedNoRows) => {}
         _ => panic!("Expected QueryReturnedNoRows error"),
     }
 }

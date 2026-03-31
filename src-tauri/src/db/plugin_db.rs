@@ -1,6 +1,6 @@
+use super::connection::{params, Connection, OptionalExtension, Result};
 use super::get_db_path;
 use chrono::prelude::*;
-use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
 
@@ -49,7 +49,7 @@ pub struct PluginDatabase {
 
 impl PluginDatabase {
     #[instrument(level = "debug", skip(app_handle), fields(db = "plugin.db"))]
-    pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
+    pub fn new(app_handle: &tauri::AppHandle) -> Result<Self> {
         let db_path = get_db_path(app_handle, "plugin.db");
         let conn = Connection::open(db_path.unwrap())?;
         debug!("Opened plugin database");
@@ -57,7 +57,7 @@ impl PluginDatabase {
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub fn create_tables(&self) -> rusqlite::Result<()> {
+    pub fn create_tables(&self) -> Result<()> {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS Plugins (
                 plugin_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,7 +69,7 @@ impl PluginDatabase {
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )",
-            [],
+            (),
         )?;
 
         self.conn.execute(
@@ -80,7 +80,7 @@ impl PluginDatabase {
                 last_run TIMESTAMP,
                 FOREIGN KEY (plugin_id) REFERENCES Plugins(plugin_id)
             )",
-            [],
+            (),
         )?;
 
         self.conn.execute(
@@ -91,7 +91,7 @@ impl PluginDatabase {
                 config_value TEXT,
                 FOREIGN KEY (plugin_id) REFERENCES Plugins(plugin_id)
             )",
-            [],
+            (),
         )?;
 
         self.conn.execute(
@@ -105,7 +105,7 @@ impl PluginDatabase {
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (plugin_id) REFERENCES Plugins(plugin_id)
             )",
-            [],
+            (),
         )?;
         debug!("Plugin database tables ensured");
         Ok(())
@@ -139,7 +139,7 @@ impl PluginDatabase {
         let mut stmt = self.conn.prepare(
             "SELECT plugin_id, name, version, folder_name, description, author, created_at, updated_at FROM Plugins ORDER BY created_at DESC",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map((), |row| {
             Ok(Plugin {
                 plugin_id: row.get(0)?,
                 name: row.get(1)?,
@@ -151,7 +151,7 @@ impl PluginDatabase {
                 updated_at: row.get(7)?,
             })
         })?;
-        let plugins: Vec<Plugin> = rows.collect::<Result<Vec<_>>>()?;
+        let plugins: Vec<Plugin> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         debug!(count = plugins.len(), "Fetched plugins");
         Ok(plugins)
     }
@@ -161,7 +161,7 @@ impl PluginDatabase {
         let plugin = self.conn
             .query_row(
                 "SELECT plugin_id, name, version, folder_name, description, author, created_at, updated_at FROM Plugins WHERE plugin_id = ?",
-                [plugin_id],
+                params![plugin_id],
                 |row| {
                     Ok(Plugin {
                         plugin_id: row.get(0)?,
@@ -185,12 +185,12 @@ impl PluginDatabase {
         let affected = self.conn.execute(
             "UPDATE Plugins SET name = ?, version = ?, folder_name = ?, description = ?, author = ?, updated_at = ? WHERE plugin_id = ?",
             params![
-                plugin.name,
-                plugin.version,
-                plugin.folder_name,
-                plugin.description,
-                plugin.author,
-                plugin.updated_at,
+                plugin.name.clone(),
+                plugin.version.clone(),
+                plugin.folder_name.clone(),
+                plugin.description.clone(),
+                plugin.author.clone(),
+                plugin.updated_at.to_rfc3339(),
                 plugin.plugin_id
             ],
         )?;
@@ -200,7 +200,8 @@ impl PluginDatabase {
 
     #[instrument(level = "debug", skip(self), fields(plugin_id))]
     pub fn delete_plugin(&self, plugin_id: i64) -> Result<()> {
-        let affected = self.conn.execute("DELETE FROM Plugins WHERE plugin_id = ?", [plugin_id])?;
+        let affected =
+            self.conn.execute("DELETE FROM Plugins WHERE plugin_id = ?", params![plugin_id])?;
         debug!(affected, "Deleted plugin");
         Ok(())
     }
@@ -211,7 +212,7 @@ impl PluginDatabase {
         let status = self.conn
             .query_row(
                 "SELECT status_id, plugin_id, is_active, last_run FROM PluginStatus WHERE plugin_id = ?",
-                [plugin_id],
+                params![plugin_id],
                 |row| {
                     Ok(PluginStatus {
                         status_id: row.get(0)?,
@@ -236,14 +237,14 @@ impl PluginDatabase {
         if let Some(existing) = self.get_plugin_status(plugin_id)? {
             let affected = self.conn.execute(
                 "UPDATE PluginStatus SET is_active = ?, last_run = ? WHERE status_id = ?",
-                params![is_active as i64, last_run, existing.status_id],
+                params![is_active as i64, last_run.map(|dt| dt.to_rfc3339()), existing.status_id],
             )?;
             debug!(affected, status_id = existing.status_id, "Updated plugin status");
             Ok(existing.status_id)
         } else {
             self.conn.execute(
                 "INSERT INTO PluginStatus (plugin_id, is_active, last_run) VALUES (?, ?, ?)",
-                params![plugin_id, is_active as i64, last_run],
+                params![plugin_id, is_active as i64, last_run.map(|dt| dt.to_rfc3339())],
             )?;
             let id = self.conn.last_insert_rowid();
             debug!(status_id = id, "Inserted plugin status");
@@ -253,8 +254,9 @@ impl PluginDatabase {
 
     #[instrument(level = "debug", skip(self), fields(status_id))]
     pub fn delete_plugin_status(&self, status_id: i64) -> Result<()> {
-        let affected =
-            self.conn.execute("DELETE FROM PluginStatus WHERE status_id = ?", [status_id])?;
+        let affected = self
+            .conn
+            .execute("DELETE FROM PluginStatus WHERE status_id = ?", params![status_id])?;
         debug!(affected, "Deleted plugin status");
         Ok(())
     }
@@ -265,7 +267,7 @@ impl PluginDatabase {
         let mut stmt = self.conn.prepare(
             "SELECT config_id, plugin_id, config_key, config_value FROM PluginConfigurations WHERE plugin_id = ?",
         )?;
-        let rows = stmt.query_map([plugin_id], |row| {
+        let rows = stmt.query_map(params![plugin_id], |row| {
             Ok(PluginConfiguration {
                 config_id: row.get(0)?,
                 plugin_id: row.get(1)?,
@@ -273,7 +275,7 @@ impl PluginDatabase {
                 config_value: row.get(3)?,
             })
         })?;
-        let configs: Vec<PluginConfiguration> = rows.collect::<Result<Vec<_>>>()?;
+        let configs: Vec<PluginConfiguration> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         debug!(count = configs.len(), "Fetched plugin configs");
         Ok(configs)
     }
@@ -319,7 +321,7 @@ impl PluginDatabase {
     pub fn delete_plugin_configuration(&self, config_id: i64) -> Result<()> {
         let affected = self
             .conn
-            .execute("DELETE FROM PluginConfigurations WHERE config_id = ?", [config_id])?;
+            .execute("DELETE FROM PluginConfigurations WHERE config_id = ?", params![config_id])?;
         debug!(affected, "Deleted plugin config");
         Ok(())
     }
@@ -345,7 +347,7 @@ impl PluginDatabase {
                 updated_at: row.get(6)?,
             })
         })?;
-        let data: Vec<PluginData> = rows.collect::<Result<Vec<_>>>()?;
+        let data: Vec<PluginData> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         debug!(count = data.len(), "Fetched plugin data by session");
         Ok(data)
     }
@@ -356,11 +358,11 @@ impl PluginDatabase {
             "INSERT INTO PluginData (plugin_id, session_id, data_key, data_value, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
             params![
                 data.plugin_id,
-                data.session_id,
-                data.data_key,
-                data.data_value,
-                data.created_at,
-                data.updated_at
+                data.session_id.clone(),
+                data.data_key.clone(),
+                data.data_value.clone(),
+                data.created_at.to_rfc3339(),
+                data.updated_at.to_rfc3339()
             ],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -377,7 +379,7 @@ impl PluginDatabase {
     ) -> Result<()> {
         let affected = self.conn.execute(
             "UPDATE PluginData SET data_value = ?, updated_at = ? WHERE data_id = ?",
-            params![data_value, updated_at, data_id],
+            params![data_value, updated_at.to_rfc3339(), data_id],
         )?;
         debug!(affected, "Updated plugin data");
         Ok(())
@@ -385,7 +387,8 @@ impl PluginDatabase {
 
     #[instrument(level = "debug", skip(self), fields(data_id))]
     pub fn delete_plugin_data(&self, data_id: i64) -> Result<()> {
-        let affected = self.conn.execute("DELETE FROM PluginData WHERE data_id = ?", [data_id])?;
+        let affected =
+            self.conn.execute("DELETE FROM PluginData WHERE data_id = ?", params![data_id])?;
         debug!(affected, "Deleted plugin data");
         Ok(())
     }

@@ -89,10 +89,7 @@ impl CopilotTokenManagerState {
         if let Some(cached) = &inner.cached {
             if cached.oauth_token_hash == token_hash && cached.effective_expiry > Utc::now() {
                 debug!("[CopilotTokenManager] Using cached session token");
-                return Ok((
-                    cached.info.token.clone(),
-                    cached.info.endpoints.api.clone(),
-                ));
+                return Ok((cached.info.token.clone(), cached.info.endpoints.api.clone()));
             }
             debug!("[CopilotTokenManager] Cached session expired or token changed, refreshing");
         }
@@ -100,19 +97,13 @@ impl CopilotTokenManagerState {
         // 执行 token exchange
         let info = exchange_token(&mut inner, oauth_token, network_proxy).await?;
 
-        let effective_expiry = DateTime::from_timestamp(
-            info.expires_at - TOKEN_REFRESH_BUFFER_SECONDS,
-            0,
-        )
-        .unwrap_or_else(Utc::now);
+        let effective_expiry =
+            DateTime::from_timestamp(info.expires_at - TOKEN_REFRESH_BUFFER_SECONDS, 0)
+                .unwrap_or_else(Utc::now);
 
         let result = (info.token.clone(), info.endpoints.api.clone());
 
-        inner.cached = Some(CachedSession {
-            oauth_token_hash: token_hash,
-            info,
-            effective_expiry,
-        });
+        inner.cached = Some(CachedSession { oauth_token_hash: token_hash, info, effective_expiry });
 
         Ok(result)
     }
@@ -139,8 +130,8 @@ fn get_or_create_client(
     // 每次根据 proxy 配置重建 client（proxy 可能变化）
     let client = if let Some(proxy_url) = network_proxy {
         if !proxy_url.trim().is_empty() {
-            let proxy = reqwest::Proxy::all(proxy_url)
-                .map_err(|e| format!("代理配置失败: {}", e))?;
+            let proxy =
+                reqwest::Proxy::all(proxy_url).map_err(|e| format!("代理配置失败: {}", e))?;
             reqwest::Client::builder()
                 .proxy(proxy)
                 .build()
@@ -186,11 +177,9 @@ async fn exchange_token(
     let status = response.status();
 
     if status == reqwest::StatusCode::NOT_FOUND {
-        return Err(
-            "Copilot Token Exchange 端点返回 404。\
+        return Err("Copilot Token Exchange 端点返回 404。\
             此 Token 可能不支持完整模型访问，请通过 OAuth Device Flow 重新授权。"
-                .to_string(),
-        );
+            .to_string());
     }
 
     if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -204,10 +193,7 @@ async fn exchange_token(
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         error!(status = ?status, body = %body, "[CopilotTokenManager] Token exchange failed");
-        return Err(format!(
-            "Copilot Token Exchange 失败: {} - {}",
-            status, body
-        ));
+        return Err(format!("Copilot Token Exchange 失败: {} - {}", status, body));
     }
 
     let body = response.text().await.map_err(|e| {
@@ -247,9 +233,7 @@ pub async fn test_copilot_token_exchange(
     drop(config_feature_map);
 
     let manager = app_handle.state::<CopilotTokenManagerState>();
-    let (_, _) = manager
-        .get_session(&oauth_token, network_proxy.as_deref())
-        .await?;
+    let (_, _) = manager.get_session(&oauth_token, network_proxy.as_deref()).await?;
 
     // 返回完整的 session info 供前端检查
     let inner = manager.inner.lock().await;
@@ -276,20 +260,15 @@ pub async fn resolve_copilot_session_if_needed(
     }
 
     // 从 configs 中提取 OAuth token
-    let oauth_token = configs
-        .iter()
-        .find(|c| c.name == "api_key")
-        .map(|c| c.value.clone())
-        .unwrap_or_default();
+    let oauth_token =
+        configs.iter().find(|c| c.name == "api_key").map(|c| c.value.clone()).unwrap_or_default();
 
     if oauth_token.is_empty() {
         return Err("Copilot provider 未配置 API Key (OAuth Token)".to_string());
     }
 
     let manager = app_handle.state::<CopilotTokenManagerState>();
-    let (session_token, api_endpoint) = manager
-        .get_session(&oauth_token, network_proxy)
-        .await?;
+    let (session_token, api_endpoint) = manager.get_session(&oauth_token, network_proxy).await?;
 
     info!(
         api_endpoint = %api_endpoint,
@@ -309,8 +288,8 @@ pub async fn prepare_provider_configs(
 ) -> Result<Vec<crate::db::llm_db::LLMProviderConfig>, String> {
     use crate::db::llm_db::LLMProviderConfig;
 
-    let session = resolve_copilot_session_if_needed(app_handle, api_type, configs, network_proxy)
-        .await?;
+    let session =
+        resolve_copilot_session_if_needed(app_handle, api_type, configs, network_proxy).await?;
 
     match session {
         Some((session_token, api_endpoint)) => {

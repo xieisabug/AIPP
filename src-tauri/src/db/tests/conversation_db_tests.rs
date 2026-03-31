@@ -7,9 +7,9 @@
 //! 不会读写任何磁盘文件，确保与项目真实数据完全隔离。
 
 use super::test_helpers::*;
+use crate::db::connection::{params, Connection};
 use crate::db::conversation_db::*;
 use chrono::Utc;
-use rusqlite::Connection;
 
 // ============================================================================
 // ConversationRepository CRUD 测试
@@ -386,20 +386,20 @@ fn test_list_reconcilable_butler_task_conversation_ids_filters_terminal_tasks() 
                 parent_butler_conversation_id, source_task_title, is_hidden_from_normal_chat_list,
                 channel_source, butler_task_status, butler_task_summary, butler_task_finalized_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            (
-                &running_task.name,
-                &running_task.assistant_id,
-                &running_task.created_time.to_rfc3339(),
-                &running_task.updated_time.to_rfc3339(),
-                &running_task.conversation_kind,
-                &running_task.parent_butler_conversation_id,
-                &running_task.source_task_title,
-                &(running_task.is_hidden_from_normal_chat_list as i64),
-                &running_task.channel_source,
-                &running_task.butler_task_status,
-                &running_task.butler_task_summary,
-                &running_task.butler_task_finalized_at.map(|value| value.to_rfc3339()),
-            ),
+            params![
+                running_task.name,
+                running_task.assistant_id,
+                running_task.created_time.to_rfc3339(),
+                running_task.updated_time.to_rfc3339(),
+                running_task.conversation_kind,
+                running_task.parent_butler_conversation_id,
+                running_task.source_task_title,
+                running_task.is_hidden_from_normal_chat_list as i64,
+                running_task.channel_source,
+                running_task.butler_task_status,
+                running_task.butler_task_summary,
+                running_task.butler_task_finalized_at.map(|value| value.to_rfc3339()),
+            ],
         )
         .unwrap();
     let running_task_id = conn.last_insert_rowid();
@@ -410,20 +410,20 @@ fn test_list_reconcilable_butler_task_conversation_ids_filters_terminal_tasks() 
             parent_butler_conversation_id, source_task_title, is_hidden_from_normal_chat_list,
             channel_source, butler_task_status, butler_task_summary, butler_task_finalized_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-        (
-            &cancelled_without_result.name,
-            &cancelled_without_result.assistant_id,
-            &cancelled_without_result.created_time.to_rfc3339(),
-            &cancelled_without_result.updated_time.to_rfc3339(),
-            &cancelled_without_result.conversation_kind,
-            &cancelled_without_result.parent_butler_conversation_id,
-            &cancelled_without_result.source_task_title,
-            &(cancelled_without_result.is_hidden_from_normal_chat_list as i64),
-            &cancelled_without_result.channel_source,
-            &cancelled_without_result.butler_task_status,
-            &cancelled_without_result.butler_task_summary,
-            &cancelled_without_result.butler_task_finalized_at.map(|value| value.to_rfc3339()),
-        ),
+        params![
+            cancelled_without_result.name,
+            cancelled_without_result.assistant_id,
+            cancelled_without_result.created_time.to_rfc3339(),
+            cancelled_without_result.updated_time.to_rfc3339(),
+            cancelled_without_result.conversation_kind,
+            cancelled_without_result.parent_butler_conversation_id,
+            cancelled_without_result.source_task_title,
+            cancelled_without_result.is_hidden_from_normal_chat_list as i64,
+            cancelled_without_result.channel_source,
+            cancelled_without_result.butler_task_status,
+            cancelled_without_result.butler_task_summary,
+            cancelled_without_result.butler_task_finalized_at.map(|value| value.to_rfc3339()),
+        ],
     )
     .unwrap();
     let cancelled_task_id = conn.last_insert_rowid();
@@ -434,20 +434,20 @@ fn test_list_reconcilable_butler_task_conversation_ids_filters_terminal_tasks() 
             parent_butler_conversation_id, source_task_title, is_hidden_from_normal_chat_list,
             channel_source, butler_task_status, butler_task_summary, butler_task_finalized_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-        (
-            &finished_task.name,
-            &finished_task.assistant_id,
-            &finished_task.created_time.to_rfc3339(),
-            &finished_task.updated_time.to_rfc3339(),
-            &finished_task.conversation_kind,
-            &finished_task.parent_butler_conversation_id,
-            &finished_task.source_task_title,
-            &(finished_task.is_hidden_from_normal_chat_list as i64),
-            &finished_task.channel_source,
-            &finished_task.butler_task_status,
-            &finished_task.butler_task_summary,
-            &finished_task.butler_task_finalized_at.map(|value| value.to_rfc3339()),
-        ),
+        params![
+            finished_task.name,
+            finished_task.assistant_id,
+            finished_task.created_time.to_rfc3339(),
+            finished_task.updated_time.to_rfc3339(),
+            finished_task.conversation_kind,
+            finished_task.parent_butler_conversation_id,
+            finished_task.source_task_title,
+            finished_task.is_hidden_from_normal_chat_list as i64,
+            finished_task.channel_source,
+            finished_task.butler_task_status,
+            finished_task.butler_task_summary,
+            finished_task.butler_task_finalized_at.map(|value| value.to_rfc3339()),
+        ],
     )
     .unwrap();
     let finished_task_id = conn.last_insert_rowid();
@@ -458,7 +458,7 @@ fn test_list_reconcilable_butler_task_conversation_ids_filters_terminal_tasks() 
             evidence_json, artifact_refs_json, followup_suggestions_json, final_message_id,
             created_time, updated_time
          ) VALUES (?1, NULL, NULL, ?2, NULL, NULL, NULL, NULL, NULL, ?3, ?3)",
-        (finished_task_id, "done", Utc::now().to_rfc3339()),
+        params![finished_task_id, "done", Utc::now().to_rfc3339()],
     )
     .unwrap();
 
@@ -485,7 +485,7 @@ fn test_list_butler_task_conversation_ids_pending_followup_only_returns_pending_
             (102, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'handoff_injected', 9001, NULL, ?1, ?1),
             (103, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'enqueued', 9002, NULL, ?1, ?1),
             (104, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'dispatching', 9003, NULL, ?1, ?1)",
-        [&now],
+        params![&now],
     )
     .unwrap();
 
@@ -505,7 +505,7 @@ fn test_try_mark_task_result_followup_dispatching_only_claims_once() {
             evidence_json, artifact_refs_json, followup_suggestions_json, followup_status,
             handoff_message_id, final_message_id, created_time, updated_time
          ) VALUES (?1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'pending', NULL, NULL, ?2, ?2)",
-        (201, &now),
+        params![201, &now],
     )
     .unwrap();
 
@@ -529,7 +529,7 @@ fn test_ensure_conversation_table_migrates_legacy_schema_without_non_constant_de
             assistant_id INTEGER,
             created_time DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
-        [],
+        (),
     )
     .unwrap();
     conn.execute(
@@ -543,21 +543,21 @@ fn test_ensure_conversation_table_migrates_legacy_schema_without_non_constant_de
     let updated_time: String = conn
         .query_row(
             "SELECT updated_time FROM conversation WHERE name = ?1",
-            ["Legacy Conversation"],
+            params!["Legacy Conversation"],
             |row| row.get(0),
         )
         .unwrap();
     let conversation_kind: String = conn
         .query_row(
             "SELECT conversation_kind FROM conversation WHERE name = ?1",
-            ["Legacy Conversation"],
+            params!["Legacy Conversation"],
             |row| row.get(0),
         )
         .unwrap();
     let is_hidden: i64 = conn
         .query_row(
             "SELECT is_hidden_from_normal_chat_list FROM conversation WHERE name = ?1",
-            ["Legacy Conversation"],
+            params!["Legacy Conversation"],
             |row| row.get(0),
         )
         .unwrap();

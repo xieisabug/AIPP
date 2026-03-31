@@ -430,7 +430,8 @@ impl ActionHandler for ScheduleDeleteHandler {
                 .unwrap_or("")
                 .to_string(),
             butler_conversation_id: snapshot.get("butler_conversation_id").and_then(|v| v.as_i64()),
-            created_time: Utc::now(),            updated_time: Utc::now(),
+            created_time: Utc::now(),
+            updated_time: Utc::now(),
         };
 
         let db = ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string())?;

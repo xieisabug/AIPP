@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use super::connection::{params, Connection, DbError, Result};
 use tracing::{debug, instrument, warn};
 
 use super::get_db_path;
@@ -51,14 +51,14 @@ pub struct LLMDatabase {
 
 impl LLMDatabase {
     #[instrument(level = "debug", skip(app_handle), err)]
-    pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
+    pub fn new(app_handle: &tauri::AppHandle) -> Result<Self> {
         let db_path = get_db_path(app_handle, "llm.db");
         let conn = Connection::open(db_path.unwrap())?;
         Ok(LLMDatabase { conn })
     }
 
     #[instrument(level = "debug", skip(self), err)]
-    pub fn create_tables(&self) -> rusqlite::Result<()> {
+    pub fn create_tables(&self) -> Result<()> {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS llm_provider (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,7 +69,7 @@ impl LLMDatabase {
                     is_enabled BOOLEAN NOT NULL DEFAULT 0,
                     created_time DATETIME DEFAULT CURRENT_TIMESTAMP
                 );",
-            [],
+            (),
         )?;
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS llm_model (
@@ -84,7 +84,7 @@ impl LLMDatabase {
                     created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (llm_provider_id) REFERENCES llm_provider(id)
                 );",
-            [],
+            (),
         )?;
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS llm_provider_config (
@@ -96,7 +96,7 @@ impl LLMDatabase {
                     is_addition BOOLEAN NOT NULL DEFAULT 0,
                     created_time DATETIME DEFAULT CURRENT_TIMESTAMP
                 );",
-            [],
+            (),
         )?;
         self.create_model_request_mode_preference_table()?;
 
@@ -114,7 +114,7 @@ impl LLMDatabase {
         description: &str,
         is_official: bool,
         is_enabled: bool,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO llm_provider (name, api_type, description, is_official, is_enabled) VALUES (?, ?, ?, ?, ?)",
             params![name, api_type, description, is_official, is_enabled],
@@ -124,13 +124,11 @@ impl LLMDatabase {
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub fn get_llm_providers(
-        &self,
-    ) -> rusqlite::Result<Vec<(i64, String, String, String, bool, bool)>> {
+    pub fn get_llm_providers(&self) -> Result<Vec<(i64, String, String, String, bool, bool)>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, api_type, description, is_official, is_enabled FROM llm_provider",
         )?;
-        let llm_providers = stmt.query_map([], |row| {
+        let llm_providers = stmt.query_map((), |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
         })?;
 
@@ -148,7 +146,7 @@ impl LLMDatabase {
     pub fn get_filtered_providers(
         &self,
         assistant_type: i64,
-    ) -> rusqlite::Result<Vec<(i64, String, String, String, bool, bool)>> {
+    ) -> Result<Vec<(i64, String, String, String, bool, bool)>> {
         let where_clause = if assistant_type == 4 {
             // ACP 助手：只要 ACP 提供商
             "api_type = 'acp'"
@@ -163,7 +161,7 @@ impl LLMDatabase {
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let llm_providers = stmt.query_map([], |row| {
+        let llm_providers = stmt.query_map((), |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
         })?;
 
@@ -175,10 +173,10 @@ impl LLMDatabase {
     }
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
-    pub fn get_llm_provider(&self, id: i64) -> rusqlite::Result<LLMProvider> {
+    pub fn get_llm_provider(&self, id: i64) -> Result<LLMProvider> {
         let mut stmt = self.conn.prepare("SELECT id, name, api_type, description, is_official, is_enabled FROM llm_provider WHERE id = ?")?;
         let provider = stmt
-            .query_map([id], |row| {
+            .query_map(params![id], |row| {
                 Ok(LLMProvider {
                     id: row.get(0)?,
                     name: row.get(1)?,
@@ -193,7 +191,7 @@ impl LLMDatabase {
 
         match provider {
             Some(provider) => Ok(provider),
-            None => Err(rusqlite::Error::QueryReturnedNoRows),
+            None => Err(DbError::QueryReturnedNoRows),
         }
     }
 
@@ -205,7 +203,7 @@ impl LLMDatabase {
         api_type: &str,
         description: &str,
         is_enabled: bool,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<()> {
         self.conn.execute(
             "UPDATE llm_provider SET name = ?, api_type = ?, description = ?, is_enabled = ? WHERE id = ?",
             params![name, api_type, description, is_enabled, id],
@@ -214,7 +212,7 @@ impl LLMDatabase {
     }
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
-    pub fn delete_llm_provider(&self, id: i64) -> rusqlite::Result<()> {
+    pub fn delete_llm_provider(&self, id: i64) -> Result<()> {
         self.conn
             .execute("DELETE FROM llm_provider_config WHERE llm_provider_id = ?", params![id])?;
         self.conn.execute(
@@ -227,12 +225,9 @@ impl LLMDatabase {
     }
 
     #[instrument(level = "debug", skip(self), fields(llm_provider_id = llm_provider_id))]
-    pub fn get_llm_provider_config(
-        &self,
-        llm_provider_id: i64,
-    ) -> rusqlite::Result<Vec<LLMProviderConfig>> {
+    pub fn get_llm_provider_config(&self, llm_provider_id: i64) -> Result<Vec<LLMProviderConfig>> {
         let mut stmt = self.conn.prepare("SELECT id, name, llm_provider_id, value, append_location, is_addition FROM llm_provider_config WHERE llm_provider_id = ?")?;
-        let configs = stmt.query_map([llm_provider_id], |row| {
+        let configs = stmt.query_map(params![llm_provider_id], |row| {
             Ok(LLMProviderConfig {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -256,7 +251,7 @@ impl LLMDatabase {
         llm_provider_id: i64,
         name: &str,
         value: &str,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO llm_provider_config (id, name, llm_provider_id, value) VALUES ((SELECT id FROM llm_provider_config WHERE llm_provider_id = ? AND name = ?), ?, ?, ?)",
             params![llm_provider_id, name, name, llm_provider_id, value],
@@ -272,7 +267,7 @@ impl LLMDatabase {
         value: &str,
         append_location: &str,
         is_addition: bool,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO llm_provider_config (name, llm_provider_id, value, append_location, is_addition) VALUES (?, ?, ?, ?, ?)",
             params![name, llm_provider_id, value, append_location, is_addition],
@@ -290,7 +285,7 @@ impl LLMDatabase {
         vision_support: bool,
         audio_support: bool,
         video_support: bool,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO llm_model (name, llm_provider_id, code, description, vision_support, audio_support, video_support) VALUES (?, ?, ?, ?, ?, ?, ?)",
             params![name, llm_provider_id, code, description, vision_support, audio_support, video_support],
@@ -299,7 +294,7 @@ impl LLMDatabase {
     }
 
     #[instrument(level = "debug", skip(self), err)]
-    pub fn create_model_request_mode_preference_table(&self) -> rusqlite::Result<()> {
+    pub fn create_model_request_mode_preference_table(&self) -> Result<()> {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS llm_model_request_mode_preference (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -311,7 +306,7 @@ impl LLMDatabase {
                     UNIQUE (llm_provider_id, model_code),
                     FOREIGN KEY (llm_provider_id) REFERENCES llm_provider(id)
                 );",
-            [],
+            (),
         )?;
         Ok(())
     }
@@ -321,7 +316,7 @@ impl LLMDatabase {
         &self,
         llm_provider_id: i64,
         model_code: &str,
-    ) -> rusqlite::Result<Option<String>> {
+    ) -> Result<Option<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT request_mode
              FROM llm_model_request_mode_preference
@@ -330,23 +325,21 @@ impl LLMDatabase {
 
         stmt.query_row(params![llm_provider_id, model_code], |row| row.get(0)).map(Some).or_else(
             |err| match err {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                DbError::QueryReturnedNoRows => Ok(None),
                 _ => Err(err),
             },
         )
     }
 
     #[instrument(level = "debug", skip(self), fields(llm_provider_id = llm_provider_id))]
-    pub fn list_model_request_modes(
-        &self,
-        llm_provider_id: i64,
-    ) -> rusqlite::Result<Vec<(String, String)>> {
+    pub fn list_model_request_modes(&self, llm_provider_id: i64) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT model_code, request_mode
              FROM llm_model_request_mode_preference
              WHERE llm_provider_id = ?",
         )?;
-        let rows = stmt.query_map([llm_provider_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let rows =
+            stmt.query_map(params![llm_provider_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
 
         let mut result = Vec::new();
         for row in rows {
@@ -361,7 +354,7 @@ impl LLMDatabase {
         llm_provider_id: i64,
         model_code: &str,
         request_mode: &str,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO llm_model_request_mode_preference (llm_provider_id, model_code, request_mode, updated_time)
              VALUES (?, ?, ?, CURRENT_TIMESTAMP)
@@ -374,9 +367,9 @@ impl LLMDatabase {
 
     pub fn get_all_llm_models(
         &self,
-    ) -> rusqlite::Result<Vec<(i64, String, i64, String, String, bool, bool, bool)>> {
+    ) -> Result<Vec<(i64, String, i64, String, String, bool, bool, bool)>> {
         let mut stmt = self.conn.prepare("SELECT id, name, llm_provider_id, code, description, vision_support, audio_support, video_support FROM llm_model")?;
-        let llm_models = stmt.query_map([], |row| {
+        let llm_models = stmt.query_map((), |row| {
             Ok((
                 row.get(0)?,
                 row.get(1)?,
@@ -399,9 +392,9 @@ impl LLMDatabase {
     pub fn get_llm_models(
         &self,
         provider_id: String,
-    ) -> rusqlite::Result<Vec<(i64, String, i64, String, String, bool, bool, bool)>> {
+    ) -> Result<Vec<(i64, String, i64, String, String, bool, bool, bool)>> {
         let mut stmt = self.conn.prepare("SELECT id, name, llm_provider_id, code, description, vision_support, audio_support, video_support FROM llm_model WHERE llm_provider_id = ?")?;
-        let llm_models = stmt.query_map([provider_id], |row| {
+        let llm_models = stmt.query_map(params![provider_id], |row| {
             Ok((
                 row.get(0)?,
                 row.get(1)?,
@@ -426,10 +419,10 @@ impl LLMDatabase {
         &self,
         provider_id: &i64,
         model_code: &String,
-    ) -> rusqlite::Result<ModelDetail> {
+    ) -> Result<ModelDetail> {
         let mut stmt = self.conn.prepare("SELECT id, name, llm_provider_id, code, description, vision_support, audio_support, video_support FROM llm_model WHERE llm_provider_id = ? AND code = ?")?;
         let model = stmt
-            .query_map([&provider_id.to_string(), model_code], |row| {
+            .query_map(params![provider_id.to_string(), model_code.clone()], |row| {
                 Ok(LLMModel {
                     id: row.get(0)?,
                     name: row.get(1)?,
@@ -449,7 +442,7 @@ impl LLMDatabase {
 
         let model = match model {
             Some(model) => model,
-            None => return Err(rusqlite::Error::QueryReturnedNoRows),
+            None => return Err(DbError::QueryReturnedNoRows),
         };
 
         let provider_id = model.llm_provider_id;
@@ -460,10 +453,10 @@ impl LLMDatabase {
     }
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
-    pub fn get_llm_model_detail_by_id(&self, id: &i64) -> rusqlite::Result<ModelDetail> {
+    pub fn get_llm_model_detail_by_id(&self, id: &i64) -> Result<ModelDetail> {
         let mut stmt = self.conn.prepare("SELECT id, name, llm_provider_id, code, description, vision_support, audio_support, video_support FROM llm_model WHERE id = ?")?;
         let model = stmt
-            .query_map([id], |row| {
+            .query_map(params![id], |row| {
                 Ok(LLMModel {
                     id: row.get(0)?,
                     name: row.get(1)?,
@@ -483,7 +476,7 @@ impl LLMDatabase {
 
         let model = match model {
             Some(model) => model,
-            None => return Err(rusqlite::Error::QueryReturnedNoRows),
+            None => return Err(DbError::QueryReturnedNoRows),
         };
 
         let provider_id = model.llm_provider_id;
@@ -494,7 +487,7 @@ impl LLMDatabase {
     }
 
     #[instrument(level = "debug", skip(self), fields(provider_id = provider_id, code = code))]
-    pub fn delete_llm_model(&self, provider_id: i64, code: String) -> rusqlite::Result<()> {
+    pub fn delete_llm_model(&self, provider_id: i64, code: String) -> Result<()> {
         self.conn.execute(
             "DELETE FROM llm_model WHERE llm_provider_id = ? AND code = ?",
             params![provider_id, code],
@@ -503,14 +496,16 @@ impl LLMDatabase {
     }
 
     #[instrument(level = "debug", skip(self), fields(provider_id = provider_id))]
-    pub fn delete_llm_model_by_provider(&self, provider_id: i64) -> rusqlite::Result<()> {
+    pub fn delete_llm_model_by_provider(&self, provider_id: i64) -> Result<()> {
         self.conn
             .execute("DELETE FROM llm_model WHERE llm_provider_id = ?", params![provider_id])?;
         Ok(())
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub fn get_models_for_select(&self) -> Result<Vec<(String, String, i64, i64)>, String> {
+    pub fn get_models_for_select(
+        &self,
+    ) -> std::result::Result<Vec<(String, String, i64, i64)>, String> {
         let mut stmt = match self.conn.prepare(
             "
             SELECT
@@ -526,21 +521,21 @@ impl LLMDatabase {
         ",
         ) {
             Ok(stmt) => stmt,
-            Err(e) => return Err(e.to_string()), // Convert rusqlite::Error to String
+            Err(e) => return Err(e.to_string()), // Convert DbError to String
         };
 
         let models = match stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+            .query_map((), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
         {
             Ok(models) => models,
-            Err(e) => return Err(e.to_string()), // Convert rusqlite::Error to String
+            Err(e) => return Err(e.to_string()), // Convert DbError to String
         };
 
         let mut result = Vec::new();
         for model in models {
             match model {
                 Ok(model) => result.push(model),
-                Err(e) => return Err(e.to_string()), // Convert rusqlite::Error to String
+                Err(e) => return Err(e.to_string()), // Convert DbError to String
             }
         }
         Ok(result)
@@ -553,7 +548,7 @@ impl LLMDatabase {
     pub fn get_filtered_models_for_select(
         &self,
         assistant_type: i64,
-    ) -> Result<Vec<(String, String, i64, i64)>, String> {
+    ) -> std::result::Result<Vec<(String, String, i64, i64)>, String> {
         let (filter_condition, exclude_condition) = if assistant_type == 4 {
             // ACP 助手：只要 ACP 提供商
             ("p.api_type = 'acp'", "")
@@ -591,7 +586,7 @@ impl LLMDatabase {
         };
 
         let models = match stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+            .query_map((), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
         {
             Ok(models) => models,
             Err(e) => return Err(e.to_string()),
@@ -608,23 +603,23 @@ impl LLMDatabase {
     }
 
     #[instrument(level = "debug", skip(self), err)]
-    pub fn init_llm_provider(&self) -> rusqlite::Result<()> {
+    pub fn init_llm_provider(&self) -> Result<()> {
         // 使用 INSERT OR IGNORE 避免重复初始化时触发 UNIQUE 约束错误
         self.conn.execute(
             "INSERT OR IGNORE INTO llm_provider (id, name, api_type, description, is_official) VALUES (1, 'OpenAI', 'openai_api', 'OpenAI API', 1)",
-            [],
+            (),
         )?;
         self.conn.execute(
             "INSERT OR IGNORE INTO llm_provider (id, name, api_type, description, is_official) VALUES (10, 'Ollama', 'ollama', 'Ollama API', 1)",
-            [],
+            (),
         )?;
         self.conn.execute(
             "INSERT OR IGNORE INTO llm_provider (id, name, api_type, description, is_official) VALUES (20, 'Anthropic', 'anthropic', 'Anthropic API', 1);",
-            [],
+            (),
         )?;
         self.conn.execute(
             "INSERT OR IGNORE INTO llm_provider (id, name, api_type, description, is_official) VALUES (30, 'DeepSeek', 'deepseek', 'DeepSeek API', 1);",
-            [],
+            (),
         )?;
 
         Ok(())

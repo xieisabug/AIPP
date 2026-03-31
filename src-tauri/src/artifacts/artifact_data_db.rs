@@ -1,4 +1,5 @@
-use rusqlite::{params_from_iter, Connection, Result};
+use crate::db::connection::{params_from_iter, sync_metadata_path, Connection};
+use crate::db::get_db_dir;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::path::PathBuf;
@@ -31,12 +32,31 @@ pub struct TableInfo {
 }
 
 impl ArtifactDataDatabase {
-    /// 获取 artifact 数据目录
-    fn get_artifact_data_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+    const MANAGED_DB_PREFIX: &'static str = "artifact-data-";
+
+    /// 获取旧版 artifact 数据目录
+    fn get_legacy_artifact_data_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
         let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
         let data_path = app_dir.join("artifact_data");
         std::fs::create_dir_all(&data_path).map_err(|e| e.to_string())?;
         Ok(data_path)
+    }
+
+    fn managed_db_file_name(db_id: &str) -> String {
+        format!("{}{}.db", Self::MANAGED_DB_PREFIX, db_id)
+    }
+
+    fn managed_db_path(app_handle: &tauri::AppHandle, db_id: &str) -> Result<PathBuf, String> {
+        Ok(get_db_dir(app_handle)?.join(Self::managed_db_file_name(db_id)))
+    }
+
+    fn legacy_db_path(app_handle: &tauri::AppHandle, db_id: &str) -> Result<PathBuf, String> {
+        Ok(Self::get_legacy_artifact_data_dir(app_handle)?.join(format!("{}.db", db_id)))
+    }
+
+    fn parse_managed_db_id(file_name: &str) -> Option<String> {
+        let suffix = file_name.strip_prefix(Self::MANAGED_DB_PREFIX)?;
+        suffix.strip_suffix(".db").map(str::to_string)
     }
 
     /// 验证 db_id 是否合法（防止路径注入）
@@ -58,9 +78,8 @@ impl ArtifactDataDatabase {
     /// 打开或创建指定 db_id 的数据库
     pub fn new(app_handle: &tauri::AppHandle, db_id: &str) -> Result<Self, String> {
         Self::validate_db_id(db_id)?;
-
-        let data_dir = Self::get_artifact_data_dir(app_handle)?;
-        let db_path = data_dir.join(format!("{}.db", db_id));
+        Self::migrate_legacy_database(app_handle, db_id)?;
+        let db_path = Self::managed_db_path(app_handle, db_id)?;
 
         let conn =
             Connection::open(&db_path).map_err(|e| format!("Failed to open database: {}", e))?;
@@ -77,28 +96,38 @@ impl ArtifactDataDatabase {
         let mut stmt =
             self.conn.prepare(sql).map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
-        // 获取列名
-        let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-
         // 转换参数
-        let params_vec: Vec<Box<dyn rusqlite::ToSql>> =
-            params.iter().map(|v| json_to_sql_param(v)).collect();
+        let param_values: Vec<libsql::Value> =
+            params.iter().map(|v| json_to_libsql_value(v)).collect();
 
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+        // 获取列名（从第一行中提取）和执行查询
+        let mut columns: Vec<String> = Vec::new();
+        let rows_result = stmt
+            .query_map(params_from_iter(param_values), |row| {
+                if columns.is_empty() {
+                    let count = row.column_count();
+                    for i in 0..count {
+                        if let Some(name) = row.column_name(i) {
+                            columns.push(name.to_string());
+                        }
+                    }
+                }
+                let col_count =
+                    if !columns.is_empty() { columns.len() } else { row.column_count() as usize };
 
-        // 执行查询
-        let mut rows_data: Vec<Vec<JsonValue>> = Vec::new();
-        let mut rows = stmt
-            .query(param_refs.as_slice())
+                let mut row_data = Vec::new();
+                for i in 0..col_count {
+                    let value = row_value_to_json(row, i)
+                        .map_err(|e| crate::db::connection::DbError::Custom(e))?;
+                    row_data.push(value);
+                }
+                Ok(row_data)
+            })
             .map_err(|e| format!("Failed to execute query: {}", e))?;
 
-        while let Some(row) = rows.next().map_err(|e| format!("Failed to fetch row: {}", e))? {
-            let mut row_data = Vec::new();
-            for i in 0..columns.len() {
-                let value = row_value_to_json(row, i)?;
-                row_data.push(value);
-            }
-            rows_data.push(row_data);
+        let mut rows_data: Vec<Vec<JsonValue>> = Vec::new();
+        for row_result in rows_result {
+            rows_data.push(row_result.map_err(|e| format!("Failed to fetch row: {}", e))?);
         }
 
         let row_count = rows_data.len();
@@ -108,14 +137,12 @@ impl ArtifactDataDatabase {
     /// 执行修改语句 (INSERT/UPDATE/DELETE/CREATE/DROP)
     pub fn execute(&self, sql: &str, params: Vec<JsonValue>) -> Result<ExecuteResult, String> {
         // 转换参数
-        let params_vec: Vec<Box<dyn rusqlite::ToSql>> =
-            params.iter().map(|v| json_to_sql_param(v)).collect();
-
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+        let param_values: Vec<libsql::Value> =
+            params.iter().map(|v| json_to_libsql_value(v)).collect();
 
         let rows_affected = self
             .conn
-            .execute(sql, param_refs.as_slice())
+            .execute(sql, params_from_iter(param_values))
             .map_err(|e| format!("Failed to execute statement: {}", e))?;
 
         let last_insert_rowid = self.conn.last_insert_rowid();
@@ -136,7 +163,7 @@ impl ArtifactDataDatabase {
             .map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
         let tables = stmt
-            .query_map([], |row| {
+            .query_map((), |row| {
                 Ok(TableInfo {
                     name: row.get(0)?,
                     sql: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
@@ -156,7 +183,7 @@ impl ArtifactDataDatabase {
             self.conn.prepare(&sql).map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
         let columns = stmt
-            .query_map([], |row| row.get::<_, String>(1))
+            .query_map((), |row| row.get::<_, String>(1))
             .map_err(|e| format!("Failed to query columns: {}", e))?
             .filter_map(|r| r.ok())
             .collect();
@@ -167,88 +194,186 @@ impl ArtifactDataDatabase {
     /// 检查数据库是否存在
     pub fn exists(app_handle: &tauri::AppHandle, db_id: &str) -> Result<bool, String> {
         Self::validate_db_id(db_id)?;
-        let data_dir = Self::get_artifact_data_dir(app_handle)?;
-        let db_path = data_dir.join(format!("{}.db", db_id));
-        Ok(db_path.exists())
+        Self::migrate_legacy_database(app_handle, db_id)?;
+        let managed_db_path = Self::managed_db_path(app_handle, db_id)?;
+        let legacy_db_path = Self::legacy_db_path(app_handle, db_id)?;
+        Ok(managed_db_path.exists() || legacy_db_path.exists())
     }
 
     /// 删除数据库
     pub fn delete(app_handle: &tauri::AppHandle, db_id: &str) -> Result<(), String> {
         Self::validate_db_id(db_id)?;
-        let data_dir = Self::get_artifact_data_dir(app_handle)?;
-        let db_path = data_dir.join(format!("{}.db", db_id));
-
-        if db_path.exists() {
-            std::fs::remove_file(&db_path)
-                .map_err(|e| format!("Failed to delete database: {}", e))?;
-            // 也删除 WAL 和 SHM 文件
-            let wal_path = data_dir.join(format!("{}.db-wal", db_id));
-            let shm_path = data_dir.join(format!("{}.db-shm", db_id));
-            let _ = std::fs::remove_file(wal_path);
-            let _ = std::fs::remove_file(shm_path);
+        for db_path in
+            [Self::managed_db_path(app_handle, db_id)?, Self::legacy_db_path(app_handle, db_id)?]
+        {
+            if db_path.exists() {
+                std::fs::remove_file(&db_path)
+                    .map_err(|e| format!("Failed to delete database: {}", e))?;
+            }
+            for sidecar in [
+                PathBuf::from(format!("{}-wal", db_path.to_string_lossy())),
+                PathBuf::from(format!("{}-shm", db_path.to_string_lossy())),
+                sync_metadata_path(&db_path),
+            ] {
+                let _ = std::fs::remove_file(sidecar);
+            }
         }
         Ok(())
     }
 
     /// 列出所有 artifact 数据库
     pub fn list_databases(app_handle: &tauri::AppHandle) -> Result<Vec<String>, String> {
-        let data_dir = Self::get_artifact_data_dir(app_handle)?;
+        Self::migrate_all_legacy_databases(app_handle)?;
 
+        let db_dir = get_db_dir(app_handle)?;
         let entries =
-            std::fs::read_dir(&data_dir).map_err(|e| format!("Failed to read directory: {}", e))?;
+            std::fs::read_dir(&db_dir).map_err(|e| format!("Failed to read directory: {}", e))?;
 
-        let mut db_ids = Vec::new();
+        let mut db_ids = std::collections::BTreeSet::new();
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
-                if name.ends_with(".db") && !name.ends_with("-wal") && !name.ends_with("-shm") {
-                    db_ids.push(name.trim_end_matches(".db").to_string());
+                if let Some(db_id) = Self::parse_managed_db_id(name) {
+                    db_ids.insert(db_id);
                 }
             }
         }
 
+        let legacy_dir = Self::get_legacy_artifact_data_dir(app_handle)?;
+        if legacy_dir.exists() {
+            let legacy_entries = std::fs::read_dir(&legacy_dir)
+                .map_err(|e| format!("Failed to read legacy artifact directory: {}", e))?;
+            for entry in legacy_entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.ends_with(".db") && !name.ends_with("-wal") && !name.ends_with("-shm") {
+                        db_ids.insert(name.trim_end_matches(".db").to_string());
+                    }
+                }
+            }
+        }
+
+        let db_ids: Vec<String> = db_ids.into_iter().collect();
         Ok(db_ids)
+    }
+
+    pub fn migrate_all_legacy_databases(app_handle: &tauri::AppHandle) -> Result<(), String> {
+        let legacy_dir = Self::get_legacy_artifact_data_dir(app_handle)?;
+        if !legacy_dir.exists() {
+            return Ok(());
+        }
+
+        let entries = std::fs::read_dir(&legacy_dir)
+            .map_err(|e| format!("Failed to read legacy artifact directory: {}", e))?;
+        for entry in entries.flatten() {
+            let Some(file_name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if !file_name.ends_with(".db") {
+                continue;
+            }
+            let db_id = file_name.trim_end_matches(".db");
+            if Self::validate_db_id(db_id).is_ok() {
+                Self::migrate_legacy_database(app_handle, db_id)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn migrate_legacy_database(app_handle: &tauri::AppHandle, db_id: &str) -> Result<(), String> {
+        let legacy_db_path = Self::legacy_db_path(app_handle, db_id)?;
+        if !legacy_db_path.exists() {
+            return Ok(());
+        }
+
+        let managed_db_path = Self::managed_db_path(app_handle, db_id)?;
+        if managed_db_path.exists() {
+            return Ok(());
+        }
+
+        for (source, target) in [
+            (legacy_db_path.clone(), managed_db_path.clone()),
+            (
+                PathBuf::from(format!("{}-wal", legacy_db_path.to_string_lossy())),
+                PathBuf::from(format!("{}-wal", managed_db_path.to_string_lossy())),
+            ),
+            (
+                PathBuf::from(format!("{}-shm", legacy_db_path.to_string_lossy())),
+                PathBuf::from(format!("{}-shm", managed_db_path.to_string_lossy())),
+            ),
+        ] {
+            move_file_if_exists(&source, &target)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn move_file_if_exists(source: &PathBuf, target: &PathBuf) -> Result<(), String> {
+    if !source.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!("Failed to create target directory `{}`: {}", parent.display(), e)
+        })?;
+    }
+
+    match std::fs::rename(source, target) {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            std::fs::copy(source, target).map_err(|e| {
+                format!(
+                    "Failed to migrate artifact DB `{}` to `{}`: {}",
+                    source.display(),
+                    target.display(),
+                    e
+                )
+            })?;
+            std::fs::remove_file(source).map_err(|e| {
+                format!("Failed to remove legacy artifact DB `{}`: {}", source.display(), e)
+            })
+        }
     }
 }
 
 /// 将 JSON 值转换为 SQL 参数
-fn json_to_sql_param(value: &JsonValue) -> Box<dyn rusqlite::ToSql> {
+fn json_to_libsql_value(value: &JsonValue) -> libsql::Value {
     match value {
-        JsonValue::Null => Box::new(rusqlite::types::Null),
-        JsonValue::Bool(b) => Box::new(*b),
+        JsonValue::Null => libsql::Value::Null,
+        JsonValue::Bool(b) => libsql::Value::Integer(if *b { 1 } else { 0 }),
         JsonValue::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Box::new(i)
+                libsql::Value::Integer(i)
             } else if let Some(f) = n.as_f64() {
-                Box::new(f)
+                libsql::Value::Real(f)
             } else {
-                Box::new(n.to_string())
+                libsql::Value::Text(n.to_string())
             }
         }
-        JsonValue::String(s) => Box::new(s.clone()),
-        JsonValue::Array(_) | JsonValue::Object(_) => Box::new(value.to_string()),
+        JsonValue::String(s) => libsql::Value::Text(s.clone()),
+        JsonValue::Array(_) | JsonValue::Object(_) => libsql::Value::Text(value.to_string()),
     }
 }
 
 /// 将 SQLite 行值转换为 JSON
-fn row_value_to_json(row: &rusqlite::Row, idx: usize) -> Result<JsonValue, String> {
-    use rusqlite::types::ValueRef;
-
-    let value = row.get_ref(idx).map_err(|e| format!("Failed to get column value: {}", e))?;
+fn row_value_to_json(
+    row: &crate::db::connection::Row,
+    idx: usize,
+) -> std::result::Result<JsonValue, String> {
+    let value = row.get_value(idx).map_err(|e| format!("Failed to get column value: {}", e))?;
 
     Ok(match value {
-        ValueRef::Null => JsonValue::Null,
-        ValueRef::Integer(i) => JsonValue::Number(i.into()),
-        ValueRef::Real(f) => {
+        libsql::Value::Null => JsonValue::Null,
+        libsql::Value::Integer(i) => JsonValue::Number(i.into()),
+        libsql::Value::Real(f) => {
             serde_json::Number::from_f64(f).map(JsonValue::Number).unwrap_or(JsonValue::Null)
         }
-        ValueRef::Text(s) => {
-            let text = std::str::from_utf8(s).map_err(|e| format!("Invalid UTF-8: {}", e))?;
-            JsonValue::String(text.to_string())
-        }
-        ValueRef::Blob(b) => {
+        libsql::Value::Text(s) => JsonValue::String(s),
+        libsql::Value::Blob(b) => {
             // 将 blob 转为 base64 字符串
             use base64::Engine;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(b);
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&b);
             JsonValue::String(format!("base64:{}", encoded))
         }
     })

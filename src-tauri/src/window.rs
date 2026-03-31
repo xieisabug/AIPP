@@ -27,25 +27,21 @@ fn reposition_to_source_monitor(
     let monitors_cache = app.available_monitors().unwrap_or_default();
 
     // 定位来源窗口所在显示器
-    let source_monitor = source
-        .current_monitor()
-        .ok()
-        .flatten()
-        .or_else(|| {
-            source.outer_position().ok().and_then(|pos| {
-                monitors_cache
-                    .iter()
-                    .find(|m| {
-                        let mp = m.position();
-                        let ms = m.size();
-                        pos.x >= mp.x
-                            && pos.x < mp.x + ms.width as i32
-                            && pos.y >= mp.y
-                            && pos.y < mp.y + ms.height as i32
-                    })
-                    .cloned()
-            })
-        });
+    let source_monitor = source.current_monitor().ok().flatten().or_else(|| {
+        source.outer_position().ok().and_then(|pos| {
+            monitors_cache
+                .iter()
+                .find(|m| {
+                    let mp = m.position();
+                    let ms = m.size();
+                    pos.x >= mp.x
+                        && pos.x < mp.x + ms.width as i32
+                        && pos.y >= mp.y
+                        && pos.y < mp.y + ms.height as i32
+                })
+                .cloned()
+        })
+    });
 
     let Some(monitor) = source_monitor else {
         return;
@@ -56,9 +52,7 @@ fn reposition_to_source_monitor(
     let screen_height = monitor.size().height as f64 / scale;
 
     // 获取目标窗口的当前尺寸（逻辑像素）
-    let target_size = target
-        .outer_size()
-        .unwrap_or(tauri::PhysicalSize::new(800, 600));
+    let target_size = target.outer_size().unwrap_or(tauri::PhysicalSize::new(800, 600));
     let target_width = target_size.width as f64 / scale;
     let target_height = target_size.height as f64 / scale;
 

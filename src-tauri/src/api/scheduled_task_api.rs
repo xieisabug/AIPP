@@ -1,5 +1,5 @@
-use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 use crate::db::connection::params;
+use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -17,8 +17,10 @@ use crate::api::ai::conversation::{
     build_chat_request_from_messages, ToolCallStrategy, ToolConfig,
 };
 use crate::api::ai::summary::extract_json_from_response;
-use crate::api::ai_api::{add_message, ask_ai, build_tools_with_mapping, resolve_tool_name, ToolNameMapping};
 use crate::api::ai::types::AiRequest;
+use crate::api::ai_api::{
+    add_message, ask_ai, build_tools_with_mapping, resolve_tool_name, ToolNameMapping,
+};
 use crate::api::assistant_api::get_assistant;
 use crate::api::butler_api::{
     get_butler_main_continuation_lock, resolve_or_create_butler_execution_window,
@@ -1395,8 +1397,7 @@ pub async fn list_butler_scheduled_tasks(
     butler_conversation_id: i64,
 ) -> Result<Vec<ScheduledTaskDTO>, String> {
     let db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let tasks =
-        db.list_tasks_by_butler(butler_conversation_id).map_err(|e| e.to_string())?;
+    let tasks = db.list_tasks_by_butler(butler_conversation_id).map_err(|e| e.to_string())?;
     Ok(tasks.into_iter().map(to_dto).collect())
 }
 
@@ -2182,9 +2183,8 @@ async fn enqueue_scheduled_task_butler_followup(
     if main_conversation.conversation_kind != "butler_main" {
         return Err("总管家主会话已归档，无法回流定时任务结果".to_string());
     }
-    let assistant_id = main_conversation
-        .assistant_id
-        .ok_or_else(|| "总管家主会话缺少 assistant".to_string())?;
+    let assistant_id =
+        main_conversation.assistant_id.ok_or_else(|| "总管家主会话缺少 assistant".to_string())?;
 
     let status = "success";
     let system_message_content = build_butler_scheduled_task_result_message(

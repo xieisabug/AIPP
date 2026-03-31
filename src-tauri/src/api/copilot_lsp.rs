@@ -345,7 +345,6 @@ fn try_read_token_from_env() -> Vec<CopilotOauthTokenCandidate> {
     candidates
 }
 
-
 #[cfg(target_os = "macos")]
 fn try_read_token_from_macos_keychain() -> Result<Vec<CopilotOauthTokenCandidate>, String> {
     let mut candidates = Vec::new();
@@ -368,14 +367,15 @@ fn try_read_token_from_macos_keychain() -> Result<Vec<CopilotOauthTokenCandidate
                 for entry in array {
                     if let Some(token) = entry.get("accessToken").and_then(|v| v.as_str()) {
                         if is_supported_copilot_token(token) {
-                            let account = entry
-                                .get("account")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown");
+                            let account =
+                                entry.get("account").and_then(|v| v.as_str()).unwrap_or("unknown");
                             candidates.push(build_token_candidate(
                                 token.to_string(),
                                 "VSCode Keychain",
-                                format!("service=github.vscode-github-authentication, account={}", account),
+                                format!(
+                                    "service=github.vscode-github-authentication, account={}",
+                                    account
+                                ),
                             ));
                         }
                     }

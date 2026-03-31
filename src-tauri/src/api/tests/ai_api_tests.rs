@@ -1,7 +1,7 @@
 use crate::api::ai_api::*;
+use crate::db::connection::{params, Connection};
 use crate::db::conversation_db::*;
 use chrono::Utc;
-use rusqlite::Connection;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -10,7 +10,7 @@ fn create_ai_api_test_db() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
 
     // 禁用外键约束检查
-    conn.execute("PRAGMA foreign_keys = OFF", []).unwrap();
+    conn.execute("PRAGMA foreign_keys = OFF", ()).unwrap();
 
     // 创建对话表
     conn.execute(
@@ -20,7 +20,7 @@ fn create_ai_api_test_db() -> Connection {
             assistant_id INTEGER,
             created_time TEXT NOT NULL
         )",
-        [],
+        (),
     )
     .unwrap();
 
@@ -46,7 +46,7 @@ fn create_ai_api_test_db() -> Connection {
             first_token_time TEXT,
             ttft_ms INTEGER
         )",
-        [],
+        (),
     )
     .unwrap();
 
@@ -62,7 +62,7 @@ fn create_ai_api_test_db() -> Connection {
             use_vector BOOLEAN DEFAULT 0,
             token_count INTEGER
         )",
-        [],
+        (),
     )
     .unwrap();
 
@@ -81,17 +81,17 @@ fn create_test_message_for_ai_api(
     conn.execute(
         "INSERT INTO message (conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, token_count, parent_id, generation_group_id, input_token_count, output_token_count, first_token_time, ttft_ms)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, NULL)",
-        (
-            &conversation_id,
-            &message_type,
-            &content,
-            &Some(1i64),
-            &Some("test-model"),
-            &Utc::now().to_rfc3339(),
-            &100i32,
-            &parent_id,
-            &generation_group_id,
-        )
+        params![
+            conversation_id,
+            message_type,
+            content,
+            Some(1i64),
+            Some("test-model"),
+            Utc::now().to_rfc3339(),
+            100i32,
+            parent_id,
+            generation_group_id,
+        ]
     ).unwrap();
     conn.last_insert_rowid()
 }
@@ -100,7 +100,7 @@ fn create_test_message_for_ai_api(
 fn create_test_conversation_for_ai_api(conn: &Connection, name: &str, assistant_id: i64) -> i64 {
     conn.execute(
         "INSERT INTO conversation (name, assistant_id, created_time) VALUES (?, ?, ?)",
-        (&name, &assistant_id, &Utc::now().to_rfc3339()),
+        params![name, assistant_id, Utc::now().to_rfc3339()],
     )
     .unwrap();
     conn.last_insert_rowid()

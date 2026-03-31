@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension, Result};
+use super::connection::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
 
@@ -45,7 +45,7 @@ impl SystemDatabase {
                     value TEXT NOT NULL,
                     created_time DATETIME DEFAULT CURRENT_TIMESTAMP
                 );",
-            [],
+            (),
         )?;
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS feature_config (
@@ -57,7 +57,7 @@ impl SystemDatabase {
                 description TEXT,
                 UNIQUE(feature_code, key)
             )",
-            [],
+            (),
         )?;
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS secure_config (
@@ -68,7 +68,7 @@ impl SystemDatabase {
                 updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY(scope, key)
             )",
-            [],
+            (),
         )?;
         debug!("System tables ensured");
         Ok(())
@@ -118,11 +118,11 @@ impl SystemDatabase {
             "INSERT INTO feature_config (feature_code, key, value, data_type, description)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
-                config.feature_code,
-                config.key,
-                config.value,
-                config.data_type,
-                config.description
+                config.feature_code.clone(),
+                config.key.clone(),
+                config.value.clone(),
+                config.data_type.clone(),
+                config.description.clone()
             ],
         )?;
         debug!("Inserted feature config");
@@ -135,11 +135,11 @@ impl SystemDatabase {
             "UPDATE feature_config SET value = ?1, data_type = ?2, description = ?3
              WHERE feature_code = ?4 AND key = ?5",
             params![
-                config.value,
-                config.data_type,
-                config.description,
-                config.feature_code,
-                config.key
+                config.value.clone(),
+                config.data_type.clone(),
+                config.description.clone(),
+                config.feature_code.clone(),
+                config.key.clone()
             ],
         )?;
         debug!("Updated feature config");
@@ -208,7 +208,7 @@ impl SystemDatabase {
                     description: row.get(5)?,
                 })
             })?
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         debug!(count = configs.len(), "Fetched feature configs by module");
         Ok(configs)
     }
@@ -221,7 +221,7 @@ impl SystemDatabase {
              FROM feature_config",
         )?;
         let configs = stmt
-            .query_map(params![], |row| {
+            .query_map((), |row| {
                 Ok(FeatureConfig {
                     id: Some(row.get(0)?),
                     feature_code: row.get(1)?,
@@ -231,7 +231,7 @@ impl SystemDatabase {
                     description: row.get(5)?,
                 })
             })?
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         debug!(count = configs.len(), "Fetched all feature configs");
         Ok(configs)
     }
@@ -245,7 +245,12 @@ impl SystemDatabase {
                  ciphertext = excluded.ciphertext,
                  nonce = excluded.nonce,
                  updated_time = CURRENT_TIMESTAMP",
-            params![entry.scope, entry.key, entry.ciphertext, entry.nonce],
+            params![
+                entry.scope.clone(),
+                entry.key.clone(),
+                entry.ciphertext.clone(),
+                entry.nonce.clone()
+            ],
         )?;
         Ok(())
     }
@@ -279,7 +284,7 @@ impl SystemDatabase {
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub fn init_feature_config(&self) -> rusqlite::Result<()> {
+    pub fn init_feature_config(&self) -> Result<()> {
         self.add_feature_config(&FeatureConfig {
             id: None,
             feature_code: "conversation_summary".to_string(),

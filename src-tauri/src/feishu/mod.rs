@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::db::connection::{params, OptionalExtension};
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -11,7 +13,6 @@ use futures::FutureExt;
 use openlark_client::ws_client::{EventDispatcherHandler, LarkWsClient};
 use pulldown_cmark::{Options as MarkdownOptions, Parser as MarkdownParser};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
-use crate::db::connection::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter, Manager};
@@ -42,6 +43,7 @@ const EXPERIMENTAL_FEATURE_CODE: &str = "experimental";
 const FEISHU_SCOPE: &str = "butler_feishu";
 const FEISHU_SECRET_KEY: &str = "app_secret";
 const SECURE_MASTER_KEY: &str = "secure_config_master_key";
+const SECURE_MASTER_KEY_FILE: &str = "secure-config-master-key.bin";
 const CHANNEL_FEISHU: &str = "feishu";
 const BOTLER_SOURCE: &str = "feishu_butler";
 const TERMINAL_TASK_STATUSES: [&str; 3] = ["succeeded", "failed", "cancelled"];
@@ -703,29 +705,159 @@ fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-fn get_or_create_master_key(app_handle: &AppHandle) -> Result<[u8; 32], String> {
+pub(crate) fn migrate_secure_storage_if_needed(app_handle: &AppHandle) -> Result<(), String> {
+    if let Some(local_key) = read_master_key_from_file(app_handle)? {
+        return finalize_secure_storage_migration(app_handle, &local_key);
+    }
+
     let db = SystemDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    let existing = db.get_config(SECURE_MASTER_KEY).map_err(|e| e.to_string())?;
-    let key_b64 = if existing.trim().is_empty() {
-        let bytes: [u8; 32] = rand::random();
-        let encoded = BASE64.encode(bytes);
-        match db.add_system_config(SECURE_MASTER_KEY, &encoded) {
-            Ok(_) => encoded,
-            Err(_) => {
-                db.update_system_config(SECURE_MASTER_KEY, &encoded).map_err(|e| e.to_string())?;
-                encoded
+    let existing_key_b64 = db.get_config(SECURE_MASTER_KEY).map_err(|e| e.to_string())?;
+    if existing_key_b64.trim().is_empty() {
+        return Ok(());
+    }
+
+    let legacy_key = decode_master_key(existing_key_b64.trim())?;
+    let local_key: [u8; 32] = rand::random();
+    write_master_key_to_file(app_handle, &local_key)?;
+
+    if let Some(entry) =
+        db.get_secure_config(FEISHU_SCOPE, FEISHU_SECRET_KEY).map_err(|e| e.to_string())?
+    {
+        match decrypt_secret_with_key(&legacy_key, &entry.ciphertext, &entry.nonce) {
+            Ok(secret) => {
+                let (ciphertext, nonce) = encrypt_secret_with_key(&local_key, &secret)?;
+                db.upsert_secure_config(&SecureConfigEntry {
+                    scope: entry.scope,
+                    key: entry.key,
+                    ciphertext,
+                    nonce,
+                    updated_time: None,
+                })
+                .map_err(|e| e.to_string())?;
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "Stored Feishu secret could not be re-encrypted during secure storage migration"
+                );
             }
         }
-    } else {
-        existing
+    }
+
+    db.delete_system_config(SECURE_MASTER_KEY).map_err(|e| e.to_string())
+}
+
+fn get_or_create_master_key(app_handle: &AppHandle) -> Result<[u8; 32], String> {
+    if let Some(key) = read_master_key_from_file(app_handle)? {
+        migrate_secure_storage_if_needed(app_handle)?;
+        return Ok(key);
+    }
+
+    migrate_secure_storage_if_needed(app_handle)?;
+
+    if let Some(key) = read_master_key_from_file(app_handle)? {
+        return Ok(key);
+    }
+
+    let key: [u8; 32] = rand::random();
+    write_master_key_to_file(app_handle, &key)?;
+    Ok(key)
+}
+
+fn local_secret_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let secret_dir = app_dir.join("local-secrets");
+    std::fs::create_dir_all(&secret_dir).map_err(|e| e.to_string())?;
+    Ok(secret_dir)
+}
+
+fn master_key_file_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
+    Ok(local_secret_dir(app_handle)?.join(SECURE_MASTER_KEY_FILE))
+}
+
+fn read_master_key_from_file(app_handle: &AppHandle) -> Result<Option<[u8; 32]>, String> {
+    let path = master_key_file_path(app_handle)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let bytes = std::fs::read(&path)
+        .map_err(|e| format!("Failed to read secure master key `{}`: {}", path.display(), e))?;
+    let key: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| format!("Invalid secure master key length in `{}`", path.display()))?;
+    Ok(Some(key))
+}
+
+fn write_master_key_to_file(app_handle: &AppHandle, key: &[u8; 32]) -> Result<(), String> {
+    let path = master_key_file_path(app_handle)?;
+    std::fs::write(&path, key)
+        .map_err(|e| format!("Failed to write secure master key `{}`: {}", path.display(), e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(&path, permissions).map_err(|e| {
+            format!("Failed to set secure permissions on master key `{}`: {}", path.display(), e)
+        })?;
+    }
+    Ok(())
+}
+
+fn finalize_secure_storage_migration(
+    app_handle: &AppHandle,
+    local_key: &[u8; 32],
+) -> Result<(), String> {
+    let db = SystemDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let existing_key_b64 = db.get_config(SECURE_MASTER_KEY).map_err(|e| e.to_string())?;
+    if existing_key_b64.trim().is_empty() {
+        return Ok(());
+    }
+
+    let Some(entry) =
+        db.get_secure_config(FEISHU_SCOPE, FEISHU_SECRET_KEY).map_err(|e| e.to_string())?
+    else {
+        return db.delete_system_config(SECURE_MASTER_KEY).map_err(|e| e.to_string());
     };
+
+    if decrypt_secret_with_key(local_key, &entry.ciphertext, &entry.nonce).is_ok() {
+        return db.delete_system_config(SECURE_MASTER_KEY).map_err(|e| e.to_string());
+    }
+
+    let legacy_key = decode_master_key(existing_key_b64.trim())?;
+    match decrypt_secret_with_key(&legacy_key, &entry.ciphertext, &entry.nonce) {
+        Ok(secret) => {
+            let (ciphertext, nonce) = encrypt_secret_with_key(local_key, &secret)?;
+            db.upsert_secure_config(&SecureConfigEntry {
+                scope: entry.scope,
+                key: entry.key,
+                ciphertext,
+                nonce,
+                updated_time: None,
+            })
+            .map_err(|e| e.to_string())?;
+            db.delete_system_config(SECURE_MASTER_KEY).map_err(|e| e.to_string())
+        }
+        Err(error) => {
+            warn!(
+                error = %error,
+                "Secure storage migration is incomplete; keeping legacy DB master key for recovery"
+            );
+            Ok(())
+        }
+    }
+}
+
+fn decode_master_key(key_b64: &str) -> Result<[u8; 32], String> {
     let decoded = BASE64.decode(key_b64).map_err(|e| e.to_string())?;
     decoded.try_into().map_err(|_| "Invalid secure config master key length".to_string())
 }
 
-fn encrypt_secret(app_handle: &AppHandle, plaintext: &str) -> Result<(String, String), String> {
-    let key_bytes = get_or_create_master_key(app_handle)?;
-    let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
+fn encrypt_secret_with_key(
+    key_bytes: &[u8; 32],
+    plaintext: &str,
+) -> Result<(String, String), String> {
+    let key = Key::<Aes256Gcm>::from_slice(key_bytes);
     let cipher = Aes256Gcm::new(key);
     let nonce_bytes: [u8; 12] = rand::random();
     let nonce = Nonce::from_slice(&nonce_bytes);
@@ -735,9 +867,12 @@ fn encrypt_secret(app_handle: &AppHandle, plaintext: &str) -> Result<(String, St
     Ok((BASE64.encode(encrypted), BASE64.encode(nonce_bytes)))
 }
 
-fn decrypt_secret(app_handle: &AppHandle, ciphertext: &str, nonce: &str) -> Result<String, String> {
-    let key_bytes = get_or_create_master_key(app_handle)?;
-    let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
+fn decrypt_secret_with_key(
+    key_bytes: &[u8; 32],
+    ciphertext: &str,
+    nonce: &str,
+) -> Result<String, String> {
+    let key = Key::<Aes256Gcm>::from_slice(key_bytes);
     let cipher = Aes256Gcm::new(key);
     let nonce_bytes = BASE64.decode(nonce).map_err(|e| e.to_string())?;
     let nonce = Nonce::from_slice(&nonce_bytes);
@@ -746,6 +881,16 @@ fn decrypt_secret(app_handle: &AppHandle, ciphertext: &str, nonce: &str) -> Resu
         .decrypt(nonce, encrypted.as_ref())
         .map_err(|e| format!("Failed to decrypt secret: {e}"))?;
     String::from_utf8(decrypted).map_err(|e| e.to_string())
+}
+
+fn encrypt_secret(app_handle: &AppHandle, plaintext: &str) -> Result<(String, String), String> {
+    let key_bytes = get_or_create_master_key(app_handle)?;
+    encrypt_secret_with_key(&key_bytes, plaintext)
+}
+
+fn decrypt_secret(app_handle: &AppHandle, ciphertext: &str, nonce: &str) -> Result<String, String> {
+    let key_bytes = get_or_create_master_key(app_handle)?;
+    decrypt_secret_with_key(&key_bytes, ciphertext, nonce)
 }
 
 pub(crate) fn save_feishu_secret(app_handle: &AppHandle, app_secret: &str) -> Result<(), String> {
@@ -776,7 +921,16 @@ fn load_feishu_secret(app_handle: &AppHandle) -> Result<Option<String>, String> 
     else {
         return Ok(None);
     };
-    Ok(Some(decrypt_secret(app_handle, &entry.ciphertext, &entry.nonce)?))
+    match decrypt_secret(app_handle, &entry.ciphertext, &entry.nonce) {
+        Ok(secret) => Ok(Some(secret)),
+        Err(error) => {
+            warn!(
+                error = %error,
+                "Stored Feishu secret cannot be decrypted on this device; treating it as unavailable"
+            );
+            Ok(None)
+        }
+    }
 }
 
 async fn load_runtime_config(app_handle: &AppHandle) -> Result<FeishuRuntimeConfig, String> {

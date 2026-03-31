@@ -8,9 +8,9 @@
 //! - 批量查询附件
 //! - 附件与消息的关联
 
+use crate::db::connection::Connection;
 use crate::db::conversation_db::*;
 use crate::db::tests::test_helpers::*;
-use rusqlite::Connection;
 
 // ============================================================================
 // 辅助函数

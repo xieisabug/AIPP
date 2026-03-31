@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use crate::db::connection::Connection;
 
 use crate::mcp::builtin_mcp::superadmin::audit::*;
 use crate::mcp::builtin_mcp::superadmin::types::RiskLevel;

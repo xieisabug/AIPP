@@ -186,7 +186,7 @@ async fn get_conversations_needing_summary(
     })?;
 
     let conversation_ids: Vec<i64> = stmt
-        .query_map([], |row| row.get(0))
+        .query_map((), |row| row.get(0))
         .map_err(|e| {
             error!(error = %e, "执行查询失败");
             AppError::DatabaseError(format!("执行查询失败: {}", e))
