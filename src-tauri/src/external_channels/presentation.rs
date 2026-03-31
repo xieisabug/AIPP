@@ -39,6 +39,11 @@ trait ToolPresenter: Send + Sync {
     fn matches(&self, server_name: &str, tool_name: &str) -> bool;
     fn present_call(&self, tool_call: &ExternalToolCall) -> Option<String>;
     fn present_result(&self, tool_result: &ExternalToolResult) -> Option<String>;
+    /// Return multiple separate messages for a single tool result.
+    /// When Some, each element is sent as an independent Feishu message.
+    fn present_result_parts(&self, _tool_result: &ExternalToolResult) -> Option<Vec<String>> {
+        None
+    }
 }
 
 struct AgentToolPresenter;
@@ -84,19 +89,35 @@ impl ToolPresentationRegistry {
             .and_then(|presenter| presenter.present_result(tool_result))
             .unwrap_or_else(|| self.fallback.present_result(tool_result).unwrap_or_default())
     }
+
+    fn present_result_vec(&self, tool_result: &ExternalToolResult) -> Vec<String> {
+        let server_name = tool_result.server_name.as_deref().unwrap_or_default();
+        let tool_name = tool_result.tool_name.as_deref().unwrap_or_default();
+        if let Some(presenter) =
+            self.presenters.iter().find(|p| p.matches(server_name, tool_name))
+        {
+            if let Some(parts) = presenter.present_result_parts(tool_result) {
+                return parts.into_iter().filter(|s| !s.trim().is_empty()).collect();
+            }
+            return presenter.present_result(tool_result).into_iter().collect();
+        }
+        self.fallback.present_result(tool_result).into_iter().collect()
+    }
 }
 
 pub fn render_message_for_external_channel(
     message: &Message,
     context: &RenderContext<'_>,
-) -> Option<String> {
+) -> Vec<String> {
     let _channel = context.channel;
     match message.message_type.as_str() {
-        "system" | "reasoning" => None,
-        "user" => render_user_message(&message.content, context),
-        "response" | "assistant" => render_assistant_message(&message.content),
+        "system" | "reasoning" => Vec::new(),
+        "user" => render_user_message(&message.content, context).into_iter().collect(),
+        "response" | "assistant" => {
+            render_assistant_message(&message.content).into_iter().collect()
+        }
         "tool_result" => render_tool_result_message(&message.content),
-        _ => sanitize_plain_text(&message.content),
+        _ => sanitize_plain_text(&message.content).into_iter().collect(),
     }
 }
 
@@ -128,15 +149,12 @@ fn render_assistant_message(content: &str) -> Option<String> {
     }
 }
 
-fn render_tool_result_message(content: &str) -> Option<String> {
-    let tool_result = parse_tool_result(content)?;
+fn render_tool_result_message(content: &str) -> Vec<String> {
+    let Some(tool_result) = parse_tool_result(content) else {
+        return Vec::new();
+    };
     let registry = ToolPresentationRegistry::new();
-    let rendered = registry.present_result(&tool_result);
-    if rendered.trim().is_empty() {
-        None
-    } else {
-        Some(rendered)
-    }
+    registry.present_result_vec(&tool_result)
 }
 
 fn parse_tool_calls_from_response(content: &str) -> Vec<ExternalToolCall> {
@@ -375,6 +393,39 @@ fn preview_multiline(value: &str, max_lines: usize, max_chars: usize) -> String 
         .collect::<Vec<_>>()
         .join("\n");
     preview_text(&lines, max_chars)
+}
+
+/// Prepare file content for sending to Feishu, truncating if necessary.
+fn content_for_feishu(content: &str, max_chars: usize) -> String {
+    let trimmed = content.trim();
+    let char_count = trimmed.chars().count();
+    if char_count <= max_chars {
+        trimmed.to_string()
+    } else {
+        let truncated: String = trimmed.chars().take(max_chars).collect();
+        format!("{}\n\n（内容过长，已截断 {} 字符）", truncated, char_count - max_chars)
+    }
+}
+
+fn task_action_label(action: &str) -> &str {
+    match action {
+        "read" => "查看对话",
+        "reply_prompt" => "发送指令",
+        "mcp_tool_execute" => "执行工具调用",
+        "permission_confirm" | "operate_confirm" => "操作权限审批",
+        "acp_permission_confirm" => "ACP 权限审批",
+        "ask_user_respond" => "回复提问",
+        _ => action,
+    }
+}
+
+fn decision_label(decision: &str) -> &str {
+    match decision {
+        "allow" => "允许",
+        "deny" => "拒绝",
+        "allow_and_save" => "允许并记住",
+        _ => decision,
+    }
 }
 
 fn parse_tag_attributes(attributes: &str) -> HashMap<String, String> {
@@ -803,6 +854,148 @@ fn summarize_edit_file_result(tool_result: &ExternalToolResult) -> Option<String
     Some(lines.join("\n"))
 }
 
+fn present_task_conversation_operation_call(params: &Value) -> Option<String> {
+    let task_id = value_u64(params, "task_conversation_id")
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let action = value_string(params, "action").unwrap_or("未知操作");
+
+    match action {
+        "read" => {
+            let count = value_u64(params, "latest_count").unwrap_or(1);
+            if count > 1 {
+                Some(format!("📖 查看子任务 #{} 最新 {} 条对话", task_id, count))
+            } else {
+                Some(format!("📖 查看子任务 #{} 的对话进展", task_id))
+            }
+        }
+        "reply_prompt" => {
+            let prompt = value_string(params, "prompt")
+                .map(|p| format!("\n{}", preview_text(p, 100)))
+                .unwrap_or_default();
+            Some(format!("💬 向子任务 #{} 发送指令{}", task_id, prompt))
+        }
+        "mcp_tool_execute" => Some(format!("⚡ 批准子任务 #{} 的工具调用执行", task_id)),
+        "permission_confirm" | "operate_confirm" => {
+            let d = value_string(params, "decision")
+                .map(decision_label)
+                .unwrap_or("未知");
+            Some(format!("🔐 审批子任务 #{} 的操作权限：{}", task_id, d))
+        }
+        "acp_permission_confirm" => {
+            let cancelled = params.get("cancelled").and_then(Value::as_bool).unwrap_or(false);
+            if cancelled {
+                Some(format!("🔐 取消子任务 #{} 的 ACP 权限请求", task_id))
+            } else {
+                let option_id = value_string(params, "option_id").unwrap_or("未知选项");
+                Some(format!(
+                    "🔐 审批子任务 #{} 的 ACP 权限：选择「{}」",
+                    task_id, option_id
+                ))
+            }
+        }
+        "ask_user_respond" => {
+            let cancelled = params.get("cancelled").and_then(Value::as_bool).unwrap_or(false);
+            if cancelled {
+                Some(format!("💬 取消子任务 #{} 的用户提问", task_id))
+            } else {
+                let answers = params.get("answers").and_then(Value::as_object);
+                match answers {
+                    Some(map) if !map.is_empty() => {
+                        let answer_summary = preview_list(
+                            map.iter().map(|(k, v)| {
+                                let val = v.as_str().unwrap_or("");
+                                format!("{}={}", k, preview_text(val, 40))
+                            }),
+                            3,
+                        );
+                        Some(format!(
+                            "💬 回复子任务 #{} 的提问：{}",
+                            task_id, answer_summary
+                        ))
+                    }
+                    _ => Some(format!("💬 回复子任务 #{} 的提问", task_id)),
+                }
+            }
+        }
+        _ => Some(format!("📋 操作子任务 #{} — {}", task_id, action)),
+    }
+}
+
+fn present_task_conversation_operation_result(tool_result: &ExternalToolResult) -> Option<String> {
+    let params = tool_result_parameters(tool_result);
+    let task_id = params
+        .as_ref()
+        .and_then(|p| value_u64(p, "task_conversation_id"))
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let action = params
+        .as_ref()
+        .and_then(|p| value_string(p, "action"))
+        .unwrap_or("未知操作");
+
+    if !tool_result_effective_success(tool_result) {
+        return Some(format!(
+            "❌ 子任务 #{} {}失败\n{}",
+            task_id,
+            task_action_label(action),
+            tool_result_text_preview(tool_result, 180)
+        ));
+    }
+
+    match action {
+        "read" => Some(format!("📖 已查看子任务 #{} 的对话进展", task_id)),
+        "reply_prompt" => {
+            let prompt = params
+                .as_ref()
+                .and_then(|p| value_string(p, "prompt"))
+                .map(|p| format!("\n{}", preview_text(p, 100)))
+                .unwrap_or_default();
+            Some(format!("💬 已向子任务 #{} 发送指令{}", task_id, prompt))
+        }
+        "mcp_tool_execute" => {
+            Some(format!("⚡ 已派发子任务 #{} 的工具调用执行", task_id))
+        }
+        "permission_confirm" | "operate_confirm" => {
+            let json = tool_result_content_json(tool_result);
+            let d = json
+                .and_then(|j| value_string(j, "decision"))
+                .map(decision_label)
+                .unwrap_or("未知");
+            Some(format!("🔐 已审批子任务 #{} 的操作权限：{}", task_id, d))
+        }
+        "acp_permission_confirm" => {
+            let json = tool_result_content_json(tool_result);
+            let cancelled = json
+                .and_then(|j| j.get("cancelled"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if cancelled {
+                Some(format!("🔐 已取消子任务 #{} 的 ACP 权限请求", task_id))
+            } else {
+                Some(format!("🔐 已审批子任务 #{} 的 ACP 权限", task_id))
+            }
+        }
+        "ask_user_respond" => {
+            let json = tool_result_content_json(tool_result);
+            let cancelled = json
+                .and_then(|j| j.get("cancelled"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if cancelled {
+                Some(format!("💬 已取消子任务 #{} 的用户提问", task_id))
+            } else {
+                Some(format!("💬 已回复子任务 #{} 的提问", task_id))
+            }
+        }
+        _ => Some(format!(
+            "📋 子任务 #{} {} 完成",
+            task_id,
+            task_action_label(action)
+        )),
+    }
+}
+
 impl ToolPresenter for AgentToolPresenter {
     fn matches(&self, server_name: &str, _tool_name: &str) -> bool {
         canonical_server_name(server_name) == "agent"
@@ -847,6 +1040,9 @@ impl ToolPresenter for AgentToolPresenter {
                     })
                     .unwrap_or_else(|| "关键词".to_string());
                 Some(format!("🔧 加载工具说明：{}", names))
+            }
+            "task_conversation_operation" => {
+                present_task_conversation_operation_call(&tool_call.parameters)
             }
             _ => None,
         }
@@ -914,6 +1110,9 @@ impl ToolPresenter for AgentToolPresenter {
             }
             Some("load_skill") => {
                 Some(format!("❌ 技能加载失败：{}", tool_result_text_preview(tool_result, 180)))
+            }
+            Some("task_conversation_operation") => {
+                present_task_conversation_operation_result(tool_result)
             }
             _ => None,
         }
@@ -991,6 +1190,82 @@ impl ToolPresenter for UiInteractionToolPresenter {
                 Some(format!("❌ 内嵌 UI 处理失败：{}", tool_result_text_preview(tool_result, 180)))
             }
             _ => None,
+        }
+    }
+
+    fn present_result_parts(&self, tool_result: &ExternalToolResult) -> Option<Vec<String>> {
+        if tool_result.tool_name.as_deref() != Some("preview_file") {
+            return None;
+        }
+        if !tool_result_effective_success(tool_result) {
+            return None;
+        }
+        let params = tool_result_parameters(tool_result)?;
+        let files = json_array(&params, "files")?;
+        if files.is_empty() {
+            return None;
+        }
+
+        let mut parts = Vec::new();
+        for file in files {
+            let title = value_string(file, "title").unwrap_or("未命名文件");
+            let file_type = value_string(file, "type").unwrap_or("file");
+            let content = value_string(file, "content");
+
+            match content {
+                Some(content) if !content.trim().is_empty() => {
+                    let is_markdown = matches!(file_type, "markdown")
+                        || title.to_lowercase().ends_with(".md");
+                    let language = value_string(file, "language").unwrap_or("");
+                    if is_markdown {
+                        let header = format!("**📄 {}**\n\n", title);
+                        parts.push(format!(
+                            "{}{}",
+                            header,
+                            content_for_feishu(content, 3800)
+                        ));
+                    } else if language.is_empty()
+                        || language == "text"
+                        || language == "plaintext"
+                    {
+                        let label = preview_file_kind_label(file_type);
+                        parts.push(format!(
+                            "**📄 {}**（{}）\n\n```\n{}\n```",
+                            title,
+                            label,
+                            content_for_feishu(content, 3600)
+                        ));
+                    } else {
+                        let label = preview_file_kind_label(file_type);
+                        parts.push(format!(
+                            "**📄 {}**（{}）\n\n```{}\n{}\n```",
+                            title,
+                            label,
+                            language,
+                            content_for_feishu(content, 3600)
+                        ));
+                    }
+                }
+                _ => {
+                    let label = preview_file_kind_label(file_type);
+                    if let Some(description) = value_string(file, "description") {
+                        parts.push(format!(
+                            "📄 {}（{}）\n{}",
+                            title,
+                            label,
+                            preview_text(description, 120)
+                        ));
+                    } else {
+                        parts.push(format!("📄 {}（{}）", title, label));
+                    }
+                }
+            }
+        }
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts)
         }
     }
 }
@@ -1300,13 +1575,23 @@ mod tests {
         )
     }
 
+    /// Join all rendered parts for assertion convenience.
+    fn render_joined(message: &Message, context: &RenderContext<'_>) -> Option<String> {
+        let parts = render_message_for_external_channel(message, context);
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
+        }
+    }
+
     #[test]
     fn renders_response_without_raw_mcp_comments() {
         let message = build_message(
             "response",
             "先检查一下。<!-- MCP_TOOL_CALL:{\"server_name\":\"aipp:operation\",\"tool_name\":\"read_file\",\"parameters\":\"{\\\"file_path\\\":\\\"C:\\\\\\\\demo.txt\\\"}\"} -->",
         );
-        let rendered = render_message_for_external_channel(
+        let rendered = render_joined(
             &message,
             &RenderContext { channel: "feishu", relay_origin: "aipp" },
         )
@@ -1320,7 +1605,7 @@ mod tests {
     #[test]
     fn skips_feishu_origin_user_echo() {
         let message = build_message("user", "你好");
-        let rendered = render_message_for_external_channel(
+        let rendered = render_joined(
             &message,
             &RenderContext { channel: "feishu", relay_origin: "feishu" },
         );
@@ -1334,7 +1619,7 @@ mod tests {
             "tool_result",
             "Tool execution completed:\n\nTool Call ID: call_1\nTool: search_web\nServer: aipp:search\nParameters: {\"query\":\"rust tauri\"}\nResult:\n找到 5 条结果",
         );
-        let rendered = render_message_for_external_channel(
+        let rendered = render_joined(
             &message,
             &RenderContext { channel: "feishu", relay_origin: "aipp" },
         )
@@ -1350,7 +1635,7 @@ mod tests {
             "user",
             "请看附件\n<fileattachment name=\"diagram.png\">data:image/png;base64,AAAA</fileattachment>\n<skillattachment skill_name=\"skill-creator\" invocation=\"/skills(skill-creator)\" identifier=\"agents:skill-creator\"># hidden prompt\nsecret body</skillattachment>",
         );
-        let rendered = render_message_for_external_channel(
+        let rendered = render_joined(
             &message,
             &RenderContext { channel: "feishu", relay_origin: "aipp" },
         )
@@ -1384,7 +1669,7 @@ mod tests {
                 }
             }]),
         );
-        let rendered = render_message_for_external_channel(
+        let rendered = render_joined(
             &message,
             &RenderContext { channel: "feishu", relay_origin: "aipp" },
         )
@@ -1422,7 +1707,7 @@ mod tests {
                 }
             }]),
         );
-        let rendered = render_message_for_external_channel(
+        let rendered = render_joined(
             &message,
             &RenderContext { channel: "feishu", relay_origin: "aipp" },
         )
@@ -1451,7 +1736,7 @@ mod tests {
                 "text": "Todo list updated: 1/3 tasks completed (33%)\n\nCurrent task: 创建CSIC数据集下载脚本中"
             }]),
         );
-        let rendered = render_message_for_external_channel(
+        let rendered = render_joined(
             &message,
             &RenderContext { channel: "feishu", relay_origin: "aipp" },
         )
@@ -1482,14 +1767,13 @@ mod tests {
                 "json": {"status": "preview_shown", "request_id": "req_1"}
             }]),
         );
-        let preview_rendered = render_message_for_external_channel(
+        let preview_parts = render_message_for_external_channel(
             &preview_message,
             &RenderContext { channel: "feishu", relay_origin: "aipp" },
-        )
-        .unwrap();
-        assert!(preview_rendered.contains("👁 已展示"));
-        assert!(preview_rendered.contains("README.md"));
-        assert!(preview_rendered.contains("内容摘要"));
+        );
+        assert_eq!(preview_parts.len(), 1);
+        assert!(preview_parts[0].contains("README.md"));
+        assert!(preview_parts[0].contains("# Title\nline1\nline2"));
 
         let bash_message = build_tool_result_message(
             "execute_bash",
@@ -1500,7 +1784,7 @@ mod tests {
                 "text": "Command started in background. Use get_bash_output with bash_id='bash-1' to check output."
             }]),
         );
-        let bash_rendered = render_message_for_external_channel(
+        let bash_rendered = render_joined(
             &bash_message,
             &RenderContext { channel: "feishu", relay_origin: "aipp" },
         )
@@ -1519,7 +1803,7 @@ mod tests {
                 "text": "     1\tfirst line\n     2\tsecond line"
             }]),
         );
-        let rendered = render_message_for_external_channel(
+        let rendered = render_joined(
             &message,
             &RenderContext { channel: "feishu", relay_origin: "aipp" },
         )
@@ -1535,7 +1819,7 @@ mod tests {
             "response",
             "好的，我来处理。<!-- MCP_TOOL_CALL:{\"server_name\":\"Agent 工具\",\"tool_name\":\"todo_write\",\"parameters\":\"{\\\"todos\\\":[{\\\"content\\\":\\\"修复bug\\\",\\\"status\\\":\\\"in_progress\\\",\\\"activeForm\\\":\\\"修复bug中\\\"}]}\"} --><!-- MCP_TOOL_CALL:{\"server_name\":\"aipp:operation\",\"tool_name\":\"read_file\",\"parameters\":\"{\\\"file_path\\\":\\\"src/main.rs\\\"}\"} -->",
         );
-        let rendered = render_message_for_external_channel(
+        let rendered = render_joined(
             &message,
             &RenderContext { channel: "feishu", relay_origin: "aipp" },
         )
@@ -1564,7 +1848,7 @@ mod tests {
                 }
             }]),
         );
-        let rendered = render_message_for_external_channel(
+        let rendered = render_joined(
             &message,
             &RenderContext { channel: "feishu", relay_origin: "aipp" },
         )
@@ -1584,7 +1868,7 @@ mod tests {
             json!({}),
             json!([{"type": "text", "text": "执行成功"}]),
         );
-        let rendered = render_message_for_external_channel(
+        let rendered = render_joined(
             &message,
             &RenderContext { channel: "feishu", relay_origin: "aipp" },
         )
@@ -1603,7 +1887,7 @@ mod tests {
             json!({"file_path": "/tmp/output.txt", "content": "hello"}),
             json!([{"type": "text", "text": "Successfully wrote 5 bytes to /tmp/output.txt"}]),
         );
-        let rendered = render_message_for_external_channel(
+        let rendered = render_joined(
             &message,
             &RenderContext { channel: "feishu", relay_origin: "aipp" },
         )
@@ -1628,7 +1912,7 @@ mod tests {
                 }
             }]),
         );
-        let rendered = render_message_for_external_channel(
+        let rendered = render_joined(
             &message,
             &RenderContext { channel: "feishu", relay_origin: "aipp" },
         )
@@ -1637,5 +1921,86 @@ mod tests {
         assert!(rendered.contains("✅ 子任务已创建「数据分析」"));
         assert!(rendered.contains("状态：pending"));
         assert!(rendered.contains("任务 ID：42"));
+    }
+
+    #[test]
+    fn preview_file_multi_files_returns_multiple_parts() {
+        let message = build_tool_result_message(
+            "preview_file",
+            "UI交互工具",
+            json!({
+                "files": [
+                    {
+                        "title": "README.md",
+                        "type": "markdown",
+                        "language": "markdown",
+                        "content": "# Hello\nWorld"
+                    },
+                    {
+                        "title": "main.rs",
+                        "type": "text",
+                        "language": "rust",
+                        "content": "fn main() {}"
+                    }
+                ]
+            }),
+            json!([{
+                "type": "json",
+                "json": {"status": "preview_shown", "request_id": "req_2"}
+            }]),
+        );
+        let parts = render_message_for_external_channel(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        );
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].contains("README.md"));
+        assert!(parts[0].contains("# Hello\nWorld"));
+        assert!(parts[1].contains("main.rs"));
+        assert!(parts[1].contains("fn main() {}"));
+        assert!(parts[1].contains("```rust"));
+    }
+
+    #[test]
+    fn task_conversation_operation_call_is_human_readable() {
+        let message = build_message(
+            "response",
+            "<!-- MCP_TOOL_CALL:{\"server_name\":\"Agent 工具\",\"tool_name\":\"task_conversation_operation\",\"parameters\":\"{\\\"task_conversation_id\\\":42,\\\"action\\\":\\\"reply_prompt\\\",\\\"prompt\\\":\\\"请继续分析数据\\\"}\"} -->",
+        );
+        let rendered = render_joined(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        )
+        .unwrap();
+
+        assert!(rendered.contains("💬 向子任务 #42 发送指令"));
+        assert!(rendered.contains("请继续分析数据"));
+        assert!(!rendered.contains("task_conversation_operation"));
+    }
+
+    #[test]
+    fn task_conversation_operation_result_is_human_readable() {
+        let message = build_tool_result_message(
+            "task_conversation_operation",
+            "Agent 工具",
+            json!({"task_conversation_id": 42, "action": "permission_confirm", "decision": "allow"}),
+            json!([{
+                "type": "json",
+                "json": {
+                    "status": "permission_confirmed",
+                    "request_id": "req_1",
+                    "decision": "allow",
+                    "resolved": true
+                }
+            }]),
+        );
+        let rendered = render_joined(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        )
+        .unwrap();
+
+        assert!(rendered.contains("🔐 已审批子任务 #42 的操作权限：允许"));
+        assert!(!rendered.contains("permission_confirmed"));
     }
 }

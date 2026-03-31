@@ -2682,14 +2682,31 @@ async fn flush_feishu_relay_scope(
             continue;
         }
 
-        let rendered = render_message_for_external_channel(
+        let rendered_parts = render_message_for_external_channel(
             &message,
             &RenderContext { channel: &scope.channel, relay_origin: &scope.origin },
         );
         last_processed_message_id = message.id;
 
-        match rendered {
-            Some(rendered_text) if !rendered_text.trim().is_empty() => {
+        let non_empty_parts: Vec<&str> = rendered_parts
+            .iter()
+            .map(String::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+
+        if non_empty_parts.is_empty() {
+            record_scope_delivery(
+                app_handle,
+                scope.id,
+                &scope.channel,
+                scope.conversation_id,
+                message.id,
+                None,
+                "skipped",
+                "",
+            )?;
+        } else {
+            for rendered_text in &non_empty_parts {
                 let outbound = send_markdown_message_to_target(
                     app_handle,
                     config,
@@ -2698,7 +2715,7 @@ async fn flush_feishu_relay_scope(
                         external_chat_id: scope.external_chat_id.clone(),
                         external_user_id: scope.external_user_id.clone(),
                     },
-                    &rendered_text,
+                    rendered_text,
                 )
                 .await?;
                 insert_external_link(
@@ -2721,22 +2738,10 @@ async fn flush_feishu_relay_scope(
                     message.id,
                     Some(&outbound.external_message_id),
                     "sent",
-                    &rendered_text,
+                    rendered_text,
                 )?;
                 current_reply_to = Some(outbound.external_message_id.clone());
                 delivered_count += 1;
-            }
-            _ => {
-                record_scope_delivery(
-                    app_handle,
-                    scope.id,
-                    &scope.channel,
-                    scope.conversation_id,
-                    message.id,
-                    None,
-                    "skipped",
-                    "",
-                )?;
             }
         }
 
@@ -3858,34 +3863,44 @@ pub(crate) async fn resend_message_to_feishu_for_debug(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("未找到消息: {message_id}"))?;
 
-    let rendered_text = render_message_for_external_channel(
+    let rendered_parts = render_message_for_external_channel(
         &message,
         &RenderContext { channel: CHANNEL_FEISHU, relay_origin: RELAY_ORIGIN_AIPP },
-    )
-    .filter(|content| !content.trim().is_empty())
-    .ok_or_else(|| "该消息没有可发送到飞书的可读内容".to_string())?;
+    );
+    let non_empty_parts: Vec<&str> = rendered_parts
+        .iter()
+        .map(String::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+    if non_empty_parts.is_empty() {
+        return Err("该消息没有可发送到飞书的可读内容".to_string());
+    }
 
     let target =
         find_latest_feishu_target(app_handle, message.conversation_id)?.ok_or_else(|| {
             "当前对话没有可用的飞书发送目标，请先让该对话与飞书建立一次消息链路".to_string()
         })?;
-    let outcome =
-        send_markdown_message_to_target(app_handle, &config, &target, &rendered_text).await?;
 
-    insert_external_link(
-        app_handle,
-        ChannelLinkRecord {
-            external_message_id: &outcome.external_message_id,
-            external_chat_id: target.external_chat_id.as_deref(),
-            external_user_id: target.external_user_id.as_deref(),
-            conversation_id: message.conversation_id,
-            local_message_id: Some(message.id),
-            direction: "outbound",
-            payload_type: &outcome.payload_type,
-        },
-    )?;
+    let mut last_outcome: Option<FeishuDebugSendResult> = None;
+    for rendered_text in &non_empty_parts {
+        let outcome =
+            send_markdown_message_to_target(app_handle, &config, &target, rendered_text).await?;
+        insert_external_link(
+            app_handle,
+            ChannelLinkRecord {
+                external_message_id: &outcome.external_message_id,
+                external_chat_id: target.external_chat_id.as_deref(),
+                external_user_id: target.external_user_id.as_deref(),
+                conversation_id: message.conversation_id,
+                local_message_id: Some(message.id),
+                direction: "outbound",
+                payload_type: &outcome.payload_type,
+            },
+        )?;
+        last_outcome = Some(outcome);
+    }
 
-    Ok(outcome)
+    Ok(last_outcome.expect("non_empty_parts guarantees at least one outcome"))
 }
 
 pub fn debug_build_feishu_markdown_card(markdown: &str) -> Result<Value, String> {
