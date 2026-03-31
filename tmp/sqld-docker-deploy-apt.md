@@ -31,6 +31,22 @@
 - `同步服务地址` 指向你的同步网关地址，例如 `http://服务器IP:9000/t/<uuid>` 或 `https://sync.example.com/t/<uuid>`
 - `访问令牌` 指的是 **tenant 自己的 gateway token**，不是 `sqld` 上游 JWT
 
+**重要兼容性说明：**
+
+- 当前 AIPP 使用的是 `libsql 0.9.x` 的 synced database 客户端
+- 这套客户端会请求旧同步协议端点：`/info`、`/export/<generation>`、`/sync/...`
+- 而 `ghcr.io/tursodatabase/libsql-server:latest` 当前公开代码路由里只看到 `"/v2/pipeline"` 和 `"/dev/:namespace/v:version/pipeline"`，没有看到上述旧同步端点
+- 所以如果你直接使用 `latest`，很可能出现：
+  - 裸 `sqld` 的 `POST /v2/pipeline` 本机验证成功
+  - 但 gateway 的 `GET /t/<uuid>/dev/system/info` 返回 `404`
+
+这说明不是 tenant token、namespace、或 gateway 路由本身有问题，而是 **AIPP 当前 libsql 客户端与最新 libsql-server 镜像存在同步协议不兼容**。
+
+结论：
+
+- 若要继续走 AIPP 当前 embedded sync 方案，请固定到一个**仍提供 `/info` / `/export` / `/sync` 旧协议端点**的 `libsql-server` 旧版本镜像
+- 不建议继续默认使用 `ghcr.io/tursodatabase/libsql-server:latest`
+
 ### 2. `sqld` 只负责“远端主库 + 同步协议”
 
 这份部署文档能解决的是：

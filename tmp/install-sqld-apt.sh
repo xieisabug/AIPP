@@ -754,6 +754,30 @@ list_gateway_tenants() {
   gateway_admin list-tenants --config "${APP_DIR}/gateway/config.json" --ids-only
 }
 
+find_valid_gateway_credential() {
+  [ "$USE_PY_GATEWAY" = "1" ] || return 0
+
+  local tenant=""
+  local credential_file=""
+  local missing_count=0
+
+  while IFS= read -r tenant; do
+    [ -n "$tenant" ] || continue
+    credential_file="${APP_DIR}/gateway/credentials/${tenant}.json"
+    if [ -f "$credential_file" ]; then
+      printf '%s\n' "$credential_file"
+      return 0
+    fi
+    missing_count=$((missing_count + 1))
+  done < <(list_gateway_tenants || true)
+
+  if [ "$missing_count" -gt 0 ]; then
+    warn "检测到已有 tenant 配置，但缺少对应凭据文件；请检查 ${APP_DIR}/gateway/credentials"
+  fi
+
+  return 1
+}
+
 write_compose() {
   local bind_spec
   local admin_bind_spec
@@ -864,7 +888,9 @@ create_default_namespaces() {
 start_sqld() {
   section "启动 sqld"
   cd "${APP_DIR}"
-  docker_compose up -d
+  info "重建 sqld 容器，确保加载最新的密钥、数据目录挂载和配置"
+  docker_compose down --remove-orphans >/dev/null 2>&1 || true
+  docker_compose up -d --force-recreate
   ok "sqld 已启动"
 }
 
@@ -917,7 +943,8 @@ WantedBy=multi-user.target
 EOF
 
   $SUDO systemctl daemon-reload
-  $SUDO systemctl enable --now aipp-sqld-gateway
+  $SUDO systemctl enable aipp-sqld-gateway >/dev/null
+  $SUDO systemctl restart aipp-sqld-gateway
   ok "Python tenant gateway 服务已启动"
 }
 
@@ -1105,6 +1132,7 @@ verify_local() {
   local access_token=""
   local base_path=""
   local gateway_origin=""
+  local info_status=""
   local -a gateway_values=()
   local -a curl_prefix=()
   local -a host_args=()
@@ -1126,9 +1154,9 @@ verify_local() {
     return 0
   fi
 
-  credential_file="$(find "${APP_DIR}/gateway/credentials" -maxdepth 1 -type f -name '*.json' | sort | head -n 1)"
+  credential_file="$(find_valid_gateway_credential || true)"
   if [ -z "$credential_file" ]; then
-    warn "未找到 tenant 凭据文件，跳过 gateway HTTP 验证"
+    warn "未找到与当前 gateway 配置匹配的 tenant 凭据文件，跳过 gateway HTTP 验证"
     return 0
   fi
 
@@ -1151,9 +1179,38 @@ PY
   gateway_origin="http://127.0.0.1:${GATEWAY_PORT}"
   curl -fsS "${gateway_origin}/healthz" >/dev/null
 
-  curl -fsS \
+  info_status="$(curl -sS -o /dev/null -w '%{http_code}' \
     -H "Authorization: Bearer ${access_token}" \
-    "${gateway_origin}${base_path}/dev/system/info" >/dev/null
+    "${gateway_origin}${base_path}/dev/system/info" || true)"
+  if [ "$info_status" = "404" ]; then
+    cat <<EOF >&2
+[ERROR] Python tenant gateway 的 /dev/system/info 校验返回 404。
+
+这不是 tenant token 或 namespace 创建失败；而是当前 sqld 镜像不提供 AIPP/libsql 0.9 synced database 需要的旧同步协议端点：
+  - 需要的端点: /info, /export/<generation>, /sync/...
+  - 当前镜像实际可见: /v2/pipeline, /dev/<namespace>/v2/pipeline
+
+已确认本机裸 sqld 的 /v2/pipeline 正常，但 AIPP embedded sync 依赖的 /info 协议不存在，
+所以 Python gateway 转发到 sqld 根路径后会得到 404。
+
+结论：
+  - 问题不在 tenant gateway 路由本身
+  - 问题在于当前 SQLD_IMAGE=${SQLD_IMAGE} 与 AIPP 使用的 libsql 0.9.30 同步协议不兼容
+
+建议：
+  1. 不要继续用 ghcr.io/tursodatabase/libsql-server:latest 做这套 AIPP embedded sync 校验
+  2. 改为固定到与 libsql 0.9.30 兼容、仍提供 /info /export /sync 的 libsql-server 旧镜像标签
+  3. 或者升级 AIPP 侧 libsql client / 同步实现，改用新协议
+
+可继续人工确认：
+  ACCESS_TOKEN='<tenant access_token>'
+  curl -i -H "Authorization: Bearer \${ACCESS_TOKEN}" "${gateway_origin}${base_path}/dev/system/info"
+  curl -i -X POST -H "Authorization: Bearer \${ACCESS_TOKEN}" -H "Content-Type: application/json" "${gateway_origin}${base_path}/dev/system/v2/pipeline" -d '{"baton":null,"requests":[{"type":"execute","stmt":{"sql":"select 1 as ok"}},{"type":"close"}]}'
+EOF
+    return 1
+  elif [ "$info_status" != "200" ]; then
+    die "Python tenant gateway /dev/system/info 校验失败，HTTP 状态码: ${info_status}"
+  fi
 
   curl -fsS -X POST \
     "${gateway_origin}${base_path}/dev/system/v2/pipeline" \
@@ -1174,9 +1231,12 @@ PY
       gateway_origin="http://127.0.0.1"
     fi
 
-    "${curl_prefix[@]}" -fsS "${host_args[@]}" \
+    info_status="$("${curl_prefix[@]}" -sS -o /dev/null -w '%{http_code}' "${host_args[@]}" \
       -H "Authorization: Bearer ${access_token}" \
-      "${gateway_origin}${base_path}/dev/system/info" >/dev/null
+      "${gateway_origin}${base_path}/dev/system/info" || true)"
+    if [ "$info_status" != "200" ]; then
+      die "Nginx 前置层 /dev/system/info 校验失败，HTTP 状态码: ${info_status}"
+    fi
     ok "Nginx 前置层验证成功: ${tenant_id}"
   fi
 }
@@ -1242,7 +1302,13 @@ AIPP 里填写（每个 tenant 各一套）:
 
 EOF
 
-    for credential_file in "${APP_DIR}"/gateway/credentials/*.json; do
+    while IFS= read -r tenant_id; do
+      [ -n "$tenant_id" ] || continue
+      credential_file="${APP_DIR}/gateway/credentials/${tenant_id}.json"
+      if [ ! -f "$credential_file" ]; then
+        warn "tenant ${tenant_id} 缺少凭据文件，已跳过摘要输出"
+        continue
+      fi
       [ -e "$credential_file" ] || continue
       mapfile -t gateway_values < <(gateway_python - "$credential_file" <<'PY'
 import json
@@ -1265,7 +1331,7 @@ tenant:
   credential_file: ${credential_file}
 
 EOF
-    done
+    done < <(list_gateway_tenants || true)
   else
     local token
     token="$(cat "${APP_DIR}/keys/aipp-token.txt")"

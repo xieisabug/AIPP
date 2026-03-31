@@ -11,8 +11,9 @@ use crate::api::ai::config::{
 };
 use crate::api::ai::context_manager::{self, budget::ContextBudget, CompactionContext};
 use crate::api::ai::conversation::{
-    build_chat_request_from_messages, build_message_list_from_db, filter_messages_for_parent_group,
-    init_conversation, BranchSelection, ChatRequestBuildResult, ToolCallStrategy, ToolConfig,
+    build_chat_request_from_messages, build_message_list_with_metadata_from_db,
+    filter_messages_for_parent_group, init_conversation, BranchSelection, ChatRequestBuildResult,
+    ToolCallStrategy, ToolConfig,
 };
 use crate::api::ai::events::{
     ActivityFocus, ConversationEvent, ConversationRuntimeState, ConversationShineState,
@@ -569,6 +570,8 @@ pub async fn ask_ai(
         user_message_id,
         request_prompt_result_with_context,
         init_message_list,
+        init_message_ids,
+        init_db_token_counts,
     ) = initialize_conversation(
         &app_handle_clone,
         &processed_request,
@@ -902,12 +905,12 @@ pub async fn ask_ai(
             conversation_id,
             conversation_db: &conversation_db,
             is_butler,
-            message_ids: vec![], // TODO: pass DB message IDs for persistence
+            message_ids: init_message_ids,
         };
         let fit_result = context_manager::fit_to_budget_with_compaction(
             init_message_list,
             &budget,
-            &[],
+            &init_db_token_counts,
             compaction_ctx,
         )
         .await;
@@ -1109,8 +1112,8 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         .max_by_key(|msg| msg.id)
         .and_then(|m| m.generation_group_id.clone());
 
-    let init_message_list =
-        build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
+    let (init_message_list, init_metadata) =
+        build_message_list_with_metadata_from_db(&all_messages, BranchSelection::LatestBranch);
 
     let override_mcp_config = enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
 
@@ -1302,10 +1305,32 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let tool_config =
         build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id_i64));
 
-    // Context budget management
+    // Context budget management with compaction for continuation
     let budget = ContextBudget::from_config(&config_feature_map);
-    let fit_result = context_manager::fit_to_budget(init_message_list, &budget, &[]);
+    let is_butler_cont = is_butler_system_assistant_name(&assistant_detail.assistant.name);
+    let compaction_ctx = CompactionContext {
+        client: &chat_config.client,
+        model_name: &chat_config.model_name,
+        conversation_id: conversation_id_i64,
+        conversation_db: &conversation_db,
+        is_butler: is_butler_cont,
+        message_ids: init_metadata.message_ids,
+    };
+    let fit_result = context_manager::fit_to_budget_with_compaction(
+        init_message_list,
+        &budget,
+        &init_metadata.db_token_counts,
+        compaction_ctx,
+    )
+    .await;
     let init_message_list = fit_result.messages;
+    if fit_result.compacted {
+        info!(
+            conversation_id = conversation_id_i64,
+            estimated_tokens = fit_result.estimated_tokens,
+            "compaction triggered in tool_result_continue"
+        );
+    }
 
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
@@ -1413,8 +1438,8 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
             .and_then(|m| m.generation_group_id.clone())
     };
 
-    let init_message_list =
-        build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
+    let (init_message_list, init_metadata) =
+        build_message_list_with_metadata_from_db(&all_messages, BranchSelection::LatestBranch);
 
     let override_mcp_config = enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
 
@@ -1595,10 +1620,32 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let tool_config =
         build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id));
 
-    // Context budget management
+    // Context budget management with compaction for batch continuation
     let budget = ContextBudget::from_config(&config_feature_map);
-    let fit_result = context_manager::fit_to_budget(init_message_list, &budget, &[]);
+    let is_butler_batch = is_butler_system_assistant_name(&assistant_detail.assistant.name);
+    let compaction_ctx = CompactionContext {
+        client: &chat_config.client,
+        model_name: &chat_config.model_name,
+        conversation_id,
+        conversation_db: &conversation_db,
+        is_butler: is_butler_batch,
+        message_ids: init_metadata.message_ids,
+    };
+    let fit_result = context_manager::fit_to_budget_with_compaction(
+        init_message_list,
+        &budget,
+        &init_metadata.db_token_counts,
+        compaction_ctx,
+    )
+    .await;
     let init_message_list = fit_result.messages;
+    if fit_result.compacted {
+        info!(
+            conversation_id,
+            estimated_tokens = fit_result.estimated_tokens,
+            "compaction triggered in batch_tool_result_continue"
+        );
+    }
 
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
@@ -1837,8 +1884,8 @@ pub async fn regenerate_ai(
     let filtered_messages =
         filter_messages_for_parent_group(filtered_messages, regenerate_parent_group_id.as_deref());
 
-    let init_message_list =
-        build_message_list_from_db(&filtered_messages, BranchSelection::LatestBranch);
+    let (init_message_list, init_metadata) =
+        build_message_list_with_metadata_from_db(&filtered_messages, BranchSelection::LatestBranch);
 
     debug!(?init_message_list, "initial message list for regenerate");
 
@@ -2019,9 +2066,24 @@ pub async fn regenerate_ai(
             None
         };
 
-        // Context budget management
+        // Context budget management with compaction for regenerate
         let budget = ContextBudget::from_config(&_config_feature_map);
-        let fit_result = context_manager::fit_to_budget(init_message_list, &budget, &[]);
+        let is_butler_regen = is_butler_system_assistant_name(&assistant_detail.assistant.name);
+        let compaction_ctx = CompactionContext {
+            client: &chat_config.client,
+            model_name: &chat_config.model_name,
+            conversation_id,
+            conversation_db: &conversation_db,
+            is_butler: is_butler_regen,
+            message_ids: init_metadata.message_ids,
+        };
+        let fit_result = context_manager::fit_to_budget_with_compaction(
+            init_message_list,
+            &budget,
+            &init_metadata.db_token_counts,
+            compaction_ctx,
+        )
+        .await;
         let init_message_list = fit_result.messages;
 
         let ChatRequestBuildResult { chat_request, tool_name_mapping } =
@@ -2143,9 +2205,9 @@ async fn initialize_conversation(
     runtime_user_prompt: String,
     override_prompt: Option<String>,
     extra_user_attachments: Vec<MessageAttachment>,
-) -> Result<(i64, Option<i64>, i64, String, Vec<(String, String, Vec<MessageAttachment>)>), AppError>
+) -> Result<(i64, Option<i64>, i64, String, Vec<(String, String, Vec<MessageAttachment>)>, Vec<i64>, Vec<i32>), AppError>
 {
-    // 返回值：(conversation_id, add_message_id, user_message_id, request_prompt_with_context, init_message_list)
+    // 返回值：(conversation_id, add_message_id, user_message_id, request_prompt_with_context, init_message_list, message_ids, db_token_counts)
     let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
 
     let system_prompt = override_prompt.unwrap_or(assistant_prompt_result);
@@ -2156,6 +2218,8 @@ async fn initialize_conversation(
         user_message_id,
         request_prompt_result_with_context,
         init_message_list,
+        message_ids,
+        db_token_counts,
     ) = if request.conversation_id.is_empty() {
         let mut message_attachment_list = db
             .attachment_repo()
@@ -2216,13 +2280,18 @@ async fn initialize_conversation(
             user_msg_id,
             runtime_user_prompt_with_context,
             runtime_init_message_list,
+            vec![], // New conversation: no message IDs needed (too few for compaction)
+            vec![], // New conversation: no DB token counts
         )
     } else {
         // 已存在对话逻辑
         let conversation_id = request.conversation_id.parse::<i64>()?;
         let all_messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id)?;
 
-        let message_list = build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
+        let (message_list, metadata) =
+            build_message_list_with_metadata_from_db(&all_messages, BranchSelection::LatestBranch);
+        let mut branch_message_ids = metadata.message_ids;
+        let mut branch_db_token_counts = metadata.db_token_counts;
         let has_system_message =
             message_list.iter().any(|(message_type, _, _)| message_type == "system");
 
@@ -2345,12 +2414,18 @@ async fn initialize_conversation(
         let mut updated_message_list = message_list;
         if !has_system_message {
             updated_message_list.insert(0, (String::from("system"), system_prompt, vec![]));
+            // system 消息不来自 DB，为其补充占位 id 和 token
+            branch_message_ids.insert(0, 0);
+            branch_db_token_counts.insert(0, 0);
         }
         updated_message_list.push((
             String::from("user"),
             runtime_user_prompt_with_context.clone(),
             message_attachment_list,
         ));
+        // 新的 user 消息还没有 DB token count
+        branch_message_ids.push(user_message.id);
+        branch_db_token_counts.push(0);
 
         (
             conversation_id,
@@ -2358,6 +2433,8 @@ async fn initialize_conversation(
             user_message.id,
             runtime_user_prompt_with_context,
             updated_message_list,
+            branch_message_ids,
+            branch_db_token_counts,
         )
     };
     Ok((
@@ -2366,6 +2443,8 @@ async fn initialize_conversation(
         user_message_id,
         request_prompt_result_with_context,
         init_message_list,
+        message_ids,
+        db_token_counts,
     ))
 }
 
