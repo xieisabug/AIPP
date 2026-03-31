@@ -249,6 +249,7 @@ function ButlerExperimentWindow() {
     const showFeishuStatus = butlerExperimentEnabled && feishuEnabled;
 
     const conversationUIRef = useRef<ConversationUIRef>(null);
+    const mainLoadRequestRef = useRef(0);
     const latestTaskDetailRequestRef = useRef(0);
     const selectedTaskIdRef = useRef<number | null>(null);
     const isTaskDetailDialogOpenRef = useRef(false);
@@ -410,6 +411,7 @@ function ButlerExperimentWindow() {
         silentError?: boolean;
         reconcile?: boolean;
     }) => {
+        const requestId = ++mainLoadRequestRef.current;
         const showLoading = options?.showLoading ?? false;
         const silentError = options?.silentError ?? false;
         const reconcile = options?.reconcile ?? false;
@@ -421,8 +423,14 @@ function ButlerExperimentWindow() {
                 "load_butler_main_conversation",
                 { reconcile }
             );
+            if (requestId !== mainLoadRequestRef.current) {
+                return;
+            }
             applyMainConversationResult(result);
         } catch (error) {
+            if (requestId !== mainLoadRequestRef.current) {
+                return;
+            }
             const message =
                 error instanceof Error ? error.message : "无法加载总管家实验窗口";
             console.error("[ButlerExperimentWindow] Failed to load main conversation:", error);
@@ -433,7 +441,7 @@ function ButlerExperimentWindow() {
                 toast.error(message);
             }
         } finally {
-            if (showLoading) {
+            if (showLoading && requestId === mainLoadRequestRef.current) {
                 setLoadingMain(false);
             }
         }
