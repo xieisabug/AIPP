@@ -105,6 +105,20 @@ impl ToolPresentationRegistry {
     }
 }
 
+pub fn render_preview_file_result_parts_for_feishu(params: &Value) -> Vec<String> {
+    let tool_result = ExternalToolResult {
+        call_id: None,
+        server_name: Some("UI交互工具".to_string()),
+        tool_name: Some("preview_file".to_string()),
+        parameters: Some(params.clone()),
+        raw_parameters: None,
+        success: true,
+        output: String::new(),
+        parsed_output: None,
+    };
+    UiInteractionToolPresenter.present_result_parts(&tool_result).unwrap_or_default()
+}
+
 pub fn render_message_for_external_channel(
     message: &Message,
     context: &RenderContext<'_>,
@@ -395,15 +409,69 @@ fn preview_multiline(value: &str, max_lines: usize, max_chars: usize) -> String 
     preview_text(&lines, max_chars)
 }
 
-/// Prepare file content for sending to Feishu, truncating if necessary.
-fn content_for_feishu(content: &str, max_chars: usize) -> String {
-    let trimmed = content.trim();
-    let char_count = trimmed.chars().count();
-    if char_count <= max_chars {
-        trimmed.to_string()
+fn split_content_for_feishu(content: &str, max_chars: usize) -> Vec<String> {
+    if max_chars == 0 {
+        return vec![content.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize;
+
+    for line in content.split_inclusive('\n') {
+        let line_len = line.chars().count();
+        if current_len + line_len <= max_chars {
+            current.push_str(line);
+            current_len += line_len;
+            continue;
+        }
+
+        if !current.is_empty() {
+            chunks.push(current);
+            current = String::new();
+            current_len = 0;
+        }
+
+        if line_len <= max_chars {
+            current.push_str(line);
+            current_len = line_len;
+            continue;
+        }
+
+        let mut line_chunk = String::new();
+        let mut line_chunk_len = 0usize;
+        for ch in line.chars() {
+            line_chunk.push(ch);
+            line_chunk_len += 1;
+            if line_chunk_len == max_chars {
+                chunks.push(line_chunk);
+                line_chunk = String::new();
+                line_chunk_len = 0;
+            }
+        }
+
+        if !line_chunk.is_empty() {
+            current = line_chunk;
+            current_len = line_chunk_len;
+        }
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    if chunks.is_empty() {
+        vec![String::new()]
     } else {
-        let truncated: String = trimmed.chars().take(max_chars).collect();
-        format!("{}\n\n（内容过长，已截断 {} 字符）", truncated, char_count - max_chars)
+        chunks
+    }
+}
+
+fn preview_part_suffix(part_index: usize, total_parts: usize) -> String {
+    if total_parts > 1 {
+        format!("（第 {}/{} 部分）", part_index + 1, total_parts)
+    } else {
+        String::new()
     }
 }
 
@@ -1218,32 +1286,46 @@ impl ToolPresenter for UiInteractionToolPresenter {
                         || title.to_lowercase().ends_with(".md");
                     let language = value_string(file, "language").unwrap_or("");
                     if is_markdown {
-                        let header = format!("**📄 {}**\n\n", title);
-                        parts.push(format!(
-                            "{}{}",
-                            header,
-                            content_for_feishu(content, 3800)
-                        ));
+                        let content_parts = split_content_for_feishu(content, 3800);
+                        let total_parts = content_parts.len();
+                        for (part_index, content_part) in content_parts.into_iter().enumerate() {
+                            let header = format!(
+                                "**📄 {}{}**\n\n",
+                                title,
+                                preview_part_suffix(part_index, total_parts)
+                            );
+                            parts.push(format!("{}{}", header, content_part));
+                        }
                     } else if language.is_empty()
                         || language == "text"
                         || language == "plaintext"
                     {
                         let label = preview_file_kind_label(file_type);
-                        parts.push(format!(
-                            "**📄 {}**（{}）\n\n```\n{}\n```",
-                            title,
-                            label,
-                            content_for_feishu(content, 3600)
-                        ));
+                        let content_parts = split_content_for_feishu(content, 3600);
+                        let total_parts = content_parts.len();
+                        for (part_index, content_part) in content_parts.into_iter().enumerate() {
+                            parts.push(format!(
+                                "**📄 {}{}**（{}）\n\n```\n{}\n```",
+                                title,
+                                preview_part_suffix(part_index, total_parts),
+                                label,
+                                content_part
+                            ));
+                        }
                     } else {
                         let label = preview_file_kind_label(file_type);
-                        parts.push(format!(
-                            "**📄 {}**（{}）\n\n```{}\n{}\n```",
-                            title,
-                            label,
-                            language,
-                            content_for_feishu(content, 3600)
-                        ));
+                        let content_parts = split_content_for_feishu(content, 3600);
+                        let total_parts = content_parts.len();
+                        for (part_index, content_part) in content_parts.into_iter().enumerate() {
+                            parts.push(format!(
+                                "**📄 {}{}**（{}）\n\n```{}\n{}\n```",
+                                title,
+                                preview_part_suffix(part_index, total_parts),
+                                label,
+                                language,
+                                content_part
+                            ));
+                        }
                     }
                 }
                 _ => {
@@ -1959,6 +2041,43 @@ mod tests {
         assert!(parts[1].contains("main.rs"));
         assert!(parts[1].contains("fn main() {}"));
         assert!(parts[1].contains("```rust"));
+    }
+
+    #[test]
+    fn preview_file_long_content_is_split_without_truncation() {
+        let long_content = format!(
+            "{}\n{}\nEND",
+            "A".repeat(3700),
+            "B".repeat(3700),
+        );
+        let message = build_tool_result_message(
+            "preview_file",
+            "UI交互工具",
+            json!({
+                "files": [{
+                    "title": "main.rs",
+                    "type": "text",
+                    "language": "rust",
+                    "content": long_content
+                }]
+            }),
+            json!([{
+                "type": "json",
+                "json": {"status": "preview_shown", "request_id": "req_long"}
+            }]),
+        );
+
+        let parts = render_message_for_external_channel(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        );
+
+        assert!(parts.len() >= 3);
+        assert!(parts[0].contains("第 1/"));
+        assert!(parts.iter().all(|part| !part.contains("内容过长，已截断")));
+        assert!(parts[0].contains(&"A".repeat(100)));
+        assert!(parts.iter().any(|part| part.contains(&"B".repeat(100))));
+        assert!(parts.iter().any(|part| part.contains("END")));
     }
 
     #[test]

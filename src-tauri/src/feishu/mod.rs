@@ -33,6 +33,7 @@ use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::{MCPDatabase, MCPToolCall};
 use crate::db::system_db::{SecureConfigEntry, SystemDatabase};
 use crate::external_channels::presentation::{render_message_for_external_channel, RenderContext};
+use crate::mcp::builtin_mcp::interaction::{prepare_preview_file_request_for_ui, PreviewFileRequest};
 use crate::mcp::builtin_mcp::interaction::{
     resolve_ask_user_question_response, AskUserQuestionItem, AskUserQuestionRequest,
     AskUserQuestionRequestEvent,
@@ -2660,6 +2661,7 @@ async fn flush_feishu_relay_scope(
     scope_id: i64,
 ) -> Result<(), String> {
     let scope = load_relay_scope(app_handle, scope_id)?;
+    let mcp_db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
     if matches!(scope.status.as_str(), "completed" | "superseded") {
         return Ok(());
     }
@@ -2688,10 +2690,15 @@ async fn flush_feishu_relay_scope(
             continue;
         }
 
-        let rendered_parts = render_message_for_external_channel(
+        let preview_tool_call =
+            resolve_preview_file_tool_call_for_message(&mcp_db, &message, &message);
+        let rendered_parts = render_message_for_feishu_delivery(
+            app_handle,
             &message,
-            &RenderContext { channel: &scope.channel, relay_origin: &scope.origin },
-        );
+            preview_tool_call,
+            &scope.origin,
+        )
+        .await?;
         last_processed_message_id = message.id;
 
         let non_empty_parts: Vec<&str> = rendered_parts
@@ -3856,6 +3863,143 @@ async fn send_markdown_message_to_target(
     })
 }
 
+fn message_contains_preview_file_tool_call(message: &crate::db::conversation_db::Message) -> bool {
+    if message.message_type != "response" {
+        return false;
+    }
+
+    let content = message.content.as_str();
+    content.contains("MCP_TOOL_CALL:")
+        && (content.contains("\"tool_name\":\"preview_file\"")
+            || content.contains("\"tool_name\": \"preview_file\""))
+}
+
+fn message_is_preview_file_tool_result(message: &crate::db::conversation_db::Message) -> bool {
+    message.message_type == "tool_result" && message.content.contains("Tool: preview_file")
+}
+
+fn find_preview_file_tool_call_for_message(
+    mcp_db: &MCPDatabase,
+    selected_message: &crate::db::conversation_db::Message,
+    resend_message: &crate::db::conversation_db::Message,
+) -> Option<MCPToolCall> {
+    if selected_message.message_type == "tool_result" {
+        let tool_call_id =
+            crate::api::ai::conversation::extract_tool_call_id(&selected_message.content)?;
+        let conversation_calls =
+            mcp_db.get_mcp_tool_calls_by_conversation(resend_message.conversation_id).ok()?;
+        return conversation_calls
+            .into_iter()
+            .find(|call| call.tool_name == "preview_file"
+                && call.llm_call_id.as_deref() == Some(tool_call_id.as_str()));
+    }
+
+    let message_calls = mcp_db.get_mcp_tool_calls_by_message(selected_message.id).ok()?;
+    message_calls
+        .into_iter()
+        .find(|call| call.tool_name == "preview_file")
+}
+
+async fn render_preview_file_mcp_call_for_feishu(
+    app_handle: &AppHandle,
+    conversation_id: i64,
+    tool_call: &MCPToolCall,
+) -> Result<Option<Vec<String>>, String> {
+    let request: PreviewFileRequest = serde_json::from_str(&tool_call.parameters)
+        .map_err(|e| format!("解析 preview_file 参数失败: {e}"))?;
+    let hydrated_request =
+        prepare_preview_file_request_for_ui(app_handle.clone(), Some(conversation_id), request).await?;
+
+    let files = hydrated_request
+        .files
+        .into_iter()
+        .map(|file| {
+            serde_json::json!({
+                "title": file.title,
+                "type": file.file_type,
+                "content": file.content,
+                "url": file.url,
+                "language": file.language,
+                "description": file.description,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let rendered = crate::external_channels::presentation::render_preview_file_result_parts_for_feishu(
+        &serde_json::json!({ "files": files })
+    );
+    Ok((!rendered.is_empty()).then_some(rendered))
+}
+
+fn resolve_preview_file_tool_call_for_message(
+    mcp_db: &MCPDatabase,
+    source_message: &crate::db::conversation_db::Message,
+    delivery_message: &crate::db::conversation_db::Message,
+) -> Option<MCPToolCall> {
+    if !message_is_preview_file_tool_result(delivery_message) {
+        return None;
+    }
+    find_preview_file_tool_call_for_message(mcp_db, source_message, delivery_message)
+}
+
+async fn render_message_for_feishu_delivery(
+    app_handle: &AppHandle,
+    delivery_message: &crate::db::conversation_db::Message,
+    preview_tool_call: Option<MCPToolCall>,
+    relay_origin: &str,
+) -> Result<Vec<String>, String> {
+    if let Some(tool_call) = preview_tool_call {
+        if let Some(rendered) = render_preview_file_mcp_call_for_feishu(
+            app_handle,
+            delivery_message.conversation_id,
+            &tool_call,
+        )
+        .await?
+        {
+            return Ok(rendered);
+        }
+    }
+
+    Ok(render_message_for_external_channel(
+        delivery_message,
+        &RenderContext { channel: CHANNEL_FEISHU, relay_origin },
+    ))
+}
+
+fn collect_feishu_debug_resend_messages(
+    selected_message: &crate::db::conversation_db::Message,
+    conversation_messages: &[crate::db::conversation_db::Message],
+) -> Vec<crate::db::conversation_db::Message> {
+    if !message_contains_preview_file_tool_call(selected_message) {
+        return vec![selected_message.clone()];
+    }
+
+    let mut selected_seen = false;
+    let mut preview_results = Vec::new();
+
+    for message in conversation_messages {
+        if message.id == selected_message.id {
+            selected_seen = true;
+            continue;
+        }
+        if !selected_seen {
+            continue;
+        }
+        if message.message_type == "response" || message.message_type == "assistant" {
+            break;
+        }
+        if message_is_preview_file_tool_result(message) {
+            preview_results.push(message.clone());
+        }
+    }
+
+    if preview_results.is_empty() {
+        vec![selected_message.clone()]
+    } else {
+        preview_results
+    }
+}
+
 pub(crate) async fn resend_message_to_feishu_for_debug(
     app_handle: &AppHandle,
     message_id: i64,
@@ -3873,18 +4017,20 @@ pub(crate) async fn resend_message_to_feishu_for_debug(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("未找到消息: {message_id}"))?;
 
-    let rendered_parts = render_message_for_external_channel(
-        &message,
-        &RenderContext { channel: CHANNEL_FEISHU, relay_origin: RELAY_ORIGIN_AIPP },
-    );
-    let non_empty_parts: Vec<&str> = rendered_parts
-        .iter()
-        .map(String::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .collect();
-    if non_empty_parts.is_empty() {
-        return Err("该消息没有可发送到飞书的可读内容".to_string());
+    let conversation_messages_raw = db
+        .message_repo()
+        .map_err(|e| e.to_string())?
+        .list_by_conversation_id(message.conversation_id)
+        .map_err(|e| e.to_string())?;
+    let mut seen_message_ids = HashSet::new();
+    let mut conversation_messages = Vec::new();
+    for (message_item, _) in conversation_messages_raw {
+        if seen_message_ids.insert(message_item.id) {
+            conversation_messages.push(message_item);
+        }
     }
+    let resend_messages = collect_feishu_debug_resend_messages(&message, &conversation_messages);
+    let mcp_db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
 
     let target =
         find_latest_feishu_target(app_handle, message.conversation_id)?.ok_or_else(|| {
@@ -3892,22 +4038,46 @@ pub(crate) async fn resend_message_to_feishu_for_debug(
         })?;
 
     let mut last_outcome: Option<FeishuDebugSendResult> = None;
-    for rendered_text in &non_empty_parts {
-        let outcome =
-            send_markdown_message_to_target(app_handle, &config, &target, rendered_text).await?;
-        insert_external_link(
+    for resend_message in &resend_messages {
+        let preview_tool_call =
+            resolve_preview_file_tool_call_for_message(&mcp_db, &message, resend_message);
+        let rendered_parts = render_message_for_feishu_delivery(
             app_handle,
-            ChannelLinkRecord {
-                external_message_id: &outcome.external_message_id,
-                external_chat_id: target.external_chat_id.as_deref(),
-                external_user_id: target.external_user_id.as_deref(),
-                conversation_id: message.conversation_id,
-                local_message_id: Some(message.id),
-                direction: "outbound",
-                payload_type: &outcome.payload_type,
-            },
-        )?;
-        last_outcome = Some(outcome);
+            resend_message,
+            preview_tool_call,
+            RELAY_ORIGIN_AIPP,
+        )
+        .await?;
+        let non_empty_parts: Vec<&str> = rendered_parts
+            .iter()
+            .map(String::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+        if non_empty_parts.is_empty() {
+            continue;
+        }
+
+        for rendered_text in &non_empty_parts {
+            let outcome =
+                send_markdown_message_to_target(app_handle, &config, &target, rendered_text).await?;
+            insert_external_link(
+                app_handle,
+                ChannelLinkRecord {
+                    external_message_id: &outcome.external_message_id,
+                    external_chat_id: target.external_chat_id.as_deref(),
+                    external_user_id: target.external_user_id.as_deref(),
+                    conversation_id: message.conversation_id,
+                    local_message_id: Some(resend_message.id),
+                    direction: "outbound",
+                    payload_type: &outcome.payload_type,
+                },
+            )?;
+            last_outcome = Some(outcome);
+        }
+    }
+
+    if last_outcome.is_none() {
+        return Err("该消息没有可发送到飞书的可读内容".to_string());
     }
 
     Ok(last_outcome.expect("non_empty_parts guarantees at least one outcome"))
@@ -4556,5 +4726,47 @@ mod tests {
         assert!(!is_message_ready_for_feishu_relay(&streaming));
         assert!(is_message_ready_for_feishu_relay(&finished));
         assert!(is_message_ready_for_feishu_relay(&tool_result));
+    }
+
+    #[test]
+    fn debug_resend_prefers_preview_tool_result_after_response() {
+        let now = Utc::now();
+        let response = crate::db::conversation_db::Message {
+            id: 10,
+            parent_id: None,
+            conversation_id: 1,
+            message_type: "response".to_string(),
+            content: "好的。<!-- MCP_TOOL_CALL:{\"server_name\":\"UI交互工具\",\"tool_name\":\"preview_file\",\"parameters\":\"{\\\"files\\\":[{\\\"title\\\":\\\"华容道情节构思\\\"}]}\"} -->".to_string(),
+            llm_model_id: None,
+            llm_model_name: None,
+            created_time: now,
+            start_time: Some(now),
+            finish_time: Some(now),
+            token_count: 0,
+            input_token_count: 0,
+            output_token_count: 0,
+            generation_group_id: Some("group-1".to_string()),
+            parent_group_id: None,
+            tool_calls_json: None,
+            first_token_time: None,
+            ttft_ms: None,
+        };
+        let preview_tool_result = crate::db::conversation_db::Message {
+            id: 11,
+            message_type: "tool_result".to_string(),
+            content: "Tool execution completed:\n\nTool Call ID: call_1\nTool: preview_file\nServer: UI交互工具\nParameters: {\"files\":[{\"title\":\"华容道情节构思\",\"type\":\"text\",\"content\":\"完整正文\"}]}\nResult:\n[{\"type\":\"json\",\"json\":{\"status\":\"preview_shown\"}}]".to_string(),
+            ..response.clone()
+        };
+        let later_response = crate::db::conversation_db::Message {
+            id: 12,
+            content: "后续回复".to_string(),
+            ..response.clone()
+        };
+
+        let selected =
+            collect_feishu_debug_resend_messages(&response, &[response.clone(), preview_tool_result.clone(), later_response]);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id, preview_tool_result.id);
     }
 }

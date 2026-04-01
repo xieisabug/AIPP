@@ -227,7 +227,8 @@ const MessageItem = React.memo<MessageItemProps>(
         ]);
 
         const canResendToFeishuDebug =
-            allowFeishuDebugResend && message.message_type === "response";
+            allowFeishuDebugResend
+            && (message.message_type === "response" || message.message_type === "tool_result");
 
         const handleFeishuDebugResend = useCallback(async () => {
             if (isFeishuDebugSending || !canResendToFeishuDebug) {

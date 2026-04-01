@@ -60,7 +60,7 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
             {messageType === "response" && onFork && (
                 <IconButton icon={<GitBranch size={16} className="text-icon" />} onClick={onFork} />
             )}
-            {messageType === "response" && onResendToFeishuDebug && (
+            {(messageType === "response" || messageType === "tool_result") && onResendToFeishuDebug && (
                 <IconButton
                     icon={
                         isResendToFeishuDebugPending ? (
