@@ -97,6 +97,7 @@ const MessageItem = React.memo<MessageItemProps>(
         const { processContent } = useMcpToolCallProcessor(markdownConfig, {
             conversationId,
             messageId: message.id,
+            isLastMessage,
             mcpToolCallStates,
             shiningMcpCallId,
             inlineInteractionItems,

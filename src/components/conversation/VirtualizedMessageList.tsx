@@ -18,6 +18,23 @@ import {
     type UseMessageListElementsProps,
 } from "./useMessageListElements";
 
+declare global {
+    interface Window {
+        __AIPP_CHAT_PERF_CAPTURE__?: {
+            recordVirtualRowHeight?: (key: string, height: number) => void;
+            resetVirtualRowHeightDrift?: () => void;
+            getVirtualRowHeightDrift?: () => Array<{
+                key: string;
+                changeCount: number;
+                minHeight: number;
+                maxHeight: number;
+                delta: number;
+                lastHeight: number;
+            }>;
+        };
+    }
+}
+
 interface VirtualizedMessageListProps extends UseMessageListElementsProps {
     scrollContainerRef: React.RefObject<HTMLDivElement | null>;
     pendingScrollMessageId: number | null;
@@ -94,6 +111,18 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
     ...messageListProps
 }) => {
     const { renderItems } = useMessageListElements(messageListProps);
+    const tailItem = useMemo(
+        () =>
+            renderItems.find((item) => item.key === "last-reply-container") ?? null,
+        [renderItems],
+    );
+    const virtualizedItems = useMemo(
+        () =>
+            tailItem
+                ? renderItems.filter((item) => item.key !== tailItem.key)
+                : renderItems,
+        [renderItems, tailItem],
+    );
     const [scrollTop, setScrollTop] = useState(0);
     const [viewportHeight, setViewportHeight] = useState(0);
     const [measuredHeights, setMeasuredHeights] = useState<Record<string, number>>(
@@ -108,16 +137,19 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
     const scrollMetricsFrameRef = useRef<number | null>(null);
 
     const layout = useMemo(
-        () => buildVirtualizedLayout(renderItems, measuredHeights),
-        [renderItems, measuredHeights],
+        () => buildVirtualizedLayout(virtualizedItems, measuredHeights),
+        [virtualizedItems, measuredHeights],
     );
     const visibleRange = useMemo(
         () => findVisibleRange(layout, scrollTop, viewportHeight),
         [layout, scrollTop, viewportHeight],
     );
     const visibleItems = useMemo(() => {
-        return renderItems.slice(visibleRange.startIndex, visibleRange.endIndex);
-    }, [renderItems, visibleRange.endIndex, visibleRange.startIndex]);
+        return virtualizedItems.slice(
+            visibleRange.startIndex,
+            visibleRange.endIndex,
+        );
+    }, [virtualizedItems, visibleRange.endIndex, visibleRange.startIndex]);
 
     const syncScrollMetrics = useCallback(() => {
         const container = scrollContainerRef.current;
@@ -183,6 +215,7 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
     }, [scheduleScrollMetricsUpdate, scrollContainerRef, syncScrollMetrics]);
 
     const handleHeightChange = useCallback((key: string, height: number) => {
+        window.__AIPP_CHAT_PERF_CAPTURE__?.recordVirtualRowHeight?.(key, height);
         setMeasuredHeights((prev) => {
             if (prev[key] === height) {
                 return prev;
@@ -200,7 +233,7 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
         const previousRenderKeys = previousRenderKeysRef.current;
 
         previousLayoutRef.current = layout;
-        previousRenderKeysRef.current = renderItems.map((item) => item.key);
+        previousRenderKeysRef.current = virtualizedItems.map((item) => item.key);
 
         if (!container || !previousLayout) {
             return;
@@ -254,7 +287,7 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
             return;
         }
 
-        const nextAnchorIndex = renderItems.findIndex(
+        const nextAnchorIndex = virtualizedItems.findIndex(
             (item) => item.key === anchorKey,
         );
         if (nextAnchorIndex < 0) {
@@ -272,7 +305,7 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
     }, [
         layout,
         pendingScrollMessageId,
-        renderItems,
+        virtualizedItems,
         scrollContainerRef,
         syncScrollMetrics,
     ]);
@@ -287,11 +320,63 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
             return;
         }
 
-        const targetIndex = renderItems.findIndex(
+        const targetIsTail =
+            !!tailItem
+            && (
+                tailItem.messageId === pendingScrollMessageId
+                || tailItem.messageIds?.includes(pendingScrollMessageId)
+            );
+        const targetIndex = virtualizedItems.findIndex(
             (item) =>
                 item.messageId === pendingScrollMessageId
                 || item.messageIds?.includes(pendingScrollMessageId),
         );
+        if (targetIsTail) {
+            const existingTarget = container.querySelector(
+                `[data-message-id='${pendingScrollMessageId}']`,
+            ) as HTMLElement | null;
+            if (existingTarget) {
+                existingTarget.scrollIntoView({
+                    block: "center",
+                    behavior: "smooth",
+                });
+            } else {
+                container.scrollTo({
+                    top: Math.max(
+                        0,
+                        container.scrollHeight - container.clientHeight,
+                    ),
+                    behavior: "smooth",
+                });
+            }
+
+            let attempts = 0;
+            const tryHighlightTail = () => {
+                const target = container.querySelector(
+                    `[data-message-id='${pendingScrollMessageId}']`,
+                ) as HTMLElement | null;
+                if (target) {
+                    applyScrollHighlight({
+                        target,
+                        messageId: pendingScrollMessageId,
+                        setShiningMessageIds,
+                        clearPendingScrollMessageId,
+                    });
+                    return;
+                }
+
+                attempts += 1;
+                if (attempts >= MAX_SCROLL_HIGHLIGHT_ATTEMPTS) {
+                    clearPendingScrollMessageId(null);
+                    return;
+                }
+
+                requestAnimationFrame(tryHighlightTail);
+            };
+
+            requestAnimationFrame(tryHighlightTail);
+            return;
+        }
         if (targetIndex < 0) {
             clearPendingScrollMessageId(null);
             return;
@@ -336,34 +421,38 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
         clearPendingScrollMessageId,
         layout,
         pendingScrollMessageId,
-        renderItems,
+        tailItem,
+        virtualizedItems,
         scrollContainerRef,
         setShiningMessageIds,
         viewportHeight,
     ]);
 
     return (
-        <div
-            style={{
-                position: "relative",
-                height: layout.totalHeight,
-                minHeight: layout.totalHeight > 0 ? layout.totalHeight : 1,
-            }}
-        >
-            {visibleItems.map((item, relativeIndex) => {
-                const absoluteIndex = visibleRange.startIndex + relativeIndex;
-                return (
-                    <VirtualizedRow
-                        key={item.key}
-                        itemKey={item.key}
-                        top={layout.tops[absoluteIndex] ?? 0}
-                        onHeightChange={handleHeightChange}
-                    >
-                        {item.element}
-                    </VirtualizedRow>
-                );
-            })}
-        </div>
+        <>
+            <div
+                style={{
+                    position: "relative",
+                    height: layout.totalHeight,
+                    minHeight: layout.totalHeight > 0 ? layout.totalHeight : 1,
+                }}
+            >
+                {visibleItems.map((item, relativeIndex) => {
+                    const absoluteIndex = visibleRange.startIndex + relativeIndex;
+                    return (
+                        <VirtualizedRow
+                            key={item.key}
+                            itemKey={item.key}
+                            top={layout.tops[absoluteIndex] ?? 0}
+                            onHeightChange={handleHeightChange}
+                        >
+                            {item.element}
+                        </VirtualizedRow>
+                    );
+                })}
+            </div>
+            {tailItem?.element ?? null}
+        </>
     );
 };
 

@@ -11,6 +11,7 @@ import {
     parsePreviewCodeRequestLoose,
     type PreviewCodeStreamingState,
     parsePreviewCodeToolResult,
+    PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX,
     PreviewCodeRequestEvent,
 } from "@/utils/previewCode";
 import { createPreviewCodeRuntime } from "@/utils/previewCodeRuntime";
@@ -22,6 +23,7 @@ interface InlineCodePreviewCardProps {
     conversationId?: number;
     messageId?: number;
     callId?: number;
+    isLastMessage?: boolean;
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>;
     isStreaming?: boolean;
     streamingPreviewState?: PreviewCodeStreamingState;
@@ -36,12 +38,107 @@ type DisplayState =
     | "failed"
     | "idle";
 
+function buildStaticPreviewDocument(html: string): string {
+    return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+      }
+
+      body {
+        overflow-wrap: anywhere;
+      }
+    </style>
+  </head>
+  <body>${html}</body>
+</html>`;
+}
+
+function StaticPreviewFrame({
+    html,
+    collapsed,
+    viewportHeight,
+}: {
+    html: string;
+    collapsed: boolean;
+    viewportHeight: number;
+}) {
+    const iframeRef = useRef<HTMLIFrameElement | null>(null);
+    const [expandedHeight, setExpandedHeight] = useState<number | null>(
+        collapsed ? viewportHeight : null,
+    );
+    const srcDoc = useMemo(() => buildStaticPreviewDocument(html), [html]);
+
+    useEffect(() => {
+        if (collapsed) {
+            setExpandedHeight(viewportHeight);
+            return;
+        }
+
+        const iframe = iframeRef.current;
+        if (!iframe) {
+            return;
+        }
+
+        const updateHeight = () => {
+            const doc = iframe.contentDocument;
+            if (!doc) {
+                return;
+            }
+            const nextHeight = Math.max(
+                doc.body?.scrollHeight ?? 0,
+                doc.documentElement?.scrollHeight ?? 0,
+                viewportHeight,
+            );
+            setExpandedHeight(nextHeight);
+        };
+
+        const handleLoad = () => {
+            updateHeight();
+            window.setTimeout(updateHeight, 50);
+            window.setTimeout(updateHeight, 250);
+        };
+
+        iframe.addEventListener("load", handleLoad);
+        handleLoad();
+
+        return () => {
+            iframe.removeEventListener("load", handleLoad);
+        };
+    }, [collapsed, srcDoc, viewportHeight]);
+
+    return (
+        <iframe
+            ref={iframeRef}
+            srcDoc={srcDoc}
+            sandbox="allow-same-origin"
+            className="w-full border-0 bg-transparent"
+            style={collapsed
+                ? {
+                    height: viewportHeight,
+                    minHeight: viewportHeight,
+                    maxHeight: viewportHeight,
+                }
+                : {
+                    height: expandedHeight ?? viewportHeight,
+                    minHeight: viewportHeight,
+                }}
+        />
+    );
+}
+
 export default function InlineCodePreviewCard({
     parameters,
     llmCallId,
     conversationId,
     messageId,
     callId,
+    isLastMessage = false,
     mcpToolCallStates,
     isStreaming = false,
     streamingPreviewState,
@@ -53,7 +150,12 @@ export default function InlineCodePreviewCard({
     const [runtimeError, setRuntimeError] = useState<string | null>(null);
     const [interactionError, setInteractionError] = useState<string | null>(null);
     const [isSubmitting, setIsSubmitting] = useState(false);
-    const [isCollapsed, setIsCollapsed] = useState(false);
+    const [isCollapsed, setIsCollapsed] = useState(!isLastMessage && !isStreaming);
+    const [isHidden, setIsHidden] = useState(false);
+    const [isRuntimeActivated, setIsRuntimeActivated] = useState(
+        isStreaming || isLastMessage,
+    );
+    const [isInteractionEnabled, setIsInteractionEnabled] = useState(isStreaming);
     const [optimisticResult, setOptimisticResult] = useState<ReturnType<typeof parsePreviewCodeToolResult> | null>(null);
 
     const matchedStateByLlmCallId = useMemo(() => {
@@ -96,14 +198,29 @@ export default function InlineCodePreviewCard({
             ),
         [previewRequest]
     );
+    const hasScriptContent = useMemo(() => {
+        if (streamingPreviewState) {
+            return streamingPreviewState.containsScript;
+        }
+        return /<script[\s>]/i.test(previewRequest?.code ?? "");
+    }, [previewRequest?.code, streamingPreviewState]);
+    const shouldUseStaticFrame =
+        hasScriptContent && !isInteractionEnabled && !isStreaming;
+    const staticPreviewHtml = useMemo(
+        () => previewRequest?.code ?? "",
+        [previewRequest?.code],
+    );
 
     useEffect(() => {
         setResolvedRequestId(null);
         setOptimisticResult(null);
         setInteractionError(null);
         setRuntimeError(null);
-        setIsCollapsed(false);
-    }, [conversationId, requestSignature]);
+        setIsCollapsed(!isLastMessage && !isStreaming);
+        setIsHidden(false);
+        setIsRuntimeActivated(isStreaming || (isLastMessage && !hasScriptContent));
+        setIsInteractionEnabled(isStreaming || !hasScriptContent);
+    }, [conversationId, hasScriptContent, isLastMessage, isStreaming, requestSignature]);
 
     useEffect(() => {
         if (!effectiveCallId) {
@@ -195,7 +312,7 @@ export default function InlineCodePreviewCard({
     }, [conversationId, requestSignature]);
 
     useEffect(() => {
-        if (!hostRef.current || runtimeRef.current) {
+        if (!hostRef.current || runtimeRef.current || !isRuntimeActivated || shouldUseStaticFrame) {
             return;
         }
         runtimeRef.current = createPreviewCodeRuntime(hostRef.current);
@@ -203,10 +320,10 @@ export default function InlineCodePreviewCard({
             runtimeRef.current?.destroy();
             runtimeRef.current = null;
         };
-    }, []);
+    }, [isRuntimeActivated, shouldUseStaticFrame]);
 
     useEffect(() => {
-        if (!previewRequest || !runtimeRef.current) {
+        if (!previewRequest || !runtimeRef.current || !isRuntimeActivated || shouldUseStaticFrame) {
             return;
         }
 
@@ -218,7 +335,7 @@ export default function InlineCodePreviewCard({
                 : previewRequest.code;
         runtimeRef.current.update({
             code: renderCode,
-            isFinal: !isStreaming,
+            isFinal: !isStreaming && (!hasScriptContent || isInteractionEnabled),
             bridgeId,
             bridge: {
                 submit: async (payload?: unknown) => {
@@ -286,6 +403,11 @@ export default function InlineCodePreviewCard({
         isStreaming,
         resolvedRequestId,
         streamingPreviewState,
+        isRuntimeActivated,
+        hasScriptContent,
+        isInteractionEnabled,
+        isLastMessage,
+        shouldUseStaticFrame,
     ]);
 
     const toolResult =
@@ -314,6 +436,15 @@ export default function InlineCodePreviewCard({
         }
         return "idle";
     }, [toolResult, stateOverride?.status, persistedToolCall?.status, isStreaming]);
+
+    useEffect(() => {
+        if (displayState === "streaming" || displayState === "pending" || displayState === "executing") {
+            setIsCollapsed(false);
+            setIsHidden(false);
+            setIsRuntimeActivated(true);
+            setIsInteractionEnabled(true);
+        }
+    }, [displayState]);
 
     const loadingMessage = useMemo(() => {
         if (!previewRequest?.loadingMessages?.length) {
@@ -391,9 +522,49 @@ export default function InlineCodePreviewCard({
         }
     })();
 
-    const previewHidden = displayState === "dismissed" || isCollapsed;
-    const hostHidden = previewHidden || shouldShowStreamingFallback;
+    const previewHidden = displayState === "dismissed" || isHidden;
+    const hostHidden = previewHidden || shouldShowStreamingFallback || shouldUseStaticFrame;
     const toggleButtonLabel = isCollapsed ? "展开" : "收起";
+    const previewViewportHeight = isStreaming
+        ? Math.max(160, PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX - 64)
+        : PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX;
+
+    useEffect(() => {
+        if (hostHidden || isRuntimeActivated) {
+            return;
+        }
+
+        const host = hostRef.current;
+        if (!host) {
+            return;
+        }
+
+        const root = host.closest(
+            "[data-aipp-slot='chat-conversation-scroll']",
+        ) as Element | null;
+        if (!root || typeof IntersectionObserver !== "function") {
+            setIsRuntimeActivated(true);
+            return;
+        }
+        const observer = new IntersectionObserver(
+            (entries) => {
+                if (entries.some((entry) => entry.isIntersecting)) {
+                    setIsRuntimeActivated(true);
+                    observer.disconnect();
+                }
+            },
+            {
+                root,
+                rootMargin: "320px 0px",
+                threshold: 0.01,
+            },
+        );
+        observer.observe(host);
+
+        return () => {
+            observer.disconnect();
+        };
+    }, [hostHidden, isRuntimeActivated]);
 
     return (
         <div className="space-y-3 py-2">
@@ -409,12 +580,40 @@ export default function InlineCodePreviewCard({
                     </div>
                     <div className="flex items-center gap-2">
                         {statusBadge}
-                        {displayState !== "dismissed" && (
+                        {hasScriptContent && displayState !== "dismissed" && !isHidden && !isInteractionEnabled && !isStreaming && (
+                            <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                    setIsRuntimeActivated(true);
+                                    setIsInteractionEnabled(true);
+                                }}
+                                disabled={isSubmitting}
+                            >
+                                启用交互
+                            </Button>
+                        )}
+                        {displayState !== "dismissed" && isLastMessage && (
                             <Button
                                 type="button"
                                 variant="ghost"
                                 size="sm"
-                                onClick={() => setIsCollapsed((current) => !current)}
+                                onClick={() => setIsHidden((current) => !current)}
+                                disabled={isSubmitting}
+                            >
+                                {isHidden ? "显示" : "隐藏"}
+                            </Button>
+                        )}
+                        {displayState !== "dismissed" && !isHidden && (
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => {
+                                    setIsRuntimeActivated(true);
+                                    setIsCollapsed((current) => !current);
+                                }}
                                 disabled={isSubmitting}
                                 aria-expanded={!isCollapsed}
                             >
@@ -446,8 +645,39 @@ export default function InlineCodePreviewCard({
                 <div
                     ref={hostRef}
                     data-testid="preview-code-host"
-                    className={hostHidden ? "hidden min-h-[96px] overflow-hidden bg-transparent" : "min-h-[96px] overflow-hidden bg-transparent"}
-                />
+                    className={hostHidden
+                        ? "hidden bg-transparent"
+                        : isCollapsed
+                            ? "overflow-auto bg-transparent"
+                            : "bg-transparent"}
+                    style={hostHidden
+                        ? undefined
+                        : isCollapsed
+                            ? {
+                                height: previewViewportHeight,
+                                minHeight: previewViewportHeight,
+                                maxHeight: previewViewportHeight,
+                            }
+                            : undefined}
+                >
+                    {!hostHidden && !isRuntimeActivated && (
+                        <div className="flex h-full items-center justify-center rounded-md border border-dashed border-border/60 bg-muted/20 px-4 text-xs text-muted-foreground">
+                            滚动到此处后加载预览
+                        </div>
+                    )}
+                </div>
+                {!previewHidden && shouldUseStaticFrame && staticPreviewHtml && (
+                    <StaticPreviewFrame
+                        html={staticPreviewHtml}
+                        collapsed={isCollapsed}
+                        viewportHeight={previewViewportHeight}
+                    />
+                )}
+                {!previewHidden && hasScriptContent && !isInteractionEnabled && !isStreaming && (
+                    <div className="text-xs text-muted-foreground">
+                        默认先展示静态预览，点击“启用交互”后再运行其中脚本。
+                    </div>
+                )}
                 {shouldShowStreamingFallback && !previewHidden && sourceExcerpt && (
                     <div className="rounded-md border border-border/70 bg-muted/40 px-3 py-3 space-y-2">
                         <div className="text-xs text-muted-foreground">
@@ -463,9 +693,9 @@ export default function InlineCodePreviewCard({
                         {JSON.stringify(toolResult.payload, null, 2)}
                     </pre>
                 )}
-                {isCollapsed && displayState !== "dismissed" && (
+                {isHidden && displayState !== "dismissed" && (
                     <div className="text-sm text-muted-foreground">
-                        预览已收起。
+                        预览已隐藏。
                     </div>
                 )}
                 {displayState === "dismissed" && (
@@ -477,4 +707,3 @@ export default function InlineCodePreviewCard({
         </div>
     );
 }
-

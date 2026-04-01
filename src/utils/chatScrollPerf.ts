@@ -19,6 +19,9 @@ export interface ChatScrollProbeOptions {
 export interface ChatScrollProbeResult extends ChatScrollFrameSummary {
     totalDurationMs: number;
     maxScrollTop: number;
+    finalMaxScrollTop: number;
+    minObservedMaxScrollTop: number;
+    maxObservedMaxScrollTop: number;
     startScrollTop: number;
     endScrollTop: number;
     scrollEventCount: number;
@@ -146,9 +149,11 @@ async function runScrollPass(
     durationMs: number,
     frameDurations: number[],
     lastFrameAtRef: { current: number | null },
+    observeMaxScrollTop: () => void,
 ): Promise<void> {
     if (durationMs <= 0 || Math.abs(toScrollTop - fromScrollTop) < 1) {
         container.scrollTop = toScrollTop;
+        observeMaxScrollTop();
         return;
     }
 
@@ -164,6 +169,7 @@ async function runScrollPass(
                 frameDurations.push(now - lastFrameAtRef.current);
             }
             lastFrameAtRef.current = now;
+            observeMaxScrollTop();
 
             const progress = Math.min(1, (now - passStartedAt) / durationMs);
             const easedProgress = easeInOutQuad(progress);
@@ -200,12 +206,31 @@ export async function runScrollPerformanceProbe(
         0,
         container.scrollHeight - container.clientHeight,
     );
+    let minObservedMaxScrollTop = maxScrollTop;
+    let maxObservedMaxScrollTop = maxScrollTop;
+    const observeMaxScrollTop = () => {
+        const observedMaxScrollTop = Math.max(
+            0,
+            container.scrollHeight - container.clientHeight,
+        );
+        minObservedMaxScrollTop = Math.min(
+            minObservedMaxScrollTop,
+            observedMaxScrollTop,
+        );
+        maxObservedMaxScrollTop = Math.max(
+            maxObservedMaxScrollTop,
+            observedMaxScrollTop,
+        );
+    };
 
     if (maxScrollTop <= 0) {
         return {
             ...summarizeFrameDurations([]),
             totalDurationMs: 0,
             maxScrollTop,
+            finalMaxScrollTop: maxScrollTop,
+            minObservedMaxScrollTop: maxScrollTop,
+            maxObservedMaxScrollTop: maxScrollTop,
             startScrollTop,
             endScrollTop: container.scrollTop,
             scrollEventCount: 0,
@@ -217,6 +242,7 @@ export async function runScrollPerformanceProbe(
     let scrollEventCount = 0;
     const handleScroll = () => {
         scrollEventCount += 1;
+        observeMaxScrollTop();
     };
 
     container.addEventListener("scroll", handleScroll, { passive: true });
@@ -235,6 +261,7 @@ export async function runScrollPerformanceProbe(
             durationMs,
             frameDurations,
             lastFrameAtRef,
+            observeMaxScrollTop,
         );
 
         if (includeReturnTrip) {
@@ -245,6 +272,7 @@ export async function runScrollPerformanceProbe(
                 durationMs,
                 frameDurations,
                 lastFrameAtRef,
+                observeMaxScrollTop,
             );
         }
     } finally {
@@ -252,11 +280,19 @@ export async function runScrollPerformanceProbe(
     }
 
     await waitForAnimationFrames(2);
+    observeMaxScrollTop();
+    const finalMaxScrollTop = Math.max(
+        0,
+        container.scrollHeight - container.clientHeight,
+    );
 
     return {
         ...summarizeFrameDurations(frameDurations),
         totalDurationMs: roundToTwo(performance.now() - startedAt),
         maxScrollTop: roundToTwo(maxScrollTop),
+        finalMaxScrollTop: roundToTwo(finalMaxScrollTop),
+        minObservedMaxScrollTop: roundToTwo(minObservedMaxScrollTop),
+        maxObservedMaxScrollTop: roundToTwo(maxObservedMaxScrollTop),
         startScrollTop: roundToTwo(startScrollTop),
         endScrollTop: roundToTwo(container.scrollTop),
         scrollEventCount,

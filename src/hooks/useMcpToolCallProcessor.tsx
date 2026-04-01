@@ -20,6 +20,7 @@ interface McpProcessorOptions {
 interface ProcessorContext {
     conversationId?: number;
     messageId?: number;
+    isLastMessage?: boolean;
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>;
     shiningMcpCallId?: number | null;
     inlineInteractionItems?: InlineInteractionItem[];
@@ -457,6 +458,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         messageId,
         mcpToolCallStates,
         shiningMcpCallId,
+        isLastMessage,
         inlineInteractionItems,
         sentBatchToolResultMessageIds,
     } = context || {};
@@ -550,6 +552,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
                         mcpToolCallStates={mcpToolCallStates}
                         isStreaming={data.isStreaming}
                         streamingPreviewState={data.preview_state}
+                        isLastMessage={isLastMessage}
                     />
                 );
             } else {

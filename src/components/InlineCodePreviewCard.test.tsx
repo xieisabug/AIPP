@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearAllMockHandlers, invoke, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 import InlineCodePreviewCard from "@/components/InlineCodePreviewCard";
+import { PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX } from "@/utils/previewCode";
 
 describe("InlineCodePreviewCard", () => {
     afterEach(() => {
@@ -64,7 +65,7 @@ describe("InlineCodePreviewCard", () => {
         expect(host.querySelector("style")).toBeNull();
     });
 
-    it("toggles collapse locally without dismissing the preview request", async () => {
+    it("defaults historical previews to a collapsed viewport and can expand them locally", async () => {
         mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
         render(
             <InlineCodePreviewCard
@@ -82,24 +83,68 @@ describe("InlineCodePreviewCard", () => {
         );
 
         const user = userEvent.setup();
-        const toggleButton = await screen.findByRole("button", { name: "收起" });
+        const toggleButton = await screen.findByRole("button", { name: "展开" });
         const host = await screen.findByTestId("preview-code-host");
         await waitFor(() => expect(host.shadowRoot?.textContent).toContain("Collapsible"));
         expect(host).not.toHaveClass("hidden");
+        expect(host).toHaveStyle({
+            height: `${PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX}px`,
+            minHeight: `${PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX}px`,
+            maxHeight: `${PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX}px`,
+        });
 
         await user.click(toggleButton);
-        expect(await screen.findByRole("button", { name: "展开" })).toBeInTheDocument();
-        expect(await screen.findByText("预览已收起。")).toBeInTheDocument();
-        expect(host).toHaveClass("hidden");
+        expect(await screen.findByRole("button", { name: "收起" })).toBeInTheDocument();
+        expect(host.style.height).toBe("");
+        expect(host.style.minHeight).toBe("");
+        expect(host.style.maxHeight).toBe("");
         expect(invoke).not.toHaveBeenCalledWith(
             "submit_preview_code_response",
             expect.anything()
         );
 
-        await user.click(screen.getByRole("button", { name: "展开" }));
-        expect(await screen.findByRole("button", { name: "收起" })).toBeInTheDocument();
-        expect(screen.queryByText("预览已收起。")).not.toBeInTheDocument();
-        expect(host).not.toHaveClass("hidden");
+        await user.click(screen.getByRole("button", { name: "收起" }));
+        expect(await screen.findByRole("button", { name: "展开" })).toBeInTheDocument();
+        expect(host).toHaveStyle({
+            height: `${PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX}px`,
+            minHeight: `${PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX}px`,
+            maxHeight: `${PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX}px`,
+        });
+    });
+
+    it("keeps the last message preview expanded by default and supports local hide", async () => {
+        mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
+        render(
+            <InlineCodePreviewCard
+                parameters={JSON.stringify({
+                    title: "latest_preview",
+                    renderer: "html",
+                    code: "<div>Latest Preview</div>",
+                    interaction_mode: "submit_once",
+                })}
+                conversationId={6}
+                messageId={14}
+                isLastMessage
+                mcpToolCallStates={new Map()}
+                isStreaming={false}
+            />
+        );
+
+        const user = userEvent.setup();
+        const host = await screen.findByTestId("preview-code-host");
+        await waitFor(() =>
+            expect(host.shadowRoot?.textContent).toContain("Latest Preview")
+        );
+        expect(host.style.height).toBe("");
+        expect(await screen.findByRole("button", { name: "隐藏" })).toBeInTheDocument();
+
+        await user.click(screen.getByRole("button", { name: "隐藏" }));
+        expect(await screen.findByText("预览已隐藏。")).toBeInTheDocument();
+        expect(await screen.findByRole("button", { name: "显示" })).toBeInTheDocument();
+
+        await user.click(screen.getByRole("button", { name: "显示" }));
+        expect(screen.queryByText("预览已隐藏。")).not.toBeInTheDocument();
+        expect(await screen.findByRole("button", { name: "隐藏" })).toBeInTheDocument();
     });
 
     it("does not render a manual dismiss action for display-only previews", async () => {
@@ -128,4 +173,3 @@ describe("InlineCodePreviewCard", () => {
         );
     });
 });
-

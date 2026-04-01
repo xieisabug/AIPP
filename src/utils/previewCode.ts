@@ -1,5 +1,7 @@
 export type PreviewCodeInteractionMode = "none" | "submit_once";
 
+export const PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX = 320;
+
 export interface PreviewCodeMetadata {
     origin?: string;
 }
@@ -274,4 +276,3 @@ export function buildPreviewCodeSignature(
         interactionMode: request.interactionMode,
     });
 }
-

@@ -4,6 +4,7 @@ import MessageItem from "../MessageItem";
 import VersionPagination from "../VersionPagination";
 import { Message, StreamEvent } from "../../data/Conversation";
 import type { InlineInteractionItem } from "../ConversationUI";
+import { PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX } from "../../utils/previewCode";
 
 export interface UseMessageListElementsProps {
     allDisplayMessages: Message[];
@@ -40,21 +41,109 @@ export interface RenderableConversationItem {
     element: React.ReactElement;
 }
 
-function estimateMessageHeight(message: Message): number {
-    const contentLength = message.content?.length ?? 0;
-    const lengthContribution = Math.min(720, Math.ceil(contentLength / 240) * 28);
+function stripMcpToolCallMarkup(content: string): string {
+    return content
+        .replace(/<!--\s*MCP_TOOL_CALL(?:_STREAMING)?[\s\S]*?-->/g, "")
+        .replace(/<mcp_tool_call[\s\S]*?<\/mcp_tool_call>/gi, "")
+        .trim();
+}
+
+function countMcpToolCalls(content: string): number {
+    return (
+        (content.match(/<!--\s*MCP_TOOL_CALL(?:_STREAMING)?[\s\S]*?-->/g) ?? []).length
+        + (content.match(/<mcp_tool_call[\s\S]*?<\/mcp_tool_call>/gi) ?? []).length
+    );
+}
+
+function countPreviewCodeToolCalls(content: string): number {
+    return (
+        (content.match(/"tool_name"\s*:\s*"preview_code"/g) ?? []).length
+        + (content.match(/<tool_name>\s*preview_code\s*<\/tool_name>/gi) ?? []).length
+    );
+}
+
+function collectPreviewCodePayloadLengths(content: string): number[] {
+    const segments = [
+        ...(content.match(/<!--\s*MCP_TOOL_CALL(?:_STREAMING)?[\s\S]*?-->/g) ?? []),
+        ...(content.match(/<mcp_tool_call[\s\S]*?<\/mcp_tool_call>/gi) ?? []),
+    ];
+
+    return segments
+        .filter((segment) =>
+            /"tool_name"\s*:\s*"preview_code"/.test(segment)
+            || /<tool_name>\s*preview_code\s*<\/tool_name>/i.test(segment)
+        )
+        .map((segment) => segment.length);
+}
+
+function estimateMessageHeight(
+    message: Message,
+    options: { isLastMessage?: boolean } = {},
+): number {
+    const { isLastMessage = false } = options;
+    const rawContent = message.content ?? "";
+    const content = stripMcpToolCallMarkup(rawContent);
+    const mcpToolCallCount = countMcpToolCalls(rawContent);
+    const previewCodePayloadLengths = rawContent.includes("MCP_TOOL_CALL_STREAMING")
+        ? []
+        : collectPreviewCodePayloadLengths(rawContent);
+    const previewCodeToolCallCount = rawContent.includes("MCP_TOOL_CALL_STREAMING")
+        ? 0
+        : previewCodePayloadLengths.length || countPreviewCodeToolCalls(rawContent);
+    const genericToolCallCount = Math.max(
+        0,
+        mcpToolCallCount - previewCodeToolCallCount,
+    );
+    const contentLength = content.length;
+    const lineCount = content.length > 0
+        ? content.split(/\r?\n/).length
+        : 1;
+    const wrappedLineCount = content.split(/\r?\n/).reduce(
+        (total, line) => total + Math.max(0, Math.ceil(line.length / 96) - 1),
+        0,
+    );
+    const codeBlockCount = Math.floor((content.match(/```/g) ?? []).length / 2);
+    const listItemCount = (content.match(/^\s*(?:[-*+]|\d+\.)\s+/gm) ?? []).length;
+    const tableRowCount = (content.match(/^\|.*\|$/gm) ?? []).length;
+
+    const structureContribution = Math.min(
+        5200,
+        Math.max(0, lineCount - 1) * 22
+        + wrappedLineCount * 18
+        + codeBlockCount * 240
+        + listItemCount * 10
+        + tableRowCount * 18,
+    );
+    const lengthContribution = Math.min(1600, Math.ceil(contentLength / 240) * 12);
+    const previewCodeContribution = isLastMessage
+        ? (previewCodePayloadLengths.length > 0
+            ? previewCodePayloadLengths.reduce(
+                (sum, payloadLength) =>
+                    sum
+                    + Math.min(2400, 420 + Math.ceil(payloadLength / 90) * 24),
+                0,
+            )
+            : previewCodeToolCallCount * (PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX + 520))
+        : previewCodeToolCallCount * (PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX + 56);
+    const toolCallContribution = mcpToolCallCount > 0
+        ? previewCodeContribution + genericToolCallCount * 88 + (mcpToolCallCount >= 2 ? 44 : 0)
+        : 0;
 
     switch (message.message_type) {
         case "response":
-            return 180 + lengthContribution;
+            return 180 + structureContribution + lengthContribution + toolCallContribution;
         case "tool_result":
-            return 160 + lengthContribution;
+            return 160 + structureContribution + lengthContribution + toolCallContribution;
         case "user":
-            return 100 + Math.min(220, Math.ceil(contentLength / 320) * 18);
+            return 100
+                + Math.min(1800, Math.max(0, lineCount - 1) * 14 + wrappedLineCount * 10)
+                + Math.min(320, Math.ceil(contentLength / 320) * 14);
         case "system":
-            return 96 + Math.min(120, Math.ceil(contentLength / 480) * 16);
+            return 96
+                + Math.min(960, Math.max(0, lineCount - 1) * 12 + wrappedLineCount * 8)
+                + Math.min(240, Math.ceil(contentLength / 480) * 12);
         default:
-            return 120 + lengthContribution;
+            return 120 + structureContribution + lengthContribution + toolCallContribution;
     }
 }
 
@@ -109,13 +198,25 @@ export function useMessageListElements({
             allDisplayMessages.map((message) => [message.id, message] as const),
         );
     }, [allDisplayMessages]);
-
-    const messageElements = useMemo(() => {
-        const lastMessageId =
+    const lastMessageId = useMemo(
+        () =>
             allDisplayMessages.length > 0
                 ? allDisplayMessages[allDisplayMessages.length - 1].id
-                : -1;
+                : null,
+        [allDisplayMessages],
+    );
+    const estimatedHeightByMessageId = useMemo(() => {
+        return new Map(
+            allDisplayMessages.map((message) => [
+                message.id,
+                estimateMessageHeight(message, {
+                    isLastMessage: message.id === lastMessageId,
+                }),
+            ] as const),
+        );
+    }, [allDisplayMessages, lastMessageId]);
 
+    const messageElements = useMemo(() => {
         return allDisplayMessages.map((message) => {
             const streamEvent = streamingMessages.get(message.id);
             const groupControl = getGenerationGroupControl(message);
@@ -172,6 +273,7 @@ export function useMessageListElements({
         messageInlineInteractionMap,
         sentBatchToolResultMessageIds,
         allowFeishuDebugResend,
+        lastMessageId,
     ]);
 
     const versionControlElements = useMemo(() => {
@@ -262,9 +364,12 @@ export function useMessageListElements({
                 key: `message-${entry.messageId}`,
                 messageId: entry.messageId,
                 messageIds: [entry.messageId],
-                estimatedHeight: estimateMessageHeight(
-                    messageById.get(entry.messageId) ?? allDisplayMessages[0],
-                ),
+                estimatedHeight:
+                    estimatedHeightByMessageId.get(entry.messageId)
+                    ?? estimateMessageHeight(
+                        messageById.get(entry.messageId) ?? allDisplayMessages[0],
+                        { isLastMessage: entry.messageId === lastMessageId },
+                    ),
                 element: entry.messageElement,
             });
 
@@ -291,8 +396,12 @@ export function useMessageListElements({
             const lastGroupEstimatedHeight = Math.max(
                 0,
                 lastGroup.reduce((sum, entry) => {
-                    let next = sum + estimateMessageHeight(
-                        messageById.get(entry.messageId) ?? allDisplayMessages[0],
+                    let next = sum + (
+                        estimatedHeightByMessageId.get(entry.messageId)
+                        ?? estimateMessageHeight(
+                            messageById.get(entry.messageId) ?? allDisplayMessages[0],
+                            { isLastMessage: entry.messageId === lastMessageId },
+                        )
                     );
                     if (versionMap.has(`version-${entry.messageId}`)) {
                         next += 48;
@@ -376,6 +485,7 @@ export function useMessageListElements({
         placeholderElements,
         fallbackInlineInteractionItems,
         allDisplayMessages,
+        estimatedHeightByMessageId,
         messageById,
     ]);
 

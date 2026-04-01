@@ -370,6 +370,7 @@ async fn run_chat_scroll_perf_autorun(
 
     let (tx, rx) = tokio::sync::oneshot::channel::<String>();
     let sender = Arc::new(TokioMutex::new(Some(tx)));
+    let last_progress = Arc::new(TokioMutex::new(None::<String>));
     let app_handle_clone = app_handle.clone();
     let listener_id: EventId = app_handle.listen("chat-scroll-perf-result", move |event: tauri::Event| {
         let sender_clone = sender.clone();
@@ -380,6 +381,15 @@ async fn run_chat_scroll_perf_autorun(
             }
         });
     });
+    let progress_listener_state = last_progress.clone();
+    let progress_listener_id: EventId =
+        app_handle.listen("chat-scroll-perf-progress", move |event: tauri::Event| {
+            let progress_listener_state = progress_listener_state.clone();
+            let payload = event.payload().to_string();
+            tokio::spawn(async move {
+                *progress_listener_state.lock().await = Some(payload);
+            });
+        });
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -409,20 +419,29 @@ async fn run_chat_scroll_perf_autorun(
 
     if let Err(error) = chat_window.eval(script.as_str()) {
         app_handle_clone.unlisten(listener_id);
+        app_handle_clone.unlisten(progress_listener_id);
         return Err(format!("Failed to trigger chat scroll perf test: {error}"));
     }
 
-    let payload = tokio::time::timeout(Duration::from_secs(config.timeout_secs), rx)
-        .await
-        .map_err(|_| {
-            format!(
-                "Timed out after {}s waiting for chat scroll perf result",
-                config.timeout_secs
-            )
-        })?
-        .map_err(|_| "Chat scroll perf result channel closed".to_string())?;
+    let payload = match tokio::time::timeout(Duration::from_secs(config.timeout_secs), rx).await {
+        Ok(payload) => payload.map_err(|_| "Chat scroll perf result channel closed".to_string())?,
+        Err(_) => {
+            let last_progress = last_progress
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(|| "none".to_string());
+            app_handle_clone.unlisten(listener_id);
+            app_handle_clone.unlisten(progress_listener_id);
+            return Err(format!(
+                "Timed out after {}s waiting for chat scroll perf result (last progress: {})",
+                config.timeout_secs, last_progress
+            ));
+        }
+    };
 
     app_handle_clone.unlisten(listener_id);
+    app_handle_clone.unlisten(progress_listener_id);
 
     serde_json::from_str::<serde_json::Value>(&payload).map_err(|error| {
         format!("Failed to parse chat scroll perf result payload: {error}")

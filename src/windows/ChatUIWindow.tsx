@@ -37,6 +37,7 @@ import {
     waitForCondition,
     type ChatScrollProbeResult,
 } from "../utils/chatScrollPerf";
+import { getErrorMessage } from "../utils/error";
 
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { pluginRuntime } from "../services/PluginRuntime";
@@ -54,7 +55,25 @@ interface ChatScrollPerfTestResult extends ChatScrollProbeResult {
     conversationIndex: number;
     conversationName: string;
     messageItemCount: number;
+    rowHeightDrift: Array<{
+        key: string;
+        changeCount: number;
+        minHeight: number;
+        maxHeight: number;
+        delta: number;
+        lastHeight: number;
+    }>;
 }
+
+interface ChatScrollPerfTestErrorResult {
+    recordedAt: string;
+    conversationIndex: number;
+    error: string;
+}
+
+type ChatScrollPerfTestOutcome =
+    | ChatScrollPerfTestResult
+    | ChatScrollPerfTestErrorResult;
 
 declare global {
     interface Window {
@@ -65,7 +84,19 @@ declare global {
             runSecondConversationScrollTest: (
                 options?: Omit<ChatScrollPerfTestOptions, "conversationIndex">,
             ) => Promise<ChatScrollPerfTestResult>;
-            getLastResult: () => ChatScrollPerfTestResult | null;
+            getLastResult: () => ChatScrollPerfTestOutcome | null;
+        };
+        __AIPP_CHAT_PERF_CAPTURE__?: {
+            recordVirtualRowHeight?: (key: string, height: number) => void;
+            resetVirtualRowHeightDrift?: () => void;
+            getVirtualRowHeightDrift?: () => Array<{
+                key: string;
+                changeCount: number;
+                minHeight: number;
+                maxHeight: number;
+                delta: number;
+                lastHeight: number;
+            }>;
         };
     }
 }
@@ -90,7 +121,15 @@ function ChatUIWindow() {
     const [selectedConversation, setSelectedConversation] = useState<string>("");
     const conversationUIRef = useRef<ConversationUIRef>(null);
     const selectedConversationRef = useRef(selectedConversation);
-    const lastChatPerfResultRef = useRef<ChatScrollPerfTestResult | null>(null);
+    const lastChatPerfResultRef = useRef<ChatScrollPerfTestOutcome | null>(null);
+    const virtualRowHeightDriftRef = useRef(
+        new Map<string, {
+            changeCount: number;
+            minHeight: number;
+            maxHeight: number;
+            lastHeight: number;
+        }>(),
+    );
     const { listConversations } = useConversationManager();
 
     // 操作权限对话框
@@ -200,79 +239,125 @@ function ChatUIWindow() {
         async (
             options: ChatScrollPerfTestOptions = {},
         ): Promise<ChatScrollPerfTestResult> => {
-            if (isMobile) {
-                throw new Error("Chat scroll perf test only supports desktop ChatUIWindow.");
-            }
-
             const conversationIndex = Math.max(0, options.conversationIndex ?? 1);
-            const conversations = await listConversations(1, 100);
-            const targetConversation = conversations[conversationIndex];
-            if (!targetConversation) {
-                throw new Error(
-                    `Conversation index ${conversationIndex} is unavailable; only ${conversations.length} conversation(s) were loaded.`,
+            const emitProgress = (
+                phase: string,
+                extra: Record<string, unknown> = {},
+            ) => {
+                void emit("chat-scroll-perf-progress", {
+                    recordedAt: new Date().toISOString(),
+                    conversationIndex,
+                    phase,
+                    ...extra,
+                });
+            };
+            try {
+                emitProgress("start");
+                if (isMobile) {
+                    throw new Error("Chat scroll perf test only supports desktop ChatUIWindow.");
+                }
+
+                const conversations = await listConversations(1, 100);
+                emitProgress("conversations-loaded", {
+                    conversationCount: conversations.length,
+                });
+                const targetConversation = conversations[conversationIndex];
+                if (!targetConversation) {
+                    throw new Error(
+                        `Conversation index ${conversationIndex} is unavailable; only ${conversations.length} conversation(s) were loaded.`,
+                    );
+                }
+
+                const targetConversationId = targetConversation.id.toString();
+                if (selectedConversationRef.current !== targetConversationId) {
+                    setSelectedConversation(targetConversationId);
+                }
+
+                await waitForCondition(
+                    () => selectedConversationRef.current === targetConversationId,
+                    { timeoutMs: 4000 },
                 );
-            }
+                emitProgress("conversation-selected", {
+                    conversationId: targetConversationId,
+                });
 
-            const targetConversationId = targetConversation.id.toString();
-            if (selectedConversationRef.current !== targetConversationId) {
-                setSelectedConversation(targetConversationId);
-            }
+                await waitForCondition(() => {
+                    const scrollContainer = document.querySelector(
+                        "[data-aipp-slot='chat-conversation-scroll']",
+                    ) as HTMLDivElement | null;
+                    return (
+                        !!scrollContainer
+                        && scrollContainer.querySelectorAll("[data-message-item]")
+                        .length > 0
+                    );
+                }, { timeoutMs: 10000, intervalMs: 50 });
+                emitProgress("messages-rendered");
 
-            await waitForCondition(
-                () => selectedConversationRef.current === targetConversationId,
-                { timeoutMs: 4000 },
-            );
-
-            await waitForCondition(() => {
                 const scrollContainer = document.querySelector(
                     "[data-aipp-slot='chat-conversation-scroll']",
                 ) as HTMLDivElement | null;
-                return (
-                    !!scrollContainer
-                    && scrollContainer.querySelectorAll("[data-message-item]")
-                        .length > 0
+                if (!scrollContainer) {
+                    throw new Error("Chat scroll container was not found.");
+                }
+
+                await waitForAnimationFrames(4);
+                scrollContainer.scrollTop = 0;
+                await waitForAnimationFrames(2);
+                window.__AIPP_CHAT_PERF_CAPTURE__?.resetVirtualRowHeightDrift?.();
+
+                const messageItemCount = scrollContainer.querySelectorAll(
+                    "[data-message-item]",
+                ).length;
+                emitProgress("probe-start", {
+                    messageItemCount,
+                });
+                const probeResult = await runScrollPerformanceProbe(scrollContainer, {
+                    durationMs: options.scrollDurationMs,
+                    includeReturnTrip: options.includeReturnTrip,
+                    settleFrameCount: options.settleFrameCount,
+                });
+                emitProgress("probe-complete", {
+                    sampleCount: probeResult.sampleCount,
+                });
+
+                const result: ChatScrollPerfTestResult = {
+                    ...probeResult,
+                    recordedAt: new Date().toISOString(),
+                    conversationId: targetConversationId,
+                    conversationIndex,
+                    conversationName: targetConversation.name,
+                    messageItemCount,
+                    rowHeightDrift:
+                        window.__AIPP_CHAT_PERF_CAPTURE__?.getVirtualRowHeightDrift?.()
+                        ?? [],
+                };
+
+                lastChatPerfResultRef.current = result;
+                await emit("chat-scroll-perf-result", result);
+                console.log("[AIPP][chat-scroll-perf]", result);
+                window.dispatchEvent(
+                    new CustomEvent("aipp:chat-scroll-perf-result", {
+                        detail: result,
+                    }),
                 );
-            }, { timeoutMs: 10000, intervalMs: 50 });
 
-            const scrollContainer = document.querySelector(
-                "[data-aipp-slot='chat-conversation-scroll']",
-            ) as HTMLDivElement | null;
-            if (!scrollContainer) {
-                throw new Error("Chat scroll container was not found.");
+                return result;
+            } catch (error) {
+                const failure: ChatScrollPerfTestErrorResult = {
+                    recordedAt: new Date().toISOString(),
+                    conversationIndex,
+                    error: getErrorMessage(error),
+                };
+                lastChatPerfResultRef.current = failure;
+                await emit("chat-scroll-perf-result", failure);
+                console.error("[AIPP][chat-scroll-perf][error]", failure, error);
+                window.dispatchEvent(
+                    new CustomEvent("aipp:chat-scroll-perf-result", {
+                        detail: failure,
+                    }),
+                );
+                throw error;
             }
-
-            await waitForAnimationFrames(4);
-            scrollContainer.scrollTop = 0;
-            await waitForAnimationFrames(2);
-
-            const messageItemCount = scrollContainer.querySelectorAll(
-                "[data-message-item]",
-            ).length;
-            const probeResult = await runScrollPerformanceProbe(scrollContainer, {
-                durationMs: options.scrollDurationMs,
-                includeReturnTrip: options.includeReturnTrip,
-                settleFrameCount: options.settleFrameCount,
-            });
-
-            const result: ChatScrollPerfTestResult = {
-                ...probeResult,
-                recordedAt: new Date().toISOString(),
-                conversationId: targetConversationId,
-                conversationIndex,
-                conversationName: targetConversation.name,
-                messageItemCount,
-            };
-
-            lastChatPerfResultRef.current = result;
-            await emit("chat-scroll-perf-result", result);
-            console.log("[AIPP][chat-scroll-perf]", result);
-            window.dispatchEvent(
-                new CustomEvent("aipp:chat-scroll-perf-result", {
-                    detail: result,
-                }),
-            );
-
-            return result;
         },
         [isMobile, listConversations],
     );
@@ -416,6 +501,57 @@ function ChatUIWindow() {
             }
         };
     }, [runConversationScrollPerfTest]);
+
+    useEffect(() => {
+        const capture = {
+            recordVirtualRowHeight: (key: string, height: number) => {
+                const map = virtualRowHeightDriftRef.current;
+                const existing = map.get(key);
+                if (!existing) {
+                    map.set(key, {
+                        changeCount: 1,
+                        minHeight: height,
+                        maxHeight: height,
+                        lastHeight: height,
+                    });
+                    return;
+                }
+
+                if (existing.lastHeight === height) {
+                    return;
+                }
+
+                existing.changeCount += 1;
+                existing.minHeight = Math.min(existing.minHeight, height);
+                existing.maxHeight = Math.max(existing.maxHeight, height);
+                existing.lastHeight = height;
+            },
+            resetVirtualRowHeightDrift: () => {
+                virtualRowHeightDriftRef.current.clear();
+            },
+            getVirtualRowHeightDrift: () => Array.from(
+                virtualRowHeightDriftRef.current,
+                ([key, value]) => ({
+                    key,
+                    changeCount: value.changeCount,
+                    minHeight: Math.round(value.minHeight * 100) / 100,
+                    maxHeight: Math.round(value.maxHeight * 100) / 100,
+                    delta: Math.round((value.maxHeight - value.minHeight) * 100) / 100,
+                    lastHeight: Math.round(value.lastHeight * 100) / 100,
+                }),
+            )
+                .sort((a, b) => b.delta - a.delta || b.changeCount - a.changeCount)
+                .slice(0, 12),
+        };
+
+        window.__AIPP_CHAT_PERF_CAPTURE__ = capture;
+
+        return () => {
+            if (window.__AIPP_CHAT_PERF_CAPTURE__ === capture) {
+                delete window.__AIPP_CHAT_PERF_CAPTURE__;
+            }
+        };
+    }, []);
 
     // 移动端布局
     if (isMobile) {
