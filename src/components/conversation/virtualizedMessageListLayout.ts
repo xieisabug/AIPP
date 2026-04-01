@@ -1,5 +1,5 @@
 export const VIRTUAL_ROW_GAP_PX = 16;
-export const VIRTUAL_OVERSCAN_PX = 1200;
+export const VIRTUAL_OVERSCAN_PX = 600;
 
 export interface VirtualizedLayoutItem {
     key: string;

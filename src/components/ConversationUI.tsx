@@ -337,6 +337,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             scrollContainerRef,
             handleScroll,
             handleUserScrollIntent,
+            syncScrollState,
             smartScroll,
             scrollToUserMessage,
         } = useScrollManagement({
@@ -927,7 +928,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         ref={scrollContainerRef}
                         onWheelCapture={handleUserScrollIntent}
                         onTouchMoveCapture={handleUserScrollIntent}
-                        onScroll={handleScroll}
+                        onScroll={virtualizeMessages ? undefined : handleScroll}
                         className={`conversation-scroll-transparent-track h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
                         data-aipp-slot="chat-conversation-scroll"
                     >
@@ -957,6 +958,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             pendingScrollMessageId={pendingScrollMessageId}
                             clearPendingScrollMessageId={setPendingScrollMessageId}
                             setShiningMessageIds={setShiningMessageIds}
+                            onScrollStateChange={syncScrollState}
                             smartScroll={smartScroll}
                             // NewChatComponent props
                             selectedText={selectedText}

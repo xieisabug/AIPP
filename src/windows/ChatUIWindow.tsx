@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import ChatUIToolbar from "../components/ChatUIToolbar";
 import ConversationList from "../components/ConversationList";
@@ -26,13 +26,49 @@ import {
 import { useAskUserQuestion, usePreviewFile } from "../hooks/useInlineInteraction";
 import { useFeatureConfig } from "../hooks/feature/useFeatureConfig";
 import { useAppShortcuts } from "../hooks/useAppShortcuts";
+import useConversationManager from "../hooks/useConversationManager";
 import { AntiLeakageProvider } from "../contexts/AntiLeakageContext";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
 import { Menu, Plus } from "lucide-react";
+import {
+    runScrollPerformanceProbe,
+    waitForAnimationFrames,
+    waitForCondition,
+    type ChatScrollProbeResult,
+} from "../utils/chatScrollPerf";
 
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { pluginRuntime } from "../services/PluginRuntime";
+
+interface ChatScrollPerfTestOptions {
+    conversationIndex?: number;
+    scrollDurationMs?: number;
+    includeReturnTrip?: boolean;
+    settleFrameCount?: number;
+}
+
+interface ChatScrollPerfTestResult extends ChatScrollProbeResult {
+    recordedAt: string;
+    conversationId: string;
+    conversationIndex: number;
+    conversationName: string;
+    messageItemCount: number;
+}
+
+declare global {
+    interface Window {
+        __AIPP_CHAT_PERF__?: {
+            runConversationScrollTest: (
+                options?: ChatScrollPerfTestOptions,
+            ) => Promise<ChatScrollPerfTestResult>;
+            runSecondConversationScrollTest: (
+                options?: Omit<ChatScrollPerfTestOptions, "conversationIndex">,
+            ) => Promise<ChatScrollPerfTestResult>;
+            getLastResult: () => ChatScrollPerfTestResult | null;
+        };
+    }
+}
 
 function ChatUIWindow() {
     // 集成主题系统
@@ -53,6 +89,9 @@ function ChatUIWindow() {
 
     const [selectedConversation, setSelectedConversation] = useState<string>("");
     const conversationUIRef = useRef<ConversationUIRef>(null);
+    const selectedConversationRef = useRef(selectedConversation);
+    const lastChatPerfResultRef = useRef<ChatScrollPerfTestResult | null>(null);
+    const { listConversations } = useConversationManager();
 
     // 操作权限对话框
     const {
@@ -152,6 +191,91 @@ function ChatUIWindow() {
     const handleConversationChange = useCallback((conv?: Conversation) => {
         setConversationTitle(conv?.name || "");
     }, []);
+
+    useEffect(() => {
+        selectedConversationRef.current = selectedConversation;
+    }, [selectedConversation]);
+
+    const runConversationScrollPerfTest = useCallback(
+        async (
+            options: ChatScrollPerfTestOptions = {},
+        ): Promise<ChatScrollPerfTestResult> => {
+            if (isMobile) {
+                throw new Error("Chat scroll perf test only supports desktop ChatUIWindow.");
+            }
+
+            const conversationIndex = Math.max(0, options.conversationIndex ?? 1);
+            const conversations = await listConversations(1, 100);
+            const targetConversation = conversations[conversationIndex];
+            if (!targetConversation) {
+                throw new Error(
+                    `Conversation index ${conversationIndex} is unavailable; only ${conversations.length} conversation(s) were loaded.`,
+                );
+            }
+
+            const targetConversationId = targetConversation.id.toString();
+            if (selectedConversationRef.current !== targetConversationId) {
+                setSelectedConversation(targetConversationId);
+            }
+
+            await waitForCondition(
+                () => selectedConversationRef.current === targetConversationId,
+                { timeoutMs: 4000 },
+            );
+
+            await waitForCondition(() => {
+                const scrollContainer = document.querySelector(
+                    "[data-aipp-slot='chat-conversation-scroll']",
+                ) as HTMLDivElement | null;
+                return (
+                    !!scrollContainer
+                    && scrollContainer.querySelectorAll("[data-message-item]")
+                        .length > 0
+                );
+            }, { timeoutMs: 10000, intervalMs: 50 });
+
+            const scrollContainer = document.querySelector(
+                "[data-aipp-slot='chat-conversation-scroll']",
+            ) as HTMLDivElement | null;
+            if (!scrollContainer) {
+                throw new Error("Chat scroll container was not found.");
+            }
+
+            await waitForAnimationFrames(4);
+            scrollContainer.scrollTop = 0;
+            await waitForAnimationFrames(2);
+
+            const messageItemCount = scrollContainer.querySelectorAll(
+                "[data-message-item]",
+            ).length;
+            const probeResult = await runScrollPerformanceProbe(scrollContainer, {
+                durationMs: options.scrollDurationMs,
+                includeReturnTrip: options.includeReturnTrip,
+                settleFrameCount: options.settleFrameCount,
+            });
+
+            const result: ChatScrollPerfTestResult = {
+                ...probeResult,
+                recordedAt: new Date().toISOString(),
+                conversationId: targetConversationId,
+                conversationIndex,
+                conversationName: targetConversation.name,
+                messageItemCount,
+            };
+
+            lastChatPerfResultRef.current = result;
+            await emit("chat-scroll-perf-result", result);
+            console.log("[AIPP][chat-scroll-perf]", result);
+            window.dispatchEvent(
+                new CustomEvent("aipp:chat-scroll-perf-result", {
+                    detail: result,
+                }),
+            );
+
+            return result;
+        },
+        [isMobile, listConversations],
+    );
 
     const handleSearchSelect = useCallback((hit: ConversationSearchHit) => {
         setSelectedConversation(hit.conversation_id.toString());
@@ -270,6 +394,28 @@ function ChatUIWindow() {
             unlisten.then((f) => f());
         };
     }, [loadFeatureConfig]);
+
+    useEffect(() => {
+        const api = {
+            runConversationScrollTest: runConversationScrollPerfTest,
+            runSecondConversationScrollTest: (
+                options: Omit<ChatScrollPerfTestOptions, "conversationIndex"> = {},
+            ) =>
+                runConversationScrollPerfTest({
+                    ...options,
+                    conversationIndex: 1,
+                }),
+            getLastResult: () => lastChatPerfResultRef.current,
+        };
+
+        window.__AIPP_CHAT_PERF__ = api;
+
+        return () => {
+            if (window.__AIPP_CHAT_PERF__ === api) {
+                delete window.__AIPP_CHAT_PERF__;
+            }
+        };
+    }, [runConversationScrollPerfTest]);
 
     // 移动端布局
     if (isMobile) {

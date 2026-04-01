@@ -23,6 +23,7 @@ interface VirtualizedMessageListProps extends UseMessageListElementsProps {
     pendingScrollMessageId: number | null;
     clearPendingScrollMessageId: (messageId: number | null) => void;
     setShiningMessageIds: React.Dispatch<React.SetStateAction<Set<number>>>;
+    onScrollStateChange?: (container?: HTMLDivElement | null) => void;
     smartScroll: (forceScroll?: boolean, behaviorOverride?: ScrollBehavior) => void;
 }
 
@@ -88,6 +89,7 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
     pendingScrollMessageId,
     clearPendingScrollMessageId,
     setShiningMessageIds,
+    onScrollStateChange,
     smartScroll,
     ...messageListProps
 }) => {
@@ -103,6 +105,7 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
     const previousRenderKeysRef = useRef<string[]>([]);
     const lastKnownScrollTopRef = useRef(0);
     const userMovedAwayFromBottomRef = useRef(false);
+    const scrollMetricsFrameRef = useRef<number | null>(null);
 
     const layout = useMemo(
         () => buildVirtualizedLayout(renderItems, measuredHeights),
@@ -116,7 +119,7 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
         return renderItems.slice(visibleRange.startIndex, visibleRange.endIndex);
     }, [renderItems, visibleRange.endIndex, visibleRange.startIndex]);
 
-    const updateScrollMetrics = useCallback(() => {
+    const syncScrollMetrics = useCallback(() => {
         const container = scrollContainerRef.current;
         if (!container) {
             return;
@@ -136,9 +139,21 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
         }
         lastKnownScrollTopRef.current = nextScrollTop;
 
+        onScrollStateChange?.(container);
         setScrollTop(nextScrollTop);
         setViewportHeight(container.clientHeight);
-    }, [scrollContainerRef]);
+    }, [onScrollStateChange, scrollContainerRef]);
+
+    const scheduleScrollMetricsUpdate = useCallback(() => {
+        if (scrollMetricsFrameRef.current !== null) {
+            return;
+        }
+
+        scrollMetricsFrameRef.current = requestAnimationFrame(() => {
+            scrollMetricsFrameRef.current = null;
+            syncScrollMetrics();
+        });
+    }, [syncScrollMetrics]);
 
     useEffect(() => {
         const container = scrollContainerRef.current;
@@ -146,22 +161,26 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
             return;
         }
 
-        updateScrollMetrics();
+        syncScrollMetrics();
         const handleScroll = () => {
-            updateScrollMetrics();
+            scheduleScrollMetricsUpdate();
         };
 
         container.addEventListener("scroll", handleScroll, { passive: true });
         const resizeObserver = new ResizeObserver(() => {
-            updateScrollMetrics();
+            scheduleScrollMetricsUpdate();
         });
         resizeObserver.observe(container);
 
         return () => {
+            if (scrollMetricsFrameRef.current !== null) {
+                cancelAnimationFrame(scrollMetricsFrameRef.current);
+                scrollMetricsFrameRef.current = null;
+            }
             container.removeEventListener("scroll", handleScroll);
             resizeObserver.disconnect();
         };
-    }, [scrollContainerRef, updateScrollMetrics]);
+    }, [scheduleScrollMetricsUpdate, scrollContainerRef, syncScrollMetrics]);
 
     const handleHeightChange = useCallback((key: string, height: number) => {
         setMeasuredHeights((prev) => {
@@ -218,7 +237,7 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
             const nextMaxScrollTop = currentMaxScrollTop;
             if (Math.abs(nextMaxScrollTop - currentScrollTop) > 1) {
                 container.scrollTop = nextMaxScrollTop;
-                updateScrollMetrics();
+                syncScrollMetrics();
             }
             return;
         }
@@ -248,14 +267,14 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
             (layout.tops[nextAnchorIndex] ?? 0) - offsetWithinViewport;
         if (Math.abs(nextScrollTop - currentScrollTop) > 1) {
             container.scrollTop = Math.max(0, nextScrollTop);
-            updateScrollMetrics();
+            syncScrollMetrics();
         }
     }, [
         layout,
         pendingScrollMessageId,
         renderItems,
         scrollContainerRef,
-        updateScrollMetrics,
+        syncScrollMetrics,
     ]);
 
     useEffect(() => {

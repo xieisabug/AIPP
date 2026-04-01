@@ -32,6 +32,7 @@ export interface ConversationContentProps {
     pendingScrollMessageId?: number | null;
     clearPendingScrollMessageId?: (messageId: number | null) => void;
     setShiningMessageIds?: React.Dispatch<React.SetStateAction<Set<number>>>;
+    onScrollStateChange?: (container?: HTMLDivElement | null) => void;
     smartScroll?: (forceScroll?: boolean, behaviorOverride?: ScrollBehavior) => void;
     // NewChatComponent props
     selectedText: string;
@@ -66,6 +67,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     pendingScrollMessageId = null,
     clearPendingScrollMessageId,
     setShiningMessageIds,
+    onScrollStateChange,
     smartScroll,
     // NewChatComponent props
     selectedText,
@@ -109,6 +111,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
                                 clearPendingScrollMessageId
                             }
                             setShiningMessageIds={setShiningMessageIds}
+                            onScrollStateChange={onScrollStateChange}
                             smartScroll={smartScroll}
                         />
                     ) : (
