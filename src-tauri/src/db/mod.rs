@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use assistant_db::AssistantDatabase;
 use conversation_db::ConversationDatabase;
@@ -26,11 +27,20 @@ mod tests;
 
 const CURRENT_VERSION: &str = "0.0.11";
 
+static SQLITE_WRITE_LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Arc<Mutex<()>>>>> =
+    OnceLock::new();
+
 pub(crate) fn get_db_path(app_handle: &tauri::AppHandle, db_name: &str) -> Result<PathBuf, String> {
     let app_dir = app_handle.path().app_data_dir().unwrap();
     let db_path = app_dir.join("db");
     std::fs::create_dir_all(&db_path).map_err(|e| e.to_string())?;
     Ok(db_path.join(db_name))
+}
+
+pub(crate) fn get_db_write_lock(db_path: &PathBuf) -> Arc<Mutex<()>> {
+    let locks = SQLITE_WRITE_LOCKS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut guard = locks.lock().expect("sqlite write locks poisoned");
+    guard.entry(db_path.clone()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
 }
 
 #[instrument(level = "info", skip(app_handle, system_db, llm_db, assistant_db, conversation_db))]

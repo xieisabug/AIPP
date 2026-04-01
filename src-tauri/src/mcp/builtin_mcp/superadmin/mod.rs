@@ -34,8 +34,8 @@ pub fn init_superadmin_tables(app_handle: &AppHandle) {
     use crate::db::conversation_db::ConversationDatabase;
 
     match ConversationDatabase::new(app_handle) {
-        Ok(db) => match db.get_connection() {
-            Ok(conn) => {
+        Ok(db) => {
+            if let Err(e) = db.with_write_connection(|conn| {
                 if let Err(e) = audit::create_audit_table(&conn) {
                     error!(error = %e, "Failed to create superadmin_audit_log table");
                 }
@@ -43,11 +43,11 @@ pub fn init_superadmin_tables(app_handle: &AppHandle) {
                 if let Err(e) = audit::migrate_audit_table(&conn) {
                     error!(error = %e, "Failed to migrate superadmin_audit_log table");
                 }
+                Ok(())
+            }) {
+                error!(error = %e, "Failed to get write connection for superadmin init");
             }
-            Err(e) => {
-                error!(error = %e, "Failed to get connection for superadmin init");
-            }
-        },
+        }
         Err(e) => {
             error!(error = %e, "Failed to open conversation DB for superadmin init");
         }

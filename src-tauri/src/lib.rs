@@ -205,11 +205,15 @@ use serde::{Deserialize, Serialize};
 use state::activity_state::ConversationActivityManager;
 use state::message_token::MessageTokenManager;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use tauri::AppHandle;
 use tauri::path::BaseDirectory;
 use tauri::Emitter;
 #[cfg(desktop)]
 use tauri::{
+    EventId, Listener,
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconEvent},
     Manager, RunEvent,
@@ -251,6 +255,217 @@ struct NameCacheState {
 #[derive(Serialize, Deserialize)]
 struct Config {
     selected_text: String,
+}
+
+#[cfg(desktop)]
+#[derive(Debug, Clone)]
+struct ChatScrollPerfAutorunConfig {
+    conversation_index: usize,
+    scroll_duration_ms: u64,
+    include_return_trip: bool,
+    settle_frame_count: u32,
+    timeout_secs: u64,
+    result_path: PathBuf,
+}
+
+#[cfg(desktop)]
+fn parse_bool_env(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(default)
+}
+
+#[cfg(desktop)]
+fn read_chat_scroll_perf_autorun_config() -> Option<ChatScrollPerfAutorunConfig> {
+    if !parse_bool_env("AIPP_CHAT_SCROLL_PERF_AUTORUN", false) {
+        return None;
+    }
+
+    let conversation_index = std::env::var("AIPP_CHAT_SCROLL_PERF_INDEX")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1);
+    let scroll_duration_ms = std::env::var("AIPP_CHAT_SCROLL_PERF_DURATION_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(2200);
+    let settle_frame_count = std::env::var("AIPP_CHAT_SCROLL_PERF_SETTLE_FRAMES")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(4);
+    let timeout_secs = std::env::var("AIPP_CHAT_SCROLL_PERF_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30);
+    let result_path = std::env::var("AIPP_CHAT_SCROLL_PERF_RESULT_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::temp_dir().join("aipp-chat-scroll-perf-result.json")
+        });
+
+    Some(ChatScrollPerfAutorunConfig {
+        conversation_index,
+        scroll_duration_ms,
+        include_return_trip: parse_bool_env(
+            "AIPP_CHAT_SCROLL_PERF_INCLUDE_RETURN_TRIP",
+            true,
+        ),
+        settle_frame_count,
+        timeout_secs,
+        result_path,
+    })
+}
+
+#[cfg(desktop)]
+fn write_chat_scroll_perf_output(path: &PathBuf, value: &serde_json::Value) {
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            error!(
+                target: "chat_scroll_perf",
+                path = %path.display(),
+                error = %error,
+                "Failed to create chat scroll perf output directory"
+            );
+            return;
+        }
+    }
+
+    match serde_json::to_string_pretty(value) {
+        Ok(serialized) => {
+            if let Err(error) = std::fs::write(path, serialized) {
+                error!(
+                    target: "chat_scroll_perf",
+                    path = %path.display(),
+                    error = %error,
+                    "Failed to write chat scroll perf output"
+                );
+            }
+        }
+        Err(error) => {
+            error!(
+                target: "chat_scroll_perf",
+                path = %path.display(),
+                error = %error,
+                "Failed to serialize chat scroll perf output"
+            );
+        }
+    }
+}
+
+#[cfg(desktop)]
+async fn run_chat_scroll_perf_autorun(
+    app_handle: AppHandle,
+    config: ChatScrollPerfAutorunConfig,
+) -> Result<serde_json::Value, String> {
+    let Some(chat_window) = app_handle.get_webview_window("chat_ui") else {
+        return Err("chat_ui window is not available".to_string());
+    };
+
+    open_chat_ui_window_inner(&app_handle, &chat_window);
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    let sender = Arc::new(TokioMutex::new(Some(tx)));
+    let app_handle_clone = app_handle.clone();
+    let listener_id: EventId = app_handle.listen("chat-scroll-perf-result", move |event: tauri::Event| {
+        let sender_clone = sender.clone();
+        let payload = event.payload().to_string();
+        tokio::spawn(async move {
+            if let Some(tx) = sender_clone.lock().await.take() {
+                let _ = tx.send(payload);
+            }
+        });
+    });
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let options_json = serde_json::json!({
+        "conversationIndex": config.conversation_index,
+        "scrollDurationMs": config.scroll_duration_ms,
+        "includeReturnTrip": config.include_return_trip,
+        "settleFrameCount": config.settle_frame_count,
+    });
+    let timeout_ms = config.timeout_secs.saturating_mul(1000);
+    let script = format!(
+        r#"(async () => {{
+  const options = {options_json};
+  const startedAt = performance.now();
+  while (!window.__AIPP_CHAT_PERF__?.runConversationScrollTest) {{
+    if (performance.now() - startedAt > {timeout_ms}) {{
+      console.error("[AIPP][chat-scroll-perf] timed out waiting for perf harness");
+      return;
+    }}
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }}
+  await window.__AIPP_CHAT_PERF__.runConversationScrollTest(options);
+}})();"#,
+        options_json = options_json,
+        timeout_ms = timeout_ms,
+    );
+
+    if let Err(error) = chat_window.eval(script.as_str()) {
+        app_handle_clone.unlisten(listener_id);
+        return Err(format!("Failed to trigger chat scroll perf test: {error}"));
+    }
+
+    let payload = tokio::time::timeout(Duration::from_secs(config.timeout_secs), rx)
+        .await
+        .map_err(|_| {
+            format!(
+                "Timed out after {}s waiting for chat scroll perf result",
+                config.timeout_secs
+            )
+        })?
+        .map_err(|_| "Chat scroll perf result channel closed".to_string())?;
+
+    app_handle_clone.unlisten(listener_id);
+
+    serde_json::from_str::<serde_json::Value>(&payload).map_err(|error| {
+        format!("Failed to parse chat scroll perf result payload: {error}")
+    })
+}
+
+#[cfg(desktop)]
+fn spawn_chat_scroll_perf_autorun_if_requested(app_handle: &AppHandle) {
+    let Some(config) = read_chat_scroll_perf_autorun_config() else {
+        return;
+    };
+
+    let app_handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let output = match run_chat_scroll_perf_autorun(app_handle.clone(), config.clone()).await {
+            Ok(result) => {
+                info!(
+                    target: "chat_scroll_perf",
+                    path = %config.result_path.display(),
+                    "Chat scroll perf autorun completed"
+                );
+                serde_json::json!({
+                    "ok": true,
+                    "result": result,
+                })
+            }
+            Err(error) => {
+                error!(
+                    target: "chat_scroll_perf",
+                    path = %config.result_path.display(),
+                    error = %error,
+                    "Chat scroll perf autorun failed"
+                );
+                serde_json::json!({
+                    "ok": false,
+                    "error": error,
+                })
+            }
+        };
+
+        write_chat_scroll_perf_output(&config.result_path, &output);
+        request_app_exit(&app_handle);
+    });
 }
 
 fn request_app_exit(app_handle: &tauri::AppHandle) {
@@ -640,6 +855,7 @@ pub fn run() {
                             create_ask_window(&app_handle);
                         }
                     }
+                    spawn_chat_scroll_perf_autorun_if_requested(&app_handle);
                 }
             }
 

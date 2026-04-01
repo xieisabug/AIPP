@@ -121,28 +121,36 @@ pub async fn handle_undo(
             let undo_args_str = serde_json::to_string(&undo_args).ok();
             let undo_result_str = serde_json::to_string(&undo_value).ok();
 
-            if let Err(e) = audit::insert_audit_log(
-                &conn,
-                &undo_audit_id,
-                &format!("undo:{}", entry.action_id),
-                &entry.domain,
-                RiskLevel::MEDIUM,
-                undo_args_str.as_deref(),
-                reason,
-                false,
-                false,
-                true,
-                undo_result_str.as_deref(),
-                None,
-                butler_conversation_id,
-                "butler",
-                None, // undo operations themselves don't need snapshots
-            ) {
+            if let Err(e) = db.with_write_connection(|write_conn| {
+                audit::insert_audit_log(
+                    write_conn,
+                    &undo_audit_id,
+                    &format!("undo:{}", entry.action_id),
+                    &entry.domain,
+                    RiskLevel::MEDIUM,
+                    undo_args_str.as_deref(),
+                    reason,
+                    false,
+                    false,
+                    true,
+                    undo_result_str.as_deref(),
+                    None,
+                    butler_conversation_id,
+                    "butler",
+                    None,
+                )
+                .map_err(crate::errors::AppError::from)?;
+                Ok(())
+            }) {
                 warn!(error = %e, "Failed to write undo audit log");
             }
 
             // 8. Mark original as undone
-            if let Err(e) = audit::mark_audit_undone(&conn, audit_id, &undo_audit_id) {
+            if let Err(e) = db.with_write_connection(|write_conn| {
+                audit::mark_audit_undone(write_conn, audit_id, &undo_audit_id)
+                    .map_err(crate::errors::AppError::from)?;
+                Ok(())
+            }) {
                 warn!(error = %e, "Failed to mark original audit as undone");
             }
 
@@ -173,23 +181,27 @@ pub async fn handle_undo(
             });
             let undo_args_str = serde_json::to_string(&undo_args).ok();
 
-            if let Err(e) = audit::insert_audit_log(
-                &conn,
-                &undo_audit_id,
-                &format!("undo:{}", entry.action_id),
-                &entry.domain,
-                RiskLevel::MEDIUM,
-                undo_args_str.as_deref(),
-                reason,
-                false,
-                false,
-                false,
-                None,
-                Some(&err),
-                butler_conversation_id,
-                "butler",
-                None,
-            ) {
+            if let Err(e) = db.with_write_connection(|write_conn| {
+                audit::insert_audit_log(
+                    write_conn,
+                    &undo_audit_id,
+                    &format!("undo:{}", entry.action_id),
+                    &entry.domain,
+                    RiskLevel::MEDIUM,
+                    undo_args_str.as_deref(),
+                    reason,
+                    false,
+                    false,
+                    false,
+                    None,
+                    Some(&err),
+                    butler_conversation_id,
+                    "butler",
+                    None,
+                )
+                .map_err(crate::errors::AppError::from)?;
+                Ok(())
+            }) {
                 warn!(error = %e, "Failed to write failed undo audit log");
             }
 

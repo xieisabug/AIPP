@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Result, Row};
@@ -7,7 +8,7 @@ use tracing::{debug, instrument};
 
 use crate::utils::db_utils::{get_datetime_from_row, get_required_datetime_from_row};
 
-use super::get_db_path;
+use super::{get_db_path, get_db_write_lock};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ScheduledTask {
@@ -99,6 +100,7 @@ fn scheduled_task_run_from_row(row: &Row) -> rusqlite::Result<ScheduledTaskRun> 
 pub struct ScheduledTaskDatabase {
     pub conn: Connection,
     pub db_path: PathBuf,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl ScheduledTaskDatabase {
@@ -106,12 +108,25 @@ impl ScheduledTaskDatabase {
     pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
         let db_path = get_db_path(app_handle, "conversation.db").unwrap();
         let conn = Connection::open(&db_path)?;
+        let write_lock = get_db_write_lock(&db_path);
         debug!("Opened scheduled task database");
-        Ok(ScheduledTaskDatabase { conn, db_path })
+        Ok(ScheduledTaskDatabase { conn, db_path, write_lock })
     }
 
     pub fn get_connection(&self) -> rusqlite::Result<Connection> {
         Connection::open(&self.db_path)
+    }
+
+    pub fn write_lock(&self) -> Arc<Mutex<()>> {
+        self.write_lock.clone()
+    }
+
+    fn with_write_lock<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce() -> Result<T>,
+    {
+        let _guard = self.write_lock.lock().expect("scheduled task db write lock poisoned");
+        f()
     }
 
     #[instrument(level = "debug", skip(self))]
@@ -252,66 +267,72 @@ impl ScheduledTaskDatabase {
 
     #[instrument(level = "debug", skip(self, task), fields(name = %task.name))]
     pub fn create_task(&self, task: &ScheduledTask) -> Result<ScheduledTask> {
-        self.conn.execute(
-            "INSERT INTO scheduled_task (name, is_enabled, schedule_type, interval_value, interval_unit, start_time, week_days, month_days, run_at, next_run_at, last_run_at, assistant_id, task_prompt, notify_prompt, butler_conversation_id, created_time, updated_time)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-            params![
-                task.name,
-                task.is_enabled,
-                task.schedule_type,
-                task.interval_value,
-                task.interval_unit,
-                task.start_time,
-                task.week_days,
-                task.month_days,
-                task.run_at,
-                task.next_run_at,
-                task.last_run_at,
-                task.assistant_id,
-                task.task_prompt,
-                task.notify_prompt,
-                task.butler_conversation_id,
-                task.created_time,
-                task.updated_time
-            ],
-        )?;
-        let id = self.conn.last_insert_rowid();
-        Ok(ScheduledTask { id, ..task.clone() })
+        self.with_write_lock(|| {
+            self.conn.execute(
+                "INSERT INTO scheduled_task (name, is_enabled, schedule_type, interval_value, interval_unit, start_time, week_days, month_days, run_at, next_run_at, last_run_at, assistant_id, task_prompt, notify_prompt, butler_conversation_id, created_time, updated_time)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                params![
+                    task.name,
+                    task.is_enabled,
+                    task.schedule_type,
+                    task.interval_value,
+                    task.interval_unit,
+                    task.start_time,
+                    task.week_days,
+                    task.month_days,
+                    task.run_at,
+                    task.next_run_at,
+                    task.last_run_at,
+                    task.assistant_id,
+                    task.task_prompt,
+                    task.notify_prompt,
+                    task.butler_conversation_id,
+                    task.created_time,
+                    task.updated_time
+                ],
+            )?;
+            let id = self.conn.last_insert_rowid();
+            Ok(ScheduledTask { id, ..task.clone() })
+        })
     }
 
     #[instrument(level = "debug", skip(self, task), fields(id = task.id))]
     pub fn update_task(&self, task: &ScheduledTask) -> Result<()> {
-        self.conn.execute(
-            "UPDATE scheduled_task SET name = ?1, is_enabled = ?2, schedule_type = ?3, interval_value = ?4, interval_unit = ?5, start_time = ?6, week_days = ?7, month_days = ?8, run_at = ?9, next_run_at = ?10, last_run_at = ?11, assistant_id = ?12, task_prompt = ?13, notify_prompt = ?14, butler_conversation_id = ?15, updated_time = ?16 WHERE id = ?17",
-            params![
-                task.name,
-                task.is_enabled,
-                task.schedule_type,
-                task.interval_value,
-                task.interval_unit,
-                task.start_time,
-                task.week_days,
-                task.month_days,
-                task.run_at,
-                task.next_run_at,
-                task.last_run_at,
-                task.assistant_id,
-                task.task_prompt,
-                task.notify_prompt,
-                task.butler_conversation_id,
-                task.updated_time,
-                task.id
-            ],
-        )?;
-        Ok(())
+        self.with_write_lock(|| {
+            self.conn.execute(
+                "UPDATE scheduled_task SET name = ?1, is_enabled = ?2, schedule_type = ?3, interval_value = ?4, interval_unit = ?5, start_time = ?6, week_days = ?7, month_days = ?8, run_at = ?9, next_run_at = ?10, last_run_at = ?11, assistant_id = ?12, task_prompt = ?13, notify_prompt = ?14, butler_conversation_id = ?15, updated_time = ?16 WHERE id = ?17",
+                params![
+                    task.name,
+                    task.is_enabled,
+                    task.schedule_type,
+                    task.interval_value,
+                    task.interval_unit,
+                    task.start_time,
+                    task.week_days,
+                    task.month_days,
+                    task.run_at,
+                    task.next_run_at,
+                    task.last_run_at,
+                    task.assistant_id,
+                    task.task_prompt,
+                    task.notify_prompt,
+                    task.butler_conversation_id,
+                    task.updated_time,
+                    task.id
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     #[instrument(level = "debug", skip(self), fields(id))]
     pub fn delete_task(&self, id: i64) -> Result<()> {
-        let _ = self.conn.execute("DELETE FROM scheduled_task_log WHERE task_id = ?", [id]);
-        let _ = self.conn.execute("DELETE FROM scheduled_task_run WHERE task_id = ?", [id]);
-        self.conn.execute("DELETE FROM scheduled_task WHERE id = ?", [id])?;
-        Ok(())
+        self.with_write_lock(|| {
+            let _ = self.conn.execute("DELETE FROM scheduled_task_log WHERE task_id = ?", [id]);
+            let _ = self.conn.execute("DELETE FROM scheduled_task_run WHERE task_id = ?", [id]);
+            self.conn.execute("DELETE FROM scheduled_task WHERE id = ?", [id])?;
+            Ok(())
+        })
     }
 
     #[instrument(level = "debug", skip(self, now), fields(now = %now))]
@@ -329,13 +350,15 @@ impl ScheduledTaskDatabase {
 
     #[instrument(level = "debug", skip(self, log), fields(task_id = log.task_id))]
     pub fn add_log(&self, log: &ScheduledTaskLog) -> Result<ScheduledTaskLog> {
-        self.conn.execute(
-            "INSERT INTO scheduled_task_log (task_id, run_id, message_type, content, created_time)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![log.task_id, log.run_id, log.message_type, log.content, log.created_time],
-        )?;
-        let id = self.conn.last_insert_rowid();
-        Ok(ScheduledTaskLog { id, ..log.clone() })
+        self.with_write_lock(|| {
+            self.conn.execute(
+                "INSERT INTO scheduled_task_log (task_id, run_id, message_type, content, created_time)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![log.task_id, log.run_id, log.message_type, log.content, log.created_time],
+            )?;
+            let id = self.conn.last_insert_rowid();
+            Ok(ScheduledTaskLog { id, ..log.clone() })
+        })
     }
 
     #[instrument(level = "debug", skip(self), fields(task_id, limit))]
@@ -408,23 +431,25 @@ impl ScheduledTaskDatabase {
 
     #[instrument(level = "debug", skip(self, run), fields(task_id = run.task_id, status = %run.status))]
     pub fn create_run(&self, run: &ScheduledTaskRun) -> Result<ScheduledTaskRun> {
-        self.conn.execute(
-            "INSERT INTO scheduled_task_run (task_id, run_id, status, notify, summary, error_message, started_time, finished_time, butler_followup_status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                run.task_id,
-                run.run_id,
-                run.status,
-                run.notify,
-                run.summary,
-                run.error_message,
-                run.started_time,
-                run.finished_time,
-                run.butler_followup_status
-            ],
-        )?;
-        let id = self.conn.last_insert_rowid();
-        Ok(ScheduledTaskRun { id, ..run.clone() })
+        self.with_write_lock(|| {
+            self.conn.execute(
+                "INSERT INTO scheduled_task_run (task_id, run_id, status, notify, summary, error_message, started_time, finished_time, butler_followup_status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    run.task_id,
+                    run.run_id,
+                    run.status,
+                    run.notify,
+                    run.summary,
+                    run.error_message,
+                    run.started_time,
+                    run.finished_time,
+                    run.butler_followup_status
+                ],
+            )?;
+            let id = self.conn.last_insert_rowid();
+            Ok(ScheduledTaskRun { id, ..run.clone() })
+        })
     }
 
     #[instrument(
@@ -441,13 +466,15 @@ impl ScheduledTaskDatabase {
         error_message: Option<&str>,
         finished_time: Option<DateTime<Utc>>,
     ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE scheduled_task_run
-             SET status = ?1, notify = ?2, summary = ?3, error_message = ?4, finished_time = ?5
-             WHERE run_id = ?6",
-            params![status, notify, summary, error_message, finished_time, run_id],
-        )?;
-        Ok(())
+        self.with_write_lock(|| {
+            self.conn.execute(
+                "UPDATE scheduled_task_run
+                 SET status = ?1, notify = ?2, summary = ?3, error_message = ?4, finished_time = ?5
+                 WHERE run_id = ?6",
+                params![status, notify, summary, error_message, finished_time, run_id],
+            )?;
+            Ok(())
+        })
     }
 
     /// List scheduled tasks owned by a specific Butler conversation.
@@ -473,10 +500,12 @@ impl ScheduledTaskDatabase {
         run_id: &str,
         status: &str,
     ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE scheduled_task_run SET butler_followup_status = ? WHERE run_id = ?",
-            params![status, run_id],
-        )?;
-        Ok(())
+        self.with_write_lock(|| {
+            self.conn.execute(
+                "UPDATE scheduled_task_run SET butler_followup_status = ? WHERE run_id = ?",
+                params![status, run_id],
+            )?;
+            Ok(())
+        })
     }
 }

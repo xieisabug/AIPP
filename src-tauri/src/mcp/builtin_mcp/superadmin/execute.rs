@@ -167,8 +167,8 @@ fn log_audit(
 
     // Best-effort audit logging – do not fail the action if audit DB write fails
     match ConversationDatabase::new(app_handle) {
-        Ok(db) => match db.get_connection() {
-            Ok(conn) => {
+        Ok(db) => {
+            if let Err(e) = db.with_write_connection(|conn| {
                 if let Err(e) = audit::insert_audit_log(
                     &conn,
                     audit_id,
@@ -188,11 +188,11 @@ fn log_audit(
                 ) {
                     error!(error = %e, "Failed to write audit log");
                 }
+                Ok(())
+            }) {
+                error!(error = %e, "Failed to get write connection for audit log");
             }
-            Err(e) => {
-                error!(error = %e, "Failed to get connection for audit log");
-            }
-        },
+        }
         Err(e) => {
             error!(error = %e, "Failed to open conversation DB for audit log");
         }

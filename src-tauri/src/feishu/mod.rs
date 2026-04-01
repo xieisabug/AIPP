@@ -2290,48 +2290,46 @@ fn find_latest_message_id_by_type(
 
 fn create_relay_scope(app_handle: &AppHandle, new_scope: NewRelayScope<'_>) -> Result<i64, String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    db.with_write_connection(|conn| {
+        let superseded = conn
+            .execute(
+                "UPDATE external_channel_relay_scope
+                 SET status = 'superseded', updated_time = CURRENT_TIMESTAMP
+                 WHERE channel = ?1
+                   AND conversation_id = ?2
+                   AND COALESCE(status, '') NOT IN ('completed', 'failed', 'superseded')",
+                params![new_scope.channel, new_scope.conversation_id],
+            )
+            .map_err(crate::errors::AppError::from)?;
+        if superseded > 0 {
+            info!(
+                conversation_id = new_scope.conversation_id,
+                superseded,
+                new_origin = new_scope.origin,
+                "superseded existing relay scopes before creating new scope"
+            );
+        }
 
-    // Cancel all non-completed scopes for the same conversation to prevent
-    // race conditions where an old scope wakes up and duplicates messages
-    // sent by the new scope.
-    let superseded = conn
-        .execute(
-            "UPDATE external_channel_relay_scope
-             SET status = 'superseded', updated_time = CURRENT_TIMESTAMP
-             WHERE channel = ?1
-               AND conversation_id = ?2
-               AND COALESCE(status, '') NOT IN ('completed', 'failed', 'superseded')",
-            params![new_scope.channel, new_scope.conversation_id],
+        conn.execute(
+            "INSERT INTO external_channel_relay_scope
+                (channel, conversation_id, origin, external_chat_id, external_user_id,
+                 anchor_external_message_id, start_after_local_message_id, last_delivered_local_message_id,
+                 status, updated_time)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 'pending', CURRENT_TIMESTAMP)",
+            params![
+                new_scope.channel,
+                new_scope.conversation_id,
+                new_scope.origin,
+                new_scope.external_chat_id,
+                new_scope.external_user_id,
+                new_scope.anchor_external_message_id,
+                new_scope.start_after_local_message_id,
+            ],
         )
-        .map_err(|e| e.to_string())?;
-    if superseded > 0 {
-        info!(
-            conversation_id = new_scope.conversation_id,
-            superseded,
-            new_origin = new_scope.origin,
-            "superseded existing relay scopes before creating new scope"
-        );
-    }
-
-    conn.execute(
-        "INSERT INTO external_channel_relay_scope
-            (channel, conversation_id, origin, external_chat_id, external_user_id,
-             anchor_external_message_id, start_after_local_message_id, last_delivered_local_message_id,
-             status, updated_time)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 'pending', CURRENT_TIMESTAMP)",
-        params![
-            new_scope.channel,
-            new_scope.conversation_id,
-            new_scope.origin,
-            new_scope.external_chat_id,
-            new_scope.external_user_id,
-            new_scope.anchor_external_message_id,
-            new_scope.start_after_local_message_id,
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(conn.last_insert_rowid())
+        .map_err(crate::errors::AppError::from)?;
+        Ok(conn.last_insert_rowid())
+    })
+    .map_err(|e| e.to_string())
 }
 
 fn load_relay_scope(app_handle: &AppHandle, scope_id: i64) -> Result<RelayScopeRecord, String> {
@@ -2407,18 +2405,20 @@ fn mark_relay_scope_progress(
     status: &str,
 ) -> Result<(), String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    let conn = db.get_connection().map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE external_channel_relay_scope
-         SET last_delivered_local_message_id = ?2,
-             status = ?3,
-             last_error = NULL,
-             updated_time = CURRENT_TIMESTAMP
-         WHERE id = ?1",
-        params![scope_id, last_delivered_local_message_id, status],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    db.with_write_connection(|conn| {
+        conn.execute(
+            "UPDATE external_channel_relay_scope
+             SET last_delivered_local_message_id = ?2,
+                 status = ?3,
+                 last_error = NULL,
+                 updated_time = CURRENT_TIMESTAMP
+             WHERE id = ?1",
+            params![scope_id, last_delivered_local_message_id, status],
+        )
+        .map_err(crate::errors::AppError::from)?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
 }
 
 fn mark_relay_scope_failed(
@@ -2427,17 +2427,19 @@ fn mark_relay_scope_failed(
     error: &str,
 ) -> Result<(), String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    let conn = db.get_connection().map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE external_channel_relay_scope
-         SET status = 'failed',
-             last_error = ?2,
-             updated_time = CURRENT_TIMESTAMP
-         WHERE id = ?1",
-        params![scope_id, truncate_text(error, 500)],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    db.with_write_connection(|conn| {
+        conn.execute(
+            "UPDATE external_channel_relay_scope
+             SET status = 'failed',
+                 last_error = ?2,
+                 updated_time = CURRENT_TIMESTAMP
+             WHERE id = ?1",
+            params![scope_id, truncate_text(error, 500)],
+        )
+        .map_err(crate::errors::AppError::from)?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// Cross-scope deduplication: check if a local message was already successfully
@@ -2476,28 +2478,30 @@ fn record_scope_delivery(
     rendered_text: &str,
 ) -> Result<(), String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    let conn = db.get_connection().map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT INTO external_channel_message_delivery
-            (scope_id, channel, conversation_id, local_message_id, external_message_id, status, rendered_text, updated_time)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP)
-         ON CONFLICT(scope_id, local_message_id) DO UPDATE SET
-            external_message_id = excluded.external_message_id,
-            status = excluded.status,
-            rendered_text = excluded.rendered_text,
-            updated_time = CURRENT_TIMESTAMP",
-        params![
-            scope_id,
-            channel,
-            conversation_id,
-            local_message_id,
-            external_message_id,
-            status,
-            rendered_text,
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    db.with_write_connection(|conn| {
+        conn.execute(
+            "INSERT INTO external_channel_message_delivery
+                (scope_id, channel, conversation_id, local_message_id, external_message_id, status, rendered_text, updated_time)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP)
+             ON CONFLICT(scope_id, local_message_id) DO UPDATE SET
+                external_message_id = excluded.external_message_id,
+                status = excluded.status,
+                rendered_text = excluded.rendered_text,
+                updated_time = CURRENT_TIMESTAMP",
+            params![
+                scope_id,
+                channel,
+                conversation_id,
+                local_message_id,
+                external_message_id,
+                status,
+                rendered_text,
+            ],
+        )
+        .map_err(crate::errors::AppError::from)?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
 }
 
 fn find_latest_feishu_target(
@@ -2570,25 +2574,27 @@ pub(crate) fn inherit_latest_feishu_target(
     };
 
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    let conn = db.get_connection().map_err(|e| e.to_string())?;
     let anchor_external_message_id = target.reply_to_message_id.unwrap_or_default();
-    conn.execute(
-        "INSERT INTO external_channel_relay_scope
-            (channel, conversation_id, origin, external_chat_id, external_user_id,
-             anchor_external_message_id, start_after_local_message_id, last_delivered_local_message_id,
-             status, updated_time)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0, 'completed', CURRENT_TIMESTAMP)",
-        params![
-            CHANNEL_FEISHU,
-            target_conversation_id,
-            RELAY_ORIGIN_AIPP,
-            target.external_chat_id.as_deref(),
-            target.external_user_id.as_deref(),
-            anchor_external_message_id,
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    db.with_write_connection(|conn| {
+        conn.execute(
+            "INSERT INTO external_channel_relay_scope
+                (channel, conversation_id, origin, external_chat_id, external_user_id,
+                 anchor_external_message_id, start_after_local_message_id, last_delivered_local_message_id,
+                 status, updated_time)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0, 'completed', CURRENT_TIMESTAMP)",
+            params![
+                CHANNEL_FEISHU,
+                target_conversation_id,
+                RELAY_ORIGIN_AIPP,
+                target.external_chat_id.as_deref(),
+                target.external_user_id.as_deref(),
+                anchor_external_message_id,
+            ],
+        )
+        .map_err(crate::errors::AppError::from)?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
 }
 
 fn find_scope_reply_anchor(
@@ -2803,24 +2809,26 @@ fn insert_external_link(
     record: ChannelLinkRecord<'_>,
 ) -> Result<(), String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    let conn = db.get_connection().map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT OR REPLACE INTO external_channel_message_link
-            (channel, external_message_id, external_chat_id, external_user_id, conversation_id, local_message_id, direction, payload_type)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![
-            CHANNEL_FEISHU,
-            record.external_message_id,
-            record.external_chat_id,
-            record.external_user_id,
-            record.conversation_id,
-            record.local_message_id,
-            record.direction,
-            record.payload_type
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    db.with_write_connection(|conn| {
+        conn.execute(
+            "INSERT OR REPLACE INTO external_channel_message_link
+                (channel, external_message_id, external_chat_id, external_user_id, conversation_id, local_message_id, direction, payload_type)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                CHANNEL_FEISHU,
+                record.external_message_id,
+                record.external_chat_id,
+                record.external_user_id,
+                record.conversation_id,
+                record.local_message_id,
+                record.direction,
+                record.payload_type
+            ],
+        )
+        .map_err(crate::errors::AppError::from)?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
 }
 
 fn update_external_link_local_message(
@@ -2830,15 +2838,17 @@ fn update_external_link_local_message(
     local_message_id: i64,
 ) -> Result<(), String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    let conn = db.get_connection().map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE external_channel_message_link
-         SET local_message_id = ?1
-         WHERE channel = ?2 AND external_message_id = ?3",
-        params![local_message_id, channel, external_message_id],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    db.with_write_connection(|conn| {
+        conn.execute(
+            "UPDATE external_channel_message_link
+             SET local_message_id = ?1
+             WHERE channel = ?2 AND external_message_id = ?3",
+            params![local_message_id, channel, external_message_id],
+        )
+        .map_err(crate::errors::AppError::from)?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
 }
 
 async fn fetch_tenant_access_token(
