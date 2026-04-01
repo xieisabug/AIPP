@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use super::connection::{params, Connection, OptionalExtension, Result, Row};
 use chrono::{DateTime, Utc};
+use rusqlite::{params, Connection, OptionalExtension, Result, Row};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
 
@@ -58,7 +58,7 @@ pub struct ScheduledTaskRun {
 /// Column order: id, name, is_enabled, schedule_type, interval_value, interval_unit,
 /// start_time, week_days, month_days, run_at, next_run_at, last_run_at, assistant_id,
 /// task_prompt, notify_prompt, butler_conversation_id, created_time, updated_time
-fn scheduled_task_from_row(row: &Row) -> Result<ScheduledTask> {
+fn scheduled_task_from_row(row: &Row) -> rusqlite::Result<ScheduledTask> {
     Ok(ScheduledTask {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -81,7 +81,7 @@ fn scheduled_task_from_row(row: &Row) -> Result<ScheduledTask> {
     })
 }
 
-fn scheduled_task_run_from_row(row: &Row) -> Result<ScheduledTaskRun> {
+fn scheduled_task_run_from_row(row: &Row) -> rusqlite::Result<ScheduledTaskRun> {
     Ok(ScheduledTaskRun {
         id: row.get(0)?,
         task_id: row.get(1)?,
@@ -103,19 +103,19 @@ pub struct ScheduledTaskDatabase {
 
 impl ScheduledTaskDatabase {
     #[instrument(level = "debug", skip(app_handle), fields(db = "conversation.db"))]
-    pub fn new(app_handle: &tauri::AppHandle) -> Result<Self> {
+    pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
         let db_path = get_db_path(app_handle, "conversation.db").unwrap();
         let conn = Connection::open(&db_path)?;
         debug!("Opened scheduled task database");
         Ok(ScheduledTaskDatabase { conn, db_path })
     }
 
-    pub fn get_connection(&self) -> Result<Connection> {
+    pub fn get_connection(&self) -> rusqlite::Result<Connection> {
         Connection::open(&self.db_path)
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub fn create_tables(&self) -> Result<()> {
+    pub fn create_tables(&self) -> rusqlite::Result<()> {
         let conn = &self.conn;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS scheduled_task (
@@ -137,37 +137,37 @@ impl ScheduledTaskDatabase {
                 created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_time DATETIME DEFAULT CURRENT_TIMESTAMP
             )",
-            (),
+            [],
         )?;
 
         // Migration: add new columns if they don't exist
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(scheduled_task)")?
-            .query_map((), |row| row.get::<_, String>(1))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>>>()?;
         if !columns.contains(&"start_time".to_string()) {
-            conn.execute("ALTER TABLE scheduled_task ADD COLUMN start_time TEXT", ())?;
+            conn.execute("ALTER TABLE scheduled_task ADD COLUMN start_time TEXT", [])?;
         }
         if !columns.contains(&"week_days".to_string()) {
-            conn.execute("ALTER TABLE scheduled_task ADD COLUMN week_days TEXT", ())?;
+            conn.execute("ALTER TABLE scheduled_task ADD COLUMN week_days TEXT", [])?;
         }
         if !columns.contains(&"month_days".to_string()) {
-            conn.execute("ALTER TABLE scheduled_task ADD COLUMN month_days TEXT", ())?;
+            conn.execute("ALTER TABLE scheduled_task ADD COLUMN month_days TEXT", [])?;
         }
         if !columns.contains(&"butler_conversation_id".to_string()) {
             conn.execute(
                 "ALTER TABLE scheduled_task ADD COLUMN butler_conversation_id INTEGER",
-                (),
+                [],
             )?;
         }
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_scheduled_task_enabled_next_run ON scheduled_task(is_enabled, next_run_at)",
-            (),
+            [],
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_scheduled_task_assistant ON scheduled_task(assistant_id)",
-            (),
+            [],
         )?;
 
         conn.execute(
@@ -179,11 +179,11 @@ impl ScheduledTaskDatabase {
                 content TEXT NOT NULL,
                 created_time DATETIME DEFAULT CURRENT_TIMESTAMP
             )",
-            (),
+            [],
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_scheduled_task_log_task_time ON scheduled_task_log(task_id, created_time)",
-            (),
+            [],
         )?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS scheduled_task_run (
@@ -197,26 +197,26 @@ impl ScheduledTaskDatabase {
                 started_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 finished_time DATETIME
             )",
-            (),
+            [],
         )?;
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_task_run_run_id ON scheduled_task_run(run_id)",
-            (),
+            [],
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_scheduled_task_run_task_time ON scheduled_task_run(task_id, started_time)",
-            (),
+            [],
         )?;
 
         // Migration: add butler_followup_status to scheduled_task_run
         let run_columns: Vec<String> = conn
             .prepare("PRAGMA table_info(scheduled_task_run)")?
-            .query_map((), |row| row.get::<_, String>(1))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>>>()?;
         if !run_columns.contains(&"butler_followup_status".to_string()) {
             conn.execute(
                 "ALTER TABLE scheduled_task_run ADD COLUMN butler_followup_status TEXT",
-                (),
+                [],
             )?;
         }
 
@@ -231,8 +231,8 @@ impl ScheduledTaskDatabase {
              FROM scheduled_task
              ORDER BY created_time DESC",
         )?;
-        let rows = stmt.query_map((), |row| scheduled_task_from_row(row))?;
-        let tasks: Vec<ScheduledTask> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let rows = stmt.query_map([], |row| scheduled_task_from_row(row))?;
+        let tasks: Vec<ScheduledTask> = rows.collect::<Result<Vec<_>>>()?;
         Ok(tasks)
     }
 
@@ -243,7 +243,7 @@ impl ScheduledTaskDatabase {
             .query_row(
                 "SELECT id, name, is_enabled, schedule_type, interval_value, interval_unit, start_time, week_days, month_days, run_at, next_run_at, last_run_at, assistant_id, task_prompt, notify_prompt, butler_conversation_id, created_time, updated_time
                  FROM scheduled_task WHERE id = ?",
-                params![id],
+                [id],
                 |row| scheduled_task_from_row(row),
             )
             .optional()?;
@@ -256,20 +256,20 @@ impl ScheduledTaskDatabase {
             "INSERT INTO scheduled_task (name, is_enabled, schedule_type, interval_value, interval_unit, start_time, week_days, month_days, run_at, next_run_at, last_run_at, assistant_id, task_prompt, notify_prompt, butler_conversation_id, created_time, updated_time)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
-                task.name.clone(),
+                task.name,
                 task.is_enabled,
-                task.schedule_type.clone(),
+                task.schedule_type,
                 task.interval_value,
-                task.interval_unit.clone(),
-                task.start_time.clone(),
-                task.week_days.clone(),
-                task.month_days.clone(),
+                task.interval_unit,
+                task.start_time,
+                task.week_days,
+                task.month_days,
                 task.run_at,
                 task.next_run_at,
                 task.last_run_at,
                 task.assistant_id,
-                task.task_prompt.clone(),
-                task.notify_prompt.clone(),
+                task.task_prompt,
+                task.notify_prompt,
                 task.butler_conversation_id,
                 task.created_time,
                 task.updated_time
@@ -284,20 +284,20 @@ impl ScheduledTaskDatabase {
         self.conn.execute(
             "UPDATE scheduled_task SET name = ?1, is_enabled = ?2, schedule_type = ?3, interval_value = ?4, interval_unit = ?5, start_time = ?6, week_days = ?7, month_days = ?8, run_at = ?9, next_run_at = ?10, last_run_at = ?11, assistant_id = ?12, task_prompt = ?13, notify_prompt = ?14, butler_conversation_id = ?15, updated_time = ?16 WHERE id = ?17",
             params![
-                task.name.clone(),
+                task.name,
                 task.is_enabled,
-                task.schedule_type.clone(),
+                task.schedule_type,
                 task.interval_value,
-                task.interval_unit.clone(),
-                task.start_time.clone(),
-                task.week_days.clone(),
-                task.month_days.clone(),
+                task.interval_unit,
+                task.start_time,
+                task.week_days,
+                task.month_days,
                 task.run_at,
                 task.next_run_at,
                 task.last_run_at,
                 task.assistant_id,
-                task.task_prompt.clone(),
-                task.notify_prompt.clone(),
+                task.task_prompt,
+                task.notify_prompt,
                 task.butler_conversation_id,
                 task.updated_time,
                 task.id
@@ -308,9 +308,9 @@ impl ScheduledTaskDatabase {
 
     #[instrument(level = "debug", skip(self), fields(id))]
     pub fn delete_task(&self, id: i64) -> Result<()> {
-        let _ = self.conn.execute("DELETE FROM scheduled_task_log WHERE task_id = ?", params![id]);
-        let _ = self.conn.execute("DELETE FROM scheduled_task_run WHERE task_id = ?", params![id]);
-        self.conn.execute("DELETE FROM scheduled_task WHERE id = ?", params![id])?;
+        let _ = self.conn.execute("DELETE FROM scheduled_task_log WHERE task_id = ?", [id]);
+        let _ = self.conn.execute("DELETE FROM scheduled_task_run WHERE task_id = ?", [id]);
+        self.conn.execute("DELETE FROM scheduled_task WHERE id = ?", [id])?;
         Ok(())
     }
 
@@ -322,8 +322,8 @@ impl ScheduledTaskDatabase {
              WHERE is_enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
              ORDER BY next_run_at ASC",
         )?;
-        let rows = stmt.query_map(params![now], |row| scheduled_task_from_row(row))?;
-        let tasks: Vec<ScheduledTask> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let rows = stmt.query_map([now], |row| scheduled_task_from_row(row))?;
+        let tasks: Vec<ScheduledTask> = rows.collect::<Result<Vec<_>>>()?;
         Ok(tasks)
     }
 
@@ -332,13 +332,7 @@ impl ScheduledTaskDatabase {
         self.conn.execute(
             "INSERT INTO scheduled_task_log (task_id, run_id, message_type, content, created_time)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                log.task_id,
-                log.run_id.clone(),
-                log.message_type.clone(),
-                log.content.clone(),
-                log.created_time
-            ],
+            params![log.task_id, log.run_id, log.message_type, log.content, log.created_time],
         )?;
         let id = self.conn.last_insert_rowid();
         Ok(ScheduledTaskLog { id, ..log.clone() })
@@ -363,7 +357,7 @@ impl ScheduledTaskDatabase {
                 created_time: get_required_datetime_from_row(row, 5, "created_time")?,
             })
         })?;
-        let mut logs: Vec<ScheduledTaskLog> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut logs: Vec<ScheduledTaskLog> = rows.collect::<Result<Vec<_>>>()?;
         logs.reverse();
         Ok(logs)
     }
@@ -379,7 +373,7 @@ impl ScheduledTaskDatabase {
         )?;
         let rows =
             stmt.query_map(params![task_id, limit], |row| scheduled_task_run_from_row(row))?;
-        let runs: Vec<ScheduledTaskRun> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let runs: Vec<ScheduledTaskRun> = rows.collect::<Result<Vec<_>>>()?;
         Ok(runs)
     }
 
@@ -407,7 +401,7 @@ impl ScheduledTaskDatabase {
                 created_time: get_required_datetime_from_row(row, 5, "created_time")?,
             })
         })?;
-        let mut logs: Vec<ScheduledTaskLog> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut logs: Vec<ScheduledTaskLog> = rows.collect::<Result<Vec<_>>>()?;
         logs.reverse();
         Ok(logs)
     }
@@ -419,14 +413,14 @@ impl ScheduledTaskDatabase {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 run.task_id,
-                run.run_id.clone(),
-                run.status.clone(),
+                run.run_id,
+                run.status,
                 run.notify,
-                run.summary.clone(),
-                run.error_message.clone(),
+                run.summary,
+                run.error_message,
                 run.started_time,
                 run.finished_time,
-                run.butler_followup_status.clone()
+                run.butler_followup_status
             ],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -458,21 +452,27 @@ impl ScheduledTaskDatabase {
 
     /// List scheduled tasks owned by a specific Butler conversation.
     #[instrument(level = "debug", skip(self), fields(butler_conversation_id))]
-    pub fn list_tasks_by_butler(&self, butler_conversation_id: i64) -> Result<Vec<ScheduledTask>> {
+    pub fn list_tasks_by_butler(
+        &self,
+        butler_conversation_id: i64,
+    ) -> Result<Vec<ScheduledTask>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, is_enabled, schedule_type, interval_value, interval_unit, start_time, week_days, month_days, run_at, next_run_at, last_run_at, assistant_id, task_prompt, notify_prompt, butler_conversation_id, created_time, updated_time
              FROM scheduled_task
              WHERE butler_conversation_id = ?
              ORDER BY created_time DESC",
         )?;
-        let rows =
-            stmt.query_map(params![butler_conversation_id], |row| scheduled_task_from_row(row))?;
+        let rows = stmt.query_map([butler_conversation_id], |row| scheduled_task_from_row(row))?;
         rows.collect()
     }
 
     /// Update the butler followup status for a run.
     #[instrument(level = "debug", skip(self), fields(run_id, status))]
-    pub fn update_run_butler_followup_status(&self, run_id: &str, status: &str) -> Result<()> {
+    pub fn update_run_butler_followup_status(
+        &self,
+        run_id: &str,
+        status: &str,
+    ) -> Result<()> {
         self.conn.execute(
             "UPDATE scheduled_task_run SET butler_followup_status = ? WHERE run_id = ?",
             params![status, run_id],

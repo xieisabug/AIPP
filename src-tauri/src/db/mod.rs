@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use assistant_db::AssistantDatabase;
-use connection::params;
 use conversation_db::ConversationDatabase;
 use llm_db::LLMDatabase;
 use mcp_db::MCPDatabase;
+use connection::params;
 use scheduled_task_db::ScheduledTaskDatabase;
 use semver::Version;
 use system_db::SystemDatabase;
@@ -19,7 +19,6 @@ pub mod mcp_db;
 pub mod plugin_db;
 pub mod scheduled_task_db;
 pub mod skill_db;
-pub mod sync_manager;
 pub mod system_db;
 
 #[cfg(test)]
@@ -28,15 +27,10 @@ mod tests;
 const CURRENT_VERSION: &str = "0.0.11";
 
 pub(crate) fn get_db_path(app_handle: &tauri::AppHandle, db_name: &str) -> Result<PathBuf, String> {
-    let db_path = get_db_dir(app_handle)?;
-    Ok(db_path.join(db_name))
-}
-
-pub(crate) fn get_db_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
     let app_dir = app_handle.path().app_data_dir().unwrap();
     let db_path = app_dir.join("db");
     std::fs::create_dir_all(&db_path).map_err(|e| e.to_string())?;
-    Ok(db_path)
+    Ok(db_path.join(db_name))
 }
 
 #[instrument(level = "info", skip(app_handle, system_db, llm_db, assistant_db, conversation_db))]

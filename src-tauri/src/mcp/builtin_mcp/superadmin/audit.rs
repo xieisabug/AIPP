@@ -1,4 +1,4 @@
-use crate::db::connection::{self, params, Connection};
+use crate::db::connection::{self, params, params_from_iter, Connection, Value};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 use uuid::Uuid;
@@ -184,30 +184,30 @@ pub fn query_audit_log(
                 before_snapshot_json, is_undone, undo_audit_id
          FROM superadmin_audit_log WHERE 1=1",
     );
-    let mut param_values: Vec<libsql::Value> = Vec::new();
+    let mut param_values: Vec<Value> = Vec::new();
 
     if let Some(aid) = action_id {
         sql.push_str(" AND action_id = ?");
-        param_values.push(libsql::Value::from(aid.to_string()));
+        param_values.push(Value::from(aid.to_string()));
     }
     if let Some(d) = domain {
         sql.push_str(" AND domain = ?");
-        param_values.push(libsql::Value::from(d.to_string()));
+        param_values.push(Value::from(d.to_string()));
     }
     if let Some(s) = success_only {
         sql.push_str(" AND success = ?");
-        param_values.push(libsql::Value::from(s as i32));
+        param_values.push(Value::from(s as i32));
     }
     if undoable_only {
         // Only show successful write ops with snapshots that haven't been undone
         sql.push_str(" AND success = 1 AND is_undone = 0 AND before_snapshot_json IS NOT NULL AND dry_run = 0");
     }
     sql.push_str(" ORDER BY created_time DESC LIMIT ? OFFSET ?");
-    param_values.push(libsql::Value::from(limit as i64));
-    param_values.push(libsql::Value::from(offset as i64));
+    param_values.push(Value::from(limit as i64));
+    param_values.push(Value::from(offset as i64));
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(param_values, map_audit_row)?;
+    let rows = stmt.query_map(params_from_iter(param_values), map_audit_row)?;
     rows.collect()
 }
 

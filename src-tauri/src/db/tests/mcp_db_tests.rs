@@ -10,8 +10,8 @@
 //! ## 测试隔离
 //! 所有测试使用 `Connection::open_in_memory()` 创建内存数据库
 
-use crate::db::connection::{Connection, DbError};
 use crate::db::mcp_db::*;
+use rusqlite::Connection;
 
 // ============================================================================
 // 测试辅助函数
@@ -42,7 +42,7 @@ fn create_mcp_test_db() -> Connection {
             proxy_enabled BOOLEAN NOT NULL DEFAULT 0,
             created_time DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
-        (),
+        [],
     )
     .unwrap();
 
@@ -60,7 +60,7 @@ fn create_mcp_test_db() -> Connection {
             FOREIGN KEY (server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
             UNIQUE(server_id, tool_name)
         )",
-        (),
+        [],
     )
     .unwrap();
 
@@ -77,7 +77,7 @@ fn create_mcp_test_db() -> Connection {
             FOREIGN KEY (server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
             UNIQUE(server_id, resource_uri)
         )",
-        (),
+        [],
     )
     .unwrap();
 
@@ -94,7 +94,7 @@ fn create_mcp_test_db() -> Connection {
             FOREIGN KEY (server_id) REFERENCES mcp_server(id) ON DELETE CASCADE,
             UNIQUE(server_id, prompt_name)
         )",
-        (),
+        [],
     )
     .unwrap();
 
@@ -119,7 +119,7 @@ fn create_mcp_test_db() -> Connection {
             subtask_id INTEGER,
             FOREIGN KEY (server_id) REFERENCES mcp_server(id) ON DELETE CASCADE
         )",
-        (),
+        [],
     )
     .unwrap();
 
@@ -592,7 +592,7 @@ fn test_mcp_server_read_nonexistent() {
     let result = db.get_mcp_server(999);
     assert!(result.is_err());
     match result {
-        Err(DbError::QueryReturnedNoRows) => {}
+        Err(rusqlite::Error::QueryReturnedNoRows) => {}
         _ => panic!("Expected QueryReturnedNoRows error"),
     }
 }

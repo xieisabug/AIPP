@@ -2,7 +2,7 @@
 //!
 //! 测试 system_config 和 feature_config 的 CRUD 操作
 
-use crate::db::connection::{params, Connection, DbError};
+use rusqlite::Connection;
 
 // Test helper to create in-memory database and initialize tables
 fn create_test_db() -> Connection {
@@ -16,7 +16,7 @@ fn create_test_db() -> Connection {
             value TEXT NOT NULL,
             created_time DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
-        (),
+        [],
     )
     .unwrap();
 
@@ -31,7 +31,7 @@ fn create_test_db() -> Connection {
             description TEXT,
             UNIQUE(feature_code, key)
         )",
-        (),
+        [],
     )
     .unwrap();
 
@@ -48,15 +48,12 @@ fn test_add_and_get_system_config() {
     let conn = create_test_db();
 
     // Add config
-    conn.execute(
-        "INSERT INTO system_config (key, value) VALUES (?, ?)",
-        params!["app_version", "1.0.0"],
-    )
-    .unwrap();
+    conn.execute("INSERT INTO system_config (key, value) VALUES (?, ?)", ["app_version", "1.0.0"])
+        .unwrap();
 
     // Get config
     let value: String = conn
-        .query_row("SELECT value FROM system_config WHERE key = ?", params!["app_version"], |row| {
+        .query_row("SELECT value FROM system_config WHERE key = ?", ["app_version"], |row| {
             row.get(0)
         })
         .unwrap();
@@ -70,17 +67,12 @@ fn test_system_config_key_unique() {
     let conn = create_test_db();
 
     // Add first config
-    conn.execute(
-        "INSERT INTO system_config (key, value) VALUES (?, ?)",
-        params!["unique_key", "value1"],
-    )
-    .unwrap();
+    conn.execute("INSERT INTO system_config (key, value) VALUES (?, ?)", ["unique_key", "value1"])
+        .unwrap();
 
     // Try to add duplicate key - should fail
-    let result = conn.execute(
-        "INSERT INTO system_config (key, value) VALUES (?, ?)",
-        params!["unique_key", "value2"],
-    );
+    let result = conn
+        .execute("INSERT INTO system_config (key, value) VALUES (?, ?)", ["unique_key", "value2"]);
 
     assert!(result.is_err());
 }
@@ -92,20 +84,17 @@ fn test_update_system_config() {
 
     conn.execute(
         "INSERT INTO system_config (key, value) VALUES (?, ?)",
-        params!["update_key", "original"],
+        ["update_key", "original"],
     )
     .unwrap();
 
     // Update
-    conn.execute(
-        "UPDATE system_config SET value = ? WHERE key = ?",
-        params!["updated", "update_key"],
-    )
-    .unwrap();
+    conn.execute("UPDATE system_config SET value = ? WHERE key = ?", ["updated", "update_key"])
+        .unwrap();
 
     // Verify
     let value: String = conn
-        .query_row("SELECT value FROM system_config WHERE key = ?", params!["update_key"], |row| {
+        .query_row("SELECT value FROM system_config WHERE key = ?", ["update_key"], |row| {
             row.get(0)
         })
         .unwrap();
@@ -120,20 +109,18 @@ fn test_delete_system_config() {
 
     conn.execute(
         "INSERT INTO system_config (key, value) VALUES (?, ?)",
-        params!["delete_key", "to_delete"],
+        ["delete_key", "to_delete"],
     )
     .unwrap();
 
     // Delete
-    conn.execute("DELETE FROM system_config WHERE key = ?", params!["delete_key"]).unwrap();
+    conn.execute("DELETE FROM system_config WHERE key = ?", ["delete_key"]).unwrap();
 
     // Verify
     let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM system_config WHERE key = ?",
-            params!["delete_key"],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM system_config WHERE key = ?", ["delete_key"], |row| {
+            row.get(0)
+        })
         .unwrap();
 
     assert_eq!(count, 0);
@@ -144,11 +131,10 @@ fn test_delete_system_config() {
 fn test_get_nonexistent_config() {
     let conn = create_test_db();
 
-    let result: crate::db::connection::Result<String> = conn.query_row(
-        "SELECT value FROM system_config WHERE key = ?",
-        params!["nonexistent"],
-        |row| row.get(0),
-    );
+    let result: rusqlite::Result<String> =
+        conn.query_row("SELECT value FROM system_config WHERE key = ?", ["nonexistent"], |row| {
+            row.get(0)
+        });
 
     assert!(result.is_err());
 }
@@ -166,7 +152,13 @@ fn test_add_and_get_feature_config() {
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["conversation_summary", "summary_length", "100", "string", "对话总结使用长度"],
+        rusqlite::params![
+            "conversation_summary",
+            "summary_length",
+            "100",
+            "string",
+            "对话总结使用长度"
+        ],
     )
     .unwrap();
 
@@ -174,7 +166,7 @@ fn test_add_and_get_feature_config() {
     let (value, data_type): (String, String) = conn
         .query_row(
             "SELECT value, data_type FROM feature_config WHERE feature_code = ? AND key = ?",
-            params!["conversation_summary", "summary_length"],
+            ["conversation_summary", "summary_length"],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
@@ -192,7 +184,7 @@ fn test_feature_config_unique_constraint() {
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["module1", "key1", "value1", "string", "desc"],
+        rusqlite::params!["module1", "key1", "value1", "string", "desc"],
     )
     .unwrap();
 
@@ -200,7 +192,7 @@ fn test_feature_config_unique_constraint() {
     let result = conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["module1", "key1", "value2", "string", "desc2"],
+        rusqlite::params!["module1", "key1", "value2", "string", "desc2"],
     );
 
     assert!(result.is_err());
@@ -215,21 +207,21 @@ fn test_multiple_keys_per_feature() {
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["feature1", "key1", "value1", "string", None::<String>],
+        rusqlite::params!["feature1", "key1", "value1", "string", None::<String>],
     )
     .unwrap();
 
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["feature1", "key2", "value2", "number", None::<String>],
+        rusqlite::params!["feature1", "key2", "value2", "number", None::<String>],
     )
     .unwrap();
 
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["feature1", "key3", "value3", "boolean", None::<String>],
+        rusqlite::params!["feature1", "key3", "value3", "boolean", None::<String>],
     )
     .unwrap();
 
@@ -237,7 +229,7 @@ fn test_multiple_keys_per_feature() {
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM feature_config WHERE feature_code = ?",
-            params!["feature1"],
+            ["feature1"],
             |row| row.get(0),
         )
         .unwrap();
@@ -254,14 +246,14 @@ fn test_same_key_different_features() {
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["feature_a", "enabled", "true", "boolean", None::<String>],
+        rusqlite::params!["feature_a", "enabled", "true", "boolean", None::<String>],
     )
     .unwrap();
 
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["feature_b", "enabled", "false", "boolean", None::<String>],
+        rusqlite::params!["feature_b", "enabled", "false", "boolean", None::<String>],
     )
     .unwrap();
 
@@ -269,7 +261,7 @@ fn test_same_key_different_features() {
     let value_a: String = conn
         .query_row(
             "SELECT value FROM feature_config WHERE feature_code = ? AND key = ?",
-            params!["feature_a", "enabled"],
+            ["feature_a", "enabled"],
             |row| row.get(0),
         )
         .unwrap();
@@ -277,7 +269,7 @@ fn test_same_key_different_features() {
     let value_b: String = conn
         .query_row(
             "SELECT value FROM feature_config WHERE feature_code = ? AND key = ?",
-            params!["feature_b", "enabled"],
+            ["feature_b", "enabled"],
             |row| row.get(0),
         )
         .unwrap();
@@ -294,14 +286,14 @@ fn test_update_feature_config() {
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["test_feature", "test_key", "old_value", "string", "old desc"],
+        rusqlite::params!["test_feature", "test_key", "old_value", "string", "old desc"],
     )
     .unwrap();
 
     // Update
     conn.execute(
         "UPDATE feature_config SET value = ?, description = ? WHERE feature_code = ? AND key = ?",
-        params!["new_value", "new desc", "test_feature", "test_key"],
+        rusqlite::params!["new_value", "new desc", "test_feature", "test_key"],
     )
     .unwrap();
 
@@ -309,7 +301,7 @@ fn test_update_feature_config() {
     let (value, description): (String, String) = conn
         .query_row(
             "SELECT value, description FROM feature_config WHERE feature_code = ? AND key = ?",
-            params!["test_feature", "test_key"],
+            ["test_feature", "test_key"],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
@@ -327,33 +319,32 @@ fn test_delete_feature_config_by_feature_code() {
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["to_delete", "key1", "value1", "string", None::<String>],
+        rusqlite::params!["to_delete", "key1", "value1", "string", None::<String>],
     )
     .unwrap();
 
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["to_delete", "key2", "value2", "string", None::<String>],
+        rusqlite::params!["to_delete", "key2", "value2", "string", None::<String>],
     )
     .unwrap();
 
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["to_keep", "key1", "value1", "string", None::<String>],
+        rusqlite::params!["to_keep", "key1", "value1", "string", None::<String>],
     )
     .unwrap();
 
     // Delete all for 'to_delete'
-    conn.execute("DELETE FROM feature_config WHERE feature_code = ?", params!["to_delete"])
-        .unwrap();
+    conn.execute("DELETE FROM feature_config WHERE feature_code = ?", ["to_delete"]).unwrap();
 
     // Verify
     let deleted_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM feature_config WHERE feature_code = ?",
-            params!["to_delete"],
+            ["to_delete"],
             |row| row.get(0),
         )
         .unwrap();
@@ -361,7 +352,7 @@ fn test_delete_feature_config_by_feature_code() {
     let kept_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM feature_config WHERE feature_code = ?",
-            params!["to_keep"],
+            ["to_keep"],
             |row| row.get(0),
         )
         .unwrap();
@@ -380,14 +371,14 @@ fn test_get_all_feature_config() {
         conn.execute(
             "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
              VALUES (?, ?, ?, ?, ?)",
-            params![format!("feature{}", i), "key", "value", "string", None::<String>],
+            rusqlite::params![format!("feature{}", i), "key", "value", "string", None::<String>],
         )
         .unwrap();
     }
 
     // Get all
     let count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM feature_config", (), |row| row.get(0)).unwrap();
+        conn.query_row("SELECT COUNT(*) FROM feature_config", [], |row| row.get(0)).unwrap();
 
     assert_eq!(count, 5);
 }
@@ -401,7 +392,7 @@ fn test_null_values() {
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["null_test", "key1", "value", "string", None::<String>],
+        rusqlite::params!["null_test", "key1", "value", "string", None::<String>],
     )
     .unwrap();
 
@@ -409,7 +400,7 @@ fn test_null_values() {
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["null_test", "key2", None::<String>, "string", "has desc"],
+        rusqlite::params!["null_test", "key2", None::<String>, "string", "has desc"],
     )
     .unwrap();
 
@@ -417,7 +408,7 @@ fn test_null_values() {
     let desc: Option<String> = conn
         .query_row(
             "SELECT description FROM feature_config WHERE feature_code = ? AND key = ?",
-            params!["null_test", "key1"],
+            ["null_test", "key1"],
             |row| row.get(0),
         )
         .unwrap();
@@ -425,7 +416,7 @@ fn test_null_values() {
     let value: Option<String> = conn
         .query_row(
             "SELECT value FROM feature_config WHERE feature_code = ? AND key = ?",
-            params!["null_test", "key2"],
+            ["null_test", "key2"],
             |row| row.get(0),
         )
         .unwrap();
@@ -445,20 +436,26 @@ fn test_data_type_field() {
         conn.execute(
             "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
              VALUES (?, ?, ?, ?, ?)",
-            params!["type_test", format!("key{}", i), "value", *data_type, None::<String>],
+            rusqlite::params![
+                "type_test",
+                format!("key{}", i),
+                "value",
+                *data_type,
+                None::<String>
+            ],
         )
         .unwrap();
     }
 
     // Query by data type
     let string_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feature_config WHERE data_type = 'string'", (), |row| {
+        .query_row("SELECT COUNT(*) FROM feature_config WHERE data_type = 'string'", [], |row| {
             row.get(0)
         })
         .unwrap();
 
     let boolean_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feature_config WHERE data_type = 'boolean'", (), |row| {
+        .query_row("SELECT COUNT(*) FROM feature_config WHERE data_type = 'boolean'", [], |row| {
             row.get(0)
         })
         .unwrap();
@@ -481,7 +478,13 @@ fn test_long_text_value() {
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["conversation_summary", "prompt", long_prompt, "string", "对话总结提示词"],
+        rusqlite::params![
+            "conversation_summary",
+            "prompt",
+            long_prompt,
+            "string",
+            "对话总结提示词"
+        ],
     )
     .unwrap();
 
@@ -489,7 +492,7 @@ fn test_long_text_value() {
     let stored_value: String = conn
         .query_row(
             "SELECT value FROM feature_config WHERE feature_code = ? AND key = ?",
-            params!["conversation_summary", "prompt"],
+            ["conversation_summary", "prompt"],
             |row| row.get(0),
         )
         .unwrap();
@@ -506,21 +509,21 @@ fn test_get_feature_config_by_module() {
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["module_a", "key1", "value1", "string", None::<String>],
+        rusqlite::params!["module_a", "key1", "value1", "string", None::<String>],
     )
     .unwrap();
 
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["module_a", "key2", "value2", "string", None::<String>],
+        rusqlite::params!["module_a", "key2", "value2", "string", None::<String>],
     )
     .unwrap();
 
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["module_b", "key1", "value1", "string", None::<String>],
+        rusqlite::params!["module_b", "key1", "value1", "string", None::<String>],
     )
     .unwrap();
 
@@ -528,7 +531,7 @@ fn test_get_feature_config_by_module() {
     let module_a_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM feature_config WHERE feature_code = ?",
-            params!["module_a"],
+            ["module_a"],
             |row| row.get(0),
         )
         .unwrap();
@@ -545,7 +548,7 @@ fn test_id_autoincrement() {
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["auto_id", "key1", "value1", "string", None::<String>],
+        rusqlite::params!["auto_id", "key1", "value1", "string", None::<String>],
     )
     .unwrap();
     let id1 = conn.last_insert_rowid();
@@ -553,7 +556,7 @@ fn test_id_autoincrement() {
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["auto_id", "key2", "value2", "string", None::<String>],
+        rusqlite::params!["auto_id", "key2", "value2", "string", None::<String>],
     )
     .unwrap();
     let id2 = conn.last_insert_rowid();
@@ -561,7 +564,7 @@ fn test_id_autoincrement() {
     conn.execute(
         "INSERT INTO feature_config (feature_code, key, value, data_type, description) 
          VALUES (?, ?, ?, ?, ?)",
-        params!["auto_id", "key3", "value3", "string", None::<String>],
+        rusqlite::params!["auto_id", "key3", "value3", "string", None::<String>],
     )
     .unwrap();
     let id3 = conn.last_insert_rowid();

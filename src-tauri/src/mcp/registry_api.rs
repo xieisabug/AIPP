@@ -110,7 +110,7 @@ pub struct MCPServerRequest {
 
 // 打开数据库的辅助函数，减少重复样板代码
 fn open_db(app_handle: &tauri::AppHandle) -> Result<MCPDatabase, String> {
-    MCPDatabase::new(app_handle).map_err(|e| e.to_string())
+    MCPDatabase::new(app_handle).map_err(|e: rusqlite::Error| e.to_string())
 }
 
 // 简化后的能力实体，用于统一持久化逻辑
@@ -885,7 +885,7 @@ pub async fn get_mcp_provider(
     // Get server information
     let server = match db.get_mcp_server(server_id) {
         Ok(server) => server,
-        Err(crate::db::connection::DbError::QueryReturnedNoRows) => return Ok(None),
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
         Err(e) => return Err(e.to_string()),
     };
 

@@ -10,9 +10,9 @@
 //! - 测试结束后自动销毁，无需清理
 //! - 完全隔离，不同测试之间互不影响
 
-use crate::db::connection::{params, Connection};
 use crate::db::conversation_db::*;
 use chrono::Utc;
+use rusqlite::Connection;
 use uuid::Uuid;
 
 /// 创建内存测试数据库并初始化表结构
@@ -24,7 +24,7 @@ pub fn create_test_db() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
 
     // 禁用外键约束检查，简化测试
-    conn.execute("PRAGMA foreign_keys = OFF", ()).unwrap();
+    conn.execute("PRAGMA foreign_keys = OFF", []).unwrap();
 
     // 创建对话表
     conn.execute(
@@ -43,7 +43,7 @@ pub fn create_test_db() -> Connection {
             butler_task_summary TEXT,
             butler_task_finalized_at TEXT
         )",
-        (),
+        [],
     )
     .unwrap();
 
@@ -69,7 +69,7 @@ pub fn create_test_db() -> Connection {
             first_token_time TEXT,
             ttft_ms INTEGER
         )",
-        (),
+        [],
     )
     .unwrap();
 
@@ -85,7 +85,7 @@ pub fn create_test_db() -> Connection {
             use_vector BOOLEAN DEFAULT 0,
             token_count INTEGER
         )",
-        (),
+        [],
     )
     .unwrap();
 
@@ -98,7 +98,7 @@ pub fn create_test_db() -> Connection {
             created_time TEXT NOT NULL,
             updated_time TEXT NOT NULL
         )",
-        (),
+        [],
     )
     .unwrap();
 
@@ -117,7 +117,7 @@ pub fn create_test_db() -> Connection {
             notification_policy TEXT,
             created_time TEXT NOT NULL
         )",
-        (),
+        [],
     )
     .unwrap();
 
@@ -138,7 +138,7 @@ pub fn create_test_db() -> Connection {
             created_time TEXT NOT NULL,
             updated_time TEXT NOT NULL
         )",
-        (),
+        [],
     )
     .unwrap();
 
@@ -211,7 +211,7 @@ pub fn create_shared_test_db(
     shared_conn
         .execute(
             "INSERT INTO conversation (name, assistant_id, created_time) VALUES (?, ?, ?)",
-            params!["Test Conversation", Some(1i64), Utc::now().to_rfc3339()],
+            (&"Test Conversation", &Some(1i64), &Utc::now().to_rfc3339()),
         )
         .unwrap();
     let conversation_id = shared_conn.last_insert_rowid();
@@ -245,7 +245,7 @@ pub fn create_message_test_db() -> (MessageRepository, i64) {
     // 创建对话
     conn.execute(
         "INSERT INTO conversation (name, assistant_id, created_time) VALUES (?, ?, ?)",
-        params!["Test Conversation", Some(1i64), Utc::now().to_rfc3339()],
+        (&"Test Conversation", &Some(1i64), &Utc::now().to_rfc3339()),
     )
     .unwrap();
     let conversation_id = conn.last_insert_rowid();

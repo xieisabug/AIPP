@@ -542,7 +542,11 @@ impl PendingInteractionCleanup {
         request_id: String,
         kind: InteractionCleanupKind,
     ) -> Self {
-        Self { interaction_state: interaction_state.clone(), request_id: Some(request_id), kind }
+        Self {
+            interaction_state: interaction_state.clone(),
+            request_id: Some(request_id),
+            kind,
+        }
     }
 
     fn disarm(&mut self) {

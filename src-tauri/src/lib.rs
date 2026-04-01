@@ -41,7 +41,8 @@ use crate::api::assistant_summary_api::summarize_all_assistant_summaries;
 use crate::api::attachment_api::{add_attachment, open_attachment_with_default_app};
 use crate::api::butler_api::{
     get_butler_task_detail, list_butler_tasks, list_butler_tasks_paginated,
-    load_butler_main_conversation, reset_butler_main_conversation, spawn_butler_task_conversation,
+    load_butler_main_conversation, reset_butler_main_conversation,
+    spawn_butler_task_conversation,
 };
 use crate::api::conversation_api::{
     create_conversation_with_messages, create_message, delete_conversation, fork_conversation,
@@ -49,12 +50,14 @@ use crate::api::conversation_api::{
     update_assistant_message, update_conversation, update_message_content,
 };
 use crate::api::copilot_api::{poll_github_copilot_token, start_github_copilot_device_flow};
+use crate::api::copilot_token_manager::{
+    test_copilot_token_exchange, CopilotTokenManagerState,
+};
 #[cfg(desktop)]
 use crate::api::copilot_lsp::{
     check_copilot_status, get_copilot_lsp_status, get_copilot_oauth_token_from_config,
     sign_in_confirm, sign_in_initiate, sign_out_copilot, stop_copilot_lsp, CopilotLspState,
 };
-use crate::api::copilot_token_manager::{test_copilot_token_exchange, CopilotTokenManagerState};
 use crate::api::export_api::{markdown_to_docx, markdown_to_pdf};
 use crate::api::highlight_api::{highlight_code, list_syntect_themes};
 use crate::api::llm_api::{
@@ -89,9 +92,8 @@ use crate::api::system_api::{
     clear_butler_feishu_secret, conversation_has_feishu_target, copy_image_to_clipboard,
     debug_resend_message_to_feishu, get_all_feature_config, get_autostart_state, get_bang_list,
     get_butler_feishu_runtime_status, get_experimental_summary_task_status, get_selected_text_api,
-    get_sync_config, open_data_folder, open_image, refresh_butler_feishu_runtime_command,
-    reset_sync_onboarding, resume_global_shortcut, run_sync_now, save_butler_feishu_secret,
-    save_feature_config, save_sync_config, set_autostart, set_shortcut_recording,
+    open_data_folder, open_image, refresh_butler_feishu_runtime_command, resume_global_shortcut,
+    save_butler_feishu_secret, save_feature_config, set_autostart, set_shortcut_recording,
     suspend_global_shortcut, trigger_assistant_summary_generation,
     trigger_conversation_summary_generation, trigger_mcp_summary_generation,
 };
@@ -136,11 +138,9 @@ use crate::artifacts::{
     vue_runner::{clear_vue_artifact_cache, close_vue_artifact, run_vue_artifact},
 };
 use crate::db::assistant_db::AssistantDatabase;
-use crate::db::connection::{DatabaseManager, DatabaseMode, ManagedDatabaseState};
 use crate::db::llm_db::LLMDatabase;
 use crate::db::mcp_db::MCPDatabase;
 use crate::db::scheduled_task_db::ScheduledTaskDatabase;
-use crate::db::sync_manager::{FirstSyncStrategy, SyncConfig, SyncManager, SyncMode, SyncStatus};
 use crate::db::system_db::SystemDatabase;
 use crate::feishu::FeishuButlerState;
 use crate::mcp::builtin_mcp::{
@@ -195,7 +195,6 @@ use crate::window::{
     open_config_window, open_config_window_inner, open_default_home_window, open_plugin_window,
     open_schedule_window, open_sidebar_window, preferred_home_window_label,
 };
-use chrono::Utc;
 use db::conversation_db::ConversationDatabase;
 use db::database_upgrade;
 use db::plugin_db::PluginDatabase;
@@ -206,7 +205,6 @@ use serde::{Deserialize, Serialize};
 use state::activity_state::ConversationActivityManager;
 use state::message_token::MessageTokenManager;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::path::BaseDirectory;
 use tauri::Emitter;
@@ -248,131 +246,6 @@ struct FeatureConfigState {
 struct NameCacheState {
     assistant_names: Arc<TokioMutex<HashMap<i64, String>>>,
     model_names: Arc<TokioMutex<HashMap<i64, String>>>,
-}
-
-#[derive(Clone)]
-struct SyncState {
-    config: Arc<TokioMutex<SyncConfig>>,
-    db_dir: Arc<PathBuf>,
-    runtime_force_local: Arc<TokioMutex<bool>>,
-}
-
-impl SyncState {
-    fn new(config: SyncConfig, db_dir: PathBuf) -> Self {
-        Self::with_runtime_force_local(config, db_dir, false)
-    }
-
-    fn with_runtime_force_local(config: SyncConfig, db_dir: PathBuf, runtime_force_local: bool) -> Self {
-        Self {
-            config: Arc::new(TokioMutex::new(config)),
-            db_dir: Arc::new(db_dir),
-            runtime_force_local: Arc::new(TokioMutex::new(runtime_force_local)),
-        }
-    }
-
-    async fn snapshot(&self) -> SyncConfig {
-        self.config.lock().await.clone()
-    }
-
-    async fn is_runtime_force_local(&self) -> bool {
-        *self.runtime_force_local.lock().await
-    }
-
-    async fn set_runtime_force_local(&self, value: bool) {
-        *self.runtime_force_local.lock().await = value;
-    }
-}
-
-struct StartupDatabases {
-    system_db: SystemDatabase,
-    llm_db: LLMDatabase,
-    assistant_db: AssistantDatabase,
-    conversation_db: ConversationDatabase,
-    plugin_db: PluginDatabase,
-    mcp_db: MCPDatabase,
-    scheduled_task_db: ScheduledTaskDatabase,
-    artifacts_db: ArtifactsDatabase,
-    skill_db: db::skill_db::SkillDatabase,
-}
-
-impl StartupDatabases {
-    fn open(app_handle: &tauri::AppHandle) -> Result<Self, String> {
-        Ok(Self {
-            system_db: SystemDatabase::new(app_handle).map_err(|e| e.to_string())?,
-            llm_db: LLMDatabase::new(app_handle).map_err(|e| e.to_string())?,
-            assistant_db: AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?,
-            conversation_db: ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?,
-            plugin_db: PluginDatabase::new(app_handle).map_err(|e| e.to_string())?,
-            mcp_db: MCPDatabase::new(app_handle).map_err(|e| e.to_string())?,
-            scheduled_task_db: ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string())?,
-            artifacts_db: ArtifactsDatabase::new(app_handle).map_err(|e| e.to_string())?,
-            skill_db: db::skill_db::SkillDatabase::new(app_handle).map_err(|e| e.to_string())?,
-        })
-    }
-
-    fn create_tables(&self) -> Result<(), String> {
-        self.system_db.create_tables().map_err(|e| e.to_string())?;
-        self.llm_db.create_tables().map_err(|e| e.to_string())?;
-        self.assistant_db.create_tables().map_err(|e| e.to_string())?;
-        self.conversation_db.create_tables().map_err(|e| e.to_string())?;
-        self.plugin_db.create_tables().map_err(|e| e.to_string())?;
-        self.mcp_db.create_tables().map_err(|e| e.to_string())?;
-        self.scheduled_task_db.create_tables().map_err(|e| e.to_string())?;
-        self.artifacts_db.create_tables().map_err(|e| e.to_string())?;
-        self.skill_db.create_tables().map_err(|e| e.to_string())?;
-        Ok(())
-    }
-}
-
-fn should_attempt_startup_sync(sync_config: &SyncConfig) -> bool {
-    matches!(SyncManager::new(sync_config.clone()).to_database_mode(), DatabaseMode::Synced { .. })
-}
-
-fn build_startup_sync_fallback_message(error: &str) -> String {
-    format!("启动时无法连接同步服务，已临时切回本地模式：{error}")
-}
-
-fn open_startup_databases_with_sync_fallback(
-    app_handle: &tauri::AppHandle,
-    managed_db_state: &ManagedDatabaseState,
-    db_dir: &Path,
-    sync_config: &mut SyncConfig,
-) -> Result<(StartupDatabases, bool), String> {
-    let attempt_open = || -> Result<StartupDatabases, String> {
-        let dbs = StartupDatabases::open(app_handle)?;
-        dbs.create_tables()?;
-        Ok(dbs)
-    };
-
-    match attempt_open() {
-        Ok(dbs) => Ok((dbs, false)),
-        Err(error) if should_attempt_startup_sync(sync_config) => {
-            warn!(
-                error = %error,
-                "Failed to initialize synced databases during setup, falling back to local mode"
-            );
-            managed_db_state.replace(DatabaseManager::new(db_dir.to_path_buf(), DatabaseMode::Local));
-            sync_config.last_sync_status = SyncStatus::Error;
-            sync_config.last_sync_finished_at = Some(current_sync_timestamp());
-            sync_config.last_sync_message = Some(build_startup_sync_fallback_message(&error));
-            let dbs = attempt_open()?;
-            Ok((dbs, true))
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn current_sync_timestamp() -> String {
-    Utc::now().to_rfc3339()
-}
-
-fn describe_first_sync_strategy(strategy: &FirstSyncStrategy) -> &'static str {
-    match strategy {
-        FirstSyncStrategy::UseRemote => "首次同步策略：使用云端数据（推荐）",
-        FirstSyncStrategy::UseLocal => "首次同步策略：上传本设备数据并替换云端",
-        FirstSyncStrategy::AppendLocal => "首次同步策略：AppendLocal（当前直连 sqld 模式暂未支持）",
-        FirstSyncStrategy::BackupThenUseRemote => "首次同步策略：先备份本地数据，再使用云端数据",
-    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -624,42 +497,28 @@ pub fn run() {
             )?;
             debug!(?resource_path, "resource path");
 
-            let db_dir = db::get_db_dir(&app_handle)?;
-            if let Err(err) =
-                crate::artifacts::artifact_data_db::ArtifactDataDatabase::migrate_all_legacy_databases(&app_handle)
-            {
-                warn!(error = %err, "Failed to migrate legacy artifact data databases into managed db dir");
+            let system_db = SystemDatabase::new(&app_handle)?;
+            let llm_db = LLMDatabase::new(&app_handle)?;
+            let assistant_db = AssistantDatabase::new(&app_handle)?;
+            let conversation_db = ConversationDatabase::new(&app_handle)?;
+            let plugin_db = PluginDatabase::new(&app_handle)?;
+            if db::mcp_db::MCPDatabase::recover_if_corrupted(&app_handle)? {
+                warn!("Recovered corrupted MCP database by recreating a fresh local cache database");
             }
-            let sync_config = SyncManager::load_for_app(&app_handle).unwrap_or_else(|err| {
-                warn!(error = %err, "Failed to load sync config, falling back to local-only mode");
-                SyncConfig::default()
-            });
-            let managed_db_state = ManagedDatabaseState::install(DatabaseManager::new(
-                db_dir.clone(),
-                SyncManager::new(sync_config.clone()).to_database_mode(),
-            ));
-            let mut runtime_sync_config = sync_config.clone();
-            let (startup_databases, runtime_force_local) = open_startup_databases_with_sync_fallback(
-                &app_handle,
-                &managed_db_state,
-                &db_dir,
-                &mut runtime_sync_config,
-            )?;
-            let StartupDatabases {
-                system_db,
-                llm_db,
-                assistant_db,
-                conversation_db,
-                plugin_db: _plugin_db,
-                mcp_db: _mcp_db,
-                scheduled_task_db: _scheduled_task_db,
-                artifacts_db: _artifacts_db,
-                skill_db,
-            } = startup_databases;
+            let mcp_db = MCPDatabase::new(&app_handle)?;
+            let scheduled_task_db = ScheduledTaskDatabase::new(&app_handle)?;
+            let artifacts_db = ArtifactsDatabase::new(&app_handle)?;
+            let skill_db = db::skill_db::SkillDatabase::new(&app_handle)?;
 
-            if let Err(err) = crate::feishu::migrate_secure_storage_if_needed(&app_handle) {
-                warn!(error = %err, "Failed to migrate device-local secure storage");
-            }
+            system_db.create_tables()?;
+            llm_db.create_tables()?;
+            assistant_db.create_tables()?;
+            conversation_db.create_tables()?;
+            plugin_db.create_tables()?;
+            mcp_db.create_tables()?;
+            scheduled_task_db.create_tables()?;
+            artifacts_db.create_tables()?;
+            skill_db.create_tables()?;
 
             // Migration: Remove old Claude Code agents/rules skill configs
             if let Err(e) = skill_db.migrate_claude_code_skills() {
@@ -728,15 +587,8 @@ pub fn run() {
             let todo_state = app.state::<TodoState>();
             todo_state.set_app_handle(app_handle.clone());
 
-            app.manage(managed_db_state);
-            app.manage(SyncState::with_runtime_force_local(
-                runtime_sync_config,
-                db_dir,
-                runtime_force_local,
-            ));
             app.manage(initialize_state(&app_handle));
             app.manage(initialize_name_cache_state(&app_handle));
-            spawn_database_sync_loop(app_handle.clone());
             crate::api::butler_api::spawn_butler_task_reconciler(app_handle.clone());
             crate::mcp::summarizer::trigger_pending_mcp_catalog_summary_generation(
                 app_handle.clone(),
@@ -836,10 +688,6 @@ pub fn run() {
             get_config,
             get_all_feature_config,
             save_feature_config,
-            get_sync_config,
-            save_sync_config,
-            run_sync_now,
-            reset_sync_onboarding,
             save_butler_feishu_secret,
             clear_butler_feishu_secret,
             get_butler_feishu_runtime_status,
@@ -1148,16 +996,8 @@ pub fn run() {
 }
 
 fn initialize_state(app_handle: &tauri::AppHandle) -> FeatureConfigState {
-    let configs = match SystemDatabase::new(app_handle)
-        .and_then(|db| db.get_all_feature_config())
-        .map_err(|e| e.to_string())
-    {
-        Ok(configs) => configs,
-        Err(error) => {
-            warn!(error = %error, "Failed to initialize feature config state, using empty defaults");
-            Vec::new()
-        }
-    };
+    let db = SystemDatabase::new(app_handle).expect("Failed to connect to database");
+    let configs = db.get_all_feature_config().expect("Failed to load feature configs");
     let mut configs_map = HashMap::new();
     for config in configs.clone().into_iter() {
         let feature_code = config.feature_code.clone();
@@ -1174,112 +1014,24 @@ fn initialize_state(app_handle: &tauri::AppHandle) -> FeatureConfigState {
 }
 
 fn initialize_name_cache_state(app_handle: &tauri::AppHandle) -> NameCacheState {
+    let assistant_db = AssistantDatabase::new(app_handle).expect("Failed to connect to database");
+    let assistants = assistant_db.get_assistants().expect("Failed to load assistants");
     let mut assistant_names = HashMap::new();
-    match AssistantDatabase::new(app_handle)
-        .and_then(|assistant_db| assistant_db.get_assistants())
-        .map_err(|e| e.to_string())
-    {
-        Ok(assistants) => {
-            for assistant in assistants {
-                assistant_names.insert(assistant.id, assistant.name);
-            }
-        }
-        Err(error) => {
-            warn!(error = %error, "Failed to initialize assistant name cache, using empty cache");
-        }
+    for assistant in assistants.clone().into_iter() {
+        assistant_names.insert(assistant.id, assistant.name.clone());
     }
 
+    let llm_db = LLMDatabase::new(app_handle).expect("Failed to connect to database");
+    let models = llm_db.get_models_for_select().expect("Failed to load models");
     let mut model_names = HashMap::new();
-    match LLMDatabase::new(app_handle) {
-        Ok(llm_db) => match llm_db.get_models_for_select() {
-            Ok(models) => {
-                for model in models {
-                    model_names.insert(model.2, model.0);
-                }
-            }
-            Err(error) => {
-                warn!(error = %error, "Failed to initialize model name cache, using empty cache");
-            }
-        },
-        Err(error) => {
-            warn!(error = %error, "Failed to connect model database for name cache, using empty cache");
-        }
+    for model in models.clone().into_iter() {
+        model_names.insert(model.2, model.0);
     }
 
     NameCacheState {
         assistant_names: Arc::new(TokioMutex::new(assistant_names)),
         model_names: Arc::new(TokioMutex::new(model_names)),
     }
-}
-
-fn spawn_database_sync_loop(app_handle: tauri::AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        loop {
-            let sleep_secs = if let Some(sync_state) = app_handle.try_state::<SyncState>() {
-                if sync_state.is_runtime_force_local().await {
-                    60
-                } else {
-                    let started_snapshot = {
-                        let mut current = sync_state.config.lock().await;
-                        if !current.enabled
-                            || !current.initial_sync_completed
-                            || !matches!(current.sync_mode, SyncMode::Auto)
-                            || sync_state.is_runtime_force_local().await
-                        {
-                            None
-                        } else {
-                            current.last_sync_started_at = Some(current_sync_timestamp());
-                            current.last_sync_message = Some("后台自动同步进行中".to_string());
-                            Some(current.clone())
-                        }
-                    };
-
-                    if let Some(started_snapshot) = started_snapshot {
-                        let sync_interval_secs = started_snapshot.sync_interval_secs.max(10);
-                        let _ = SyncManager::save_for_app(&app_handle, &started_snapshot);
-                        let _ = app_handle.emit("sync_status_changed", &started_snapshot);
-
-                        let result = ManagedDatabaseState::global()
-                            .ok_or_else(|| "数据库管理器尚未初始化".to_string())
-                            .and_then(|manager| manager.sync_all().map_err(|e| e.to_string()));
-
-                        let mut current = sync_state.config.lock().await;
-                        current.last_sync_finished_at = Some(current_sync_timestamp());
-                        match result {
-                            Ok(_) => {
-                                current.last_sync_status = SyncStatus::Success;
-                                if !current.initial_sync_completed {
-                                    current.initial_sync_completed = true;
-                                    current.last_sync_message = Some(format!(
-                                        "{}；后台同步已完成",
-                                        describe_first_sync_strategy(&current.first_sync_strategy)
-                                    ));
-                                } else {
-                                    current.last_sync_message = Some("后台自动同步已完成".to_string());
-                                }
-                            }
-                            Err(err) => {
-                                warn!(error = %err, "Background database sync failed");
-                                current.last_sync_status = SyncStatus::Error;
-                                current.last_sync_message = Some(format!("后台自动同步失败：{err}"));
-                            }
-                        }
-
-                        let finished_snapshot = current.clone();
-                        drop(current);
-                        let _ = SyncManager::save_for_app(&app_handle, &finished_snapshot);
-                        let _ = app_handle.emit("sync_status_changed", &finished_snapshot);
-                        sync_interval_secs
-                    } else {
-                        60
-                    }
-                }
-            } else {
-                60
-            };
-            tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
-        }
-    });
 }
 
 #[cfg(desktop)]

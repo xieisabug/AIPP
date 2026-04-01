@@ -45,8 +45,8 @@ pub enum AppError {
     InternalError(String),
 }
 
-impl From<crate::db::connection::DbError> for AppError {
-    fn from(err: crate::db::connection::DbError) -> Self {
+impl From<rusqlite::Error> for AppError {
+    fn from(err: rusqlite::Error) -> Self {
         AppError::DatabaseError(err.to_string())
     }
 }

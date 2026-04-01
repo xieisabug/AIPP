@@ -601,7 +601,7 @@ impl ActionHandler for LlmAddModelHandler {
         db.conn
             .execute(
                 "DELETE FROM llm_model_request_mode_preference WHERE llm_provider_id = ? AND model_code = ?",
-                crate::db::connection::params![provider_id, code],
+                rusqlite::params![provider_id, code],
             )
             .map_err(|e| e.to_string())?;
 
