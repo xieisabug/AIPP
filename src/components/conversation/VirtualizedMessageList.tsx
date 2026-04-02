@@ -111,12 +111,32 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
     ...messageListProps
 }) => {
     const { renderItems } = useMessageListElements(messageListProps);
-    const tailItem = useMemo(
+    const firstLiveIndex = useMemo(
         () =>
-            renderItems.find((item) => item.key === "last-reply-container") ?? null,
+            renderItems.findIndex(
+                (item) => item.virtualizationMode === "live",
+            ),
         [renderItems],
     );
-    const virtualizedItems = renderItems;
+    const virtualizedItems = useMemo(
+        () =>
+            firstLiveIndex >= 0
+                ? renderItems.slice(0, firstLiveIndex)
+                : renderItems,
+        [firstLiveIndex, renderItems],
+    );
+    const liveItems = useMemo(
+        () =>
+            firstLiveIndex >= 0 ? renderItems.slice(firstLiveIndex) : [],
+        [firstLiveIndex, renderItems],
+    );
+    const tailItem = useMemo(
+        () =>
+            liveItems.find((item) => item.key === "last-reply-container")
+            ?? renderItems.find((item) => item.key === "last-reply-container")
+            ?? null,
+        [liveItems, renderItems],
+    );
     const [scrollTop, setScrollTop] = useState(0);
     const [viewportHeight, setViewportHeight] = useState(0);
     const [measuredHeights, setMeasuredHeights] = useState<Record<string, number>>(
@@ -426,8 +446,16 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
         <div
             style={{
                 position: "relative",
-                height: layout.totalHeight,
-                minHeight: layout.totalHeight > 0 ? layout.totalHeight : 1,
+                height:
+                    layout.totalHeight > 0
+                        ? layout.totalHeight
+                        : liveItems.length > 0
+                          ? undefined
+                          : 1,
+                minHeight:
+                    layout.totalHeight > 0
+                        ? layout.totalHeight
+                        : 1,
             }}
         >
             {visibleItems.map((item, relativeIndex) => {
@@ -443,6 +471,21 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
                     </VirtualizedRow>
                 );
             })}
+            {liveItems.length > 0 && (
+                <div
+                    style={{
+                        position: layout.totalHeight > 0 ? "absolute" : "relative",
+                        top: layout.totalHeight > 0 ? layout.totalHeight + 16 : undefined,
+                        left: 0,
+                        right: 0,
+                    }}
+                    className="flex flex-col gap-4"
+                >
+                    {liveItems.map((item) => (
+                        <React.Fragment key={item.key}>{item.element}</React.Fragment>
+                    ))}
+                </div>
+            )}
         </div>
     );
 };

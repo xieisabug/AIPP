@@ -40,6 +40,7 @@ export interface RenderableConversationItem {
     messageIds?: number[];
     estimatedHeight: number;
     element: React.ReactElement;
+    virtualizationMode?: "virtualized" | "live";
 }
 
 function stripMcpToolCallMarkup(content: string): string {
@@ -372,6 +373,10 @@ export function useMessageListElements({
         }
 
         const pushMessageWithVersion = (entry: MessageElementEntry) => {
+            const sourceMessage = messageById.get(entry.messageId) ?? allDisplayMessages[0];
+            const shouldKeepLive =
+                sourceMessage?.message_type === "reasoning"
+                || countPreviewCodeToolCalls(sourceMessage?.content ?? "") > 0;
             items.push({
                 key: `message-${entry.messageId}`,
                 messageId: entry.messageId,
@@ -387,6 +392,7 @@ export function useMessageListElements({
                         },
                     ),
                 element: entry.messageElement,
+                virtualizationMode: shouldKeepLive ? "live" : "virtualized",
             });
 
             const versionElement = versionMap.get(`version-${entry.messageId}`);
@@ -396,6 +402,7 @@ export function useMessageListElements({
                     messageId: null,
                     estimatedHeight: 48,
                     element: versionElement,
+                    virtualizationMode: shouldKeepLive ? "live" : "virtualized",
                 });
             }
         };
@@ -439,6 +446,7 @@ export function useMessageListElements({
                     lastGroupMessageIds[lastGroupMessageIds.length - 1] ?? null,
                 messageIds: lastGroupMessageIds,
                 estimatedHeight: Math.max(420, lastGroupEstimatedHeight),
+                virtualizationMode: "live",
                 element: (
                     <div
                         id="last-reply-container"
@@ -479,6 +487,7 @@ export function useMessageListElements({
                     messageId: null,
                     estimatedHeight: 96,
                     element,
+                    virtualizationMode: "live",
                 });
             });
 
@@ -494,6 +503,7 @@ export function useMessageListElements({
                             </React.Fragment>
                         </div>
                     ),
+                    virtualizationMode: "live",
                 });
             });
         }
