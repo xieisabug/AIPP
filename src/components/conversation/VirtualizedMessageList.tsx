@@ -116,13 +116,7 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
             renderItems.find((item) => item.key === "last-reply-container") ?? null,
         [renderItems],
     );
-    const virtualizedItems = useMemo(
-        () =>
-            tailItem
-                ? renderItems.filter((item) => item.key !== tailItem.key)
-                : renderItems,
-        [renderItems, tailItem],
-    );
+    const virtualizedItems = renderItems;
     const [scrollTop, setScrollTop] = useState(0);
     const [viewportHeight, setViewportHeight] = useState(0);
     const [measuredHeights, setMeasuredHeights] = useState<Record<string, number>>(
@@ -429,30 +423,27 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
     ]);
 
     return (
-        <>
-            <div
-                style={{
-                    position: "relative",
-                    height: layout.totalHeight,
-                    minHeight: layout.totalHeight > 0 ? layout.totalHeight : 1,
-                }}
-            >
-                {visibleItems.map((item, relativeIndex) => {
-                    const absoluteIndex = visibleRange.startIndex + relativeIndex;
-                    return (
-                        <VirtualizedRow
-                            key={item.key}
-                            itemKey={item.key}
-                            top={layout.tops[absoluteIndex] ?? 0}
-                            onHeightChange={handleHeightChange}
-                        >
-                            {item.element}
-                        </VirtualizedRow>
-                    );
-                })}
-            </div>
-            {tailItem?.element ?? null}
-        </>
+        <div
+            style={{
+                position: "relative",
+                height: layout.totalHeight,
+                minHeight: layout.totalHeight > 0 ? layout.totalHeight : 1,
+            }}
+        >
+            {visibleItems.map((item, relativeIndex) => {
+                const absoluteIndex = visibleRange.startIndex + relativeIndex;
+                return (
+                    <VirtualizedRow
+                        key={item.key}
+                        itemKey={item.key}
+                        top={layout.tops[absoluteIndex] ?? 0}
+                        onHeightChange={handleHeightChange}
+                    >
+                        {item.element}
+                    </VirtualizedRow>
+                );
+            })}
+        </div>
     );
 };
 

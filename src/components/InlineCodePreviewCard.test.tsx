@@ -65,7 +65,7 @@ describe("InlineCodePreviewCard", () => {
         expect(host.querySelector("style")).toBeNull();
     });
 
-    it("defaults historical previews to a collapsed viewport and can expand them locally", async () => {
+    it("defaults historical previews to a collapsed masked viewport and expands on overlay click", async () => {
         mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
         render(
             <InlineCodePreviewCard
@@ -83,7 +83,7 @@ describe("InlineCodePreviewCard", () => {
         );
 
         const user = userEvent.setup();
-        const toggleButton = await screen.findByRole("button", { name: "展开" });
+        const expandOverlay = await screen.findByRole("button", { name: "展开预览" });
         const host = await screen.findByTestId("preview-code-host");
         await waitFor(() => expect(host.shadowRoot?.textContent).toContain("Collapsible"));
         expect(host).not.toHaveClass("hidden");
@@ -92,8 +92,14 @@ describe("InlineCodePreviewCard", () => {
             minHeight: `${PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX}px`,
             maxHeight: `${PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX}px`,
         });
+        expect(host.className).toContain("overflow-hidden");
+        expect(host.className).not.toContain("overflow-auto");
+        expect(screen.getByText("点击展开预览")).toBeInTheDocument();
 
-        await user.click(toggleButton);
+        await user.click(expandOverlay);
+        await waitFor(() => {
+            expect(screen.queryByRole("button", { name: "展开预览" })).not.toBeInTheDocument();
+        });
         expect(await screen.findByRole("button", { name: "收起" })).toBeInTheDocument();
         expect(host.style.height).toBe("");
         expect(host.style.minHeight).toBe("");
@@ -102,17 +108,9 @@ describe("InlineCodePreviewCard", () => {
             "submit_preview_code_response",
             expect.anything()
         );
-
-        await user.click(screen.getByRole("button", { name: "收起" }));
-        expect(await screen.findByRole("button", { name: "展开" })).toBeInTheDocument();
-        expect(host).toHaveStyle({
-            height: `${PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX}px`,
-            minHeight: `${PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX}px`,
-            maxHeight: `${PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX}px`,
-        });
     });
 
-    it("keeps the last message preview expanded by default and supports local hide", async () => {
+    it("keeps the last message preview expanded by default and supports local hide and show", async () => {
         mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
         render(
             <InlineCodePreviewCard
@@ -137,6 +135,8 @@ describe("InlineCodePreviewCard", () => {
         );
         expect(host.style.height).toBe("");
         expect(await screen.findByRole("button", { name: "隐藏" })).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "展开预览" })).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "收起" })).toBeInTheDocument();
 
         await user.click(screen.getByRole("button", { name: "隐藏" }));
         expect(await screen.findByText("预览已隐藏。")).toBeInTheDocument();
@@ -145,6 +145,43 @@ describe("InlineCodePreviewCard", () => {
         await user.click(screen.getByRole("button", { name: "显示" }));
         expect(screen.queryByText("预览已隐藏。")).not.toBeInTheDocument();
         expect(await screen.findByRole("button", { name: "隐藏" })).toBeInTheDocument();
+        const restoredHost = await screen.findByTestId("preview-code-host");
+        await waitFor(() =>
+            expect(restoredHost.shadowRoot?.textContent).toContain("Latest Preview")
+        );
+    });
+
+    it("keeps hide available while collapsed and can show the preview again", async () => {
+        mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
+
+        render(
+            <InlineCodePreviewCard
+                parameters={JSON.stringify({
+                    title: "collapsed_hide",
+                    renderer: "html",
+                    code: "<div>Collapsed Hide</div>",
+                    interaction_mode: "submit_once",
+                })}
+                conversationId={8}
+                messageId={16}
+                mcpToolCallStates={new Map()}
+                isStreaming={false}
+            />
+        );
+
+        const user = userEvent.setup();
+        const host = await screen.findByTestId("preview-code-host");
+        await waitFor(() => expect(host.shadowRoot?.textContent).toContain("Collapsed Hide"));
+        expect(await screen.findByRole("button", { name: "隐藏" })).toBeInTheDocument();
+        expect(await screen.findByRole("button", { name: "展开预览" })).toBeInTheDocument();
+
+        await user.click(screen.getByRole("button", { name: "隐藏" }));
+        expect(await screen.findByText("预览已隐藏。")).toBeInTheDocument();
+        expect(await screen.findByRole("button", { name: "显示" })).toBeInTheDocument();
+
+        await user.click(screen.getByRole("button", { name: "显示" }));
+        expect(await screen.findByRole("button", { name: "隐藏" })).toBeInTheDocument();
+        expect(await screen.findByRole("button", { name: "展开预览" })).toBeInTheDocument();
     });
 
     it("does not render a manual dismiss action for display-only previews", async () => {
@@ -171,5 +208,35 @@ describe("InlineCodePreviewCard", () => {
             "submit_preview_code_response",
             expect.anything()
         );
+    });
+
+    it("keeps scripted historical previews static while collapsed and enables interaction after expand", async () => {
+        mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
+
+        render(
+            <InlineCodePreviewCard
+                parameters={JSON.stringify({
+                    title: "script_preview",
+                    renderer: "html",
+                    code: "<div>Static First</div><script>const marker = document.createElement('div'); marker.textContent = 'Script Active'; marker.setAttribute('data-script-active', 'true'); document.body.appendChild(marker);</script>",
+                    interaction_mode: "submit_once",
+                })}
+                conversationId={7}
+                messageId={15}
+                mcpToolCallStates={new Map()}
+                isStreaming={false}
+            />
+        );
+
+        const user = userEvent.setup();
+        const host = await screen.findByTestId("preview-code-host");
+        await screen.findByText("点击展开预览");
+        expect(host.shadowRoot?.textContent).toContain("Static First");
+        expect(host.shadowRoot?.querySelector('[data-script-active="true"]')).toBeNull();
+
+        await user.click(screen.getByRole("button", { name: "展开预览" }));
+
+        await waitFor(() => expect(host.shadowRoot?.textContent).toContain("Script Active"));
+        expect(screen.getByRole("button", { name: "收起" })).toBeInTheDocument();
     });
 });

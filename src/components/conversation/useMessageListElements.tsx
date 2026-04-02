@@ -5,6 +5,7 @@ import VersionPagination from "../VersionPagination";
 import { Message, StreamEvent } from "../../data/Conversation";
 import type { InlineInteractionItem } from "../ConversationUI";
 import { PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX } from "../../utils/previewCode";
+import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
 
 export interface UseMessageListElementsProps {
     allDisplayMessages: Message[];
@@ -69,18 +70,15 @@ function collectPreviewCodePayloadLengths(content: string): number[] {
     ];
 
     return segments
-        .filter((segment) =>
-            /"tool_name"\s*:\s*"preview_code"/.test(segment)
-            || /<tool_name>\s*preview_code\s*<\/tool_name>/i.test(segment)
-        )
+        .filter((segment) => messageContainsPreviewCode(segment))
         .map((segment) => segment.length);
 }
 
 function estimateMessageHeight(
     message: Message,
-    options: { isLastMessage?: boolean } = {},
+    options: { isLastMessage?: boolean; isReasoningExpanded?: boolean } = {},
 ): number {
-    const { isLastMessage = false } = options;
+    const { isLastMessage = false, isReasoningExpanded = false } = options;
     const rawContent = message.content ?? "";
     const content = stripMcpToolCallMarkup(rawContent);
     const mcpToolCallCount = countMcpToolCalls(rawContent);
@@ -105,6 +103,7 @@ function estimateMessageHeight(
     const codeBlockCount = Math.floor((content.match(/```/g) ?? []).length / 2);
     const listItemCount = (content.match(/^\s*(?:[-*+]|\d+\.)\s+/gm) ?? []).length;
     const tableRowCount = (content.match(/^\|.*\|$/gm) ?? []).length;
+    const hasToolCall = mcpToolCallCount > 0;
 
     const structureContribution = Math.min(
         5200,
@@ -115,25 +114,36 @@ function estimateMessageHeight(
         + tableRowCount * 18,
     );
     const lengthContribution = Math.min(1600, Math.ceil(contentLength / 240) * 12);
-    const previewCodeContribution = isLastMessage
-        ? (previewCodePayloadLengths.length > 0
-            ? previewCodePayloadLengths.reduce(
-                (sum, payloadLength) =>
-                    sum
-                    + Math.min(2400, 420 + Math.ceil(payloadLength / 90) * 24),
-                0,
-            )
-            : previewCodeToolCallCount * (PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX + 520))
-        : previewCodeToolCallCount * (PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX + 56);
+    const previewCodeBaseHeight = isLastMessage
+        ? PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX + 144
+        : PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX + 120;
+    const previewCodeContribution = previewCodeToolCallCount > 0
+        ? previewCodePayloadLengths.length > 0
+            ? previewCodePayloadLengths.reduce((sum, payloadLength) => {
+                const payloadOverhead = isLastMessage
+                    ? Math.min(40, Math.ceil(payloadLength / 6000) * 20)
+                    : Math.min(24, Math.ceil(payloadLength / 6000) * 12);
+                return sum + previewCodeBaseHeight + payloadOverhead;
+            }, 0)
+            : previewCodeToolCallCount * previewCodeBaseHeight
+        : 0;
     const toolCallContribution = mcpToolCallCount > 0
         ? previewCodeContribution + genericToolCallCount * 88 + (mcpToolCallCount >= 2 ? 44 : 0)
         : 0;
 
     switch (message.message_type) {
         case "response":
+            if (hasToolCall) {
+                return 112 + structureContribution + lengthContribution + toolCallContribution;
+            }
             return 180 + structureContribution + lengthContribution + toolCallContribution;
         case "tool_result":
             return 160 + structureContribution + lengthContribution + toolCallContribution;
+        case "reasoning":
+            if (!isReasoningExpanded) {
+                return hasToolCall ? 140 : 72;
+            }
+            return 132 + structureContribution + lengthContribution + toolCallContribution;
         case "user":
             return 100
                 + Math.min(1800, Math.max(0, lineCount - 1) * 14 + wrappedLineCount * 10)
@@ -211,10 +221,12 @@ export function useMessageListElements({
                 message.id,
                 estimateMessageHeight(message, {
                     isLastMessage: message.id === lastMessageId,
+                    isReasoningExpanded:
+                        reasoningExpandStates.get(message.id) || false,
                 }),
             ] as const),
         );
-    }, [allDisplayMessages, lastMessageId]);
+    }, [allDisplayMessages, lastMessageId, reasoningExpandStates]);
 
     const messageElements = useMemo(() => {
         return allDisplayMessages.map((message) => {
@@ -365,10 +377,14 @@ export function useMessageListElements({
                 messageId: entry.messageId,
                 messageIds: [entry.messageId],
                 estimatedHeight:
-                    estimatedHeightByMessageId.get(entry.messageId)
+                estimatedHeightByMessageId.get(entry.messageId)
                     ?? estimateMessageHeight(
                         messageById.get(entry.messageId) ?? allDisplayMessages[0],
-                        { isLastMessage: entry.messageId === lastMessageId },
+                        {
+                            isLastMessage: entry.messageId === lastMessageId,
+                            isReasoningExpanded:
+                                reasoningExpandStates.get(entry.messageId) || false,
+                        },
                     ),
                 element: entry.messageElement,
             });
@@ -400,7 +416,11 @@ export function useMessageListElements({
                         estimatedHeightByMessageId.get(entry.messageId)
                         ?? estimateMessageHeight(
                             messageById.get(entry.messageId) ?? allDisplayMessages[0],
-                            { isLastMessage: entry.messageId === lastMessageId },
+                            {
+                                isLastMessage: entry.messageId === lastMessageId,
+                                isReasoningExpanded:
+                                    reasoningExpandStates.get(entry.messageId) || false,
+                            },
                         )
                     );
                     if (versionMap.has(`version-${entry.messageId}`)) {

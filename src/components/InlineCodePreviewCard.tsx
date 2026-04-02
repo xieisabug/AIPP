@@ -15,7 +15,7 @@ import {
     PreviewCodeRequestEvent,
 } from "@/utils/previewCode";
 import { createPreviewCodeRuntime } from "@/utils/previewCodeRuntime";
-import { CheckCircle, ChevronDown, ChevronUp, Loader2, Sparkles, XCircle } from "lucide-react";
+import { CheckCircle, Loader2, Sparkles, XCircle } from "lucide-react";
 
 interface InlineCodePreviewCardProps {
     parameters: string;
@@ -37,100 +37,6 @@ type DisplayState =
     | "dismissed"
     | "failed"
     | "idle";
-
-function buildStaticPreviewDocument(html: string): string {
-    return `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <style>
-      html, body {
-        margin: 0;
-        padding: 0;
-        background: transparent;
-      }
-
-      body {
-        overflow-wrap: anywhere;
-      }
-    </style>
-  </head>
-  <body>${html}</body>
-</html>`;
-}
-
-function StaticPreviewFrame({
-    html,
-    collapsed,
-    viewportHeight,
-}: {
-    html: string;
-    collapsed: boolean;
-    viewportHeight: number;
-}) {
-    const iframeRef = useRef<HTMLIFrameElement | null>(null);
-    const [expandedHeight, setExpandedHeight] = useState<number | null>(
-        collapsed ? viewportHeight : null,
-    );
-    const srcDoc = useMemo(() => buildStaticPreviewDocument(html), [html]);
-
-    useEffect(() => {
-        if (collapsed) {
-            setExpandedHeight(viewportHeight);
-            return;
-        }
-
-        const iframe = iframeRef.current;
-        if (!iframe) {
-            return;
-        }
-
-        const updateHeight = () => {
-            const doc = iframe.contentDocument;
-            if (!doc) {
-                return;
-            }
-            const nextHeight = Math.max(
-                doc.body?.scrollHeight ?? 0,
-                doc.documentElement?.scrollHeight ?? 0,
-                viewportHeight,
-            );
-            setExpandedHeight(nextHeight);
-        };
-
-        const handleLoad = () => {
-            updateHeight();
-            window.setTimeout(updateHeight, 50);
-            window.setTimeout(updateHeight, 250);
-        };
-
-        iframe.addEventListener("load", handleLoad);
-        handleLoad();
-
-        return () => {
-            iframe.removeEventListener("load", handleLoad);
-        };
-    }, [collapsed, srcDoc, viewportHeight]);
-
-    return (
-        <iframe
-            ref={iframeRef}
-            srcDoc={srcDoc}
-            sandbox="allow-same-origin"
-            className="w-full border-0 bg-transparent"
-            style={collapsed
-                ? {
-                    height: viewportHeight,
-                    minHeight: viewportHeight,
-                    maxHeight: viewportHeight,
-                }
-                : {
-                    height: expandedHeight ?? viewportHeight,
-                    minHeight: viewportHeight,
-                }}
-        />
-    );
-}
 
 export default function InlineCodePreviewCard({
     parameters,
@@ -155,7 +61,6 @@ export default function InlineCodePreviewCard({
     const [isRuntimeActivated, setIsRuntimeActivated] = useState(
         isStreaming || isLastMessage,
     );
-    const [isInteractionEnabled, setIsInteractionEnabled] = useState(isStreaming);
     const [optimisticResult, setOptimisticResult] = useState<ReturnType<typeof parsePreviewCodeToolResult> | null>(null);
 
     const matchedStateByLlmCallId = useMemo(() => {
@@ -204,22 +109,82 @@ export default function InlineCodePreviewCard({
         }
         return /<script[\s>]/i.test(previewRequest?.code ?? "");
     }, [previewRequest?.code, streamingPreviewState]);
-    const shouldUseStaticFrame =
-        hasScriptContent && !isInteractionEnabled && !isStreaming;
-    const staticPreviewHtml = useMemo(
-        () => previewRequest?.code ?? "",
-        [previewRequest?.code],
-    );
+    const isInteractionEnabled = isStreaming || !hasScriptContent || !isCollapsed;
+    const toolResult =
+        optimisticResult ??
+        parsePreviewCodeToolResult(stateOverride?.result ?? persistedToolCall?.result ?? null);
+
+    const displayState: DisplayState = useMemo(() => {
+        if (toolResult?.status === "submitted") {
+            return "submitted";
+        }
+        if (toolResult?.status === "dismissed") {
+            return "dismissed";
+        }
+        const status = stateOverride?.status ?? persistedToolCall?.status;
+        if (status === "failed") {
+            return "failed";
+        }
+        if (status === "executing") {
+            return "executing";
+        }
+        if (status === "pending") {
+            return "pending";
+        }
+        if (isStreaming) {
+            return "streaming";
+        }
+        return "idle";
+    }, [toolResult, stateOverride?.status, persistedToolCall?.status, isStreaming]);
+    const loadingMessage = useMemo(() => {
+        if (!previewRequest?.loadingMessages?.length) {
+            return null;
+        }
+        if (!previewRequest.code.trim()) {
+            return previewRequest.loadingMessages[0];
+        }
+        if (previewRequest.code.includes("<script")) {
+            return (
+                previewRequest.loadingMessages[
+                    Math.min(previewRequest.loadingMessages.length - 1, 2)
+                ] ?? previewRequest.loadingMessages[previewRequest.loadingMessages.length - 1]
+            );
+        }
+        return (
+            previewRequest.loadingMessages[
+                Math.min(previewRequest.loadingMessages.length - 1, 1)
+            ] ?? previewRequest.loadingMessages[0]
+        );
+    }, [previewRequest]);
+    const shouldShowStreamingFallback =
+        isStreaming && !!streamingPreviewState && !streamingPreviewState.hasRenderableDom;
+    const sourceExcerpt = useMemo(() => {
+        if (streamingPreviewState?.sourceExcerpt?.trim()) {
+            return streamingPreviewState.sourceExcerpt.trim();
+        }
+        const code = previewRequest?.code?.trim();
+        if (!code) {
+            return null;
+        }
+        return code.length > 600 ? `${code.slice(0, 600)}…` : code;
+    }, [previewRequest?.code, streamingPreviewState?.sourceExcerpt]);
+    const previewHidden = displayState === "dismissed" || isHidden;
+    const hostHidden = previewHidden || shouldShowStreamingFallback;
+    const shouldRenderPreviewSurface = !previewHidden && !shouldShowStreamingFallback;
+    const shouldRenderRuntimeHost = !previewHidden && !shouldShowStreamingFallback;
+    const previewViewportHeight = isStreaming
+        ? Math.max(160, PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX - 64)
+        : PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX;
 
     useEffect(() => {
+        const defaultCollapsed = !isLastMessage && !isStreaming;
         setResolvedRequestId(null);
         setOptimisticResult(null);
         setInteractionError(null);
         setRuntimeError(null);
-        setIsCollapsed(!isLastMessage && !isStreaming);
+        setIsCollapsed(defaultCollapsed);
         setIsHidden(false);
-        setIsRuntimeActivated(isStreaming || (isLastMessage && !hasScriptContent));
-        setIsInteractionEnabled(isStreaming || !hasScriptContent);
+        setIsRuntimeActivated(isStreaming || !defaultCollapsed);
     }, [conversationId, hasScriptContent, isLastMessage, isStreaming, requestSignature]);
 
     useEffect(() => {
@@ -312,7 +277,7 @@ export default function InlineCodePreviewCard({
     }, [conversationId, requestSignature]);
 
     useEffect(() => {
-        if (!hostRef.current || runtimeRef.current || !isRuntimeActivated || shouldUseStaticFrame) {
+        if (!hostRef.current || runtimeRef.current || !isRuntimeActivated || !shouldRenderRuntimeHost) {
             return;
         }
         runtimeRef.current = createPreviewCodeRuntime(hostRef.current);
@@ -320,10 +285,15 @@ export default function InlineCodePreviewCard({
             runtimeRef.current?.destroy();
             runtimeRef.current = null;
         };
-    }, [isRuntimeActivated, shouldUseStaticFrame]);
+    }, [isRuntimeActivated, shouldRenderRuntimeHost]);
 
     useEffect(() => {
-        if (!previewRequest || !runtimeRef.current || !isRuntimeActivated || shouldUseStaticFrame) {
+        if (
+            !previewRequest
+            || !runtimeRef.current
+            || !isRuntimeActivated
+            || !shouldRenderRuntimeHost
+        ) {
             return;
         }
 
@@ -403,81 +373,20 @@ export default function InlineCodePreviewCard({
         isStreaming,
         resolvedRequestId,
         streamingPreviewState,
-        isRuntimeActivated,
-        hasScriptContent,
-        isInteractionEnabled,
-        isLastMessage,
-        shouldUseStaticFrame,
-    ]);
-
-    const toolResult =
-        optimisticResult ??
-        parsePreviewCodeToolResult(stateOverride?.result ?? persistedToolCall?.result ?? null);
-
-    const displayState: DisplayState = useMemo(() => {
-        if (toolResult?.status === "submitted") {
-            return "submitted";
-        }
-        if (toolResult?.status === "dismissed") {
-            return "dismissed";
-        }
-        const status = stateOverride?.status ?? persistedToolCall?.status;
-        if (status === "failed") {
-            return "failed";
-        }
-        if (status === "executing") {
-            return "executing";
-        }
-        if (status === "pending") {
-            return "pending";
-        }
-        if (isStreaming) {
-            return "streaming";
-        }
-        return "idle";
-    }, [toolResult, stateOverride?.status, persistedToolCall?.status, isStreaming]);
+            isRuntimeActivated,
+            hasScriptContent,
+            isInteractionEnabled,
+            isLastMessage,
+            shouldRenderRuntimeHost,
+        ]);
 
     useEffect(() => {
         if (displayState === "streaming" || displayState === "pending" || displayState === "executing") {
             setIsCollapsed(false);
             setIsHidden(false);
             setIsRuntimeActivated(true);
-            setIsInteractionEnabled(true);
         }
     }, [displayState]);
-
-    const loadingMessage = useMemo(() => {
-        if (!previewRequest?.loadingMessages?.length) {
-            return null;
-        }
-        if (!previewRequest.code.trim()) {
-            return previewRequest.loadingMessages[0];
-        }
-        if (previewRequest.code.includes("<script")) {
-            return (
-                previewRequest.loadingMessages[
-                    Math.min(previewRequest.loadingMessages.length - 1, 2)
-                ] ?? previewRequest.loadingMessages[previewRequest.loadingMessages.length - 1]
-            );
-        }
-        return (
-            previewRequest.loadingMessages[
-                Math.min(previewRequest.loadingMessages.length - 1, 1)
-            ] ?? previewRequest.loadingMessages[0]
-        );
-    }, [previewRequest]);
-    const shouldShowStreamingFallback =
-        isStreaming && !!streamingPreviewState && !streamingPreviewState.hasRenderableDom;
-    const sourceExcerpt = useMemo(() => {
-        if (streamingPreviewState?.sourceExcerpt?.trim()) {
-            return streamingPreviewState.sourceExcerpt.trim();
-        }
-        const code = previewRequest?.code?.trim();
-        if (!code) {
-            return null;
-        }
-        return code.length > 600 ? `${code.slice(0, 600)}…` : code;
-    }, [previewRequest?.code, streamingPreviewState?.sourceExcerpt]);
 
     const statusBadge = (() => {
         switch (displayState) {
@@ -522,13 +431,6 @@ export default function InlineCodePreviewCard({
         }
     })();
 
-    const previewHidden = displayState === "dismissed" || isHidden;
-    const hostHidden = previewHidden || shouldShowStreamingFallback || shouldUseStaticFrame;
-    const toggleButtonLabel = isCollapsed ? "展开" : "收起";
-    const previewViewportHeight = isStreaming
-        ? Math.max(160, PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX - 64)
-        : PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX;
-
     useEffect(() => {
         if (hostHidden || isRuntimeActivated) {
             return;
@@ -566,6 +468,21 @@ export default function InlineCodePreviewCard({
         };
     }, [hostHidden, isRuntimeActivated]);
 
+    useEffect(() => {
+        if (shouldRenderRuntimeHost) {
+            return;
+        }
+        runtimeRef.current?.destroy();
+        runtimeRef.current = null;
+    }, [shouldRenderRuntimeHost]);
+
+    useEffect(() => {
+        if (!previewHidden) {
+            return;
+        }
+        setRuntimeError(null);
+    }, [previewHidden]);
+
     return (
         <div className="space-y-3 py-2">
             <div className="space-y-3">
@@ -580,21 +497,7 @@ export default function InlineCodePreviewCard({
                     </div>
                     <div className="flex items-center gap-2">
                         {statusBadge}
-                        {hasScriptContent && displayState !== "dismissed" && !isHidden && !isInteractionEnabled && !isStreaming && (
-                            <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                onClick={() => {
-                                    setIsRuntimeActivated(true);
-                                    setIsInteractionEnabled(true);
-                                }}
-                                disabled={isSubmitting}
-                            >
-                                启用交互
-                            </Button>
-                        )}
-                        {displayState !== "dismissed" && isLastMessage && (
+                        {displayState !== "dismissed" && (
                             <Button
                                 type="button"
                                 variant="ghost"
@@ -603,26 +506,6 @@ export default function InlineCodePreviewCard({
                                 disabled={isSubmitting}
                             >
                                 {isHidden ? "显示" : "隐藏"}
-                            </Button>
-                        )}
-                        {displayState !== "dismissed" && !isHidden && (
-                            <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => {
-                                    setIsRuntimeActivated(true);
-                                    setIsCollapsed((current) => !current);
-                                }}
-                                disabled={isSubmitting}
-                                aria-expanded={!isCollapsed}
-                            >
-                                {isCollapsed ? (
-                                    <ChevronDown className="h-3.5 w-3.5" />
-                                ) : (
-                                    <ChevronUp className="h-3.5 w-3.5" />
-                                )}
-                                {toggleButtonLabel}
                             </Button>
                         )}
                     </div>
@@ -642,40 +525,79 @@ export default function InlineCodePreviewCard({
                         {interactionError}
                     </div>
                 )}
-                <div
-                    ref={hostRef}
-                    data-testid="preview-code-host"
-                    className={hostHidden
-                        ? "hidden bg-transparent"
-                        : isCollapsed
-                            ? "overflow-auto bg-transparent"
-                            : "bg-transparent"}
-                    style={hostHidden
-                        ? undefined
-                        : isCollapsed
-                            ? {
-                                height: previewViewportHeight,
-                                minHeight: previewViewportHeight,
-                                maxHeight: previewViewportHeight,
-                            }
-                            : undefined}
-                >
-                    {!hostHidden && !isRuntimeActivated && (
-                        <div className="flex h-full items-center justify-center rounded-md border border-dashed border-border/60 bg-muted/20 px-4 text-xs text-muted-foreground">
-                            滚动到此处后加载预览
+                {shouldRenderPreviewSurface && (
+                    <div
+                        className={isCollapsed
+                            ? "relative overflow-hidden bg-transparent"
+                            : "relative bg-transparent"}
+                        style={{
+                            overflowAnchor: "none",
+                            ...(isCollapsed
+                                ? {
+                                    height: previewViewportHeight,
+                                    minHeight: previewViewportHeight,
+                                    maxHeight: previewViewportHeight,
+                                }
+                                : {}),
+                        }}
+                    >
+                        <div
+                            ref={hostRef}
+                            data-testid="preview-code-host"
+                            className={hostHidden
+                                ? "hidden bg-transparent"
+                                : isCollapsed
+                                    ? "h-full overflow-hidden bg-transparent"
+                                    : "bg-transparent"}
+                            style={{
+                                overflowAnchor: "none",
+                                ...(hostHidden
+                                    ? {}
+                                    : isCollapsed
+                                        ? {
+                                            height: previewViewportHeight,
+                                            minHeight: previewViewportHeight,
+                                            maxHeight: previewViewportHeight,
+                                        }
+                                        : {}),
+                            }}
+                        >
+                            {!hostHidden && !isRuntimeActivated && (
+                                <div className="flex h-full items-center justify-center rounded-md border border-dashed border-border/60 bg-muted/20 px-4 text-xs text-muted-foreground">
+                                    滚动到此处后加载预览
+                                </div>
+                            )}
                         </div>
-                    )}
-                </div>
-                {!previewHidden && shouldUseStaticFrame && staticPreviewHtml && (
-                    <StaticPreviewFrame
-                        html={staticPreviewHtml}
-                        collapsed={isCollapsed}
-                        viewportHeight={previewViewportHeight}
-                    />
-                )}
-                {!previewHidden && hasScriptContent && !isInteractionEnabled && !isStreaming && (
-                    <div className="text-xs text-muted-foreground">
-                        默认先展示静态预览，点击“启用交互”后再运行其中脚本。
+                        {isCollapsed && (
+                            <button
+                                type="button"
+                                className="absolute inset-0 z-10 flex flex-col items-center justify-end gap-2 bg-gradient-to-t from-background/95 via-background/72 to-background/18 px-4 pb-5 pt-10 text-center transition-colors hover:from-background hover:via-background/78 hover:to-background/26"
+                                onClick={() => {
+                                    setIsCollapsed(false);
+                                    setIsRuntimeActivated(true);
+                                }}
+                                disabled={isSubmitting}
+                                aria-label="展开预览"
+                            >
+                                <span className="text-sm font-medium text-foreground">点击展开预览</span>
+                                <span className="text-xs text-muted-foreground">
+                                    {hasScriptContent ? "展开后将启用交互" : "展开查看完整内容"}
+                                </span>
+                            </button>
+                        )}
+                        {!isCollapsed && (
+                            <div className="absolute bottom-2 right-2 z-10">
+                                <button
+                                    type="button"
+                                    className="pointer-events-auto rounded bg-muted px-2 py-1 text-xs text-foreground hover:bg-muted/80"
+                                    onClick={() => setIsCollapsed(true)}
+                                    disabled={isSubmitting}
+                                    title="收起"
+                                >
+                                    收起
+                                </button>
+                            </div>
+                        )}
                     </div>
                 )}
                 {shouldShowStreamingFallback && !previewHidden && sourceExcerpt && (

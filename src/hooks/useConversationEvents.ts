@@ -19,6 +19,7 @@ import {
     ShineStateSnapshotEvent,
 } from "../data/Conversation";
 import { MCPToolCall } from "@/data/MCPToolCall";
+import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
 
 export interface UseConversationEventsOptions {
     conversationId: string | number;
@@ -43,7 +44,7 @@ type McpRefreshResult = "success" | "failed" | "stale";
 
 export function shouldFlushStreamingMessageImmediately(content: string): boolean {
     return content.includes("MCP_TOOL_CALL_STREAMING")
-        && content.includes('"tool_name":"preview_code"');
+        && messageContainsPreviewCode(content);
 }
 
 export function useConversationEvents(options: UseConversationEventsOptions) {

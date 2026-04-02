@@ -172,6 +172,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 常规消息列表
         const [messages, setMessages] = useState<Array<Message>>([]);
         const streamingMessagesRef = useRef<Map<number, StreamEvent>>(new Map());
+        const smartScrollRef = useRef<
+            ((forceScroll?: boolean, behaviorOverride?: ScrollBehavior) => void) | null
+        >(null);
 
         // AI响应状态管理
         const [aiIsResponsing, setAiIsResponsing] = useState<boolean>(false);
@@ -331,20 +334,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             [conversation?.id, conversationId]
         );
 
-        // 滚动管理 - 移除依赖项，改为手动调用
-        const {
-            messagesEndRef,
-            scrollContainerRef,
-            handleScroll,
-            handleUserScrollIntent,
-            syncScrollState,
-            smartScroll,
-            scrollToUserMessage,
-        } = useScrollManagement({
-            disableTailObservation: virtualizeMessages,
-        });
-        const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
-
         // 使用 useMemo 稳定 options 对象，避免频繁触发 useConversationEvents 内部的 useEffect
         const conversationEventsOptions = useMemo(() => {
             const handleMessageUpdate = (streamEvent: StreamEvent) => {
@@ -367,7 +356,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 }
 
                 // 每次消息更新时手动触发滚动
-                setTimeout(() => smartScroll(), 0);
+                setTimeout(() => smartScrollRef.current?.(), 0);
             };
 
             return {
@@ -410,7 +399,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             handleError,
             handleMessageCompletion,
             conversation?.id,
-            smartScroll,
             // 移除 functionMap 依赖，改为在回调内部访问
         ]);
 
@@ -483,6 +471,21 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             () => collectSentBatchToolResultMessageIds(messages),
             [messages],
         );
+
+        // 滚动管理 - 移除依赖项，改为手动调用
+        const {
+            messagesEndRef,
+            scrollContainerRef,
+            handleScroll,
+            handleUserScrollIntent,
+            syncScrollState,
+            smartScroll,
+            scrollToUserMessage,
+        } = useScrollManagement({
+            disableTailObservation: virtualizeMessages,
+        });
+        smartScrollRef.current = smartScroll;
+        const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
 
         // ============= Chat Sidebar 数据提取 =============
         
