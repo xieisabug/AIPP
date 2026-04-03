@@ -345,6 +345,30 @@ impl VuePreviewManager {
         Ok((preview_dir, need_install_deps))
     }
 
+    pub fn setup_capture_preview_project(
+        &self,
+        preview_id: &str,
+        component_code: &str,
+        component_name: &str,
+    ) -> Result<(PathBuf, bool), Box<dyn std::error::Error>> {
+        self.setup_template_project(
+            preview_id,
+            component_code,
+            component_name,
+            "artifact_preview",
+            None,
+        )
+    }
+
+    pub fn start_capture_dev_server(
+        &self,
+        project_path: &PathBuf,
+        port: u16,
+        force_install: bool,
+    ) -> Result<u32, Box<dyn std::error::Error>> {
+        self.start_dev_server(project_path, port, force_install)
+    }
+
     fn start_dev_server(
         &self,
         project_path: &PathBuf,

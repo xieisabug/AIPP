@@ -405,6 +405,72 @@ fn resolve_artifact_tool_conversation_id(
         .ok_or_else(|| "Artifact tools require conversation context".to_string())
 }
 
+fn build_capture_artifact_screenshot_result(
+    response: &crate::artifacts::workspace::CaptureArtifactScreenshotResponse,
+) -> serde_json::Value {
+    let summary = format!(
+        "Captured artifact screenshot for {} at {}x{}.",
+        response.entry_file, response.width, response.height
+    );
+    let structured = serde_json::json!({
+        "artifact_key": response.artifact_key,
+        "entry_file": response.entry_file,
+        "language": response.language,
+        "preview_type": response.preview_type,
+        "output_mode": response.output_mode,
+        "width": response.width,
+        "height": response.height,
+        "mime_type": response.mime_type,
+        "path": response.path,
+    });
+
+    if let Some(base64) = response.base64.as_deref() {
+        serde_json::json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": summary,
+                },
+                {
+                    "type": "image",
+                    "mimeType": response.mime_type,
+                    "data": base64,
+                }
+            ],
+            "structuredContent": structured,
+            "isError": false
+        })
+    } else if let Some(path) = response.path.as_deref() {
+        serde_json::json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": format!("{}\nScreenshot saved to {}.", summary, path),
+                },
+                {
+                    "type": "resource_link",
+                    "uri": format!("file://{}", path),
+                    "name": response.entry_file,
+                    "mimeType": response.mime_type,
+                }
+            ],
+            "structuredContent": structured,
+            "isError": false
+        })
+    } else {
+        serde_json::json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": summary,
+                }
+            ],
+            "structuredContent": structured,
+            "isError": false
+        })
+    }
+}
+
 fn execute_dynamic_mcp_tool(
     app_handle: &AppHandle,
     tool_name: &str,
@@ -1240,7 +1306,8 @@ pub async fn execute_aipp_builtin_tool(
         }
         "artifact" => {
             use crate::artifacts::workspace::{
-                get_artifact_workspace, show_artifact, ShowArtifactRequest,
+                capture_artifact_screenshot, get_artifact_workspace, show_artifact,
+                CaptureArtifactScreenshotRequest, ShowArtifactRequest,
             };
 
             match tool_name.as_str() {
@@ -1301,6 +1368,55 @@ pub async fn execute_aipp_builtin_tool(
                         }),
                         Err(e) => {
                             error!(error = %e, "show_artifact tool execution failed");
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": e}],
+                                "isError": true
+                            })
+                        }
+                    }
+                }
+                "capture_artifact_screenshot" => {
+                    let resolved_conversation_id = resolve_artifact_tool_conversation_id(
+                        tool_name.as_str(),
+                        &args,
+                        conversation_id,
+                    )?;
+                    let artifact_key = args
+                        .get("artifact_key")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing required parameter: artifact_key".to_string())?;
+                    let entry_file = args
+                        .get("entry_file")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing required parameter: entry_file".to_string())?;
+                    let request = CaptureArtifactScreenshotRequest {
+                        conversation_id: resolved_conversation_id,
+                        artifact_key: artifact_key.to_string(),
+                        entry_file: entry_file.to_string(),
+                        language: args
+                            .get("language")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                        preview_type: args
+                            .get("preview_type")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                        output_mode: args
+                            .get("output_mode")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                        selector: args
+                            .get("selector")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                        width: args.get("width").and_then(|v| v.as_u64()).map(|v| v as u32),
+                        height: args.get("height").and_then(|v| v.as_u64()).map(|v| v as u32),
+                        delay_ms: args.get("delay_ms").and_then(|v| v.as_u64()),
+                    };
+                    match capture_artifact_screenshot(&app_handle, request).await {
+                        Ok(response) => build_capture_artifact_screenshot_result(&response),
+                        Err(e) => {
+                            error!(error = %e, "capture_artifact_screenshot tool execution failed");
                             serde_json::json!({
                                 "content": [{"type": "text", "text": e}],
                                 "isError": true
@@ -2490,6 +2606,69 @@ mod tests {
             .expect("show_artifact should resolve string conversation ids");
 
         assert_eq!(resolved, 999);
+    }
+
+    #[test]
+    fn capture_artifact_screenshot_accepts_string_conversation_override() {
+        let args = serde_json::json!({ "conversation_id": "999" });
+        let resolved =
+            resolve_artifact_tool_conversation_id("capture_artifact_screenshot", &args, Some(123))
+                .expect("capture_artifact_screenshot should resolve string conversation ids");
+
+        assert_eq!(resolved, 999);
+    }
+
+    #[test]
+    fn capture_artifact_screenshot_result_uses_mcp_image_content() {
+        let response = crate::artifacts::workspace::CaptureArtifactScreenshotResponse {
+            artifact_key: "demo/card".to_string(),
+            entry_file: "src/App.tsx".to_string(),
+            language: "tsx".to_string(),
+            preview_type: "react".to_string(),
+            output_mode: "base64".to_string(),
+            width: 800,
+            height: 600,
+            mime_type: "image/png".to_string(),
+            base64: Some("iVBORw0KGgoAAAANSUhEUgAA".to_string()),
+            path: None,
+        };
+
+        let result = build_capture_artifact_screenshot_result(&response);
+
+        assert_eq!(result["isError"], false);
+        assert_eq!(result["content"][0]["type"], "text");
+        assert_eq!(result["content"][1]["type"], "image");
+        assert_eq!(result["content"][1]["mimeType"], "image/png");
+        assert_eq!(result["content"][1]["data"], "iVBORw0KGgoAAAANSUhEUgAA");
+        assert_eq!(result["structuredContent"]["artifact_key"], "demo/card");
+        assert_eq!(result["structuredContent"]["entry_file"], "src/App.tsx");
+        assert_eq!(result["structuredContent"]["output_mode"], "base64");
+        assert_eq!(result["structuredContent"]["width"], 800);
+        assert_eq!(result["structuredContent"]["height"], 600);
+    }
+
+    #[test]
+    fn capture_artifact_screenshot_result_can_return_path_resource() {
+        let response = crate::artifacts::workspace::CaptureArtifactScreenshotResponse {
+            artifact_key: "demo/card".to_string(),
+            entry_file: "src/App.tsx".to_string(),
+            language: "tsx".to_string(),
+            preview_type: "react".to_string(),
+            output_mode: "path".to_string(),
+            width: 800,
+            height: 600,
+            mime_type: "image/png".to_string(),
+            base64: None,
+            path: Some("/tmp/aipp/artifact-shot.png".to_string()),
+        };
+
+        let result = build_capture_artifact_screenshot_result(&response);
+
+        assert_eq!(result["isError"], false);
+        assert_eq!(result["content"][1]["type"], "resource_link");
+        assert_eq!(result["content"][1]["uri"], "file:///tmp/aipp/artifact-shot.png");
+        assert_eq!(result["structuredContent"]["output_mode"], "path");
+        assert_eq!(result["structuredContent"]["path"], "/tmp/aipp/artifact-shot.png");
     }
 
     #[test]

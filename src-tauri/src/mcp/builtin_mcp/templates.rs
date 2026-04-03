@@ -1029,6 +1029,57 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                     "required": ["artifact_key", "entry_file"]
                 }),
             },
+            BuiltinToolInfo {
+                name: "capture_artifact_screenshot".into(),
+                description: "按指定分辨率渲染 Artifact 入口，支持可选 selector 点击，并按 output_mode 返回 PNG 截图的 base64 或 temp 文件路径。适合在 artifact 工作区中对页面/组件做预览截图。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "conversation_id": {
+                            "type": "number",
+                            "description": "可选。会话 ID，不提供时会使用当前会话上下文。"
+                        },
+                        "artifact_key": {
+                            "type": "string",
+                            "description": "Artifact 标识，相对路径风格（例如: ui/dashboard）"
+                        },
+                        "entry_file": {
+                            "type": "string",
+                            "description": "Artifact 入口文件，相对 artifact_key 目录（例如: src/App.tsx）"
+                        },
+                        "language": {
+                            "type": "string",
+                            "description": "可选。用于解析的语言类型（如 html/markdown/vue/tsx）"
+                        },
+                        "preview_type": {
+                            "type": "string",
+                            "description": "可选。预览类型，不传则自动推断"
+                        },
+                        "output_mode": {
+                            "type": "string",
+                            "description": "可选。截图输出模式：base64（默认，返回 image content）或 path（保存到 temp 并返回文件路径）",
+                            "enum": ["base64", "path"]
+                        },
+                        "selector": {
+                            "type": "string",
+                            "description": "可选。截图前等待并点击的 CSS 选择器"
+                        },
+                        "width": {
+                            "type": "number",
+                            "description": "可选。截图宽度，默认 800"
+                        },
+                        "height": {
+                            "type": "number",
+                            "description": "可选。截图高度，默认 600"
+                        },
+                        "delay_ms": {
+                            "type": "number",
+                            "description": "可选。页面稳定后以及点击后额外等待的毫秒数，默认 300"
+                        }
+                    },
+                    "required": ["artifact_key", "entry_file"]
+                }),
+            },
         ],
         Some("superadmin") => vec![
             BuiltinToolInfo {
@@ -1530,6 +1581,23 @@ mod tests {
             !properties.contains_key("conversation_id"),
             "get_artifact_workspace should not expose conversation_id override"
         );
+    }
+
+    #[test]
+    fn test_capture_artifact_screenshot_schema_has_resolution_options() {
+        let tools = get_builtin_tools_for_command("aipp:artifact");
+        let capture_tool = tools
+            .iter()
+            .find(|t| t.name == "capture_artifact_screenshot")
+            .expect("capture_artifact_screenshot tool should exist");
+
+        let properties = capture_tool.input_schema["properties"]
+            .as_object()
+            .expect("input schema properties should be an object");
+        assert!(properties.contains_key("output_mode"));
+        assert!(properties.contains_key("selector"));
+        assert!(properties.contains_key("width"));
+        assert!(properties.contains_key("height"));
     }
 
     #[test]

@@ -614,6 +614,13 @@ fn tool_result_content_json(tool_result: &ExternalToolResult) -> Option<&Value> 
     })
 }
 
+fn tool_result_structured_content(tool_result: &ExternalToolResult) -> Option<&Value> {
+    tool_result
+        .parsed_output
+        .as_ref()
+        .and_then(|value| value.get("structuredContent"))
+}
+
 fn tool_result_effective_success(tool_result: &ExternalToolResult) -> bool {
     if !tool_result.success {
         return false;
@@ -1526,6 +1533,7 @@ impl ToolPresenter for ArtifactToolPresenter {
                     .unwrap_or("未知 Artifact");
                 Some(format!("🎨 展示 Artifact：{}", artifact_id))
             }
+            "capture_artifact_screenshot" => Some("📸 截取 Artifact 预览".to_string()),
             _ => None,
         }
     }
@@ -1547,6 +1555,28 @@ impl ToolPresenter for ArtifactToolPresenter {
                 Some("📦 Artifact 工作区已读取".to_string())
             }
             Some("get_artifact_workspace") => Some("❌ Artifact 工作区读取失败".to_string()),
+            Some("capture_artifact_screenshot") if tool_result.success => {
+                let payload = tool_result_structured_content(tool_result);
+                let entry_file =
+                    payload.and_then(|p| value_string(p, "entry_file")).unwrap_or("Artifact");
+                let width = payload.and_then(|p| p.get("width")).and_then(Value::as_u64);
+                let height = payload.and_then(|p| p.get("height")).and_then(Value::as_u64);
+                let path = payload.and_then(|p| value_string(p, "path"));
+                match (width, height, path) {
+                    (Some(width), Some(height), Some(path)) => Some(format!(
+                        "📸 Artifact 截图已生成：{}（{}x{}），已保存到 {}",
+                        entry_file, width, height, path
+                    )),
+                    (Some(width), Some(height), None) => {
+                        Some(format!("📸 Artifact 截图已生成：{}（{}x{}）", entry_file, width, height))
+                    }
+                    (None, None, Some(path)) | (Some(_), None, Some(path)) | (None, Some(_), Some(path)) => {
+                        Some(format!("📸 Artifact 截图已生成：{}，已保存到 {}", entry_file, path))
+                    }
+                    _ => Some(format!("📸 Artifact 截图已生成：{}", entry_file)),
+                }
+            }
+            Some("capture_artifact_screenshot") => Some("❌ Artifact 截图失败".to_string()),
             _ => None,
         }
     }
@@ -1927,6 +1957,64 @@ mod tests {
 
         assert!(rendered.contains("✏️ 已写入 /tmp/output.txt"));
         assert!(rendered.contains("Successfully wrote 5 bytes"));
+    }
+
+    #[test]
+    fn artifact_screenshot_result_prefers_structured_summary() {
+        let message = build_tool_result_message(
+            "capture_artifact_screenshot",
+            "Artifact 工具",
+            json!({"artifact_key": "demo/card", "entry_file": "src/App.tsx"}),
+            json!({
+                "content": [
+                    {"type": "text", "text": "Captured artifact screenshot for src/App.tsx at 800x600."},
+                    {"type": "image", "mimeType": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAA"}
+                ],
+                "structuredContent": {
+                    "artifact_key": "demo/card",
+                    "entry_file": "src/App.tsx",
+                    "width": 800,
+                    "height": 600
+                }
+            }),
+        );
+        let rendered = render_joined(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        )
+        .unwrap();
+
+        assert!(rendered.contains("📸 Artifact 截图已生成：src/App.tsx（800x600）"));
+        assert!(!rendered.contains("iVBORw0KGgoAAAANSUhEUgAA"));
+    }
+
+    #[test]
+    fn artifact_screenshot_path_result_mentions_saved_path() {
+        let message = build_tool_result_message(
+            "capture_artifact_screenshot",
+            "Artifact 工具",
+            json!({"artifact_key": "demo/card", "entry_file": "src/App.tsx", "output_mode": "path"}),
+            json!({
+                "content": [
+                    {"type": "text", "text": "Captured artifact screenshot for src/App.tsx at 800x600.\nScreenshot saved to /tmp/aipp/artifact-shot.png."},
+                    {"type": "resource_link", "uri": "file:///tmp/aipp/artifact-shot.png", "name": "src/App.tsx", "mimeType": "image/png"}
+                ],
+                "structuredContent": {
+                    "artifact_key": "demo/card",
+                    "entry_file": "src/App.tsx",
+                    "width": 800,
+                    "height": 600,
+                    "path": "/tmp/aipp/artifact-shot.png"
+                }
+            }),
+        );
+        let rendered = render_joined(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        )
+        .unwrap();
+
+        assert!(rendered.contains("📸 Artifact 截图已生成：src/App.tsx（800x600），已保存到 /tmp/aipp/artifact-shot.png"));
     }
 
     #[test]
