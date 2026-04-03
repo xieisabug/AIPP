@@ -1827,8 +1827,12 @@ async fn execute_scheduled_task_inner(
     let is_gemini = model_code_lc.contains("gemini");
     let capture_usage = !(is_openai_like && is_gemini);
     let has_available_tools = mcp_info.use_native_toolcall && !mcp_info.enabled_servers.is_empty();
-    let chat_options = ConfigBuilder::build_chat_options(&config_map)
+    let chat_options = ConfigBuilder::build_chat_options(&config_map);
+    let capture_reasoning_content =
+        is_openai_like && has_available_tools && config_map.contains_key("reasoning_effort");
+    let chat_options = chat_options
         .with_normalize_reasoning_content(true)
+        .with_capture_reasoning_content(capture_reasoning_content)
         .with_capture_usage(capture_usage)
         .with_capture_tool_calls(has_available_tools);
 

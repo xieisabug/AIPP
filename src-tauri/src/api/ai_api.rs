@@ -862,11 +862,15 @@ pub async fn ask_ai(
         let is_gemini = model_code_lc.contains("gemini");
         let capture_usage = !(is_openai_like && is_gemini);
 
+        let capture_reasoning_content =
+            stream && is_openai_like && has_available_tools && config_map.contains_key("reasoning_effort");
+
         let chat_config = ChatConfig {
             model_name,
             stream,
             chat_options: chat_options
                 .with_normalize_reasoning_content(true)
+                .with_capture_reasoning_content(capture_reasoning_content)
                 .with_capture_usage(capture_usage)
                 .with_capture_tool_calls(has_available_tools), // 动态设置
             client,
@@ -878,6 +882,7 @@ pub async fn ask_ai(
             has_tools = has_available_tools,
             provider_api_type = %provider_api_type,
             capture_usage = capture_usage,
+            capture_reasoning_content = capture_reasoning_content,
             is_openai_like = is_openai_like,
             is_gemini = is_gemini,
             force_non_native_for_invalid_tool_args,
@@ -1270,11 +1275,15 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let is_gemini = model_code_lc.contains("gemini");
     let capture_usage = !(is_openai_like && is_gemini);
 
+    let capture_reasoning_content =
+        stream && is_openai_like && has_available_tools && config_map.contains_key("reasoning_effort");
+
     let chat_config = ChatConfig {
         model_name,
         stream,
         chat_options: chat_options
             .with_normalize_reasoning_content(true)
+            .with_capture_reasoning_content(capture_reasoning_content)
             .with_capture_usage(capture_usage)
             .with_capture_tool_calls(has_available_tools), // 动态设置
         client,
@@ -1286,6 +1295,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         has_tools = has_available_tools,
         provider_api_type = %provider_api_type,
         capture_usage = capture_usage,
+        capture_reasoning_content = capture_reasoning_content,
         is_openai_like = is_openai_like,
         is_gemini = is_gemini,
         force_non_native_for_gemini_toolresult,
@@ -1595,11 +1605,15 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let is_gemini = model_code_lc.contains("gemini");
     let capture_usage = !(is_openai_like && is_gemini);
 
+    let capture_reasoning_content =
+        stream && is_openai_like && has_available_tools && config_map.contains_key("reasoning_effort");
+
     let chat_config = ChatConfig {
         model_name,
         stream,
         chat_options: chat_options
             .with_normalize_reasoning_content(true)
+            .with_capture_reasoning_content(capture_reasoning_content)
             .with_capture_usage(capture_usage)
             .with_capture_tool_calls(has_available_tools),
         client,
@@ -1610,6 +1624,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         stream = chat_config.stream,
         has_tools = has_available_tools,
         provider_api_type = %provider_api_type,
+        capture_reasoning_content = capture_reasoning_content,
         force_non_native_for_gemini_toolresult,
         force_non_native_for_invalid_tool_args,
         "chat configuration (batch_tool_result_continue)"
@@ -2022,11 +2037,15 @@ pub async fn regenerate_ai(
         let is_gemini = model_code_lc.contains("gemini");
         let capture_usage = !(is_openai_like && is_gemini);
 
+        let capture_reasoning_content =
+            stream && is_openai_like && has_available_tools && config_map.contains_key("reasoning_effort");
+
         let chat_config = ChatConfig {
             model_name,
             stream,
             chat_options: chat_options
                 .with_normalize_reasoning_content(true)
+                .with_capture_reasoning_content(capture_reasoning_content)
                 .with_capture_usage(capture_usage)
                 .with_capture_tool_calls(has_available_tools), // 动态设置
             client,
@@ -2038,6 +2057,7 @@ pub async fn regenerate_ai(
             has_tools = has_available_tools,
             provider_api_type = %regenerate_provider_api_type,
             capture_usage = capture_usage,
+            capture_reasoning_content = capture_reasoning_content,
             is_openai_like = is_openai_like,
             is_gemini = is_gemini,
             force_non_native_for_invalid_tool_args,
