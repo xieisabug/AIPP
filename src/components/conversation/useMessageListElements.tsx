@@ -10,6 +10,11 @@ import { useDisplayConfig } from "@/hooks/useDisplayConfig";
 import { ShineBorder } from "../magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import MessageActionButtons from "../message-item/MessageActionButtons";
+import {
+    LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX,
+    LAST_REPLY_CONTAINER_MIN_HEIGHT,
+} from "./layoutConstants";
+import { findLastReplyStartIndex } from "./lastReplyLayout";
 
 export interface UseMessageListElementsProps {
     allDisplayMessages: Message[];
@@ -530,14 +535,10 @@ export function useMessageListElements({
 
     const renderItems = useMemo(() => {
         const items: RenderableConversationItem[] = [];
-        let lastUserMessageIndex = -1;
-
-        for (let i = allDisplayMessages.length - 1; i >= 0; i -= 1) {
-            if (allDisplayMessages[i].message_type === "user") {
-                lastUserMessageIndex = i;
-                break;
-            }
-        }
+        const lastReplyStartIndex = findLastReplyStartIndex(
+            allDisplayMessages,
+            messageElements,
+        );
 
         const pushMessageWithVersion = (entry: MessageElementEntry) => {
             const sourceMessage = messageById.get(entry.messageId) ?? allDisplayMessages[0];
@@ -574,9 +575,9 @@ export function useMessageListElements({
             }
         };
 
-        if (lastUserMessageIndex >= 0) {
-            const before = messageElements.slice(0, lastUserMessageIndex);
-            const lastGroup = messageElements.slice(lastUserMessageIndex);
+        if (lastReplyStartIndex >= 0) {
+            const before = messageElements.slice(0, lastReplyStartIndex);
+            const lastGroup = messageElements.slice(lastReplyStartIndex);
 
             before.forEach((entry) => {
                 pushMessageWithVersion(entry);
@@ -612,12 +613,12 @@ export function useMessageListElements({
                 messageId:
                     lastGroupMessageIds[lastGroupMessageIds.length - 1] ?? null,
                 messageIds: lastGroupMessageIds,
-                estimatedHeight: Math.max(420, lastGroupEstimatedHeight),
+                estimatedHeight: lastGroupEstimatedHeight,
                 virtualizationMode: "live",
                 element: (
                     <div
                         id="last-reply-container"
-                        style={{ minHeight: "calc(100dvh - 130px)" }}
+                        style={{ minHeight: LAST_REPLY_CONTAINER_MIN_HEIGHT }}
                         className="flex flex-col gap-4"
                         data-aipp-slot="chat-last-reply-container"
                     >
@@ -641,7 +642,10 @@ export function useMessageListElements({
                             </div>
                         )}
                         <div
-                            className="flex-none h-[120px]"
+                            className="flex-none"
+                            style={{
+                                height: LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX,
+                            }}
                             data-aipp-slot="chat-bottom-spacer"
                         />
                     </div>

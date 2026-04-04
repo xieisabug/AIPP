@@ -4,6 +4,11 @@ import {
     useMessageListElements,
     type UseMessageListElementsProps,
 } from "./useMessageListElements";
+import {
+    LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX,
+    LAST_REPLY_CONTAINER_MIN_HEIGHT,
+} from "./layoutConstants";
+import { findLastReplyStartIndex } from "./lastReplyLayout";
 
 export interface MessageListProps extends UseMessageListElementsProps {}
 
@@ -24,19 +29,14 @@ const MessageList: React.FC<MessageListProps> = ({
     // 组合所有元素，并将最后的 user + AI 响应包裹在带 min-height 的容器中
     const allElements = useMemo(() => {
         const elements: React.ReactElement[] = [];
+        const lastReplyStartIndex = findLastReplyStartIndex(
+            allDisplayMessages,
+            messageElements,
+        );
 
-        // 查找最后一条 user 消息的索引
-        let lastUserMessageIndex = -1;
-        for (let i = allDisplayMessages.length - 1; i >= 0; i--) {
-            if (allDisplayMessages[i].message_type === 'user') {
-                lastUserMessageIndex = i;
-                break;
-            }
-        }
-
-        if (lastUserMessageIndex >= 0) {
-            const before = messageElements.slice(0, lastUserMessageIndex);
-            const last = messageElements.slice(lastUserMessageIndex);
+        if (lastReplyStartIndex >= 0) {
+            const before = messageElements.slice(0, lastReplyStartIndex);
+            const last = messageElements.slice(lastReplyStartIndex);
 
             // 渲染最后一组之前的消息及其版本控制
             before.forEach((item, i) => {
@@ -50,14 +50,14 @@ const MessageList: React.FC<MessageListProps> = ({
                 <div
                     key="last-reply-container"
                     id="last-reply-container"
-                    style={{ minHeight: 'calc(100dvh - 130px)' }}
+                    style={{ minHeight: LAST_REPLY_CONTAINER_MIN_HEIGHT }}
                     className="flex flex-col gap-4"
                     data-aipp-slot="chat-last-reply-container"
                 >
                     {last.map((item, idx) => (
-                        <React.Fragment key={`last-group-${messageElements[lastUserMessageIndex + idx].messageId}`}>
+                        <React.Fragment key={`last-group-${messageElements[lastReplyStartIndex + idx].messageId}`}>
                             {item.messageElement}
-                            {versionMap.get(`version-${messageElements[lastUserMessageIndex + idx].messageId}`) || null}
+                            {versionMap.get(`version-${messageElements[lastReplyStartIndex + idx].messageId}`) || null}
                         </React.Fragment>
                     ))}
                     {placeholderElements}
@@ -68,7 +68,10 @@ const MessageList: React.FC<MessageListProps> = ({
                             ))}
                         </div>
                     )}
-                    <div className="flex-none h-[120px]"></div>
+                    <div
+                        className="flex-none"
+                        style={{ height: LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX }}
+                    />
                 </div>
             );
         } else {

@@ -11,6 +11,10 @@ import { useVersionManager } from "@/hooks/feature/useVersionManager";
 import { FeatureFormRenderer } from "./feature/FeatureFormRenderer";
 import { APP_SHORTCUT_KEY_PREFIX, SHORTCUT_ACTIONS } from "@/data/Shortcuts";
 import {
+    buildDisplayFormValues,
+    serializeDisplayFormValues,
+} from "./displayConfigFormValues";
+import {
     buildExperimentalConfigFormValues,
     EXPERIMENTAL_CONFIG_DEFAULT_VALUES,
     ExperimentalConfigFormState,
@@ -127,14 +131,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
 
     // 初始化表单
     const displayForm = useForm({
-        defaultValues: {
-            theme: "default",
-            color_mode: "system",
-            user_message_markdown_render: "disabled",
-            notification_on_completion: "false",
-            code_theme_light: "github",
-            code_theme_dark: "github-dark",
-        },
+        defaultValues: buildDisplayFormValues(),
     });
 
     const summaryForm = useForm({
@@ -209,14 +206,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             // 更新 display 表单
             const displayConfig = featureConfig.get("display");
             if (displayConfig) {
-                displayForm.reset({
-                    theme: displayConfig.get("theme") || "default",
-                    color_mode: displayConfig.get("color_mode") || "system",
-                    user_message_markdown_render: displayConfig.get("user_message_markdown_render") || "disabled",
-                    notification_on_completion: displayConfig.get("notification_on_completion") || "false",
-                    code_theme_light: displayConfig.get("code_theme_light") || "github",
-                    code_theme_dark: displayConfig.get("code_theme_dark") || "github-dark",
-                });
+                displayForm.reset(buildDisplayFormValues(displayConfig));
             }
 
             // 更新 summary 表单 - 支持新旧配置键兼容
@@ -333,14 +323,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
     // 保存功能配置的回调函数
     const handleSaveDisplayConfig = useCallback(async () => {
         const values = displayForm.getValues();
-        await saveFeatureConfig("display", {
-            theme: values.theme,
-            color_mode: values.color_mode,
-            user_message_markdown_render: values.user_message_markdown_render,
-            notification_on_completion: values.notification_on_completion.toString(),
-            code_theme_light: values.code_theme_light,
-            code_theme_dark: values.code_theme_dark,
-        });
+        await saveFeatureConfig("display", serializeDisplayFormValues(values));
     }, [displayForm, saveFeatureConfig]);
 
     const handleSaveSummaryConfig = useCallback(async () => {

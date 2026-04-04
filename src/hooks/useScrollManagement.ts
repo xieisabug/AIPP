@@ -1,4 +1,5 @@
 import { useRef, useCallback, useEffect } from "react";
+import { CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR } from "@/components/conversation/layoutConstants";
 
 const SMOOTH_SCROLL_LOCK_MS = 350;
 const AUTO_SCROLL_LOCK_MS = 100;
@@ -38,6 +39,32 @@ export function useScrollManagement(
     const smartScrollRef = useRef<UseScrollManagementReturn["smartScroll"] | null>(
         null,
     );
+
+    useEffect(() => {
+        const container = scrollContainerRef.current;
+        if (!container) {
+            return;
+        }
+
+        const syncViewportHeightVar = () => {
+            container.style.setProperty(
+                CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR,
+                `${container.clientHeight}px`,
+            );
+        };
+
+        syncViewportHeightVar();
+
+        const resizeObserver = new ResizeObserver(() => {
+            syncViewportHeightVar();
+        });
+        resizeObserver.observe(container);
+
+        return () => {
+            resizeObserver.disconnect();
+            container.style.removeProperty(CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR);
+        };
+    }, []);
 
     const queuePendingSmartScroll = useCallback(
         (forceScroll: boolean, behaviorOverride?: ScrollBehavior) => {
