@@ -8,6 +8,19 @@ import {
     PREVIEW_CODE_STREAMING_UPDATE_INTERVAL_MS,
 } from "@/utils/previewCode";
 
+vi.mock("@/hooks/useDisplayConfig", () => ({
+    useDisplayConfig: () => ({
+        config: null,
+        isLoading: false,
+        error: null,
+        isUserMessageMarkdownEnabled: true,
+        isMergeAssistantMessages: true,
+        isShowThinking: true,
+        isPreviewCodeShowToolbar: true,
+        refreshConfig: vi.fn(),
+    }),
+}));
+
 describe("InlineCodePreviewCard", () => {
     afterEach(() => {
         clearAllMockHandlers();

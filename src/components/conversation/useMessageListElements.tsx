@@ -6,6 +6,10 @@ import { Message, StreamEvent } from "../../data/Conversation";
 import type { InlineInteractionItem } from "../ConversationUI";
 import { PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX } from "../../utils/previewCode";
 import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
+import { useDisplayConfig } from "@/hooks/useDisplayConfig";
+import { ShineBorder } from "../magicui/shine-border";
+import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
+import MessageActionButtons from "../message-item/MessageActionButtons";
 
 export interface UseMessageListElementsProps {
     allDisplayMessages: Message[];
@@ -178,6 +182,8 @@ export function useMessageListElements({
     sentBatchToolResultMessageIds,
     allowFeishuDebugResend = false,
 }: UseMessageListElementsProps) {
+    const { isMergeAssistantMessages } = useDisplayConfig();
+
     const messageInlineInteractionMap = useMemo(() => {
         const map = new Map<number, InlineInteractionItem[]>();
         (inlineInteractionItems ?? []).forEach((item) => {
@@ -230,46 +236,206 @@ export function useMessageListElements({
     }, [allDisplayMessages, lastMessageId, reasoningExpandStates]);
 
     const messageElements = useMemo(() => {
-        return allDisplayMessages.map((message) => {
-            const streamEvent = streamingMessages.get(message.id);
-            const groupControl = getGenerationGroupControl(message);
-            const shouldShowShineBorder = shiningMessageIds.has(message.id);
-            const isLastMessage = message.id === lastMessageId;
+        if (!isMergeAssistantMessages) {
+            // 非合并模式：每条消息单独渲染
+            return allDisplayMessages.map((message) => {
+                const streamEvent = streamingMessages.get(message.id);
+                const groupControl = getGenerationGroupControl(message);
+                const shouldShowShineBorder = shiningMessageIds.has(message.id);
+                const isLastMessage = message.id === lastMessageId;
 
-            return {
-                messageId: message.id,
-                messageElement: (
-                    <MessageItem
-                        key={`message-${message.id}`}
-                        message={message}
-                        streamEvent={streamEvent}
-                        onCodeRun={onCodeRun}
-                        onMessageRegenerate={() => onMessageRegenerate(message.id)}
-                        onMessageEdit={() => onMessageEdit(message)}
-                        onMessageFork={() => onMessageFork(message.id)}
-                        isReasoningExpanded={
-                            reasoningExpandStates.get(message.id) || false
-                        }
-                        onToggleReasoningExpand={() =>
-                            onToggleReasoningExpand(message.id)
-                        }
-                        shouldShowShineBorder={shouldShowShineBorder}
-                        conversationId={message.conversation_id}
-                        mcpToolCallStates={mcpToolCallStates}
-                        shiningMcpCallId={shiningMcpCallId}
-                        isLastMessage={isLastMessage}
-                        inlineInteractionItems={messageInlineInteractionMap.get(
-                            message.id,
+                return {
+                    messageId: message.id,
+                    messageElement: (
+                        <MessageItem
+                            key={`message-${message.id}`}
+                            message={message}
+                            streamEvent={streamEvent}
+                            onCodeRun={onCodeRun}
+                            onMessageRegenerate={() => onMessageRegenerate(message.id)}
+                            onMessageEdit={() => onMessageEdit(message)}
+                            onMessageFork={() => onMessageFork(message.id)}
+                            isReasoningExpanded={
+                                reasoningExpandStates.get(message.id) || false
+                            }
+                            onToggleReasoningExpand={() =>
+                                onToggleReasoningExpand(message.id)
+                            }
+                            shouldShowShineBorder={shouldShowShineBorder}
+                            conversationId={message.conversation_id}
+                            mcpToolCallStates={mcpToolCallStates}
+                            shiningMcpCallId={shiningMcpCallId}
+                            isLastMessage={isLastMessage}
+                            inlineInteractionItems={messageInlineInteractionMap.get(
+                                message.id,
+                            )}
+                            sentBatchToolResultMessageIds={
+                                sentBatchToolResultMessageIds
+                            }
+                            allowFeishuDebugResend={allowFeishuDebugResend}
+                        />
+                    ),
+                    groupControl,
+                } satisfies MessageElementEntry;
+            });
+        }
+
+        // 合并模式：将连续的非 user 消息合并到一个气泡中
+        const result: MessageElementEntry[] = [];
+        let currentGroup: Message[] = [];
+
+        const flushGroup = () => {
+            if (currentGroup.length === 0) return;
+
+            if (currentGroup.length === 1) {
+                // 单条消息也用合并气泡包裹（保持一致性）
+            }
+
+            const groupMessages = [...currentGroup];
+            const lastMsg = groupMessages[groupMessages.length - 1];
+            // 合并组使用最后一条消息的 groupControl
+            const groupControl = getGenerationGroupControl(lastMsg);
+            const anyShining = groupMessages.some((m) => shiningMessageIds.has(m.id));
+
+            const mergedElement = (
+                <div
+                    key={`merged-${groupMessages.map((m) => m.id).join("-")}`}
+                    className="flex flex-col"
+                    data-message-item
+                    data-message-id={lastMsg.id}
+                    data-message-type="merged"
+                >
+                    <div className="group relative py-4 px-5 rounded-2xl inline-block max-w-[65%] transition-all duration-200 bg-background text-foreground border border-border self-start">
+                        {anyShining && (
+                            <ShineBorder
+                                shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}
+                                borderWidth={DEFAULT_SHINE_BORDER_CONFIG.borderWidth}
+                                duration={DEFAULT_SHINE_BORDER_CONFIG.duration}
+                            />
                         )}
-                        sentBatchToolResultMessageIds={
-                            sentBatchToolResultMessageIds
-                        }
-                        allowFeishuDebugResend={allowFeishuDebugResend}
-                    />
-                ),
+                        <div className="flex flex-col gap-2">
+                            {groupMessages.map((message) => {
+                                const streamEvent = streamingMessages.get(message.id);
+                                const isLast = message.id === lastMessageId;
+
+                                return (
+                                    <MessageItem
+                                        key={`message-${message.id}`}
+                                        message={message}
+                                        streamEvent={streamEvent}
+                                        onCodeRun={onCodeRun}
+                                        onMessageRegenerate={() => onMessageRegenerate(message.id)}
+                                        onMessageEdit={() => onMessageEdit(message)}
+                                        onMessageFork={() => onMessageFork(message.id)}
+                                        isReasoningExpanded={
+                                            reasoningExpandStates.get(message.id) || false
+                                        }
+                                        onToggleReasoningExpand={() =>
+                                            onToggleReasoningExpand(message.id)
+                                        }
+                                        shouldShowShineBorder={false}
+                                        conversationId={message.conversation_id}
+                                        mcpToolCallStates={mcpToolCallStates}
+                                        shiningMcpCallId={shiningMcpCallId}
+                                        isLastMessage={isLast}
+                                        inlineInteractionItems={messageInlineInteractionMap.get(
+                                            message.id,
+                                        )}
+                                        sentBatchToolResultMessageIds={
+                                            sentBatchToolResultMessageIds
+                                        }
+                                        allowFeishuDebugResend={allowFeishuDebugResend}
+                                        mergedMode
+                                    />
+                                );
+                            })}
+                        </div>
+                        {/* 合并气泡底部显示最后一条 response 消息的 action buttons */}
+                        {groupMessages.some((m) => m.message_type === "response") && (() => {
+                            const lastResponse = [...groupMessages].reverse().find((m) => m.message_type === "response");
+                            if (!lastResponse) return null;
+                            return (
+                                <MessageActionButtons
+                                    messageType="response"
+                                    isUserMessage={false}
+                                    copyIconState="copy"
+                                    onCopy={() => {
+                                        const content = groupMessages
+                                            .filter((m) => m.message_type === "response")
+                                            .map((m) => m.content)
+                                            .join("\n");
+                                        navigator.clipboard.writeText(content);
+                                    }}
+                                    onRegenerate={() => onMessageRegenerate(lastResponse.id)}
+                                    onFork={() => onMessageFork(lastResponse.id)}
+                                    tokenCount={lastResponse.token_count}
+                                    inputTokenCount={lastResponse.input_token_count}
+                                    outputTokenCount={lastResponse.output_token_count}
+                                    messageContent={lastResponse.content}
+                                />
+                            );
+                        })()}
+                    </div>
+                </div>
+            );
+
+            result.push({
+                messageId: lastMsg.id,
+                messageElement: mergedElement,
                 groupControl,
-            } satisfies MessageElementEntry;
-        });
+            });
+
+            currentGroup = [];
+        };
+
+        for (const message of allDisplayMessages) {
+            if (message.message_type === "user") {
+                flushGroup();
+                const streamEvent = streamingMessages.get(message.id);
+                const groupControl = getGenerationGroupControl(message);
+                const shouldShowShineBorder = shiningMessageIds.has(message.id);
+                const isLastMessage = message.id === lastMessageId;
+
+                result.push({
+                    messageId: message.id,
+                    messageElement: (
+                        <MessageItem
+                            key={`message-${message.id}`}
+                            message={message}
+                            streamEvent={streamEvent}
+                            onCodeRun={onCodeRun}
+                            onMessageRegenerate={() => onMessageRegenerate(message.id)}
+                            onMessageEdit={() => onMessageEdit(message)}
+                            onMessageFork={() => onMessageFork(message.id)}
+                            isReasoningExpanded={
+                                reasoningExpandStates.get(message.id) || false
+                            }
+                            onToggleReasoningExpand={() =>
+                                onToggleReasoningExpand(message.id)
+                            }
+                            shouldShowShineBorder={shouldShowShineBorder}
+                            conversationId={message.conversation_id}
+                            mcpToolCallStates={mcpToolCallStates}
+                            shiningMcpCallId={shiningMcpCallId}
+                            isLastMessage={isLastMessage}
+                            inlineInteractionItems={messageInlineInteractionMap.get(
+                                message.id,
+                            )}
+                            sentBatchToolResultMessageIds={
+                                sentBatchToolResultMessageIds
+                            }
+                            allowFeishuDebugResend={allowFeishuDebugResend}
+                        />
+                    ),
+                    groupControl,
+                });
+            } else {
+                currentGroup.push(message);
+            }
+        }
+
+        flushGroup();
+        return result;
     }, [
         allDisplayMessages,
         streamingMessages,
@@ -287,6 +453,7 @@ export function useMessageListElements({
         sentBatchToolResultMessageIds,
         allowFeishuDebugResend,
         lastMessageId,
+        isMergeAssistantMessages,
     ]);
 
     const versionControlElements = useMemo(() => {

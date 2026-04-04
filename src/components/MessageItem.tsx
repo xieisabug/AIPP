@@ -18,6 +18,7 @@ import { maskContent } from "../utils/antiLeakage";
 import type { InlineInteractionItem } from "./ConversationUI";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { Loader2 } from "lucide-react";
 
 interface FeishuDebugSendResult {
     external_message_id: string;
@@ -48,6 +49,7 @@ interface MessageItemProps {
     inlineInteractionItems?: InlineInteractionItem[];
     sentBatchToolResultMessageIds?: ReadonlySet<number>;
     allowFeishuDebugResend?: boolean;
+    mergedMode?: boolean; // 合并模式：不渲染外层气泡包装
 }
 
 const MessageItem = React.memo<MessageItemProps>(
@@ -68,6 +70,7 @@ const MessageItem = React.memo<MessageItemProps>(
         inlineInteractionItems,
         sentBatchToolResultMessageIds,
         allowFeishuDebugResend = false,
+        mergedMode = false,
     }) => {
         // 防泄露模式
         const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
@@ -82,7 +85,7 @@ const MessageItem = React.memo<MessageItemProps>(
 
         const { copyIconState, handleCopy } = useCopyHandler(displayContent);
         const { parseCustomTags } = useCustomTagParser();
-        const { isUserMessageMarkdownEnabled } = useDisplayConfig();
+        const { isUserMessageMarkdownEnabled, isShowThinking } = useDisplayConfig();
         const [isFeishuDebugSending, setIsFeishuDebugSending] = useState(false);
 
         // 统一的 Markdown 配置，根据用户消息类型和配置决定是否禁用 Markdown 语法
@@ -301,6 +304,25 @@ const MessageItem = React.memo<MessageItemProps>(
 
         // 早期返回：reasoning 类型消息
         if (message.message_type === "reasoning") {
+            // 不展示思考过程：思考中时显示加载指示器，思考完成后不渲染
+            if (!isShowThinking) {
+                const isReasoningComplete = message.finish_time !== null || streamEvent?.is_done === true;
+                if (isReasoningComplete) {
+                    return null;
+                }
+                // 思考中：展示一个 loading badge
+                return (
+                    <div
+                        data-message-item
+                        data-message-id={message.id}
+                        data-message-type="reasoning"
+                        className="my-2 flex items-center gap-2 px-3 py-1.5"
+                    >
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                        <span className="text-xs text-muted-foreground">思考中...</span>
+                    </div>
+                );
+            }
             return (
                 <ReasoningMessage
                     message={message}
@@ -324,6 +346,18 @@ const MessageItem = React.memo<MessageItemProps>(
         }
 
         // 常规消息渲染
+        // 合并模式下不渲染外层气泡包装，只渲染内容
+        if (mergedMode && !isUserMessage) {
+            return (
+                <div data-message-item data-message-id={message.id} data-message-type={message.message_type}>
+                    <div className="prose prose-sm max-w-none text-foreground break-all">
+                        {isUserMessage && !isUserMessageMarkdownEnabled ? contentElement : <div>{contentElement}</div>}
+                    </div>
+                    <ImageAttachments attachments={message.attachment_list} />
+                </div>
+            );
+        }
+
         return (
             <div className="flex flex-col" data-message-item data-message-id={message.id} data-message-type={message.message_type}>
                 <div
@@ -405,6 +439,9 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
 
     // 防泄露模式：isLastMessage 变化时需要重新渲染
     if (prevProps.isLastMessage !== nextProps.isLastMessage) return false;
+
+    // 合并模式比较
+    if (prevProps.mergedMode !== nextProps.mergedMode) return false;
 
     return true;
 };

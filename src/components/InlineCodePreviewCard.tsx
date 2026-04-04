@@ -17,6 +17,7 @@ import {
 } from "@/utils/previewCode";
 import { createPreviewCodeRuntime } from "@/utils/previewCodeRuntime";
 import { CheckCircle, Loader2, Sparkles, XCircle } from "lucide-react";
+import { useDisplayConfig } from "@/hooks/useDisplayConfig";
 
 interface InlineCodePreviewCardProps {
     parameters: string;
@@ -52,6 +53,7 @@ export default function InlineCodePreviewCard({
 }: InlineCodePreviewCardProps) {
     const hostRef = useRef<HTMLDivElement | null>(null);
     const runtimeRef = useRef<ReturnType<typeof createPreviewCodeRuntime> | null>(null);
+    const { isPreviewCodeShowToolbar } = useDisplayConfig();
     const [resolvedRequestId, setResolvedRequestId] = useState<string | null>(null);
     const [persistedToolCall, setPersistedToolCall] = useState<MCPToolCall | null>(null);
     const [runtimeError, setRuntimeError] = useState<string | null>(null);
@@ -599,36 +601,38 @@ export default function InlineCodePreviewCard({
     }, [previewHidden]);
 
     return (
-        <div className="space-y-3 py-2">
-            <div className="space-y-3">
-                <div className="flex items-start justify-between gap-3">
-                    <div className="space-y-1">
-                        <div className="text-sm font-medium">
-                            {previewRequest?.title || "inline_preview"}
+        <div className={isPreviewCodeShowToolbar ? "space-y-3 py-2" : "py-1"}>
+            {isPreviewCodeShowToolbar && (
+                <div className="space-y-3">
+                    <div className="flex items-start justify-between gap-3">
+                        <div className="space-y-1">
+                            <div className="text-sm font-medium">
+                                {previewRequest?.title || "inline_preview"}
+                            </div>
+                            <div className="text-xs text-muted-foreground">
+                                preview_code · {previewRequest?.renderer || "html"}
+                            </div>
                         </div>
-                        <div className="text-xs text-muted-foreground">
-                            preview_code · {previewRequest?.renderer || "html"}
+                        <div className="flex items-center gap-2">
+                            {statusBadge}
+                            {displayState !== "dismissed" && (
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => setIsHidden((current) => !current)}
+                                    disabled={isSubmitting}
+                                >
+                                    {isHidden ? "显示" : "隐藏"}
+                                </Button>
+                            )}
                         </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                        {statusBadge}
-                        {displayState !== "dismissed" && (
-                            <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setIsHidden((current) => !current)}
-                                disabled={isSubmitting}
-                            >
-                                {isHidden ? "显示" : "隐藏"}
-                            </Button>
-                        )}
-                    </div>
+                    {loadingMessage && (displayState === "streaming" || displayState === "executing" || displayState === "pending") && (
+                        <div className="text-xs text-muted-foreground">{loadingMessage}</div>
+                    )}
                 </div>
-                {loadingMessage && (displayState === "streaming" || displayState === "executing" || displayState === "pending") && (
-                    <div className="text-xs text-muted-foreground">{loadingMessage}</div>
-                )}
-            </div>
+            )}
             <div className="space-y-3">
                 {runtimeError && (
                     <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">

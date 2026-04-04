@@ -12,6 +12,19 @@ vi.mock("@/contexts/AntiLeakageContext", () => ({
     }),
 }));
 
+vi.mock("@/hooks/useDisplayConfig", () => ({
+    useDisplayConfig: () => ({
+        config: null,
+        isLoading: false,
+        error: null,
+        isUserMessageMarkdownEnabled: true,
+        isMergeAssistantMessages: true,
+        isShowThinking: true,
+        isPreviewCodeShowToolbar: true,
+        refreshConfig: vi.fn(),
+    }),
+}));
+
 vi.mock("@/components/magicui/shine-border", () => ({
     ShineBorder: () => <div data-testid="shine-border" />,
 }));

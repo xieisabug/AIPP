@@ -162,6 +162,13 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({ form, onSa
                 code_theme_dark: values.code_theme_dark,
             });
 
+            // 发出显示配置变化事件，通知聊天界面实时更新
+            await emit("display-config-changed", {
+                merge_assistant_messages: values.merge_assistant_messages,
+                show_thinking: values.show_thinking,
+                preview_code_show_toolbar: values.preview_code_show_toolbar,
+            });
+
             toast.success("显示配置保存成功");
         } catch (e) {
             toast.error("保存显示配置失败: " + e);
@@ -215,6 +222,30 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({ form, onSa
                 type: "switch" as const,
                 label: "消息完成时发送系统通知",
                 tooltip: "AI消息生成完成时发送系统通知提醒",
+            },
+        },
+        {
+            key: "merge_assistant_messages",
+            config: {
+                type: "switch" as const,
+                label: "合并助手消息",
+                tooltip: "开启后，同一轮对话中的思考、工具调用和回复将合并在一个气泡中展示",
+            },
+        },
+        {
+            key: "show_thinking",
+            config: {
+                type: "switch" as const,
+                label: "展示思考过程",
+                tooltip: "关闭后，AI 思考过程仅显示为一个加载指示器，不展示思考内容",
+            },
+        },
+        {
+            key: "preview_code_show_toolbar",
+            config: {
+                type: "switch" as const,
+                label: "preview_code 展示工具栏",
+                tooltip: "开启后，preview_code 组件显示标题、工具名称、文件类型和隐藏按钮",
             },
         },
     ];
