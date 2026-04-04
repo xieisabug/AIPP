@@ -479,10 +479,7 @@ impl ScheduledTaskDatabase {
 
     /// List scheduled tasks owned by a specific Butler conversation.
     #[instrument(level = "debug", skip(self), fields(butler_conversation_id))]
-    pub fn list_tasks_by_butler(
-        &self,
-        butler_conversation_id: i64,
-    ) -> Result<Vec<ScheduledTask>> {
+    pub fn list_tasks_by_butler(&self, butler_conversation_id: i64) -> Result<Vec<ScheduledTask>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, is_enabled, schedule_type, interval_value, interval_unit, start_time, week_days, month_days, run_at, next_run_at, last_run_at, assistant_id, task_prompt, notify_prompt, butler_conversation_id, created_time, updated_time
              FROM scheduled_task
@@ -495,11 +492,7 @@ impl ScheduledTaskDatabase {
 
     /// Update the butler followup status for a run.
     #[instrument(level = "debug", skip(self), fields(run_id, status))]
-    pub fn update_run_butler_followup_status(
-        &self,
-        run_id: &str,
-        status: &str,
-    ) -> Result<()> {
+    pub fn update_run_butler_followup_status(&self, run_id: &str, status: &str) -> Result<()> {
         self.with_write_lock(|| {
             self.conn.execute(
                 "UPDATE scheduled_task_run SET butler_followup_status = ? WHERE run_id = ?",

@@ -174,7 +174,8 @@ impl MCPDatabase {
         for suffix in ["-wal", "-shm"] {
             let sidecar = PathBuf::from(format!("{}{}", path.display(), suffix));
             if sidecar.exists() {
-                let sidecar_backup = PathBuf::from(format!("{}.corrupt-{}.bak", sidecar.display(), timestamp));
+                let sidecar_backup =
+                    PathBuf::from(format!("{}.corrupt-{}.bak", sidecar.display(), timestamp));
                 std::fs::rename(&sidecar, sidecar_backup)?;
             }
         }
@@ -182,7 +183,9 @@ impl MCPDatabase {
         Ok(backup_path)
     }
 
-    pub fn recover_if_corrupted(app_handle: &tauri::AppHandle) -> std::result::Result<bool, String> {
+    pub fn recover_if_corrupted(
+        app_handle: &tauri::AppHandle,
+    ) -> std::result::Result<bool, String> {
         let db_path = Self::db_path(app_handle)?;
         let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
         match conn.execute_batch(
@@ -615,26 +618,25 @@ impl MCPDatabase {
             placeholders
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let servers_iter =
-            stmt.query_map(params_from_iter(server_ids.iter().copied()), |row| {
-                Ok(MCPServer {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    description: row.get(2)?,
-                    transport_type: row.get(3)?,
-                    command: row.get(4)?,
-                    environment_variables: row.get(5)?,
-                    headers: row.get(6)?,
-                    url: row.get(7)?,
-                    timeout: row.get(8)?,
-                    is_long_running: row.get(9)?,
-                    is_enabled: row.get(10)?,
-                    is_builtin: row.get(11)?,
-                    is_deletable: row.get(12)?,
-                    proxy_enabled: row.get(13)?,
-                    created_time: row.get(14)?,
-                })
-            })?;
+        let servers_iter = stmt.query_map(params_from_iter(server_ids.iter().copied()), |row| {
+            Ok(MCPServer {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                transport_type: row.get(3)?,
+                command: row.get(4)?,
+                environment_variables: row.get(5)?,
+                headers: row.get(6)?,
+                url: row.get(7)?,
+                timeout: row.get(8)?,
+                is_long_running: row.get(9)?,
+                is_enabled: row.get(10)?,
+                is_builtin: row.get(11)?,
+                is_deletable: row.get(12)?,
+                proxy_enabled: row.get(13)?,
+                created_time: row.get(14)?,
+            })
+        })?;
 
         let mut servers: Vec<MCPServer> = Vec::new();
         for s in servers_iter {
@@ -652,9 +654,8 @@ impl MCPDatabase {
             placeholders_tools
         );
         let mut tool_stmt = self.conn.prepare(&tools_sql)?;
-        let tools_iter = tool_stmt.query_map(
-            params_from_iter(servers.iter().map(|s| s.id)),
-            |row| {
+        let tools_iter =
+            tool_stmt.query_map(params_from_iter(servers.iter().map(|s| s.id)), |row| {
                 Ok(MCPServerTool {
                     id: row.get(0)?,
                     server_id: row.get(1)?,
@@ -664,8 +665,7 @@ impl MCPDatabase {
                     is_auto_run: row.get(5)?,
                     parameters: row.get(6)?,
                 })
-            },
-        )?;
+            })?;
 
         use std::collections::HashMap;
         let mut tool_map: HashMap<i64, Vec<MCPServerTool>> = HashMap::new();
@@ -904,10 +904,7 @@ impl MCPDatabase {
         }
     }
 
-    pub fn get_mcp_server_resources(
-        &self,
-        server_id: i64,
-    ) -> Result<Vec<MCPServerResource>> {
+    pub fn get_mcp_server_resources(&self, server_id: i64) -> Result<Vec<MCPServerResource>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, server_id, resource_uri, resource_name, resource_type, resource_description 
              FROM mcp_server_resource WHERE server_id = ? ORDER BY resource_name"
@@ -1334,10 +1331,7 @@ impl MCPDatabase {
 
     /// Fetch MCP tool calls linked to a specific message
     #[instrument(level = "trace", skip(self), fields(message_id))]
-    pub fn get_mcp_tool_calls_by_message(
-        &self,
-        message_id: i64,
-    ) -> Result<Vec<MCPToolCall>> {
+    pub fn get_mcp_tool_calls_by_message(&self, message_id: i64) -> Result<Vec<MCPToolCall>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, conversation_id, message_id, server_id, server_name, tool_name,
              parameters, status, result, error, created_time, started_time, finished_time,
@@ -1555,9 +1549,7 @@ impl MCPDatabase {
         self.rebuild_dynamic_mcp_catalog()
     }
 
-    pub fn list_server_capability_catalog(
-        &self,
-    ) -> Result<Vec<MCPServerCapabilityEpochCatalog>> {
+    pub fn list_server_capability_catalog(&self) -> Result<Vec<MCPServerCapabilityEpochCatalog>> {
         let mut stmt = self.conn.prepare(
             "SELECT c.server_id, s.name, c.epoch, c.last_refresh_at, c.summary, c.summary_generated_at
              FROM mcp_server_capability_epoch_catalog c
@@ -1582,10 +1574,7 @@ impl MCPDatabase {
         Ok(result)
     }
 
-    pub fn list_tool_catalog(
-        &self,
-        server_id: Option<i64>,
-    ) -> Result<Vec<MCPToolCatalogEntry>> {
+    pub fn list_tool_catalog(&self, server_id: Option<i64>) -> Result<Vec<MCPToolCatalogEntry>> {
         let sql = if server_id.is_some() {
             "SELECT c.tool_id, c.server_id, s.name, c.tool_name, c.summary, c.keywords_json, c.schema_hash,
                     c.capability_epoch, c.updated_at, c.summary_generated_at, s.is_enabled, t.is_enabled
@@ -1631,11 +1620,7 @@ impl MCPDatabase {
         Ok(result)
     }
 
-    pub fn update_server_catalog_summary(
-        &self,
-        server_id: i64,
-        summary: &str,
-    ) -> Result<()> {
+    pub fn update_server_catalog_summary(&self, server_id: i64, summary: &str) -> Result<()> {
         let now = Self::now_string();
         self.conn.execute(
             "UPDATE mcp_server_capability_epoch_catalog
@@ -1728,10 +1713,7 @@ impl MCPDatabase {
         Ok(())
     }
 
-    pub fn refresh_conversation_loaded_tool_statuses(
-        &self,
-        conversation_id: i64,
-    ) -> Result<()> {
+    pub fn refresh_conversation_loaded_tool_statuses(&self, conversation_id: i64) -> Result<()> {
         let now = Self::now_string();
         let mut stmt = self.conn.prepare(
             "SELECT id, tool_id, loaded_schema_hash

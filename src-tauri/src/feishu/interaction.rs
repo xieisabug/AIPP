@@ -11,13 +11,13 @@ use crate::mcp::builtin_mcp::interaction::{
     AskUserQuestionItem, AskUserQuestionRequest, AskUserQuestionRequestEvent,
 };
 
-use super::types::*;
+use super::api::send_interactive_card_to_target;
 use super::config::load_runtime_config;
 use super::relay::{
     find_active_relay_scope, find_latest_feishu_target, insert_external_link,
     mark_relay_scope_progress, spawn_feishu_relay_scope_worker,
 };
-use super::api::send_interactive_card_to_target;
+use super::types::*;
 
 pub(super) fn is_missing_ask_user_request_error(error: &str) -> bool {
     error.contains("AskUserQuestion request not found")
@@ -51,7 +51,9 @@ pub(super) fn find_conversation_id_by_external_message(
     .map_err(|e| e.to_string())
 }
 
-pub(super) fn find_latest_recoverable_ask_user_tool_call(calls: &[MCPToolCall]) -> Option<&MCPToolCall> {
+pub(super) fn find_latest_recoverable_ask_user_tool_call(
+    calls: &[MCPToolCall],
+) -> Option<&MCPToolCall> {
     calls.iter().find(|call| {
         call.tool_name == "ask_user_question"
             && matches!(call.status.as_str(), "pending" | "executing")

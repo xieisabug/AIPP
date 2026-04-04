@@ -18,19 +18,19 @@ use crate::db::connection::params;
 use crate::db::conversation_db::ConversationDatabase;
 use crate::mcp::builtin_mcp::interaction::resolve_ask_user_question_response;
 
-use super::types::*;
-use super::runtime::{mutate_status, set_feishu_runtime_ready_status};
-use super::relay::{
-    create_relay_scope, spawn_feishu_relay_scope_worker, insert_external_link,
-    external_message_exists, linked_to_outbound_message, update_external_link_local_message,
-    get_latest_message_id, find_latest_message_id_by_type,
-};
 use super::api::{reply_text_message, send_text_message_to_open_id};
 use super::interaction::{
-    is_missing_ask_user_request_error, build_ask_user_question_tool_result,
-    try_recover_feishu_ask_user_resolution, build_ask_user_answers_from_card_callback,
-    recover_answers_from_callback_payload,
+    build_ask_user_answers_from_card_callback, build_ask_user_question_tool_result,
+    is_missing_ask_user_request_error, recover_answers_from_callback_payload,
+    try_recover_feishu_ask_user_resolution,
 };
+use super::relay::{
+    create_relay_scope, external_message_exists, find_latest_message_id_by_type,
+    get_latest_message_id, insert_external_link, linked_to_outbound_message,
+    spawn_feishu_relay_scope_worker, update_external_link_local_message,
+};
+use super::runtime::{mutate_status, set_feishu_runtime_ready_status};
+use super::types::*;
 
 // ── Payload dispatch ───────────────────────────────────────────────
 

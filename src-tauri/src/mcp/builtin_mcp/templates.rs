@@ -1,6 +1,6 @@
+use crate::db::connection::{params, OptionalExtension};
 use crate::db::mcp_db::MCPDatabase;
 use anyhow::{Context, Result};
-use crate::db::connection::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tracing::{error, instrument};
@@ -43,18 +43,12 @@ pub struct BuiltinToolInfo {
 
 /// Returns true if the entire builtin command (server) is butler-only.
 pub fn is_butler_only_builtin_command(command: &str) -> bool {
-    matches!(
-        super::builtin_command_id(command).as_deref(),
-        Some("superadmin")
-    )
+    matches!(super::builtin_command_id(command).as_deref(), Some("superadmin"))
 }
 
 /// Butler-only tool names within the `aipp:agent` command.
-const BUTLER_ONLY_AGENT_TOOLS: &[&str] = &[
-    "spawn_task_conversation",
-    "task_conversation_operation",
-    "schedule_task",
-];
+const BUTLER_ONLY_AGENT_TOOLS: &[&str] =
+    &["spawn_task_conversation", "task_conversation_operation", "schedule_task"];
 
 /// Returns true if the given tool from `aipp:agent` is butler-only.
 pub fn is_butler_only_agent_tool(tool_name: &str) -> bool {
@@ -757,7 +751,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "preview_code".into(),
-                description: "Render an inline interactive UI inside the chat message. Supports progressive generation, final HTML activation, and returning submit/close results back to the tool execution flow. For best streaming UX, emit CSS first, then visible HTML structure, and put scripts last so the card can progressively appear before final JS activation.".into(),
+                description: "Render an inline interactive UI inside the chat message. This renderer is streaming-first: the UI should become visible progressively while the tool call is still being generated, then activate scripts only after the final HTML arrives. Optimize for stable incremental DOM growth rather than full-screen visual effects or JavaScript-only bootstrapping.".into(),
                 input_schema: serde_json::json!({
                     "$schema": "https://json-schema.org/draft/2020-12/schema",
                     "type": "object",
@@ -773,11 +767,11 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "code": {
                             "type": "string",
-                            "description": "Inline HTML/CSS/JS snippet to render in the controlled host container. Prefer the order <style>...</style> then visible HTML markup, then <script>...</script>. Do not rely on JavaScript to create the initial DOM from scratch; scripts should enhance already-rendered elements and wire interactions after the final activation step."
+                            "description": "Inline HTML/CSS/JS snippet rendered inside the controlled host container. Output order matters: keep <style> short and first, then emit visible HTML that can progressively render, and place <script> tags last so behavior activates only after finalization. Do not rely on JavaScript to create the initial DOM from scratch. Prefer stable ids/structure, keep the first meaningful UI visible in HTML, and use scripts only to enhance already-rendered content. Avoid HTML comments and avoid flashy effects such as gradients, heavy shadows, blur, or other styling that flickers during streaming DOM patches."
                         },
                         "loading_messages": {
                             "type": "array",
-                            "description": "Optional progressive disclosure status messages shown while the UI is still being generated.",
+                            "description": "Optional short status messages shown while the UI is still being generated. Prefer concise progressive messages that match the current build stage of the UI.",
                             "items": {
                                 "type": "string"
                             },

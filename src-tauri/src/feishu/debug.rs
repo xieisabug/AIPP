@@ -6,15 +6,15 @@ use tauri::AppHandle;
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::MCPDatabase;
 
-use super::types::*;
-use super::config::load_runtime_config;
-use super::relay::{find_latest_feishu_target, insert_external_link};
 use super::api::{
     build_feishu_interactive_payload, build_feishu_markdown_card,
     message_contains_preview_file_tool_call, message_is_preview_file_tool_result,
     render_message_for_feishu_delivery, resolve_preview_file_tool_call_for_message,
     send_markdown_message_to_target, split_markdown_into_feishu_blocks,
 };
+use super::config::load_runtime_config;
+use super::relay::{find_latest_feishu_target, insert_external_link};
+use super::types::*;
 
 pub(super) fn collect_feishu_debug_resend_messages(
     selected_message: &crate::db::conversation_db::Message,
@@ -98,18 +98,16 @@ pub(crate) async fn resend_message_to_feishu_for_debug(
             RELAY_ORIGIN_AIPP,
         )
         .await?;
-        let non_empty_parts: Vec<&str> = rendered_parts
-            .iter()
-            .map(String::as_str)
-            .filter(|s| !s.trim().is_empty())
-            .collect();
+        let non_empty_parts: Vec<&str> =
+            rendered_parts.iter().map(String::as_str).filter(|s| !s.trim().is_empty()).collect();
         if non_empty_parts.is_empty() {
             continue;
         }
 
         for rendered_text in &non_empty_parts {
             let outcome =
-                send_markdown_message_to_target(app_handle, &config, &target, rendered_text).await?;
+                send_markdown_message_to_target(app_handle, &config, &target, rendered_text)
+                    .await?;
             insert_external_link(
                 app_handle,
                 ChannelLinkRecord {

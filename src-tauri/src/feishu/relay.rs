@@ -9,14 +9,14 @@ use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::MCPDatabase;
 use crate::external_channels::presentation::{render_message_for_external_channel, RenderContext};
 
-use super::types::*;
-use super::config::{load_feishu_secret, load_runtime_config, load_runtime_config_inner};
-use super::runtime::{mutate_status, set_feishu_runtime_ready_status};
 use super::api::{
     render_message_for_feishu_delivery, resolve_preview_file_tool_call_for_message,
     send_markdown_message_to_target,
 };
+use super::config::{load_feishu_secret, load_runtime_config, load_runtime_config_inner};
 use super::events::count_pending_butler_tasks;
+use super::runtime::{mutate_status, set_feishu_runtime_ready_status};
+use super::types::*;
 
 pub(super) async fn mark_relay_scope_failed_with_log(
     app_handle: &AppHandle,
@@ -201,7 +201,10 @@ pub(crate) async fn maybe_schedule_butler_feishu_relay_for_aipp_turn(
     Ok(())
 }
 
-pub(super) fn get_latest_message_id(app_handle: &AppHandle, conversation_id: i64) -> Result<i64, String> {
+pub(super) fn get_latest_message_id(
+    app_handle: &AppHandle,
+    conversation_id: i64,
+) -> Result<i64, String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conn = db.get_connection().map_err(|e| e.to_string())?;
     Ok(conn
@@ -234,7 +237,10 @@ pub(super) fn find_latest_message_id_by_type(
     .map_err(|e| e.to_string())
 }
 
-pub(super) fn create_relay_scope(app_handle: &AppHandle, new_scope: NewRelayScope<'_>) -> Result<i64, String> {
+pub(super) fn create_relay_scope(
+    app_handle: &AppHandle,
+    new_scope: NewRelayScope<'_>,
+) -> Result<i64, String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     db.with_write_connection(|conn| {
         let superseded = conn
@@ -278,7 +284,10 @@ pub(super) fn create_relay_scope(app_handle: &AppHandle, new_scope: NewRelayScop
     .map_err(|e| e.to_string())
 }
 
-pub(super) fn load_relay_scope(app_handle: &AppHandle, scope_id: i64) -> Result<RelayScopeRecord, String> {
+pub(super) fn load_relay_scope(
+    app_handle: &AppHandle,
+    scope_id: i64,
+) -> Result<RelayScopeRecord, String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conn = db.get_connection().map_err(|e| e.to_string())?;
     conn.query_row(
@@ -593,7 +602,9 @@ pub(super) fn list_relayable_messages(
         .collect())
 }
 
-pub(super) fn is_message_ready_for_feishu_relay(message: &crate::db::conversation_db::Message) -> bool {
+pub(super) fn is_message_ready_for_feishu_relay(
+    message: &crate::db::conversation_db::Message,
+) -> bool {
     match message.message_type.as_str() {
         "response" | "assistant" => message.finish_time.is_some(),
         _ => true,
@@ -646,11 +657,8 @@ pub(super) async fn flush_feishu_relay_scope(
         .await?;
         last_processed_message_id = message.id;
 
-        let non_empty_parts: Vec<&str> = rendered_parts
-            .iter()
-            .map(String::as_str)
-            .filter(|s| !s.trim().is_empty())
-            .collect();
+        let non_empty_parts: Vec<&str> =
+            rendered_parts.iter().map(String::as_str).filter(|s| !s.trim().is_empty()).collect();
 
         if non_empty_parts.is_empty() {
             record_scope_delivery(

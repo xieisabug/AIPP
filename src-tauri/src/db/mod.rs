@@ -2,10 +2,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use assistant_db::AssistantDatabase;
+use connection::params;
 use conversation_db::ConversationDatabase;
 use llm_db::LLMDatabase;
 use mcp_db::MCPDatabase;
-use connection::params;
 use scheduled_task_db::ScheduledTaskDatabase;
 use semver::Version;
 use system_db::SystemDatabase;

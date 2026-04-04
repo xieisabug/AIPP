@@ -10,12 +10,17 @@ mod types;
 // ── Public re-exports ──────────────────────────────────────────────
 
 pub use debug::{
-    debug_build_feishu_markdown_card, debug_build_feishu_interactive_payload,
+    debug_build_feishu_interactive_payload, debug_build_feishu_markdown_card,
     debug_describe_feishu_markdown_blocks,
 };
 pub use types::{FeishuButlerState, FeishuDebugSendResult, FeishuRuntimeStatus};
 
-pub(crate) use config::{clear_feishu_secret, migrate_secure_storage_if_needed, save_feishu_secret};
+pub(crate) use api::{
+    try_deliver_acp_permission_to_feishu, try_deliver_operation_permission_to_feishu,
+};
+pub(crate) use config::{
+    clear_feishu_secret, migrate_secure_storage_if_needed, save_feishu_secret,
+};
 pub(crate) use debug::resend_message_to_feishu_for_debug;
 pub(crate) use interaction::try_deliver_ask_user_question_to_feishu;
 pub(crate) use relay::{
@@ -23,9 +28,6 @@ pub(crate) use relay::{
     maybe_schedule_butler_feishu_relay_for_aipp_turn,
 };
 pub(crate) use runtime::{get_runtime_status, refresh_runtime, refresh_runtime_async};
-pub(crate) use api::{
-    try_deliver_acp_permission_to_feishu, try_deliver_operation_permission_to_feishu,
-};
 
 // ── Tests ──────────────────────────────────────────────────────────
 
@@ -42,7 +44,6 @@ mod tests {
     use serde_json::{json, Map, Value};
 
     use crate::mcp::builtin_mcp::interaction::{AskUserQuestionItem, AskUserQuestionRequestEvent};
-
     #[test]
     fn split_markdown_blocks_extracts_table() {
         let blocks = split_markdown_into_feishu_blocks(
@@ -691,10 +692,110 @@ mod tests {
             ..response.clone()
         };
 
-        let selected =
-            collect_feishu_debug_resend_messages(&response, &[response.clone(), preview_tool_result.clone(), later_response]);
+        let selected = collect_feishu_debug_resend_messages(
+            &response,
+            &[response.clone(), preview_tool_result.clone(), later_response],
+        );
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].id, preview_tool_result.id);
+    }
+
+    #[test]
+    fn preview_tool_result_rendering_keeps_full_content_from_tool_result() {
+        let now = Utc::now();
+        let preview_tool_result = crate::db::conversation_db::Message {
+            id: 11,
+            parent_id: None,
+            conversation_id: 1,
+            message_type: "tool_result".to_string(),
+            content: "Tool execution completed:\n\nTool Call ID: call_1\nTool: preview_file\nServer: UI交互工具\nParameters: {\"files\":[{\"title\":\"华容道情节构思\",\"type\":\"text\",\"content\":\"完整正文\"}]}\nResult:\n[{\"type\":\"json\",\"json\":{\"status\":\"preview_shown\"}}]".to_string(),
+            llm_model_id: None,
+            llm_model_name: None,
+            created_time: now,
+            start_time: Some(now),
+            finish_time: Some(now),
+            token_count: 0,
+            input_token_count: 0,
+            output_token_count: 0,
+            generation_group_id: Some("group-1".to_string()),
+            parent_group_id: None,
+            tool_calls_json: None,
+            first_token_time: None,
+            ttft_ms: None,
+        };
+
+        assert!(preview_tool_result_has_inline_content(&preview_tool_result));
+        let rendered =
+            render_inline_preview_tool_result_parts_for_feishu(&preview_tool_result, "aipp")
+                .expect("inline preview content should render");
+
+        assert_eq!(rendered.len(), 1);
+        assert!(rendered[0].contains("华容道情节构思"));
+        assert!(rendered[0].contains("完整正文"));
+    }
+
+    #[test]
+    fn preview_response_parameters_are_extracted_from_mcp_comment() {
+        let now = Utc::now();
+        let response = crate::db::conversation_db::Message {
+            id: 12,
+            parent_id: None,
+            conversation_id: 1,
+            message_type: "response".to_string(),
+            content: "修改完成。\n\n<!-- MCP_TOOL_CALL:{\"call_id\":1644,\"llm_call_id\":\"functions.UI__preview_file:5\",\"parameters\":\"{\\\"files\\\":[{\\\"title\\\":\\\"第二章样稿.md\\\",\\\"type\\\":\\\"text\\\",\\\"url\\\":\\\"D:\\\\\\\\BaiduSyncdisk\\\\\\\\ai_area\\\\\\\\01-进行中的项目\\\\\\\\三国-侠之大者\\\\\\\\05-草稿区\\\\\\\\第二章样稿.md\\\"}]}\",\"server_name\":\"UI交互工具\",\"tool_name\":\"preview_file\"} -->".to_string(),
+            llm_model_id: None,
+            llm_model_name: None,
+            created_time: now,
+            start_time: Some(now),
+            finish_time: Some(now),
+            token_count: 0,
+            input_token_count: 0,
+            output_token_count: 0,
+            generation_group_id: Some("group-1".to_string()),
+            parent_group_id: None,
+            tool_calls_json: None,
+            first_token_time: None,
+            ttft_ms: None,
+        };
+
+        let params = preview_file_parameters_from_response_message(&response)
+            .expect("preview_file response params");
+
+        assert_eq!(params["files"][0]["title"], "第二章样稿.md");
+        assert_eq!(params["files"][0]["type"], "text");
+        assert_eq!(
+            params["files"][0]["url"],
+            "D:\\BaiduSyncdisk\\ai_area\\01-进行中的项目\\三国-侠之大者\\05-草稿区\\第二章样稿.md"
+        );
+    }
+
+    #[test]
+    fn preview_tool_result_with_only_local_url_is_not_treated_as_inline_content() {
+        let now = Utc::now();
+        let preview_tool_result = crate::db::conversation_db::Message {
+            id: 12,
+            parent_id: None,
+            conversation_id: 1,
+            message_type: "tool_result".to_string(),
+            content: "Tool execution completed:\n\nTool Call ID: call_2\nTool: preview_file\nServer: UI交互工具\nParameters: {\"files\":[{\"title\":\"第一章样稿\",\"type\":\"markdown\",\"url\":\"D:\\\\demo\\\\chapter1.md\"}]}\nResult:\n[{\"type\":\"json\",\"json\":{\"status\":\"preview_shown\"}}]".to_string(),
+            llm_model_id: None,
+            llm_model_name: None,
+            created_time: now,
+            start_time: Some(now),
+            finish_time: Some(now),
+            token_count: 0,
+            input_token_count: 0,
+            output_token_count: 0,
+            generation_group_id: Some("group-1".to_string()),
+            parent_group_id: None,
+            tool_calls_json: None,
+            first_token_time: None,
+            ttft_ms: None,
+        };
+
+        assert!(!preview_tool_result_has_inline_content(&preview_tool_result));
+        assert!(render_inline_preview_tool_result_parts_for_feishu(&preview_tool_result, "aipp")
+            .is_none());
     }
 }

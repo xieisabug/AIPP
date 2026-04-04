@@ -133,11 +133,7 @@ pub async fn fit_to_budget_with_compaction(
         return FitResult { estimated_tokens, compacted: false, messages };
     }
 
-    info!(
-        estimated_tokens,
-        trigger,
-        "context over threshold, attempting compaction"
-    );
+    info!(estimated_tokens, trigger, "context over threshold, attempting compaction");
 
     // --- Level 1: Microcompact (truncate old tool results) ---
     let (messages, db_token_counts_vec) = microcompact_tool_results(messages, db_token_counts);
@@ -155,8 +151,7 @@ pub async fn fit_to_budget_with_compaction(
 
     info!(
         post_microcompact_tokens = post_mc_tokens,
-        trigger,
-        "microcompact not sufficient, proceeding with LLM compaction"
+        trigger, "microcompact not sufficient, proceeding with LLM compaction"
     );
 
     // --- Level 2: Full LLM compaction ---
@@ -220,9 +215,7 @@ pub async fn fit_to_budget_with_compaction(
         } else {
             info!(
                 conversation_id = ctx.conversation_id,
-                first_id,
-                last_id,
-                "compaction summary persisted to DB"
+                first_id, last_id, "compaction summary persisted to DB"
             );
         }
     } else {
@@ -297,7 +290,8 @@ fn microcompact_tool_results(
         .enumerate()
         .map(|(i, (msg_type, content, attachments))| {
             if indices_to_truncate.contains(&i) {
-                let old_tokens = estimate_message_tokens(&content, new_db_tokens.get(i).copied().unwrap_or(0));
+                let old_tokens =
+                    estimate_message_tokens(&content, new_db_tokens.get(i).copied().unwrap_or(0));
                 let new_tokens = estimate_message_tokens(TOOL_RESULT_CLEARED, 0);
                 tokens_saved += old_tokens.saturating_sub(new_tokens);
                 new_db_tokens[i] = 0; // reset DB token count for truncated message
@@ -571,11 +565,11 @@ mod tests {
         let messages = vec![
             msg("system", "sys"),
             msg("user", "hello"),
-            msg("response", "calling 3 tools"),  // index 2
-            msg("tool_result", "result 1"),       // index 3
-            msg("tool_result", "result 2"),       // index 4
-            msg("tool_result", "result 3"),       // index 5
-            msg("user", "next question"),         // index 6
+            msg("response", "calling 3 tools"), // index 2
+            msg("tool_result", "result 1"),     // index 3
+            msg("tool_result", "result 2"),     // index 4
+            msg("tool_result", "result 3"),     // index 5
+            msg("user", "next question"),       // index 6
         ];
         // Budget fits user + 1 tool_result but atomicity should pull in all 3 + response
         let db_tokens = vec![0, 100, 100, 100, 100, 100, 100];

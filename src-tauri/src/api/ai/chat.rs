@@ -905,6 +905,26 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_preview_code_streaming_state_keeps_style_prefixed_partial_html_renderable() {
+        let state = extract_preview_code_streaming_state(&serde_json::json!({
+            "title": "streaming_card",
+            "renderer": "html",
+            "code": "<style>.card{padding:12px;}</style><section class=\"card\"><h2>Revenue</h2><p>42",
+            "loading_messages": ["正在生成交互面板"],
+            "interaction_mode": "submit_once"
+        }))
+        .expect("preview state");
+
+        assert!(state.has_renderable_dom);
+        assert!(!state.contains_script);
+        assert_eq!(
+            state.renderable_html,
+            "<style>.card{padding:12px;}</style><section class=\"card\"><h2>Revenue</h2><p>42"
+        );
+        assert_eq!(state.title, "streaming_card");
+    }
+
+    #[test]
     fn test_normalize_tool_arguments_json_object() {
         let args = serde_json::json!({"key": "val"});
         let result = normalize_tool_arguments_json(&args);

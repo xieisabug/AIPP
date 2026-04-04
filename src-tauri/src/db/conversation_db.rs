@@ -260,9 +260,8 @@ impl ConversationRepository {
     ) -> Result<Vec<Conversation>> {
         let offset = (page - 1) * per_page;
         let kind = conversation_kind.unwrap_or("normal");
-        let search_pattern = search
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| format!("%{}%", s.trim()));
+        let search_pattern =
+            search.filter(|s| !s.trim().is_empty()).map(|s| format!("%{}%", s.trim()));
 
         let sql = if search_pattern.is_some() {
             "SELECT DISTINCT c.id, c.name, c.assistant_id, c.created_time, c.updated_time,
@@ -288,26 +287,23 @@ impl ConversationRepository {
 
         let mut stmt = self.conn.prepare(sql)?;
         let like_val = search_pattern.unwrap_or_default();
-        let rows = stmt.query_map(
-            rusqlite::params![kind, like_val, per_page, offset],
-            |row| {
-                Ok(Conversation {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    assistant_id: row.get(2)?,
-                    created_time: get_required_datetime_from_row(row, 3, "created_time")?,
-                    updated_time: get_required_datetime_from_row(row, 4, "updated_time")?,
-                    conversation_kind: row.get(5)?,
-                    parent_butler_conversation_id: row.get(6)?,
-                    source_task_title: row.get(7)?,
-                    is_hidden_from_normal_chat_list: row.get(8)?,
-                    channel_source: row.get(9)?,
-                    butler_task_status: row.get(10)?,
-                    butler_task_summary: row.get(11)?,
-                    butler_task_finalized_at: get_datetime_from_row(row, 12)?,
-                })
-            },
-        )?;
+        let rows = stmt.query_map(rusqlite::params![kind, like_val, per_page, offset], |row| {
+            Ok(Conversation {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                assistant_id: row.get(2)?,
+                created_time: get_required_datetime_from_row(row, 3, "created_time")?,
+                updated_time: get_required_datetime_from_row(row, 4, "updated_time")?,
+                conversation_kind: row.get(5)?,
+                parent_butler_conversation_id: row.get(6)?,
+                source_task_title: row.get(7)?,
+                is_hidden_from_normal_chat_list: row.get(8)?,
+                channel_source: row.get(9)?,
+                butler_task_status: row.get(10)?,
+                butler_task_summary: row.get(11)?,
+                butler_task_finalized_at: get_datetime_from_row(row, 12)?,
+            })
+        })?;
         rows.collect()
     }
 
@@ -1100,10 +1096,9 @@ impl ConversationDatabase {
     where
         F: FnOnce(&Connection) -> Result<T, AppError>,
     {
-        let _guard = self
-            .write_lock
-            .lock()
-            .map_err(|_| AppError::UnknownError("conversation db write lock poisoned".to_string()))?;
+        let _guard = self.write_lock.lock().map_err(|_| {
+            AppError::UnknownError("conversation db write lock poisoned".to_string())
+        })?;
         let conn = self.get_connection().map_err(AppError::from)?;
         f(&conn)
     }

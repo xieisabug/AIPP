@@ -1,6 +1,7 @@
 export type PreviewCodeInteractionMode = "none" | "submit_once";
 
 export const PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX = 320;
+export const PREVIEW_CODE_STREAMING_UPDATE_INTERVAL_MS = 1000;
 
 export interface PreviewCodeMetadata {
     origin?: string;

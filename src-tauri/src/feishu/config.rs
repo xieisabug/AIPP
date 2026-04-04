@@ -239,7 +239,9 @@ pub(super) fn load_feishu_secret(app_handle: &AppHandle) -> Result<Option<String
     }
 }
 
-pub(super) async fn load_runtime_config(app_handle: &AppHandle) -> Result<FeishuRuntimeConfig, String> {
+pub(super) async fn load_runtime_config(
+    app_handle: &AppHandle,
+) -> Result<FeishuRuntimeConfig, String> {
     load_runtime_config_inner(app_handle, None).await
 }
 

@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use tokio::sync::{Mutex};
-use reqwest;
+use tokio::sync::Mutex;
 
 // Constants
 pub(super) const EXPERIMENTAL_FEATURE_CODE: &str = "experimental";
@@ -443,7 +443,9 @@ pub(super) fn feishu_reply_matches_permission_context(
     true
 }
 
-pub(super) fn build_operation_permission_fallback_text(request: &crate::mcp::builtin_mcp::operation::state::PermissionRequestSnapshot) -> String {
+pub(super) fn build_operation_permission_fallback_text(
+    request: &crate::mcp::builtin_mcp::operation::state::PermissionRequestSnapshot,
+) -> String {
     format!(
         "权限审批 {review_code}\n操作：{operation}\n路径：{path}\n\n可回复：\n- 批准一次 {review_code}\n- 本任务批准 {review_code}\n- 助手批准 {review_code}\n- 拒绝 {review_code}",
         review_code = request.review_code,
@@ -452,7 +454,9 @@ pub(super) fn build_operation_permission_fallback_text(request: &crate::mcp::bui
     )
 }
 
-pub(super) fn build_acp_permission_fallback_text(request: &crate::api::ai::acp::AcpPermissionRequestSnapshot) -> String {
+pub(super) fn build_acp_permission_fallback_text(
+    request: &crate::api::ai::acp::AcpPermissionRequestSnapshot,
+) -> String {
     let mut lines = vec![format!(
         "ACP 权限审批 {review_code}\n标题：{title}\n参数：{parameters}",
         review_code = request.review_code,

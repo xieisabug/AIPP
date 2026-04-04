@@ -41,8 +41,7 @@ use crate::api::assistant_summary_api::summarize_all_assistant_summaries;
 use crate::api::attachment_api::{add_attachment, open_attachment_with_default_app};
 use crate::api::butler_api::{
     get_butler_task_detail, list_butler_tasks, list_butler_tasks_paginated,
-    load_butler_main_conversation, reset_butler_main_conversation,
-    spawn_butler_task_conversation,
+    load_butler_main_conversation, reset_butler_main_conversation, spawn_butler_task_conversation,
 };
 use crate::api::conversation_api::{
     create_conversation_with_messages, create_message, delete_conversation, fork_conversation,
@@ -50,14 +49,12 @@ use crate::api::conversation_api::{
     update_assistant_message, update_conversation, update_message_content,
 };
 use crate::api::copilot_api::{poll_github_copilot_token, start_github_copilot_device_flow};
-use crate::api::copilot_token_manager::{
-    test_copilot_token_exchange, CopilotTokenManagerState,
-};
 #[cfg(desktop)]
 use crate::api::copilot_lsp::{
     check_copilot_status, get_copilot_lsp_status, get_copilot_oauth_token_from_config,
     sign_in_confirm, sign_in_initiate, sign_out_copilot, stop_copilot_lsp, CopilotLspState,
 };
+use crate::api::copilot_token_manager::{test_copilot_token_exchange, CopilotTokenManagerState};
 use crate::api::export_api::{markdown_to_docx, markdown_to_pdf};
 use crate::api::highlight_api::{highlight_code, list_syntect_themes};
 use crate::api::llm_api::{
@@ -208,15 +205,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::AppHandle;
 use tauri::path::BaseDirectory;
+use tauri::AppHandle;
 use tauri::Emitter;
 #[cfg(desktop)]
 use tauri::{
-    EventId, Listener,
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconEvent},
-    Manager, RunEvent,
+    EventId, Listener, Manager, RunEvent,
 };
 #[cfg(mobile)]
 use tauri::{Manager, RunEvent};
@@ -304,17 +300,12 @@ fn read_chat_scroll_perf_autorun_config() -> Option<ChatScrollPerfAutorunConfig>
         .unwrap_or(30);
     let result_path = std::env::var("AIPP_CHAT_SCROLL_PERF_RESULT_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::env::temp_dir().join("aipp-chat-scroll-perf-result.json")
-        });
+        .unwrap_or_else(|_| std::env::temp_dir().join("aipp-chat-scroll-perf-result.json"));
 
     Some(ChatScrollPerfAutorunConfig {
         conversation_index,
         scroll_duration_ms,
-        include_return_trip: parse_bool_env(
-            "AIPP_CHAT_SCROLL_PERF_INCLUDE_RETURN_TRIP",
-            true,
-        ),
+        include_return_trip: parse_bool_env("AIPP_CHAT_SCROLL_PERF_INCLUDE_RETURN_TRIP", true),
         settle_frame_count,
         timeout_secs,
         result_path,
@@ -372,15 +363,16 @@ async fn run_chat_scroll_perf_autorun(
     let sender = Arc::new(TokioMutex::new(Some(tx)));
     let last_progress = Arc::new(TokioMutex::new(None::<String>));
     let app_handle_clone = app_handle.clone();
-    let listener_id: EventId = app_handle.listen("chat-scroll-perf-result", move |event: tauri::Event| {
-        let sender_clone = sender.clone();
-        let payload = event.payload().to_string();
-        tokio::spawn(async move {
-            if let Some(tx) = sender_clone.lock().await.take() {
-                let _ = tx.send(payload);
-            }
+    let listener_id: EventId =
+        app_handle.listen("chat-scroll-perf-result", move |event: tauri::Event| {
+            let sender_clone = sender.clone();
+            let payload = event.payload().to_string();
+            tokio::spawn(async move {
+                if let Some(tx) = sender_clone.lock().await.take() {
+                    let _ = tx.send(payload);
+                }
+            });
         });
-    });
     let progress_listener_state = last_progress.clone();
     let progress_listener_id: EventId =
         app_handle.listen("chat-scroll-perf-progress", move |event: tauri::Event| {
@@ -426,11 +418,8 @@ async fn run_chat_scroll_perf_autorun(
     let payload = match tokio::time::timeout(Duration::from_secs(config.timeout_secs), rx).await {
         Ok(payload) => payload.map_err(|_| "Chat scroll perf result channel closed".to_string())?,
         Err(_) => {
-            let last_progress = last_progress
-                .lock()
-                .await
-                .clone()
-                .unwrap_or_else(|| "none".to_string());
+            let last_progress =
+                last_progress.lock().await.clone().unwrap_or_else(|| "none".to_string());
             app_handle_clone.unlisten(listener_id);
             app_handle_clone.unlisten(progress_listener_id);
             return Err(format!(
@@ -443,9 +432,8 @@ async fn run_chat_scroll_perf_autorun(
     app_handle_clone.unlisten(listener_id);
     app_handle_clone.unlisten(progress_listener_id);
 
-    serde_json::from_str::<serde_json::Value>(&payload).map_err(|error| {
-        format!("Failed to parse chat scroll perf result payload: {error}")
-    })
+    serde_json::from_str::<serde_json::Value>(&payload)
+        .map_err(|error| format!("Failed to parse chat scroll perf result payload: {error}"))
 }
 
 #[cfg(desktop)]
@@ -737,7 +725,9 @@ pub fn run() {
             let conversation_db = ConversationDatabase::new(&app_handle)?;
             let plugin_db = PluginDatabase::new(&app_handle)?;
             if db::mcp_db::MCPDatabase::recover_if_corrupted(&app_handle)? {
-                warn!("Recovered corrupted MCP database by recreating a fresh local cache database");
+                warn!(
+                    "Recovered corrupted MCP database by recreating a fresh local cache database"
+                );
             }
             let mcp_db = MCPDatabase::new(&app_handle)?;
             let scheduled_task_db = ScheduledTaskDatabase::new(&app_handle)?;

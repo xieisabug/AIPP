@@ -7,9 +7,9 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{debug, warn};
 
-use super::types::*;
 use super::config::load_runtime_config;
 use super::events::handle_payload;
+use super::types::*;
 
 pub(super) fn build_status(config: &FeishuRuntimeConfig) -> FeishuRuntimeStatus {
     FeishuRuntimeStatus {
@@ -53,7 +53,10 @@ where
     let _ = app_handle.emit("butler_feishu_status_changed", snapshot);
 }
 
-pub(super) async fn set_feishu_runtime_ready_status(app_handle: &AppHandle, detail: impl Into<String>) {
+pub(super) async fn set_feishu_runtime_ready_status(
+    app_handle: &AppHandle,
+    detail: impl Into<String>,
+) {
     let detail = detail.into();
     mutate_status(app_handle, |status| {
         status.running = true;

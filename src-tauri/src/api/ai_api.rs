@@ -2205,8 +2205,18 @@ async fn initialize_conversation(
     runtime_user_prompt: String,
     override_prompt: Option<String>,
     extra_user_attachments: Vec<MessageAttachment>,
-) -> Result<(i64, Option<i64>, i64, String, Vec<(String, String, Vec<MessageAttachment>)>, Vec<i64>, Vec<i32>), AppError>
-{
+) -> Result<
+    (
+        i64,
+        Option<i64>,
+        i64,
+        String,
+        Vec<(String, String, Vec<MessageAttachment>)>,
+        Vec<i64>,
+        Vec<i32>,
+    ),
+    AppError,
+> {
     // 返回值：(conversation_id, add_message_id, user_message_id, request_prompt_with_context, init_message_list, message_ids, db_token_counts)
     let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
 
