@@ -497,4 +497,59 @@ describe("useMcpToolCallProcessor MCP identity", () => {
         ).toBeInTheDocument();
         expect(screen.getByText(/console\.log\("boot"\)/)).toBeInTheDocument();
     });
+
+    it("merges streaming comment data when incomplete XML tag shadows it during dedup", async () => {
+        const conversationId = 30;
+        mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
+
+        // Simulate real streaming scenario: the model output has an incomplete
+        // <mcp_tool_call> XML tag, and the backend appends a
+        // <!-- MCP_TOOL_CALL_STREAMING --> comment AFTER it.
+        // The XML extraction claims start=0, end=content.length (incomplete),
+        // which would shadow the HTML comment. The dedup must merge the streaming
+        // comment data into the XML entry.
+        const previewState = {
+            title: "steam_demo",
+            renderer: "html",
+            code: "<div>Steam Engine</div>",
+            loadingMessages: ["正在生成交互面板"],
+            interactionMode: "submit_once",
+            hasRenderableDom: true,
+            containsScript: false,
+            renderableHtml: "<div>Steam Engine</div>",
+            sourceExcerpt: "<div>Steam Engine</div>",
+        };
+        const markdown = [
+            '<mcp_tool_call>',
+            '<server_name>UI交互工具</server_name>',
+            '<tool_name>preview_code</tool_name>',
+            '<parameters>{"title":"steam_demo","renderer":"html","code":"<div>Steam Engine</div>","loading_messages":["正在生成交互面板"]',
+            // ↑ Incomplete: no closing </parameters> or </mcp_tool_call>
+            '',
+            `<!-- MCP_TOOL_CALL_STREAMING:${JSON.stringify({
+                server_name: "ui_interaction",
+                tool_name: "preview_code",
+                fn_arguments: '{"title":"steam_demo","renderer":"html","code":"<div>Steam Engine</div>","loading_messages":["正在生成交互面板"]}',
+                llm_call_id: "call_merge_test",
+                preview_state: previewState,
+            })} -->`,
+        ].join('\n');
+
+        render(
+            <ProcessorHarness
+                markdown={markdown}
+                conversationId={conversationId}
+                messageId={21}
+                mcpToolCallStates={new Map()}
+                shiningMcpCallId={null}
+            />
+        );
+
+        // The card should render with the streaming preview_state data
+        expect(await screen.findByText("steam_demo")).toBeInTheDocument();
+        const host = await screen.findByTestId("preview-code-host");
+        await waitFor(() =>
+            expect(host.shadowRoot?.textContent).toContain("Steam Engine"),
+        );
+    });
 });

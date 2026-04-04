@@ -1,3 +1,6 @@
+import morphdom from "morphdom";
+import { PREVIEW_CODE_STREAMING_UPDATE_INTERVAL_MS } from "@/utils/previewCode";
+
 export interface PreviewCodeBridge {
     submit: (payload?: unknown) => Promise<void>;
     close: () => Promise<void>;
@@ -25,7 +28,9 @@ declare global {
     }
 }
 
-const PREVIEW_CODE_FRAME_MS = 16;
+const PREVIEW_CODE_FRAME_FALLBACK_MS = 16;
+const PREVIEW_CODE_ENTER_ATTRIBUTE = "data-aipp-preview-enter";
+const PREVIEW_CODE_ENTER_DURATION_MS = 280;
 const PREVIEW_CODE_RUNTIME_STYLES = `
 :host {
     display: block;
@@ -43,7 +48,7 @@ const PREVIEW_CODE_RUNTIME_STYLES = `
     min-height: inherit;
 }
 
-.aipp-preview-code-root > :where(:not(style):not(script)) {
+.aipp-preview-code-root :where([data-aipp-preview-enter="true"]) {
     animation: aipp-preview-code-enter 240ms cubic-bezier(0.22, 1, 0.36, 1);
     transform-origin: top center;
     will-change: opacity, transform, filter;
@@ -108,24 +113,34 @@ const ALLOWED_EXTERNAL_SCRIPT_ORIGINS = new Set([
     "https://esm.sh",
 ]);
 
-type ScheduledFrameHandle =
+type ScheduledApplyHandle =
     | { kind: "raf"; id: number }
     | { kind: "timeout"; id: number };
 
-function scheduleNextFrame(callback: FrameRequestCallback): ScheduledFrameHandle {
+function scheduleImmediateApply(callback: () => void): ScheduledApplyHandle {
     if (typeof window.requestAnimationFrame === "function") {
         return {
             kind: "raf",
-            id: window.requestAnimationFrame(callback),
+            id: window.requestAnimationFrame(() => callback()),
         };
     }
     return {
         kind: "timeout",
-        id: window.setTimeout(() => callback(performance.now()), PREVIEW_CODE_FRAME_MS),
+        id: window.setTimeout(callback, PREVIEW_CODE_FRAME_FALLBACK_MS),
     };
 }
 
-function cancelScheduledFrame(handle: ScheduledFrameHandle | null) {
+function scheduleApply(callback: () => void, delayMs: number): ScheduledApplyHandle {
+    if (delayMs <= 0) {
+        return scheduleImmediateApply(callback);
+    }
+    return {
+        kind: "timeout",
+        id: window.setTimeout(callback, delayMs),
+    };
+}
+
+function cancelScheduledApply(handle: ScheduledApplyHandle | null) {
     if (!handle) {
         return;
     }
@@ -177,6 +192,53 @@ function collectScriptNodes(root: ParentNode) {
         type: script.getAttribute("type"),
         content: script.textContent ?? "",
     }));
+}
+
+function buildTargetMountPoint(code: string): {
+    mountPoint: HTMLDivElement;
+    scripts: Array<{ src: string | null; type: string | null; content: string }>;
+} {
+    const template = document.createElement("template");
+    template.innerHTML = code;
+    normalizeStyleNodes(template.content);
+    const scripts = collectScriptNodes(template.content);
+    const mountPoint = document.createElement("div");
+    mountPoint.className = "aipp-preview-code-root";
+    mountPoint.append(template.content.cloneNode(true));
+    return { mountPoint, scripts };
+}
+
+function getMorphNodeKey(node: Node): string | undefined {
+    if (!(node instanceof Element)) {
+        return undefined;
+    }
+    return node.getAttribute("data-aipp-key") ?? node.id ?? undefined;
+}
+
+function markNodeForEntranceAnimation(node: Node) {
+    if (!(node instanceof Element) || node.tagName === "STYLE" || node.tagName === "SCRIPT") {
+        return;
+    }
+    node.setAttribute(PREVIEW_CODE_ENTER_ATTRIBUTE, "true");
+    const clear = () => node.removeAttribute(PREVIEW_CODE_ENTER_ATTRIBUTE);
+    node.addEventListener("animationend", clear, { once: true });
+    window.setTimeout(clear, PREVIEW_CODE_ENTER_DURATION_MS);
+}
+
+function patchMountPoint(mountPoint: HTMLDivElement, nextMountPoint: HTMLDivElement) {
+    morphdom(mountPoint, nextMountPoint, {
+        childrenOnly: true,
+        getNodeKey: getMorphNodeKey,
+        onBeforeElUpdated(fromEl, toEl) {
+            if (fromEl.isEqualNode(toEl)) {
+                return false;
+            }
+            return true;
+        },
+        onNodeAdded(node) {
+            markNodeForEntranceAnimation(node);
+        },
+    });
 }
 
 function normalizeExternalScriptUrl(src: string): string {
@@ -245,6 +307,8 @@ interface PreviewScriptEnvironment {
     previewWindow: PreviewWindow;
     previewDocument: ReturnType<typeof createPreviewDocumentFacade>;
 }
+
+const inlineHandlerRegistry = new WeakMap<Element, Map<string, EventListener>>();
 
 function createPreviewScriptEnvironment(
     shadowRoot: ShadowRoot,
@@ -328,12 +392,15 @@ function bindInlineEventHandlers(
 ) {
     const elements = "querySelectorAll" in root ? root.querySelectorAll("*") : [];
     elements.forEach((element) => {
+        const existingBindings = inlineHandlerRegistry.get(element) ?? new Map<string, EventListener>();
+        const nextBindings = new Set<string>();
         for (const attribute of Array.from(element.attributes)) {
             if (!attribute.name.startsWith("on")) {
                 continue;
             }
 
             const eventName = attribute.name.slice(2);
+            nextBindings.add(eventName);
             const handlerRunner = new Function(
                 "event",
                 "window",
@@ -344,8 +411,12 @@ function bindInlineEventHandlers(
                 `with(window){ ${attribute.value} }`
             );
 
-            element.removeAttribute(attribute.name);
-            element.addEventListener(eventName, (event) => {
+            const previousListener = existingBindings.get(eventName);
+            if (previousListener) {
+                element.removeEventListener(eventName, previousListener);
+            }
+
+            const listener: EventListener = (event) => {
                 const result = handlerRunner.call(
                     environment.previewWindow,
                     event,
@@ -360,7 +431,25 @@ function bindInlineEventHandlers(
                     event.preventDefault();
                     event.stopPropagation();
                 }
-            });
+            };
+
+            element.removeAttribute(attribute.name);
+            existingBindings.set(eventName, listener);
+            element.addEventListener(eventName, listener);
+        }
+
+        for (const [eventName, listener] of existingBindings) {
+            if (nextBindings.has(eventName)) {
+                continue;
+            }
+            element.removeEventListener(eventName, listener);
+            existingBindings.delete(eventName);
+        }
+
+        if (existingBindings.size > 0) {
+            inlineHandlerRegistry.set(element, existingBindings);
+        } else {
+            inlineHandlerRegistry.delete(element);
         }
     });
 }
@@ -403,13 +492,15 @@ async function executeScripts(
 
 export function createPreviewCodeRuntime(host: HTMLElement): PreviewCodeRuntimeController {
     let disposed = false;
-    let scheduledFrame: ScheduledFrameHandle | null = null;
+    let scheduledApply: ScheduledApplyHandle | null = null;
     let latestUpdate: PreviewCodeRuntimeUpdate | null = null;
     let lastFinalSignature: string | null = null;
     let lastBridgeId: string | null = null;
     let lastRenderedCode: string | null = null;
     let lastScripts: Array<{ src: string | null; type: string | null; content: string }> = [];
     let lastEnvironment: PreviewScriptEnvironment | null = null;
+    let lastAppliedAt = 0;
+    let lastPatchedAt = 0;
     const shadowRoot = host.shadowRoot ?? host.attachShadow({ mode: "open" });
     const styleElement = document.createElement("style");
     styleElement.textContent = PREVIEW_CODE_RUNTIME_STYLES;
@@ -438,19 +529,35 @@ export function createPreviewCodeRuntime(host: HTMLElement): PreviewCodeRuntimeC
         };
 
         try {
-            if (!lastEnvironment || lastRenderedCode !== code || lastBridgeId !== bridgeId) {
-                const template = document.createElement("template");
-                template.innerHTML = code;
-                normalizeStyleNodes(template.content);
-                lastScripts = collectScriptNodes(template.content);
-                mountPoint.replaceChildren(template.content.cloneNode(true));
+            if (!lastEnvironment || lastBridgeId !== bridgeId) {
                 lastEnvironment = createPreviewScriptEnvironment(shadowRoot, host, liveBridge);
                 bindInlineEventHandlers(mountPoint, lastEnvironment, host, shadowRoot);
                 if (lastBridgeId !== null && lastBridgeId !== bridgeId) {
+                    delete registry[lastBridgeId];
                     lastFinalSignature = null;
                 }
                 lastBridgeId = bridgeId;
-                lastRenderedCode = code;
+            } else {
+                lastEnvironment.previewWindow.aippPreviewCode = liveBridge;
+            }
+
+            if (lastRenderedCode !== code) {
+                const canPatch = isFinal
+                    || lastPatchedAt === 0
+                    || Date.now() - lastPatchedAt >= PREVIEW_CODE_STREAMING_UPDATE_INTERVAL_MS;
+                if (canPatch) {
+                    const parsed = buildTargetMountPoint(code);
+                    lastScripts = parsed.scripts;
+                    patchMountPoint(mountPoint, parsed.mountPoint);
+                    bindInlineEventHandlers(mountPoint, lastEnvironment, host, shadowRoot);
+                    lastRenderedCode = code;
+                    lastPatchedAt = Date.now();
+                } else if (scheduledApply === null) {
+                    scheduledApply = scheduleApply(
+                        flushLatest,
+                        PREVIEW_CODE_STREAMING_UPDATE_INTERVAL_MS - (Date.now() - lastPatchedAt),
+                    );
+                }
             } else {
                 lastEnvironment.previewWindow.aippPreviewCode = liveBridge;
             }
@@ -477,23 +584,44 @@ export function createPreviewCodeRuntime(host: HTMLElement): PreviewCodeRuntimeC
         }
     };
 
+    const flushLatest = () => {
+        scheduledApply = null;
+        if (disposed || !latestUpdate) {
+            return;
+        }
+        lastAppliedAt = Date.now();
+        applyLatest();
+    };
+
     return {
         update(next) {
             latestUpdate = next;
             const registry = getBridgeRegistry();
             registry[next.bridgeId] = next.bridge;
-            if (scheduledFrame !== null) {
+
+            if (next.isFinal) {
+                cancelScheduledApply(scheduledApply);
+                scheduledApply = scheduleApply(flushLatest, 0);
                 return;
             }
-            scheduledFrame = scheduleNextFrame(() => {
-                scheduledFrame = null;
-                applyLatest();
-            });
+
+            if (scheduledApply !== null) {
+                return;
+            }
+
+            const throttleDelay =
+                lastAppliedAt === 0
+                    ? 0
+                    : Math.max(
+                          PREVIEW_CODE_STREAMING_UPDATE_INTERVAL_MS - (Date.now() - lastAppliedAt),
+                          0
+                      );
+            scheduledApply = scheduleApply(flushLatest, throttleDelay);
         },
         destroy() {
             disposed = true;
-            cancelScheduledFrame(scheduledFrame);
-            scheduledFrame = null;
+            cancelScheduledApply(scheduledApply);
+            scheduledApply = null;
             if (latestUpdate) {
                 const registry = getBridgeRegistry();
                 delete registry[latestUpdate.bridgeId];

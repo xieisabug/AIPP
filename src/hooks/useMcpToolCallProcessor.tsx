@@ -327,11 +327,14 @@ function extractMcpToolCallXmlTags(content: string): ParsedMcpToolCallComment[] 
         const closeStart = content.indexOf(closeTag, openTagEnd + 1);
         if (closeStart === -1) {
             const rawPayload = content.slice(openTagEnd + 1);
+            const data = parsePartialXmlToolCallPayload(rawPayload);
+            // Incomplete XML tag → the model is still generating this tool call
+            data.isStreaming = true;
             tags.push({
                 start,
                 end: content.length,
                 complete: false,
-                data: parsePartialXmlToolCallPayload(rawPayload),
+                data,
             });
             break;
         }
@@ -362,14 +365,41 @@ function extractMcpToolCalls(content: string): ParsedMcpToolCallComment[] {
 
     const deduped: ParsedMcpToolCallComment[] = [];
     let lastEnd = -1;
+    let sealed = false;
     for (const item of merged) {
         if (item.start < lastEnd) {
+            // This item is shadowed by the previous one's range.
+            // When an incomplete XML tag shadows a streaming HTML comment,
+            // merge the richer streaming data (preview_state, llm_call_id, etc.)
+            // into the XML entry so the component receives streaming context.
+            if (
+                deduped.length > 0
+                && !deduped[deduped.length - 1].complete
+                && item.data.isStreaming
+            ) {
+                const prev = deduped[deduped.length - 1].data;
+                prev.isStreaming = true;
+                if (item.data.preview_state && !prev.preview_state) {
+                    prev.preview_state = item.data.preview_state;
+                }
+                if (item.data.fn_arguments && !prev.fn_arguments) {
+                    prev.fn_arguments = item.data.fn_arguments;
+                }
+                if (item.data.llm_call_id && !prev.llm_call_id) {
+                    prev.llm_call_id = item.data.llm_call_id;
+                }
+            }
             continue;
+        }
+        if (sealed) {
+            break;
         }
         deduped.push(item);
         lastEnd = item.end;
         if (!item.complete) {
-            break;
+            // Don't break — continue iterating so shadowed streaming comments
+            // within the incomplete range can still merge their data.
+            sealed = true;
         }
     }
     return deduped;
@@ -539,7 +569,11 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             // 添加 MCP 工具调用组件
             // 只有最后一个工具调用在执行成功后才触发续写
             const isLastCall = index === mcpCalls.length - 1;
-            const toolCallKey = `mcp-${data.llm_call_id ?? data.call_id ?? (data.isStreaming ? `streaming-${index}` : `tmp-${index}-${match.start}`)}`;
+            const toolCallKey = data.call_id
+                ? `mcp-call-${data.call_id}`
+                : data.isStreaming
+                  ? `mcp-stream-${messageId ?? "message"}-${index}-${data.server_name}-${data.tool_name}`
+                  : `mcp-${data.llm_call_id ?? `tmp-${index}-${match.start}`}`;
             if (data.tool_name === "preview_code") {
                 parts.push(
                     <InlineCodePreviewCard

@@ -12,6 +12,7 @@ import {
     type PreviewCodeStreamingState,
     parsePreviewCodeToolResult,
     PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX,
+    PREVIEW_CODE_STREAMING_UPDATE_INTERVAL_MS,
     PreviewCodeRequestEvent,
 } from "@/utils/previewCode";
 import { createPreviewCodeRuntime } from "@/utils/previewCodeRuntime";
@@ -62,6 +63,15 @@ export default function InlineCodePreviewCard({
         isStreaming || isLastMessage,
     );
     const [optimisticResult, setOptimisticResult] = useState<ReturnType<typeof parsePreviewCodeToolResult> | null>(null);
+    const [displayStreamingPreviewState, setDisplayStreamingPreviewState] =
+        useState<PreviewCodeStreamingState | null>(streamingPreviewState ?? null);
+    const displayStreamingPreviewStateRef = useRef<PreviewCodeStreamingState | null>(
+        streamingPreviewState ?? null,
+    );
+    const pendingStreamingPreviewStateRef = useRef<PreviewCodeStreamingState | null>(null);
+    const streamingPreviewTimerRef = useRef<number | null>(null);
+    const lastStreamingPreviewAppliedAtRef = useRef(0);
+    const lastStreamingPreviewIdentityRef = useRef<string | null>(null);
 
     const matchedStateByLlmCallId = useMemo(() => {
         if (!mcpToolCallStates || !llmCallId || callId) {
@@ -76,6 +86,19 @@ export default function InlineCodePreviewCard({
     }, [mcpToolCallStates, llmCallId, callId]);
 
     const effectiveCallId = callId ?? matchedStateByLlmCallId?.call_id ?? null;
+    const previewIdentity = useMemo(
+        () =>
+            effectiveCallId !== null
+                ? `call:${effectiveCallId}`
+                : llmCallId
+                  ? `llm:${llmCallId}`
+                  : messageId !== undefined
+                    ? `message:${messageId}`
+                    : "transient",
+        [effectiveCallId, llmCallId, messageId]
+    );
+    const activeStreamingPreviewState =
+        isStreaming ? (displayStreamingPreviewState ?? streamingPreviewState ?? null) : streamingPreviewState;
     const stateOverride =
         (effectiveCallId && mcpToolCallStates
             ? mcpToolCallStates.get(effectiveCallId)
@@ -83,32 +106,124 @@ export default function InlineCodePreviewCard({
     const effectiveParameters = isStreaming
         ? parameters
         : stateOverride?.parameters ?? persistedToolCall?.parameters ?? parameters;
+
+    useEffect(() => {
+        const clearScheduledStreamingPreview = () => {
+            if (streamingPreviewTimerRef.current !== null) {
+                window.clearTimeout(streamingPreviewTimerRef.current);
+                streamingPreviewTimerRef.current = null;
+            }
+        };
+        const applyStreamingPreviewState = (nextState: PreviewCodeStreamingState | null) => {
+            clearScheduledStreamingPreview();
+            pendingStreamingPreviewStateRef.current = null;
+            displayStreamingPreviewStateRef.current = nextState;
+            setDisplayStreamingPreviewState(nextState);
+            lastStreamingPreviewAppliedAtRef.current = nextState ? Date.now() : 0;
+        };
+
+        if (!isStreaming) {
+            lastStreamingPreviewIdentityRef.current = previewIdentity;
+            applyStreamingPreviewState(streamingPreviewState ?? null);
+            return;
+        }
+
+        if (!streamingPreviewState) {
+            lastStreamingPreviewIdentityRef.current = previewIdentity;
+            applyStreamingPreviewState(null);
+            return;
+        }
+
+        if (lastStreamingPreviewIdentityRef.current !== previewIdentity) {
+            lastStreamingPreviewIdentityRef.current = previewIdentity;
+            applyStreamingPreviewState(streamingPreviewState);
+            return;
+        }
+
+        // Read the current visible state from the ref to avoid a feedback loop:
+        // displayStreamingPreviewState (React state) is intentionally excluded from
+        // the deps to prevent the effect from re-triggering on every apply cycle.
+        const currentVisibleState = displayStreamingPreviewStateRef.current;
+        if (!currentVisibleState) {
+            applyStreamingPreviewState(streamingPreviewState);
+            return;
+        }
+
+        const isUnchanged =
+            currentVisibleState.title === streamingPreviewState.title
+            && currentVisibleState.renderer === streamingPreviewState.renderer
+            && currentVisibleState.interactionMode === streamingPreviewState.interactionMode
+            && currentVisibleState.hasRenderableDom === streamingPreviewState.hasRenderableDom
+            && currentVisibleState.containsScript === streamingPreviewState.containsScript
+            && currentVisibleState.renderableHtml === streamingPreviewState.renderableHtml
+            && currentVisibleState.sourceExcerpt === streamingPreviewState.sourceExcerpt
+            && currentVisibleState.loadingMessages.join("\u0000")
+                === streamingPreviewState.loadingMessages.join("\u0000");
+        if (isUnchanged) {
+            return;
+        }
+
+        if (!currentVisibleState.hasRenderableDom && streamingPreviewState.hasRenderableDom) {
+            applyStreamingPreviewState(streamingPreviewState);
+            return;
+        }
+
+        const elapsed = Date.now() - lastStreamingPreviewAppliedAtRef.current;
+        if (elapsed >= PREVIEW_CODE_STREAMING_UPDATE_INTERVAL_MS) {
+            applyStreamingPreviewState(streamingPreviewState);
+            return;
+        }
+
+        pendingStreamingPreviewStateRef.current = streamingPreviewState;
+        if (streamingPreviewTimerRef.current !== null) {
+            return;
+        }
+        streamingPreviewTimerRef.current = window.setTimeout(() => {
+            streamingPreviewTimerRef.current = null;
+            const pendingState = pendingStreamingPreviewStateRef.current;
+            pendingStreamingPreviewStateRef.current = null;
+            displayStreamingPreviewStateRef.current = pendingState;
+            setDisplayStreamingPreviewState(pendingState);
+            lastStreamingPreviewAppliedAtRef.current = pendingState ? Date.now() : 0;
+        }, Math.max(PREVIEW_CODE_STREAMING_UPDATE_INTERVAL_MS - elapsed, 0));
+    }, [isStreaming, previewIdentity, streamingPreviewState]);
+
+    useEffect(() => {
+        return () => {
+            if (streamingPreviewTimerRef.current !== null) {
+                window.clearTimeout(streamingPreviewTimerRef.current);
+            }
+        };
+    }, []);
+
     const previewRequest = useMemo(() => {
-        if (isStreaming && streamingPreviewState) {
-            return streamingPreviewState;
+        if (isStreaming && activeStreamingPreviewState) {
+            return activeStreamingPreviewState;
         }
         return parsePreviewCodeRequestLoose(effectiveParameters);
-    }, [effectiveParameters, isStreaming, streamingPreviewState]);
+    }, [activeStreamingPreviewState, effectiveParameters, isStreaming]);
     const requestSignature = useMemo(
         () =>
-            buildPreviewCodeSignature(
-                previewRequest
-                    ? {
-                          title: previewRequest.title,
-                          renderer: previewRequest.renderer,
-                          code: previewRequest.code,
-                          interactionMode: previewRequest.interactionMode,
-                      }
-                    : null
-            ),
-        [previewRequest]
+            isStreaming
+                ? null
+                : buildPreviewCodeSignature(
+                      previewRequest
+                          ? {
+                                title: previewRequest.title,
+                                renderer: previewRequest.renderer,
+                                code: previewRequest.code,
+                                interactionMode: previewRequest.interactionMode,
+                            }
+                          : null
+                  ),
+        [isStreaming, previewRequest]
     );
     const hasScriptContent = useMemo(() => {
-        if (streamingPreviewState) {
-            return streamingPreviewState.containsScript;
+        if (activeStreamingPreviewState) {
+            return activeStreamingPreviewState.containsScript;
         }
         return /<script[\s>]/i.test(previewRequest?.code ?? "");
-    }, [previewRequest?.code, streamingPreviewState]);
+    }, [activeStreamingPreviewState, previewRequest?.code]);
     const isInteractionEnabled = isStreaming || !hasScriptContent || !isCollapsed;
     const toolResult =
         optimisticResult ??
@@ -157,17 +272,17 @@ export default function InlineCodePreviewCard({
         );
     }, [previewRequest]);
     const shouldShowStreamingFallback =
-        isStreaming && !!streamingPreviewState && !streamingPreviewState.hasRenderableDom;
+        isStreaming && !!activeStreamingPreviewState && !activeStreamingPreviewState.hasRenderableDom;
     const sourceExcerpt = useMemo(() => {
-        if (streamingPreviewState?.sourceExcerpt?.trim()) {
-            return streamingPreviewState.sourceExcerpt.trim();
+        if (activeStreamingPreviewState?.sourceExcerpt?.trim()) {
+            return activeStreamingPreviewState.sourceExcerpt.trim();
         }
         const code = previewRequest?.code?.trim();
         if (!code) {
             return null;
         }
         return code.length > 600 ? `${code.slice(0, 600)}…` : code;
-    }, [previewRequest?.code, streamingPreviewState?.sourceExcerpt]);
+    }, [activeStreamingPreviewState?.sourceExcerpt, previewRequest?.code]);
     const previewHidden = displayState === "dismissed" || isHidden;
     const hostHidden = previewHidden || shouldShowStreamingFallback;
     const shouldRenderPreviewSurface = !previewHidden && !shouldShowStreamingFallback;
@@ -300,8 +415,8 @@ export default function InlineCodePreviewCard({
         const bridgeId =
             `preview-code-${llmCallId ?? messageId ?? effectiveCallId ?? "transient"}`;
         const renderCode =
-            isStreaming && streamingPreviewState
-                ? streamingPreviewState.renderableHtml
+            isStreaming && activeStreamingPreviewState
+                ? activeStreamingPreviewState.renderableHtml
                 : previewRequest.code;
         runtimeRef.current.update({
             code: renderCode,
@@ -372,7 +487,7 @@ export default function InlineCodePreviewCard({
         messageId,
         isStreaming,
         resolvedRequestId,
-        streamingPreviewState,
+        activeStreamingPreviewState,
             isRuntimeActivated,
             hasScriptContent,
             isInteractionEnabled,
