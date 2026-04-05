@@ -1161,7 +1161,7 @@ pub fn compute_next_run_at_with_config(
     config: ScheduleConfig,
     base_time: DateTime<Utc>,
 ) -> Result<Option<DateTime<Utc>>, String> {
-    use chrono::{Datelike, Timelike, Weekday};
+    use chrono::{Datelike, Timelike};
 
     if config.schedule_type == "once" {
         return Ok(config.run_at);
@@ -1170,10 +1170,41 @@ pub fn compute_next_run_at_with_config(
         return Err("不支持的 schedule_type".to_string());
     }
 
-    let value = config.interval_value.ok_or_else(|| "缺少 interval_value".to_string())?;
-    let unit = config.interval_unit.ok_or_else(|| "缺少 interval_unit".to_string())?;
+    let interval_usage_hint = "schedule_type='interval' 时必须显式提供 interval_value 和 interval_unit。常见写法：每天 22:00 => interval_unit='day', interval_value=1, start_time='22:00'；工作日 09:00 => interval_unit='week', interval_value=1, week_days=[1,2,3,4,5], start_time='09:00'。";
+    let has_week_days = config.week_days.as_ref().is_some_and(|days| !days.is_empty());
+    let has_month_days = config.month_days.as_ref().is_some_and(|days| !days.is_empty());
+    let value = config.interval_value.ok_or_else(|| {
+        if has_week_days {
+            format!(
+                "{} 你当前提供了 week_days，但 week_days 不能单独使用，必须与 interval_unit='week' 和 interval_value 一起传入。",
+                interval_usage_hint
+            )
+        } else if has_month_days {
+            format!(
+                "{} 你当前提供了 month_days，但 month_days 不能单独使用，必须与 interval_unit='month' 和 interval_value 一起传入。",
+                interval_usage_hint
+            )
+        } else {
+            interval_usage_hint.to_string()
+        }
+    })?;
+    let unit = config
+        .interval_unit
+        .ok_or_else(|| interval_usage_hint.to_string())?;
     if value <= 0 {
         return Err("interval_value 需要大于 0".to_string());
+    }
+    if has_week_days && unit != "week" {
+        return Err(format!(
+            "week_days 仅在 interval_unit='week' 时有效，当前 interval_unit='{}'。正确示例：interval_unit='week', interval_value=1, week_days=[1,2,3,4,5], start_time='09:00'。",
+            unit
+        ));
+    }
+    if has_month_days && unit != "month" {
+        return Err(format!(
+            "month_days 仅在 interval_unit='month' 时有效，当前 interval_unit='{}'。正确示例：interval_unit='month', interval_value=1, month_days=[1,15], start_time='09:00'。",
+            unit
+        ));
     }
 
     let local_base = base_time.with_timezone(&Local);

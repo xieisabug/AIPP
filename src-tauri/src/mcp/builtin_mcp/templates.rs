@@ -533,9 +533,10 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "schedule_task".into(),
-                description: "Manage scheduled tasks (定时任务) that run periodically or at a specific time. Use this to create, list, update, delete, enable, or disable scheduled tasks. Tasks created through this tool are automatically linked to the current butler conversation for result backflow.".into(),
+                description: "Manage scheduled tasks (定时任务) that run periodically or at a specific time. Use this to create, list, update, delete, enable, or disable scheduled tasks. Tasks created through this tool are automatically linked to the current butler conversation for result backflow. For create/update with schedule_type='interval', always provide interval_unit + interval_value explicitly. Common combinations: every day at 22:00 => interval_unit='day', interval_value=1, start_time='22:00'; weekdays at 09:00 => interval_unit='week', interval_value=1, week_days=[1,2,3,4,5], start_time='09:00'; monthly => interval_unit='month', interval_value=1, month_days=[1,15], start_time='09:00'. Do not pass week_days by itself.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
+                    "description": "Parameter matrix for create/update: once => run_at is required. interval => interval_unit + interval_value are required. week_days is only valid with interval_unit='week'. month_days is only valid with interval_unit='month'.",
                     "properties": {
                         "action": {
                             "type": "string",
@@ -553,34 +554,34 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         "schedule_type": {
                             "type": "string",
                             "enum": ["once", "interval"],
-                            "description": "Required for create. 'once' runs at a specific time, 'interval' runs repeatedly."
+                            "description": "Required for create. 'once' runs at a specific time and requires run_at. 'interval' runs repeatedly and requires interval_unit + interval_value."
                         },
                         "interval_value": {
                             "type": "integer",
-                            "description": "For interval type. The numeric interval value (e.g. 2 for 'every 2 hours')."
+                            "description": "Required when schedule_type='interval'. The numeric interval value used together with interval_unit (e.g. 1=every day, 2=every 2 hours)."
                         },
                         "interval_unit": {
                             "type": "string",
                             "enum": ["minute", "hour", "day", "week", "month"],
-                            "description": "For interval type. The time unit for the interval."
+                            "description": "Required when schedule_type='interval'. The time unit for the interval. Use 'week' together with week_days; use 'month' together with month_days."
                         },
                         "start_time": {
                             "type": "string",
-                            "description": "For day/week/month intervals. The time of day to run in HH:mm format (e.g. '14:30')."
+                            "description": "For day/week/month intervals. The time of day to run in HH:mm format (e.g. '14:30'). Example daily at 22:00 => interval_unit='day', interval_value=1, start_time='22:00'."
                         },
                         "week_days": {
                             "type": "array",
                             "items": { "type": "integer" },
-                            "description": "For week intervals. Days of the week (0=Sun, 1=Mon, ..., 6=Sat)."
+                            "description": "Only valid when interval_unit='week'. Days of the week (0=Sun, 1=Mon, ..., 6=Sat). Cannot be used alone. Example weekdays at 09:00 => interval_unit='week', interval_value=1, week_days=[1,2,3,4,5], start_time='09:00'."
                         },
                         "month_days": {
                             "type": "array",
                             "items": { "type": "integer" },
-                            "description": "For month intervals. Days of the month (1-31)."
+                            "description": "Only valid when interval_unit='month'. Days of the month (1-31). Example: interval_unit='month', interval_value=1, month_days=[1,15], start_time='09:00'."
                         },
                         "run_at": {
                             "type": "string",
-                            "description": "For 'once' type. The datetime to run at in 'YYYY-MM-DD HH:mm' format (local time)."
+                            "description": "Required when schedule_type='once'. The datetime to run at in 'YYYY-MM-DD HH:mm' format (local time)."
                         },
                         "assistant_id": {
                             "type": "integer",
@@ -603,6 +604,28 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                             "description": "Optional. Butler main conversation id. If omitted, the current conversation context is used."
                         }
                     },
+                    "allOf": [
+                        {
+                            "if": {
+                                "properties": {
+                                    "schedule_type": { "const": "once" }
+                                }
+                            },
+                            "then": {
+                                "required": ["run_at"]
+                            }
+                        },
+                        {
+                            "if": {
+                                "properties": {
+                                    "schedule_type": { "const": "interval" }
+                                }
+                            },
+                            "then": {
+                                "required": ["interval_value", "interval_unit"]
+                            }
+                        }
+                    ],
                     "required": ["action"]
                 }),
             },
