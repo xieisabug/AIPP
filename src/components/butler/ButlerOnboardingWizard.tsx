@@ -18,10 +18,11 @@ import {
 } from "./useButlerOnboarding";
 import StepModelConfig from "./steps/StepModelConfig";
 import StepEnvironmentCheck from "./steps/StepEnvironmentCheck";
+import StepSkillsInstall from "./steps/StepSkillsInstall";
 import StepWorkspaceConfig from "./steps/StepWorkspaceConfig";
 import StepFeishuGuide from "./steps/StepFeishuGuide";
 
-const STEP_LABELS = ["模型配置", "环境检测", "工作区", "飞书接入"];
+const STEP_LABELS = ["模型配置", "环境检测", "安装 Skills", "工作区", "飞书接入"];
 
 interface ButlerOnboardingWizardProps {
     open: boolean;
@@ -267,6 +268,9 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
                         />
                     )}
                     {state.currentStep === 2 && (
+                        <StepSkillsInstall />
+                    )}
+                    {state.currentStep === 3 && (
                         <StepWorkspaceConfig
                             trustedWorkspaces={state.trustedWorkspaces}
                             trustAllWorkspaces={state.trustAllWorkspaces}
@@ -276,7 +280,7 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
                             onUpdateDescription={updateWorkspaceDescription}
                         />
                     )}
-                    {state.currentStep === 3 && (
+                    {state.currentStep === 4 && (
                         <StepFeishuGuide
                             feishuEnabled={state.feishuEnabled}
                             feishuAppId={state.feishuAppId}

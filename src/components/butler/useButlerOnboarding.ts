@@ -31,7 +31,7 @@ export interface OnboardingState {
     feishuBaseUrl: string;
 }
 
-const TOTAL_STEPS = 4;
+const TOTAL_STEPS = 5;
 
 const initialState: OnboardingState = {
     currentStep: 0,
@@ -274,6 +274,7 @@ export function useButlerOnboarding(options: UseButlerOnboardingOptions = {}) {
             case 1:
             case 2:
             case 3:
+            case 4:
                 return true;
             default:
                 return false;
