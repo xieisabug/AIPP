@@ -59,7 +59,7 @@ static ATTENTION_LAST_ENQUEUED: OnceLock<Arc<Mutex<HashMap<i64, DateTime<Utc>>>>
 fn attention_last_enqueued_registry() -> &'static Arc<Mutex<HashMap<i64, DateTime<Utc>>>> {
     ATTENTION_LAST_ENQUEUED.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
-const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，是负责理解目标、拆解任务、选择执行助手、派发子任务、汇总结果并给出建议的内置系统角色，你的核心职责是总控、调度、判断和汇总。
+const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，名字是 {BUTLER_NAME}，是负责理解目标、拆解任务、选择执行助手、派发子任务、汇总结果并给出建议的内置系统角色，你的核心职责是总控、调度、判断和汇总。
 
 ## 工作原则
 
@@ -293,11 +293,15 @@ async fn ensure_butler_enabled(app_handle: &AppHandle) -> Result<(), String> {
 }
 
 async fn build_butler_system_prompt(app_handle: &AppHandle) -> Result<String, String> {
+    let butler_name = get_experimental_config_value(app_handle, "butler_display_name")
+        .await
+        .unwrap_or_else(|| "总管家".to_string());
     let assistant_directory_prompt = build_butler_assistant_directory_prompt(app_handle).await?;
     let trusted_workspaces_prompt = build_butler_trusted_workspaces_prompt(app_handle).await;
+    let base = BUTLER_SYSTEM_PROMPT_BASE.replace("{BUTLER_NAME}", &butler_name);
     Ok(format!(
         "{}\n\n{}\n\n{}",
-        BUTLER_SYSTEM_PROMPT_BASE, assistant_directory_prompt, trusted_workspaces_prompt,
+        base, assistant_directory_prompt, trusted_workspaces_prompt,
     ))
 }
 

@@ -1195,7 +1195,9 @@ function ButlerExperimentWindow() {
                                         {task.last_summary || task.goal}
                                     </div>
                                     <div className="mt-2 text-[11px] text-muted-foreground">
-                                        更新于 {formatTime(task.updated_time)}
+                                        {task.is_finalized
+                                            ? `完成于 ${formatTime(task.finalized_at)}`
+                                            : "进行中"}
                                     </div>
                                 </button>
                             ))}
