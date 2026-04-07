@@ -39,6 +39,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 - Rust 编译与测试必须使用默认编译位置。禁止为了绕开占用而切换到其他编译目录、临时 `CARGO_TARGET_DIR`、或任何“另一处”构建输出路径。
 - 如果发现已经有别的编译在占用默认编译位置，不要改去别处编译，直接等待占用结束后再继续。
+- 不要随意运行 `cargo fmt` 或做与当前任务无关的批量格式化。只有在用户明确要求，或为修复当前改动直接导致的格式/编译问题而必须时，才进行最小范围的格式化，避免 diff 混入无关改动。
 
 - If you add a standalone Rust binary under `src-tauri/src/bin/` (for example, a debug/preview CLI), keep `src-tauri/Cargo.toml` aligned with `default-run = "Aipp"`.
 - Otherwise `cargo run` becomes ambiguous once multiple binaries exist, which breaks the default Tauri dev flow with errors like: `cargo run could not determine which binary to run`.

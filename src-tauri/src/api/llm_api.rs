@@ -1,6 +1,6 @@
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::genai_client;
-use crate::db::llm_db::{LLMDatabase, DEFAULT_MODEL_REQUEST_MODE};
+use crate::db::llm_db::{resolve_request_mode_or_default, LLMDatabase, DEFAULT_MODEL_REQUEST_MODE};
 use crate::utils::share_utils::{decrypt_provider_data, encrypt_provider_data, ProviderShareData};
 use crate::FeatureConfigState;
 use genai::Modality;
@@ -172,6 +172,11 @@ pub async fn get_llm_models(
     let models = db.get_llm_models(llm_provider_id).map_err(|e| e.to_string())?;
     let provider_id_num =
         models.first().map(|(_, _, llm_provider_id, _, _, _, _, _)| *llm_provider_id);
+    let provider_api_type = if let Some(provider_id_num) = provider_id_num {
+        Some(db.get_llm_provider(provider_id_num).map_err(|e| e.to_string())?.api_type)
+    } else {
+        None
+    };
     let request_mode_map = if let Some(provider_id_num) = provider_id_num {
         list_request_mode_map(&db, provider_id_num)?
     } else {
@@ -189,10 +194,10 @@ pub async fn get_llm_models(
         video_support,
     ) in models
     {
-        let request_mode = request_mode_map
-            .get(&code)
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string());
+        let request_mode = request_mode_map.get(&code).cloned().unwrap_or_else(|| {
+            resolve_request_mode_or_default(provider_api_type.as_deref().unwrap_or(""), &code, None)
+                .to_string()
+        });
         result.push(LlmModel {
             id,
             name,
@@ -273,7 +278,14 @@ pub async fn fetch_model_list(
                     request_mode: request_mode_map
                         .get(&model.id.to_string())
                         .cloned()
-                        .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string()),
+                        .unwrap_or_else(|| {
+                            resolve_request_mode_or_default(
+                                &llm_provider.api_type,
+                                &model.id.to_string(),
+                                None,
+                            )
+                            .to_string()
+                        }),
                 };
 
                 db.add_llm_model(
@@ -306,13 +318,16 @@ pub async fn add_llm_model(
     code: String,
 ) -> Result<LlmModel, String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let llm_provider = db.get_llm_provider(llm_provider_id).map_err(|e| e.to_string())?;
     let code_str = code.clone();
     db.add_llm_model(&code_str, llm_provider_id, &code_str, &code_str, false, false, false)
         .map_err(|e| e.to_string())?;
     let request_mode = db
         .get_model_request_mode(llm_provider_id, &code_str)
         .map_err(|e| e.to_string())?
-        .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string());
+        .unwrap_or_else(|| {
+            resolve_request_mode_or_default(&llm_provider.api_type, &code_str, None).to_string()
+        });
 
     Ok(LlmModel {
         id: 0,
@@ -435,10 +450,11 @@ pub async fn preview_model_list(
             for model in &models {
                 let model_code = model.id.to_string();
                 let is_selected = existing_model_codes.contains(&model_code);
-                let request_mode = request_mode_map
-                    .get(&model_code)
-                    .cloned()
-                    .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string());
+                let request_mode =
+                    request_mode_map.get(&model_code).cloned().unwrap_or_else(|| {
+                        resolve_request_mode_or_default(&llm_provider.api_type, &model_code, None)
+                            .to_string()
+                    });
 
                 available_models.push(ModelForSelection {
                     name: model.name.to_string(),
