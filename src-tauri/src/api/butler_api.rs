@@ -25,6 +25,9 @@ use crate::feishu::inherit_latest_feishu_target;
 use crate::mcp::builtin_mcp::OperationState;
 use crate::mcp::registry_api::ensure_agent_load_skill_for_assistant;
 use crate::skills::scanner::SkillScanner;
+use crate::utils::bun_utils::BunUtils;
+use crate::utils::python_utils::{PythonInfo, PythonUtils};
+use crate::utils::uv_utils::UvUtils;
 
 const EXPERIMENTAL_FEATURE_CODE: &str = "experimental";
 const BUTLER_MAIN_SLOT: &str = "default";
@@ -351,9 +354,10 @@ async fn load_butler_workspace_config(app_handle: &AppHandle) -> ButlerWorkspace
         get_experimental_config_value(app_handle, "butler_main_workspace_path").await;
     let main_workspace_description =
         get_experimental_config_value(app_handle, "butler_main_workspace_description").await;
-    let trusted_workspaces_raw = get_experimental_config_value(app_handle, "butler_trusted_workspaces")
-        .await
-        .unwrap_or_default();
+    let trusted_workspaces_raw =
+        get_experimental_config_value(app_handle, "butler_trusted_workspaces")
+            .await
+            .unwrap_or_default();
 
     build_butler_workspace_config(
         main_workspace_path.as_deref(),
@@ -381,11 +385,16 @@ async fn build_butler_system_prompt(app_handle: &AppHandle) -> Result<String, St
     let assistant_directory_prompt = build_butler_assistant_directory_prompt(app_handle).await?;
     let trusted_workspaces_prompt =
         build_butler_trusted_workspaces_prompt(app_handle, &workspace_config).await;
+    let dev_tools_prompt = build_butler_dev_tools_prompt(app_handle).await;
     let base = BUTLER_SYSTEM_PROMPT_BASE.replace("{BUTLER_NAME}", &butler_name);
-    Ok(format!(
-        "{}\n\n{}\n\n{}",
-        base, assistant_directory_prompt, trusted_workspaces_prompt,
-    ))
+    if dev_tools_prompt.is_empty() {
+        Ok(format!("{}\n\n{}\n\n{}", base, assistant_directory_prompt, trusted_workspaces_prompt,))
+    } else {
+        Ok(format!(
+            "{}\n\n{}\n\n{}\n\n{}",
+            base, assistant_directory_prompt, trusted_workspaces_prompt, dev_tools_prompt,
+        ))
+    }
 }
 
 /// Build a prompt section informing the Butler about trusted workspaces.
@@ -411,10 +420,7 @@ async fn build_butler_trusted_workspaces_prompt(
             if workspace.description.is_empty() {
                 format!("- {}：{}", label, workspace.path)
             } else {
-                format!(
-                    "- {}：{}（{}）",
-                    label, workspace.path, workspace.description
-                )
+                format!("- {}：{}（{}）", label, workspace.path, workspace.description)
             }
         })
         .collect::<Vec<_>>()
@@ -423,6 +429,45 @@ async fn build_butler_trusted_workspaces_prompt(
         "可信工作区：\n以下路径已被标记为可信工作区，子任务在这些路径下的文件操作将自动放行，无需权限确认。派发任务时，应优先使用主工作区作为工作目录。\n{}",
         list
     )
+}
+
+/// Build a prompt section informing the Butler about available dev tools (bun, uv).
+async fn build_butler_dev_tools_prompt(app_handle: &AppHandle) -> String {
+    let ah = app_handle.clone();
+
+    let (bun_info, python_info, uv_path) = tokio::task::spawn_blocking(move || {
+        let bun_info =
+            BunUtils::get_bun_executable(&ah).ok().map(|path| path.display().to_string());
+
+        let python_info = PythonUtils::get_python_info(&ah);
+
+        let uv_path = UvUtils::find_uv_executable().map(|p| p.display().to_string());
+
+        (bun_info, python_info, uv_path)
+    })
+    .await
+    .unwrap_or((None, PythonInfo::default(), None));
+
+    let mut sections: Vec<String> = Vec::new();
+
+    if let Some(bun_path) = &bun_info {
+        sections.push(format!("- Bun：已安装，路径 {}", bun_path));
+    }
+
+    if let Some(uv) = &uv_path {
+        let py_versions = if python_info.installed_pythons.is_empty() {
+            "无已安装的 Python 版本".to_string()
+        } else {
+            python_info.installed_pythons.join(", ")
+        };
+        sections.push(format!("- Uv：已安装，路径 {}，已管理的 Python 版本：{}", uv, py_versions));
+    }
+
+    if sections.is_empty() {
+        return String::new();
+    }
+
+    format!("本地开发工具：\n以下工具已安装并可在任务中使用进行辅助。\n{}", sections.join("\n"))
 }
 
 /// Parse trusted workspaces config value. Supports JSON array format
@@ -443,10 +488,7 @@ pub(crate) fn parse_trusted_workspaces(raw: &str) -> Vec<ButlerTrustedWorkspace>
                     if path.is_empty() {
                         return None;
                     }
-                    let description = v
-                        .get("description")
-                        .and_then(|d| d.as_str())
-                        .unwrap_or("");
+                    let description = v.get("description").and_then(|d| d.as_str()).unwrap_or("");
                     Some(ButlerTrustedWorkspace {
                         path,
                         description: description.trim().to_string(),
@@ -465,10 +507,7 @@ pub(crate) fn parse_trusted_workspaces(raw: &str) -> Vec<ButlerTrustedWorkspace>
             .split('\n')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-            .map(|s| ButlerTrustedWorkspace {
-                path: s.to_string(),
-                description: String::new(),
-            })
+            .map(|s| ButlerTrustedWorkspace { path: s.to_string(), description: String::new() })
             .collect(),
     )
 }
@@ -479,9 +518,8 @@ pub(crate) fn build_butler_workspace_config(
     trusted_workspaces_raw: &str,
 ) -> ButlerWorkspaceConfig {
     let parsed_trusted_workspaces = parse_trusted_workspaces(trusted_workspaces_raw);
-    let explicit_main_workspace_path = main_workspace_path
-        .map(normalize_workspace_path)
-        .unwrap_or_default();
+    let explicit_main_workspace_path =
+        main_workspace_path.map(normalize_workspace_path).unwrap_or_default();
 
     let main_workspace = if !explicit_main_workspace_path.is_empty() {
         Some(ButlerTrustedWorkspace {
@@ -501,7 +539,8 @@ pub(crate) fn build_butler_workspace_config(
         })
     };
 
-    let main_workspace_key = main_workspace.as_ref().map(|workspace| workspace_key(&workspace.path));
+    let main_workspace_key =
+        main_workspace.as_ref().map(|workspace| workspace_key(&workspace.path));
     let trusted_workspace_candidates = if !explicit_main_workspace_path.is_empty() {
         parsed_trusted_workspaces
     } else {
@@ -524,11 +563,7 @@ pub(crate) fn build_butler_workspace_config(
         trusted_workspaces.clone()
     };
 
-    ButlerWorkspaceConfig {
-        main_workspace,
-        trusted_workspaces,
-        all_trusted_workspaces,
-    }
+    ButlerWorkspaceConfig { main_workspace, trusted_workspaces, all_trusted_workspaces }
 }
 
 pub(crate) fn normalize_butler_experimental_config(
@@ -536,13 +571,8 @@ pub(crate) fn normalize_butler_experimental_config(
 ) -> Result<HashMap<String, String>, String> {
     let workspace_config = build_butler_workspace_config(
         config.get("butler_main_workspace_path").map(String::as_str),
-        config
-            .get("butler_main_workspace_description")
-            .map(String::as_str),
-        config
-            .get("butler_trusted_workspaces")
-            .map(String::as_str)
-            .unwrap_or_default(),
+        config.get("butler_main_workspace_description").map(String::as_str),
+        config.get("butler_trusted_workspaces").map(String::as_str).unwrap_or_default(),
     );
     let butler_enabled = config
         .get("butler_experiment_enabled")
