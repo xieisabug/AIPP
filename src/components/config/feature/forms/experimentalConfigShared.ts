@@ -1,4 +1,9 @@
 import type { FeatureConfig } from "@/hooks/feature/useFeatureConfig";
+import {
+    buildButlerWorkspaceConfig,
+    BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
+    serializeButlerWorkspaceConfig,
+} from "@/components/butler/butlerWorkspaceConfig";
 
 export const EXPERIMENTAL_CONFIG_DEFAULT_VALUES = {
     dynamic_mcp_loading_enabled: "false",
@@ -11,6 +16,8 @@ export const EXPERIMENTAL_CONFIG_DEFAULT_VALUES = {
     butler_display_name: "总管家",
     default_home_window: "ask",
     butler_model_id: "",
+    butler_main_workspace_path: "",
+    butler_main_workspace_description: BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
     butler_feishu_enabled: "false",
     butler_feishu_app_id: "",
     butler_feishu_app_secret: "",
@@ -66,6 +73,11 @@ export function buildExperimentalConfigFormValues(
         experimentalConfig?.get("conversation_summary_provider_id") || "";
     const legacyModel = summaryConfig?.get("conversation_summary_model") || "";
     const legacyProviderId = summaryConfig?.get("conversation_summary_provider_id") || "";
+    const workspaceConfig = buildButlerWorkspaceConfig({
+        mainWorkspacePath: experimentalConfig?.get("butler_main_workspace_path"),
+        mainWorkspaceDescription: experimentalConfig?.get("butler_main_workspace_description"),
+        trustedWorkspacesRaw: experimentalConfig?.get("butler_trusted_workspaces") || "",
+    });
 
     return {
         ...EXPERIMENTAL_CONFIG_DEFAULT_VALUES,
@@ -91,6 +103,9 @@ export function buildExperimentalConfigFormValues(
         butler_display_name: experimentalConfig?.get("butler_display_name") || "总管家",
         default_home_window: experimentalConfig?.get("default_home_window") || "ask",
         butler_model_id: experimentalConfig?.get("butler_model_id") || "",
+        butler_main_workspace_path: workspaceConfig.mainWorkspace?.path || "",
+        butler_main_workspace_description:
+            workspaceConfig.mainWorkspace?.description || BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
         butler_feishu_enabled: experimentalConfig?.get("butler_feishu_enabled") || "false",
         butler_feishu_app_id: experimentalConfig?.get("butler_feishu_app_id") || "",
         butler_feishu_app_secret: "",
@@ -118,7 +133,9 @@ export function buildExperimentalConfigFormValues(
         butler_trust_all_workspaces:
             experimentalConfig?.get("butler_trust_all_workspaces") || "false",
         butler_trusted_workspaces:
-            experimentalConfig?.get("butler_trusted_workspaces") || "",
+            workspaceConfig.trustedWorkspaces.length > 0
+                ? JSON.stringify(workspaceConfig.trustedWorkspaces)
+                : "",
     };
 }
 
@@ -129,6 +146,15 @@ export async function saveExperimentalConfigValues(
     const conversationSummaryModel = parseModelValue(
         String(values.conversation_summary_model || "")
     );
+    const workspaceConfig = serializeButlerWorkspaceConfig({
+        mainWorkspacePath: String(values.butler_main_workspace_path || ""),
+        mainWorkspaceDescription: String(values.butler_main_workspace_description || ""),
+        trustedWorkspaces: buildButlerWorkspaceConfig({
+            mainWorkspacePath: String(values.butler_main_workspace_path || ""),
+            mainWorkspaceDescription: String(values.butler_main_workspace_description || ""),
+            trustedWorkspacesRaw: String(values.butler_trusted_workspaces || ""),
+        }).trustedWorkspaces,
+    });
 
     await saveFeatureConfig("experimental", {
         dynamic_mcp_loading_enabled: String(values.dynamic_mcp_loading_enabled),
@@ -142,6 +168,8 @@ export async function saveExperimentalConfigValues(
         butler_display_name: String(values.butler_display_name || "总管家"),
         default_home_window: String(values.default_home_window || "ask"),
         butler_model_id: String(values.butler_model_id || ""),
+        butler_main_workspace_path: workspaceConfig.mainWorkspacePath,
+        butler_main_workspace_description: workspaceConfig.mainWorkspaceDescription,
         butler_feishu_enabled: String(values.butler_feishu_enabled),
         butler_feishu_app_id: String(values.butler_feishu_app_id || ""),
         butler_feishu_base_url: String(
@@ -164,6 +192,6 @@ export async function saveExperimentalConfigValues(
         ),
         context_tail_ratio: String(values.context_tail_ratio || "0.30"),
         butler_trust_all_workspaces: String(values.butler_trust_all_workspaces),
-        butler_trusted_workspaces: String(values.butler_trusted_workspaces || ""),
+        butler_trusted_workspaces: workspaceConfig.trustedWorkspacesRaw,
     });
 }

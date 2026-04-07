@@ -16,6 +16,12 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { FolderPicker } from "@/components/config/FolderPicker";
 import { ButlerOnboardingWizard } from "@/components/butler/ButlerOnboardingWizard";
+import {
+    buildButlerWorkspaceConfig,
+    BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
+    serializeButlerWorkspaceConfig,
+    type TrustedWorkspace,
+} from "@/components/butler/butlerWorkspaceConfig";
 import { AlertTriangle, Plus, Trash2, Wand2 } from "lucide-react";
 
 interface ExperimentalConfigFormProps {
@@ -144,6 +150,11 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
     const assistantSummarizerModelId = form.watch("assistant_summarizer_model_id") || "";
     const conversationSummaryModel = form.watch("conversation_summary_model") || "";
     const butlerModelId = form.watch("butler_model_id") || "";
+    const butlerMainWorkspacePath = String(form.watch("butler_main_workspace_path") || "");
+    const butlerMainWorkspaceDescription = String(
+        form.watch("butler_main_workspace_description")
+        || BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION
+    );
     const feishuAppId = String(form.watch("butler_feishu_app_id") || "");
     const feishuAppSecret = String(form.watch("butler_feishu_app_secret") || "");
     const feishuBaseUrl = String(form.watch("butler_feishu_base_url") || "https://open.feishu.cn");
@@ -339,26 +350,60 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
         triggerSummaryTask,
     ]);
 
-    // Trusted workspace helpers — stored as JSON array [{path, description}]
-    type TrustedWorkspace = { path: string; description: string };
-    const trustedPathsRaw: string = form.watch("butler_trusted_workspaces") || "[]";
-    const trustedWorkspaces: TrustedWorkspace[] = useMemo(() => {
-        try {
-            const parsed = JSON.parse(trustedPathsRaw);
-            if (Array.isArray(parsed)) return parsed;
-        } catch {
-            // Legacy: plain newline-separated paths → migrate to JSON
-            const lines = trustedPathsRaw.split("\n").map(s => s.trim()).filter(Boolean);
-            if (lines.length > 0) return lines.map(p => ({ path: p, description: "" }));
-        }
-        return [];
-    }, [trustedPathsRaw]);
+    const trustedPathsRaw: string = String(form.watch("butler_trusted_workspaces") || "");
+    const workspaceConfig = useMemo(
+        () =>
+            buildButlerWorkspaceConfig({
+                mainWorkspacePath: butlerMainWorkspacePath,
+                mainWorkspaceDescription: butlerMainWorkspaceDescription,
+                trustedWorkspacesRaw: trustedPathsRaw,
+            }),
+        [butlerMainWorkspaceDescription, butlerMainWorkspacePath, trustedPathsRaw]
+    );
+    const trustedWorkspaces = workspaceConfig.trustedWorkspaces;
     const setTrustedWorkspaces = useCallback((ws: TrustedWorkspace[]) => {
-        form.setValue("butler_trusted_workspaces", JSON.stringify(ws), { shouldDirty: true });
-    }, [form]);
+        const nextConfig = serializeButlerWorkspaceConfig({
+            mainWorkspacePath: butlerMainWorkspacePath,
+            mainWorkspaceDescription: butlerMainWorkspaceDescription,
+            trustedWorkspaces: ws,
+        });
+        form.setValue("butler_main_workspace_path", nextConfig.mainWorkspacePath, {
+            shouldDirty: true,
+        });
+        form.setValue(
+            "butler_main_workspace_description",
+            nextConfig.mainWorkspaceDescription || BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
+            { shouldDirty: true }
+        );
+        form.setValue("butler_trusted_workspaces", nextConfig.trustedWorkspacesRaw, {
+            shouldDirty: true,
+        });
+    }, [butlerMainWorkspaceDescription, butlerMainWorkspacePath, form]);
+    const setMainWorkspace = useCallback((path: string, description: string) => {
+        const nextConfig = serializeButlerWorkspaceConfig({
+            mainWorkspacePath: path,
+            mainWorkspaceDescription: description,
+            trustedWorkspaces,
+        });
+        form.setValue("butler_main_workspace_path", nextConfig.mainWorkspacePath, {
+            shouldDirty: true,
+        });
+        form.setValue(
+            "butler_main_workspace_description",
+            nextConfig.mainWorkspaceDescription || BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
+            { shouldDirty: true }
+        );
+        form.setValue("butler_trusted_workspaces", nextConfig.trustedWorkspacesRaw, {
+            shouldDirty: true,
+        });
+    }, [form, trustedWorkspaces]);
     const handleAddTrustedPath = useCallback(() => {
         const trimmed = newTrustedPath.trim();
         if (!trimmed) return;
+        if (trimmed === butlerMainWorkspacePath.trim()) {
+            toast.error("该路径已被设置为主工作区");
+            return;
+        }
         if (trustedWorkspaces.some(w => w.path === trimmed)) {
             toast.error("该路径已存在");
             return;
@@ -366,7 +411,13 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
         setTrustedWorkspaces([...trustedWorkspaces, { path: trimmed, description: newTrustedDesc.trim() }]);
         setNewTrustedPath("");
         setNewTrustedDesc("");
-    }, [newTrustedPath, newTrustedDesc, trustedWorkspaces, setTrustedWorkspaces]);
+    }, [
+        butlerMainWorkspacePath,
+        newTrustedDesc,
+        newTrustedPath,
+        setTrustedWorkspaces,
+        trustedWorkspaces,
+    ]);
     const handleRemoveTrustedPath = useCallback((path: string) => {
         setTrustedWorkspaces(trustedWorkspaces.filter(w => w.path !== path));
     }, [trustedWorkspaces, setTrustedWorkspaces]);
@@ -390,6 +441,10 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
         }
         if (butlerEnabled && !butlerModelId) {
             toast.error("请先为总管家模式选择模型");
+            return;
+        }
+        if (butlerEnabled && !butlerMainWorkspacePath.trim()) {
+            toast.error("请先配置总管家的主工作区");
             return;
         }
         if (butlerEnabled && feishuEnabled && !feishuAppId.trim()) {
@@ -539,6 +594,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
         || (showSummarySection && assistantSummaryEnabled && !assistantSummarizerModelId)
         || (showSummarySection && conversationSummaryEnabled && !conversationSummaryModel)
         || (butlerEnabled && !butlerModelId)
+        || (butlerEnabled && !butlerMainWorkspacePath.trim())
         || (butlerEnabled && feishuEnabled && !feishuAppId.trim())
         || (butlerEnabled && feishuEnabled && !feishuAppSecret.trim() && !feishuStatus?.secret_configured);
 
@@ -1188,18 +1244,59 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                         )}
                                     />
 
-                                    {!trustAllWorkspaces && (
-                                        <div className={nestedGroupClassName}>
-                                            <p className="text-sm text-muted-foreground">
-                                                配置可信工作区路径及描述。在这些路径下的文件操作将自动放行，描述会注入到总管家的提示词中帮助 AI 理解工作区用途。
-                                            </p>
-                                            {/* 添加新路径 */}
+                                    <div className={nestedGroupClassName}>
+                                        <p className="text-sm text-muted-foreground">
+                                            主工作区为必填，额外工作区按需补充。在这些路径下的文件操作将自动放行，描述会注入到总管家的提示词中帮助 AI 理解工作区用途。
+                                        </p>
+                                        <div className="space-y-3 rounded-lg border border-primary/20 bg-background p-4">
+                                            <div>
+                                                <p className="text-sm font-medium">主工作区</p>
+                                                <p className="mt-1 text-xs text-muted-foreground">
+                                                    总管家会优先在这里组织任务、文件与产物。
+                                                </p>
+                                            </div>
+                                            <FolderPicker
+                                                value={butlerMainWorkspacePath}
+                                                onChange={(value) =>
+                                                    setMainWorkspace(
+                                                        value,
+                                                        butlerMainWorkspaceDescription
+                                                    )
+                                                }
+                                                placeholder="选择或输入主工作区目录路径"
+                                            />
+                                            <Input
+                                                value={butlerMainWorkspaceDescription}
+                                                onChange={(event) =>
+                                                    setMainWorkspace(
+                                                        butlerMainWorkspacePath,
+                                                        event.target.value
+                                                    )
+                                                }
+                                                placeholder={BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION}
+                                            />
+                                            {!butlerMainWorkspacePath.trim() ? (
+                                                <p className="text-xs text-destructive">
+                                                    请先配置主工作区
+                                                </p>
+                                            ) : null}
+                                        </div>
+
+                                        {!trustAllWorkspaces && (
+                                            <>
+                                                <div className="space-y-2">
+                                                    <p className="text-sm font-medium">额外可信工作区</p>
+                                                    <p className="text-xs text-muted-foreground">
+                                                        用于补充主工作区之外也允许自动放行的目录。
+                                                    </p>
+                                                </div>
+
                                             <div className="space-y-2">
                                                 <div className="flex items-center gap-2">
                                                     <FolderPicker
                                                         value={newTrustedPath}
                                                         onChange={setNewTrustedPath}
-                                                        placeholder="选择或输入可信目录路径"
+                                                        placeholder="选择或输入额外可信目录路径"
                                                     />
                                                     <Button
                                                         type="button"
@@ -1222,7 +1319,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                             <div className="space-y-2 max-h-64 overflow-y-auto">
                                                 {trustedWorkspaces.length === 0 ? (
                                                     <div className="text-sm text-muted-foreground text-center py-3">
-                                                        暂未配置可信工作区
+                                                        暂未配置额外可信工作区
                                                     </div>
                                                 ) : (
                                                     trustedWorkspaces.map((ws) => (
@@ -1254,8 +1351,9 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                                     ))
                                                 )}
                                             </div>
-                                        </div>
-                                    )}
+                                            </>
+                                        )}
+                                    </div>
                                 </div>
 
                                 <Controller
@@ -1550,6 +1648,9 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                         {showSummarySection && conversationSummaryEnabled && !conversationSummaryModel && (
                             <p className="text-sm text-destructive mt-2">请先选择对话总结模型</p>
                         )}
+                        {butlerEnabled && !butlerMainWorkspacePath.trim() && (
+                            <p className="text-sm text-destructive mt-2">请先配置主工作区</p>
+                        )}
                         {butlerEnabled && feishuEnabled && !feishuAppId.trim() && (
                             <p className="text-sm text-destructive mt-2">请先填写飞书 App ID</p>
                         )}
@@ -1566,6 +1667,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                     existingModelId={butlerModelId}
                     existingDisplayName={String(form.watch("butler_display_name") || "总管家")}
                     existingTrustAll={trustAllWorkspaces}
+                    existingMainWorkspace={workspaceConfig.mainWorkspace}
                     existingTrustedWorkspaces={trustedWorkspaces}
                     existingFeishuEnabled={feishuEnabled}
                     existingFeishuAppId={feishuAppId}

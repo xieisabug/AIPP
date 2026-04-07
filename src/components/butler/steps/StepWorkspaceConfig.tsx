@@ -14,11 +14,18 @@ import {
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { AlertTriangle, FolderOpen, Plus, Trash2, ShieldAlert } from "lucide-react";
-import type { TrustedWorkspace } from "../useButlerOnboarding";
+import {
+    BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
+    type TrustedWorkspace,
+} from "../butlerWorkspaceConfig";
 
 interface StepWorkspaceConfigProps {
+    mainWorkspacePath: string;
+    mainWorkspaceDescription: string;
     trustedWorkspaces: TrustedWorkspace[];
     trustAllWorkspaces: boolean;
+    onMainWorkspacePathChange: (path: string) => void;
+    onMainWorkspaceDescriptionChange: (description: string) => void;
     onTrustAllChange: (trustAll: boolean) => void;
     onAddWorkspace: (path: string, description: string) => void;
     onRemoveWorkspace: (path: string) => void;
@@ -26,8 +33,12 @@ interface StepWorkspaceConfigProps {
 }
 
 const StepWorkspaceConfig: React.FC<StepWorkspaceConfigProps> = ({
+    mainWorkspacePath,
+    mainWorkspaceDescription,
     trustedWorkspaces,
     trustAllWorkspaces,
+    onMainWorkspacePathChange,
+    onMainWorkspaceDescriptionChange,
     onTrustAllChange,
     onAddWorkspace,
     onRemoveWorkspace,
@@ -92,10 +103,31 @@ const StepWorkspaceConfig: React.FC<StepWorkspaceConfigProps> = ({
                 </div>
             </div>
 
-            {/* Trusted workspace list */}
-            {!trustAllWorkspaces && (
-                <div className="space-y-3 rounded-lg border border-border/60 bg-muted/30 p-4">
-                    <p className="text-sm font-medium text-muted-foreground">可信工作区列表</p>
+            <div className="space-y-3 rounded-lg border border-border/60 bg-muted/30 p-4">
+                <div className="space-y-3 rounded-lg border border-primary/20 bg-background p-4">
+                    <p className="text-sm font-medium">主工作区</p>
+                    <p className="text-xs text-muted-foreground">
+                        主工作区为必填。总管家会优先把任务组织到这里；未填写描述时默认使用预设说明。
+                    </p>
+                    <FolderPicker
+                        value={mainWorkspacePath}
+                        onChange={onMainWorkspacePathChange}
+                        placeholder="选择或输入主工作区目录路径"
+                    />
+                    <Input
+                        value={mainWorkspaceDescription}
+                        onChange={(e) => onMainWorkspaceDescriptionChange(e.target.value)}
+                        placeholder={BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION}
+                        className="text-sm"
+                    />
+                    {!mainWorkspacePath.trim() ? (
+                        <p className="text-xs text-destructive">请先配置主工作区</p>
+                    ) : null}
+                </div>
+
+                {!trustAllWorkspaces && (
+                    <>
+                        <p className="text-sm font-medium text-muted-foreground">额外可信工作区</p>
 
                     <div className="space-y-2">
                         <div className="flex items-center gap-2">
@@ -125,7 +157,7 @@ const StepWorkspaceConfig: React.FC<StepWorkspaceConfigProps> = ({
                     <div className="space-y-2 max-h-48 overflow-y-auto">
                         {trustedWorkspaces.length === 0 ? (
                             <div className="text-sm text-muted-foreground text-center py-4">
-                                暂未配置可信工作区。你可以稍后在设置中添加。
+                                暂未配置额外可信工作区。主工作区以外的目录可按需补充。
                             </div>
                         ) : (
                             trustedWorkspaces.map((ws) => (
@@ -159,8 +191,9 @@ const StepWorkspaceConfig: React.FC<StepWorkspaceConfigProps> = ({
                             ))
                         )}
                     </div>
-                </div>
-            )}
+                    </>
+                )}
+            </div>
 
             {/* Trust-all confirmation dialog */}
             <AlertDialog open={showTrustAllConfirm} onOpenChange={setShowTrustAllConfirm}>

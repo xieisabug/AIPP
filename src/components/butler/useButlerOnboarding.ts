@@ -2,11 +2,10 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
-
-export interface TrustedWorkspace {
-    path: string;
-    description: string;
-}
+import {
+    BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
+    type TrustedWorkspace,
+} from "./butlerWorkspaceConfig";
 
 export interface OnboardingState {
     currentStep: number;
@@ -22,6 +21,8 @@ export interface OnboardingState {
     bunInstallLog: string;
     uvInstallLog: string;
     // Step 3
+    mainWorkspacePath: string;
+    mainWorkspaceDescription: string;
     trustedWorkspaces: TrustedWorkspace[];
     trustAllWorkspaces: boolean;
     // Step 4
@@ -44,6 +45,8 @@ const initialState: OnboardingState = {
     uvInstalling: false,
     bunInstallLog: "",
     uvInstallLog: "",
+    mainWorkspacePath: "",
+    mainWorkspaceDescription: BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
     trustedWorkspaces: [],
     trustAllWorkspaces: false,
     feishuEnabled: false,
@@ -57,6 +60,7 @@ interface UseButlerOnboardingOptions {
     existingModelId?: string;
     existingDisplayName?: string;
     existingTrustAll?: boolean;
+    existingMainWorkspace?: TrustedWorkspace | null;
     existingTrustedWorkspaces?: TrustedWorkspace[];
     existingFeishuEnabled?: boolean;
     existingFeishuAppId?: string;
@@ -70,6 +74,9 @@ export function useButlerOnboarding(options: UseButlerOnboardingOptions = {}) {
         modelId: options.existingModelId || "",
         displayName: options.existingDisplayName || "总管家",
         trustAllWorkspaces: options.existingTrustAll || false,
+        mainWorkspacePath: options.existingMainWorkspace?.path || "",
+        mainWorkspaceDescription:
+            options.existingMainWorkspace?.description || BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
         trustedWorkspaces: options.existingTrustedWorkspaces || [],
         feishuEnabled: options.existingFeishuEnabled || false,
         feishuAppId: options.existingFeishuAppId || "",
@@ -79,6 +86,7 @@ export function useButlerOnboarding(options: UseButlerOnboardingOptions = {}) {
         options.existingFeishuAppId,
         options.existingFeishuBaseUrl,
         options.existingFeishuEnabled,
+        options.existingMainWorkspace,
         options.existingModelId,
         options.existingTrustAll,
         options.existingTrustedWorkspaces,
@@ -195,14 +203,36 @@ export function useButlerOnboarding(options: UseButlerOnboardingOptions = {}) {
         setState((prev) => ({ ...prev, trustAllWorkspaces: trustAll }));
     }, []);
 
+    const setMainWorkspacePath = useCallback((mainWorkspacePath: string) => {
+        const normalizedPath = mainWorkspacePath.trim();
+        setState((prev) => ({
+            ...prev,
+            mainWorkspacePath: normalizedPath,
+            trustedWorkspaces: prev.trustedWorkspaces.filter(
+                (workspace) => workspace.path !== normalizedPath
+            ),
+        }));
+    }, []);
+
+    const setMainWorkspaceDescription = useCallback((mainWorkspaceDescription: string) => {
+        setState((prev) => ({ ...prev, mainWorkspaceDescription }));
+    }, []);
+
     const addTrustedWorkspace = useCallback((path: string, description: string) => {
         setState((prev) => {
-            if (prev.trustedWorkspaces.some((ws) => ws.path === path)) {
+            const normalizedPath = path.trim();
+            if (!normalizedPath || prev.mainWorkspacePath === normalizedPath) {
+                return prev;
+            }
+            if (prev.trustedWorkspaces.some((ws) => ws.path === normalizedPath)) {
                 return prev;
             }
             return {
                 ...prev,
-                trustedWorkspaces: [...prev.trustedWorkspaces, { path, description }],
+                trustedWorkspaces: [
+                    ...prev.trustedWorkspaces,
+                    { path: normalizedPath, description: description.trim() },
+                ],
             };
         });
     }, []);
@@ -273,13 +303,15 @@ export function useButlerOnboarding(options: UseButlerOnboardingOptions = {}) {
                 return !!state.modelId;
             case 1:
             case 2:
+                return true;
             case 3:
+                return !!state.mainWorkspacePath.trim();
             case 4:
                 return true;
             default:
                 return false;
         }
-    }, [state.modelId]);
+    }, [state.mainWorkspacePath, state.modelId]);
 
     return {
         state,
@@ -292,6 +324,8 @@ export function useButlerOnboarding(options: UseButlerOnboardingOptions = {}) {
         installBun,
         installUv,
         // Step 3
+        setMainWorkspacePath,
+        setMainWorkspaceDescription,
         setTrustAllWorkspaces,
         addTrustedWorkspace,
         removeTrustedWorkspace,

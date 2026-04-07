@@ -12,10 +12,11 @@ import {
 } from "@/components/ui/dialog";
 import { useModels } from "@/hooks/useModels";
 import { saveExperimentalConfigValues } from "@/components/config/feature/forms/experimentalConfigShared";
+import { useButlerOnboarding } from "./useButlerOnboarding";
 import {
-    useButlerOnboarding,
+    serializeButlerWorkspaceConfig,
     type TrustedWorkspace,
-} from "./useButlerOnboarding";
+} from "./butlerWorkspaceConfig";
 import StepModelConfig from "./steps/StepModelConfig";
 import StepEnvironmentCheck from "./steps/StepEnvironmentCheck";
 import StepSkillsInstall from "./steps/StepSkillsInstall";
@@ -30,6 +31,7 @@ interface ButlerOnboardingWizardProps {
     existingModelId?: string;
     existingDisplayName?: string;
     existingTrustAll?: boolean;
+    existingMainWorkspace?: TrustedWorkspace | null;
     existingTrustedWorkspaces?: TrustedWorkspace[];
     existingFeishuEnabled?: boolean;
     existingFeishuAppId?: string;
@@ -45,6 +47,7 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
     existingModelId,
     existingDisplayName,
     existingTrustAll,
+    existingMainWorkspace,
     existingTrustedWorkspaces,
     existingFeishuEnabled,
     existingFeishuAppId,
@@ -64,6 +67,8 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
         checkUvVersion,
         installBun,
         installUv,
+        setMainWorkspacePath,
+        setMainWorkspaceDescription,
         setTrustAllWorkspaces,
         addTrustedWorkspace,
         removeTrustedWorkspace,
@@ -83,6 +88,7 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
         existingModelId,
         existingDisplayName,
         existingTrustAll,
+        existingMainWorkspace,
         existingTrustedWorkspaces,
         existingFeishuEnabled,
         existingFeishuAppId,
@@ -108,13 +114,20 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
     const persistWizard = useCallback(async (closeAfterSave: boolean) => {
         setSaving(true);
         try {
+            const workspaceConfig = serializeButlerWorkspaceConfig({
+                mainWorkspacePath: state.mainWorkspacePath,
+                mainWorkspaceDescription: state.mainWorkspaceDescription,
+                trustedWorkspaces: state.trustedWorkspaces,
+            });
             await saveExperimentalConfigValues(saveFeatureConfig, {
                 ...initialValuesRef.current,
                 butler_experiment_enabled: "true",
                 butler_model_id: state.modelId,
                 butler_display_name: state.displayName || "总管家",
+                butler_main_workspace_path: workspaceConfig.mainWorkspacePath,
+                butler_main_workspace_description: workspaceConfig.mainWorkspaceDescription,
                 butler_trust_all_workspaces: String(state.trustAllWorkspaces),
-                butler_trusted_workspaces: JSON.stringify(state.trustedWorkspaces),
+                butler_trusted_workspaces: workspaceConfig.trustedWorkspacesRaw,
                 butler_feishu_enabled: String(state.feishuEnabled),
                 butler_feishu_app_id: state.feishuAppId,
                 butler_feishu_base_url: state.feishuBaseUrl,
@@ -124,8 +137,10 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
                 butler_experiment_enabled: "true",
                 butler_model_id: state.modelId,
                 butler_display_name: state.displayName || "总管家",
+                butler_main_workspace_path: workspaceConfig.mainWorkspacePath,
+                butler_main_workspace_description: workspaceConfig.mainWorkspaceDescription,
                 butler_trust_all_workspaces: String(state.trustAllWorkspaces),
-                butler_trusted_workspaces: JSON.stringify(state.trustedWorkspaces),
+                butler_trusted_workspaces: workspaceConfig.trustedWorkspacesRaw,
                 butler_feishu_enabled: String(state.feishuEnabled),
                 butler_feishu_app_id: state.feishuAppId,
                 butler_feishu_base_url: state.feishuBaseUrl,
@@ -272,8 +287,12 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
                     )}
                     {state.currentStep === 3 && (
                         <StepWorkspaceConfig
+                            mainWorkspacePath={state.mainWorkspacePath}
+                            mainWorkspaceDescription={state.mainWorkspaceDescription}
                             trustedWorkspaces={state.trustedWorkspaces}
                             trustAllWorkspaces={state.trustAllWorkspaces}
+                            onMainWorkspacePathChange={setMainWorkspacePath}
+                            onMainWorkspaceDescriptionChange={setMainWorkspaceDescription}
                             onTrustAllChange={setTrustAllWorkspaces}
                             onAddWorkspace={addTrustedWorkspace}
                             onRemoveWorkspace={removeTrustedWorkspace}
@@ -313,16 +332,14 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
                             <Button
                                 variant="ghost"
                                 onClick={() => void handleSkip()}
-                                disabled={saving}
+                                disabled={saving || state.currentStep === 3}
                             >
                                 跳过
                             </Button>
                         )}
                         <Button
                             onClick={() => void handleNext()}
-                            disabled={
-                                (state.currentStep === 0 && !currentStepValid) || saving
-                            }
+                            disabled={!currentStepValid || saving}
                         >
                             {saving ? (
                                 "保存中..."
