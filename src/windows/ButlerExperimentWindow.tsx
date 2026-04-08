@@ -1403,7 +1403,7 @@ function ButlerExperimentWindow() {
                             role="dialog"
                             aria-modal="true"
                             aria-labelledby="butler-task-detail-title"
-                            className="flex max-h-[85vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border bg-background shadow-lg"
+                            className="flex h-[85vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border bg-background shadow-lg"
                             onClick={(event) => event.stopPropagation()}
                         >
                             <div className="flex items-start justify-between gap-4 border-b px-6 py-4">
@@ -1428,7 +1428,7 @@ function ButlerExperimentWindow() {
                                 </button>
                             </div>
 
-                            <div className="min-h-0 flex-1 px-6 py-4">
+                            <div className="flex min-h-0 flex-1 flex-col px-6 py-4">
                                 {!selectedTaskId ? (
                                     <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">
                                         请选择一个任务。
@@ -1439,8 +1439,8 @@ function ButlerExperimentWindow() {
                                         正在加载详情...
                                     </div>
                                 ) : selectedTaskDetail ? (
-                                    <div className="flex h-full min-h-0 flex-col overflow-hidden">
-                                        <div className="space-y-3">
+                                    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                                        <div className="shrink-0 space-y-3">
                                             <div className="flex items-start justify-between gap-2">
                                                 <div>
                                                     <div className="font-medium">
@@ -1504,10 +1504,10 @@ function ButlerExperimentWindow() {
                                             </div>
                                         </div>
 
-                                        <Separator className="my-4" />
+                                        <Separator className="my-4 shrink-0" />
 
-                                        <ScrollArea className="min-h-0 flex-1 pr-2">
-                                            <div className="space-y-4">
+                                        <ScrollArea className="min-h-0 flex-1">
+                                            <div className="space-y-4 pr-4">
                                                 <div>
                                                     <div className="mb-1 text-xs font-medium text-muted-foreground">
                                                         运行状态
