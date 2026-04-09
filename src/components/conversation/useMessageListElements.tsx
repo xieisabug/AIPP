@@ -7,6 +7,7 @@ import type { InlineInteractionItem } from "../ConversationUI";
 import { PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX } from "../../utils/previewCode";
 import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
+import { useFeishuDebugResend } from "@/hooks/useFeishuDebugResend";
 import { ShineBorder } from "../magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import MessageActionButtons from "../message-item/MessageActionButtons";
@@ -188,6 +189,7 @@ export function useMessageListElements({
     allowFeishuDebugResend = false,
 }: UseMessageListElementsProps) {
     const { isMergeAssistantMessages } = useDisplayConfig();
+    const { pendingMessageId, resendMessageToFeishuDebug } = useFeishuDebugResend();
 
     const messageInlineInteractionMap = useMemo(() => {
         const map = new Map<number, InlineInteractionItem[]>();
@@ -355,28 +357,41 @@ export function useMessageListElements({
                                 );
                             })}
                         </div>
-                        {/* 合并气泡底部显示最后一条 response 消息的 action buttons */}
-                        {groupMessages.some((m) => m.message_type === "response") && (() => {
+                        {(() => {
                             const lastResponse = [...groupMessages].reverse().find((m) => m.message_type === "response");
-                            if (!lastResponse) return null;
+                            const resendTargetMessage = [...groupMessages]
+                                .reverse()
+                                .find((m) => m.message_type === "response" || m.message_type === "tool_result");
+                            const toolbarMessage = lastResponse ?? resendTargetMessage;
+
+                            if (!toolbarMessage) return null;
+
                             return (
                                 <MessageActionButtons
-                                    messageType="response"
+                                    messageType={lastResponse ? "response" : toolbarMessage.message_type}
                                     isUserMessage={false}
                                     copyIconState="copy"
                                     onCopy={() => {
-                                        const content = groupMessages
+                                        const responseContent = groupMessages
                                             .filter((m) => m.message_type === "response")
-                                            .map((m) => m.content)
-                                            .join("\n");
+                                            .map((m) => m.content);
+                                        const content = responseContent.length > 0
+                                            ? responseContent.join("\n")
+                                            : toolbarMessage.content;
                                         navigator.clipboard.writeText(content);
                                     }}
-                                    onRegenerate={() => onMessageRegenerate(lastResponse.id)}
-                                    onFork={() => onMessageFork(lastResponse.id)}
-                                    tokenCount={lastResponse.token_count}
-                                    inputTokenCount={lastResponse.input_token_count}
-                                    outputTokenCount={lastResponse.output_token_count}
-                                    messageContent={lastResponse.content}
+                                    onRegenerate={lastResponse ? () => onMessageRegenerate(lastResponse.id) : undefined}
+                                    onFork={lastResponse ? () => onMessageFork(lastResponse.id) : undefined}
+                                    onResendToFeishuDebug={
+                                        allowFeishuDebugResend && resendTargetMessage
+                                            ? () => void resendMessageToFeishuDebug(resendTargetMessage.id)
+                                            : undefined
+                                    }
+                                    isResendToFeishuDebugPending={pendingMessageId === resendTargetMessage?.id}
+                                    tokenCount={toolbarMessage.token_count}
+                                    inputTokenCount={toolbarMessage.input_token_count}
+                                    outputTokenCount={toolbarMessage.output_token_count}
+                                    messageContent={toolbarMessage.content}
                                 />
                             );
                         })()}
@@ -459,6 +474,8 @@ export function useMessageListElements({
         allowFeishuDebugResend,
         lastMessageId,
         isMergeAssistantMessages,
+        pendingMessageId,
+        resendMessageToFeishuDebug,
     ]);
 
     const versionControlElements = useMemo(() => {

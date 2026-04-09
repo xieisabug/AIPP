@@ -1,7 +1,7 @@
 use pulldown_cmark::{Options as MarkdownOptions, Parser as MarkdownParser};
 use regex::Regex;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use tracing::{debug, warn};
 
@@ -16,6 +16,8 @@ use crate::mcp::builtin_mcp::operation::state::PermissionRequestSnapshot;
 use super::config::load_runtime_config;
 use super::relay::{find_latest_feishu_target, insert_external_link};
 use super::types::*;
+
+pub(super) const FEISHU_MARKDOWN_ELEMENT_SOFT_LIMIT: usize = 3000;
 
 pub(super) fn build_feishu_http_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -66,20 +68,25 @@ pub(super) fn build_feishu_markdown_card(markdown: &str) -> Result<Value, String
     // Validate that the source is parseable markdown before building a card.
     let _ = MarkdownParser::new_ext(&normalized, MarkdownOptions::all()).count();
 
-    let mut elements = Vec::new();
-    for (index, block) in split_markdown_into_feishu_blocks(&normalized).into_iter().enumerate() {
+    let mut markdown_segments = Vec::new();
+    for block in split_markdown_into_feishu_blocks(&normalized) {
         match block {
             FeishuCardBlock::Markdown(content) => {
                 let trimmed = content.trim();
                 if !trimmed.is_empty() {
-                    elements.push(build_feishu_markdown_element(trimmed));
+                    markdown_segments.push(trimmed.to_string());
                 }
             }
             FeishuCardBlock::Table(table) => {
-                elements.push(build_feishu_table_element(index, &table)?);
+                markdown_segments.push(render_markdown_table_block(&table));
             }
         }
     }
+
+    let elements = coalesce_feishu_markdown_segments(&markdown_segments)
+        .into_iter()
+        .map(|content| build_feishu_markdown_element(&content))
+        .collect::<Vec<_>>();
 
     if elements.is_empty() {
         return Err("飞书卡片缺少可发送内容".to_string());
@@ -87,6 +94,9 @@ pub(super) fn build_feishu_markdown_card(markdown: &str) -> Result<Value, String
 
     Ok(json!({
         "schema": "2.0",
+        "config": {
+            "update_multi": true
+        },
         "body": {
             "elements": elements
         }
@@ -270,49 +280,61 @@ fn build_feishu_markdown_element(content: &str) -> Value {
     })
 }
 
-fn build_feishu_table_element(index: usize, table: &FeishuMarkdownTable) -> Result<Value, String> {
-    if table.headers.is_empty() {
-        return Err("飞书表格缺少列定义".to_string());
+fn coalesce_feishu_markdown_segments(segments: &[String]) -> Vec<String> {
+    let mut merged = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize;
+
+    for segment in segments {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let segment_len = trimmed.chars().count();
+        let separator = if current.is_empty() { "" } else { "\n\n" };
+        let separator_len = if current.is_empty() { 0 } else { 2 };
+
+        if !current.is_empty()
+            && current_len + separator_len + segment_len > FEISHU_MARKDOWN_ELEMENT_SOFT_LIMIT
+        {
+            merged.push(current);
+            current = String::new();
+            current_len = 0;
+        }
+
+        if !current.is_empty() {
+            current.push_str(separator);
+            current_len += separator_len;
+        }
+        current.push_str(trimmed);
+        current_len += segment_len;
     }
 
-    let columns = table
-        .headers
-        .iter()
-        .enumerate()
-        .map(|(column_index, header)| {
-            json!({
-                "name": format!("col_{}", column_index + 1),
-                "display_name": if header.is_empty() {
-                    format!("列{}", column_index + 1)
-                } else {
-                    header.clone()
-                },
-                "data_type": "lark_md",
-                "width": "auto"
-            })
-        })
-        .collect::<Vec<_>>();
+    if !current.is_empty() {
+        merged.push(current);
+    }
 
-    let rows = table
-        .rows
-        .iter()
-        .map(|row| {
-            let mut map = Map::new();
-            for (column_index, cell) in row.iter().enumerate() {
-                map.insert(format!("col_{}", column_index + 1), Value::String(cell.clone()));
-            }
-            Value::Object(map)
-        })
-        .collect::<Vec<_>>();
+    merged
+}
 
-    Ok(json!({
-        "tag": "table",
-        "element_id": format!("md_table_{}", index + 1),
-        "row_height": "low",
-        "page_size": rows.len().max(1),
-        "columns": columns,
-        "rows": rows
-    }))
+fn render_markdown_table_block(table: &FeishuMarkdownTable) -> String {
+    let mut lines = Vec::with_capacity(table.rows.len() + 2);
+    lines.push(render_markdown_table_row(&table.headers));
+    lines.push(render_markdown_table_separator(table.headers.len()));
+    for row in &table.rows {
+        lines.push(render_markdown_table_row(row));
+    }
+    lines.join("\n")
+}
+
+fn render_markdown_table_row(cells: &[String]) -> String {
+    let escaped_cells = cells.iter().map(|cell| cell.replace('|', r"\|")).collect::<Vec<_>>();
+    format!("| {} |", escaped_cells.join(" | "))
+}
+
+fn render_markdown_table_separator(width: usize) -> String {
+    format!("| {} |", vec!["---"; width].join(" | "))
 }
 
 pub(super) async fn reply_markdown_message(
@@ -397,7 +419,7 @@ pub(super) async fn send_message_request(
         .map_err(|e| e.to_string())?;
     let body: SendMessageResponse = response.json().await.map_err(|e| e.to_string())?;
     if body.code != 0 {
-        return Err(format!("发送飞书消息失败: {}", body.msg));
+        return Err(format!("发送飞书消息失败(code={}): {}", body.code, body.msg));
     }
     body.data
         .map(|data| data.message_id)
@@ -759,7 +781,7 @@ pub(super) async fn send_reply_message_request(
         .map_err(|e| e.to_string())?;
     let body: SendMessageResponse = response.json().await.map_err(|e| e.to_string())?;
     if body.code != 0 {
-        return Err(format!("回发飞书消息失败: {}", body.msg));
+        return Err(format!("回发飞书消息失败(code={}): {}", body.code, body.msg));
     }
     body.data
         .map(|data| data.message_id)
@@ -856,6 +878,9 @@ pub(super) async fn send_markdown_message_to_target(
                 return Ok(FeishuDebugSendResult {
                     external_message_id: message_id,
                     payload_type: "interactive".to_string(),
+                    part_count: 1,
+                    interactive_part_count: 1,
+                    text_part_count: 0,
                     delivery_mode: delivery_mode.to_string(),
                     reply_to_message_id: target.reply_to_message_id.clone(),
                     target_type: selected_target
@@ -902,6 +927,9 @@ pub(super) async fn send_markdown_message_to_target(
     Ok(FeishuDebugSendResult {
         external_message_id: message_id,
         payload_type: "text".to_string(),
+        part_count: 1,
+        interactive_part_count: 0,
+        text_part_count: 1,
         delivery_mode: delivery_mode.to_string(),
         reply_to_message_id: target.reply_to_message_id.clone(),
         target_type: selected_target.as_ref().map(|(target_type, _)| target_type.clone()),

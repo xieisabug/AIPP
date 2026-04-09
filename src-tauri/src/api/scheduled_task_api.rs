@@ -1188,9 +1188,7 @@ pub fn compute_next_run_at_with_config(
             interval_usage_hint.to_string()
         }
     })?;
-    let unit = config
-        .interval_unit
-        .ok_or_else(|| interval_usage_hint.to_string())?;
+    let unit = config.interval_unit.ok_or_else(|| interval_usage_hint.to_string())?;
     if value <= 0 {
         return Err("interval_value 需要大于 0".to_string());
     }

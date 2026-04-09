@@ -4,6 +4,13 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 const ORIGIN_FEISHU: &str = "feishu";
+const FEISHU_ASSISTANT_MESSAGE_SOFT_LIMIT: usize = 2800;
+const FEISHU_ASSISTANT_TABLE_BLOCK_SOFT_LIMIT: usize = 5;
+
+struct FeishuAssistantBlockPart {
+    content: String,
+    table_block_count: usize,
+}
 
 #[derive(Debug, Clone)]
 pub struct RenderContext<'a> {
@@ -122,13 +129,10 @@ pub fn render_message_for_external_channel(
     message: &Message,
     context: &RenderContext<'_>,
 ) -> Vec<String> {
-    let _channel = context.channel;
     match message.message_type.as_str() {
         "system" | "reasoning" => Vec::new(),
         "user" => render_user_message(&message.content, context).into_iter().collect(),
-        "response" | "assistant" => {
-            render_assistant_message(&message.content).into_iter().collect()
-        }
+        "response" | "assistant" => render_assistant_message(&message.content, context),
         "tool_result" => render_tool_result_message(&message.content),
         _ => sanitize_plain_text(&message.content).into_iter().collect(),
     }
@@ -143,7 +147,7 @@ fn render_user_message(content: &str, context: &RenderContext<'_>) -> Option<Str
     Some(format!("AIPP 用户：\n{}", sanitized))
 }
 
-fn render_assistant_message(content: &str) -> Option<String> {
+fn render_assistant_message(content: &str, context: &RenderContext<'_>) -> Vec<String> {
     let tool_calls = parse_tool_calls_from_response(content);
     let clean_text = sanitize_plain_text(content);
     let registry = ToolPresentationRegistry::new();
@@ -154,11 +158,19 @@ fn render_assistant_message(content: &str) -> Option<String> {
         .filter(|line| !line.trim().is_empty())
         .collect();
 
-    match (clean_text, tool_lines.is_empty()) {
+    let rendered = match (clean_text, tool_lines.is_empty()) {
         (Some(text), true) => Some(text),
         (Some(text), false) => Some(format!("{}\n\n{}", text, tool_lines.join("\n"))),
         (None, false) => Some(tool_lines.join("\n")),
         (None, true) => None,
+    };
+
+    match rendered {
+        Some(text) if context.channel == ORIGIN_FEISHU => {
+            split_assistant_content_for_feishu(&text, FEISHU_ASSISTANT_MESSAGE_SOFT_LIMIT)
+        }
+        Some(text) => vec![text],
+        None => Vec::new(),
     }
 }
 
@@ -466,6 +478,250 @@ fn split_content_for_feishu(content: &str, max_chars: usize) -> Vec<String> {
     }
 }
 
+fn split_assistant_content_for_feishu(content: &str, max_chars: usize) -> Vec<String> {
+    if max_chars == 0 {
+        return vec![content.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize;
+    let mut current_table_block_count = 0usize;
+
+    for block in split_markdown_blocks_for_feishu(content) {
+        for part in split_markdown_block_for_feishu(&block, max_chars) {
+            let trimmed = part.content.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let separator_len = usize::from(!current.is_empty()) * 2;
+            let part_len = trimmed.chars().count();
+            let next_table_block_count = current_table_block_count + part.table_block_count;
+            if !current.is_empty()
+                && (current_len + separator_len + part_len > max_chars
+                    || next_table_block_count > FEISHU_ASSISTANT_TABLE_BLOCK_SOFT_LIMIT)
+            {
+                chunks.push(current);
+                current = String::new();
+                current_len = 0;
+                current_table_block_count = 0;
+            }
+
+            if !current.is_empty() {
+                current.push_str("\n\n");
+                current_len += 2;
+            }
+            current.push_str(trimmed);
+            current_len += part_len;
+            current_table_block_count += part.table_block_count;
+        }
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    if chunks.is_empty() {
+        sanitize_plain_text(content).into_iter().collect()
+    } else {
+        chunks
+    }
+}
+
+fn split_markdown_blocks_for_feishu(content: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current = Vec::new();
+    let mut in_fence = false;
+    let mut fence_marker = '`';
+    let mut fence_length = 0usize;
+
+    for line in content.lines() {
+        if let Some((marker, length)) = parse_markdown_fence_delimiter(line) {
+            if !in_fence {
+                in_fence = true;
+                fence_marker = marker;
+                fence_length = length;
+            } else if marker == fence_marker && length >= fence_length {
+                in_fence = false;
+            }
+            current.push(line.to_string());
+            continue;
+        }
+
+        if !in_fence && line.trim().is_empty() {
+            flush_feishu_markdown_block(&mut blocks, &mut current);
+            continue;
+        }
+
+        current.push(line.to_string());
+    }
+
+    flush_feishu_markdown_block(&mut blocks, &mut current);
+    blocks
+}
+
+fn flush_feishu_markdown_block(blocks: &mut Vec<String>, current: &mut Vec<String>) {
+    if current.is_empty() {
+        return;
+    }
+
+    let block = current.join("\n");
+    current.clear();
+    let trimmed = block.trim();
+    if !trimmed.is_empty() {
+        blocks.push(trimmed.to_string());
+    }
+}
+
+fn split_markdown_block_for_feishu(block: &str, max_chars: usize) -> Vec<FeishuAssistantBlockPart> {
+    let trimmed = block.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if trimmed.chars().count() <= max_chars {
+        return vec![FeishuAssistantBlockPart {
+            content: trimmed.to_string(),
+            table_block_count: usize::from(looks_like_markdown_table_block(trimmed)),
+        }];
+    }
+    if looks_like_markdown_table_block(trimmed) {
+        return split_markdown_table_block_for_feishu(trimmed, max_chars);
+    }
+    if let Some(parts) = split_fenced_code_block_for_feishu(trimmed, max_chars) {
+        return parts
+            .into_iter()
+            .map(|content| FeishuAssistantBlockPart {
+                content,
+                table_block_count: 0,
+            })
+            .collect();
+    }
+    split_content_for_feishu(trimmed, max_chars)
+        .into_iter()
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .map(|content| FeishuAssistantBlockPart { content, table_block_count: 0 })
+        .collect()
+}
+
+fn looks_like_markdown_table_block(block: &str) -> bool {
+    let mut lines = block.lines();
+    let Some(header) = lines.next() else {
+        return false;
+    };
+    let Some(separator) = lines.next() else {
+        return false;
+    };
+    header.contains('|')
+        && separator.contains('|')
+        && separator.chars().all(|ch| ch == '|' || ch == '-' || ch == ':' || ch == ' ')
+}
+
+fn split_markdown_table_block_for_feishu(
+    block: &str,
+    max_chars: usize,
+) -> Vec<FeishuAssistantBlockPart> {
+    let lines: Vec<&str> = block.lines().collect();
+    if lines.len() < 3 {
+        return split_content_for_feishu(block, max_chars)
+            .into_iter()
+            .map(|content| FeishuAssistantBlockPart { content, table_block_count: 1 })
+            .collect();
+    }
+
+    let header = lines[0].trim_end();
+    let separator = lines[1].trim_end();
+    let repeated_prefix = format!("{}\n{}", header, separator);
+    let prefix_len = repeated_prefix.chars().count();
+    if prefix_len >= max_chars {
+        return split_content_for_feishu(block, max_chars)
+            .into_iter()
+            .map(|content| FeishuAssistantBlockPart { content, table_block_count: 1 })
+            .collect();
+    }
+
+    let mut parts = Vec::new();
+    let mut current = repeated_prefix.clone();
+    let mut current_len = prefix_len;
+    let mut row_count = 0usize;
+
+    for row in lines.iter().skip(2).map(|line| line.trim_end()) {
+        let row_len = row.chars().count();
+        if prefix_len + 1 + row_len > max_chars {
+            return split_content_for_feishu(block, max_chars)
+                .into_iter()
+                .map(|content| FeishuAssistantBlockPart { content, table_block_count: 1 })
+                .collect();
+        }
+
+        if row_count > 0 && current_len + 1 + row_len > max_chars {
+            parts.push(FeishuAssistantBlockPart { content: current, table_block_count: 1 });
+            current = repeated_prefix.clone();
+            current_len = prefix_len;
+            row_count = 0;
+        }
+
+        current.push('\n');
+        current.push_str(row);
+        current_len += 1 + row_len;
+        row_count += 1;
+    }
+
+    if row_count == 0 {
+        return split_content_for_feishu(block, max_chars)
+            .into_iter()
+            .map(|content| FeishuAssistantBlockPart { content, table_block_count: 1 })
+            .collect();
+    }
+
+    parts.push(FeishuAssistantBlockPart { content: current, table_block_count: 1 });
+    parts
+}
+
+fn split_fenced_code_block_for_feishu(block: &str, max_chars: usize) -> Option<Vec<String>> {
+    let mut lines = block.lines();
+    let first_line = lines.next()?;
+    let last_line = block.lines().last()?;
+    let (marker, length) = parse_markdown_fence_delimiter(first_line)?;
+    let (closing_marker, closing_length) = parse_markdown_fence_delimiter(last_line)?;
+    if marker != closing_marker || closing_length < length {
+        return None;
+    }
+
+    let closing_fence = marker.to_string().repeat(length);
+    let wrapper_len = first_line.chars().count() + closing_fence.chars().count() + 2;
+    if wrapper_len >= max_chars {
+        return None;
+    }
+
+    let inner_lines =
+        block.lines().skip(1).take(block.lines().count().saturating_sub(2)).collect::<Vec<_>>();
+    let inner_content = inner_lines.join("\n");
+    let body_limit = max_chars - wrapper_len;
+    if body_limit == 0 {
+        return None;
+    }
+
+    Some(
+        split_content_for_feishu(&inner_content, body_limit)
+            .into_iter()
+            .map(|part| format!("{}\n{}\n{}", first_line, part.trim_end(), closing_fence))
+            .collect(),
+    )
+}
+
+fn parse_markdown_fence_delimiter(line: &str) -> Option<(char, usize)> {
+    let trimmed = line.trim_start();
+    let marker = trimmed.chars().next()?;
+    if marker != '`' && marker != '~' {
+        return None;
+    }
+
+    let length = trimmed.chars().take_while(|ch| *ch == marker).count();
+    (length >= 3).then_some((marker, length))
+}
+
 fn preview_part_suffix(part_index: usize, total_parts: usize) -> String {
     if total_parts > 1 {
         format!("（第 {}/{} 部分）", part_index + 1, total_parts)
@@ -615,10 +871,7 @@ fn tool_result_content_json(tool_result: &ExternalToolResult) -> Option<&Value> 
 }
 
 fn tool_result_structured_content(tool_result: &ExternalToolResult) -> Option<&Value> {
-    tool_result
-        .parsed_output
-        .as_ref()
-        .and_then(|value| value.get("structuredContent"))
+    tool_result.parsed_output.as_ref().and_then(|value| value.get("structuredContent"))
 }
 
 fn tool_result_effective_success(tool_result: &ExternalToolResult) -> bool {
@@ -1567,10 +1820,13 @@ impl ToolPresenter for ArtifactToolPresenter {
                         "📸 Artifact 截图已生成：{}（{}x{}），已保存到 {}",
                         entry_file, width, height, path
                     )),
-                    (Some(width), Some(height), None) => {
-                        Some(format!("📸 Artifact 截图已生成：{}（{}x{}）", entry_file, width, height))
-                    }
-                    (None, None, Some(path)) | (Some(_), None, Some(path)) | (None, Some(_), Some(path)) => {
+                    (Some(width), Some(height), None) => Some(format!(
+                        "📸 Artifact 截图已生成：{}（{}x{}）",
+                        entry_file, width, height
+                    )),
+                    (None, None, Some(path))
+                    | (Some(_), None, Some(path))
+                    | (None, Some(_), Some(path)) => {
                         Some(format!("📸 Artifact 截图已生成：{}，已保存到 {}", entry_file, path))
                     }
                     _ => Some(format!("📸 Artifact 截图已生成：{}", entry_file)),
@@ -1615,7 +1871,9 @@ impl ToolPresenter for FallbackToolPresenter {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_message_for_external_channel, RenderContext};
+    use super::{
+        render_message_for_external_channel, RenderContext, FEISHU_ASSISTANT_MESSAGE_SOFT_LIMIT,
+    };
     use crate::db::conversation_db::Message;
     use chrono::Utc;
     use serde_json::{json, Value};
@@ -1684,6 +1942,87 @@ mod tests {
         assert!(rendered.contains("先检查一下"));
         assert!(rendered.contains("📖 读取 C:\\demo.txt"));
         assert!(!rendered.contains("MCP_TOOL_CALL"));
+    }
+
+    #[test]
+    fn feishu_response_long_markdown_is_split_into_multiple_messages() {
+        let content = (1..=6)
+            .map(|index| {
+                format!(
+                    "## 第{}部分\n\n这是第{}部分的总结，重点核对数据接入、风险边界与实施建议。\n\n| 维度 | 说明 |\n|------|------|\n| 风险 | {} |\n| 建议 | {} |\n| 备注 | {} |",
+                    index,
+                    index,
+                    "A".repeat(180),
+                    "B".repeat(180),
+                    "C".repeat(180),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let message = build_message("response", &content);
+
+        let parts = render_message_for_external_channel(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        );
+
+        assert!(parts.len() >= 2);
+        assert!(parts[0].contains("## 第1部分"));
+        assert!(parts.last().is_some_and(|part| part.contains("## 第6部分")));
+        assert!(parts
+            .iter()
+            .all(|part| part.chars().count() <= FEISHU_ASSISTANT_MESSAGE_SOFT_LIMIT));
+
+        let other_channel_parts = render_message_for_external_channel(
+            &message,
+            &RenderContext { channel: "wechat", relay_origin: "aipp" },
+        );
+        assert_eq!(other_channel_parts.len(), 1);
+    }
+
+    #[test]
+    fn feishu_response_split_table_repeats_table_header() {
+        let rows = (1..=24)
+            .map(|index| format!("| 项目{} | {} |", index, "超长说明".repeat(18)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = format!("## 表格拆分验证\n\n| 项目 | 说明 |\n|------|------|\n{}", rows);
+        let message = build_message("response", &content);
+
+        let parts = render_message_for_external_channel(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        );
+
+        assert!(parts.len() >= 2);
+        assert!(parts[0].contains("## 表格拆分验证"));
+        assert!(parts.iter().filter(|part| part.contains("| 项目 | 说明 |")).count() >= 2);
+        assert!(parts.iter().filter(|part| part.contains("|------|------|")).count() >= 2);
+    }
+
+    #[test]
+    fn feishu_response_with_six_table_blocks_starts_new_part() {
+        let content = (1..=6)
+            .map(|index| {
+                format!(
+                    "## 小节{}\n\n| 维度 | 说明 |\n|------|------|\n| 项目{} | 简短内容 |",
+                    index, index
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let message = build_message("response", &content);
+
+        let parts = render_message_for_external_channel(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        );
+
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].contains("## 小节1"));
+        assert!(parts[0].contains("## 小节5"));
+        assert!(!parts[0].contains("## 小节6"));
+        assert!(parts[1].contains("## 小节6"));
     }
 
     #[test]
@@ -1978,11 +2317,9 @@ mod tests {
                 }
             }),
         );
-        let rendered = render_joined(
-            &message,
-            &RenderContext { channel: "feishu", relay_origin: "aipp" },
-        )
-        .unwrap();
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
 
         assert!(rendered.contains("📸 Artifact 截图已生成：src/App.tsx（800x600）"));
         assert!(!rendered.contains("iVBORw0KGgoAAAANSUhEUgAA"));
@@ -2008,13 +2345,13 @@ mod tests {
                 }
             }),
         );
-        let rendered = render_joined(
-            &message,
-            &RenderContext { channel: "feishu", relay_origin: "aipp" },
-        )
-        .unwrap();
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
 
-        assert!(rendered.contains("📸 Artifact 截图已生成：src/App.tsx（800x600），已保存到 /tmp/aipp/artifact-shot.png"));
+        assert!(rendered.contains(
+            "📸 Artifact 截图已生成：src/App.tsx（800x600），已保存到 /tmp/aipp/artifact-shot.png"
+        ));
     }
 
     #[test]

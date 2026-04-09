@@ -1,7 +1,7 @@
+use crate::api::butler_api::build_butler_workspace_config;
 use crate::api::operation_api::{
     emit_permission_request_event, OPERATION_PERMISSION_REQUEST_EVENT,
 };
-use crate::api::butler_api::build_butler_workspace_config;
 use crate::db::conversation_db::Repository;
 use crate::db::{
     assistant_db::AssistantDatabase, conversation_db::ConversationDatabase, mcp_db::MCPDatabase,
@@ -230,12 +230,10 @@ impl PermissionManager {
             .get("butler_trusted_workspaces")
             .map(|cfg| cfg.value.clone())
             .unwrap_or_default();
-        let main_workspace_path = experimental
-            .get("butler_main_workspace_path")
-            .map(|cfg| cfg.value.clone());
-        let main_workspace_description = experimental
-            .get("butler_main_workspace_description")
-            .map(|cfg| cfg.value.clone());
+        let main_workspace_path =
+            experimental.get("butler_main_workspace_path").map(|cfg| cfg.value.clone());
+        let main_workspace_description =
+            experimental.get("butler_main_workspace_description").map(|cfg| cfg.value.clone());
         drop(config_map);
 
         let workspace_config = build_butler_workspace_config(
@@ -609,10 +607,7 @@ mod tests {
     use crate::api::butler_api::parse_trusted_workspaces;
 
     fn extract_trusted_paths(raw: &str) -> Vec<String> {
-        parse_trusted_workspaces(raw)
-            .into_iter()
-            .map(|workspace| workspace.path)
-            .collect()
+        parse_trusted_workspaces(raw).into_iter().map(|workspace| workspace.path).collect()
     }
 
     // --- extract_trusted_paths tests ---
@@ -711,7 +706,10 @@ mod tests {
             let json = r#"[{"path":"/home/user/proj1","description":"fe"},{"path":"/home/user/proj2","description":"be"}]"#;
             let paths = extract_trusted_paths(json);
             assert!(PermissionManager::is_path_in_trusted_dirs("/home/user/proj2/file.rs", &paths));
-            assert!(!PermissionManager::is_path_in_trusted_dirs("/home/user/proj3/file.rs", &paths));
+            assert!(!PermissionManager::is_path_in_trusted_dirs(
+                "/home/user/proj3/file.rs",
+                &paths
+            ));
         }
     }
 

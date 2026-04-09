@@ -113,7 +113,11 @@ impl OperationState {
     }
 
     /// 记录文件已被读取（按会话隔离）
-    pub async fn record_file_read_for_conversation(&self, path: &str, conversation_id: Option<i64>) {
+    pub async fn record_file_read_for_conversation(
+        &self,
+        path: &str,
+        conversation_id: Option<i64>,
+    ) {
         let mut files = self.read_files.lock().await;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -147,11 +151,7 @@ impl OperationState {
     }
 
     /// 清除文件读取记录（按会话隔离）
-    pub async fn clear_file_read_for_conversation(
-        &self,
-        path: &str,
-        conversation_id: Option<i64>,
-    ) {
+    pub async fn clear_file_read_for_conversation(&self, path: &str, conversation_id: Option<i64>) {
         let mut files = self.read_files.lock().await;
         files.remove(&ScopedFileKey::new(path, conversation_id));
     }

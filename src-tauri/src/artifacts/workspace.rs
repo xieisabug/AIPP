@@ -29,8 +29,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chromiumoxide::browser::{Browser, BrowserConfig};
 #[cfg(desktop)]
 use chromiumoxide::cdp::browser_protocol::{
-    emulation::SetDeviceMetricsOverrideParams,
-    page::CaptureScreenshotFormat,
+    emulation::SetDeviceMetricsOverrideParams, page::CaptureScreenshotFormat,
 };
 #[cfg(desktop)]
 use chromiumoxide::page::ScreenshotParams;
@@ -513,11 +512,7 @@ fn prepare_artifact_capture(
     ensure_preview_size(&entry_absolute)?;
 
     let inferred_language = infer_language_from_path(&entry_absolute);
-    let language = request
-        .language
-        .as_deref()
-        .map(normalize_language)
-        .unwrap_or(inferred_language);
+    let language = request.language.as_deref().map(normalize_language).unwrap_or(inferred_language);
     if !is_supported_language(&language) {
         return Err(format!("Unsupported artifact language '{}'", language));
     }
@@ -532,11 +527,7 @@ fn prepare_artifact_capture(
     }
 
     let code = fs::read_to_string(&entry_absolute).map_err(|e| {
-        format!(
-            "Failed to read artifact entry file '{}': {}",
-            entry_absolute.display(),
-            e
-        )
+        format!("Failed to read artifact entry file '{}': {}", entry_absolute.display(), e)
     })?;
 
     Ok(PreparedArtifactCapture {
@@ -569,10 +560,8 @@ async fn launch_component_preview(
     app_handle: &AppHandle,
     prepared: &PreparedArtifactCapture,
 ) -> Result<ComponentPreviewSession, String> {
-    let preview_id = format!(
-        "artifact-capture-{}",
-        Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    );
+    let preview_id =
+        format!("artifact-capture-{}", Utc::now().timestamp_nanos_opt().unwrap_or_default());
     let shared_utils = SharedPreviewUtils::new(app_handle.clone());
     let port = shared_utils
         .find_available_port(42000, 52000)
@@ -688,10 +677,7 @@ async fn wait_for_local_url_ready(port: u16, timeout_duration: Duration) -> Resu
         }
         sleep(Duration::from_millis(250)).await;
     }
-    Err(format!(
-        "Timed out waiting for local preview server on port {}",
-        port
-    ))
+    Err(format!("Timed out waiting for local preview server on port {}", port))
 }
 
 #[cfg(desktop)]
@@ -744,9 +730,7 @@ async fn capture_url_screenshot(
 
     let result = async {
         configure_capture_viewport(&page, width, height).await?;
-        page.goto(url)
-            .await
-            .map_err(|e| format!("Failed to open preview URL '{}': {}", url, e))?;
+        page.goto(url).await.map_err(|e| format!("Failed to open preview URL '{}': {}", url, e))?;
         wait_for_render_stability(&page, delay_ms).await?;
         click_selector_if_requested(&page, selector, delay_ms).await?;
         take_png_screenshot(&page).await
@@ -773,9 +757,8 @@ async fn launch_capture_browser(app_handle: &AppHandle) -> Result<Browser, Strin
         config_builder = config_builder.chrome_executable(&browser_path);
     }
 
-    let config = config_builder
-        .build()
-        .map_err(|e| format!("Failed to build Chromium config: {}", e))?;
+    let config =
+        config_builder.build().map_err(|e| format!("Failed to build Chromium config: {}", e))?;
 
     let (browser, mut handler) = Browser::launch(config)
         .await
@@ -880,16 +863,15 @@ async fn click_selector_if_requested(
 
 #[cfg(desktop)]
 async fn take_png_screenshot(page: &chromiumoxide::Page) -> Result<Vec<u8>, String> {
-    page
-        .screenshot(
-            ScreenshotParams::builder()
-                .format(CaptureScreenshotFormat::Png)
-                .full_page(false)
-                .omit_background(false)
-                .build(),
-        )
-        .await
-        .map_err(|e| format!("Failed to capture screenshot: {}", e))
+    page.screenshot(
+        ScreenshotParams::builder()
+            .format(CaptureScreenshotFormat::Png)
+            .full_page(false)
+            .omit_background(false)
+            .build(),
+    )
+    .await
+    .map_err(|e| format!("Failed to capture screenshot: {}", e))
 }
 
 #[cfg(desktop)]
@@ -925,10 +907,9 @@ fn normalize_screenshot_output_mode(output_mode: Option<&str>) -> Result<&'stati
     match output_mode.map(str::trim).filter(|value| !value.is_empty()) {
         None | Some("base64") => Ok("base64"),
         Some("path") => Ok("path"),
-        Some(other) => Err(format!(
-            "Unsupported output_mode '{}'. Expected 'base64' or 'path'.",
-            other
-        )),
+        Some(other) => {
+            Err(format!("Unsupported output_mode '{}'. Expected 'base64' or 'path'.", other))
+        }
     }
 }
 
@@ -947,8 +928,13 @@ fn write_artifact_screenshot_temp_file(
     fs::create_dir_all(&temp_dir)
         .map_err(|e| format!("Failed to create screenshot temp directory: {}", e))?;
 
-    write_artifact_screenshot_temp_file_in_dir(&temp_dir, artifact_key, entry_file, screenshot_bytes)
-        .map(|path| normalize_path_string(&path))
+    write_artifact_screenshot_temp_file_in_dir(
+        &temp_dir,
+        artifact_key,
+        entry_file,
+        screenshot_bytes,
+    )
+    .map(|path| normalize_path_string(&path))
 }
 
 #[cfg(desktop)]
@@ -961,7 +947,8 @@ fn write_artifact_screenshot_temp_file_in_dir(
     let artifact_slug = screenshot_filename_slug(artifact_key);
     let entry_slug = screenshot_filename_slug(entry_file);
     let timestamp = Utc::now().timestamp_nanos_opt().unwrap_or_default();
-    let file_name = format!("artifact-screenshot-{}-{}-{}.png", artifact_slug, entry_slug, timestamp);
+    let file_name =
+        format!("artifact-screenshot-{}-{}-{}.png", artifact_slug, entry_slug, timestamp);
     let path = temp_dir.join(file_name);
     fs::write(&path, screenshot_bytes)
         .map_err(|e| format!("Failed to write artifact screenshot '{}': {}", path.display(), e))?;
@@ -972,16 +959,14 @@ fn write_artifact_screenshot_temp_file_in_dir(
 fn screenshot_filename_slug(value: &str) -> String {
     let slug: String = value
         .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '-' })
         .collect();
     let slug = slug.trim_matches('-');
-    if slug.is_empty() { "artifact".to_string() } else { slug.to_string() }
+    if slug.is_empty() {
+        "artifact".to_string()
+    } else {
+        slug.to_string()
+    }
 }
 
 fn ensure_workspace_context(
@@ -1301,17 +1286,13 @@ mod tests {
             tokio::spawn(async move { while handler.next().await.is_some() {} });
 
             let page = browser.new_page("about:blank").await.expect("new page");
-            configure_capture_viewport(&page, 320, 240)
-                .await
-                .expect("configure viewport");
+            configure_capture_viewport(&page, 320, 240).await.expect("configure viewport");
             page.set_content(build_html_like_capture_document(
                 "<button id='toggle' onclick=\"document.body.dataset.clicked='yes'\">ok</button>",
             ))
             .await
             .expect("set content");
-            click_selector_if_requested(&page, Some("#toggle"), 50)
-                .await
-                .expect("click selector");
+            click_selector_if_requested(&page, Some("#toggle"), 50).await.expect("click selector");
             let bytes = take_png_screenshot(&page).await.expect("take screenshot");
             assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
 

@@ -862,8 +862,10 @@ pub async fn ask_ai(
         let is_gemini = model_code_lc.contains("gemini");
         let capture_usage = !(is_openai_like && is_gemini);
 
-        let capture_reasoning_content =
-            stream && is_openai_like && has_available_tools && config_map.contains_key("reasoning_effort");
+        let capture_reasoning_content = stream
+            && is_openai_like
+            && has_available_tools
+            && config_map.contains_key("reasoning_effort");
 
         let chat_config = ChatConfig {
             model_name,
@@ -1275,8 +1277,10 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let is_gemini = model_code_lc.contains("gemini");
     let capture_usage = !(is_openai_like && is_gemini);
 
-    let capture_reasoning_content =
-        stream && is_openai_like && has_available_tools && config_map.contains_key("reasoning_effort");
+    let capture_reasoning_content = stream
+        && is_openai_like
+        && has_available_tools
+        && config_map.contains_key("reasoning_effort");
 
     let chat_config = ChatConfig {
         model_name,
@@ -1605,8 +1609,10 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let is_gemini = model_code_lc.contains("gemini");
     let capture_usage = !(is_openai_like && is_gemini);
 
-    let capture_reasoning_content =
-        stream && is_openai_like && has_available_tools && config_map.contains_key("reasoning_effort");
+    let capture_reasoning_content = stream
+        && is_openai_like
+        && has_available_tools
+        && config_map.contains_key("reasoning_effort");
 
     let chat_config = ChatConfig {
         model_name,
@@ -2037,8 +2043,10 @@ pub async fn regenerate_ai(
         let is_gemini = model_code_lc.contains("gemini");
         let capture_usage = !(is_openai_like && is_gemini);
 
-        let capture_reasoning_content =
-            stream && is_openai_like && has_available_tools && config_map.contains_key("reasoning_effort");
+        let capture_reasoning_content = stream
+            && is_openai_like
+            && has_available_tools
+            && config_map.contains_key("reasoning_effort");
 
         let chat_config = ChatConfig {
             model_name,

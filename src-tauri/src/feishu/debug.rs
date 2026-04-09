@@ -88,6 +88,10 @@ pub(crate) async fn resend_message_to_feishu_for_debug(
         })?;
 
     let mut last_outcome: Option<FeishuDebugSendResult> = None;
+    let mut part_count = 0usize;
+    let mut interactive_part_count = 0usize;
+    let mut text_part_count = 0usize;
+    let mut first_interactive_error: Option<String> = None;
     for resend_message in &resend_messages {
         let preview_tool_call =
             resolve_preview_file_tool_call_for_message(&mcp_db, &message, resend_message);
@@ -108,6 +112,15 @@ pub(crate) async fn resend_message_to_feishu_for_debug(
             let outcome =
                 send_markdown_message_to_target(app_handle, &config, &target, rendered_text)
                     .await?;
+            part_count += 1;
+            match outcome.payload_type.as_str() {
+                "interactive" => interactive_part_count += 1,
+                "text" => text_part_count += 1,
+                _ => {}
+            }
+            if first_interactive_error.is_none() {
+                first_interactive_error = outcome.interactive_error.clone();
+            }
             insert_external_link(
                 app_handle,
                 ChannelLinkRecord {
@@ -128,7 +141,18 @@ pub(crate) async fn resend_message_to_feishu_for_debug(
         return Err("该消息没有可发送到飞书的可读内容".to_string());
     }
 
-    Ok(last_outcome.expect("non_empty_parts guarantees at least one outcome"))
+    let mut result = last_outcome.expect("non_empty_parts guarantees at least one outcome");
+    result.part_count = part_count;
+    result.interactive_part_count = interactive_part_count;
+    result.text_part_count = text_part_count;
+    if text_part_count > 0 && interactive_part_count > 0 {
+        result.payload_type = "mixed".to_string();
+    }
+    if result.interactive_error.is_none() {
+        result.interactive_error = first_interactive_error;
+    }
+
+    Ok(result)
 }
 
 pub fn debug_build_feishu_markdown_card(markdown: &str) -> Result<Value, String> {

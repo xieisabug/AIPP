@@ -275,12 +275,13 @@ pub async fn poll_github_copilot_token(
                     continue;
                 }
                 "slow_down" => {
-                    let server_interval = error_response.interval.unwrap_or((poll_interval_secs + 5) as i64);
-                    poll_interval_secs = server_interval.max((poll_interval_secs + 5) as i64).max(5) as u64;
+                    let server_interval =
+                        error_response.interval.unwrap_or((poll_interval_secs + 5) as i64);
+                    poll_interval_secs =
+                        server_interval.max((poll_interval_secs + 5) as i64).max(5) as u64;
                     warn!(
                         attempt,
-                        poll_interval_secs,
-                        "[Copilot] Rate limited, slowing down polling"
+                        poll_interval_secs, "[Copilot] Rate limited, slowing down polling"
                     );
                     continue;
                 }

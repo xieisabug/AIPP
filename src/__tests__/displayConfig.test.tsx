@@ -240,5 +240,35 @@ describe("Display Config Features", () => {
             const bubble = container.querySelector('.rounded-2xl');
             expect(bubble).toBeInTheDocument();
         });
+
+        it("re-renders resend button when allowFeishuDebugResend changes", () => {
+            const msg = makeMessage({
+                id: 23,
+                message_type: "response",
+                content: "Feishu resend test",
+            });
+
+            const { container, rerender } = render(
+                <MessageItem
+                    message={msg}
+                    conversationId={1}
+                    mcpToolCallStates={new Map()}
+                    allowFeishuDebugResend={false}
+                />
+            );
+
+            expect(container.querySelector('[data-aipp-slot="message-toolbar-resend-feishu"]')).not.toBeInTheDocument();
+
+            rerender(
+                <MessageItem
+                    message={msg}
+                    conversationId={1}
+                    mcpToolCallStates={new Map()}
+                    allowFeishuDebugResend
+                />
+            );
+
+            expect(container.querySelector('[data-aipp-slot="message-toolbar-resend-feishu"]')).toBeInTheDocument();
+        });
     });
 });

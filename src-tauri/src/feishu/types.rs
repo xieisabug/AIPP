@@ -297,6 +297,9 @@ pub(super) struct FeishuMarkdownTable {
 pub struct FeishuDebugSendResult {
     pub external_message_id: String,
     pub payload_type: String,
+    pub part_count: usize,
+    pub interactive_part_count: usize,
+    pub text_part_count: usize,
     pub delivery_mode: String,
     pub reply_to_message_id: Option<String>,
     pub target_type: Option<String>,
