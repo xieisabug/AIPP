@@ -210,6 +210,10 @@ pub struct SpawnButlerTaskRequest {
     pub handoff_contract_json: Option<String>,
     pub result_handling_mode: Option<String>,
     pub notification_policy: Option<String>,
+    #[serde(default)]
+    pub temporary_trusted_paths: Vec<String>,
+    #[serde(default)]
+    pub temporary_skill_identifiers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,6 +349,66 @@ fn dedupe_workspaces(workspaces: Vec<ButlerTrustedWorkspace>) -> Vec<ButlerTrust
     }
 
     normalized
+}
+
+fn normalize_temporary_trusted_paths(paths: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for path in paths {
+        let normalized_path = normalize_workspace_path(path);
+        if normalized_path.is_empty() {
+            continue;
+        }
+        let key = workspace_key(&normalized_path);
+        if !seen.insert(key) {
+            continue;
+        }
+        normalized.push(normalized_path);
+    }
+
+    normalized
+}
+
+fn normalize_temporary_skill_identifiers(skill_identifiers: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for identifier in skill_identifiers {
+        let value = identifier.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if seen.insert(value.to_string()) {
+            normalized.push(value.to_string());
+        }
+    }
+
+    normalized
+}
+
+fn validate_temporary_skill_identifiers(
+    app_handle: &AppHandle,
+    skill_identifiers: &[String],
+) -> Result<Vec<String>, String> {
+    let normalized = normalize_temporary_skill_identifiers(skill_identifiers);
+    if normalized.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let home_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let app_data_dir =
+        app_handle.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let scanner = SkillScanner::new(home_dir, app_data_dir);
+    let available = scanner.scan_all_as_map();
+
+    for identifier in &normalized {
+        if !available.contains_key(identifier) {
+            warn!(identifier = %identifier, "Temporary skill not found during Butler task spawn, keeping identifier for task-scoped retry");
+        }
+    }
+
+    Ok(normalized)
 }
 
 pub(crate) fn is_butler_system_assistant_name(name: &str) -> bool {
@@ -2637,6 +2701,9 @@ pub(crate) async fn spawn_butler_task_with_window(
     }
 
     let (executor_assistant, executor_source) = resolve_executor_assistant(app_handle, &request)?;
+    let temporary_trusted_paths = normalize_temporary_trusted_paths(&request.temporary_trusted_paths);
+    let temporary_skill_identifiers =
+        validate_temporary_skill_identifiers(app_handle, &request.temporary_skill_identifiers)?;
     let title = request.title.trim();
     let goal = request.goal.trim();
     if title.is_empty() {
@@ -2677,6 +2744,8 @@ pub(crate) async fn spawn_butler_task_with_window(
                 .notification_policy
                 .clone()
                 .or_else(|| Some("default".to_string())),
+            temporary_trusted_paths,
+            temporary_skill_identifiers,
             created_time: Utc::now(),
         })
         .map_err(|e| e.to_string())?;
@@ -3259,6 +3328,8 @@ mod tests {
             handoff_contract_json: None,
             result_handling_mode: None,
             notification_policy: None,
+            temporary_trusted_paths: Vec::new(),
+            temporary_skill_identifiers: Vec::new(),
             created_time: Utc::now(),
         }
     }
@@ -3281,6 +3352,36 @@ mod tests {
             created_time: now,
             updated_time: now,
         }
+    }
+
+    #[test]
+    fn normalize_temporary_trusted_paths_trims_and_dedupes_case_insensitive() {
+        let paths = vec![
+            "".to_string(),
+            " C:\\Repo ".to_string(),
+            "c:\\repo".to_string(),
+            "C:\\Other".to_string(),
+        ];
+
+        assert_eq!(
+            super::normalize_temporary_trusted_paths(&paths),
+            vec!["C:\\Repo".to_string(), "C:\\Other".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalize_temporary_skill_identifiers_trims_and_dedupes() {
+        let identifiers = vec![
+            "".to_string(),
+            " aipp:test-skill ".to_string(),
+            "aipp:test-skill".to_string(),
+            "aipp:other-skill".to_string(),
+        ];
+
+        assert_eq!(
+            super::normalize_temporary_skill_identifiers(&identifiers),
+            vec!["aipp:test-skill".to_string(), "aipp:other-skill".to_string()]
+        );
     }
 
     // --- trim_chars tests ---

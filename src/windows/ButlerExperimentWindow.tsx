@@ -34,6 +34,7 @@ import {
 } from "@/components/InlineInteractionCards";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
     Dialog,
     DialogContent,
@@ -53,6 +54,7 @@ import {
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select";
+import { FolderPicker } from "@/components/config/FolderPicker";
 import { ExperimentalConfigForm } from "@/components/config/feature/forms/ExperimentalConfigForm";
 import {
     buildExperimentalConfigFormValues,
@@ -72,6 +74,7 @@ import {
     ButlerTaskResultAvailableEvent,
     PaginatedButlerTasksResponse,
 } from "@/data/Butler";
+import { ScannedSkill } from "@/data/Skill";
 import { useAskUserQuestion, usePreviewFile } from "@/hooks/useInlineInteraction";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useAppShortcuts } from "@/hooks/useAppShortcuts";
@@ -89,6 +92,38 @@ function safeParseJson<T>(value?: string | null): T | null {
     } catch {
         return null;
     }
+}
+
+function normalizeTaskTrustedPaths(paths: string[]): string[] {
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    for (const path of paths) {
+        const value = path.trim();
+        if (!value) {
+            continue;
+        }
+        const key = value.toLowerCase();
+        if (seen.has(key)) {
+            continue;
+        }
+        seen.add(key);
+        normalized.push(value);
+    }
+    return normalized;
+}
+
+function normalizeIdentifiers(values: string[]): string[] {
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    for (const value of values) {
+        const trimmed = value.trim();
+        if (!trimmed || seen.has(trimmed)) {
+            continue;
+        }
+        seen.add(trimmed);
+        normalized.push(trimmed);
+    }
+    return normalized;
 }
 
 interface ButlerScheduledTask {
@@ -274,6 +309,12 @@ function ButlerExperimentWindow() {
     const [taskTitle, setTaskTitle] = useState("");
     const [taskGoal, setTaskGoal] = useState("");
     const [taskAssistantId, setTaskAssistantId] = useState<string>("");
+    const [taskTemporaryPathInput, setTaskTemporaryPathInput] = useState("");
+    const [taskTemporaryTrustedPaths, setTaskTemporaryTrustedPaths] = useState<string[]>([]);
+    const [taskTemporarySkillIdentifiers, setTaskTemporarySkillIdentifiers] = useState<string[]>([]);
+    const [taskSkillQuery, setTaskSkillQuery] = useState("");
+    const [availableSkills, setAvailableSkills] = useState<ScannedSkill[]>([]);
+    const [loadingAvailableSkills, setLoadingAvailableSkills] = useState(false);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [feishuStatus, setFeishuStatus] = useState<FeishuRuntimeStatus | null>(null);
     const [isMainConversationFeishuBound, setIsMainConversationFeishuBound] =
@@ -300,6 +341,26 @@ function ButlerExperimentWindow() {
         });
         return Array.from(ids);
     }, [conversationIdNumber, tasks]);
+
+    const filteredAvailableSkills = useMemo(() => {
+        const query = taskSkillQuery.trim().toLowerCase();
+        if (!query) {
+            return availableSkills;
+        }
+        return availableSkills.filter((skill) => {
+            const displayName = skill.display_name.toLowerCase();
+            const identifier = skill.identifier.toLowerCase();
+            return displayName.includes(query) || identifier.includes(query);
+        });
+    }, [availableSkills, taskSkillQuery]);
+
+    const availableSkillNameByIdentifier = useMemo(
+        () =>
+            new Map(
+                availableSkills.map((skill) => [skill.identifier, skill.display_name] as const)
+            ),
+        [availableSkills]
+    );
 
     const {
         pendingRequest,
@@ -388,6 +449,50 @@ function ButlerExperimentWindow() {
             setAssistants([]);
         }
     }, []);
+
+    const loadAvailableSkills = useCallback(async () => {
+        try {
+            setLoadingAvailableSkills(true);
+            const result = await invoke<ScannedSkill[]>("scan_skills");
+            result.sort((left, right) =>
+                left.display_name.localeCompare(right.display_name, "zh-CN")
+            );
+            setAvailableSkills(result);
+        } catch (error) {
+            console.error("[ButlerExperimentWindow] Failed to load skills:", error);
+            setAvailableSkills([]);
+            toast.error("加载临时 Skills 列表失败");
+        } finally {
+            setLoadingAvailableSkills(false);
+        }
+    }, []);
+
+    const resetTaskDialogState = useCallback(() => {
+        setTaskTitle("");
+        setTaskGoal("");
+        setTaskAssistantId("");
+        setTaskTemporaryPathInput("");
+        setTaskTemporaryTrustedPaths([]);
+        setTaskTemporarySkillIdentifiers([]);
+        setTaskSkillQuery("");
+    }, []);
+
+    const handleTaskDialogOpenChange = useCallback(
+        (open: boolean) => {
+            setIsTaskDialogOpen(open);
+            if (!open) {
+                resetTaskDialogState();
+            }
+        },
+        [resetTaskDialogState]
+    );
+
+    useEffect(() => {
+        if (!isTaskDialogOpen) {
+            return;
+        }
+        void loadAvailableSkills();
+    }, [isTaskDialogOpen, loadAvailableSkills]);
 
     const applyMainConversationResult = useCallback((result: ButlerMainLoadResponse) => {
         const nextTasks = sortTasks(result.tasks);
@@ -922,6 +1027,31 @@ function ButlerExperimentWindow() {
         setIsStatsDialogOpen(true);
     }, [mainConversationId]);
 
+    const handleAddTemporaryTrustedPath = useCallback(() => {
+        const nextPath = taskTemporaryPathInput.trim();
+        if (!nextPath) {
+            return;
+        }
+        setTaskTemporaryTrustedPaths((current) =>
+            normalizeTaskTrustedPaths([...current, nextPath])
+        );
+        setTaskTemporaryPathInput("");
+    }, [taskTemporaryPathInput]);
+
+    const handleRemoveTemporaryTrustedPath = useCallback((path: string) => {
+        setTaskTemporaryTrustedPaths((current) =>
+            current.filter((item) => item !== path)
+        );
+    }, []);
+
+    const handleToggleTemporarySkill = useCallback((identifier: string, checked: boolean) => {
+        setTaskTemporarySkillIdentifiers((current) =>
+            checked
+                ? normalizeIdentifiers([...current, identifier])
+                : current.filter((item) => item !== identifier)
+        );
+    }, []);
+
     const handleCreateTask = useCallback(async () => {
         if (!mainConversationId) {
             return;
@@ -949,13 +1079,13 @@ function ButlerExperimentWindow() {
                     executor_assistant_id: taskAssistantId
                         ? parseInt(taskAssistantId, 10)
                         : null,
+                    temporary_trusted_paths: taskTemporaryTrustedPaths,
+                    temporary_skill_identifiers: taskTemporarySkillIdentifiers,
                 },
             });
             console.log("[ButlerExperimentWindow] Spawn task response:", response);
             toast.success("任务已派发");
-            setTaskTitle("");
-            setTaskGoal("");
-            setIsTaskDialogOpen(false);
+            handleTaskDialogOpenChange(false);
         } catch (error) {
             console.error("[ButlerExperimentWindow] Failed to spawn task:", error);
             toast.error(
@@ -964,7 +1094,15 @@ function ButlerExperimentWindow() {
         } finally {
             setCreatingTask(false);
         }
-    }, [mainConversationId, taskAssistantId, taskGoal, taskTitle]);
+    }, [
+        handleTaskDialogOpenChange,
+        mainConversationId,
+        taskAssistantId,
+        taskGoal,
+        taskTemporarySkillIdentifiers,
+        taskTemporaryTrustedPaths,
+        taskTitle,
+    ]);
 
     const handleOpenTaskConversation = useCallback(async (taskConversationId: number) => {
         const sendSelect = () => {
@@ -1572,6 +1710,58 @@ function ButlerExperimentWindow() {
                                                 </div>
                                                 <div>
                                                     <div className="mb-1 text-xs font-medium text-muted-foreground">
+                                                        临时可信路径
+                                                    </div>
+                                                    {selectedTaskDetail.definition
+                                                        .temporary_trusted_paths.length > 0 ? (
+                                                        <div className="flex flex-wrap gap-2">
+                                                            {selectedTaskDetail.definition.temporary_trusted_paths.map(
+                                                                (path) => (
+                                                                    <Badge
+                                                                        key={path}
+                                                                        variant="outline"
+                                                                        className="max-w-full break-all whitespace-normal"
+                                                                    >
+                                                                        {path}
+                                                                    </Badge>
+                                                                )
+                                                            )}
+                                                        </div>
+                                                    ) : (
+                                                        <div className="text-sm text-muted-foreground">
+                                                            未追加
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <div>
+                                                    <div className="mb-1 text-xs font-medium text-muted-foreground">
+                                                        临时 Skills
+                                                    </div>
+                                                    {selectedTaskDetail.definition
+                                                        .temporary_skill_identifiers.length > 0 ? (
+                                                        <div className="flex flex-wrap gap-2">
+                                                            {selectedTaskDetail.definition.temporary_skill_identifiers.map(
+                                                                (identifier) => (
+                                                                    <Badge
+                                                                        key={identifier}
+                                                                        variant="outline"
+                                                                        className="max-w-full break-all whitespace-normal"
+                                                                    >
+                                                                        {availableSkillNameByIdentifier.get(
+                                                                            identifier
+                                                                        ) ?? identifier}
+                                                                    </Badge>
+                                                                )
+                                                            )}
+                                                        </div>
+                                                    ) : (
+                                                        <div className="text-sm text-muted-foreground">
+                                                            未追加
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <div>
+                                                    <div className="mb-1 text-xs font-medium text-muted-foreground">
                                                         结果摘要
                                                     </div>
                                                     <div className="whitespace-pre-wrap rounded-md border bg-muted/20 p-3 text-sm">
@@ -1608,8 +1798,8 @@ function ButlerExperimentWindow() {
                         </div>
                     </div>
                 ) : null}
-                <Dialog open={isTaskDialogOpen} onOpenChange={setIsTaskDialogOpen}>
-                    <DialogContent>
+                <Dialog open={isTaskDialogOpen} onOpenChange={handleTaskDialogOpenChange}>
+                    <DialogContent className="max-w-2xl">
                         <DialogHeader>
                             <DialogTitle>手动派发任务</DialogTitle>
                             <DialogDescription>
@@ -1660,12 +1850,126 @@ function ButlerExperimentWindow() {
                                     </p>
                                 ) : null}
                             </div>
+                            <div className="space-y-2">
+                                <div className="text-sm font-medium">临时可信路径</div>
+                                <p className="text-xs text-muted-foreground">
+                                    仅对本次子任务额外生效，会与该助手已有信任路径并集叠加。
+                                </p>
+                                <div className="flex items-center gap-2">
+                                    <FolderPicker
+                                        value={taskTemporaryPathInput}
+                                        onChange={setTaskTemporaryPathInput}
+                                        placeholder="选择或输入要追加的路径"
+                                        className="flex-1"
+                                    />
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={handleAddTemporaryTrustedPath}
+                                        disabled={!taskTemporaryPathInput.trim()}
+                                    >
+                                        <Plus className="mr-1 h-4 w-4" />
+                                        添加
+                                    </Button>
+                                </div>
+                                {taskTemporaryTrustedPaths.length > 0 ? (
+                                    <div className="flex flex-wrap gap-2">
+                                        {taskTemporaryTrustedPaths.map((path) => (
+                                            <Badge
+                                                key={path}
+                                                variant="outline"
+                                                className="max-w-full break-all whitespace-normal"
+                                            >
+                                                {path}
+                                                <button
+                                                    type="button"
+                                                    className="ml-2 inline-flex"
+                                                    onClick={() =>
+                                                        handleRemoveTemporaryTrustedPath(path)
+                                                    }
+                                                    aria-label={`移除路径 ${path}`}
+                                                >
+                                                    <X className="h-3 w-3" />
+                                                </button>
+                                            </Badge>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <p className="text-xs text-muted-foreground">
+                                        当前未追加临时可信路径
+                                    </p>
+                                )}
+                            </div>
+                            <div className="space-y-2">
+                                <div className="text-sm font-medium">临时 Skills</div>
+                                <p className="text-xs text-muted-foreground">
+                                    仅对本次子任务额外生效，会与该助手已有 Skills 并集叠加。
+                                </p>
+                                <Input
+                                    value={taskSkillQuery}
+                                    onChange={(event) => setTaskSkillQuery(event.target.value)}
+                                    placeholder="搜索 Skill 名称或 identifier"
+                                />
+                                <div className="rounded-md border">
+                                    <ScrollArea className="h-56">
+                                        <div className="space-y-2 p-3">
+                                            {loadingAvailableSkills ? (
+                                                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                                    正在加载 Skills...
+                                                </div>
+                                            ) : filteredAvailableSkills.length > 0 ? (
+                                                filteredAvailableSkills.map((skill) => {
+                                                    const checked =
+                                                        taskTemporarySkillIdentifiers.includes(
+                                                            skill.identifier
+                                                        );
+                                                    return (
+                                                        <label
+                                                            key={skill.identifier}
+                                                            className="flex cursor-pointer items-start gap-3 rounded-md border p-3"
+                                                        >
+                                                            <Checkbox
+                                                                checked={checked}
+                                                                onCheckedChange={(value) =>
+                                                                    handleToggleTemporarySkill(
+                                                                        skill.identifier,
+                                                                        value === true
+                                                                    )
+                                                                }
+                                                            />
+                                                            <div className="min-w-0 flex-1">
+                                                                <div className="text-sm font-medium">
+                                                                    {skill.display_name}
+                                                                </div>
+                                                                <div className="break-all text-xs text-muted-foreground">
+                                                                    {skill.identifier}
+                                                                </div>
+                                                                {skill.metadata.description ? (
+                                                                    <div className="mt-1 text-xs text-muted-foreground">
+                                                                        {skill.metadata.description}
+                                                                    </div>
+                                                                ) : null}
+                                                            </div>
+                                                        </label>
+                                                    );
+                                                })
+                                            ) : (
+                                                <div className="text-sm text-muted-foreground">
+                                                    暂无匹配的 Skills
+                                                </div>
+                                            )}
+                                        </div>
+                                    </ScrollArea>
+                                </div>
+                            </div>
                         </div>
                         <DialogFooter>
                             <Button
                                 type="button"
                                 variant="outline"
-                                onClick={() => setIsTaskDialogOpen(false)}
+                                onClick={() => handleTaskDialogOpenChange(false)}
                             >
                                 取消
                             </Button>

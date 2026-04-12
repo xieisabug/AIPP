@@ -127,6 +127,50 @@ impl PermissionManager {
         operation_state.is_path_trusted_for_conversation(conversation_id, path).await
     }
 
+    fn is_path_in_butler_task_temporary_trusted_paths(
+        &self,
+        conversation_id: i64,
+        path: &str,
+    ) -> bool {
+        let conversation_db = match ConversationDatabase::new(&self.app_handle) {
+            Ok(db) => db,
+            Err(error) => {
+                warn!(error = %error, "Failed to open conversation database");
+                return false;
+            }
+        };
+        let butler_repo = match conversation_db.butler_repo() {
+            Ok(repo) => repo,
+            Err(error) => {
+                warn!(error = %error, "Failed to open butler repository");
+                return false;
+            }
+        };
+        let definition = match butler_repo.get_task_definition_by_task_conversation_id(conversation_id) {
+            Ok(definition) => definition,
+            Err(error) => {
+                warn!(error = %error, conversation_id, "Failed to load butler task definition");
+                return false;
+            }
+        };
+        let Some(definition) = definition else {
+            return false;
+        };
+        if definition.temporary_trusted_paths.is_empty() {
+            return false;
+        }
+
+        let matched = Self::is_path_in_trusted_dirs(path, &definition.temporary_trusted_paths);
+        if matched {
+            debug!(
+                conversation_id,
+                path = %path,
+                "Path auto-allowed for butler task temporary trusted paths"
+            );
+        }
+        matched
+    }
+
     /// Check if path is in assistant workspace
     fn is_path_in_assistant_workspace(&self, assistant_id: i64, path: &str) -> bool {
         let assistant_db = match AssistantDatabase::new(&self.app_handle) {
@@ -542,7 +586,14 @@ impl PermissionManager {
             }
         }
 
-        // 4. 检查助手工作区信任列表
+        // 4. 检查总管家子任务临时信任路径
+        if let Some(conv_id) = conversation_id {
+            if self.is_path_in_butler_task_temporary_trusted_paths(conv_id, path) {
+                return Ok(true);
+            }
+        }
+
+        // 5. 检查助手工作区信任列表
         if let Some(conv_id) = conversation_id {
             if let Some(assistant_id) = self.get_assistant_id_from_conversation(conv_id) {
                 if self.is_path_in_assistant_workspace(assistant_id, path) {
@@ -556,12 +607,12 @@ impl PermissionManager {
             }
         }
 
-        // 5. 检查全局白名单
+        // 6. 检查全局白名单
         if self.is_path_allowed(path) {
             return Ok(true);
         }
 
-        // 6. 请求用户权限
+        // 7. 请求用户权限
         let decision =
             self.request_permission(operation_state, operation, path, conversation_id).await?;
 

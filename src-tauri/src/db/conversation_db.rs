@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use chrono::{prelude::*, SecondsFormat};
-use rusqlite::{params, Connection, OptionalExtension, Result};
+use rusqlite::{params, types::Type, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize, Serializer};
 use tracing::{debug, instrument};
 
@@ -67,6 +67,23 @@ where
         }
         None => serializer.serialize_none(),
     }
+}
+
+fn serialize_string_array(value: &[String]) -> Result<String> {
+    serde_json::to_string(value).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+}
+
+fn deserialize_string_array(index: usize, raw: String, column_name: &str) -> Result<Vec<String>> {
+    serde_json::from_str::<Vec<String>>(&raw).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid {column_name} JSON: {error}"),
+            )),
+        )
+    })
 }
 
 fn ensure_column_exists(
@@ -1396,6 +1413,8 @@ impl ConversationDatabase {
                 handoff_contract_json TEXT,
                 result_handling_mode TEXT,
                 notification_policy TEXT,
+                temporary_trusted_paths_json TEXT NOT NULL DEFAULT '[]',
+                temporary_skill_identifiers_json TEXT NOT NULL DEFAULT '[]',
                 created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (butler_conversation_id) REFERENCES conversation(id) ON DELETE CASCADE,
                 FOREIGN KEY (task_conversation_id) REFERENCES conversation(id) ON DELETE CASCADE
@@ -1405,6 +1424,18 @@ impl ConversationDatabase {
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_butler_task_definition_parent ON butler_task_definition(butler_conversation_id, created_time DESC)",
             [],
+        )?;
+        ensure_column_exists(
+            &conn,
+            "butler_task_definition",
+            "temporary_trusted_paths_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        ensure_column_exists(
+            &conn,
+            "butler_task_definition",
+            "temporary_skill_identifiers_json",
+            "TEXT NOT NULL DEFAULT '[]'",
         )?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS butler_task_result (
@@ -2184,6 +2215,10 @@ pub struct ButlerTaskDefinition {
     pub handoff_contract_json: Option<String>,
     pub result_handling_mode: Option<String>,
     pub notification_policy: Option<String>,
+    #[serde(default)]
+    pub temporary_trusted_paths: Vec<String>,
+    #[serde(default)]
+    pub temporary_skill_identifiers: Vec<String>,
     #[serde(serialize_with = "serialize_datetime_millis")]
     pub created_time: DateTime<Utc>,
 }
@@ -2314,6 +2349,10 @@ impl ButlerRepository {
         definition: &ButlerTaskDefinition,
     ) -> Result<ButlerTaskDefinition> {
         self.with_serialized_write(|conn| {
+            let temporary_trusted_paths_json =
+                serialize_string_array(&definition.temporary_trusted_paths)?;
+            let temporary_skill_identifiers_json =
+                serialize_string_array(&definition.temporary_skill_identifiers)?;
             conn.execute(
                 "INSERT INTO butler_task_definition (
                     butler_conversation_id,
@@ -2326,8 +2365,10 @@ impl ButlerRepository {
                     handoff_contract_json,
                     result_handling_mode,
                     notification_policy,
+                    temporary_trusted_paths_json,
+                    temporary_skill_identifiers_json,
                     created_time
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     definition.butler_conversation_id,
                     definition.task_conversation_id,
@@ -2339,6 +2380,8 @@ impl ButlerRepository {
                     &definition.handoff_contract_json,
                     &definition.result_handling_mode,
                     &definition.notification_policy,
+                    temporary_trusted_paths_json,
+                    temporary_skill_identifiers_json,
                     definition.created_time,
                 ],
             )?;
@@ -2354,6 +2397,8 @@ impl ButlerRepository {
                 handoff_contract_json: definition.handoff_contract_json.clone(),
                 result_handling_mode: definition.result_handling_mode.clone(),
                 notification_policy: definition.notification_policy.clone(),
+                temporary_trusted_paths: definition.temporary_trusted_paths.clone(),
+                temporary_skill_identifiers: definition.temporary_skill_identifiers.clone(),
                 created_time: definition.created_time,
             })
         })
@@ -2368,12 +2413,17 @@ impl ButlerRepository {
             "SELECT id, butler_conversation_id, task_conversation_id, title, goal,
                     executor_assistant_id, executor_assistant_source,
                     permission_template_source, handoff_contract_json,
-                    result_handling_mode, notification_policy, created_time
+                    result_handling_mode, notification_policy,
+                    temporary_trusted_paths_json, temporary_skill_identifiers_json, created_time
              FROM butler_task_definition
              WHERE butler_conversation_id = ?1
              ORDER BY created_time DESC, id DESC",
         )?;
         let rows = stmt.query_map(params![butler_conversation_id], |row| {
+            let temporary_trusted_paths =
+                deserialize_string_array(11, row.get(11)?, "temporary_trusted_paths_json")?;
+            let temporary_skill_identifiers =
+                deserialize_string_array(12, row.get(12)?, "temporary_skill_identifiers_json")?;
             Ok(ButlerTaskDefinition {
                 id: row.get(0)?,
                 butler_conversation_id: row.get(1)?,
@@ -2386,7 +2436,9 @@ impl ButlerRepository {
                 handoff_contract_json: row.get(8)?,
                 result_handling_mode: row.get(9)?,
                 notification_policy: row.get(10)?,
-                created_time: get_required_datetime_from_row(row, 11, "created_time")?,
+                temporary_trusted_paths,
+                temporary_skill_identifiers,
+                created_time: get_required_datetime_from_row(row, 13, "created_time")?,
             })
         })?;
         rows.collect()
@@ -2402,11 +2454,22 @@ impl ButlerRepository {
                 "SELECT id, butler_conversation_id, task_conversation_id, title, goal,
                         executor_assistant_id, executor_assistant_source,
                         permission_template_source, handoff_contract_json,
-                        result_handling_mode, notification_policy, created_time
+                        result_handling_mode, notification_policy,
+                        temporary_trusted_paths_json, temporary_skill_identifiers_json, created_time
                  FROM butler_task_definition
                  WHERE task_conversation_id = ?1",
                 params![task_conversation_id],
                 |row| {
+                    let temporary_trusted_paths = deserialize_string_array(
+                        11,
+                        row.get(11)?,
+                        "temporary_trusted_paths_json",
+                    )?;
+                    let temporary_skill_identifiers = deserialize_string_array(
+                        12,
+                        row.get(12)?,
+                        "temporary_skill_identifiers_json",
+                    )?;
                     Ok(ButlerTaskDefinition {
                         id: row.get(0)?,
                         butler_conversation_id: row.get(1)?,
@@ -2419,7 +2482,9 @@ impl ButlerRepository {
                         handoff_contract_json: row.get(8)?,
                         result_handling_mode: row.get(9)?,
                         notification_policy: row.get(10)?,
-                        created_time: get_required_datetime_from_row(row, 11, "created_time")?,
+                        temporary_trusted_paths,
+                        temporary_skill_identifiers,
+                        created_time: get_required_datetime_from_row(row, 13, "created_time")?,
                     })
                 },
             )

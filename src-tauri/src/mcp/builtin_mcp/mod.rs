@@ -112,6 +112,23 @@ fn argument_i64(args: &serde_json::Value, key: &str) -> Option<i64> {
     args.get(key).and_then(value_as_i64)
 }
 
+fn argument_string_array(args: &serde_json::Value, key: &str) -> Result<Vec<String>, String> {
+    let Some(value) = args.get(key) else {
+        return Ok(Vec::new());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| format!("{key} must be an array of strings"))?;
+    array
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(|entry| entry.to_string())
+                .ok_or_else(|| format!("{key} must be an array of strings"))
+        })
+        .collect()
+}
+
 fn build_dynamic_mcp_server_tool_item(tool_name: &str, summary: &str) -> serde_json::Value {
     serde_json::json!({
         "tool": tool_name,
@@ -1717,6 +1734,14 @@ pub async fn execute_aipp_builtin_tool(
                             .get("notification_policy")
                             .and_then(|v| v.as_str())
                             .map(|v| v.to_string()),
+                        temporary_trusted_paths: argument_string_array(
+                            &args,
+                            "temporary_trusted_paths",
+                        )?,
+                        temporary_skill_identifiers: argument_string_array(
+                            &args,
+                            "temporary_skill_identifiers",
+                        )?,
                     };
 
                     let window = resolve_butler_spawn_window(&app_handle)?;

@@ -34,7 +34,7 @@ use crate::feishu::maybe_schedule_butler_feishu_relay_for_aipp_turn;
 use crate::mcp::execution_api::cancel_mcp_tool_calls_by_conversation;
 use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt, MCPInfoForAssistant};
 use crate::skills::{
-    build_active_skill_attachments, collect_skills_info_for_assistant,
+    build_active_skill_attachments, collect_skills_info_for_assistant_with_additions,
     compose_user_message_with_active_skills, format_skills_prompt,
 };
 use crate::slash::parse_slash_prompt;
@@ -181,6 +181,28 @@ fn persist_active_skill_attachments(
         .into_iter()
         .map(|attachment| attachment_repo.create(&attachment).map_err(AppError::from))
         .collect()
+}
+
+fn get_butler_task_temporary_skill_identifiers(
+    app_handle: &tauri::AppHandle,
+    conversation_id: &str,
+) -> Result<Vec<String>, AppError> {
+    let trimmed = conversation_id.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let Ok(task_conversation_id) = trimmed.parse::<i64>() else {
+        return Ok(Vec::new());
+    };
+
+    let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
+    let butler_repo = db.butler_repo().map_err(AppError::from)?;
+    Ok(butler_repo
+        .get_task_definition_by_task_conversation_id(task_conversation_id)
+        .map_err(AppError::from)?
+        .map(|definition| definition.temporary_skill_identifiers)
+        .unwrap_or_default())
 }
 
 /// 工具名称映射表，用于在 sanitized 名称和原始名称之间进行转换
@@ -532,8 +554,16 @@ pub async fn ask_ai(
     };
 
     // Collect and format Skills prompt
-    let skills_info =
-        collect_skills_info_for_assistant(&app_handle, processed_request.assistant_id).await?;
+    let temporary_skill_identifiers = get_butler_task_temporary_skill_identifiers(
+        &app_handle,
+        &processed_request.conversation_id,
+    )?;
+    let skills_info = collect_skills_info_for_assistant_with_additions(
+        &app_handle,
+        processed_request.assistant_id,
+        &temporary_skill_identifiers,
+    )
+    .await?;
     let assistant_prompt_result = if !skills_info.enabled_skills.is_empty() {
         let prompt = format_skills_prompt(&app_handle, assistant_prompt_result, &skills_info).await;
         info!(enabled_skills = skills_info.enabled_skills.len(), "Skills formatted into prompt");

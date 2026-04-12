@@ -461,6 +461,20 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         "notification_policy": {
                             "type": "string",
                             "description": "Optional notification policy for task result delivery."
+                        },
+                        "temporary_trusted_paths": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Optional additive trusted paths for this task only. They are merged with the assistant's existing trusted workspace paths and do not persist back to the assistant."
+                        },
+                        "temporary_skill_identifiers": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Optional additive skill identifiers for this task only. They are merged with the assistant's existing configured skills and do not persist back to the assistant."
                         }
                     },
                     "required": ["title", "goal"]
