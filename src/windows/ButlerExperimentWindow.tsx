@@ -639,6 +639,32 @@ function ButlerExperimentWindow() {
     }, [loadButlerScheduledTasks]);
 
     useEffect(() => {
+        if (conversationIdNumber === undefined) {
+            return;
+        }
+
+        void loadButlerScheduledTasks();
+        const intervalId = window.setInterval(() => {
+            void loadButlerScheduledTasks();
+        }, 30000);
+        const listeners = [
+            listen("scheduled_task_run_created", () => {
+                void loadButlerScheduledTasks();
+            }),
+            listen("scheduled_task_run_updated", () => {
+                void loadButlerScheduledTasks();
+            }),
+        ];
+
+        return () => {
+            window.clearInterval(intervalId);
+            listeners.forEach((listener) => {
+                listener.then((unlisten) => unlisten()).catch(console.warn);
+            });
+        };
+    }, [conversationIdNumber, loadButlerScheduledTasks]);
+
+    useEffect(() => {
         if (assistants.length === 0) {
             if (taskAssistantId) {
                 setTaskAssistantId("");

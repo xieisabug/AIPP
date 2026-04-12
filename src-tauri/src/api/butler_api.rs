@@ -32,7 +32,6 @@ use crate::utils::uv_utils::UvUtils;
 const EXPERIMENTAL_FEATURE_CODE: &str = "experimental";
 const BUTLER_MAIN_SLOT: &str = "default";
 const BUTLER_KIND_MAIN: &str = "butler_main";
-const BUTLER_KIND_MAIN_ARCHIVE: &str = "butler_main_archive";
 const BUTLER_KIND_TASK: &str = "butler_task";
 const STATUS_ACCEPTED: &str = "accepted";
 const STATUS_RUNNING: &str = "running";
@@ -64,6 +63,34 @@ pub(crate) const BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION: &str =
 fn attention_last_enqueued_registry() -> &'static Arc<Mutex<HashMap<i64, DateTime<Utc>>>> {
     ATTENTION_LAST_ENQUEUED.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
+
+pub(crate) fn active_butler_main_conversation_id(app_handle: &AppHandle) -> Result<Option<i64>, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let butler_repo = db.butler_repo().map_err(|e| e.to_string())?;
+    Ok(butler_repo
+        .get_main_state(BUTLER_MAIN_SLOT)
+        .map_err(|e| e.to_string())?
+        .map(|state| state.butler_conversation_id))
+}
+
+fn is_active_butler_main_conversation_state(
+    active_butler_conversation_id: Option<i64>,
+    conversation: &Conversation,
+) -> bool {
+    conversation.conversation_kind == BUTLER_KIND_MAIN
+        && active_butler_conversation_id == Some(conversation.id)
+}
+
+pub(crate) fn is_current_butler_main_conversation(
+    app_handle: &AppHandle,
+    conversation: &Conversation,
+) -> Result<bool, String> {
+    Ok(is_active_butler_main_conversation_state(
+        active_butler_main_conversation_id(app_handle)?,
+        conversation,
+    ))
+}
+
 const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，名字是 {BUTLER_NAME}，是负责理解目标、拆解任务、选择执行助手、派发子任务、汇总结果并给出建议的内置系统角色，你的核心职责是总控、调度、判断和汇总。
 
 ## 工作原则
@@ -1099,6 +1126,9 @@ async fn enqueue_butler_main_followup(
             return Err("总管家主会话不存在".to_string());
         };
         if main_conversation.conversation_kind != BUTLER_KIND_MAIN {
+            return Err("总管家主会话已归档，无法继续回流".to_string());
+        }
+        if !is_current_butler_main_conversation(&app_handle, &main_conversation)? {
             return Err("总管家主会话已归档，无法继续回流".to_string());
         }
         let assistant_id = main_conversation
@@ -2241,6 +2271,9 @@ async fn enqueue_butler_task_attention_followup(
     if main_conversation.conversation_kind != BUTLER_KIND_MAIN {
         return Err("总管家主会话已归档，无法继续处理子任务提醒".to_string());
     }
+    if !is_current_butler_main_conversation(&app_handle, &main_conversation)? {
+        return Err("总管家主会话已归档，无法继续处理子任务提醒".to_string());
+    }
     let assistant_id =
         main_conversation.assistant_id.ok_or_else(|| "总管家主会话缺少 assistant".to_string())?;
 
@@ -2599,6 +2632,9 @@ pub(crate) async fn spawn_butler_task_with_window(
     if butler_conversation.conversation_kind != BUTLER_KIND_MAIN {
         return Err("只能在总管家主会话下派发任务".to_string());
     }
+    if !is_current_butler_main_conversation(app_handle, &butler_conversation)? {
+        return Err("总管家主会话已归档，无法继续派发任务".to_string());
+    }
 
     let (executor_assistant, executor_source) = resolve_executor_assistant(app_handle, &request)?;
     let title = request.title.trim();
@@ -2790,7 +2826,7 @@ pub async fn reset_butler_main_conversation(
         {
             current_main.name =
                 build_butler_archive_conversation_name(&current_main.name, &archived_at);
-            current_main.conversation_kind = BUTLER_KIND_MAIN_ARCHIVE.to_string();
+            current_main.conversation_kind = BUTLER_KIND_MAIN.to_string();
             current_main.is_hidden_from_normal_chat_list = true;
             current_main.updated_time = archived_at;
             conversation_repo.update(&current_main).map_err(|e| e.to_string())?;
@@ -2916,13 +2952,14 @@ mod tests {
         build_butler_task_result_system_message, cleanup_attention_debounce,
         cleanup_butler_main_continuation_lock, cleanup_butler_task_finalization_lock,
         find_latest_attention_message_id, find_latest_handoff_message_id,
-        has_non_system_message_after, parse_task_conversation_id_from_attention_message,
+        has_non_system_message_after, is_active_butler_main_conversation_state,
+        parse_task_conversation_id_from_attention_message,
         parse_task_conversation_id_from_handoff_message, trim_chars, try_claim_attention_debounce,
         try_decide_butler_task_terminal_state, update_butler_task_watcher_state,
         ButlerTaskListItem, FollowupBatchEntry, Message, STATUS_CANCELLED, STATUS_FAILED,
         STATUS_SUCCEEDED, TASK_RESULT_DETAIL_LIMIT, TASK_RESULT_STRUCTURED_OUTPUT_LIMIT,
     };
-    use crate::db::conversation_db::{ButlerTaskDefinition, ButlerTaskResult};
+    use crate::db::conversation_db::{ButlerTaskDefinition, ButlerTaskResult, Conversation};
 
     fn build_message(id: i64, message_type: &str, content: &str, finished: bool) -> Message {
         let now = Utc::now();
@@ -2946,6 +2983,42 @@ mod tests {
             first_token_time: None,
             ttft_ms: None,
         }
+    }
+
+    fn build_conversation(id: i64, kind: &str) -> Conversation {
+        let now = Utc::now();
+        Conversation {
+            id,
+            name: "Test Butler Main".to_string(),
+            assistant_id: Some(1),
+            created_time: now,
+            updated_time: now,
+            conversation_kind: kind.to_string(),
+            parent_butler_conversation_id: None,
+            source_task_title: None,
+            is_hidden_from_normal_chat_list: true,
+            channel_source: None,
+            butler_task_status: None,
+            butler_task_summary: None,
+            butler_task_finalized_at: None,
+        }
+    }
+
+    #[test]
+    fn active_butler_main_requires_current_slot_match() {
+        let conversation = build_conversation(42, "butler_main");
+        assert!(is_active_butler_main_conversation_state(Some(42), &conversation));
+        assert!(!is_active_butler_main_conversation_state(Some(7), &conversation));
+        assert!(!is_active_butler_main_conversation_state(None, &conversation));
+    }
+
+    #[test]
+    fn active_butler_main_rejects_non_main_kind_even_when_slot_matches() {
+        let task_conversation = build_conversation(42, "butler_task");
+        let normal_conversation = build_conversation(42, "normal");
+
+        assert!(!is_active_butler_main_conversation_state(Some(42), &task_conversation));
+        assert!(!is_active_butler_main_conversation_state(Some(42), &normal_conversation));
     }
 
     #[test]

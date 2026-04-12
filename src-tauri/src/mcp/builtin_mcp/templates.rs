@@ -533,7 +533,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "schedule_task".into(),
-                description: "Manage scheduled tasks (定时任务) that run periodically or at a specific time. Use this to create, list, update, delete, enable, or disable scheduled tasks. Tasks created through this tool are automatically linked to the current butler conversation for result backflow. For create/update with schedule_type='interval', always provide interval_unit + interval_value explicitly. Common combinations: every day at 22:00 => interval_unit='day', interval_value=1, start_time='22:00'; weekdays at 09:00 => interval_unit='week', interval_value=1, week_days=[1,2,3,4,5], start_time='09:00'; monthly => interval_unit='month', interval_value=1, month_days=[1,15], start_time='09:00'. Do not pass week_days by itself.".into(),
+                description: "Manage scheduled tasks (定时任务) that run periodically or at a specific time. Use this to create, list, update, delete, enable, or disable scheduled tasks. Tasks created through this tool are treated as Butler-managed tasks, and each execution result backflows to the latest Butler main conversation at runtime instead of being pinned to an old conversation id. For create/update with schedule_type='interval', always provide interval_unit + interval_value explicitly. Common combinations: every day at 22:00 => interval_unit='day', interval_value=1, start_time='22:00'; weekdays at 09:00 => interval_unit='week', interval_value=1, week_days=[1,2,3,4,5], start_time='09:00'; monthly => interval_unit='month', interval_value=1, month_days=[1,15], start_time='09:00'. Do not pass week_days by itself.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "description": "Parameter matrix for create/update: once => run_at is required. interval => interval_unit + interval_value are required. week_days is only valid with interval_unit='week'. month_days is only valid with interval_unit='month'.",
@@ -541,7 +541,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         "action": {
                             "type": "string",
                             "enum": ["create", "list", "get", "update", "delete", "enable", "disable"],
-                            "description": "Action to perform. create: create new task; list: list all tasks owned by this butler; get: get task details + recent runs; update: modify task; delete: remove task; enable/disable: toggle task."
+                            "description": "Action to perform. create: create new task; list: list all Butler-managed tasks; get: get task details + recent runs; update: modify task; delete: remove task; enable/disable: toggle task."
                         },
                         "task_id": {
                             "type": "integer",

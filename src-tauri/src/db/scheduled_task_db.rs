@@ -477,16 +477,16 @@ impl ScheduledTaskDatabase {
         })
     }
 
-    /// List scheduled tasks owned by a specific Butler conversation.
-    #[instrument(level = "debug", skip(self), fields(butler_conversation_id))]
-    pub fn list_tasks_by_butler(&self, butler_conversation_id: i64) -> Result<Vec<ScheduledTask>> {
+    /// List scheduled tasks created from Butler context.
+    #[instrument(level = "debug", skip(self))]
+    pub fn list_butler_tasks(&self) -> Result<Vec<ScheduledTask>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, is_enabled, schedule_type, interval_value, interval_unit, start_time, week_days, month_days, run_at, next_run_at, last_run_at, assistant_id, task_prompt, notify_prompt, butler_conversation_id, created_time, updated_time
              FROM scheduled_task
-             WHERE butler_conversation_id = ?
+             WHERE butler_conversation_id IS NOT NULL
              ORDER BY created_time DESC",
         )?;
-        let rows = stmt.query_map([butler_conversation_id], |row| scheduled_task_from_row(row))?;
+        let rows = stmt.query_map([], |row| scheduled_task_from_row(row))?;
         rows.collect()
     }
 
@@ -500,5 +500,63 @@ impl ScheduledTaskDatabase {
             )?;
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ScheduledTask, ScheduledTaskDatabase};
+    use chrono::Utc;
+    use rusqlite::Connection;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    fn build_test_db() -> ScheduledTaskDatabase {
+        let conn = Connection::open_in_memory().unwrap();
+        let db = ScheduledTaskDatabase {
+            conn,
+            db_path: PathBuf::from(":memory:"),
+            write_lock: Arc::new(Mutex::new(())),
+        };
+        db.create_tables().unwrap();
+        db
+    }
+
+    fn build_task(name: &str, butler_conversation_id: Option<i64>) -> ScheduledTask {
+        let now = Utc::now();
+        ScheduledTask {
+            id: 0,
+            name: name.to_string(),
+            is_enabled: true,
+            schedule_type: "interval".to_string(),
+            interval_value: Some(1),
+            interval_unit: Some("day".to_string()),
+            start_time: Some("09:00".to_string()),
+            week_days: None,
+            month_days: None,
+            run_at: None,
+            next_run_at: Some(now),
+            last_run_at: None,
+            assistant_id: 1,
+            task_prompt: "do work".to_string(),
+            notify_prompt: "notify".to_string(),
+            butler_conversation_id,
+            created_time: now,
+            updated_time: now,
+        }
+    }
+
+    #[test]
+    fn list_butler_tasks_returns_all_butler_owned_tasks() {
+        let db = build_test_db();
+        let task_a = db.create_task(&build_task("task-a", Some(100))).unwrap();
+        let task_b = db.create_task(&build_task("task-b", Some(200))).unwrap();
+        db.create_task(&build_task("task-c", None)).unwrap();
+
+        let tasks = db.list_butler_tasks().unwrap();
+        let ids: Vec<i64> = tasks.into_iter().map(|task| task.id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&task_a.id));
+        assert!(ids.contains(&task_b.id));
     }
 }

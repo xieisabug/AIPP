@@ -1034,6 +1034,12 @@ pub(crate) fn ensure_conversation_table(conn: &Connection) -> rusqlite::Result<(
             [],
         )?;
     }
+    conn.execute(
+        "UPDATE conversation
+         SET conversation_kind = 'butler_main'
+         WHERE conversation_kind = 'butler_main_archive'",
+        [],
+    )?;
     if !conversation_columns.contains(&"parent_butler_conversation_id".to_string()) {
         conn.execute(
             "ALTER TABLE conversation ADD COLUMN parent_butler_conversation_id INTEGER",

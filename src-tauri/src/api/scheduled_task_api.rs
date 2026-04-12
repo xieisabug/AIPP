@@ -23,8 +23,9 @@ use crate::api::ai_api::{
 };
 use crate::api::assistant_api::get_assistant;
 use crate::api::butler_api::{
-    get_butler_main_continuation_lock, resolve_or_create_butler_execution_window,
-    wait_for_butler_main_to_be_idle,
+    active_butler_main_conversation_id, get_butler_main_continuation_lock,
+    is_current_butler_main_conversation,
+    resolve_or_create_butler_execution_window, wait_for_butler_main_to_be_idle,
 };
 use crate::api::genai_client::create_client_with_config;
 use crate::db::assistant_db::AssistantDatabase;
@@ -1427,10 +1428,10 @@ pub async fn list_scheduled_tasks(
 #[tauri::command]
 pub async fn list_butler_scheduled_tasks(
     app_handle: tauri::AppHandle,
-    butler_conversation_id: i64,
+    _butler_conversation_id: i64,
 ) -> Result<Vec<ScheduledTaskDTO>, String> {
     let db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let tasks = db.list_tasks_by_butler(butler_conversation_id).map_err(|e| e.to_string())?;
+    let tasks = db.list_butler_tasks().map_err(|e| e.to_string())?;
     Ok(tasks.into_iter().map(to_dto).collect())
 }
 
@@ -1474,6 +1475,20 @@ pub async fn create_scheduled_task(
     request: CreateScheduledTaskRequest,
 ) -> Result<ScheduledTaskDTO, String> {
     validate_assistant_type(&app_handle, request.assistant_id)?;
+    if let Some(butler_conversation_id) = request.butler_conversation_id {
+        let conversation_db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+        let conversation_repo = conversation_db.conversation_repo().map_err(|e| e.to_string())?;
+        let conversation = conversation_repo
+            .read(butler_conversation_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "总管家主会话不存在".to_string())?;
+        if conversation.conversation_kind != "butler_main" {
+            return Err("只能绑定总管家主会话".to_string());
+        }
+        if !is_current_butler_main_conversation(&app_handle, &conversation)? {
+            return Err("总管家主会话已归档，无法绑定新的定时任务".to_string());
+        }
+    }
     let db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let now = Utc::now();
     let run_at = match &request.run_at {
@@ -1600,11 +1615,16 @@ pub async fn run_scheduled_task_now(
     let next_run_at = if task.schedule_type == "once" {
         None
     } else {
-        compute_next_run_at(
-            &task.schedule_type,
-            task.interval_value,
-            task.interval_unit.as_deref(),
-            task.run_at,
+        compute_next_run_at_with_config(
+            ScheduleConfig {
+                schedule_type: &task.schedule_type,
+                interval_value: task.interval_value,
+                interval_unit: task.interval_unit.as_deref(),
+                start_time: task.start_time.as_deref(),
+                week_days: parse_json_array(&task.week_days),
+                month_days: parse_json_array(&task.month_days),
+                run_at: task.run_at,
+            },
             now,
         )?
     };
@@ -2092,18 +2112,23 @@ async fn execute_scheduled_task_inner(
     }
 
     // ── 9. Butler 结果回流 ─────────────────────────────────────────
-    if let Some(butler_cid) = task.butler_conversation_id {
-        let backflow_result = enqueue_scheduled_task_butler_followup(
-            app_handle,
-            butler_cid,
-            task,
-            run_id,
-            notify,
-            summary.as_deref(),
-            Some(task_result.as_str()),
-            &assistant_detail.assistant.name,
-        )
-        .await;
+    if task.butler_conversation_id.is_some() {
+        let backflow_result = match active_butler_main_conversation_id(app_handle)? {
+            Some(conversation_id) => {
+                enqueue_scheduled_task_butler_followup(
+                    app_handle,
+                    conversation_id,
+                    task,
+                    run_id,
+                    notify,
+                    summary.as_deref(),
+                    Some(task_result.as_str()),
+                    &assistant_detail.assistant.name,
+                )
+                .await
+            }
+            None => Err("当前不存在总管家主会话".to_string()),
+        };
         match &backflow_result {
             Ok(()) => {
                 log_task_message(
@@ -2118,6 +2143,9 @@ async fn execute_scheduled_task_inner(
                 }
             }
             Err(e) => {
+                if let Ok(sdb) = ScheduledTaskDatabase::new(app_handle) {
+                    let _ = sdb.update_run_butler_followup_status(run_id, "failed");
+                }
                 log_task_message(
                     app_handle,
                     task.id,
@@ -2218,6 +2246,9 @@ async fn enqueue_scheduled_task_butler_followup(
         .ok_or_else(|| "总管家主会话不存在".to_string())?;
 
     if main_conversation.conversation_kind != "butler_main" {
+        return Err("总管家主会话已归档，无法回流定时任务结果".to_string());
+    }
+    if !is_current_butler_main_conversation(app_handle, &main_conversation)? {
         return Err("总管家主会话已归档，无法回流定时任务结果".to_string());
     }
     let assistant_id =
