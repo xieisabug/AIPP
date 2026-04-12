@@ -2035,7 +2035,9 @@ impl AcpClient for AcpTauriClient {
             run_in_background: Some(true),
         };
 
-        match BashOperations::execute_bash(&self.operation_state, request).await {
+        match BashOperations::execute_bash(Some(&self.app_handle), &self.operation_state, request)
+            .await
+        {
             Ok(response) => {
                 let bash_id = response.bash_id.ok_or_else(|| {
                     acp::Error::internal_error().data("No bash_id returned for background process")

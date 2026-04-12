@@ -82,7 +82,7 @@ impl OperationHandler {
         request: ExecuteBashRequest,
     ) -> Result<ExecuteBashResponse, String> {
         info!("Handling execute_bash request");
-        BashOperations::execute_bash(state, request).await
+        BashOperations::execute_bash(Some(&self.app_handle), state, request).await
     }
 
     /// 获取 Bash 输出

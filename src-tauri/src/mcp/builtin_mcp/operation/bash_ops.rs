@@ -1,5 +1,7 @@
+use std::sync::Arc;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tauri::AppHandle;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, warn};
@@ -7,6 +9,8 @@ use uuid::Uuid;
 
 use super::state::OperationState;
 use super::types::*;
+use crate::db::mcp_db::MCPDatabase;
+use crate::utils::shell_utils::{decode_process_output, decode_process_output_line, resolve_shell, ShellCommand};
 
 /// Bash 操作实现
 pub struct BashOperations;
@@ -19,25 +23,43 @@ impl BashOperations {
     /// 最大输出长度（字符）
     const MAX_OUTPUT_LENGTH: usize = 30000;
 
-    /// 获取当前平台的 Shell
-    fn get_shell() -> (&'static str, &'static str) {
-        #[cfg(target_os = "windows")]
-        {
-            ("powershell", "-Command")
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            // 尝试使用 zsh，fallback 到 bash
-            if std::path::Path::new("/bin/zsh").exists() {
-                ("zsh", "-c")
-            } else {
-                ("bash", "-c")
+    fn get_configured_default_shell(app_handle: Option<&AppHandle>) -> Option<String> {
+        let app_handle = app_handle?;
+        let db = MCPDatabase::new(app_handle).ok()?;
+        let env_text = db
+            .conn
+            .prepare("SELECT environment_variables FROM mcp_server WHERE command = ? AND is_builtin = 1 LIMIT 1")
+            .and_then(|mut stmt| stmt.query_row(["aipp:operation"], |row| row.get::<_, Option<String>>(0)))
+            .ok()
+            .flatten()?;
+
+        for raw_line in env_text.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+
+            if key.trim() == "DEFAULT_SHELL" {
+                return Some(value.trim().to_string());
             }
         }
+
+        None
+    }
+
+    fn get_shell_command(app_handle: Option<&AppHandle>, command: &str) -> Result<ShellCommand, String> {
+        let preferred_shell = Self::get_configured_default_shell(app_handle);
+        let shell = resolve_shell(preferred_shell.as_deref())?;
+        Ok(shell.into_command(command))
     }
 
     /// 执行 Bash 命令
     pub async fn execute_bash(
+        app_handle: Option<&AppHandle>,
         state: &OperationState,
         request: ExecuteBashRequest,
     ) -> Result<ExecuteBashResponse, String> {
@@ -45,28 +67,32 @@ impl BashOperations {
         let run_in_background = request.run_in_background.unwrap_or(false);
         let timeout_ms =
             request.timeout.unwrap_or(Self::DEFAULT_TIMEOUT_MS).min(Self::MAX_TIMEOUT_MS);
+        let shell_command = Self::get_shell_command(app_handle, command)?;
 
-        let (shell, shell_arg) = Self::get_shell();
-        info!(shell = %shell, command = %command, background = run_in_background, timeout_ms = timeout_ms, "Executing bash command");
+        info!(
+            shell = %shell_command.program,
+            command = %command,
+            background = run_in_background,
+            timeout_ms = timeout_ms,
+            "Executing bash command"
+        );
 
         if run_in_background {
             // 后台执行
-            Self::execute_background(state, shell, shell_arg, command).await
+            Self::execute_background(state, &shell_command, command).await
         } else {
             // 前台执行（等待完成）
-            Self::execute_foreground(shell, shell_arg, command, timeout_ms).await
+            Self::execute_foreground(&shell_command, timeout_ms).await
         }
     }
 
     /// 前台执行命令
     async fn execute_foreground(
-        shell: &str,
-        shell_arg: &str,
-        command: &str,
+        shell_command: &ShellCommand,
         timeout_ms: u64,
     ) -> Result<ExecuteBashResponse, String> {
-        let mut cmd = Command::new(shell);
-        cmd.arg(shell_arg).arg(command).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut cmd = Command::new(&shell_command.program);
+        cmd.args(&shell_command.args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let child = cmd.spawn().map_err(|e| format!("Failed to spawn command: {}", e))?;
 
@@ -76,10 +102,10 @@ impl BashOperations {
         match result {
             Ok(Ok(output)) => {
                 let mut combined_output = String::new();
-                combined_output.push_str(&String::from_utf8_lossy(&output.stdout));
+                combined_output.push_str(&decode_process_output(&output.stdout));
                 if !output.stderr.is_empty() {
                     combined_output.push_str("\n[stderr]\n");
-                    combined_output.push_str(&String::from_utf8_lossy(&output.stderr));
+                    combined_output.push_str(&decode_process_output(&output.stderr));
                 }
 
                 // 截断过长输出
@@ -113,22 +139,21 @@ impl BashOperations {
     /// 后台执行命令
     async fn execute_background(
         state: &OperationState,
-        shell: &str,
-        shell_arg: &str,
+        shell_command: &ShellCommand,
         command: &str,
     ) -> Result<ExecuteBashResponse, String> {
         let bash_id = Uuid::new_v4().to_string();
 
         info!(
             bash_id = %bash_id,
-            shell = %shell,
-            shell_arg = %shell_arg,
+            shell = %shell_command.program,
+            shell_args = ?shell_command.args,
             command = %command,
             "Spawning background command"
         );
 
-        let mut cmd = Command::new(shell);
-        cmd.arg(shell_arg).arg(command).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut cmd = Command::new(&shell_command.program);
+        cmd.args(&shell_command.args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| {
             error!(error = %e, command = %command, "Failed to spawn background command");
@@ -177,69 +202,34 @@ impl BashOperations {
     ) {
         info!(bash_id = %bash_id, command = %command, "Starting to read output streams");
 
-        let mut stdout_reader = stdout.map(|s| BufReader::new(s).lines());
-        let mut stderr_reader = stderr.map(|s| BufReader::new(s).lines());
-
-        // 如果两个流都是 None，直接返回
-        if stdout_reader.is_none() && stderr_reader.is_none() {
+        if stdout.is_none() && stderr.is_none() {
             warn!(bash_id = %bash_id, "Both stdout and stderr are None, nothing to read");
             state.mark_bash_completed(bash_id, Some(0)).await;
             return;
         }
 
-        loop {
-            // 如果两个流都已关闭，退出循环
-            if stdout_reader.is_none() && stderr_reader.is_none() {
-                break;
-            }
+        let state = Arc::new(state.clone());
+        let mut tasks = Vec::new();
 
-            tokio::select! {
-                // 只在 stdout_reader 存在时才 select 它
-                line = async {
-                    match &mut stdout_reader {
-                        Some(reader) => reader.next_line().await,
-                        None => std::future::pending().await, // 永远不会返回
-                    }
-                } => {
-                    match line {
-                        Ok(Some(line)) => {
-                            debug!(bash_id = %bash_id, line = %line, "stdout");
-                            state.append_bash_output(bash_id, &format!("{}\n", line)).await;
-                        }
-                        Ok(None) => {
-                            debug!(bash_id = %bash_id, "stdout stream closed");
-                            stdout_reader = None;
-                        }
-                        Err(e) => {
-                            error!(bash_id = %bash_id, error = %e, "Error reading stdout");
-                            state.append_bash_output(bash_id, &format!("[error reading stdout: {}]\n", e)).await;
-                            stdout_reader = None;
-                        }
-                    }
-                }
-                // 只在 stderr_reader 存在时才 select 它
-                line = async {
-                    match &mut stderr_reader {
-                        Some(reader) => reader.next_line().await,
-                        None => std::future::pending().await, // 永远不会返回
-                    }
-                } => {
-                    match line {
-                        Ok(Some(line)) => {
-                            debug!(bash_id = %bash_id, line = %line, "stderr");
-                            state.append_bash_output(bash_id, &format!("[stderr] {}\n", line)).await;
-                        }
-                        Ok(None) => {
-                            debug!(bash_id = %bash_id, "stderr stream closed");
-                            stderr_reader = None;
-                        }
-                        Err(e) => {
-                            error!(bash_id = %bash_id, error = %e, "Error reading stderr");
-                            state.append_bash_output(bash_id, &format!("[error reading stderr: {}]\n", e)).await;
-                            stderr_reader = None;
-                        }
-                    }
-                }
+        if let Some(stdout) = stdout {
+            let state = Arc::clone(&state);
+            let bash_id = bash_id.to_string();
+            tasks.push(tokio::spawn(async move {
+                Self::read_single_stream(state, bash_id, stdout, false).await;
+            }));
+        }
+
+        if let Some(stderr) = stderr {
+            let state = Arc::clone(&state);
+            let bash_id = bash_id.to_string();
+            tasks.push(tokio::spawn(async move {
+                Self::read_single_stream(state, bash_id, stderr, true).await;
+            }));
+        }
+
+        for task in tasks {
+            if let Err(e) = task.await {
+                error!(bash_id = %bash_id, error = %e, "Output stream task failed");
             }
         }
 
@@ -249,6 +239,61 @@ impl BashOperations {
 
         // 标记进程已完成
         state.mark_bash_completed(bash_id, exit_code).await;
+    }
+
+    async fn read_single_stream<R>(
+        state: Arc<OperationState>,
+        bash_id: String,
+        mut reader: R,
+        is_stderr: bool,
+    ) where
+        R: AsyncRead + Unpin,
+    {
+        let mut buffer = [0u8; 4096];
+        let mut pending = Vec::new();
+
+        loop {
+            match reader.read(&mut buffer).await {
+                Ok(0) => {
+                    if !pending.is_empty() {
+                        Self::append_decoded_line(&state, &bash_id, &pending, is_stderr).await;
+                    }
+                    break;
+                }
+                Ok(read) => {
+                    pending.extend_from_slice(&buffer[..read]);
+                    while let Some(newline_index) = pending.iter().position(|byte| *byte == b'\n') {
+                        let line = pending.drain(..=newline_index).collect::<Vec<_>>();
+                        Self::append_decoded_line(&state, &bash_id, &line, is_stderr).await;
+                    }
+                }
+                Err(e) => {
+                    let label = if is_stderr { "stderr" } else { "stdout" };
+                    error!(bash_id = %bash_id, error = %e, stream = %label, "Error reading process output");
+                    state
+                        .append_bash_output(&bash_id, &format!("[error reading {}: {}]\n", label, e))
+                        .await;
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn append_decoded_line(
+        state: &OperationState,
+        bash_id: &str,
+        bytes: &[u8],
+        is_stderr: bool,
+    ) {
+        let line = decode_process_output_line(bytes);
+        debug!(bash_id = %bash_id, line = %line, is_stderr, "Process output line");
+
+        let formatted = if is_stderr {
+            format!("[stderr] {}\n", line)
+        } else {
+            format!("{}\n", line)
+        };
+        state.append_bash_output(bash_id, &formatted).await;
     }
 
     /// 获取 Bash 输出

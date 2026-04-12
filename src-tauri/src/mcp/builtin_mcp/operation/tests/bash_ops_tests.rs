@@ -54,7 +54,7 @@ async fn test_execute_bash_echo_command() {
         run_in_background: Some(false),
     };
 
-    let response = BashOperations::execute_bash(&state, request).await;
+    let response = BashOperations::execute_bash(None, &state, request).await;
     assert!(response.is_ok(), "Echo command should succeed");
 
     let resp = response.unwrap();
@@ -82,7 +82,7 @@ async fn test_execute_bash_pwd_command() {
         run_in_background: Some(false),
     };
 
-    let response = BashOperations::execute_bash(&state, request).await;
+    let response = BashOperations::execute_bash(None, &state, request).await;
     assert!(response.is_ok());
 
     let resp = response.unwrap();
@@ -108,7 +108,7 @@ async fn test_execute_bash_pipe_command() {
         run_in_background: Some(false),
     };
 
-    let response = BashOperations::execute_bash(&state, request).await;
+    let response = BashOperations::execute_bash(None, &state, request).await;
     assert!(response.is_ok());
 
     let resp = response.unwrap();
@@ -133,7 +133,7 @@ async fn test_execute_bash_exit_code() {
         run_in_background: Some(false),
     };
 
-    let response = BashOperations::execute_bash(&state, request).await;
+    let response = BashOperations::execute_bash(None, &state, request).await;
     assert!(response.is_ok());
     let resp = response.unwrap();
     assert_eq!(resp.exit_code, Some(0));
@@ -151,7 +151,7 @@ async fn test_execute_bash_exit_code() {
         run_in_background: Some(false),
     };
 
-    let response = BashOperations::execute_bash(&state, request).await;
+    let response = BashOperations::execute_bash(None, &state, request).await;
     assert!(response.is_ok());
     let resp = response.unwrap();
     assert_eq!(resp.exit_code, Some(1));
@@ -174,7 +174,7 @@ async fn test_execute_bash_stderr_capture() {
         run_in_background: Some(false),
     };
 
-    let response = BashOperations::execute_bash(&state, request).await;
+    let response = BashOperations::execute_bash(None, &state, request).await;
     assert!(response.is_ok());
 
     let resp = response.unwrap();
@@ -205,7 +205,7 @@ async fn test_execute_bash_timeout() {
         run_in_background: Some(false),
     };
 
-    let response = BashOperations::execute_bash(&state, request).await;
+    let response = BashOperations::execute_bash(None, &state, request).await;
 
     // 应该因超时而返回错误
     assert!(response.is_err());
@@ -260,7 +260,7 @@ async fn test_execute_bash_background() {
         run_in_background: Some(true),
     };
 
-    let response = BashOperations::execute_bash(&state, request).await;
+    let response = BashOperations::execute_bash(None, &state, request).await;
     assert!(response.is_ok());
 
     let resp = response.unwrap();
@@ -286,6 +286,50 @@ async fn test_execute_bash_background() {
             || output_resp.status == BashProcessStatus::Running,
         "Process should be completed or still running"
     );
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn test_execute_bash_chinese_output() {
+    let state = OperationState::new();
+    let request = ExecuteBashRequest {
+        command: "Write-Output '中文输出'".to_string(),
+        description: Some("Chinese output".to_string()),
+        timeout: Some(5000),
+        run_in_background: Some(false),
+    };
+
+    let response =
+        BashOperations::execute_bash(None, &state, request).await.expect("command should succeed");
+    assert_eq!(response.exit_code, Some(0));
+    assert!(response.output.unwrap_or_default().contains("中文输出"));
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn test_execute_bash_background_chinese_output() {
+    let state = OperationState::new();
+    let request = ExecuteBashRequest {
+        command: "Start-Sleep -Milliseconds 50; Write-Output '后台中文输出'".to_string(),
+        description: Some("Background Chinese output".to_string()),
+        timeout: None,
+        run_in_background: Some(true),
+    };
+
+    let response =
+        BashOperations::execute_bash(None, &state, request).await.expect("command should succeed");
+    let bash_id = response.bash_id.expect("background command should have bash_id");
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let output = BashOperations::get_bash_output(
+        &state,
+        GetBashOutputRequest { bash_id, filter: None },
+    )
+    .await
+    .expect("should read background output");
+
+    assert!(output.output.contains("后台中文输出"));
 }
 
 /// 测试获取不存在的 bash 进程输出

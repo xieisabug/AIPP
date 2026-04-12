@@ -18,6 +18,7 @@ dependencies = [
  "config",
  "dirs 5.0.1",
  "docx-rs",
+ "encoding_rs",
  "fastrand",
  "flate2",
  "futures",
