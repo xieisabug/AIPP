@@ -64,7 +64,9 @@ fn attention_last_enqueued_registry() -> &'static Arc<Mutex<HashMap<i64, DateTim
     ATTENTION_LAST_ENQUEUED.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
-pub(crate) fn active_butler_main_conversation_id(app_handle: &AppHandle) -> Result<Option<i64>, String> {
+pub(crate) fn active_butler_main_conversation_id(
+    app_handle: &AppHandle,
+) -> Result<Option<i64>, String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let butler_repo = db.butler_repo().map_err(|e| e.to_string())?;
     Ok(butler_repo
@@ -2701,7 +2703,8 @@ pub(crate) async fn spawn_butler_task_with_window(
     }
 
     let (executor_assistant, executor_source) = resolve_executor_assistant(app_handle, &request)?;
-    let temporary_trusted_paths = normalize_temporary_trusted_paths(&request.temporary_trusted_paths);
+    let temporary_trusted_paths =
+        normalize_temporary_trusted_paths(&request.temporary_trusted_paths);
     let temporary_skill_identifiers =
         validate_temporary_skill_identifiers(app_handle, &request.temporary_skill_identifiers)?;
     let title = request.title.trim();

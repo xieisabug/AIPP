@@ -1,7 +1,7 @@
-// FormDialog.tsx
 import React from 'react';
 import { X } from 'lucide-react';
 import { Button } from './ui/button';
+import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 
 interface FormDialogProps {
     title: string;
@@ -12,36 +12,25 @@ interface FormDialogProps {
 }
 
 const FormDialog: React.FC<FormDialogProps> = ({ title, onSubmit, onClose, isOpen, children }) => {
-    if (!isOpen) return null;
-
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            {/* 背景遮罩 */}
-            <div
-                className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-                onClick={onClose}
-            />
+        <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
+            <DialogContent showCloseButton={false} className="max-w-md gap-0 overflow-hidden p-0">
+                <DialogHeader className="border-b border-border px-6 py-6">
+                    <div className="flex items-center justify-between gap-4">
+                        <DialogTitle className="truncate pr-4 text-xl">{title}</DialogTitle>
+                        <DialogClose asChild>
+                            <button className="flex-shrink-0 rounded-lg p-2 transition-colors duration-200 hover:bg-muted">
+                                <X className="h-5 w-5 text-muted-foreground" />
+                            </button>
+                        </DialogClose>
+                    </div>
+                </DialogHeader>
 
-            {/* 模态框内容 */}
-            <div className="relative bg-background rounded-xl shadow-2xl w-full max-w-md transform transition-all duration-200 scale-100">
-                {/* 标题栏 */}
-                <div className="flex items-center justify-between p-6 border-b border-border">
-                    <h2 className="text-xl font-semibold text-foreground truncate pr-4">{title}</h2>
-                    <button
-                        onClick={onClose}
-                        className="p-2 hover:bg-muted rounded-lg transition-colors duration-200 flex-shrink-0"
-                    >
-                        <X className="h-5 w-5 text-muted-foreground" />
-                    </button>
-                </div>
-
-                {/* 内容区域 */}
-                <div className="p-6">
+                <div className="px-6 py-6">
                     {children}
                 </div>
 
-                {/* 按钮区域 */}
-                <div className="flex justify-end gap-3 p-6 pt-0">
+                <DialogFooter className="border-t border-border px-6 py-4 sm:justify-end">
                     <Button
                         variant="outline"
                         onClick={onClose}
@@ -55,9 +44,9 @@ const FormDialog: React.FC<FormDialogProps> = ({ title, onSubmit, onClose, isOpe
                     >
                         确认
                     </Button>
-                </div>
-            </div>
-        </div>
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
     );
 };
 
