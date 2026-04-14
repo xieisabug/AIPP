@@ -54,24 +54,6 @@ const PREVIEW_CODE_RUNTIME_STYLES = `
     will-change: opacity, transform, filter;
 }
 
-.aipp-preview-code-shell[data-streaming="true"]::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    background: linear-gradient(
-        120deg,
-        transparent 0%,
-        rgba(148, 163, 184, 0.08) 38%,
-        rgba(148, 163, 184, 0.18) 50%,
-        rgba(148, 163, 184, 0.08) 62%,
-        transparent 100%
-    );
-    opacity: 0.55;
-    transform: translateX(-55%);
-    animation: aipp-preview-code-sheen 1.8s ease-in-out infinite;
-}
-
 @keyframes aipp-preview-code-enter {
     from {
         opacity: 0;
@@ -85,24 +67,9 @@ const PREVIEW_CODE_RUNTIME_STYLES = `
     }
 }
 
-@keyframes aipp-preview-code-sheen {
-    from {
-        transform: translateX(-55%);
-    }
-    to {
-        transform: translateX(55%);
-    }
-}
-
 @media (prefers-reduced-motion: reduce) {
     .aipp-preview-code-root > :where(:not(style):not(script)) {
         animation: none;
-    }
-
-    .aipp-preview-code-shell[data-streaming="true"]::after {
-        animation: none;
-        opacity: 0.18;
-        transform: none;
     }
 }
 `;
@@ -634,4 +601,3 @@ export function createPreviewCodeRuntime(host: HTMLElement): PreviewCodeRuntimeC
         },
     };
 }
-

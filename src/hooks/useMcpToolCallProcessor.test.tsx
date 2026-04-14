@@ -488,6 +488,74 @@ describe("useMcpToolCallProcessor MCP identity", () => {
         expect(host.shadowRoot?.textContent).not.toContain("Final Content");
     });
 
+    it("keeps the same preview_code host when streaming markup settles into a persisted tool call", async () => {
+        const conversationId = 31;
+        const messageId = 22;
+        const resolvedCallId = 701;
+        const llmCallId = "preview_call_stable_key";
+        mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
+        mockInvokeHandler("get_mcp_tool_call", () => ({
+            id: resolvedCallId,
+            conversation_id: conversationId,
+            message_id: messageId,
+            server_id: 1,
+            server_name: "ui_interaction",
+            tool_name: "preview_code",
+            parameters: JSON.stringify({
+                title: "stable_preview",
+                renderer: "html",
+                code: "<div>Final Content</div>",
+                loading_messages: ["正在生成交互面板"],
+            }),
+            status: "executing",
+            created_time: "2024-01-01T00:00:00.000Z",
+        }));
+
+        const { rerender } = render(
+            <ProcessorHarness
+                markdown={`<!-- MCP_TOOL_CALL_STREAMING:{"server_name":"ui_interaction","tool_name":"preview_code","fn_arguments":"{\\"title\\":\\"stable_preview\\",\\"renderer\\":\\"html\\",\\"code\\":\\"<div>Live Content</div>\\",\\"loading_messages\\":[\\"正在生成交互面板\\"]}","llm_call_id":"${llmCallId}"} -->`}
+                conversationId={conversationId}
+                messageId={messageId}
+                mcpToolCallStates={new Map()}
+                shiningMcpCallId={null}
+            />
+        );
+
+        const streamingHost = await screen.findByTestId("preview-code-host");
+        await waitFor(() => expect(streamingHost.shadowRoot?.textContent).toContain("Live Content"));
+
+        const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
+            [resolvedCallId, {
+                call_id: resolvedCallId,
+                conversation_id: conversationId,
+                status: "executing",
+                llm_call_id: llmCallId,
+                server_name: "ui_interaction",
+                tool_name: "preview_code",
+                parameters: JSON.stringify({
+                    title: "stable_preview",
+                    renderer: "html",
+                    code: "<div>Final Content</div>",
+                    loading_messages: ["正在生成交互面板"],
+                }),
+            }],
+        ]);
+
+        rerender(
+            <ProcessorHarness
+                markdown={`<!-- MCP_TOOL_CALL:{"call_id":${resolvedCallId},"llm_call_id":"${llmCallId}","server_name":"ui_interaction","tool_name":"preview_code","parameters":"{\\"title\\":\\"stable_preview\\",\\"renderer\\":\\"html\\",\\"code\\":\\"<div>Final Content</div>\\",\\"loading_messages\\":[\\"正在生成交互面板\\"]}"} -->`}
+                conversationId={conversationId}
+                messageId={messageId}
+                mcpToolCallStates={mcpToolCallStates}
+                shiningMcpCallId={resolvedCallId}
+            />
+        );
+
+        const finalHost = await screen.findByTestId("preview-code-host");
+        expect(finalHost).toBe(streamingHost);
+        await waitFor(() => expect(finalHost.shadowRoot?.textContent).toContain("Final Content"));
+    });
+
     it("renders preview_code source fallback when Rust snapshot says DOM is not yet paintable", async () => {
         const conversationId = 29;
         mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);

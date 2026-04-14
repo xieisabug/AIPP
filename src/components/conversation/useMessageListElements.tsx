@@ -291,7 +291,7 @@ export function useMessageListElements({
         const result: MessageElementEntry[] = [];
         let currentGroup: Message[] = [];
 
-        const flushGroup = () => {
+        const flushGroup = (options?: { keepExpanded?: boolean }) => {
             if (currentGroup.length === 0) return;
 
             if (currentGroup.length === 1) {
@@ -300,6 +300,7 @@ export function useMessageListElements({
 
             const groupMessages = [...currentGroup];
             const lastMsg = groupMessages[groupMessages.length - 1];
+            const keepExpanded = options?.keepExpanded ?? false;
             // 合并组使用最后一条消息的 groupControl
             const groupControl = getGenerationGroupControl(lastMsg);
             const anyShining = groupMessages.some((m) => shiningMessageIds.has(m.id));
@@ -323,7 +324,7 @@ export function useMessageListElements({
                         <div className="flex flex-col gap-2">
                             {groupMessages.map((message) => {
                                 const streamEvent = streamingMessages.get(message.id);
-                                const isLast = message.id === lastMessageId;
+                                const isLast = keepExpanded || message.id === lastMessageId;
 
                                 return (
                                     <MessageItem
@@ -410,7 +411,7 @@ export function useMessageListElements({
 
         for (const message of allDisplayMessages) {
             if (message.message_type === "user") {
-                flushGroup();
+                flushGroup({ keepExpanded: false });
                 const streamEvent = streamingMessages.get(message.id);
                 const groupControl = getGenerationGroupControl(message);
                 const shouldShowShineBorder = shiningMessageIds.has(message.id);
@@ -454,7 +455,7 @@ export function useMessageListElements({
             }
         }
 
-        flushGroup();
+        flushGroup({ keepExpanded: true });
         return result;
     }, [
         allDisplayMessages,

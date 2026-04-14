@@ -405,6 +405,17 @@ function extractMcpToolCalls(content: string): ParsedMcpToolCallComment[] {
     return deduped;
 }
 
+function getPreviewCodeToolCallKey(
+    data: ToolCallData,
+    messageId: number | undefined,
+    index: number,
+): string {
+    if (data.llm_call_id) {
+        return `mcp-preview-${data.llm_call_id}`;
+    }
+    return `mcp-preview-slot-${messageId ?? "message"}-${index}-${data.server_name ?? "server"}-${data.tool_name ?? "tool"}`;
+}
+
 const McpToolCallResultsButton: React.FC<{
     toolCallIds: number[];
     mcpToolCallStates: Map<number, MCPToolCallUpdateEvent> | undefined;
@@ -569,12 +580,8 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             // 添加 MCP 工具调用组件
             // 只有最后一个工具调用在执行成功后才触发续写
             const isLastCall = index === mcpCalls.length - 1;
-            const toolCallKey = data.call_id
-                ? `mcp-call-${data.call_id}`
-                : data.isStreaming
-                  ? `mcp-stream-${messageId ?? "message"}-${index}-${data.server_name}-${data.tool_name}`
-                  : `mcp-${data.llm_call_id ?? `tmp-${index}-${match.start}`}`;
             if (data.tool_name === "preview_code") {
+                const toolCallKey = getPreviewCodeToolCallKey(data, messageId, index);
                 parts.push(
                     <InlineCodePreviewCard
                         key={toolCallKey}
@@ -590,6 +597,11 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
                     />
                 );
             } else {
+                const toolCallKey = data.call_id
+                    ? `mcp-call-${data.call_id}`
+                    : data.isStreaming
+                      ? `mcp-stream-${messageId ?? "message"}-${index}-${data.server_name}-${data.tool_name}`
+                      : `mcp-${data.llm_call_id ?? `tmp-${index}-${match.start}`}`;
                 parts.push(
                     <McpToolCall
                         key={toolCallKey}
