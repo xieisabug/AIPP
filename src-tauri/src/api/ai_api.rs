@@ -727,20 +727,38 @@ pub async fn ask_ai(
 
         let session_handle = {
             let mut sessions = acp_session_state.sessions.lock().await;
-            if let Some(handle) = sessions.get(&conversation_id) {
-                handle.clone()
+            if let Some(entry) = sessions.get(&conversation_id) {
+                entry.handle.clone()
             } else {
-                let (handle, join_handle) =
-                    spawn_acp_session_task(app_handle_clone, conversation_id, acp_config);
-                sessions.insert(conversation_id, handle.clone());
-                message_token_manager.store_task_handle(conversation_id, join_handle).await;
+                let handle =
+                    spawn_acp_session_task(app_handle_clone.clone(), conversation_id, acp_config.clone());
+                sessions.insert(
+                    conversation_id,
+                    crate::api::ai::acp::AcpSessionEntry::new(handle.clone(), conversation_id),
+                );
                 handle
             }
         };
 
-        if let Err(e) = session_handle.send_prompt(response_message.id, prompt_clone, window_clone)
+        if let Err(e) = session_handle.send_prompt(response_message.id, prompt_clone.clone(), window_clone.clone())
         {
-            error!(error = %e, "ACP session send prompt failed");
+            warn!(conversation_id, error = %e, "ACP session send prompt failed, respawning session");
+            let replacement_handle = {
+                let mut sessions = acp_session_state.sessions.lock().await;
+                let handle =
+                    spawn_acp_session_task(app_handle_clone.clone(), conversation_id, acp_config.clone());
+                sessions.insert(
+                    conversation_id,
+                    crate::api::ai::acp::AcpSessionEntry::new(handle.clone(), conversation_id),
+                );
+                handle
+            };
+            replacement_handle
+                .send_prompt(response_message.id, prompt_clone, window_clone)
+                .map_err(|error| {
+                    error!(conversation_id, error = %error, "ACP session resend prompt failed");
+                    error
+                })?;
         }
 
         return Ok(AiResponse {
@@ -1781,11 +1799,24 @@ pub async fn tool_result_continue_ask_ai(
 pub async fn cancel_ai(
     app_handle: tauri::AppHandle,
     feature_config_state: State<'_, FeatureConfigState>,
+    acp_session_state: State<'_, AcpSessionState>,
     message_token_manager: State<'_, MessageTokenManager>,
     window: tauri::Window,
     conversation_id: i64,
 ) -> Result<(), String> {
-    message_token_manager.cancel_request(conversation_id).await;
+    let acp_session_handle = {
+        let sessions = acp_session_state.sessions.lock().await;
+        sessions.get(&conversation_id).map(|entry| entry.handle.clone())
+    };
+
+    if let Some(handle) = acp_session_handle {
+        handle
+            .cancel_current_prompt()
+            .await
+            .map_err(|error| error.to_string())?;
+    } else {
+        message_token_manager.cancel_request(conversation_id).await;
+    }
 
     if let Err(e) = cancel_mcp_tool_calls_by_conversation(&app_handle, conversation_id).await {
         warn!(conversation_id, error = %e, "failed to cancel MCP tool calls for conversation");

@@ -1131,24 +1131,16 @@ impl MCPDatabase {
         tool_name: &str,
         parameters: &str,
     ) -> Result<MCPToolCall> {
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO mcp_tool_call (conversation_id, message_id, server_id, server_name, tool_name, parameters)
-             VALUES (?, ?, ?, ?, ?, ?)"
-        )?;
-
-        stmt.execute(params![
+        self.create_mcp_tool_call_with_server_id_and_llm_id(
             conversation_id,
             message_id,
             server_id,
             server_name,
             tool_name,
-            parameters
-        ])?;
-
-        let id = self.conn.last_insert_rowid();
-
-        // Return the created tool call
-        self.get_mcp_tool_call(id)
+            parameters,
+            None,
+            None,
+        )
     }
 
     #[instrument(
@@ -1157,6 +1149,34 @@ impl MCPDatabase {
         fields(conversation_id, server_id, tool_name)
     )]
     pub fn create_mcp_tool_call_with_llm_id(
+        &self,
+        conversation_id: i64,
+        message_id: Option<i64>,
+        server_id: i64,
+        server_name: &str,
+        tool_name: &str,
+        parameters: &str,
+        llm_call_id: Option<&str>,
+        assistant_message_id: Option<i64>,
+    ) -> Result<MCPToolCall> {
+        self.create_mcp_tool_call_with_server_id_and_llm_id(
+            conversation_id,
+            message_id,
+            server_id,
+            server_name,
+            tool_name,
+            parameters,
+            llm_call_id,
+            assistant_message_id,
+        )
+    }
+
+    #[instrument(
+        level = "trace",
+        skip(self, parameters, llm_call_id),
+        fields(conversation_id, server_id, tool_name)
+    )]
+    pub fn create_mcp_tool_call_with_server_id_and_llm_id(
         &self,
         conversation_id: i64,
         message_id: Option<i64>,
@@ -1186,7 +1206,6 @@ impl MCPDatabase {
 
         let id = self.conn.last_insert_rowid();
 
-        // Return the created tool call
         self.get_mcp_tool_call(id)
     }
 

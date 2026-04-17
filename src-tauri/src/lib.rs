@@ -24,7 +24,10 @@ pub use crate::feishu::{
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
-use crate::api::ai::acp::AcpPermissionState;
+use crate::api::ai::acp::{
+    get_acp_session_state, set_acp_session_config_option, set_acp_session_mode,
+    AcpPermissionState,
+};
 use crate::api::ai_api::{
     ask_ai, cancel_ai, get_activity_focus, get_conversation_runtime_state, get_shine_state,
     regenerate_ai, regenerate_conversation_title, tool_result_continue_ask_ai,
@@ -227,7 +230,7 @@ struct AppState {
 
 #[derive(Clone)]
 struct AcpSessionState {
-    sessions: Arc<TokioMutex<HashMap<i64, crate::api::ai::acp::AcpSessionHandle>>>,
+    sessions: Arc<TokioMutex<HashMap<i64, crate::api::ai::acp::AcpSessionEntry>>>,
 }
 
 impl AcpSessionState {
@@ -948,6 +951,9 @@ pub fn run() {
             get_assistant,
             get_assistant_field_value,
             get_acp_working_directory,
+            get_acp_session_state,
+            set_acp_session_mode,
+            set_acp_session_config_option,
             save_assistant,
             add_assistant,
             delete_assistant,

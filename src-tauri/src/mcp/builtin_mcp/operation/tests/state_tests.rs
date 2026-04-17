@@ -248,3 +248,24 @@ async fn test_file_records_are_conversation_scoped() {
     assert!(!state.has_file_been_read(path).await);
     assert!(!state.has_file_been_written(path).await);
 }
+
+/// 测试会话信任路径会去重且对子路径生效
+#[tokio::test]
+async fn test_conversation_trusted_path_is_deduplicated_and_prefix_matched() {
+    let state = OperationState::new();
+    let conversation_id = 321;
+    let trusted_root = "/tmp/aipp-acp-workdir";
+    let nested_file = "/tmp/aipp-acp-workdir/subdir/demo.txt";
+
+    state.add_conversation_trusted_path(conversation_id, trusted_root.to_string()).await;
+    state.add_conversation_trusted_path(conversation_id, trusted_root.to_string()).await;
+
+    {
+        let trusted = state.conversation_trusted_paths.lock().await;
+        let paths = trusted.get(&conversation_id).expect("conversation trusted paths should exist");
+        assert_eq!(paths, &vec![trusted_root.to_string()]);
+    }
+
+    assert!(state.is_path_trusted_for_conversation(conversation_id, nested_file).await);
+    assert!(!state.is_path_trusted_for_conversation(conversation_id, "/tmp/other/place.txt").await);
+}

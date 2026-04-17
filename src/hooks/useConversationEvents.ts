@@ -17,6 +17,8 @@ import {
     RuntimeStateSnapshotEvent,
     ConversationShineState,
     ShineStateSnapshotEvent,
+    AcpConversationSessionState,
+    AcpSessionStateSnapshotEvent,
 } from "../data/Conversation";
 import { MCPToolCall } from "@/data/MCPToolCall";
 import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
@@ -83,6 +85,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     const [activityFocus, setActivityFocus] = useState<ActivityFocus>({ focus_type: 'none' });
     const [runtimeState, setRuntimeState] = useState<ConversationRuntimeState | null>(null);
     const [shineState, setShineState] = useState<ConversationShineState | null>(null);
+    const [acpSessionState, setAcpSessionState] = useState<AcpConversationSessionState | null>(null);
     const [shiningMcpCallId, setShiningMcpCallId] = useState<number | null>(null);
     const streamingMessagesRef = useRef<Map<number, StreamEvent>>(new Map());
 
@@ -105,6 +108,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         revision: -1,
     });
     const shineSyncRequestIdRef = useRef<number>(0);
+    const acpSessionSyncRequestIdRef = useRef<number>(0);
     const shineVersionRef = useRef<{ epoch: number; revision: number }>({
         epoch: -1,
         revision: -1,
@@ -339,6 +343,28 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 console.warn("[RuntimeState] Failed to sync state", error);
             });
     }, [applyRuntimeState]);
+
+    const syncAcpSessionState = useCallback((conversationIdNum: number) => {
+        if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
+            return;
+        }
+
+        const requestId = acpSessionSyncRequestIdRef.current + 1;
+        acpSessionSyncRequestIdRef.current = requestId;
+
+        invoke<AcpConversationSessionState | null>("get_acp_session_state", {
+            conversationId: conversationIdNum,
+        })
+            .then((state) => {
+                if (acpSessionSyncRequestIdRef.current !== requestId) return;
+                setAcpSessionState(state);
+            })
+            .catch((error) => {
+                if (acpSessionSyncRequestIdRef.current !== requestId) return;
+                console.warn("[ACP] Failed to sync session state", error);
+                setAcpSessionState(null);
+            });
+    }, []);
 
     const applyMcpToolCalls = useCallback((calls: MCPToolCall[]) => {
         const stateMap = new Map<number, MCPToolCallUpdateEvent>();
@@ -853,6 +879,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 if (runtimeSnapshotEvent?.state) {
                     applyRuntimeState(runtimeSnapshotEvent.state);
                 }
+            } else if (conversationEvent.type === "acp_session_state_snapshot") {
+                const snapshotEvent = conversationEvent.data as AcpSessionStateSnapshotEvent;
+                setAcpSessionState(snapshotEvent?.state ?? null);
             } else if (conversationEvent.type === "activity_focus_change") {
                 // 处理活动焦点变化事件 - 由后端统一管理闪亮边框状态
                 const focusEvent = conversationEvent.data as ActivityFocusChangeEvent;
@@ -883,6 +912,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             // 清理状态
             runtimeSyncRequestIdRef.current += 1;
             shineSyncRequestIdRef.current += 1; // 使之前的同步请求失效
+            acpSessionSyncRequestIdRef.current += 1;
             updateStreamingMessagesState(new Map());
             setActivityShiningMessageIds(new Set());
             setManualShiningMessageIds(new Set());
@@ -896,6 +926,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             setActivityFocus({ focus_type: 'none' });
             setRuntimeState(null);
             setShineState(null);
+            setAcpSessionState(null);
             runtimeVersionRef.current = { epoch: -1, revision: -1 };
             shineVersionRef.current = { epoch: -1, revision: -1 };
             hasSyncedAfterMessageAddRef.current = false;
@@ -906,8 +937,10 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         if (Number.isNaN(conversationIdNum)) {
             runtimeSyncRequestIdRef.current += 1; // 避免旧同步影响
             shineSyncRequestIdRef.current += 1; // 避免旧同步影响
+            acpSessionSyncRequestIdRef.current += 1;
             setRuntimeState(null);
             setShineState(null);
+            setAcpSessionState(null);
             setActivityShiningMessageIds(new Set());
             setManualShiningMessageIds(new Set());
             setShiningMcpCallId(null);
@@ -923,6 +956,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         hasSyncedAfterMessageAddRef.current = false;
         setRuntimeState(null);
         setShineState(null);
+        setAcpSessionState(null);
         setActivityShiningMessageIds(new Set());
         setManualShiningMessageIds(new Set());
         setShiningMcpCallId(null);
@@ -959,6 +993,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         // 主动同步一次当前闪亮状态，避免在订阅前发生的事件导致闪烁状态缺失
         syncRuntimeState(conversationIdNum);
         syncShineState(conversationIdNum);
+        syncAcpSessionState(conversationIdNum);
 
         return () => {
             if (unsubscribeRef.current && !hasUnsubscribedRef.current) {
@@ -973,7 +1008,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             stopMcpCompensationPolling("conversation listener cleanup");
             stopMcpCompletionSync("conversation listener cleanup");
         };
-    }, [options.conversationId, syncRuntimeState, syncShineState, handleConversationEvent, stopMcpCompensationPolling, stopMcpCompletionSync, updateStreamingMessagesState]); // 只依赖 conversationId
+    }, [options.conversationId, syncRuntimeState, syncShineState, syncAcpSessionState, handleConversationEvent, stopMcpCompensationPolling, stopMcpCompletionSync, updateStreamingMessagesState]); // 只依赖 conversationId
 
     // 初始化获取已存在的 MCP 调用状态
     useEffect(() => {
@@ -1115,6 +1150,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         streamingAssistantMessageIds, // 导出正在流式输出的 assistant 消息状态
         activityFocus, // 导出活动焦点状态（后端驱动）
         runtimeState, // 导出后端语义化运行态（发送按钮等）
+        acpSessionState,
         clearStreamingMessages,
         clearShiningMessages,
         handleError,

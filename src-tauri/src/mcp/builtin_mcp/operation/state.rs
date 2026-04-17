@@ -427,7 +427,11 @@ impl OperationState {
     /// 添加会话信任路径
     pub async fn add_conversation_trusted_path(&self, conversation_id: i64, path: String) {
         let mut trusted = self.conversation_trusted_paths.lock().await;
-        trusted.entry(conversation_id).or_insert_with(Vec::new).push(path.clone());
+        let entry = trusted.entry(conversation_id).or_insert_with(Vec::new);
+        if entry.iter().any(|existing| existing == &path) {
+            return;
+        }
+        entry.push(path.clone());
         info!(conversation_id, path = %path, "Added conversation trusted path");
     }
 
