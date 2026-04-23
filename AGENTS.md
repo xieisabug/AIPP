@@ -288,6 +288,39 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - When launching async validation, append an explicit completion marker such as `; Write-Host "__AIPP_DONE__:$LASTEXITCODE"` and keep reading until that marker appears. Do not infer completion from the `pwsh` process state alone, because async sessions stay alive after the child process exits.
 - If a validation shell appears stuck and no `cargo`/`npm` child process remains, stop that shell and rerun with an explicit completion marker.
 
+### Chat scroll perf reproduction
+
+- For long-conversation scroll lag/jump issues, prefer the built-in **desktop Tauri ChatUIWindow harness** over `npm run dev`. It opens the real desktop window, switches to a target conversation, runs the in-app scroll probe, and writes a JSON result file.
+- Run the harness with `cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol` plus `AIPP_CHAT_SCROLL_PERF_*` env vars. Example:
+
+```bash
+# First conversation in the current ChatUI list order
+AIPP_CHAT_SCROLL_PERF_AUTORUN=1 \
+AIPP_CHAT_SCROLL_PERF_INDEX=0 \
+AIPP_CHAT_SCROLL_PERF_DURATION_MS=2200 \
+AIPP_CHAT_SCROLL_PERF_SETTLE_FRAMES=4 \
+AIPP_CHAT_SCROLL_PERF_TIMEOUT_SECS=45 \
+AIPP_CHAT_SCROLL_PERF_RESULT_PATH=tmp/chat-scroll-perf-result-conv1.json \
+cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol
+
+# Fourth conversation in the current ChatUI list order
+AIPP_CHAT_SCROLL_PERF_AUTORUN=1 \
+AIPP_CHAT_SCROLL_PERF_INDEX=3 \
+AIPP_CHAT_SCROLL_PERF_DURATION_MS=2200 \
+AIPP_CHAT_SCROLL_PERF_SETTLE_FRAMES=4 \
+AIPP_CHAT_SCROLL_PERF_TIMEOUT_SECS=45 \
+AIPP_CHAT_SCROLL_PERF_RESULT_PATH=tmp/chat-scroll-perf-result-conv4.json \
+cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol
+```
+
+- `AIPP_CHAT_SCROLL_PERF_INDEX` is **zero-based in the current ChatUI conversation list order**. Confirm the target conversation name from the JSON result instead of assuming the ordinal matches what the user meant.
+- Do **not** run multiple harness commands in parallel. They compete for Cargo's default build/output locks; run them sequentially and wait for each one to finish.
+- Read the JSON result first. Useful fields: `conversationName`, `messageItemCount`, `p95FrameMs`, `worstFrameMs`, `estimatedDroppedFrameCount`, `maxScrollTop`, `finalMaxScrollTop`, and `rowHeightDrift`.
+- A large gap between `maxScrollTop` and `finalMaxScrollTop` means the scrollable height shrank during the probe, which is a strong signal for scrollbar jump caused by virtualization height corrections.
+- For the 2026-04 long-conversation regression, the main causes were:
+  1. historical merged assistant groups were under-estimated because virtualization used only the last message's estimate instead of the whole merged group;
+  2. `ResizeObserver` height shrink updates were applied immediately while the user was actively scrolling, so virtualized total height collapsed mid-scroll and yanked the scrollbar.
+
 ## Common Development Tasks
 
 ### Adding a New API Endpoint

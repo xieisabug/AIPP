@@ -46,6 +46,7 @@ interface VirtualizedMessageListProps extends UseMessageListElementsProps {
 
 const MAX_SCROLL_HIGHLIGHT_ATTEMPTS = 60;
 const NEAR_BOTTOM_PIN_PX = 96;
+const HEIGHT_SHRINK_DEFER_MS = 160;
 
 interface VirtualizedRowProps {
     itemKey: string;
@@ -142,13 +143,19 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
     const [measuredHeights, setMeasuredHeights] = useState<Record<string, number>>(
         {},
     );
+    const measuredHeightsRef = useRef<Record<string, number>>({});
+    const pendingMeasuredHeightsRef = useRef<Record<string, number>>({});
+    const flushMeasuredHeightsRef = useRef<(() => void) | null>(null);
     const previousLayoutRef = useRef<ReturnType<typeof buildVirtualizedLayout> | null>(
         null,
     );
     const previousRenderKeysRef = useRef<string[]>([]);
     const lastKnownScrollTopRef = useRef(0);
     const userMovedAwayFromBottomRef = useRef(false);
+    const lastScrollActivityAtRef = useRef<number | null>(null);
     const scrollMetricsFrameRef = useRef<number | null>(null);
+    const measuredHeightFlushFrameRef = useRef<number | null>(null);
+    const shrinkFlushTimeoutRef = useRef<number | null>(null);
 
     const layout = useMemo(
         () => buildVirtualizedLayout(virtualizedItems, measuredHeights),
@@ -165,11 +172,17 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
         );
     }, [virtualizedItems, visibleRange.endIndex, visibleRange.startIndex]);
 
+    useEffect(() => {
+        measuredHeightsRef.current = measuredHeights;
+    }, [measuredHeights]);
+
     const syncScrollMetrics = useCallback(() => {
         const container = scrollContainerRef.current;
         if (!container) {
             return;
         }
+
+        lastScrollActivityAtRef.current = performance.now();
 
         const nextScrollTop = container.scrollTop;
         const previousScrollTop = lastKnownScrollTopRef.current;
@@ -228,18 +241,110 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
         };
     }, [scheduleScrollMetricsUpdate, scrollContainerRef, syncScrollMetrics]);
 
-    const handleHeightChange = useCallback((key: string, height: number) => {
-        window.__AIPP_CHAT_PERF_CAPTURE__?.recordVirtualRowHeight?.(key, height);
+    const clearShrinkFlushTimeout = useCallback(() => {
+        if (shrinkFlushTimeoutRef.current !== null) {
+            window.clearTimeout(shrinkFlushTimeoutRef.current);
+            shrinkFlushTimeoutRef.current = null;
+        }
+    }, []);
+
+    const scheduleShrinkFlushAfterIdle = useCallback(() => {
+        clearShrinkFlushTimeout();
+        shrinkFlushTimeoutRef.current = window.setTimeout(() => {
+            shrinkFlushTimeoutRef.current = null;
+            flushMeasuredHeightsRef.current?.();
+        }, HEIGHT_SHRINK_DEFER_MS);
+    }, [clearShrinkFlushTimeout]);
+
+    const isScrollActive = useCallback(() => {
+        return (
+            lastScrollActivityAtRef.current !== null
+            && performance.now() - lastScrollActivityAtRef.current
+                < HEIGHT_SHRINK_DEFER_MS
+        );
+    }, []);
+
+    const flushMeasuredHeights = useCallback(() => {
+        measuredHeightFlushFrameRef.current = null;
+        const pendingEntries = Object.entries(pendingMeasuredHeightsRef.current);
+        if (pendingEntries.length === 0) {
+            return;
+        }
+
+        pendingMeasuredHeightsRef.current = {};
+        const deferredShrinks: Record<string, number> = {};
         setMeasuredHeights((prev) => {
-            if (prev[key] === height) {
+            let changed = false;
+            const next = { ...prev };
+
+            pendingEntries.forEach(([key, height]) => {
+                const currentHeight = next[key];
+                if (currentHeight === height) {
+                    return;
+                }
+                if (
+                    typeof currentHeight === "number"
+                    && height < currentHeight
+                    && isScrollActive()
+                ) {
+                    deferredShrinks[key] = height;
+                    return;
+                }
+                next[key] = height;
+                changed = true;
+            });
+
+            if (!changed) {
                 return prev;
             }
-            return {
-                ...prev,
-                [key]: height,
-            };
+
+            measuredHeightsRef.current = next;
+            return next;
         });
-    }, []);
+
+        const deferredShrinkEntries = Object.entries(deferredShrinks);
+        if (deferredShrinkEntries.length > 0) {
+            deferredShrinkEntries.forEach(([key, height]) => {
+                pendingMeasuredHeightsRef.current[key] = height;
+            });
+            scheduleShrinkFlushAfterIdle();
+        }
+    }, [isScrollActive, scheduleShrinkFlushAfterIdle]);
+
+    flushMeasuredHeightsRef.current = flushMeasuredHeights;
+
+    const scheduleMeasuredHeightFlush = useCallback(() => {
+        if (measuredHeightFlushFrameRef.current !== null) {
+            return;
+        }
+
+        measuredHeightFlushFrameRef.current = requestAnimationFrame(() => {
+            flushMeasuredHeights();
+        });
+    }, [flushMeasuredHeights]);
+
+    const handleHeightChange = useCallback((key: string, height: number) => {
+        window.__AIPP_CHAT_PERF_CAPTURE__?.recordVirtualRowHeight?.(key, height);
+        const currentHeight =
+            pendingMeasuredHeightsRef.current[key] ?? measuredHeightsRef.current[key];
+        if (currentHeight === height) {
+            return;
+        }
+
+        pendingMeasuredHeightsRef.current[key] = height;
+        scheduleMeasuredHeightFlush();
+    }, [scheduleMeasuredHeightFlush]);
+
+    useEffect(() => {
+        return () => {
+            if (measuredHeightFlushFrameRef.current !== null) {
+                cancelAnimationFrame(measuredHeightFlushFrameRef.current);
+                measuredHeightFlushFrameRef.current = null;
+            }
+            clearShrinkFlushTimeout();
+            pendingMeasuredHeightsRef.current = {};
+        };
+    }, [clearShrinkFlushTimeout]);
 
     useLayoutEffect(() => {
         const container = scrollContainerRef.current;

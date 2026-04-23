@@ -40,6 +40,8 @@ export interface UseMessageListElementsProps {
 
 export interface MessageElementEntry {
     messageId: number;
+    messageIds?: number[];
+    estimatedHeight?: number;
     messageElement: React.ReactElement;
     groupControl: any;
 }
@@ -253,6 +255,14 @@ export function useMessageListElements({
 
                 return {
                     messageId: message.id,
+                    messageIds: [message.id],
+                    estimatedHeight:
+                        estimatedHeightByMessageId.get(message.id)
+                        ?? estimateMessageHeight(message, {
+                            isLastMessage: message.id === lastMessageId,
+                            isReasoningExpanded:
+                                reasoningExpandStates.get(message.id) || false,
+                        }),
                     messageElement: (
                         <MessageItem
                             key={`message-${message.id}`}
@@ -402,6 +412,17 @@ export function useMessageListElements({
 
             result.push({
                 messageId: lastMsg.id,
+                messageIds: groupMessages.map((message) => message.id),
+                estimatedHeight: groupMessages.reduce((sum, message) => {
+                    return sum + (
+                        estimatedHeightByMessageId.get(message.id)
+                        ?? estimateMessageHeight(message, {
+                            isLastMessage: message.id === lastMessageId,
+                            isReasoningExpanded:
+                                reasoningExpandStates.get(message.id) || false,
+                        })
+                    );
+                }, 0),
                 messageElement: mergedElement,
                 groupControl,
             });
@@ -471,6 +492,7 @@ export function useMessageListElements({
         mcpToolCallStates,
         shiningMcpCallId,
         messageInlineInteractionMap,
+        estimatedHeightByMessageId,
         sentBatchToolResultMessageIds,
         allowFeishuDebugResend,
         lastMessageId,
@@ -566,9 +588,9 @@ export function useMessageListElements({
             items.push({
                 key: `message-${entry.messageId}`,
                 messageId: entry.messageId,
-                messageIds: [entry.messageId],
+                messageIds: entry.messageIds ?? [entry.messageId],
                 estimatedHeight:
-                estimatedHeightByMessageId.get(entry.messageId)
+                entry.estimatedHeight
                     ?? estimateMessageHeight(
                         messageById.get(entry.messageId) ?? allDisplayMessages[0],
                         {

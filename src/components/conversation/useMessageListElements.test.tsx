@@ -1,6 +1,9 @@
-import { render, screen } from "@testing-library/react";
+import { render, renderHook, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useMessageListElements } from "./useMessageListElements";
+import {
+    useMessageListElements,
+    type UseMessageListElementsProps,
+} from "./useMessageListElements";
 import type { Message } from "@/data/Conversation";
 
 const mockDisplayConfig = {
@@ -81,21 +84,7 @@ function makeMessage(overrides: Partial<Message>): Message {
 
 function Harness({ messages }: { messages: Message[] }) {
     const { messageElements } = useMessageListElements({
-        allDisplayMessages: messages,
-        streamingMessages: new Map(),
-        shiningMessageIds: new Set(),
-        shiningMcpCallId: null,
-        reasoningExpandStates: new Map(),
-        mcpToolCallStates: new Map(),
-        generationGroups: new Map(),
-        selectedVersions: new Map(),
-        getGenerationGroupControl: () => null,
-        handleGenerationVersionChange: () => undefined,
-        onCodeRun: () => undefined,
-        onMessageRegenerate: () => undefined,
-        onMessageEdit: () => undefined,
-        onMessageFork: () => undefined,
-        onToggleReasoningExpand: () => undefined,
+        ...makeHookProps(messages),
     });
 
     return (
@@ -105,6 +94,28 @@ function Harness({ messages }: { messages: Message[] }) {
             ))}
         </>
     );
+}
+
+function makeHookProps(
+    messages: Message[],
+): UseMessageListElementsProps {
+    return {
+        allDisplayMessages: messages,
+        streamingMessages: new Map<number, never>(),
+        shiningMessageIds: new Set<number>(),
+        shiningMcpCallId: null,
+        reasoningExpandStates: new Map<number, boolean>(),
+        mcpToolCallStates: new Map<number, never>(),
+        generationGroups: new Map<string, never>(),
+        selectedVersions: new Map<string, number>(),
+        getGenerationGroupControl: () => null,
+        handleGenerationVersionChange: () => undefined,
+        onCodeRun: () => undefined,
+        onMessageRegenerate: () => undefined,
+        onMessageEdit: () => undefined,
+        onMessageFork: () => undefined,
+        onToggleReasoningExpand: () => undefined,
+    };
 }
 
 describe("useMessageListElements merged assistant preview state", () => {
@@ -145,5 +156,42 @@ describe("useMessageListElements merged assistant preview state", () => {
         expect(screen.getByTestId("message-2")).toHaveAttribute("data-last-message", "false");
         expect(screen.getByTestId("message-3")).toHaveAttribute("data-last-message", "false");
         expect(screen.getByTestId("message-4")).toHaveAttribute("data-last-message", "true");
+    });
+
+    it("uses the whole merged group to estimate historical row height", () => {
+        const mergedMessages = [
+            makeMessage({ id: 1, message_type: "user", content: "user-1" }),
+            makeMessage({
+                id: 2,
+                message_type: "response",
+                content: Array.from({ length: 240 }, () => "a very long assistant response line").join("\n"),
+            }),
+            makeMessage({ id: 3, message_type: "tool_result", content: "ok" }),
+            makeMessage({ id: 4, message_type: "user", content: "user-2" }),
+        ];
+        const singleMessageGroup = [
+            makeMessage({ id: 1, message_type: "user", content: "user-1" }),
+            makeMessage({ id: 3, message_type: "tool_result", content: "ok" }),
+            makeMessage({ id: 4, message_type: "user", content: "user-2" }),
+        ];
+
+        const { result: mergedResult } = renderHook(() =>
+            useMessageListElements(makeHookProps(mergedMessages)),
+        );
+        const { result: singleResult } = renderHook(() =>
+            useMessageListElements(makeHookProps(singleMessageGroup)),
+        );
+
+        const mergedGroupItem = mergedResult.current.renderItems.find(
+            (item) => item.key === "message-3",
+        );
+        const singleItem = singleResult.current.renderItems.find(
+            (item) => item.key === "message-3",
+        );
+
+        expect(mergedGroupItem?.messageIds).toEqual([2, 3]);
+        expect(mergedGroupItem?.estimatedHeight ?? 0).toBeGreaterThan(
+            singleItem?.estimatedHeight ?? 0,
+        );
     });
 });
