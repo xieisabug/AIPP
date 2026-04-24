@@ -3325,7 +3325,20 @@ async fn attempt_stream_chat(
                         )
                         .await;
 
-                        // 无论是否产生内容，都向前端发送一个流式完成事件，确保 UI 能正确退出接收状态
+                        // 清理消息焦点（保留 MCP 执行焦点）
+                        let app_handle = window.app_handle();
+                        if let Some(activity_manager) =
+                            app_handle.try_state::<ConversationActivityManager>()
+                        {
+                            activity_manager
+                                .clear_message_focus_keep_mcp(&app_handle, conversation_id)
+                                .await;
+                        }
+
+                        // 无论是否产生内容，都向前端发送一个流式完成事件，确保 UI 能正确退出接收状态。
+                        // 注意：这里必须在清理消息焦点之后发送，
+                        // 这样前端在处理 stream_complete 并主动同步 shine/runtime 状态时，
+                        // 能读到最终状态，而不是前一拍的 user_pending / assistant_streaming。
                         let stream_complete_event = ConversationEvent {
                             r#type: "stream_complete".to_string(),
                             data: serde_json::json!({
@@ -3342,16 +3355,6 @@ async fn attempt_stream_chat(
                             format!("conversation_event_{}", conversation_id).as_str(),
                             stream_complete_event,
                         );
-
-                        // 清理消息焦点（保留 MCP 执行焦点）
-                        let app_handle = window.app_handle();
-                        if let Some(activity_manager) =
-                            app_handle.try_state::<ConversationActivityManager>()
-                        {
-                            activity_manager
-                                .clear_message_focus_keep_mcp(&app_handle, conversation_id)
-                                .await;
-                        }
 
                         return Ok(());
                     }
