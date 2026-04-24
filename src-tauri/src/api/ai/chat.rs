@@ -6,7 +6,9 @@ use crate::api::ai::title::{
 use crate::api::ai::types::McpOverrideConfig;
 use crate::api::ai_api::{resolve_tool_name, sanitize_tool_name, ToolNameMapping};
 use crate::db::assistant_db::Assistant;
-use crate::db::conversation_db::{ConversationDatabase, Message, Repository};
+use crate::db::conversation_db::{
+    AttachmentType, ConversationDatabase, Message, MessageAttachment, Repository,
+};
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
 use crate::state::activity_state::ConversationActivityManager;
@@ -15,7 +17,7 @@ use crate::utils::window_utils::send_error_to_appropriate_window;
 use anyhow::Context as _;
 use futures::StreamExt;
 use genai::chat::ChatStreamEvent;
-use genai::chat::{ChatOptions, ChatRequest, ToolCall};
+use genai::chat::{Binary, BinarySource, ChatOptions, ChatRequest, ContentPart, ToolCall};
 use genai::Client;
 use scraper::{Html, Selector};
 use serde::Serialize;
@@ -307,6 +309,129 @@ fn split_tool_name(fn_name: &str) -> (String, String) {
     }
 }
 
+fn emit_message_add_event(
+    window: &tauri::Window,
+    conversation_id: i64,
+    message_id: i64,
+    message_type: &str,
+) -> anyhow::Result<()> {
+    let add_event = ConversationEvent {
+        r#type: "message_add".to_string(),
+        data: serde_json::to_value(MessageAddEvent {
+            message_id,
+            message_type: message_type.to_string(),
+        })
+        .unwrap(),
+    };
+    window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event)?;
+    Ok(())
+}
+
+fn split_captured_content(
+    captured_content: genai::chat::MessageContent,
+) -> (Vec<ToolCall>, Vec<Binary>) {
+    let mut tool_calls = Vec::new();
+    let mut binaries = Vec::new();
+
+    for part in captured_content.into_parts() {
+        match part {
+            ContentPart::ToolCall(tool_call) => tool_calls.push(tool_call),
+            ContentPart::Binary(binary) => binaries.push(binary),
+            _ => {}
+        }
+    }
+
+    (tool_calls, binaries)
+}
+
+fn infer_image_extension_from_content_type(content_type: &str) -> &'static str {
+    match content_type.trim().to_ascii_lowercase().as_str() {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        "image/bmp" => "bmp",
+        "image/tiff" => "tiff",
+        _ => "img",
+    }
+}
+
+fn build_binary_attachment_url(binary: &Binary, index: usize) -> String {
+    if let Some(name) = binary.name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+        return name.to_string();
+    }
+
+    if let BinarySource::Url(url) = &binary.source {
+        if !url.trim().is_empty() {
+            return url.clone();
+        }
+    }
+
+    format!(
+        "generated-image-{}.{}",
+        index + 1,
+        infer_image_extension_from_content_type(&binary.content_type)
+    )
+}
+
+fn build_image_attachment_from_binary(
+    binary: Binary,
+    message_id: i64,
+    index: usize,
+) -> Option<MessageAttachment> {
+    if !binary.is_image() {
+        return None;
+    }
+
+    let attachment_url = Some(build_binary_attachment_url(&binary, index));
+    let attachment_content = Some(binary.into_url());
+
+    Some(MessageAttachment {
+        id: 0,
+        message_id,
+        attachment_type: AttachmentType::Image,
+        attachment_url,
+        attachment_content,
+        attachment_hash: None,
+        use_vector: false,
+        token_count: Some(0),
+    })
+}
+
+fn persist_response_image_attachments(
+    conversation_db: &ConversationDatabase,
+    message_id: i64,
+    binaries: Vec<Binary>,
+) -> anyhow::Result<usize> {
+    if binaries.is_empty() {
+        return Ok(0);
+    }
+
+    let attachment_repo = conversation_db
+        .attachment_repo()
+        .context("failed to get attachment_repo for response image attachments")?;
+    let mut persisted_count = 0;
+
+    for (index, binary) in binaries.into_iter().enumerate() {
+        let content_type = binary.content_type.clone();
+        let Some(attachment) = build_image_attachment_from_binary(binary, message_id, index) else {
+            debug!(
+                message_id,
+                index, content_type, "skipping non-image binary attachment from response"
+            );
+            continue;
+        };
+
+        attachment_repo.create(&attachment).with_context(|| {
+            format!("failed to persist image attachment {} for message {}", index, message_id)
+        })?;
+        persisted_count += 1;
+    }
+
+    Ok(persisted_count)
+}
+
 /// 创建并发出 message_add 事件，返回消息ID
 /// 同时设置活动状态以显示闪亮边框
 async fn ensure_stream_message(
@@ -356,15 +481,7 @@ async fn ensure_stream_message(
         })
         .context("failed to create stream message")?;
 
-    let add_event = ConversationEvent {
-        r#type: "message_add".to_string(),
-        data: serde_json::to_value(MessageAddEvent {
-            message_id: new_message.id,
-            message_type: message_type.to_string(),
-        })
-        .unwrap(),
-    };
-    window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event)?;
+    emit_message_add_event(window, conversation_id, new_message.id, message_type)?;
 
     // 设置 Assistant 消息的活动状态（闪亮边框）
     if message_type == "response" || message_type == "reasoning" {
@@ -985,6 +1102,48 @@ mod tests {
         merge_streaming_tool_call(&mut existing, &incoming);
 
         assert_eq!(existing.fn_arguments, serde_json::json!("{\"code\":\"<div>Loading"));
+    }
+
+    #[test]
+    fn test_split_captured_content_separates_tool_calls_and_binaries() {
+        let content = genai::chat::MessageContent::from_parts(vec![
+            ContentPart::from_text("hello"),
+            ContentPart::Binary(Binary::from_base64(
+                "image/png",
+                "ZmFrZV9pbWFnZQ==",
+                Some("image.png".to_string()),
+            )),
+            ContentPart::ToolCall(ToolCall {
+                call_id: "call_1".to_string(),
+                fn_name: "server__tool".to_string(),
+                fn_arguments: serde_json::json!({"ok": true}),
+                thought_signatures: None,
+            }),
+        ]);
+
+        let (tool_calls, binaries) = split_captured_content(content);
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(binaries.len(), 1);
+        assert_eq!(tool_calls[0].call_id, "call_1");
+        assert_eq!(binaries[0].content_type, "image/png");
+    }
+
+    #[test]
+    fn test_build_image_attachment_from_binary_uses_data_url_content() {
+        let binary =
+            Binary::from_base64("image/png", "ZmFrZV9pbWFnZQ==", Some("preview.png".to_string()));
+
+        let attachment =
+            build_image_attachment_from_binary(binary, 42, 0).expect("image attachment");
+
+        assert_eq!(attachment.message_id, 42);
+        assert_eq!(attachment.attachment_type, AttachmentType::Image);
+        assert_eq!(attachment.attachment_url.as_deref(), Some("preview.png"));
+        assert_eq!(
+            attachment.attachment_content.as_deref(),
+            Some("data:image/png;base64,ZmFrZV9pbWFnZQ==")
+        );
     }
 }
 
@@ -2681,7 +2840,7 @@ async fn attempt_stream_chat(
                             );
                         }
                     }
-                    ChatStreamEvent::End(end_event) => {
+                    ChatStreamEvent::End(mut end_event) => {
                         debug!(?end_event, "end event");
 
                         // Extract and store token usage data before ownership is taken
@@ -2693,10 +2852,113 @@ async fn attempt_stream_chat(
                             (input_tokens, output_tokens, total_tokens)
                         });
 
-                        // Capture tool calls if they exist (this takes ownership of end_event)
-                        if let Some(tool_calls) = end_event.captured_into_tool_calls() {
+                        let mut captured_binaries: Vec<Binary> = Vec::new();
+
+                        if let Some(captured_content) = end_event.captured_content.take() {
+                            let (tool_calls, binaries) = split_captured_content(captured_content);
                             captured_tool_calls = tool_calls;
-                            debug!(?captured_tool_calls, "captured tool calls");
+                            captured_binaries = binaries;
+
+                            if !captured_tool_calls.is_empty() {
+                                debug!(?captured_tool_calls, "captured tool calls");
+                            }
+                            if !captured_binaries.is_empty() {
+                                debug!(binary_count = captured_binaries.len(), "captured binaries");
+                            }
+                        }
+
+                        if response_message_id.is_none()
+                            && (!captured_tool_calls.is_empty() || !captured_binaries.is_empty())
+                        {
+                            let actual_start_time = reasoning_end_time.unwrap_or_else(|| {
+                                let now = chrono::Utc::now();
+                                response_start_time.get_or_insert(now);
+                                response_start_time.unwrap()
+                            });
+                            response_start_time = Some(actual_start_time);
+                            current_output_type = OutputType::Response;
+
+                            let ttft_ms = response_first_token_time.as_ref().map(|ft| {
+                                (ft.timestamp_millis() - actual_start_time.timestamp_millis())
+                                    .max(0)
+                            });
+
+                            if let Ok(new_id) = ensure_stream_message(
+                                &conversation_db,
+                                &window,
+                                conversation_id,
+                                "response",
+                                &response_content,
+                                llm_model_id,
+                                &llm_model_name,
+                                &generation_group_id,
+                                parent_group_id_override.clone(),
+                                Some(actual_start_time),
+                                response_first_token_time.clone(),
+                                ttft_ms,
+                            )
+                            .await
+                            {
+                                response_message_id = Some(new_id);
+
+                                if is_regeneration && !group_merge_event_emitted {
+                                    if let Some(ref parent_group_id) = parent_group_id_override {
+                                        let group_merge_event = serde_json::json!({
+                                            "type": "group_merge",
+                                            "data": {
+                                                "original_group_id": parent_group_id,
+                                                "new_group_id": generation_group_id.clone(),
+                                                "is_regeneration": true,
+                                                "first_message_id": new_id,
+                                                "conversation_id": conversation_id
+                                            }
+                                        });
+                                        let _ = window.emit(
+                                            format!("conversation_event_{}", conversation_id)
+                                                .as_str(),
+                                            ConversationEvent {
+                                                r#type: "group_merge".to_string(),
+                                                data: group_merge_event["data"].clone(),
+                                            },
+                                        );
+                                        group_merge_event_emitted = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        let captured_binary_count = captured_binaries.len();
+                        if let Some(msg_id) = response_message_id {
+                            match persist_response_image_attachments(
+                                &conversation_db,
+                                msg_id,
+                                captured_binaries,
+                            ) {
+                                Ok(persisted_count) => {
+                                    if persisted_count > 0 {
+                                        current_output_type = OutputType::Response;
+                                        info!(
+                                            message_id = msg_id,
+                                            persisted_attachment_count = persisted_count,
+                                            "persisted image attachments for stream response"
+                                        );
+                                        let _ = emit_message_add_event(
+                                            &window,
+                                            conversation_id,
+                                            msg_id,
+                                            "response",
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(message_id = msg_id, error = %e, "failed to persist stream response image attachments");
+                                }
+                            }
+                        } else if captured_binary_count > 0 {
+                            warn!(
+                                binary_count = captured_binary_count,
+                                "stream response ended with binaries but no response message could be created"
+                            );
                         }
 
                         // Store the extracted token data
@@ -2848,6 +3110,7 @@ async fn attempt_stream_chat(
                             response_len = response_content.chars().count(),
                             reasoning_len = reasoning_content.chars().count(),
                             has_response_message = response_message_id.is_some(),
+                            captured_binaries = captured_binary_count,
                             captured_tool_calls = captured_tool_calls.len(),
                             "stream summary"
                         );
@@ -3354,6 +3617,7 @@ pub async fn handle_non_stream_chat(
             let _ = cleanup_last_error_message(conversation_db, conversation_id).await;
 
             let mut content = chat_response.first_text().unwrap_or("").to_string();
+            let response_binaries = chat_response.content.clone().into_binaries();
 
             // Extract token usage data
             let usage = &chat_response.usage;
@@ -3412,6 +3676,25 @@ pub async fn handle_non_stream_chat(
                 "Token usage captured for non-streaming response"
             );
             let response_message_id = response_message.id;
+
+            match persist_response_image_attachments(
+                conversation_db,
+                response_message_id,
+                response_binaries,
+            ) {
+                Ok(persisted_count) => {
+                    if persisted_count > 0 {
+                        info!(
+                            message_id = response_message_id,
+                            persisted_attachment_count = persisted_count,
+                            "persisted image attachments for non-stream response"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(message_id = response_message_id, error = %e, "failed to persist non-stream response image attachments");
+                }
+            }
 
             // 现在才发送 message_add 事件（消息有内容时）
             let add_event = ConversationEvent {

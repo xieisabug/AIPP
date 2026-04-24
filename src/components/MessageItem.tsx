@@ -39,6 +39,31 @@ interface MessageItemProps {
     mergedMode?: boolean; // 合并模式：不渲染外层气泡包装
 }
 
+function areAttachmentListsEqual(prevAttachments?: Array<any>, nextAttachments?: Array<any>) {
+    const prevList = prevAttachments ?? [];
+    const nextList = nextAttachments ?? [];
+
+    if (prevList.length !== nextList.length) {
+        return false;
+    }
+
+    for (let index = 0; index < prevList.length; index += 1) {
+        const prevAttachment = prevList[index];
+        const nextAttachment = nextList[index];
+
+        if (
+            prevAttachment?.id !== nextAttachment?.id ||
+            prevAttachment?.attachment_type !== nextAttachment?.attachment_type ||
+            prevAttachment?.attachment_url !== nextAttachment?.attachment_url ||
+            prevAttachment?.attachment_content !== nextAttachment?.attachment_content
+        ) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 const MessageItem = React.memo<MessageItemProps>(
     ({
         message,
@@ -310,7 +335,11 @@ const MessageItem = React.memo<MessageItemProps>(
                     <div className="prose prose-sm max-w-none text-foreground break-all">
                         {isUserMessage && !isUserMessageMarkdownEnabled ? contentElement : <div>{contentElement}</div>}
                     </div>
-                    <ImageAttachments attachments={message.attachment_list} />
+                    <ImageAttachments
+                        attachments={message.attachment_list}
+                        conversationId={message.conversation_id}
+                        messageId={message.id}
+                    />
                 </div>
             );
         }
@@ -334,7 +363,11 @@ const MessageItem = React.memo<MessageItemProps>(
                         {isUserMessage && !isUserMessageMarkdownEnabled ? contentElement : <div>{contentElement}</div>}
                     </div>
 
-                    <ImageAttachments attachments={message.attachment_list} />
+                    <ImageAttachments
+                        attachments={message.attachment_list}
+                        conversationId={message.conversation_id}
+                        messageId={message.id}
+                    />
 
                     <MessageActionButtons
                         messageType={message.message_type}
@@ -367,6 +400,9 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
     if (prevProps.message.id !== nextProps.message.id) return false;
     if (prevProps.message.content !== nextProps.message.content) return false;
     if (prevProps.message.message_type !== nextProps.message.message_type) return false;
+    if (!areAttachmentListsEqual(prevProps.message.attachment_list, nextProps.message.attachment_list)) {
+        return false;
+    }
 
     // regenerate 数组比较
     const prevRegenerate = prevProps.message.regenerate;

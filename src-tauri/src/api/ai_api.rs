@@ -730,8 +730,11 @@ pub async fn ask_ai(
             if let Some(entry) = sessions.get(&conversation_id) {
                 entry.handle.clone()
             } else {
-                let handle =
-                    spawn_acp_session_task(app_handle_clone.clone(), conversation_id, acp_config.clone());
+                let handle = spawn_acp_session_task(
+                    app_handle_clone.clone(),
+                    conversation_id,
+                    acp_config.clone(),
+                );
                 sessions.insert(
                     conversation_id,
                     crate::api::ai::acp::AcpSessionEntry::new(handle.clone(), conversation_id),
@@ -740,13 +743,19 @@ pub async fn ask_ai(
             }
         };
 
-        if let Err(e) = session_handle.send_prompt(response_message.id, prompt_clone.clone(), window_clone.clone())
-        {
+        if let Err(e) = session_handle.send_prompt(
+            response_message.id,
+            prompt_clone.clone(),
+            window_clone.clone(),
+        ) {
             warn!(conversation_id, error = %e, "ACP session send prompt failed, respawning session");
             let replacement_handle = {
                 let mut sessions = acp_session_state.sessions.lock().await;
-                let handle =
-                    spawn_acp_session_task(app_handle_clone.clone(), conversation_id, acp_config.clone());
+                let handle = spawn_acp_session_task(
+                    app_handle_clone.clone(),
+                    conversation_id,
+                    acp_config.clone(),
+                );
                 sessions.insert(
                     conversation_id,
                     crate::api::ai::acp::AcpSessionEntry::new(handle.clone(), conversation_id),
@@ -909,6 +918,7 @@ pub async fn ask_ai(
             provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
         let is_gemini = model_code_lc.contains("gemini");
         let capture_usage = !(is_openai_like && is_gemini);
+        let capture_content = stream && model_request_mode.eq_ignore_ascii_case("responses");
 
         let capture_reasoning_content = stream
             && is_openai_like
@@ -920,6 +930,7 @@ pub async fn ask_ai(
             stream,
             chat_options: chat_options
                 .with_normalize_reasoning_content(true)
+                .with_capture_content(capture_content)
                 .with_capture_reasoning_content(capture_reasoning_content)
                 .with_capture_usage(capture_usage)
                 .with_capture_tool_calls(has_available_tools), // 动态设置
@@ -931,6 +942,7 @@ pub async fn ask_ai(
             stream = chat_config.stream,
             has_tools = has_available_tools,
             provider_api_type = %provider_api_type,
+            capture_content = capture_content,
             capture_usage = capture_usage,
             capture_reasoning_content = capture_reasoning_content,
             is_openai_like = is_openai_like,
@@ -1324,6 +1336,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let is_openai_like = provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
     let is_gemini = model_code_lc.contains("gemini");
     let capture_usage = !(is_openai_like && is_gemini);
+    let capture_content = stream && model_request_mode.eq_ignore_ascii_case("responses");
 
     let capture_reasoning_content = stream
         && is_openai_like
@@ -1335,6 +1348,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         stream,
         chat_options: chat_options
             .with_normalize_reasoning_content(true)
+            .with_capture_content(capture_content)
             .with_capture_reasoning_content(capture_reasoning_content)
             .with_capture_usage(capture_usage)
             .with_capture_tool_calls(has_available_tools), // 动态设置
@@ -1346,6 +1360,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         stream = chat_config.stream,
         has_tools = has_available_tools,
         provider_api_type = %provider_api_type,
+        capture_content = capture_content,
         capture_usage = capture_usage,
         capture_reasoning_content = capture_reasoning_content,
         is_openai_like = is_openai_like,
@@ -1656,6 +1671,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let is_openai_like = provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
     let is_gemini = model_code_lc.contains("gemini");
     let capture_usage = !(is_openai_like && is_gemini);
+    let capture_content = stream && model_request_mode.eq_ignore_ascii_case("responses");
 
     let capture_reasoning_content = stream
         && is_openai_like
@@ -1667,6 +1683,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         stream,
         chat_options: chat_options
             .with_normalize_reasoning_content(true)
+            .with_capture_content(capture_content)
             .with_capture_reasoning_content(capture_reasoning_content)
             .with_capture_usage(capture_usage)
             .with_capture_tool_calls(has_available_tools),
@@ -1678,6 +1695,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         stream = chat_config.stream,
         has_tools = has_available_tools,
         provider_api_type = %provider_api_type,
+        capture_content = capture_content,
         capture_reasoning_content = capture_reasoning_content,
         force_non_native_for_gemini_toolresult,
         force_non_native_for_invalid_tool_args,
@@ -1810,10 +1828,7 @@ pub async fn cancel_ai(
     };
 
     if let Some(handle) = acp_session_handle {
-        handle
-            .cancel_current_prompt()
-            .await
-            .map_err(|error| error.to_string())?;
+        handle.cancel_current_prompt().await.map_err(|error| error.to_string())?;
     } else {
         message_token_manager.cancel_request(conversation_id).await;
     }
@@ -2103,6 +2118,8 @@ pub async fn regenerate_ai(
             provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
         let is_gemini = model_code_lc.contains("gemini");
         let capture_usage = !(is_openai_like && is_gemini);
+        let capture_content =
+            stream && regenerate_model_request_mode.eq_ignore_ascii_case("responses");
 
         let capture_reasoning_content = stream
             && is_openai_like
@@ -2114,6 +2131,7 @@ pub async fn regenerate_ai(
             stream,
             chat_options: chat_options
                 .with_normalize_reasoning_content(true)
+                .with_capture_content(capture_content)
                 .with_capture_reasoning_content(capture_reasoning_content)
                 .with_capture_usage(capture_usage)
                 .with_capture_tool_calls(has_available_tools), // 动态设置
@@ -2125,6 +2143,7 @@ pub async fn regenerate_ai(
             stream = chat_config.stream,
             has_tools = has_available_tools,
             provider_api_type = %regenerate_provider_api_type,
+            capture_content = capture_content,
             capture_usage = capture_usage,
             capture_reasoning_content = capture_reasoning_content,
             is_openai_like = is_openai_like,
