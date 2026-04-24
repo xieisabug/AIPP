@@ -32,7 +32,6 @@ impl SystemDatabase {
     pub fn new(app_handle: &tauri::AppHandle) -> Result<Self> {
         let db_path = get_db_path(app_handle, "system.db");
         let conn = Connection::open(db_path.unwrap())?;
-        debug!("Opened system database");
         Ok(SystemDatabase { conn })
     }
 
@@ -92,7 +91,6 @@ impl SystemDatabase {
             debug!(found = true, "Fetched system config");
             Ok(value)
         } else {
-            debug!(found = false, "System config not found");
             Ok(String::new())
         }
     }

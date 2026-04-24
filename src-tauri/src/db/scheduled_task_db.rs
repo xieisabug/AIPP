@@ -109,7 +109,6 @@ impl ScheduledTaskDatabase {
         let db_path = get_db_path(app_handle, "conversation.db").unwrap();
         let conn = Connection::open(&db_path)?;
         let write_lock = get_db_write_lock(&db_path);
-        debug!("Opened scheduled task database");
         Ok(ScheduledTaskDatabase { conn, db_path, write_lock })
     }
 
