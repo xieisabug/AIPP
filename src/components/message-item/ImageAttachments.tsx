@@ -75,7 +75,7 @@ const ImageAttachments: React.FC<ImageAttachmentsProps> = ({
                         aria-label="点击使用系统默认程序打开图片"
                     >
                         <img
-                            className="max-h-[320px] w-full object-cover"
+                            className="block max-h-[320px] w-full h-auto object-contain"
                             src={imageSrc}
                             alt={attachment.attachment_url || 'Message attachment'}
                         />

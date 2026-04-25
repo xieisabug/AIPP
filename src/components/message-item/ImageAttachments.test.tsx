@@ -80,4 +80,21 @@ describe('ImageAttachments', () => {
 
         expect(container).toBeEmptyDOMElement();
     });
+
+    it('renders images with contain sizing to preserve aspect ratio', () => {
+        render(
+            <ImageAttachments
+                attachments={[
+                    {
+                        attachment_type: 'Image',
+                        attachment_url: 'generated-image-1.png',
+                        attachment_content: 'data:image/png;base64,Zm9v',
+                    },
+                ]}
+            />
+        );
+
+        expect(screen.getByRole('img')).toHaveClass('object-contain');
+        expect(screen.getByRole('img')).toHaveClass('h-auto');
+    });
 });

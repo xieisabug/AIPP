@@ -13,12 +13,14 @@ interface ContextListProps {
 }
 
 const getContextIcon = (type: ContextItem['type'], attachmentType?: string) => {
-    if (type === 'user_file' && attachmentType === 'Image') {
+    if ((type === 'user_file' || type === 'generated_image') && attachmentType === 'Image') {
         return <Image className="h-4 w-4 text-blue-500 flex-shrink-0" />;
     }
     switch (type) {
         case 'user_file':
             return <FileInput className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
+        case 'generated_image':
+            return <Image className="h-4 w-4 text-blue-500 flex-shrink-0" />;
         case 'skill':
             return <Sparkles className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
         case 'read_file':
@@ -38,6 +40,8 @@ const getContextLabel = (type: ContextItem['type']): string => {
     switch (type) {
         case 'user_file':
             return '用户文件';
+        case 'generated_image':
+            return '生成图片';
         case 'skill':
             return 'Skills';
         case 'read_file':
