@@ -155,6 +155,11 @@ jobs:
               with:
                   targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
+            - name: Setup protoc
+              uses: arduino/setup-protoc@v3
+              with:
+                  version: "26.1"
+
             - name: Install dependencies
               run: pnpm install
 
