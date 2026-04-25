@@ -41,6 +41,11 @@ pub async fn save_feature_config(
     feature_code: String,
     config: HashMap<String, String>,
 ) -> Result<(), String> {
+    let config = if feature_code == "experimental" {
+        crate::api::butler_api::normalize_butler_experimental_config(&config)?
+    } else {
+        config
+    };
     let db = SystemDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let _ = db.delete_feature_config_by_feature_code(feature_code.as_str());
     for (key, value) in config.iter() {

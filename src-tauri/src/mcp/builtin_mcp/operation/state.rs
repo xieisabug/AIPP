@@ -8,6 +8,18 @@ use tracing::{debug, info};
 use super::types::{PermissionDecision, PermissionRequestEvent};
 use crate::utils::path_utils::is_path_under_trusted;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ScopedFileKey {
+    pub conversation_id: Option<i64>,
+    pub path: String,
+}
+
+impl ScopedFileKey {
+    fn new(path: &str, conversation_id: Option<i64>) -> Self {
+        Self { conversation_id, path: path.to_string() }
+    }
+}
+
 /// 文件读取记录
 #[derive(Debug, Clone)]
 pub struct FileReadRecord {
@@ -58,10 +70,10 @@ pub struct PermissionRequestResolution {
 
 /// 操作工具状态管理器
 pub struct OperationState {
-    /// 已读文件记录（路径 -> 读取记录）
-    pub(crate) read_files: Arc<Mutex<HashMap<String, FileReadRecord>>>,
-    /// 当前会话写入过的文件（路径 -> 写入时间戳）
-    pub(crate) written_files: Arc<Mutex<HashMap<String, u64>>>,
+    /// 已读文件记录（conversation_id + 路径 -> 读取记录）
+    pub(crate) read_files: Arc<Mutex<HashMap<ScopedFileKey, FileReadRecord>>>,
+    /// 当前会话写入过的文件（conversation_id + 路径 -> 写入时间戳）
+    pub(crate) written_files: Arc<Mutex<HashMap<ScopedFileKey, u64>>>,
     /// 后台 Bash 进程（bash_id -> 进程信息）
     pub(crate) bash_processes: Arc<Mutex<HashMap<String, BashProcessInfo>>>,
     /// 待处理的权限请求（request_id -> 发送通道）
@@ -97,25 +109,51 @@ impl OperationState {
 
     /// 记录文件已被读取
     pub async fn record_file_read(&self, path: &str) {
+        self.record_file_read_for_conversation(path, None).await;
+    }
+
+    /// 记录文件已被读取（按会话隔离）
+    pub async fn record_file_read_for_conversation(
+        &self,
+        path: &str,
+        conversation_id: Option<i64>,
+    ) {
         let mut files = self.read_files.lock().await;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        files.insert(path.to_string(), FileReadRecord { path: path.to_string(), read_time: now });
-        debug!(path = %path, "Recorded file read");
+        files.insert(
+            ScopedFileKey::new(path, conversation_id),
+            FileReadRecord { path: path.to_string(), read_time: now },
+        );
+        debug!(conversation_id, path = %path, "Recorded file read");
     }
 
     /// 检查文件是否已被读取过
     pub async fn has_file_been_read(&self, path: &str) -> bool {
+        self.has_file_been_read_for_conversation(path, None).await
+    }
+
+    /// 检查文件是否已被读取过（按会话隔离）
+    pub async fn has_file_been_read_for_conversation(
+        &self,
+        path: &str,
+        conversation_id: Option<i64>,
+    ) -> bool {
         let files = self.read_files.lock().await;
-        files.contains_key(path)
+        files.contains_key(&ScopedFileKey::new(path, conversation_id))
     }
 
     /// 清除文件读取记录
     pub async fn clear_file_read(&self, path: &str) {
+        self.clear_file_read_for_conversation(path, None).await;
+    }
+
+    /// 清除文件读取记录（按会话隔离）
+    pub async fn clear_file_read_for_conversation(&self, path: &str, conversation_id: Option<i64>) {
         let mut files = self.read_files.lock().await;
-        files.remove(path);
+        files.remove(&ScopedFileKey::new(path, conversation_id));
     }
 
     /// 清除所有文件读取记录
@@ -126,25 +164,52 @@ impl OperationState {
 
     /// 记录文件已被写入
     pub async fn record_file_write(&self, path: &str) {
+        self.record_file_write_for_conversation(path, None).await;
+    }
+
+    /// 记录文件已被写入（按会话隔离）
+    pub async fn record_file_write_for_conversation(
+        &self,
+        path: &str,
+        conversation_id: Option<i64>,
+    ) {
         let mut files = self.written_files.lock().await;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        files.insert(path.to_string(), now);
-        debug!(path = %path, "Recorded file write");
+        files.insert(ScopedFileKey::new(path, conversation_id), now);
+        debug!(conversation_id, path = %path, "Recorded file write");
     }
 
     /// 检查文件是否在当前会话中已被写入过
     pub async fn has_file_been_written(&self, path: &str) -> bool {
+        self.has_file_been_written_for_conversation(path, None).await
+    }
+
+    /// 检查文件是否在当前会话中已被写入过（按会话隔离）
+    pub async fn has_file_been_written_for_conversation(
+        &self,
+        path: &str,
+        conversation_id: Option<i64>,
+    ) -> bool {
         let files = self.written_files.lock().await;
-        files.contains_key(path)
+        files.contains_key(&ScopedFileKey::new(path, conversation_id))
     }
 
     /// 清除文件写入记录
     pub async fn clear_file_write(&self, path: &str) {
+        self.clear_file_write_for_conversation(path, None).await;
+    }
+
+    /// 清除文件写入记录（按会话隔离）
+    pub async fn clear_file_write_for_conversation(
+        &self,
+        path: &str,
+        conversation_id: Option<i64>,
+    ) {
         let mut files = self.written_files.lock().await;
-        files.remove(path);
+        files.remove(&ScopedFileKey::new(path, conversation_id));
     }
 
     /// 清除所有文件写入记录
@@ -362,7 +427,11 @@ impl OperationState {
     /// 添加会话信任路径
     pub async fn add_conversation_trusted_path(&self, conversation_id: i64, path: String) {
         let mut trusted = self.conversation_trusted_paths.lock().await;
-        trusted.entry(conversation_id).or_insert_with(Vec::new).push(path.clone());
+        let entry = trusted.entry(conversation_id).or_insert_with(Vec::new);
+        if entry.iter().any(|existing| existing == &path) {
+            return;
+        }
+        entry.push(path.clone());
         info!(conversation_id, path = %path, "Added conversation trusted path");
     }
 

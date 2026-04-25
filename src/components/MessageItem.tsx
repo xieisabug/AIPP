@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useMemo } from "react";
 import UnifiedMarkdown from "./UnifiedMarkdown";
 import ReasoningMessage from "./ReasoningMessage";
 import ErrorMessage from "./message-item/ErrorMessage";
@@ -13,23 +13,11 @@ import { useCustomTagParser } from "../hooks/useCustomTagParser";
 import { useMarkdownConfig } from "../hooks/useMarkdownConfig";
 import { useMcpToolCallProcessor } from "../hooks/useMcpToolCallProcessor";
 import { useDisplayConfig } from "../hooks/useDisplayConfig";
+import { useFeishuDebugResend } from "../hooks/useFeishuDebugResend";
 import { useAntiLeakage } from "../contexts/AntiLeakageContext";
 import { maskContent } from "../utils/antiLeakage";
 import type { InlineInteractionItem } from "./ConversationUI";
-import { invoke } from "@tauri-apps/api/core";
-import { toast } from "sonner";
-
-interface FeishuDebugSendResult {
-    external_message_id: string;
-    payload_type: string;
-    delivery_mode: string;
-    reply_to_message_id?: string | null;
-    target_type?: string | null;
-    target_id?: string | null;
-    rendered_text: string;
-    interactive_error?: string | null;
-    interactive_card?: unknown;
-}
+import { Loader2 } from "lucide-react";
 
 interface MessageItemProps {
     message: Message;
@@ -48,6 +36,32 @@ interface MessageItemProps {
     inlineInteractionItems?: InlineInteractionItem[];
     sentBatchToolResultMessageIds?: ReadonlySet<number>;
     allowFeishuDebugResend?: boolean;
+    mergedMode?: boolean; // 合并模式：不渲染外层气泡包装
+}
+
+function areAttachmentListsEqual(prevAttachments?: Array<any>, nextAttachments?: Array<any>) {
+    const prevList = prevAttachments ?? [];
+    const nextList = nextAttachments ?? [];
+
+    if (prevList.length !== nextList.length) {
+        return false;
+    }
+
+    for (let index = 0; index < prevList.length; index += 1) {
+        const prevAttachment = prevList[index];
+        const nextAttachment = nextList[index];
+
+        if (
+            prevAttachment?.id !== nextAttachment?.id ||
+            prevAttachment?.attachment_type !== nextAttachment?.attachment_type ||
+            prevAttachment?.attachment_url !== nextAttachment?.attachment_url ||
+            prevAttachment?.attachment_content !== nextAttachment?.attachment_content
+        ) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 const MessageItem = React.memo<MessageItemProps>(
@@ -68,6 +82,7 @@ const MessageItem = React.memo<MessageItemProps>(
         inlineInteractionItems,
         sentBatchToolResultMessageIds,
         allowFeishuDebugResend = false,
+        mergedMode = false,
     }) => {
         // 防泄露模式
         const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
@@ -82,8 +97,9 @@ const MessageItem = React.memo<MessageItemProps>(
 
         const { copyIconState, handleCopy } = useCopyHandler(displayContent);
         const { parseCustomTags } = useCustomTagParser();
-        const { isUserMessageMarkdownEnabled } = useDisplayConfig();
-        const [isFeishuDebugSending, setIsFeishuDebugSending] = useState(false);
+        const { isUserMessageMarkdownEnabled, isShowThinking } = useDisplayConfig();
+        const { pendingMessageId, resendMessageToFeishuDebug } = useFeishuDebugResend();
+        const isFeishuDebugSending = pendingMessageId === message.id;
 
         // 统一的 Markdown 配置，根据用户消息类型和配置决定是否禁用 Markdown 语法
         const isUserMessage = message.message_type === "user";
@@ -97,6 +113,7 @@ const MessageItem = React.memo<MessageItemProps>(
         const { processContent } = useMcpToolCallProcessor(markdownConfig, {
             conversationId,
             messageId: message.id,
+            isLastMessage,
             mcpToolCallStates,
             shiningMcpCallId,
             inlineInteractionItems,
@@ -226,45 +243,15 @@ const MessageItem = React.memo<MessageItemProps>(
         ]);
 
         const canResendToFeishuDebug =
-            allowFeishuDebugResend && message.message_type === "response";
+            allowFeishuDebugResend
+            && (message.message_type === "response" || message.message_type === "tool_result");
 
         const handleFeishuDebugResend = useCallback(async () => {
             if (isFeishuDebugSending || !canResendToFeishuDebug) {
                 return;
             }
-
-            setIsFeishuDebugSending(true);
-            try {
-                const result = await invoke<FeishuDebugSendResult>("debug_resend_message_to_feishu", {
-                    messageId: message.id,
-                    message_id: message.id,
-                });
-
-                console.debug("[FeishuDebugResend]", result);
-
-                const descriptionParts = [
-                    `发送类型：${result.payload_type}`,
-                    `投递方式：${result.delivery_mode === "reply" ? "回复" : "直发"}`,
-                ];
-                if (result.reply_to_message_id) {
-                    descriptionParts.push(`reply_to：${result.reply_to_message_id}`);
-                }
-                if (result.target_type && result.target_id) {
-                    descriptionParts.push(`目标：${result.target_type}=${result.target_id}`);
-                }
-                if (result.interactive_error) {
-                    descriptionParts.push(`interactive失败：${result.interactive_error}`);
-                }
-
-                toast.success("已重新发送到飞书", {
-                    description: descriptionParts.join(" | "),
-                });
-            } catch (error) {
-                toast.error(`重新发送到飞书失败: ${error instanceof Error ? error.message : String(error)}`);
-            } finally {
-                setIsFeishuDebugSending(false);
-            }
-        }, [canResendToFeishuDebug, isFeishuDebugSending, message.id]);
+            await resendMessageToFeishuDebug(message.id);
+        }, [canResendToFeishuDebug, isFeishuDebugSending, message.id, resendMessageToFeishuDebug]);
 
         // 渲染内容 - 根据用户消息类型和配置选择渲染方式
         const contentElement = useMemo(
@@ -299,6 +286,25 @@ const MessageItem = React.memo<MessageItemProps>(
 
         // 早期返回：reasoning 类型消息
         if (message.message_type === "reasoning") {
+            // 不展示思考过程：思考中时显示加载指示器，思考完成后不渲染
+            if (!isShowThinking) {
+                const isReasoningComplete = message.finish_time !== null || streamEvent?.is_done === true;
+                if (isReasoningComplete) {
+                    return null;
+                }
+                // 思考中：展示一个 loading badge
+                return (
+                    <div
+                        data-message-item
+                        data-message-id={message.id}
+                        data-message-type="reasoning"
+                        className="my-2 flex items-center gap-2 px-3 py-1.5"
+                    >
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                        <span className="text-xs text-muted-foreground">思考中...</span>
+                    </div>
+                );
+            }
             return (
                 <ReasoningMessage
                     message={message}
@@ -322,6 +328,22 @@ const MessageItem = React.memo<MessageItemProps>(
         }
 
         // 常规消息渲染
+        // 合并模式下不渲染外层气泡包装，只渲染内容
+        if (mergedMode && !isUserMessage) {
+            return (
+                <div data-message-item data-message-id={message.id} data-message-type={message.message_type}>
+                    <div className="prose prose-sm max-w-none text-foreground break-all">
+                        {isUserMessage && !isUserMessageMarkdownEnabled ? contentElement : <div>{contentElement}</div>}
+                    </div>
+                    <ImageAttachments
+                        attachments={message.attachment_list}
+                        conversationId={message.conversation_id}
+                        messageId={message.id}
+                    />
+                </div>
+            );
+        }
+
         return (
             <div className="flex flex-col" data-message-item data-message-id={message.id} data-message-type={message.message_type}>
                 <div
@@ -341,7 +363,11 @@ const MessageItem = React.memo<MessageItemProps>(
                         {isUserMessage && !isUserMessageMarkdownEnabled ? contentElement : <div>{contentElement}</div>}
                     </div>
 
-                    <ImageAttachments attachments={message.attachment_list} />
+                    <ImageAttachments
+                        attachments={message.attachment_list}
+                        conversationId={message.conversation_id}
+                        messageId={message.id}
+                    />
 
                     <MessageActionButtons
                         messageType={message.message_type}
@@ -374,6 +400,9 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
     if (prevProps.message.id !== nextProps.message.id) return false;
     if (prevProps.message.content !== nextProps.message.content) return false;
     if (prevProps.message.message_type !== nextProps.message.message_type) return false;
+    if (!areAttachmentListsEqual(prevProps.message.attachment_list, nextProps.message.attachment_list)) {
+        return false;
+    }
 
     // regenerate 数组比较
     const prevRegenerate = prevProps.message.regenerate;
@@ -403,6 +432,10 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
 
     // 防泄露模式：isLastMessage 变化时需要重新渲染
     if (prevProps.isLastMessage !== nextProps.isLastMessage) return false;
+
+    // 合并模式比较
+    if (prevProps.mergedMode !== nextProps.mergedMode) return false;
+    if (prevProps.allowFeishuDebugResend !== nextProps.allowFeishuDebugResend) return false;
 
     return true;
 };

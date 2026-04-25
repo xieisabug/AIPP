@@ -5,6 +5,37 @@ use super::get_db_path;
 
 pub const DEFAULT_MODEL_REQUEST_MODE: &str = "chat_completions";
 
+fn copilot_prefers_responses_by_default(model_code: &str) -> bool {
+    let model_code = model_code.trim().to_ascii_lowercase();
+    model_code.starts_with("gpt-5")
+        || model_code.contains("codex")
+        || model_code.starts_with("o1")
+        || model_code.starts_with("o3")
+        || model_code.starts_with("o4")
+}
+
+pub fn default_request_mode_for_model(api_type: &str, model_code: &str) -> &'static str {
+    if api_type.eq_ignore_ascii_case("github_copilot")
+        && copilot_prefers_responses_by_default(model_code)
+    {
+        "responses"
+    } else {
+        DEFAULT_MODEL_REQUEST_MODE
+    }
+}
+
+pub fn resolve_request_mode_or_default(
+    api_type: &str,
+    model_code: &str,
+    request_mode: Option<&str>,
+) -> &'static str {
+    match request_mode {
+        Some("responses") => "responses",
+        Some("chat_completions") => "chat_completions",
+        _ => default_request_mode_for_model(api_type, model_code),
+    }
+}
+
 #[derive(Debug)]
 pub struct LLMProvider {
     pub id: i64,
@@ -428,7 +459,7 @@ impl LLMDatabase {
         model_code: &String,
     ) -> rusqlite::Result<ModelDetail> {
         let mut stmt = self.conn.prepare("SELECT id, name, llm_provider_id, code, description, vision_support, audio_support, video_support FROM llm_model WHERE llm_provider_id = ? AND code = ?")?;
-        let model = stmt
+        let mut model = stmt
             .query_map([&provider_id.to_string(), model_code], |row| {
                 Ok(LLMModel {
                     id: row.get(0)?,
@@ -439,21 +470,25 @@ impl LLMDatabase {
                     vision_support: row.get(5)?,
                     audio_support: row.get(6)?,
                     video_support: row.get(7)?,
-                    request_mode: self
-                        .get_model_request_mode(*provider_id, model_code)?
-                        .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string()),
+                    request_mode: String::new(),
                 })
             })?
             .next()
             .transpose()?;
 
-        let model = match model {
+        let mut model = match model {
             Some(model) => model,
             None => return Err(rusqlite::Error::QueryReturnedNoRows),
         };
 
         let provider_id = model.llm_provider_id;
         let provider = self.get_llm_provider(provider_id)?;
+        model.request_mode = resolve_request_mode_or_default(
+            &provider.api_type,
+            &model.code,
+            self.get_model_request_mode(provider_id, &model.code)?.as_deref(),
+        )
+        .to_string();
         let configs = self.get_llm_provider_config(provider_id)?;
 
         Ok(ModelDetail { model, provider, configs })
@@ -462,7 +497,7 @@ impl LLMDatabase {
     #[instrument(level = "debug", skip(self), fields(id = id))]
     pub fn get_llm_model_detail_by_id(&self, id: &i64) -> rusqlite::Result<ModelDetail> {
         let mut stmt = self.conn.prepare("SELECT id, name, llm_provider_id, code, description, vision_support, audio_support, video_support FROM llm_model WHERE id = ?")?;
-        let model = stmt
+        let mut model = stmt
             .query_map([id], |row| {
                 Ok(LLMModel {
                     id: row.get(0)?,
@@ -473,21 +508,25 @@ impl LLMDatabase {
                     vision_support: row.get(5)?,
                     audio_support: row.get(6)?,
                     video_support: row.get(7)?,
-                    request_mode: self
-                        .get_model_request_mode(row.get(2)?, &row.get::<_, String>(3)?)?
-                        .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string()),
+                    request_mode: String::new(),
                 })
             })?
             .next()
             .transpose()?;
 
-        let model = match model {
+        let mut model = match model {
             Some(model) => model,
             None => return Err(rusqlite::Error::QueryReturnedNoRows),
         };
 
         let provider_id = model.llm_provider_id;
         let provider = self.get_llm_provider(provider_id)?;
+        model.request_mode = resolve_request_mode_or_default(
+            &provider.api_type,
+            &model.code,
+            self.get_model_request_mode(provider_id, &model.code)?.as_deref(),
+        )
+        .to_string();
         let configs = self.get_llm_provider_config(provider_id)?;
 
         Ok(ModelDetail { model, provider, configs })
@@ -628,5 +667,38 @@ impl LLMDatabase {
         )?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{default_request_mode_for_model, resolve_request_mode_or_default};
+
+    #[test]
+    fn copilot_gpt5_defaults_to_responses() {
+        assert_eq!(default_request_mode_for_model("github_copilot", "gpt-5.4"), "responses");
+        assert_eq!(default_request_mode_for_model("github_copilot", "gpt-5.3-codex"), "responses");
+        assert_eq!(default_request_mode_for_model("github_copilot", "o1-mini"), "responses");
+    }
+
+    #[test]
+    fn copilot_legacy_models_stay_on_chat_completions_by_default() {
+        assert_eq!(default_request_mode_for_model("github_copilot", "gpt-4o"), "chat_completions");
+        assert_eq!(
+            default_request_mode_for_model("github_copilot", "claude-3.5-sonnet"),
+            "chat_completions"
+        );
+    }
+
+    #[test]
+    fn explicit_request_mode_override_wins() {
+        assert_eq!(
+            resolve_request_mode_or_default("github_copilot", "gpt-5.4", Some("chat_completions")),
+            "chat_completions"
+        );
+        assert_eq!(
+            resolve_request_mode_or_default("github_copilot", "gpt-4o", Some("responses")),
+            "responses"
+        );
     }
 }

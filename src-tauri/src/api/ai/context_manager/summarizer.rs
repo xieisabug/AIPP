@@ -6,6 +6,13 @@ use tracing::{debug, info};
 
 const GENERAL_SUMMARY_PROMPT: &str = r#"请将以下对话历史压缩为结构化摘要。摘要必须足够详尽，使后续对话可以无缝继续，就像没有发生压缩一样。
 
+重要原则：
+- 按时间顺序分析每条消息，确保不遗漏任何关键信息
+- 特别关注用户的明确反馈和修改指示
+- 保留具体的文件名、代码片段、函数签名
+- 记录遇到的错误及修复方法
+- 如实记录所有用户消息（非工具结果类）
+
 必须保留：
 - 用户的原始需求和最终目标
 - 关键决策和结论（包含原因）
@@ -13,17 +20,35 @@ const GENERAL_SUMMARY_PROMPT: &str = r#"请将以下对话历史压缩为结构�
 - 所有未完成的待办事项
 - 重要的约束和规则
 - 涉及的关键文件路径或资源标识
+- 代码修改的具体内容
 
 摘要格式（严格遵守）：
 <context_summary>
 ## 用户目标
-[一句话概括用户的核心需求]
+[详细描述用户的核心需求和意图]
+
+## 关键技术概念
+- [涉及的技术、框架、工具]
 
 ## 已完成
-- [关键成果，包含具体细节]
+- [关键成果，包含具体文件和代码细节]
+
+## 文件与代码
+- [文件名]
+  - [为什么重要]
+  - [修改摘要]
+  - [关键代码片段]
+
+## 错误与修复
+- [错误描述]：
+  - [修复方法]
+  - [用户反馈（如有）]
 
 ## 进行中
-- [当前工作的精确状态]
+- [当前工作的精确状态，包含文件名和代码片段]
+
+## 用户消息记录
+- [列出所有非工具结果的用户消息要点]
 
 ## 关键决策
 - [重要决定及其原因]
@@ -33,6 +58,9 @@ const GENERAL_SUMMARY_PROMPT: &str = r#"请将以下对话历史压缩为结构�
 
 ## 约束与规则
 - [必须遵守的限制条件]
+
+## 下一步
+[基于最近工作的下一步计划，包含直接引用最近对话的内容以确保任务连续性]
 </context_summary>"#;
 
 const BUTLER_EXTRA_PROMPT: &str = r#"
@@ -160,7 +188,7 @@ mod tests {
         let long_content = "a".repeat(10000);
         let msgs: Vec<MessageTuple> = vec![("user".into(), long_content, vec![])];
         let result = format_messages_for_summary(&msgs);
-        assert!(result.contains("已截取前 8000 字符"));
+        assert!(result.contains("已截取前部分"));
         assert!(result.len() < 9000);
     }
 
@@ -178,6 +206,10 @@ mod tests {
         assert!(GENERAL_SUMMARY_PROMPT.contains("进行中"));
         assert!(GENERAL_SUMMARY_PROMPT.contains("关键决策"));
         assert!(GENERAL_SUMMARY_PROMPT.contains("待办"));
+        assert!(GENERAL_SUMMARY_PROMPT.contains("文件与代码"));
+        assert!(GENERAL_SUMMARY_PROMPT.contains("错误与修复"));
+        assert!(GENERAL_SUMMARY_PROMPT.contains("用户消息记录"));
+        assert!(GENERAL_SUMMARY_PROMPT.contains("下一步"));
         assert!(GENERAL_SUMMARY_PROMPT.contains("<context_summary>"));
     }
 }

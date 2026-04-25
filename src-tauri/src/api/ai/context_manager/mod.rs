@@ -1,8 +1,9 @@
 pub mod budget;
-#[allow(dead_code)]
 pub mod persistence;
 pub mod summarizer;
 pub mod token_estimator;
+
+use std::collections::HashSet;
 
 use crate::db::conversation_db::{ConversationDatabase, MessageAttachment};
 use budget::ContextBudget;
@@ -38,6 +39,12 @@ pub struct CompactionContext<'a> {
     /// Used for persistence (recording which messages were compacted).
     pub message_ids: Vec<i64>,
 }
+
+/// Marker text replacing truncated old tool results (microcompact).
+const TOOL_RESULT_CLEARED: &str = "[旧工具结果已清除]";
+
+/// Maximum number of tool results to keep (counted from newest).
+const MICROCOMPACT_KEEP_RECENT: usize = 6;
 
 /// Fit a message list into the given context budget (synchronous, estimation only).
 ///
@@ -86,10 +93,14 @@ pub fn fit_to_budget(
 /// Fit a message list into the given context budget, performing LLM-based
 /// compaction when the threshold is exceeded.
 ///
+/// Strategy (inspired by Claude Code's multi-level approach):
+/// 1. **Microcompact** — truncate old tool results (cheap, no LLM call)
+/// 2. **Full compact** — summarize body messages via LLM
+///
 /// The algorithm splits messages into three segments:
 /// - **Head**: the system prompt (first message)
 /// - **Body**: everything between Head and Tail — candidate for summarization
-/// - **Tail**: the most recent `tail_preserve_count` messages — kept verbatim
+/// - **Tail**: the most recent messages (by token budget) — kept verbatim
 ///
 /// When over budget, Body is summarized by the LLM and replaced with a single
 /// summary message. The summary is also persisted to the DB so subsequent
@@ -110,6 +121,9 @@ pub async fn fit_to_budget_with_compaction(
     debug!(
         estimated_tokens,
         trigger,
+        compaction_threshold = budget.compaction_threshold,
+        context_window = budget.context_window_size,
+        effective_limit = budget.effective_input_limit(),
         message_count = messages.len(),
         "context budget check (with compaction)"
     );
@@ -119,7 +133,29 @@ pub async fn fit_to_budget_with_compaction(
         return FitResult { estimated_tokens, compacted: false, messages };
     }
 
-    // Compute tail by walking backwards with a token budget
+    info!(estimated_tokens, trigger, "context over threshold, attempting compaction");
+
+    // --- Level 1: Microcompact (truncate old tool results) ---
+    let (messages, db_token_counts_vec) = microcompact_tool_results(messages, db_token_counts);
+    let db_token_counts = &db_token_counts_vec;
+    let post_mc_tokens = estimate_total(&messages, db_token_counts);
+
+    if post_mc_tokens <= trigger {
+        info!(
+            original_tokens = estimated_tokens,
+            post_microcompact_tokens = post_mc_tokens,
+            "microcompact sufficient, skipping full LLM compaction"
+        );
+        return FitResult { estimated_tokens: post_mc_tokens, compacted: true, messages };
+    }
+
+    info!(
+        post_microcompact_tokens = post_mc_tokens,
+        trigger, "microcompact not sufficient, proceeding with LLM compaction"
+    );
+
+    // --- Level 2: Full LLM compaction ---
+    // Compute tail by walking backwards with a token budget, respecting tool pair atomicity
     let tail_budget = budget.tail_token_budget();
     let head_count =
         if messages.first().map(|(t, _, _)| t.as_str()) == Some("system") { 1 } else { 0 };
@@ -129,16 +165,16 @@ pub async fn fit_to_budget_with_compaction(
 
     if body_end <= head_count {
         info!(
-            estimated_tokens,
+            estimated_tokens = post_mc_tokens,
             trigger,
             message_count = messages.len(),
             "over threshold but not enough messages to compact"
         );
-        return FitResult { estimated_tokens, compacted: false, messages };
+        return FitResult { estimated_tokens: post_mc_tokens, compacted: false, messages };
     }
 
     info!(
-        estimated_tokens,
+        estimated_tokens = post_mc_tokens,
         trigger,
         head_count,
         body_range = format!("{}..{}", head_count, body_end),
@@ -160,7 +196,7 @@ pub async fn fit_to_budget_with_compaction(
         Ok(s) => s,
         Err(e) => {
             warn!(error = %e, "LLM summary generation failed, passing through uncompacted");
-            return FitResult { estimated_tokens, compacted: false, messages };
+            return FitResult { estimated_tokens: post_mc_tokens, compacted: false, messages };
         }
     };
 
@@ -176,7 +212,19 @@ pub async fn fit_to_budget_with_compaction(
             last_id,
         ) {
             warn!(error = %e, "failed to persist compaction summary, continuing with in-memory compaction");
+        } else {
+            info!(
+                conversation_id = ctx.conversation_id,
+                first_id, last_id, "compaction summary persisted to DB"
+            );
         }
+    } else {
+        warn!(
+            head_count,
+            body_end,
+            message_ids_len = ctx.message_ids.len(),
+            "no valid message IDs for compaction persistence — summary will be in-memory only"
+        );
     }
 
     // Assemble compacted message list: Head + Summary + Tail
@@ -195,6 +243,7 @@ pub async fn fit_to_budget_with_compaction(
     let compacted_tokens = estimate_total(&compacted, &[]);
     info!(
         original_tokens = estimated_tokens,
+        post_microcompact_tokens = post_mc_tokens,
         compacted_tokens,
         original_messages = messages.len(),
         compacted_messages = compacted.len(),
@@ -204,9 +253,72 @@ pub async fn fit_to_budget_with_compaction(
     FitResult { estimated_tokens: compacted_tokens, compacted: true, messages: compacted }
 }
 
+/// Microcompact: truncate old tool_result contents to save tokens cheaply.
+///
+/// Keeps the most recent `MICROCOMPACT_KEEP_RECENT` tool results intact and
+/// replaces the content of older ones with a placeholder. This is similar to
+/// Claude Code's microcompact strategy.
+fn microcompact_tool_results(
+    messages: Vec<MessageTuple>,
+    db_token_counts: &[i32],
+) -> (Vec<MessageTuple>, Vec<i32>) {
+    // Collect indices of tool_result messages
+    let tool_result_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, (msg_type, content, _))| {
+            msg_type == "tool_result" && content != TOOL_RESULT_CLEARED
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    if tool_result_indices.len() <= MICROCOMPACT_KEEP_RECENT {
+        return (messages, db_token_counts.to_vec());
+    }
+
+    let truncate_count = tool_result_indices.len() - MICROCOMPACT_KEEP_RECENT;
+    let indices_to_truncate: HashSet<usize> =
+        tool_result_indices[..truncate_count].iter().copied().collect();
+
+    let mut tokens_saved: usize = 0;
+    let mut new_db_tokens = db_token_counts.to_vec();
+    // Ensure new_db_tokens covers all messages
+    new_db_tokens.resize(messages.len(), 0);
+
+    let new_messages: Vec<MessageTuple> = messages
+        .into_iter()
+        .enumerate()
+        .map(|(i, (msg_type, content, attachments))| {
+            if indices_to_truncate.contains(&i) {
+                let old_tokens =
+                    estimate_message_tokens(&content, new_db_tokens.get(i).copied().unwrap_or(0));
+                let new_tokens = estimate_message_tokens(TOOL_RESULT_CLEARED, 0);
+                tokens_saved += old_tokens.saturating_sub(new_tokens);
+                new_db_tokens[i] = 0; // reset DB token count for truncated message
+                (msg_type, TOOL_RESULT_CLEARED.to_string(), attachments)
+            } else {
+                (msg_type, content, attachments)
+            }
+        })
+        .collect();
+
+    if tokens_saved > 0 {
+        info!(
+            truncated_results = truncate_count,
+            kept_results = MICROCOMPACT_KEEP_RECENT,
+            estimated_tokens_saved = tokens_saved,
+            "microcompact: truncated old tool results"
+        );
+    }
+
+    (new_messages, new_db_tokens)
+}
+
 /// Walk backwards from the end of the message list, accumulating estimated tokens,
 /// until `tail_budget` is exhausted. Returns the number of tail messages to keep.
-/// Always keeps at least 1 recent message (the last user/assistant turn).
+///
+/// Ensures tool_use/tool_result pairs are not split: if including a tool_result
+/// message, also include the preceding response that contains the tool_use.
 fn compute_tail_count(
     messages: &[MessageTuple],
     db_token_counts: &[i32],
@@ -243,6 +355,28 @@ fn compute_tail_count(
         accumulated += total;
         count += 1;
     }
+
+    // Ensure tool_use/tool_result atomicity: if the boundary splits a pair,
+    // walk backwards to include the response that owns the tool_use.
+    let tail_start = messages.len() - count;
+    if tail_start > head_count && tail_start < messages.len() {
+        let (msg_type, _, _) = &messages[tail_start];
+        if msg_type == "tool_result" {
+            // Walk backwards from tail_start to find the response with tool_use
+            let mut extra = 0;
+            let mut pos = tail_start;
+            while pos > head_count {
+                pos -= 1;
+                extra += 1;
+                let (t, _, _) = &messages[pos];
+                if t == "response" || t == "assistant" {
+                    break; // Found the response that contains the tool_use
+                }
+            }
+            count += extra;
+        }
+    }
+
     count
 }
 
@@ -374,5 +508,76 @@ mod tests {
         let messages = vec![msg("system", "sys"), msg("user", "hello"), msg("assistant", "hi")];
         let count = compute_tail_count(&messages, &[], 1, 0);
         assert_eq!(count, 1, "zero budget still keeps 1 message");
+    }
+
+    #[test]
+    fn compute_tail_does_not_split_tool_result_pair() {
+        let messages = vec![
+            msg("system", "sys"),
+            msg("user", "hello"),
+            msg("response", "calling tool"),   // contains tool_use
+            msg("tool_result", "tool output"), // paired with response above
+            msg("user", "next question"),
+        ];
+        // Budget should include user("next question") + tool_result, but tool_result
+        // should pull in the response too for atomicity
+        let db_tokens = vec![0, 100, 100, 100, 100];
+        let count = compute_tail_count(&messages, &db_tokens, 1, 250);
+        // Should keep: user + tool_result + response = 3 (not split at tool_result)
+        assert!(count >= 3, "tail should not split tool_result from its response, got {count}");
+    }
+
+    #[test]
+    fn microcompact_truncates_old_tool_results() {
+        let mut messages = vec![msg("system", "sys")];
+        // Add 10 tool results
+        for i in 0..10 {
+            messages.push(msg("tool_result", &format!("tool output {}", "x".repeat(1000))));
+        }
+        messages.push(msg("user", "latest"));
+
+        let (result, _) = microcompact_tool_results(messages, &[]);
+        let cleared_count = result.iter().filter(|(_, c, _)| c == TOOL_RESULT_CLEARED).count();
+        let kept_count = result
+            .iter()
+            .filter(|(t, c, _)| t == "tool_result" && c != TOOL_RESULT_CLEARED)
+            .count();
+        assert_eq!(kept_count, MICROCOMPACT_KEEP_RECENT);
+        assert_eq!(cleared_count, 10 - MICROCOMPACT_KEEP_RECENT);
+    }
+
+    #[test]
+    fn microcompact_noop_when_few_results() {
+        let messages = vec![
+            msg("system", "sys"),
+            msg("tool_result", "output 1"),
+            msg("tool_result", "output 2"),
+            msg("user", "hi"),
+        ];
+        let (result, _) = microcompact_tool_results(messages.clone(), &[]);
+        assert_eq!(result.len(), messages.len());
+        assert!(result.iter().all(|(_, c, _)| c != TOOL_RESULT_CLEARED));
+    }
+
+    #[test]
+    fn compute_tail_atomicity_with_multiple_tool_results() {
+        // Scenario: response followed by 3 tool_results, then a user message
+        let messages = vec![
+            msg("system", "sys"),
+            msg("user", "hello"),
+            msg("response", "calling 3 tools"), // index 2
+            msg("tool_result", "result 1"),     // index 3
+            msg("tool_result", "result 2"),     // index 4
+            msg("tool_result", "result 3"),     // index 5
+            msg("user", "next question"),       // index 6
+        ];
+        // Budget fits user + 1 tool_result but atomicity should pull in all 3 + response
+        let db_tokens = vec![0, 100, 100, 100, 100, 100, 100];
+        let count = compute_tail_count(&messages, &db_tokens, 1, 250);
+        // Must include: user(6) + tool_result(5,4,3) + response(2) = 5
+        assert!(
+            count >= 5,
+            "tail should include response + all 3 tool_results + user, got {count}"
+        );
     }
 }

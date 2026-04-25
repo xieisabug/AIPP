@@ -381,7 +381,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
                     </div>
                 ))}
         </SidebarList>
-    ), [filteredGroupedSkills, selectedSkill, isRefreshing, assistantId, getSkillConfig, handleSelectSkill, scanSkills, handleOpenSkillsFolder, handleInstallOfficial, searchQuery]);
+    ), [filteredGroupedSkills, selectedSkill, isRefreshing, assistantId, getSkillConfig, handleSelectSkill, scanSkills, handleOpenSkillsFolder, handleInstallOfficial, handleShowInstallGuide, searchQuery]);
 
     // Main content
     const content = useMemo(() => selectedSkill ? (
@@ -508,30 +508,42 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
     // Empty state when no skills found
     if (skills.length === 0 && !isRefreshing) {
         return (
-            <ConfigPageLayout
-                sidebar={null}
-                content={null}
-                emptyState={
-                    <EmptyState
-                        icon={<Sparkles className="h-8 w-8 text-muted-foreground" />}
-                        title="暂无Skills"
-                        description="点击扫描按钮自动发现已安装的Skills，将扫描以下目录：~/.claude/plugins、~/.codex/skills/.system 以及AIPP应用数据skills目录"
-                        action={
-                            <div className="flex gap-2">
-                                <Button onClick={scanSkills} disabled={isRefreshing}>
-                                    <RefreshCw className={`h-4 w-4 mr-2 ${isRefreshing ? 'animate-spin' : ''}`} />
-                                    扫描Skills
-                                </Button>
-                                <Button variant="outline" onClick={handleOpenSkillsFolder}>
-                                    <Folder className="h-4 w-4 mr-2" />
-                                    打开Skills文件夹
-                                </Button>
-                            </div>
-                        }
-                    />
-                }
-                showEmptyState={true}
-            />
+            <>
+                <ConfigPageLayout
+                    sidebar={null}
+                    content={null}
+                    emptyState={
+                        <EmptyState
+                            icon={<Sparkles className="h-8 w-8 text-muted-foreground" />}
+                            title="暂无Skills"
+                            description="点击扫描按钮自动发现已安装的Skills，将扫描以下目录：~/.claude/plugins、~/.codex/skills/.system 以及AIPP应用数据skills目录"
+                            action={
+                                <div className="flex flex-wrap gap-2">
+                                    <Button variant="outline" onClick={handleShowInstallGuide}>
+                                        <Sparkles className="h-4 w-4 mr-2" />
+                                        安装Skills
+                                    </Button>
+                                    <Button onClick={scanSkills} disabled={isRefreshing}>
+                                        <RefreshCw className={`h-4 w-4 mr-2 ${isRefreshing ? 'animate-spin' : ''}`} />
+                                        扫描Skills
+                                    </Button>
+                                    <Button variant="outline" onClick={handleOpenSkillsFolder}>
+                                        <Folder className="h-4 w-4 mr-2" />
+                                        打开Skills文件夹
+                                    </Button>
+                                </div>
+                            }
+                        />
+                    }
+                    showEmptyState={true}
+                />
+
+                <SkillInstallGuideDialog
+                    isOpen={installGuideOpen}
+                    onClose={() => setInstallGuideOpen(false)}
+                    onSkillInstalled={() => scanSkills()}
+                />
+            </>
         );
     }
 

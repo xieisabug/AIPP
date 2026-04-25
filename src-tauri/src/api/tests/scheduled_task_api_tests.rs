@@ -273,4 +273,48 @@ mod tests {
         assert!(parse_local_datetime("not a date").is_err());
         assert!(parse_local_datetime("").is_err());
     }
+
+    #[test]
+    fn test_compute_next_run_at_interval_requires_explicit_unit_and_value() {
+        let base_time = chrono::Utc::now();
+        let result = compute_next_run_at_with_config(
+            ScheduleConfig {
+                schedule_type: "interval",
+                interval_value: None,
+                interval_unit: None,
+                start_time: Some("09:00"),
+                week_days: Some(vec![1, 2, 3, 4, 5]),
+                month_days: None,
+                run_at: None,
+            },
+            base_time,
+        );
+
+        let err = result.expect_err("expected validation error");
+        assert!(err.contains("interval_value"));
+        assert!(err.contains("interval_unit"));
+        assert!(err.contains("week_days"));
+        assert!(err.contains("interval_unit='week'"));
+    }
+
+    #[test]
+    fn test_compute_next_run_at_week_days_rejects_non_week_unit() {
+        let base_time = chrono::Utc::now();
+        let result = compute_next_run_at_with_config(
+            ScheduleConfig {
+                schedule_type: "interval",
+                interval_value: Some(1),
+                interval_unit: Some("day"),
+                start_time: Some("09:00"),
+                week_days: Some(vec![1, 2, 3, 4, 5]),
+                month_days: None,
+                run_at: None,
+            },
+            base_time,
+        );
+
+        let err = result.expect_err("expected validation error");
+        assert!(err.contains("week_days"));
+        assert!(err.contains("interval_unit='week'"));
+    }
 }

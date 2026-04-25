@@ -1,6 +1,6 @@
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::genai_client;
-use crate::db::llm_db::{LLMDatabase, DEFAULT_MODEL_REQUEST_MODE};
+use crate::db::llm_db::{resolve_request_mode_or_default, LLMDatabase, DEFAULT_MODEL_REQUEST_MODE};
 use crate::utils::share_utils::{decrypt_provider_data, encrypt_provider_data, ProviderShareData};
 use crate::FeatureConfigState;
 use genai::Modality;
@@ -68,7 +68,7 @@ fn list_request_mode_map(
 
 #[tauri::command]
 pub async fn get_llm_providers(app_handle: tauri::AppHandle) -> Result<Vec<LlmProvider>, String> {
-    let db = LLMDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let providers = db.get_llm_providers().map_err(|e| e.to_string())?;
     let mut result = Vec::new();
     for (id, name, api_type, description, is_official, is_enabled) in providers {
@@ -85,7 +85,7 @@ pub async fn get_filtered_providers(
     app_handle: tauri::AppHandle,
     assistant_type: i64,
 ) -> Result<Vec<LlmProvider>, String> {
-    let db = LLMDatabase::new(&app_handle).map_err(|e: rusqlite::Error| e.to_string())?;
+    let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let providers = db.get_filtered_providers(assistant_type).map_err(|e| e.to_string())?;
     let mut result = Vec::new();
     for (id, name, api_type, description, is_official, is_enabled) in providers {
@@ -172,6 +172,11 @@ pub async fn get_llm_models(
     let models = db.get_llm_models(llm_provider_id).map_err(|e| e.to_string())?;
     let provider_id_num =
         models.first().map(|(_, _, llm_provider_id, _, _, _, _, _)| *llm_provider_id);
+    let provider_api_type = if let Some(provider_id_num) = provider_id_num {
+        Some(db.get_llm_provider(provider_id_num).map_err(|e| e.to_string())?.api_type)
+    } else {
+        None
+    };
     let request_mode_map = if let Some(provider_id_num) = provider_id_num {
         list_request_mode_map(&db, provider_id_num)?
     } else {
@@ -189,10 +194,10 @@ pub async fn get_llm_models(
         video_support,
     ) in models
     {
-        let request_mode = request_mode_map
-            .get(&code)
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string());
+        let request_mode = request_mode_map.get(&code).cloned().unwrap_or_else(|| {
+            resolve_request_mode_or_default(provider_api_type.as_deref().unwrap_or(""), &code, None)
+                .to_string()
+        });
         result.push(LlmModel {
             id,
             name,
@@ -223,15 +228,29 @@ pub async fn fetch_model_list(
     let feature_config_state = app_handle.state::<FeatureConfigState>();
     let config_feature_map = feature_config_state.config_feature_map.lock().await;
     let network_proxy = get_network_proxy_from_config(&config_feature_map);
-    let proxy_enabled = network_proxy.is_some();
+    let proxy_enabled = llm_provider_config
+        .iter()
+        .find(|config| config.name == "proxy_enabled")
+        .and_then(|config| config.value.parse::<bool>().ok())
+        .unwrap_or(false);
+    let effective_network_proxy = proxy_enabled.then_some(network_proxy).flatten();
+
+    // 对 Copilot 类型进行 token exchange，替换 api_key/endpoint
+    let effective_configs = crate::api::copilot_token_manager::prepare_provider_configs(
+        &app_handle,
+        &llm_provider.api_type,
+        &llm_provider_config,
+        effective_network_proxy.as_deref(),
+    )
+    .await?;
 
     // 使用共用的客户端创建函数
     let client = genai_client::create_client_with_config(
-        &llm_provider_config,
+        &effective_configs,
         "",
         &llm_provider.api_type,
         None,
-        network_proxy.as_deref(),
+        effective_network_proxy.as_deref(),
         proxy_enabled,
         None,
         false,
@@ -259,7 +278,14 @@ pub async fn fetch_model_list(
                     request_mode: request_mode_map
                         .get(&model.id.to_string())
                         .cloned()
-                        .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string()),
+                        .unwrap_or_else(|| {
+                            resolve_request_mode_or_default(
+                                &llm_provider.api_type,
+                                &model.id.to_string(),
+                                None,
+                            )
+                            .to_string()
+                        }),
                 };
 
                 db.add_llm_model(
@@ -292,13 +318,16 @@ pub async fn add_llm_model(
     code: String,
 ) -> Result<LlmModel, String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let llm_provider = db.get_llm_provider(llm_provider_id).map_err(|e| e.to_string())?;
     let code_str = code.clone();
     db.add_llm_model(&code_str, llm_provider_id, &code_str, &code_str, false, false, false)
         .map_err(|e| e.to_string())?;
     let request_mode = db
         .get_model_request_mode(llm_provider_id, &code_str)
         .map_err(|e| e.to_string())?
-        .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string());
+        .unwrap_or_else(|| {
+            resolve_request_mode_or_default(&llm_provider.api_type, &code_str, None).to_string()
+        });
 
     Ok(LlmModel {
         id: 0,
@@ -371,21 +400,35 @@ pub async fn preview_model_list(
     let feature_config_state = app_handle.state::<FeatureConfigState>();
     let config_feature_map = feature_config_state.config_feature_map.lock().await;
     let network_proxy = get_network_proxy_from_config(&config_feature_map);
-    let proxy_enabled = network_proxy.is_some();
+    let proxy_enabled = llm_provider_config
+        .iter()
+        .find(|config| config.name == "proxy_enabled")
+        .and_then(|config| config.value.parse::<bool>().ok())
+        .unwrap_or(false);
+    let effective_network_proxy = proxy_enabled.then_some(network_proxy).flatten();
     tracing::info!(
         llm_provider_id,
-        ?network_proxy,
+        network_proxy = ?effective_network_proxy,
         proxy_enabled,
         "preview_model_list proxy config"
     );
 
+    // 对 Copilot 类型进行 token exchange，替换 api_key/endpoint
+    let effective_configs = crate::api::copilot_token_manager::prepare_provider_configs(
+        &app_handle,
+        &llm_provider.api_type,
+        &llm_provider_config,
+        effective_network_proxy.as_deref(),
+    )
+    .await?;
+
     // 使用共用的客户端创建函数
     let client = genai_client::create_client_with_config(
-        &llm_provider_config,
+        &effective_configs,
         "",
         &llm_provider.api_type,
         None,
-        network_proxy.as_deref(),
+        effective_network_proxy.as_deref(),
         proxy_enabled,
         None,
         false,
@@ -407,10 +450,11 @@ pub async fn preview_model_list(
             for model in &models {
                 let model_code = model.id.to_string();
                 let is_selected = existing_model_codes.contains(&model_code);
-                let request_mode = request_mode_map
-                    .get(&model_code)
-                    .cloned()
-                    .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string());
+                let request_mode =
+                    request_mode_map.get(&model_code).cloned().unwrap_or_else(|| {
+                        resolve_request_mode_or_default(&llm_provider.api_type, &model_code, None)
+                            .to_string()
+                    });
 
                 available_models.push(ModelForSelection {
                     name: model.name.to_string(),

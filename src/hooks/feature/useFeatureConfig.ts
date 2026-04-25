@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
 
-type FeatureConfig = Map<string, Map<string, string>>;
+export type FeatureConfig = Map<string, Map<string, string>>;
 
 interface FeatureConfigListItem {
     id: number;

@@ -11,8 +11,9 @@ use crate::api::ai::config::{
 };
 use crate::api::ai::context_manager::{self, budget::ContextBudget, CompactionContext};
 use crate::api::ai::conversation::{
-    build_chat_request_from_messages, build_message_list_from_db, filter_messages_for_parent_group,
-    init_conversation, BranchSelection, ChatRequestBuildResult, ToolCallStrategy, ToolConfig,
+    build_chat_request_from_messages, build_message_list_with_metadata_from_db,
+    filter_messages_for_parent_group, init_conversation, BranchSelection, ChatRequestBuildResult,
+    ToolCallStrategy, ToolConfig,
 };
 use crate::api::ai::events::{
     ActivityFocus, ConversationEvent, ConversationRuntimeState, ConversationShineState,
@@ -31,9 +32,9 @@ use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
 use crate::feishu::maybe_schedule_butler_feishu_relay_for_aipp_turn;
 use crate::mcp::execution_api::cancel_mcp_tool_calls_by_conversation;
-use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt};
+use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt, MCPInfoForAssistant};
 use crate::skills::{
-    build_active_skill_attachments, collect_skills_info_for_assistant,
+    build_active_skill_attachments, collect_skills_info_for_assistant_with_additions,
     compose_user_message_with_active_skills, format_skills_prompt,
 };
 use crate::slash::parse_slash_prompt;
@@ -182,6 +183,28 @@ fn persist_active_skill_attachments(
         .collect()
 }
 
+fn get_butler_task_temporary_skill_identifiers(
+    app_handle: &tauri::AppHandle,
+    conversation_id: &str,
+) -> Result<Vec<String>, AppError> {
+    let trimmed = conversation_id.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let Ok(task_conversation_id) = trimmed.parse::<i64>() else {
+        return Ok(Vec::new());
+    };
+
+    let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
+    let butler_repo = db.butler_repo().map_err(AppError::from)?;
+    Ok(butler_repo
+        .get_task_definition_by_task_conversation_id(task_conversation_id)
+        .map_err(AppError::from)?
+        .map(|definition| definition.temporary_skill_identifiers)
+        .unwrap_or_default())
+}
+
 /// 工具名称映射表，用于在 sanitized 名称和原始名称之间进行转换
 /// key: sanitized 工具名称 (如 "h1234abcd__search_web")
 /// value: (原始服务器名称, 原始工具名称) (如 ("搜索服务", "网页搜索"))
@@ -283,9 +306,25 @@ fn build_tool_config(
     enable_tools: bool,
     conversation_id: Option<i64>,
 ) -> Option<ToolConfig> {
+    use crate::mcp::builtin_mcp::templates::{
+        is_butler_conversation_kind, is_butler_only_agent_tool, is_butler_only_builtin_command,
+    };
+
     if !enable_tools {
         return None;
     }
+
+    // Determine if this is a butler conversation for tool filtering
+    let is_butler = conversation_id
+        .and_then(|cid| {
+            ConversationDatabase::new(app_handle)
+                .ok()
+                .and_then(|db| db.conversation_repo().ok())
+                .and_then(|repo| repo.read(cid).ok().flatten())
+                .map(|c| is_butler_conversation_kind(&c.conversation_kind))
+        })
+        .unwrap_or(false);
+
     let servers_for_injection = if mcp_info.dynamic_loading_enabled {
         let mut allowed: HashSet<(i64, String)> = HashSet::new();
         if let Some(cid) = conversation_id {
@@ -301,10 +340,20 @@ fn build_tool_config(
 
         let mut filtered = Vec::new();
         for server in &mcp_info.enabled_servers {
+            // Skip entire server if butler-only and not butler
+            if !is_butler && server.command.as_deref().map_or(false, is_butler_only_builtin_command)
+            {
+                continue;
+            }
             let mut tools = Vec::new();
             let is_dynamic_builtin = server.command.as_deref() == Some("aipp:dynamic_mcp");
+            let is_agent_server = server.command.as_deref() == Some("aipp:agent");
             for tool in &server.tools {
-                let is_agent_loader_tool = server.command.as_deref() == Some("aipp:agent")
+                // Skip butler-only agent tools in non-butler conversations
+                if !is_butler && is_agent_server && is_butler_only_agent_tool(&tool.name) {
+                    continue;
+                }
+                let is_agent_loader_tool = is_agent_server
                     && (tool.name == "load_mcp_server" || tool.name == "load_mcp_tool");
                 if is_dynamic_builtin
                     || is_agent_loader_tool
@@ -321,7 +370,31 @@ fn build_tool_config(
         }
         filtered
     } else {
-        mcp_info.enabled_servers.clone()
+        // Non-dynamic mode: filter butler-only tools
+        let mut filtered = Vec::new();
+        for server in &mcp_info.enabled_servers {
+            if !is_butler && server.command.as_deref().map_or(false, is_butler_only_builtin_command)
+            {
+                continue;
+            }
+            let is_agent_server = server.command.as_deref() == Some("aipp:agent");
+            if !is_butler && is_agent_server {
+                let tools: Vec<_> = server
+                    .tools
+                    .iter()
+                    .filter(|t| !is_butler_only_agent_tool(&t.name))
+                    .cloned()
+                    .collect();
+                if !tools.is_empty() {
+                    let mut server_cloned = server.clone();
+                    server_cloned.tools = tools;
+                    filtered.push(server_cloned);
+                }
+            } else {
+                filtered.push(server.clone());
+            }
+        }
+        filtered
     };
 
     let (tools, tool_name_mapping) = build_tools_with_mapping(&servers_for_injection);
@@ -410,6 +483,48 @@ pub async fn ask_ai(
         None,
     )
     .await?;
+
+    // Filter butler-only tools for non-butler conversations
+    let mcp_info = {
+        use crate::mcp::builtin_mcp::templates::{
+            is_butler_conversation_kind, is_butler_only_agent_tool, is_butler_only_builtin_command,
+        };
+        let is_butler = processed_request
+            .conversation_id
+            .parse::<i64>()
+            .ok()
+            .and_then(|cid| {
+                ConversationDatabase::new(&app_handle)
+                    .ok()
+                    .and_then(|db| db.conversation_repo().ok())
+                    .and_then(|repo| repo.read(cid).ok().flatten())
+                    .map(|c| is_butler_conversation_kind(&c.conversation_kind))
+            })
+            .unwrap_or(false);
+        if is_butler {
+            mcp_info
+        } else {
+            let filtered_servers = mcp_info
+                .enabled_servers
+                .into_iter()
+                .filter_map(|mut server| {
+                    if server.command.as_deref().map_or(false, is_butler_only_builtin_command) {
+                        return None;
+                    }
+                    if server.command.as_deref() == Some("aipp:agent") {
+                        server.tools.retain(|t| !is_butler_only_agent_tool(&t.name));
+                    }
+                    if server.tools.is_empty() {
+                        None
+                    } else {
+                        Some(server)
+                    }
+                })
+                .collect();
+            MCPInfoForAssistant { enabled_servers: filtered_servers, ..mcp_info }
+        }
+    };
+
     info!(
         enabled_servers = mcp_info.enabled_servers.len(),
         native_toolcall = mcp_info.use_native_toolcall,
@@ -439,8 +554,16 @@ pub async fn ask_ai(
     };
 
     // Collect and format Skills prompt
-    let skills_info =
-        collect_skills_info_for_assistant(&app_handle, processed_request.assistant_id).await?;
+    let temporary_skill_identifiers = get_butler_task_temporary_skill_identifiers(
+        &app_handle,
+        &processed_request.conversation_id,
+    )?;
+    let skills_info = collect_skills_info_for_assistant_with_additions(
+        &app_handle,
+        processed_request.assistant_id,
+        &temporary_skill_identifiers,
+    )
+    .await?;
     let assistant_prompt_result = if !skills_info.enabled_skills.is_empty() {
         let prompt = format_skills_prompt(&app_handle, assistant_prompt_result, &skills_info).await;
         info!(enabled_skills = skills_info.enabled_skills.len(), "Skills formatted into prompt");
@@ -477,6 +600,8 @@ pub async fn ask_ai(
         user_message_id,
         request_prompt_result_with_context,
         init_message_list,
+        init_message_ids,
+        init_db_token_counts,
     ) = initialize_conversation(
         &app_handle_clone,
         &processed_request,
@@ -602,20 +727,47 @@ pub async fn ask_ai(
 
         let session_handle = {
             let mut sessions = acp_session_state.sessions.lock().await;
-            if let Some(handle) = sessions.get(&conversation_id) {
-                handle.clone()
+            if let Some(entry) = sessions.get(&conversation_id) {
+                entry.handle.clone()
             } else {
-                let (handle, join_handle) =
-                    spawn_acp_session_task(app_handle_clone, conversation_id, acp_config);
-                sessions.insert(conversation_id, handle.clone());
-                message_token_manager.store_task_handle(conversation_id, join_handle).await;
+                let handle = spawn_acp_session_task(
+                    app_handle_clone.clone(),
+                    conversation_id,
+                    acp_config.clone(),
+                );
+                sessions.insert(
+                    conversation_id,
+                    crate::api::ai::acp::AcpSessionEntry::new(handle.clone(), conversation_id),
+                );
                 handle
             }
         };
 
-        if let Err(e) = session_handle.send_prompt(response_message.id, prompt_clone, window_clone)
-        {
-            error!(error = %e, "ACP session send prompt failed");
+        if let Err(e) = session_handle.send_prompt(
+            response_message.id,
+            prompt_clone.clone(),
+            window_clone.clone(),
+        ) {
+            warn!(conversation_id, error = %e, "ACP session send prompt failed, respawning session");
+            let replacement_handle = {
+                let mut sessions = acp_session_state.sessions.lock().await;
+                let handle = spawn_acp_session_task(
+                    app_handle_clone.clone(),
+                    conversation_id,
+                    acp_config.clone(),
+                );
+                sessions.insert(
+                    conversation_id,
+                    crate::api::ai::acp::AcpSessionEntry::new(handle.clone(), conversation_id),
+                );
+                handle
+            };
+            replacement_handle
+                .send_prompt(response_message.id, prompt_clone, window_clone)
+                .map_err(|error| {
+                    error!(conversation_id, error = %error, "ACP session resend prompt failed");
+                    error
+                })?;
         }
 
         return Ok(AiResponse {
@@ -734,7 +886,14 @@ pub async fn ask_ai(
         }
 
         let client = genai_client::create_client_with_config(
-            &model_configs,
+            &crate::api::copilot_token_manager::prepare_provider_configs(
+                &app_handle_clone,
+                &provider_api_type,
+                &model_configs,
+                network_proxy.as_deref(),
+            )
+            .await
+            .map_err(|e| AppError::ProviderError(e))?,
             &model_code,
             &provider_api_type,
             Some(&model_request_mode),
@@ -759,12 +918,20 @@ pub async fn ask_ai(
             provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
         let is_gemini = model_code_lc.contains("gemini");
         let capture_usage = !(is_openai_like && is_gemini);
+        let capture_content = stream && model_request_mode.eq_ignore_ascii_case("responses");
+
+        let capture_reasoning_content = stream
+            && is_openai_like
+            && has_available_tools
+            && config_map.contains_key("reasoning_effort");
 
         let chat_config = ChatConfig {
             model_name,
             stream,
             chat_options: chat_options
                 .with_normalize_reasoning_content(true)
+                .with_capture_content(capture_content)
+                .with_capture_reasoning_content(capture_reasoning_content)
                 .with_capture_usage(capture_usage)
                 .with_capture_tool_calls(has_available_tools), // 动态设置
             client,
@@ -775,7 +942,9 @@ pub async fn ask_ai(
             stream = chat_config.stream,
             has_tools = has_available_tools,
             provider_api_type = %provider_api_type,
+            capture_content = capture_content,
             capture_usage = capture_usage,
+            capture_reasoning_content = capture_reasoning_content,
             is_openai_like = is_openai_like,
             is_gemini = is_gemini,
             force_non_native_for_invalid_tool_args,
@@ -803,12 +972,12 @@ pub async fn ask_ai(
             conversation_id,
             conversation_db: &conversation_db,
             is_butler,
-            message_ids: vec![], // TODO: pass DB message IDs for persistence
+            message_ids: init_message_ids,
         };
         let fit_result = context_manager::fit_to_budget_with_compaction(
             init_message_list,
             &budget,
-            &[],
+            &init_db_token_counts,
             compaction_ctx,
         )
         .await;
@@ -1010,8 +1179,8 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         .max_by_key(|msg| msg.id)
         .and_then(|m| m.generation_group_id.clone());
 
-    let init_message_list =
-        build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
+    let (init_message_list, init_metadata) =
+        build_message_list_with_metadata_from_db(&all_messages, BranchSelection::LatestBranch);
 
     let override_mcp_config = enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
 
@@ -1023,6 +1192,41 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         None,
     )
     .await?;
+
+    // Filter butler-only tools for non-butler conversations
+    let mcp_info = {
+        use crate::mcp::builtin_mcp::templates::{
+            is_butler_conversation_kind, is_butler_only_agent_tool, is_butler_only_builtin_command,
+        };
+        let is_butler_conv = ConversationDatabase::new(&app_handle)
+            .ok()
+            .and_then(|db| db.conversation_repo().ok())
+            .and_then(|repo| repo.read(conversation_id_i64).ok().flatten())
+            .map(|c| is_butler_conversation_kind(&c.conversation_kind))
+            .unwrap_or(false);
+        if is_butler_conv {
+            mcp_info
+        } else {
+            let filtered_servers = mcp_info
+                .enabled_servers
+                .into_iter()
+                .filter_map(|mut server| {
+                    if server.command.as_deref().map_or(false, is_butler_only_builtin_command) {
+                        return None;
+                    }
+                    if server.command.as_deref() == Some("aipp:agent") {
+                        server.tools.retain(|t| !is_butler_only_agent_tool(&t.name));
+                    }
+                    if server.tools.is_empty() {
+                        None
+                    } else {
+                        Some(server)
+                    }
+                })
+                .collect();
+            MCPInfoForAssistant { enabled_servers: filtered_servers, ..mcp_info }
+        }
+    };
     let is_native_toolcall = mcp_info.use_native_toolcall;
 
     // Get model details (same as ask_ai)
@@ -1098,7 +1302,14 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     }
 
     let client = genai_client::create_client_with_config(
-        &model_configs,
+        &crate::api::copilot_token_manager::prepare_provider_configs(
+            &app_handle,
+            &provider_api_type,
+            &model_configs,
+            None,
+        )
+        .await
+        .map_err(|e| AppError::ProviderError(e))?,
         &model_code,
         &provider_api_type,
         Some(&model_request_mode),
@@ -1125,12 +1336,20 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let is_openai_like = provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
     let is_gemini = model_code_lc.contains("gemini");
     let capture_usage = !(is_openai_like && is_gemini);
+    let capture_content = stream && model_request_mode.eq_ignore_ascii_case("responses");
+
+    let capture_reasoning_content = stream
+        && is_openai_like
+        && has_available_tools
+        && config_map.contains_key("reasoning_effort");
 
     let chat_config = ChatConfig {
         model_name,
         stream,
         chat_options: chat_options
             .with_normalize_reasoning_content(true)
+            .with_capture_content(capture_content)
+            .with_capture_reasoning_content(capture_reasoning_content)
             .with_capture_usage(capture_usage)
             .with_capture_tool_calls(has_available_tools), // 动态设置
         client,
@@ -1141,7 +1360,9 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         stream = chat_config.stream,
         has_tools = has_available_tools,
         provider_api_type = %provider_api_type,
+        capture_content = capture_content,
         capture_usage = capture_usage,
+        capture_reasoning_content = capture_reasoning_content,
         is_openai_like = is_openai_like,
         is_gemini = is_gemini,
         force_non_native_for_gemini_toolresult,
@@ -1161,10 +1382,32 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let tool_config =
         build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id_i64));
 
-    // Context budget management
+    // Context budget management with compaction for continuation
     let budget = ContextBudget::from_config(&config_feature_map);
-    let fit_result = context_manager::fit_to_budget(init_message_list, &budget, &[]);
+    let is_butler_cont = is_butler_system_assistant_name(&assistant_detail.assistant.name);
+    let compaction_ctx = CompactionContext {
+        client: &chat_config.client,
+        model_name: &chat_config.model_name,
+        conversation_id: conversation_id_i64,
+        conversation_db: &conversation_db,
+        is_butler: is_butler_cont,
+        message_ids: init_metadata.message_ids,
+    };
+    let fit_result = context_manager::fit_to_budget_with_compaction(
+        init_message_list,
+        &budget,
+        &init_metadata.db_token_counts,
+        compaction_ctx,
+    )
+    .await;
     let init_message_list = fit_result.messages;
+    if fit_result.compacted {
+        info!(
+            conversation_id = conversation_id_i64,
+            estimated_tokens = fit_result.estimated_tokens,
+            "compaction triggered in tool_result_continue"
+        );
+    }
 
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
@@ -1272,8 +1515,8 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
             .and_then(|m| m.generation_group_id.clone())
     };
 
-    let init_message_list =
-        build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
+    let (init_message_list, init_metadata) =
+        build_message_list_with_metadata_from_db(&all_messages, BranchSelection::LatestBranch);
 
     let override_mcp_config = enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
 
@@ -1285,6 +1528,41 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         None,
     )
     .await?;
+
+    // Filter butler-only tools for non-butler conversations
+    let mcp_info = {
+        use crate::mcp::builtin_mcp::templates::{
+            is_butler_conversation_kind, is_butler_only_agent_tool, is_butler_only_builtin_command,
+        };
+        let is_butler_conv = ConversationDatabase::new(&app_handle)
+            .ok()
+            .and_then(|db| db.conversation_repo().ok())
+            .and_then(|repo| repo.read(conversation_id).ok().flatten())
+            .map(|c| is_butler_conversation_kind(&c.conversation_kind))
+            .unwrap_or(false);
+        if is_butler_conv {
+            mcp_info
+        } else {
+            let filtered_servers = mcp_info
+                .enabled_servers
+                .into_iter()
+                .filter_map(|mut server| {
+                    if server.command.as_deref().map_or(false, is_butler_only_builtin_command) {
+                        return None;
+                    }
+                    if server.command.as_deref() == Some("aipp:agent") {
+                        server.tools.retain(|t| !is_butler_only_agent_tool(&t.name));
+                    }
+                    if server.tools.is_empty() {
+                        None
+                    } else {
+                        Some(server)
+                    }
+                })
+                .collect();
+            MCPInfoForAssistant { enabled_servers: filtered_servers, ..mcp_info }
+        }
+    };
     let is_native_toolcall = mcp_info.use_native_toolcall;
 
     // Get model details
@@ -1360,7 +1638,14 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     }
 
     let client = genai_client::create_client_with_config(
-        &model_configs,
+        &crate::api::copilot_token_manager::prepare_provider_configs(
+            &app_handle,
+            &provider_api_type,
+            &model_configs,
+            None,
+        )
+        .await
+        .map_err(|e| AppError::ProviderError(e))?,
         &model_code,
         &provider_api_type,
         Some(&model_request_mode),
@@ -1386,12 +1671,20 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let is_openai_like = provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
     let is_gemini = model_code_lc.contains("gemini");
     let capture_usage = !(is_openai_like && is_gemini);
+    let capture_content = stream && model_request_mode.eq_ignore_ascii_case("responses");
+
+    let capture_reasoning_content = stream
+        && is_openai_like
+        && has_available_tools
+        && config_map.contains_key("reasoning_effort");
 
     let chat_config = ChatConfig {
         model_name,
         stream,
         chat_options: chat_options
             .with_normalize_reasoning_content(true)
+            .with_capture_content(capture_content)
+            .with_capture_reasoning_content(capture_reasoning_content)
             .with_capture_usage(capture_usage)
             .with_capture_tool_calls(has_available_tools),
         client,
@@ -1402,6 +1695,8 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         stream = chat_config.stream,
         has_tools = has_available_tools,
         provider_api_type = %provider_api_type,
+        capture_content = capture_content,
+        capture_reasoning_content = capture_reasoning_content,
         force_non_native_for_gemini_toolresult,
         force_non_native_for_invalid_tool_args,
         "chat configuration (batch_tool_result_continue)"
@@ -1412,10 +1707,32 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let tool_config =
         build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id));
 
-    // Context budget management
+    // Context budget management with compaction for batch continuation
     let budget = ContextBudget::from_config(&config_feature_map);
-    let fit_result = context_manager::fit_to_budget(init_message_list, &budget, &[]);
+    let is_butler_batch = is_butler_system_assistant_name(&assistant_detail.assistant.name);
+    let compaction_ctx = CompactionContext {
+        client: &chat_config.client,
+        model_name: &chat_config.model_name,
+        conversation_id,
+        conversation_db: &conversation_db,
+        is_butler: is_butler_batch,
+        message_ids: init_metadata.message_ids,
+    };
+    let fit_result = context_manager::fit_to_budget_with_compaction(
+        init_message_list,
+        &budget,
+        &init_metadata.db_token_counts,
+        compaction_ctx,
+    )
+    .await;
     let init_message_list = fit_result.messages;
+    if fit_result.compacted {
+        info!(
+            conversation_id,
+            estimated_tokens = fit_result.estimated_tokens,
+            "compaction triggered in batch_tool_result_continue"
+        );
+    }
 
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
@@ -1500,11 +1817,21 @@ pub async fn tool_result_continue_ask_ai(
 pub async fn cancel_ai(
     app_handle: tauri::AppHandle,
     feature_config_state: State<'_, FeatureConfigState>,
+    acp_session_state: State<'_, AcpSessionState>,
     message_token_manager: State<'_, MessageTokenManager>,
     window: tauri::Window,
     conversation_id: i64,
 ) -> Result<(), String> {
-    message_token_manager.cancel_request(conversation_id).await;
+    let acp_session_handle = {
+        let sessions = acp_session_state.sessions.lock().await;
+        sessions.get(&conversation_id).map(|entry| entry.handle.clone())
+    };
+
+    if let Some(handle) = acp_session_handle {
+        handle.cancel_current_prompt().await.map_err(|error| error.to_string())?;
+    } else {
+        message_token_manager.cancel_request(conversation_id).await;
+    }
 
     if let Err(e) = cancel_mcp_tool_calls_by_conversation(&app_handle, conversation_id).await {
         warn!(conversation_id, error = %e, "failed to cancel MCP tool calls for conversation");
@@ -1654,8 +1981,8 @@ pub async fn regenerate_ai(
     let filtered_messages =
         filter_messages_for_parent_group(filtered_messages, regenerate_parent_group_id.as_deref());
 
-    let init_message_list =
-        build_message_list_from_db(&filtered_messages, BranchSelection::LatestBranch);
+    let (init_message_list, init_metadata) =
+        build_message_list_with_metadata_from_db(&filtered_messages, BranchSelection::LatestBranch);
 
     debug!(?init_message_list, "initial message list for regenerate");
 
@@ -1761,7 +2088,14 @@ pub async fn regenerate_ai(
         }
 
         let client = genai_client::create_client_with_config(
-            &regenerate_model_configs,
+            &crate::api::copilot_token_manager::prepare_provider_configs(
+                &app_handle_clone,
+                &regenerate_provider_api_type,
+                &regenerate_model_configs,
+                network_proxy.as_deref(),
+            )
+            .await
+            .map_err(|e| AppError::ProviderError(e))?,
             &regenerate_model_code,
             &regenerate_provider_api_type,
             Some(&regenerate_model_request_mode),
@@ -1784,12 +2118,21 @@ pub async fn regenerate_ai(
             provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
         let is_gemini = model_code_lc.contains("gemini");
         let capture_usage = !(is_openai_like && is_gemini);
+        let capture_content =
+            stream && regenerate_model_request_mode.eq_ignore_ascii_case("responses");
+
+        let capture_reasoning_content = stream
+            && is_openai_like
+            && has_available_tools
+            && config_map.contains_key("reasoning_effort");
 
         let chat_config = ChatConfig {
             model_name,
             stream,
             chat_options: chat_options
                 .with_normalize_reasoning_content(true)
+                .with_capture_content(capture_content)
+                .with_capture_reasoning_content(capture_reasoning_content)
                 .with_capture_usage(capture_usage)
                 .with_capture_tool_calls(has_available_tools), // 动态设置
             client,
@@ -1800,7 +2143,9 @@ pub async fn regenerate_ai(
             stream = chat_config.stream,
             has_tools = has_available_tools,
             provider_api_type = %regenerate_provider_api_type,
+            capture_content = capture_content,
             capture_usage = capture_usage,
+            capture_reasoning_content = capture_reasoning_content,
             is_openai_like = is_openai_like,
             is_gemini = is_gemini,
             force_non_native_for_invalid_tool_args,
@@ -1829,9 +2174,24 @@ pub async fn regenerate_ai(
             None
         };
 
-        // Context budget management
+        // Context budget management with compaction for regenerate
         let budget = ContextBudget::from_config(&_config_feature_map);
-        let fit_result = context_manager::fit_to_budget(init_message_list, &budget, &[]);
+        let is_butler_regen = is_butler_system_assistant_name(&assistant_detail.assistant.name);
+        let compaction_ctx = CompactionContext {
+            client: &chat_config.client,
+            model_name: &chat_config.model_name,
+            conversation_id,
+            conversation_db: &conversation_db,
+            is_butler: is_butler_regen,
+            message_ids: init_metadata.message_ids,
+        };
+        let fit_result = context_manager::fit_to_budget_with_compaction(
+            init_message_list,
+            &budget,
+            &init_metadata.db_token_counts,
+            compaction_ctx,
+        )
+        .await;
         let init_message_list = fit_result.messages;
 
         let ChatRequestBuildResult { chat_request, tool_name_mapping } =
@@ -1953,9 +2313,19 @@ async fn initialize_conversation(
     runtime_user_prompt: String,
     override_prompt: Option<String>,
     extra_user_attachments: Vec<MessageAttachment>,
-) -> Result<(i64, Option<i64>, i64, String, Vec<(String, String, Vec<MessageAttachment>)>), AppError>
-{
-    // 返回值：(conversation_id, add_message_id, user_message_id, request_prompt_with_context, init_message_list)
+) -> Result<
+    (
+        i64,
+        Option<i64>,
+        i64,
+        String,
+        Vec<(String, String, Vec<MessageAttachment>)>,
+        Vec<i64>,
+        Vec<i32>,
+    ),
+    AppError,
+> {
+    // 返回值：(conversation_id, add_message_id, user_message_id, request_prompt_with_context, init_message_list, message_ids, db_token_counts)
     let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
 
     let system_prompt = override_prompt.unwrap_or(assistant_prompt_result);
@@ -1966,6 +2336,8 @@ async fn initialize_conversation(
         user_message_id,
         request_prompt_result_with_context,
         init_message_list,
+        message_ids,
+        db_token_counts,
     ) = if request.conversation_id.is_empty() {
         let mut message_attachment_list = db
             .attachment_repo()
@@ -2026,13 +2398,18 @@ async fn initialize_conversation(
             user_msg_id,
             runtime_user_prompt_with_context,
             runtime_init_message_list,
+            vec![], // New conversation: no message IDs needed (too few for compaction)
+            vec![], // New conversation: no DB token counts
         )
     } else {
         // 已存在对话逻辑
         let conversation_id = request.conversation_id.parse::<i64>()?;
         let all_messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id)?;
 
-        let message_list = build_message_list_from_db(&all_messages, BranchSelection::LatestBranch);
+        let (message_list, metadata) =
+            build_message_list_with_metadata_from_db(&all_messages, BranchSelection::LatestBranch);
+        let mut branch_message_ids = metadata.message_ids;
+        let mut branch_db_token_counts = metadata.db_token_counts;
         let has_system_message =
             message_list.iter().any(|(message_type, _, _)| message_type == "system");
 
@@ -2155,12 +2532,18 @@ async fn initialize_conversation(
         let mut updated_message_list = message_list;
         if !has_system_message {
             updated_message_list.insert(0, (String::from("system"), system_prompt, vec![]));
+            // system 消息不来自 DB，为其补充占位 id 和 token
+            branch_message_ids.insert(0, 0);
+            branch_db_token_counts.insert(0, 0);
         }
         updated_message_list.push((
             String::from("user"),
             runtime_user_prompt_with_context.clone(),
             message_attachment_list,
         ));
+        // 新的 user 消息还没有 DB token count
+        branch_message_ids.push(user_message.id);
+        branch_db_token_counts.push(0);
 
         (
             conversation_id,
@@ -2168,6 +2551,8 @@ async fn initialize_conversation(
             user_message.id,
             runtime_user_prompt_with_context,
             updated_message_list,
+            branch_message_ids,
+            branch_db_token_counts,
         )
     };
     Ok((
@@ -2176,6 +2561,8 @@ async fn initialize_conversation(
         user_message_id,
         request_prompt_result_with_context,
         init_message_list,
+        message_ids,
+        db_token_counts,
     ))
 }
 

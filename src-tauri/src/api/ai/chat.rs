@@ -6,7 +6,9 @@ use crate::api::ai::title::{
 use crate::api::ai::types::McpOverrideConfig;
 use crate::api::ai_api::{resolve_tool_name, sanitize_tool_name, ToolNameMapping};
 use crate::db::assistant_db::Assistant;
-use crate::db::conversation_db::{ConversationDatabase, Message, Repository};
+use crate::db::conversation_db::{
+    AttachmentType, ConversationDatabase, Message, MessageAttachment, Repository,
+};
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
 use crate::state::activity_state::ConversationActivityManager;
@@ -15,8 +17,10 @@ use crate::utils::window_utils::send_error_to_appropriate_window;
 use anyhow::Context as _;
 use futures::StreamExt;
 use genai::chat::ChatStreamEvent;
-use genai::chat::{ChatOptions, ChatRequest, ToolCall};
+use genai::chat::{Binary, BinarySource, ChatOptions, ChatRequest, ContentPart, ToolCall};
 use genai::Client;
+use scraper::{Html, Selector};
+use serde::Serialize;
 use serde_json;
 use std::collections::HashMap;
 use tauri::{Emitter, Manager};
@@ -305,6 +309,129 @@ fn split_tool_name(fn_name: &str) -> (String, String) {
     }
 }
 
+fn emit_message_add_event(
+    window: &tauri::Window,
+    conversation_id: i64,
+    message_id: i64,
+    message_type: &str,
+) -> anyhow::Result<()> {
+    let add_event = ConversationEvent {
+        r#type: "message_add".to_string(),
+        data: serde_json::to_value(MessageAddEvent {
+            message_id,
+            message_type: message_type.to_string(),
+        })
+        .unwrap(),
+    };
+    window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event)?;
+    Ok(())
+}
+
+fn split_captured_content(
+    captured_content: genai::chat::MessageContent,
+) -> (Vec<ToolCall>, Vec<Binary>) {
+    let mut tool_calls = Vec::new();
+    let mut binaries = Vec::new();
+
+    for part in captured_content.into_parts() {
+        match part {
+            ContentPart::ToolCall(tool_call) => tool_calls.push(tool_call),
+            ContentPart::Binary(binary) => binaries.push(binary),
+            _ => {}
+        }
+    }
+
+    (tool_calls, binaries)
+}
+
+fn infer_image_extension_from_content_type(content_type: &str) -> &'static str {
+    match content_type.trim().to_ascii_lowercase().as_str() {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        "image/bmp" => "bmp",
+        "image/tiff" => "tiff",
+        _ => "img",
+    }
+}
+
+fn build_binary_attachment_url(binary: &Binary, index: usize) -> String {
+    if let Some(name) = binary.name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+        return name.to_string();
+    }
+
+    if let BinarySource::Url(url) = &binary.source {
+        if !url.trim().is_empty() {
+            return url.clone();
+        }
+    }
+
+    format!(
+        "generated-image-{}.{}",
+        index + 1,
+        infer_image_extension_from_content_type(&binary.content_type)
+    )
+}
+
+fn build_image_attachment_from_binary(
+    binary: Binary,
+    message_id: i64,
+    index: usize,
+) -> Option<MessageAttachment> {
+    if !binary.is_image() {
+        return None;
+    }
+
+    let attachment_url = Some(build_binary_attachment_url(&binary, index));
+    let attachment_content = Some(binary.into_url());
+
+    Some(MessageAttachment {
+        id: 0,
+        message_id,
+        attachment_type: AttachmentType::Image,
+        attachment_url,
+        attachment_content,
+        attachment_hash: None,
+        use_vector: false,
+        token_count: Some(0),
+    })
+}
+
+fn persist_response_image_attachments(
+    conversation_db: &ConversationDatabase,
+    message_id: i64,
+    binaries: Vec<Binary>,
+) -> anyhow::Result<usize> {
+    if binaries.is_empty() {
+        return Ok(0);
+    }
+
+    let attachment_repo = conversation_db
+        .attachment_repo()
+        .context("failed to get attachment_repo for response image attachments")?;
+    let mut persisted_count = 0;
+
+    for (index, binary) in binaries.into_iter().enumerate() {
+        let content_type = binary.content_type.clone();
+        let Some(attachment) = build_image_attachment_from_binary(binary, message_id, index) else {
+            debug!(
+                message_id,
+                index, content_type, "skipping non-image binary attachment from response"
+            );
+            continue;
+        };
+
+        attachment_repo.create(&attachment).with_context(|| {
+            format!("failed to persist image attachment {} for message {}", index, message_id)
+        })?;
+        persisted_count += 1;
+    }
+
+    Ok(persisted_count)
+}
+
 /// 创建并发出 message_add 事件，返回消息ID
 /// 同时设置活动状态以显示闪亮边框
 async fn ensure_stream_message(
@@ -354,15 +481,7 @@ async fn ensure_stream_message(
         })
         .context("failed to create stream message")?;
 
-    let add_event = ConversationEvent {
-        r#type: "message_add".to_string(),
-        data: serde_json::to_value(MessageAddEvent {
-            message_id: new_message.id,
-            message_type: message_type.to_string(),
-        })
-        .unwrap(),
-    };
-    let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
+    emit_message_add_event(window, conversation_id, new_message.id, message_type)?;
 
     // 设置 Assistant 消息的活动状态（闪亮边框）
     if message_type == "response" || message_type == "reasoning" {
@@ -413,7 +532,7 @@ fn persist_and_emit_update(
         })
         .unwrap(),
     };
-    let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+    window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event)?;
 
     Ok(())
 }
@@ -423,6 +542,277 @@ fn normalize_tool_arguments_json(arguments: &serde_json::Value) -> String {
         arguments.to_string()
     } else {
         "{}".to_string()
+    }
+}
+
+fn serialize_streaming_tool_arguments(arguments: &serde_json::Value) -> String {
+    match arguments {
+        serde_json::Value::Object(_) => arguments.to_string(),
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Null => String::new(),
+        _ => arguments.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewCodeStreamingState {
+    title: String,
+    renderer: String,
+    code: String,
+    loading_messages: Vec<String>,
+    interaction_mode: String,
+    has_renderable_dom: bool,
+    contains_script: bool,
+    renderable_html: String,
+    source_excerpt: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PreviewCodeFragmentAnalysis {
+    has_renderable_dom: bool,
+    contains_script: bool,
+}
+
+fn decode_json_string_fragment(raw: &str) -> String {
+    serde_json::from_str::<String>(&format!("\"{}\"", raw)).unwrap_or_else(|_| {
+        raw.replace("\\n", "\n")
+            .replace("\\r", "\r")
+            .replace("\\t", "\t")
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\")
+    })
+}
+
+fn extract_partial_string_field(raw: &str, field_names: &[&str]) -> Option<String> {
+    for field_name in field_names {
+        let exact = regex::Regex::new(
+            format!(r#""{}"\s*:\s*"((?:\\.|[^"\\])*)""#, regex::escape(field_name)).as_str(),
+        )
+        .ok()
+        .and_then(|re| re.captures(raw))
+        .and_then(|caps| caps.get(1).map(|capture| decode_json_string_fragment(capture.as_str())));
+        if exact.is_some() {
+            return exact;
+        }
+
+        let partial = regex::Regex::new(
+            format!(r#""{}"\s*:\s*"([\s\S]*)$"#, regex::escape(field_name)).as_str(),
+        )
+        .ok()
+        .and_then(|re| re.captures(raw))
+        .and_then(|caps| caps.get(1).map(|capture| decode_json_string_fragment(capture.as_str())));
+        if partial.is_some() {
+            return partial;
+        }
+    }
+    None
+}
+
+fn extract_partial_string_array_field(raw: &str, field_names: &[&str]) -> Vec<String> {
+    for field_name in field_names {
+        let Some(captures) = regex::Regex::new(
+            format!(r#""{}"\s*:\s*\[([\s\S]*?)(?:\]|$)"#, regex::escape(field_name)).as_str(),
+        )
+        .ok()
+        .and_then(|re| re.captures(raw)) else {
+            continue;
+        };
+        let Some(items_raw) = captures.get(1).map(|capture| capture.as_str()) else {
+            continue;
+        };
+        let mut items = Vec::new();
+        if let Ok(item_regex) = regex::Regex::new(r#""((?:\\.|[^"\\])*)""#) {
+            for captures in item_regex.captures_iter(items_raw) {
+                if let Some(value) = captures.get(1) {
+                    items.push(decode_json_string_fragment(value.as_str()));
+                }
+            }
+        }
+        return items;
+    }
+    Vec::new()
+}
+
+fn analyze_preview_code_fragment(code: &str) -> PreviewCodeFragmentAnalysis {
+    let trimmed = code.trim();
+    if trimmed.is_empty() {
+        return PreviewCodeFragmentAnalysis::default();
+    }
+
+    let fragment = Html::parse_fragment(trimmed);
+    let contains_script = trimmed.to_ascii_lowercase().contains("<script");
+    let has_renderable_element = Selector::parse("*")
+        .ok()
+        .map(|selector| {
+            fragment.select(&selector).any(|element| {
+                !matches!(
+                    element.value().name(),
+                    "html" | "head" | "body" | "script" | "style" | "meta" | "link" | "title"
+                )
+            })
+        })
+        .unwrap_or(false);
+    let has_visible_text = !fragment.root_element().text().collect::<String>().trim().is_empty();
+
+    PreviewCodeFragmentAnalysis {
+        has_renderable_dom: has_renderable_element || has_visible_text,
+        contains_script,
+    }
+}
+
+fn build_preview_source_excerpt(code: &str, max_chars: usize) -> String {
+    let trimmed = code.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let excerpt: String = trimmed.chars().take(max_chars).collect();
+    if trimmed.chars().count() > max_chars {
+        format!("{}…", excerpt)
+    } else {
+        excerpt
+    }
+}
+
+fn extract_preview_code_streaming_state(
+    arguments: &serde_json::Value,
+) -> Option<PreviewCodeStreamingState> {
+    let raw_arguments = serialize_streaming_tool_arguments(arguments);
+    let object = arguments.as_object();
+
+    let title = object
+        .and_then(|record| record.get("title").and_then(|value| value.as_str()))
+        .map(str::to_string)
+        .or_else(|| extract_partial_string_field(&raw_arguments, &["title"]))
+        .unwrap_or_else(|| "inline_preview".to_string());
+    let renderer = object
+        .and_then(|record| record.get("renderer").and_then(|value| value.as_str()))
+        .map(str::to_string)
+        .or_else(|| extract_partial_string_field(&raw_arguments, &["renderer"]))
+        .unwrap_or_else(|| "html".to_string());
+    let code = object
+        .and_then(|record| record.get("code").and_then(|value| value.as_str()))
+        .map(str::to_string)
+        .or_else(|| extract_partial_string_field(&raw_arguments, &["code"]))
+        .unwrap_or_default();
+    let interaction_mode = object
+        .and_then(|record| {
+            record
+                .get("interaction_mode")
+                .or_else(|| record.get("interactionMode"))
+                .and_then(|value| value.as_str())
+        })
+        .map(str::to_string)
+        .or_else(|| {
+            extract_partial_string_field(&raw_arguments, &["interaction_mode", "interactionMode"])
+        })
+        .unwrap_or_else(|| "submit_once".to_string());
+    let loading_messages = object
+        .and_then(|record| {
+            record
+                .get("loading_messages")
+                .or_else(|| record.get("loadingMessages"))
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::trim))
+                        .filter(|item| !item.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+        })
+        .unwrap_or_else(|| {
+            extract_partial_string_array_field(
+                &raw_arguments,
+                &["loading_messages", "loadingMessages"],
+            )
+        });
+
+    if title.trim().is_empty() && code.trim().is_empty() && loading_messages.is_empty() {
+        return None;
+    }
+
+    let analysis = analyze_preview_code_fragment(&code);
+
+    Some(PreviewCodeStreamingState {
+        title,
+        renderer,
+        code: code.clone(),
+        loading_messages,
+        interaction_mode,
+        has_renderable_dom: analysis.has_renderable_dom,
+        contains_script: analysis.contains_script,
+        renderable_html: if analysis.has_renderable_dom { code.clone() } else { String::new() },
+        source_excerpt: build_preview_source_excerpt(&code, 600),
+    })
+}
+
+fn merge_streaming_text(existing: &mut String, incoming: &str) {
+    if incoming.is_empty() {
+        return;
+    }
+    if existing.is_empty() {
+        existing.push_str(incoming);
+        return;
+    }
+    if existing == incoming || existing.ends_with(incoming) {
+        return;
+    }
+    if incoming.starts_with(existing.as_str()) {
+        *existing = incoming.to_string();
+        return;
+    }
+    if existing.starts_with(incoming) {
+        return;
+    }
+    existing.push_str(incoming);
+}
+
+fn merge_streaming_tool_argument_value(
+    existing: &mut serde_json::Value,
+    incoming: &serde_json::Value,
+) {
+    match (existing, incoming) {
+        (serde_json::Value::String(existing_text), serde_json::Value::String(incoming_text)) => {
+            merge_streaming_text(existing_text, incoming_text);
+        }
+        (serde_json::Value::Object(existing_map), serde_json::Value::Object(incoming_map)) => {
+            for (key, incoming_value) in incoming_map {
+                match existing_map.get_mut(key) {
+                    Some(existing_value) => {
+                        merge_streaming_tool_argument_value(existing_value, incoming_value);
+                    }
+                    None => {
+                        existing_map.insert(key.clone(), incoming_value.clone());
+                    }
+                }
+            }
+        }
+        (existing_value @ serde_json::Value::Null, incoming_value) => {
+            *existing_value = incoming_value.clone();
+        }
+        (existing_value, incoming_value) => {
+            if existing_value != incoming_value {
+                *existing_value = incoming_value.clone();
+            }
+        }
+    }
+}
+
+fn merge_streaming_tool_call(existing: &mut ToolCall, incoming: &ToolCall) {
+    if !incoming.fn_name.is_empty()
+        && (existing.fn_name.is_empty()
+            || incoming.fn_name.starts_with(&existing.fn_name)
+            || incoming.fn_name.len() > existing.fn_name.len())
+    {
+        existing.fn_name = incoming.fn_name.clone();
+    }
+
+    merge_streaming_tool_argument_value(&mut existing.fn_arguments, &incoming.fn_arguments);
+
+    if incoming.thought_signatures.is_some() {
+        existing.thought_signatures = incoming.thought_signatures.clone();
     }
 }
 
@@ -440,16 +830,24 @@ fn build_streaming_tool_call_display(
     sorted_calls.sort_by(|a, b| a.call_id.cmp(&b.call_id));
     for tc in sorted_calls {
         let (server_name, tool_name) = resolve_tool_name(&tc.fn_name, tool_name_mapping);
-        let params_str = normalize_tool_arguments_json(&tc.fn_arguments);
-        let marker = format!(
-            "\n\n<!-- MCP_TOOL_CALL_STREAMING:{} -->\n",
-            serde_json::json!({
-                "server_name": server_name,
-                "tool_name": tool_name,
-                "fn_arguments": params_str,
-                "llm_call_id": tc.call_id,
-            })
-        );
+        let params_str = serialize_streaming_tool_arguments(&tc.fn_arguments);
+        let mut marker_payload = serde_json::json!({
+            "server_name": server_name,
+            "tool_name": tool_name,
+            "fn_arguments": params_str,
+            "llm_call_id": tc.call_id,
+        });
+        if server_name == "ui_interaction" && tool_name == "preview_code" {
+            if let Some(preview_state) = extract_preview_code_streaming_state(&tc.fn_arguments) {
+                if let Some(marker_object) = marker_payload.as_object_mut() {
+                    marker_object.insert(
+                        "preview_state".to_string(),
+                        serde_json::to_value(preview_state).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+            }
+        }
+        let marker = format!("\n\n<!-- MCP_TOOL_CALL_STREAMING:{} -->\n", marker_payload);
         display.push_str(&marker);
     }
     display
@@ -567,8 +965,80 @@ mod tests {
         );
         let result = build_streaming_tool_call_display("", &tool_calls, &mapping);
         assert!(result.contains("MCP_TOOL_CALL_STREAMING"));
-        // Non-object arguments should be normalized to "{}"
-        assert!(result.contains("{}"));
+        assert!(result.contains("partial"));
+    }
+
+    #[test]
+    fn test_build_streaming_tool_call_display_preview_code_includes_preview_state() {
+        let mapping = ToolNameMapping::new();
+        let mut tool_calls = HashMap::new();
+        tool_calls.insert(
+            "call_preview".to_string(),
+            ToolCall {
+                call_id: "call_preview".to_string(),
+                fn_name: "ui_interaction__preview_code".to_string(),
+                fn_arguments: serde_json::json!({
+                    "title": "compound_interest",
+                    "renderer": "html",
+                    "code": "<div>Live Content</div><script>console.log('ready')</script>",
+                    "loading_messages": ["正在生成交互面板"],
+                    "interaction_mode": "submit_once"
+                }),
+                thought_signatures: None,
+            },
+        );
+
+        let result = build_streaming_tool_call_display("", &tool_calls, &mapping);
+        assert!(result.contains("\"preview_state\""));
+        assert!(result.contains("\"hasRenderableDom\":true"));
+        assert!(result.contains("\"containsScript\":true"));
+        assert!(result.contains("\"title\":\"compound_interest\""));
+    }
+
+    #[test]
+    fn test_build_streaming_tool_call_display_preview_code_marks_script_only_as_not_renderable() {
+        let mapping = ToolNameMapping::new();
+        let mut tool_calls = HashMap::new();
+        tool_calls.insert(
+            "call_preview".to_string(),
+            ToolCall {
+                call_id: "call_preview".to_string(),
+                fn_name: "ui_interaction__preview_code".to_string(),
+                fn_arguments: serde_json::json!({
+                    "title": "script_only",
+                    "renderer": "html",
+                    "code": "<script>console.log('boot')</script>",
+                    "loading_messages": ["正在生成交互面板"],
+                    "interaction_mode": "submit_once"
+                }),
+                thought_signatures: None,
+            },
+        );
+
+        let result = build_streaming_tool_call_display("", &tool_calls, &mapping);
+        assert!(result.contains("\"preview_state\""));
+        assert!(result.contains("\"hasRenderableDom\":false"));
+        assert!(result.contains("\"sourceExcerpt\":\"<script>console.log('boot')</script>\""));
+    }
+
+    #[test]
+    fn test_extract_preview_code_streaming_state_keeps_style_prefixed_partial_html_renderable() {
+        let state = extract_preview_code_streaming_state(&serde_json::json!({
+            "title": "streaming_card",
+            "renderer": "html",
+            "code": "<style>.card{padding:12px;}</style><section class=\"card\"><h2>Revenue</h2><p>42",
+            "loading_messages": ["正在生成交互面板"],
+            "interaction_mode": "submit_once"
+        }))
+        .expect("preview state");
+
+        assert!(state.has_renderable_dom);
+        assert!(!state.contains_script);
+        assert_eq!(
+            state.renderable_html,
+            "<style>.card{padding:12px;}</style><section class=\"card\"><h2>Revenue</h2><p>42"
+        );
+        assert_eq!(state.title, "streaming_card");
     }
 
     #[test]
@@ -586,6 +1056,94 @@ mod tests {
         assert_eq!(normalize_tool_arguments_json(&args), "{}");
         let args = serde_json::json!(null);
         assert_eq!(normalize_tool_arguments_json(&args), "{}");
+    }
+
+    #[test]
+    fn test_serialize_streaming_tool_arguments_string() {
+        let args = serde_json::json!("partial");
+        assert_eq!(serialize_streaming_tool_arguments(&args), "partial");
+    }
+
+    #[test]
+    fn test_merge_streaming_tool_call_appends_string_deltas() {
+        let mut existing = ToolCall {
+            call_id: "call_1".to_string(),
+            fn_name: "ui_interaction__preview_code".to_string(),
+            fn_arguments: serde_json::json!("{\"code\":\"<div"),
+            thought_signatures: None,
+        };
+        let incoming = ToolCall {
+            call_id: "call_1".to_string(),
+            fn_name: "ui_interaction__preview_code".to_string(),
+            fn_arguments: serde_json::json!(">Loading</div>\"}"),
+            thought_signatures: None,
+        };
+
+        merge_streaming_tool_call(&mut existing, &incoming);
+
+        assert_eq!(existing.fn_arguments, serde_json::json!("{\"code\":\"<div>Loading</div>\"}"));
+    }
+
+    #[test]
+    fn test_merge_streaming_tool_call_prefers_longer_accumulated_strings() {
+        let mut existing = ToolCall {
+            call_id: "call_1".to_string(),
+            fn_name: "ui_interaction__preview_code".to_string(),
+            fn_arguments: serde_json::json!("{\"code\":\"<div"),
+            thought_signatures: None,
+        };
+        let incoming = ToolCall {
+            call_id: "call_1".to_string(),
+            fn_name: "ui_interaction__preview_code".to_string(),
+            fn_arguments: serde_json::json!("{\"code\":\"<div>Loading"),
+            thought_signatures: None,
+        };
+
+        merge_streaming_tool_call(&mut existing, &incoming);
+
+        assert_eq!(existing.fn_arguments, serde_json::json!("{\"code\":\"<div>Loading"));
+    }
+
+    #[test]
+    fn test_split_captured_content_separates_tool_calls_and_binaries() {
+        let content = genai::chat::MessageContent::from_parts(vec![
+            ContentPart::from_text("hello"),
+            ContentPart::Binary(Binary::from_base64(
+                "image/png",
+                "ZmFrZV9pbWFnZQ==",
+                Some("image.png".to_string()),
+            )),
+            ContentPart::ToolCall(ToolCall {
+                call_id: "call_1".to_string(),
+                fn_name: "server__tool".to_string(),
+                fn_arguments: serde_json::json!({"ok": true}),
+                thought_signatures: None,
+            }),
+        ]);
+
+        let (tool_calls, binaries) = split_captured_content(content);
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(binaries.len(), 1);
+        assert_eq!(tool_calls[0].call_id, "call_1");
+        assert_eq!(binaries[0].content_type, "image/png");
+    }
+
+    #[test]
+    fn test_build_image_attachment_from_binary_uses_data_url_content() {
+        let binary =
+            Binary::from_base64("image/png", "ZmFrZV9pbWFnZQ==", Some("preview.png".to_string()));
+
+        let attachment =
+            build_image_attachment_from_binary(binary, 42, 0).expect("image attachment");
+
+        assert_eq!(attachment.message_id, 42);
+        assert_eq!(attachment.attachment_type, AttachmentType::Image);
+        assert_eq!(attachment.attachment_url.as_deref(), Some("preview.png"));
+        assert_eq!(
+            attachment.attachment_content.as_deref(),
+            Some("data:image/png;base64,ZmFrZV9pbWFnZQ==")
+        );
     }
 }
 
@@ -781,7 +1339,10 @@ async fn handle_captured_tool_calls_common(
                     });
                     let _ = window.emit(
                         format!("conversation_event_{}", conversation_id).as_str(),
-                        tool_call_event,
+                        ConversationEvent {
+                            r#type: "tool_call".to_string(),
+                            data: tool_call_event["data"].clone(),
+                        },
                     );
                 }
             }
@@ -2115,7 +2676,10 @@ async fn attempt_stream_chat(
                                         let _ = window.emit(
                                             format!("conversation_event_{}", conversation_id)
                                                 .as_str(),
-                                            group_merge_event,
+                                            ConversationEvent {
+                                                r#type: "group_merge".to_string(),
+                                                data: group_merge_event["data"].clone(),
+                                            },
                                         );
                                         group_merge_event_emitted = true;
                                     }
@@ -2194,13 +2758,22 @@ async fn attempt_stream_chat(
 
                         // 累积流式工具调用数据
                         let tc = &tool_call_chunk.tool_call;
+                        let (stream_server_name, stream_tool_name) =
+                            resolve_tool_name(&tc.fn_name, &tool_name_mapping);
                         debug!(
                             llm_call_id = %tc.call_id,
                             fn_name = %tc.fn_name,
                             fn_arguments = %tc.fn_arguments,
                             "received native tool call chunk"
                         );
-                        streaming_tool_calls.insert(tc.call_id.clone(), tc.clone());
+                        match streaming_tool_calls.entry(tc.call_id.clone()) {
+                            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                                merge_streaming_tool_call(entry.get_mut(), tc);
+                            }
+                            std::collections::hash_map::Entry::Vacant(entry) => {
+                                entry.insert(tc.clone());
+                            }
+                        }
 
                         // 确保 response 消息已创建（用于承载流式工具调用指示器）
                         if response_message_id.is_none() {
@@ -2267,7 +2840,7 @@ async fn attempt_stream_chat(
                             );
                         }
                     }
-                    ChatStreamEvent::End(end_event) => {
+                    ChatStreamEvent::End(mut end_event) => {
                         debug!(?end_event, "end event");
 
                         // Extract and store token usage data before ownership is taken
@@ -2279,10 +2852,113 @@ async fn attempt_stream_chat(
                             (input_tokens, output_tokens, total_tokens)
                         });
 
-                        // Capture tool calls if they exist (this takes ownership of end_event)
-                        if let Some(tool_calls) = end_event.captured_into_tool_calls() {
+                        let mut captured_binaries: Vec<Binary> = Vec::new();
+
+                        if let Some(captured_content) = end_event.captured_content.take() {
+                            let (tool_calls, binaries) = split_captured_content(captured_content);
                             captured_tool_calls = tool_calls;
-                            debug!(?captured_tool_calls, "captured tool calls");
+                            captured_binaries = binaries;
+
+                            if !captured_tool_calls.is_empty() {
+                                debug!(?captured_tool_calls, "captured tool calls");
+                            }
+                            if !captured_binaries.is_empty() {
+                                debug!(binary_count = captured_binaries.len(), "captured binaries");
+                            }
+                        }
+
+                        if response_message_id.is_none()
+                            && (!captured_tool_calls.is_empty() || !captured_binaries.is_empty())
+                        {
+                            let actual_start_time = reasoning_end_time.unwrap_or_else(|| {
+                                let now = chrono::Utc::now();
+                                response_start_time.get_or_insert(now);
+                                response_start_time.unwrap()
+                            });
+                            response_start_time = Some(actual_start_time);
+                            current_output_type = OutputType::Response;
+
+                            let ttft_ms = response_first_token_time.as_ref().map(|ft| {
+                                (ft.timestamp_millis() - actual_start_time.timestamp_millis())
+                                    .max(0)
+                            });
+
+                            if let Ok(new_id) = ensure_stream_message(
+                                &conversation_db,
+                                &window,
+                                conversation_id,
+                                "response",
+                                &response_content,
+                                llm_model_id,
+                                &llm_model_name,
+                                &generation_group_id,
+                                parent_group_id_override.clone(),
+                                Some(actual_start_time),
+                                response_first_token_time.clone(),
+                                ttft_ms,
+                            )
+                            .await
+                            {
+                                response_message_id = Some(new_id);
+
+                                if is_regeneration && !group_merge_event_emitted {
+                                    if let Some(ref parent_group_id) = parent_group_id_override {
+                                        let group_merge_event = serde_json::json!({
+                                            "type": "group_merge",
+                                            "data": {
+                                                "original_group_id": parent_group_id,
+                                                "new_group_id": generation_group_id.clone(),
+                                                "is_regeneration": true,
+                                                "first_message_id": new_id,
+                                                "conversation_id": conversation_id
+                                            }
+                                        });
+                                        let _ = window.emit(
+                                            format!("conversation_event_{}", conversation_id)
+                                                .as_str(),
+                                            ConversationEvent {
+                                                r#type: "group_merge".to_string(),
+                                                data: group_merge_event["data"].clone(),
+                                            },
+                                        );
+                                        group_merge_event_emitted = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        let captured_binary_count = captured_binaries.len();
+                        if let Some(msg_id) = response_message_id {
+                            match persist_response_image_attachments(
+                                &conversation_db,
+                                msg_id,
+                                captured_binaries,
+                            ) {
+                                Ok(persisted_count) => {
+                                    if persisted_count > 0 {
+                                        current_output_type = OutputType::Response;
+                                        info!(
+                                            message_id = msg_id,
+                                            persisted_attachment_count = persisted_count,
+                                            "persisted image attachments for stream response"
+                                        );
+                                        let _ = emit_message_add_event(
+                                            &window,
+                                            conversation_id,
+                                            msg_id,
+                                            "response",
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(message_id = msg_id, error = %e, "failed to persist stream response image attachments");
+                                }
+                            }
+                        } else if captured_binary_count > 0 {
+                            warn!(
+                                binary_count = captured_binary_count,
+                                "stream response ended with binaries but no response message could be created"
+                            );
                         }
 
                         // Store the extracted token data
@@ -2434,6 +3110,7 @@ async fn attempt_stream_chat(
                             response_len = response_content.chars().count(),
                             reasoning_len = reasoning_content.chars().count(),
                             has_response_message = response_message_id.is_some(),
+                            captured_binaries = captured_binary_count,
                             captured_tool_calls = captured_tool_calls.len(),
                             "stream summary"
                         );
@@ -2648,7 +3325,20 @@ async fn attempt_stream_chat(
                         )
                         .await;
 
-                        // 无论是否产生内容，都向前端发送一个流式完成事件，确保 UI 能正确退出接收状态
+                        // 清理消息焦点（保留 MCP 执行焦点）
+                        let app_handle = window.app_handle();
+                        if let Some(activity_manager) =
+                            app_handle.try_state::<ConversationActivityManager>()
+                        {
+                            activity_manager
+                                .clear_message_focus_keep_mcp(&app_handle, conversation_id)
+                                .await;
+                        }
+
+                        // 无论是否产生内容，都向前端发送一个流式完成事件，确保 UI 能正确退出接收状态。
+                        // 注意：这里必须在清理消息焦点之后发送，
+                        // 这样前端在处理 stream_complete 并主动同步 shine/runtime 状态时，
+                        // 能读到最终状态，而不是前一拍的 user_pending / assistant_streaming。
                         let stream_complete_event = ConversationEvent {
                             r#type: "stream_complete".to_string(),
                             data: serde_json::json!({
@@ -2665,16 +3355,6 @@ async fn attempt_stream_chat(
                             format!("conversation_event_{}", conversation_id).as_str(),
                             stream_complete_event,
                         );
-
-                        // 清理消息焦点（保留 MCP 执行焦点）
-                        let app_handle = window.app_handle();
-                        if let Some(activity_manager) =
-                            app_handle.try_state::<ConversationActivityManager>()
-                        {
-                            activity_manager
-                                .clear_message_focus_keep_mcp(&app_handle, conversation_id)
-                                .await;
-                        }
 
                         return Ok(());
                     }
@@ -2940,6 +3620,7 @@ pub async fn handle_non_stream_chat(
             let _ = cleanup_last_error_message(conversation_db, conversation_id).await;
 
             let mut content = chat_response.first_text().unwrap_or("").to_string();
+            let response_binaries = chat_response.content.clone().into_binaries();
 
             // Extract token usage data
             let usage = &chat_response.usage;
@@ -2998,6 +3679,25 @@ pub async fn handle_non_stream_chat(
                 "Token usage captured for non-streaming response"
             );
             let response_message_id = response_message.id;
+
+            match persist_response_image_attachments(
+                conversation_db,
+                response_message_id,
+                response_binaries,
+            ) {
+                Ok(persisted_count) => {
+                    if persisted_count > 0 {
+                        info!(
+                            message_id = response_message_id,
+                            persisted_attachment_count = persisted_count,
+                            "persisted image attachments for non-stream response"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(message_id = response_message_id, error = %e, "failed to persist non-stream response image attachments");
+                }
+            }
 
             // 现在才发送 message_add 事件（消息有内容时）
             let add_event = ConversationEvent {

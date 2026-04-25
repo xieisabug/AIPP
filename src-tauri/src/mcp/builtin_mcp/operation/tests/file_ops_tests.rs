@@ -367,13 +367,15 @@ fn test_directory_entry_structure() {
 async fn test_read_before_write_mechanism() {
     let state = OperationState::new();
     let path = "/some/file.txt";
+    let conversation_id = Some(42);
 
     // 初始状态：文件未读取
-    assert!(!state.has_file_been_read(path).await);
+    assert!(!state.has_file_been_read_for_conversation(path, conversation_id).await);
 
     // 记录文件已读取
-    state.record_file_read(path).await;
+    state.record_file_read_for_conversation(path, conversation_id).await;
 
     // 现在可以通过 read-before-write 检查
-    assert!(state.has_file_been_read(path).await);
+    assert!(state.has_file_been_read_for_conversation(path, conversation_id).await);
+    assert!(!state.has_file_been_read_for_conversation(path, Some(99)).await);
 }

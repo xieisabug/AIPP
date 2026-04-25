@@ -45,6 +45,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
     const {
         assistants,
         currentAssistant,
+        setAssistants,
         setCurrentAssistant,
         saveAssistant,
         copyAssistant,
@@ -92,27 +93,6 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             }
         });
     }, [loadAssistants]);
-    // 监听助手列表变化
-    useAssistantListListener({
-        onAssistantListChanged: useCallback(
-            (assistantList: AssistantListItem[]) => {
-                // 使用 operations hook 的方法更新列表
-                // 这里需要手动更新，因为 hook 内部不知道这个事件
-                if (assistantList.length > 0) {
-                    const currentAssistantExists = assistantList.some(
-                        (assistant) => assistant.id === currentAssistant?.assistant.id
-                    );
-                    if (!currentAssistantExists) {
-                        handleChooseAssistant(assistantList[0]);
-                    }
-                } else {
-                    setCurrentAssistant(null);
-                }
-            },
-            [currentAssistant?.assistant.id]
-        ),
-    });
-
     // 选择助手
     const handleChooseAssistant = useCallback(
         (assistant: AssistantListItem) => {
@@ -160,6 +140,34 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             loadAssistantDetail,
         ]
     );
+
+    // 监听助手列表变化
+    useAssistantListListener({
+        onAssistantListChanged: useCallback(
+            (assistantList: AssistantListItem[]) => {
+                setAssistants(assistantList);
+
+                if (assistantList.length === 0) {
+                    setCurrentAssistant(null);
+                    return;
+                }
+
+                if (!currentAssistant) {
+                    handleChooseAssistant(assistantList[0]);
+                    return;
+                }
+
+                const currentAssistantExists = assistantList.some(
+                    (assistant) => assistant.id === currentAssistant.assistant.id
+                );
+
+                if (!currentAssistantExists) {
+                    handleChooseAssistant(assistantList[0]);
+                }
+            },
+            [currentAssistant, handleChooseAssistant, setAssistants, setCurrentAssistant]
+        ),
+    });
 
     // 修改配置
     const handleConfigChange = useCallback(

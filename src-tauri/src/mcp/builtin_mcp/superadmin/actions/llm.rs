@@ -5,7 +5,10 @@ use serde_json::{json, Value};
 use tauri::AppHandle;
 
 use crate::api::llm_api::{fetch_model_list, preview_model_list};
-use crate::db::llm_db::{LLMDatabase, LLMProvider, ModelDetail, DEFAULT_MODEL_REQUEST_MODE};
+use crate::db::llm_db::{
+    resolve_request_mode_or_default, LLMDatabase, LLMProvider, ModelDetail,
+    DEFAULT_MODEL_REQUEST_MODE,
+};
 use crate::mcp::builtin_mcp::superadmin::registry::{ActionHandler, ActionRegistry};
 use crate::mcp::builtin_mcp::superadmin::types::*;
 
@@ -466,8 +469,13 @@ impl ActionHandler for LlmListModelsHandler {
             ids
         };
         let mut request_mode_maps: HashMap<i64, HashMap<String, String>> = HashMap::new();
+        let mut provider_api_types: HashMap<i64, String> = HashMap::new();
         for provider_id in provider_ids {
             request_mode_maps.insert(provider_id, load_request_mode_map(&db, provider_id)?);
+            provider_api_types.insert(
+                provider_id,
+                db.get_llm_provider(provider_id).map_err(|e| e.to_string())?.api_type,
+            );
         }
 
         let models: Vec<Value> = rows
@@ -477,7 +485,14 @@ impl ActionHandler for LlmListModelsHandler {
                     .get(&row.2)
                     .and_then(|map| map.get(&row.3))
                     .cloned()
-                    .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string());
+                    .unwrap_or_else(|| {
+                        resolve_request_mode_or_default(
+                            provider_api_types.get(&row.2).map(String::as_str).unwrap_or(""),
+                            &row.3,
+                            None,
+                        )
+                        .to_string()
+                    });
                 stored_model_to_json(row, request_mode)
             })
             .collect();
@@ -512,7 +527,7 @@ impl ActionHandler for LlmAddModelHandler {
         }
 
         let db = LLMDatabase::new(app_handle).map_err(|e| e.to_string())?;
-        let _provider = db.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
+        let provider = db.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
         let exists = db
             .get_llm_models(provider_id.to_string())
             .map_err(|e| e.to_string())?
@@ -522,8 +537,9 @@ impl ActionHandler for LlmAddModelHandler {
             return Err(format!("Model '{code}' already exists for provider {provider_id}"));
         }
 
-        let effective_request_mode =
-            request_mode.clone().unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string());
+        let effective_request_mode = request_mode.clone().unwrap_or_else(|| {
+            resolve_request_mode_or_default(&provider.api_type, &code, None).to_string()
+        });
 
         if dry_run {
             return Ok(json!({
@@ -664,6 +680,7 @@ impl ActionHandler for LlmGetModelsHandler {
     async fn snapshot_before(&self, app_handle: &AppHandle, args: &Value) -> Option<Value> {
         let provider_id = args.get("provider_id")?.as_i64()?;
         let db = LLMDatabase::new(app_handle).ok()?;
+        let provider = db.get_llm_provider(provider_id).ok()?;
         let models = db.get_llm_models(provider_id.to_string()).ok()?;
         let request_mode_map = load_request_mode_map(&db, provider_id).ok()?;
         let snapshot_models: Vec<Value> = models
@@ -680,7 +697,10 @@ impl ActionHandler for LlmGetModelsHandler {
                     "request_mode": request_mode_map
                         .get(&row.3)
                         .cloned()
-                        .unwrap_or_else(|| DEFAULT_MODEL_REQUEST_MODE.to_string()),
+                        .unwrap_or_else(|| {
+                            resolve_request_mode_or_default(&provider.api_type, &row.3, None)
+                                .to_string()
+                        }),
                 })
             })
             .collect();

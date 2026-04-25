@@ -29,6 +29,8 @@ export interface ButlerTaskDefinition {
     handoff_contract_json: string | null;
     result_handling_mode: string | null;
     notification_policy: string | null;
+    temporary_trusted_paths: string[];
+    temporary_skill_identifiers: string[];
     created_time: string;
 }
 
@@ -60,6 +62,12 @@ export interface ButlerMainLoadResponse {
     model_id: string;
     model_display_name: string;
     tasks: ButlerTaskListItem[];
+    total_tasks: number;
+}
+
+export interface PaginatedButlerTasksResponse {
+    tasks: ButlerTaskListItem[];
+    total: number;
 }
 
 export interface SpawnButlerTaskRequest {
@@ -71,6 +79,8 @@ export interface SpawnButlerTaskRequest {
     handoff_contract_json?: string | null;
     result_handling_mode?: string | null;
     notification_policy?: string | null;
+    temporary_trusted_paths?: string[];
+    temporary_skill_identifiers?: string[];
 }
 
 export interface SpawnButlerTaskResponse {

@@ -18,6 +18,7 @@ dependencies = [
  "config",
  "dirs 5.0.1",
  "docx-rs",
+ "encoding_rs",
  "fastrand",
  "flate2",
  "futures",
@@ -2407,8 +2408,8 @@ dependencies = [
 
 [[package]]
 name = "genai"
-version = "0.6.0-beta.12-WIP"
-source = "git+https://github.com/xieisabug/rust-genai.git?rev=2c0558472d5eeeb26d259006a97a3a27ff9c054c#2c0558472d5eeeb26d259006a97a3a27ff9c054c"
+version = "0.6.0-beta.17-WIP"
+source = "git+https://github.com/xieisabug/rust-genai.git?rev=04359b109d65cac31b3fdbec841d03dc27880bb3#04359b109d65cac31b3fdbec841d03dc27880bb3"
 dependencies = [
  "base64 0.22.1",
  "bytes",

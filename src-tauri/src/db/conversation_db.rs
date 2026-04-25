@@ -1,15 +1,16 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use chrono::{prelude::*, SecondsFormat};
-use rusqlite::{params, Connection, OptionalExtension, Result};
+use rusqlite::{params, types::Type, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize, Serializer};
 use tracing::{debug, instrument};
 
 use crate::errors::AppError;
 use crate::utils::db_utils::{get_datetime_from_row, get_required_datetime_from_row};
 
-use super::get_db_path;
+use super::{get_db_path, get_db_write_lock};
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 pub enum AttachmentType {
@@ -68,6 +69,23 @@ where
     }
 }
 
+fn serialize_string_array(value: &[String]) -> Result<String> {
+    serde_json::to_string(value).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+}
+
+fn deserialize_string_array(index: usize, raw: String, column_name: &str) -> Result<Vec<String>> {
+    serde_json::from_str::<Vec<String>>(&raw).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid {column_name} JSON: {error}"),
+            )),
+        )
+    })
+}
+
 fn ensure_column_exists(
     conn: &Connection,
     table_name: &str,
@@ -86,6 +104,13 @@ fn ensure_column_exists(
         [],
     )?;
     Ok(())
+}
+
+fn sqlite_write_lock_poisoned_error(db_name: &str) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!("{db_name} write lock poisoned"),
+    )))
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -182,12 +207,29 @@ pub trait Repository<T> {
 
 pub struct ConversationRepository {
     conn: Connection,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl ConversationRepository {
     #[instrument(level = "debug", skip(conn))]
     pub fn new(conn: Connection) -> Self {
-        ConversationRepository { conn }
+        Self::new_with_write_lock(conn, Arc::new(Mutex::new(())))
+    }
+
+    #[instrument(level = "debug", skip(conn, write_lock))]
+    pub fn new_with_write_lock(conn: Connection, write_lock: Arc<Mutex<()>>) -> Self {
+        ConversationRepository { conn, write_lock }
+    }
+
+    fn with_serialized_write<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T>,
+    {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| sqlite_write_lock_poisoned_error("conversation.db"))?;
+        f(&self.conn)
     }
 
     #[instrument(level = "debug", skip(self), fields(page = page, per_page = per_page))]
@@ -204,6 +246,65 @@ impl ConversationRepository {
              LIMIT ?1 OFFSET ?2",
         )?;
         let rows = stmt.query_map(&[&per_page, &offset], |row| {
+            Ok(Conversation {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                assistant_id: row.get(2)?,
+                created_time: get_required_datetime_from_row(row, 3, "created_time")?,
+                updated_time: get_required_datetime_from_row(row, 4, "updated_time")?,
+                conversation_kind: row.get(5)?,
+                parent_butler_conversation_id: row.get(6)?,
+                source_task_title: row.get(7)?,
+                is_hidden_from_normal_chat_list: row.get(8)?,
+                channel_source: row.get(9)?,
+                butler_task_status: row.get(10)?,
+                butler_task_summary: row.get(11)?,
+                butler_task_finalized_at: get_datetime_from_row(row, 12)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// List conversations with optional filters for conversation_kind and fuzzy search.
+    /// When `search` is provided, matches against conversation name and message content.
+    #[instrument(level = "debug", skip(self), fields(page = page, per_page = per_page, conversation_kind = ?conversation_kind, search = ?search))]
+    pub fn list_with_filters(
+        &self,
+        page: u32,
+        per_page: u32,
+        conversation_kind: Option<&str>,
+        search: Option<&str>,
+    ) -> Result<Vec<Conversation>> {
+        let offset = (page - 1) * per_page;
+        let kind = conversation_kind.unwrap_or("normal");
+        let search_pattern =
+            search.filter(|s| !s.trim().is_empty()).map(|s| format!("%{}%", s.trim()));
+
+        let sql = if search_pattern.is_some() {
+            "SELECT DISTINCT c.id, c.name, c.assistant_id, c.created_time, c.updated_time,
+                    c.conversation_kind, c.parent_butler_conversation_id, c.source_task_title,
+                    c.is_hidden_from_normal_chat_list, c.channel_source, c.butler_task_status,
+                    c.butler_task_summary, c.butler_task_finalized_at
+               FROM conversation c
+               LEFT JOIN message m ON m.conversation_id = c.id
+              WHERE c.conversation_kind = ?1
+                AND (c.name LIKE ?2 COLLATE NOCASE OR m.content LIKE ?2 COLLATE NOCASE)
+              ORDER BY c.updated_time DESC
+              LIMIT ?3 OFFSET ?4"
+        } else {
+            "SELECT id, name, assistant_id, created_time, updated_time, conversation_kind,
+                    parent_butler_conversation_id, source_task_title,
+                    is_hidden_from_normal_chat_list, channel_source, butler_task_status,
+                    butler_task_summary, butler_task_finalized_at
+               FROM conversation
+              WHERE conversation_kind = ?1
+              ORDER BY updated_time DESC
+              LIMIT ?3 OFFSET ?4"
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let like_val = search_pattern.unwrap_or_default();
+        let rows = stmt.query_map(rusqlite::params![kind, like_val, per_page, offset], |row| {
             Ok(Conversation {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -257,6 +358,58 @@ impl ConversationRepository {
         rows.collect()
     }
 
+    pub fn count_butler_task_conversations(
+        &self,
+        parent_butler_conversation_id: i64,
+    ) -> Result<i64> {
+        self.conn.query_row(
+            "SELECT COUNT(*)
+             FROM conversation
+             WHERE parent_butler_conversation_id = ?1
+               AND conversation_kind = 'butler_task'",
+            params![parent_butler_conversation_id],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn list_butler_task_conversations_paginated(
+        &self,
+        parent_butler_conversation_id: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Conversation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, assistant_id, created_time, updated_time, conversation_kind,
+                    parent_butler_conversation_id, source_task_title,
+                    is_hidden_from_normal_chat_list, channel_source, butler_task_status,
+                    butler_task_summary, butler_task_finalized_at
+             FROM conversation
+             WHERE parent_butler_conversation_id = ?1
+               AND conversation_kind = 'butler_task'
+             ORDER BY updated_time DESC, id DESC
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows =
+            stmt.query_map(params![parent_butler_conversation_id, limit, offset], |row| {
+                Ok(Conversation {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    assistant_id: row.get(2)?,
+                    created_time: get_required_datetime_from_row(row, 3, "created_time")?,
+                    updated_time: get_required_datetime_from_row(row, 4, "updated_time")?,
+                    conversation_kind: row.get(5)?,
+                    parent_butler_conversation_id: row.get(6)?,
+                    source_task_title: row.get(7)?,
+                    is_hidden_from_normal_chat_list: row.get(8)?,
+                    channel_source: row.get(9)?,
+                    butler_task_status: row.get(10)?,
+                    butler_task_summary: row.get(11)?,
+                    butler_task_finalized_at: get_datetime_from_row(row, 12)?,
+                })
+            })?;
+        rows.collect()
+    }
+
     #[instrument(level = "debug", skip(self))]
     pub fn list_reconcilable_butler_task_conversation_ids(&self) -> Result<Vec<i64>> {
         let mut stmt = self.conn.prepare(
@@ -296,21 +449,25 @@ impl ConversationRepository {
         assistant_id: Option<i64>,
     ) -> Result<()> {
         debug!(origin_assistant_id, new_assistant_id = ?assistant_id, "update_assistant_id");
-        self.conn.execute(
-            "UPDATE conversation SET assistant_id = ?1 WHERE assistant_id = ?2",
-            (&assistant_id, &origin_assistant_id),
-        )?;
-        Ok(())
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE conversation SET assistant_id = ?1 WHERE assistant_id = ?2",
+                (&assistant_id, &origin_assistant_id),
+            )?;
+            Ok(())
+        })
     }
 
     #[instrument(level = "debug", skip(self), fields(id = conversation.id, name = conversation.name))]
     pub fn update_name(&self, conversation: &Conversation) -> Result<()> {
         let now = chrono::Utc::now();
-        self.conn.execute(
-            "UPDATE conversation SET name = ?1, updated_time = ?2 WHERE id = ?3",
-            (&conversation.name, &now, &conversation.id),
-        )?;
-        Ok(())
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE conversation SET name = ?1, updated_time = ?2 WHERE id = ?3",
+                (&conversation.name, &now, &conversation.id),
+            )?;
+            Ok(())
+        })
     }
 
     #[instrument(level = "debug", skip(self), fields(origin_parent_id = origin_parent_id, new_parent_id = new_parent_id))]
@@ -320,66 +477,70 @@ impl ConversationRepository {
         new_parent_id: i64,
     ) -> Result<()> {
         let now = chrono::Utc::now();
-        self.conn.execute(
-            "UPDATE conversation
-             SET parent_butler_conversation_id = ?1,
-                 updated_time = ?2
-             WHERE parent_butler_conversation_id = ?3",
-            params![new_parent_id, now, origin_parent_id],
-        )?;
-        Ok(())
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE conversation
+                 SET parent_butler_conversation_id = ?1,
+                     updated_time = ?2
+                 WHERE parent_butler_conversation_id = ?3",
+                params![new_parent_id, now, origin_parent_id],
+            )?;
+            Ok(())
+        })
     }
 }
 
 impl Repository<Conversation> for ConversationRepository {
     #[instrument(level = "debug", skip(self, conversation), fields(name = conversation.name))]
     fn create(&self, conversation: &Conversation) -> Result<Conversation> {
-        self.conn.execute(
-            "INSERT INTO conversation (
-                name,
-                assistant_id,
-                created_time,
-                updated_time,
-                conversation_kind,
-                parent_butler_conversation_id,
-                source_task_title,
-                is_hidden_from_normal_chat_list,
-                channel_source,
-                butler_task_status,
-                butler_task_summary,
-                butler_task_finalized_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            (
-                &conversation.name,
-                &conversation.assistant_id,
-                &conversation.created_time,
-                &conversation.updated_time,
-                &conversation.conversation_kind,
-                &conversation.parent_butler_conversation_id,
-                &conversation.source_task_title,
-                &conversation.is_hidden_from_normal_chat_list,
-                &conversation.channel_source,
-                &conversation.butler_task_status,
-                &conversation.butler_task_summary,
-                &conversation.butler_task_finalized_at,
-            ),
-        )?;
-        let id = self.conn.last_insert_rowid();
-        debug!(conversation_id = id, "conversation inserted");
-        Ok(Conversation {
-            id,
-            name: conversation.name.clone(),
-            assistant_id: conversation.assistant_id,
-            created_time: conversation.created_time,
-            updated_time: conversation.updated_time,
-            conversation_kind: conversation.conversation_kind.clone(),
-            parent_butler_conversation_id: conversation.parent_butler_conversation_id,
-            source_task_title: conversation.source_task_title.clone(),
-            is_hidden_from_normal_chat_list: conversation.is_hidden_from_normal_chat_list,
-            channel_source: conversation.channel_source.clone(),
-            butler_task_status: conversation.butler_task_status.clone(),
-            butler_task_summary: conversation.butler_task_summary.clone(),
-            butler_task_finalized_at: conversation.butler_task_finalized_at,
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "INSERT INTO conversation (
+                    name,
+                    assistant_id,
+                    created_time,
+                    updated_time,
+                    conversation_kind,
+                    parent_butler_conversation_id,
+                    source_task_title,
+                    is_hidden_from_normal_chat_list,
+                    channel_source,
+                    butler_task_status,
+                    butler_task_summary,
+                    butler_task_finalized_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                (
+                    &conversation.name,
+                    &conversation.assistant_id,
+                    &conversation.created_time,
+                    &conversation.updated_time,
+                    &conversation.conversation_kind,
+                    &conversation.parent_butler_conversation_id,
+                    &conversation.source_task_title,
+                    &conversation.is_hidden_from_normal_chat_list,
+                    &conversation.channel_source,
+                    &conversation.butler_task_status,
+                    &conversation.butler_task_summary,
+                    &conversation.butler_task_finalized_at,
+                ),
+            )?;
+            let id = conn.last_insert_rowid();
+            debug!(conversation_id = id, "conversation inserted");
+            Ok(Conversation {
+                id,
+                name: conversation.name.clone(),
+                assistant_id: conversation.assistant_id,
+                created_time: conversation.created_time,
+                updated_time: conversation.updated_time,
+                conversation_kind: conversation.conversation_kind.clone(),
+                parent_butler_conversation_id: conversation.parent_butler_conversation_id,
+                source_task_title: conversation.source_task_title.clone(),
+                is_hidden_from_normal_chat_list: conversation.is_hidden_from_normal_chat_list,
+                channel_source: conversation.channel_source.clone(),
+                butler_task_status: conversation.butler_task_status.clone(),
+                butler_task_summary: conversation.butler_task_summary.clone(),
+                butler_task_finalized_at: conversation.butler_task_finalized_at,
+            })
         })
     }
 
@@ -417,53 +578,74 @@ impl Repository<Conversation> for ConversationRepository {
 
     #[instrument(level = "debug", skip(self, conversation), fields(id = conversation.id))]
     fn update(&self, conversation: &Conversation) -> Result<()> {
-        self.conn.execute(
-            "UPDATE conversation
-             SET name = ?1,
-                 assistant_id = ?2,
-                 updated_time = ?3,
-                 conversation_kind = ?4,
-                 parent_butler_conversation_id = ?5,
-                 source_task_title = ?6,
-                 is_hidden_from_normal_chat_list = ?7,
-                 channel_source = ?8,
-                 butler_task_status = ?9,
-                 butler_task_summary = ?10,
-                 butler_task_finalized_at = ?11
-             WHERE id = ?12",
-            (
-                &conversation.name,
-                &conversation.assistant_id,
-                &conversation.updated_time,
-                &conversation.conversation_kind,
-                &conversation.parent_butler_conversation_id,
-                &conversation.source_task_title,
-                &conversation.is_hidden_from_normal_chat_list,
-                &conversation.channel_source,
-                &conversation.butler_task_status,
-                &conversation.butler_task_summary,
-                &conversation.butler_task_finalized_at,
-                &conversation.id,
-            ),
-        )?;
-        Ok(())
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE conversation
+                 SET name = ?1,
+                     assistant_id = ?2,
+                     updated_time = ?3,
+                     conversation_kind = ?4,
+                     parent_butler_conversation_id = ?5,
+                     source_task_title = ?6,
+                     is_hidden_from_normal_chat_list = ?7,
+                     channel_source = ?8,
+                     butler_task_status = ?9,
+                     butler_task_summary = ?10,
+                     butler_task_finalized_at = ?11
+                 WHERE id = ?12",
+                (
+                    &conversation.name,
+                    &conversation.assistant_id,
+                    &conversation.updated_time,
+                    &conversation.conversation_kind,
+                    &conversation.parent_butler_conversation_id,
+                    &conversation.source_task_title,
+                    &conversation.is_hidden_from_normal_chat_list,
+                    &conversation.channel_source,
+                    &conversation.butler_task_status,
+                    &conversation.butler_task_summary,
+                    &conversation.butler_task_finalized_at,
+                    &conversation.id,
+                ),
+            )?;
+            Ok(())
+        })
     }
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
     fn delete(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM conversation WHERE id = ?", &[&id])?;
-        Ok(())
+        self.with_serialized_write(|conn| {
+            conn.execute("DELETE FROM conversation WHERE id = ?", &[&id])?;
+            Ok(())
+        })
     }
 }
 
 pub struct MessageRepository {
     conn: Connection,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl MessageRepository {
     #[instrument(level = "debug", skip(conn))]
     pub fn new(conn: Connection) -> Self {
-        MessageRepository { conn }
+        Self::new_with_write_lock(conn, Arc::new(Mutex::new(())))
+    }
+
+    #[instrument(level = "debug", skip(conn, write_lock))]
+    pub fn new_with_write_lock(conn: Connection, write_lock: Arc<Mutex<()>>) -> Self {
+        MessageRepository { conn, write_lock }
+    }
+
+    fn with_serialized_write<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T>,
+    {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| sqlite_write_lock_poisoned_error("conversation.db"))?;
+        f(&self.conn)
     }
 
     #[instrument(level = "debug", skip(self), fields(conversation_id = conversation_id))]
@@ -519,54 +701,56 @@ impl MessageRepository {
     }
 
     fn insert_message(&self, message: &Message, touch_conversation: bool) -> Result<Message> {
-        self.conn.execute(
-            "INSERT INTO message (parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, input_token_count, output_token_count, generation_group_id, parent_group_id, tool_calls_json, first_token_time, ttft_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-            rusqlite::params![
-                &message.parent_id,
-                &message.conversation_id,
-                &message.message_type,
-                &message.content,
-                &message.llm_model_id,
-                &message.llm_model_name,
-                &message.created_time,
-                &message.start_time,
-                &message.finish_time,
-                &message.token_count,
-                &message.input_token_count,
-                &message.output_token_count,
-                &message.generation_group_id,
-                &message.parent_group_id,
-                &message.tool_calls_json,
-                &message.first_token_time,
-                &message.ttft_ms,
-            ],
-        )?;
-        if touch_conversation {
-            self.conn.execute(
-                "UPDATE conversation SET updated_time = ?1 WHERE id = ?2",
-                rusqlite::params![&message.created_time, &message.conversation_id],
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "INSERT INTO message (parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, input_token_count, output_token_count, generation_group_id, parent_group_id, tool_calls_json, first_token_time, ttft_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                rusqlite::params![
+                    &message.parent_id,
+                    &message.conversation_id,
+                    &message.message_type,
+                    &message.content,
+                    &message.llm_model_id,
+                    &message.llm_model_name,
+                    &message.created_time,
+                    &message.start_time,
+                    &message.finish_time,
+                    &message.token_count,
+                    &message.input_token_count,
+                    &message.output_token_count,
+                    &message.generation_group_id,
+                    &message.parent_group_id,
+                    &message.tool_calls_json,
+                    &message.first_token_time,
+                    &message.ttft_ms,
+                ],
             )?;
-        }
-        let id = self.conn.last_insert_rowid();
-        Ok(Message {
-            id,
-            parent_id: message.parent_id,
-            conversation_id: message.conversation_id,
-            message_type: message.message_type.clone(),
-            content: message.content.clone(),
-            llm_model_id: message.llm_model_id,
-            llm_model_name: message.llm_model_name.clone(),
-            created_time: message.created_time,
-            start_time: message.start_time,
-            finish_time: message.finish_time,
-            token_count: message.token_count,
-            input_token_count: message.input_token_count,
-            output_token_count: message.output_token_count,
-            generation_group_id: message.generation_group_id.clone(),
-            parent_group_id: message.parent_group_id.clone(),
-            tool_calls_json: message.tool_calls_json.clone(),
-            first_token_time: message.first_token_time,
-            ttft_ms: message.ttft_ms,
+            if touch_conversation {
+                conn.execute(
+                    "UPDATE conversation SET updated_time = ?1 WHERE id = ?2",
+                    rusqlite::params![&message.created_time, &message.conversation_id],
+                )?;
+            }
+            let id = conn.last_insert_rowid();
+            Ok(Message {
+                id,
+                parent_id: message.parent_id,
+                conversation_id: message.conversation_id,
+                message_type: message.message_type.clone(),
+                content: message.content.clone(),
+                llm_model_id: message.llm_model_id,
+                llm_model_name: message.llm_model_name.clone(),
+                created_time: message.created_time,
+                start_time: message.start_time,
+                finish_time: message.finish_time,
+                token_count: message.token_count,
+                input_token_count: message.input_token_count,
+                output_token_count: message.output_token_count,
+                generation_group_id: message.generation_group_id.clone(),
+                parent_group_id: message.parent_group_id.clone(),
+                tool_calls_json: message.tool_calls_json.clone(),
+                first_token_time: message.first_token_time,
+                ttft_ms: message.ttft_ms,
+            })
         })
     }
 
@@ -580,18 +764,22 @@ impl MessageRepository {
         // Avoid SQLite CURRENT_TIMESTAMP (second precision) which can be earlier than millisecond
         // timestamps (e.g., first_token_time) and breaks duration-based TPS calculations.
         let now = chrono::Utc::now();
-        self.conn.execute(
-            "UPDATE message SET finish_time = ?1 WHERE id = ?2",
-            rusqlite::params![now, id],
-        )?;
-        Ok(())
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE message SET finish_time = ?1 WHERE id = ?2",
+                rusqlite::params![now, id],
+            )?;
+            Ok(())
+        })
     }
 
     /// 更新消息内容
     #[instrument(level = "debug", skip(self, content), fields(id = id, content_len = content.len()))]
     pub fn update_content(&self, id: i64, content: &str) -> Result<()> {
-        self.conn.execute("UPDATE message SET content = ?1 WHERE id = ?2", (content, id))?;
-        Ok(())
+        self.with_serialized_write(|conn| {
+            conn.execute("UPDATE message SET content = ?1 WHERE id = ?2", (content, id))?;
+            Ok(())
+        })
     }
 
     /// 更新对话中所有正在进行的消息的 finish_time（用于取消操作）
@@ -599,11 +787,13 @@ impl MessageRepository {
     #[instrument(level = "debug", skip(self), fields(conversation_id = conversation_id))]
     pub fn finish_pending_messages(&self, conversation_id: i64) -> Result<usize> {
         let now = chrono::Utc::now();
-        let updated = self.conn.execute(
-            "UPDATE message SET finish_time = ?1 WHERE conversation_id = ?2 AND start_time IS NOT NULL AND finish_time IS NULL",
-            rusqlite::params![now, conversation_id],
-        )?;
-        Ok(updated)
+        self.with_serialized_write(|conn| {
+            let updated = conn.execute(
+                "UPDATE message SET finish_time = ?1 WHERE conversation_id = ?2 AND start_time IS NOT NULL AND finish_time IS NULL",
+                rusqlite::params![now, conversation_id],
+            )?;
+            Ok(updated)
+        })
     }
 }
 
@@ -643,43 +833,64 @@ impl Repository<Message> for MessageRepository {
 
     #[instrument(level = "debug", skip(self, message), fields(id = message.id))]
     fn update(&self, message: &Message) -> Result<()> {
-        self.conn.execute(
-            "UPDATE message SET conversation_id = ?1, message_type = ?2, content = ?3, llm_model_id = ?4, llm_model_name = ?5, token_count = ?6, input_token_count = ?7, output_token_count = ?8, tool_calls_json = ?9, first_token_time = ?10, ttft_ms = ?11, start_time = ?12, finish_time = ?13 WHERE id = ?14",
-            rusqlite::params![
-                &message.conversation_id,
-                &message.message_type,
-                &message.content,
-                &message.llm_model_id,
-                &message.llm_model_name,
-                &message.token_count,
-                &message.input_token_count,
-                &message.output_token_count,
-                &message.tool_calls_json,
-                &message.first_token_time,
-                &message.ttft_ms,
-                &message.start_time,
-                &message.finish_time,
-                &message.id,
-            ],
-        )?;
-        Ok(())
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE message SET conversation_id = ?1, message_type = ?2, content = ?3, llm_model_id = ?4, llm_model_name = ?5, token_count = ?6, input_token_count = ?7, output_token_count = ?8, tool_calls_json = ?9, first_token_time = ?10, ttft_ms = ?11, start_time = ?12, finish_time = ?13 WHERE id = ?14",
+                rusqlite::params![
+                    &message.conversation_id,
+                    &message.message_type,
+                    &message.content,
+                    &message.llm_model_id,
+                    &message.llm_model_name,
+                    &message.token_count,
+                    &message.input_token_count,
+                    &message.output_token_count,
+                    &message.tool_calls_json,
+                    &message.first_token_time,
+                    &message.ttft_ms,
+                    &message.start_time,
+                    &message.finish_time,
+                    &message.id,
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
     fn delete(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM message WHERE id = ?", &[&id])?;
-        Ok(())
+        self.with_serialized_write(|conn| {
+            conn.execute("DELETE FROM message WHERE id = ?", &[&id])?;
+            Ok(())
+        })
     }
 }
 
 pub struct MessageAttachmentRepository {
     conn: Connection,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl MessageAttachmentRepository {
     #[instrument(level = "debug", skip(conn))]
     pub fn new(conn: Connection) -> Self {
-        MessageAttachmentRepository { conn }
+        Self::new_with_write_lock(conn, Arc::new(Mutex::new(())))
+    }
+
+    #[instrument(level = "debug", skip(conn, write_lock))]
+    pub fn new_with_write_lock(conn: Connection, write_lock: Arc<Mutex<()>>) -> Self {
+        MessageAttachmentRepository { conn, write_lock }
+    }
+
+    fn with_serialized_write<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T>,
+    {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| sqlite_write_lock_poisoned_error("conversation.db"))?;
+        f(&self.conn)
     }
 
     #[instrument(level = "debug", skip(self, id_list), fields(id_count = id_list.len()))]
@@ -731,20 +942,22 @@ impl MessageAttachmentRepository {
 impl Repository<MessageAttachment> for MessageAttachmentRepository {
     #[instrument(level = "debug", skip(self, attachment), fields(message_id = attachment.message_id, attachment_type = ?(attachment.attachment_type as i64)))]
     fn create(&self, attachment: &MessageAttachment) -> Result<MessageAttachment> {
-        self.conn.execute(
-            "INSERT INTO message_attachment (message_id, attachment_type, attachment_url, attachment_content, attachment_hash, use_vector, token_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            (&attachment.message_id, &(attachment.attachment_type as i64), &attachment.attachment_url, &attachment.attachment_content, &attachment.attachment_hash, &attachment.use_vector, &attachment.token_count),
-        )?;
-        let id = self.conn.last_insert_rowid();
-        Ok(MessageAttachment {
-            id,
-            message_id: attachment.message_id,
-            attachment_type: attachment.attachment_type,
-            attachment_url: attachment.attachment_url.clone(),
-            attachment_content: attachment.attachment_content.clone(),
-            attachment_hash: None,
-            use_vector: attachment.use_vector,
-            token_count: attachment.token_count,
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "INSERT INTO message_attachment (message_id, attachment_type, attachment_url, attachment_content, attachment_hash, use_vector, token_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (&attachment.message_id, &(attachment.attachment_type as i64), &attachment.attachment_url, &attachment.attachment_content, &attachment.attachment_hash, &attachment.use_vector, &attachment.token_count),
+            )?;
+            let id = conn.last_insert_rowid();
+            Ok(MessageAttachment {
+                id,
+                message_id: attachment.message_id,
+                attachment_type: attachment.attachment_type,
+                attachment_url: attachment.attachment_url.clone(),
+                attachment_content: attachment.attachment_content.clone(),
+                attachment_hash: None,
+                use_vector: attachment.use_vector,
+                token_count: attachment.token_count,
+            })
         })
     }
 
@@ -770,22 +983,27 @@ impl Repository<MessageAttachment> for MessageAttachmentRepository {
 
     #[instrument(level = "debug", skip(self, attachment), fields(id = attachment.id))]
     fn update(&self, attachment: &MessageAttachment) -> Result<()> {
-        self.conn.execute(
-            "UPDATE message_attachment SET message_id = ?1 WHERE id = ?2",
-            (&attachment.message_id, &attachment.id),
-        )?;
-        Ok(())
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE message_attachment SET message_id = ?1 WHERE id = ?2",
+                (&attachment.message_id, &attachment.id),
+            )?;
+            Ok(())
+        })
     }
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
     fn delete(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM message_attachment WHERE id = ?", &[&id])?;
-        Ok(())
+        self.with_serialized_write(|conn| {
+            conn.execute("DELETE FROM message_attachment WHERE id = ?", &[&id])?;
+            Ok(())
+        })
     }
 }
 
 pub struct ConversationDatabase {
     db_path: PathBuf,
+    write_lock: Arc<Mutex<()>>,
 }
 
 pub(crate) fn ensure_conversation_table(conn: &Connection) -> rusqlite::Result<()> {
@@ -833,6 +1051,12 @@ pub(crate) fn ensure_conversation_table(conn: &Connection) -> rusqlite::Result<(
             [],
         )?;
     }
+    conn.execute(
+        "UPDATE conversation
+         SET conversation_kind = 'butler_main'
+         WHERE conversation_kind = 'butler_main_archive'",
+        [],
+    )?;
     if !conversation_columns.contains(&"parent_butler_conversation_id".to_string()) {
         conn.execute(
             "ALTER TABLE conversation ADD COLUMN parent_butler_conversation_id INTEGER",
@@ -867,8 +1091,10 @@ pub(crate) fn ensure_conversation_table(conn: &Connection) -> rusqlite::Result<(
 impl ConversationDatabase {
     pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
         let db_path = get_db_path(app_handle, "conversation.db");
+        let db_path = db_path.unwrap();
+        let write_lock = get_db_write_lock(&db_path);
 
-        Ok(ConversationDatabase { db_path: db_path.unwrap() })
+        Ok(ConversationDatabase { db_path, write_lock })
     }
 
     #[instrument(level = "debug", skip(self))]
@@ -885,34 +1111,49 @@ impl ConversationDatabase {
         Ok(conn)
     }
 
+    pub fn write_lock(&self) -> Arc<Mutex<()>> {
+        self.write_lock.clone()
+    }
+
+    pub fn with_write_connection<T, F>(&self, f: F) -> Result<T, AppError>
+    where
+        F: FnOnce(&Connection) -> Result<T, AppError>,
+    {
+        let _guard = self.write_lock.lock().map_err(|_| {
+            AppError::UnknownError("conversation db write lock poisoned".to_string())
+        })?;
+        let conn = self.get_connection().map_err(AppError::from)?;
+        f(&conn)
+    }
+
     #[instrument(level = "debug", skip(self), err)]
     pub fn conversation_repo(&self) -> Result<ConversationRepository, AppError> {
         let conn = self.get_connection().map_err(AppError::from)?;
-        Ok(ConversationRepository::new(conn))
+        Ok(ConversationRepository::new_with_write_lock(conn, self.write_lock()))
     }
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn message_repo(&self) -> Result<MessageRepository, AppError> {
         let conn = self.get_connection().map_err(AppError::from)?;
-        Ok(MessageRepository::new(conn))
+        Ok(MessageRepository::new_with_write_lock(conn, self.write_lock()))
     }
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn attachment_repo(&self) -> Result<MessageAttachmentRepository, AppError> {
         let conn = self.get_connection().map_err(AppError::from)?;
-        Ok(MessageAttachmentRepository::new(conn))
+        Ok(MessageAttachmentRepository::new_with_write_lock(conn, self.write_lock()))
     }
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn conversation_summary_repo(&self) -> Result<ConversationSummaryRepository, AppError> {
         let conn = self.get_connection().map_err(AppError::from)?;
-        Ok(ConversationSummaryRepository::new(conn))
+        Ok(ConversationSummaryRepository::new_with_write_lock(conn, self.write_lock()))
     }
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn butler_repo(&self) -> Result<ButlerRepository, AppError> {
         let conn = self.get_connection().map_err(AppError::from)?;
-        Ok(ButlerRepository::new(conn))
+        Ok(ButlerRepository::new_with_write_lock(conn, self.write_lock()))
     }
 
     #[instrument(level = "debug", skip(self), err)]
@@ -1172,6 +1413,8 @@ impl ConversationDatabase {
                 handoff_contract_json TEXT,
                 result_handling_mode TEXT,
                 notification_policy TEXT,
+                temporary_trusted_paths_json TEXT NOT NULL DEFAULT '[]',
+                temporary_skill_identifiers_json TEXT NOT NULL DEFAULT '[]',
                 created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (butler_conversation_id) REFERENCES conversation(id) ON DELETE CASCADE,
                 FOREIGN KEY (task_conversation_id) REFERENCES conversation(id) ON DELETE CASCADE
@@ -1181,6 +1424,18 @@ impl ConversationDatabase {
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_butler_task_definition_parent ON butler_task_definition(butler_conversation_id, created_time DESC)",
             [],
+        )?;
+        ensure_column_exists(
+            &conn,
+            "butler_task_definition",
+            "temporary_trusted_paths_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        ensure_column_exists(
+            &conn,
+            "butler_task_definition",
+            "temporary_skill_identifiers_json",
+            "TEXT NOT NULL DEFAULT '[]'",
         )?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS butler_task_result (
@@ -1237,27 +1492,29 @@ impl ConversationDatabase {
         conversation_id: i64,
         session_id: &str,
     ) -> Result<(), AppError> {
-        let conn = self.get_connection().map_err(AppError::from)?;
-        conn.execute(
-            "INSERT INTO acp_session (conversation_id, session_id, updated_time)
-             VALUES (?1, ?2, CURRENT_TIMESTAMP)
-             ON CONFLICT(conversation_id)
-             DO UPDATE SET session_id = excluded.session_id, updated_time = CURRENT_TIMESTAMP",
-            params![conversation_id, session_id],
-        )
-        .map_err(AppError::from)?;
-        Ok(())
+        self.with_write_connection(|conn| {
+            conn.execute(
+                "INSERT INTO acp_session (conversation_id, session_id, updated_time)
+                 VALUES (?1, ?2, CURRENT_TIMESTAMP)
+                 ON CONFLICT(conversation_id)
+                 DO UPDATE SET session_id = excluded.session_id, updated_time = CURRENT_TIMESTAMP",
+                params![conversation_id, session_id],
+            )
+            .map_err(AppError::from)?;
+            Ok(())
+        })
     }
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn delete_acp_session_id(&self, conversation_id: i64) -> Result<(), AppError> {
-        let conn = self.get_connection().map_err(AppError::from)?;
-        conn.execute(
-            "DELETE FROM acp_session WHERE conversation_id = ?1",
-            params![conversation_id],
-        )
-        .map_err(AppError::from)?;
-        Ok(())
+        self.with_write_connection(|conn| {
+            conn.execute(
+                "DELETE FROM acp_session WHERE conversation_id = ?1",
+                params![conversation_id],
+            )
+            .map_err(AppError::from)?;
+            Ok(())
+        })
     }
 
     /// 获取对话的token统计信息
@@ -1685,62 +1942,63 @@ impl ConversationDatabase {
         conversation_id: i64,
         todos: Vec<ConversationTodoInput>,
     ) -> Result<(), AppError> {
-        let conn = self.get_connection().map_err(AppError::from)?;
+        self.with_write_connection(|conn| {
+            conn.execute("BEGIN TRANSACTION", []).map_err(AppError::from)?;
 
-        // Start transaction
-        conn.execute("BEGIN TRANSACTION", []).map_err(AppError::from)?;
-
-        // Delete existing todos
-        conn.execute(
-            "DELETE FROM conversation_todo WHERE conversation_id = ?1",
-            params![conversation_id],
-        )
-        .map_err(|e| {
-            let _ = conn.execute("ROLLBACK", []);
-            AppError::from(e)
-        })?;
-
-        // Insert new todos
-        for (index, todo) in todos.iter().enumerate() {
             conn.execute(
-                "INSERT INTO conversation_todo (conversation_id, content, status, active_form, sort_order)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    conversation_id,
-                    &todo.content,
-                    &todo.status,
-                    &todo.active_form,
-                    index as i32
-                ],
+                "DELETE FROM conversation_todo WHERE conversation_id = ?1",
+                params![conversation_id],
             )
             .map_err(|e| {
                 let _ = conn.execute("ROLLBACK", []);
                 AppError::from(e)
             })?;
-        }
 
-        // Commit transaction
-        conn.execute("COMMIT", []).map_err(AppError::from)?;
+            for (index, todo) in todos.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO conversation_todo (conversation_id, content, status, active_form, sort_order)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        conversation_id,
+                        &todo.content,
+                        &todo.status,
+                        &todo.active_form,
+                        index as i32
+                    ],
+                )
+                .map_err(|e| {
+                    let _ = conn.execute("ROLLBACK", []);
+                    AppError::from(e)
+                })?;
+            }
 
-        debug!(
-            conversation_id = conversation_id,
-            todo_count = todos.len(),
-            "Replaced todos for conversation"
-        );
+            conn.execute(
+                "COMMIT",
+                [],
+            )
+            .map_err(AppError::from)?;
 
-        Ok(())
+            debug!(
+                conversation_id = conversation_id,
+                todo_count = todos.len(),
+                "Replaced todos for conversation"
+            );
+
+            Ok(())
+        })
     }
 
     /// Delete all todos for a conversation
     #[instrument(level = "debug", skip(self), err)]
     pub fn delete_todos(&self, conversation_id: i64) -> Result<(), AppError> {
-        let conn = self.get_connection().map_err(AppError::from)?;
-        conn.execute(
-            "DELETE FROM conversation_todo WHERE conversation_id = ?1",
-            params![conversation_id],
-        )
-        .map_err(AppError::from)?;
-        Ok(())
+        self.with_write_connection(|conn| {
+            conn.execute(
+                "DELETE FROM conversation_todo WHERE conversation_id = ?1",
+                params![conversation_id],
+            )
+            .map_err(AppError::from)?;
+            Ok(())
+        })
     }
 }
 
@@ -1836,34 +2094,53 @@ pub struct ConversationSummary {
 
 pub struct ConversationSummaryRepository {
     conn: Connection,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl ConversationSummaryRepository {
     #[instrument(level = "debug", skip(conn))]
     pub fn new(conn: Connection) -> Self {
-        ConversationSummaryRepository { conn }
+        Self::new_with_write_lock(conn, Arc::new(Mutex::new(())))
+    }
+
+    #[instrument(level = "debug", skip(conn, write_lock))]
+    pub fn new_with_write_lock(conn: Connection, write_lock: Arc<Mutex<()>>) -> Self {
+        ConversationSummaryRepository { conn, write_lock }
+    }
+
+    fn with_serialized_write<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T>,
+    {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| sqlite_write_lock_poisoned_error("conversation.db"))?;
+        f(&self.conn)
     }
 
     #[instrument(level = "debug", skip(self))]
     pub fn create(&self, summary: &ConversationSummary) -> Result<ConversationSummary> {
-        self.conn.execute(
-            "INSERT INTO conversation_summary (conversation_id, summary, user_intent, key_outcomes, created_time) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                &summary.conversation_id,
-                &summary.summary,
-                &summary.user_intent,
-                &summary.key_outcomes,
-                &summary.created_time,
-            ],
-        )?;
-        let id = self.conn.last_insert_rowid();
-        Ok(ConversationSummary {
-            id,
-            conversation_id: summary.conversation_id,
-            summary: summary.summary.clone(),
-            user_intent: summary.user_intent.clone(),
-            key_outcomes: summary.key_outcomes.clone(),
-            created_time: summary.created_time,
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "INSERT INTO conversation_summary (conversation_id, summary, user_intent, key_outcomes, created_time) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    &summary.conversation_id,
+                    &summary.summary,
+                    &summary.user_intent,
+                    &summary.key_outcomes,
+                    &summary.created_time,
+                ],
+            )?;
+            let id = conn.last_insert_rowid();
+            Ok(ConversationSummary {
+                id,
+                conversation_id: summary.conversation_id,
+                summary: summary.summary.clone(),
+                user_intent: summary.user_intent.clone(),
+                key_outcomes: summary.key_outcomes.clone(),
+                created_time: summary.created_time,
+            })
         })
     }
 
@@ -1902,11 +2179,13 @@ impl ConversationSummaryRepository {
 
     #[instrument(level = "debug", skip(self))]
     pub fn delete_by_conversation_id(&self, conversation_id: i64) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM conversation_summary WHERE conversation_id = ?",
-            rusqlite::params![&conversation_id],
-        )?;
-        Ok(())
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "DELETE FROM conversation_summary WHERE conversation_id = ?",
+                rusqlite::params![&conversation_id],
+            )?;
+            Ok(())
+        })
     }
 }
 
@@ -1936,6 +2215,10 @@ pub struct ButlerTaskDefinition {
     pub handoff_contract_json: Option<String>,
     pub result_handling_mode: Option<String>,
     pub notification_policy: Option<String>,
+    #[serde(default)]
+    pub temporary_trusted_paths: Vec<String>,
+    #[serde(default)]
+    pub temporary_skill_identifiers: Vec<String>,
     #[serde(serialize_with = "serialize_datetime_millis")]
     pub created_time: DateTime<Utc>,
 }
@@ -1962,12 +2245,29 @@ pub struct ButlerTaskResult {
 
 pub struct ButlerRepository {
     conn: Connection,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl ButlerRepository {
     #[instrument(level = "debug", skip(conn))]
     pub fn new(conn: Connection) -> Self {
-        Self { conn }
+        Self::new_with_write_lock(conn, Arc::new(Mutex::new(())))
+    }
+
+    #[instrument(level = "debug", skip(conn, write_lock))]
+    pub fn new_with_write_lock(conn: Connection, write_lock: Arc<Mutex<()>>) -> Self {
+        Self { conn, write_lock }
+    }
+
+    fn with_serialized_write<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T>,
+    {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| sqlite_write_lock_poisoned_error("conversation.db"))?;
+        f(&self.conn)
     }
 
     #[instrument(level = "debug", skip(self), fields(slot = slot))]
@@ -1999,29 +2299,48 @@ impl ButlerRepository {
         slot: &str,
     ) -> Result<ButlerMainState> {
         let now = Utc::now();
-        self.conn.execute(
-            "INSERT INTO butler_main_state (
-                butler_conversation_id, slot, last_active_at, created_time, updated_time
-            ) VALUES (?1, ?2, ?3, ?4, ?5)
-            ON CONFLICT(slot) DO UPDATE SET
-                butler_conversation_id = excluded.butler_conversation_id,
-                last_active_at = excluded.last_active_at,
-                updated_time = excluded.updated_time",
-            params![butler_conversation_id, slot, now, now, now],
-        )?;
-        self.get_main_state(slot)?.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "INSERT INTO butler_main_state (
+                    butler_conversation_id, slot, last_active_at, created_time, updated_time
+                ) VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(slot) DO UPDATE SET
+                    butler_conversation_id = excluded.butler_conversation_id,
+                    last_active_at = excluded.last_active_at,
+                    updated_time = excluded.updated_time",
+                params![butler_conversation_id, slot, now, now, now],
+            )?;
+            conn.query_row(
+                "SELECT id, butler_conversation_id, slot, last_active_at, created_time, updated_time
+                 FROM butler_main_state
+                 WHERE slot = ?1",
+                params![slot],
+                |row| {
+                    Ok(ButlerMainState {
+                        id: row.get(0)?,
+                        butler_conversation_id: row.get(1)?,
+                        slot: row.get(2)?,
+                        last_active_at: get_required_datetime_from_row(row, 3, "last_active_at")?,
+                        created_time: get_required_datetime_from_row(row, 4, "created_time")?,
+                        updated_time: get_required_datetime_from_row(row, 5, "updated_time")?,
+                    })
+                },
+            )
+        })
     }
 
     #[instrument(level = "debug", skip(self), fields(slot = slot))]
     pub fn touch_main_state(&self, slot: &str) -> Result<()> {
         let now = Utc::now();
-        self.conn.execute(
-            "UPDATE butler_main_state
-             SET last_active_at = ?1, updated_time = ?1
-             WHERE slot = ?2",
-            params![now, slot],
-        )?;
-        Ok(())
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE butler_main_state
+                 SET last_active_at = ?1, updated_time = ?1
+                 WHERE slot = ?2",
+                params![now, slot],
+            )?;
+            Ok(())
+        })
     }
 
     #[instrument(level = "debug", skip(self, definition), fields(task_conversation_id = definition.task_conversation_id))]
@@ -2029,47 +2348,59 @@ impl ButlerRepository {
         &self,
         definition: &ButlerTaskDefinition,
     ) -> Result<ButlerTaskDefinition> {
-        self.conn.execute(
-            "INSERT INTO butler_task_definition (
-                butler_conversation_id,
-                task_conversation_id,
-                title,
-                goal,
-                executor_assistant_id,
-                executor_assistant_source,
-                permission_template_source,
-                handoff_contract_json,
-                result_handling_mode,
-                notification_policy,
-                created_time
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                definition.butler_conversation_id,
-                definition.task_conversation_id,
-                &definition.title,
-                &definition.goal,
-                definition.executor_assistant_id,
-                &definition.executor_assistant_source,
-                &definition.permission_template_source,
-                &definition.handoff_contract_json,
-                &definition.result_handling_mode,
-                &definition.notification_policy,
-                definition.created_time,
-            ],
-        )?;
-        Ok(ButlerTaskDefinition {
-            id: self.conn.last_insert_rowid(),
-            butler_conversation_id: definition.butler_conversation_id,
-            task_conversation_id: definition.task_conversation_id,
-            title: definition.title.clone(),
-            goal: definition.goal.clone(),
-            executor_assistant_id: definition.executor_assistant_id,
-            executor_assistant_source: definition.executor_assistant_source.clone(),
-            permission_template_source: definition.permission_template_source.clone(),
-            handoff_contract_json: definition.handoff_contract_json.clone(),
-            result_handling_mode: definition.result_handling_mode.clone(),
-            notification_policy: definition.notification_policy.clone(),
-            created_time: definition.created_time,
+        self.with_serialized_write(|conn| {
+            let temporary_trusted_paths_json =
+                serialize_string_array(&definition.temporary_trusted_paths)?;
+            let temporary_skill_identifiers_json =
+                serialize_string_array(&definition.temporary_skill_identifiers)?;
+            conn.execute(
+                "INSERT INTO butler_task_definition (
+                    butler_conversation_id,
+                    task_conversation_id,
+                    title,
+                    goal,
+                    executor_assistant_id,
+                    executor_assistant_source,
+                    permission_template_source,
+                    handoff_contract_json,
+                    result_handling_mode,
+                    notification_policy,
+                    temporary_trusted_paths_json,
+                    temporary_skill_identifiers_json,
+                    created_time
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    definition.butler_conversation_id,
+                    definition.task_conversation_id,
+                    &definition.title,
+                    &definition.goal,
+                    definition.executor_assistant_id,
+                    &definition.executor_assistant_source,
+                    &definition.permission_template_source,
+                    &definition.handoff_contract_json,
+                    &definition.result_handling_mode,
+                    &definition.notification_policy,
+                    temporary_trusted_paths_json,
+                    temporary_skill_identifiers_json,
+                    definition.created_time,
+                ],
+            )?;
+            Ok(ButlerTaskDefinition {
+                id: conn.last_insert_rowid(),
+                butler_conversation_id: definition.butler_conversation_id,
+                task_conversation_id: definition.task_conversation_id,
+                title: definition.title.clone(),
+                goal: definition.goal.clone(),
+                executor_assistant_id: definition.executor_assistant_id,
+                executor_assistant_source: definition.executor_assistant_source.clone(),
+                permission_template_source: definition.permission_template_source.clone(),
+                handoff_contract_json: definition.handoff_contract_json.clone(),
+                result_handling_mode: definition.result_handling_mode.clone(),
+                notification_policy: definition.notification_policy.clone(),
+                temporary_trusted_paths: definition.temporary_trusted_paths.clone(),
+                temporary_skill_identifiers: definition.temporary_skill_identifiers.clone(),
+                created_time: definition.created_time,
+            })
         })
     }
 
@@ -2082,12 +2413,17 @@ impl ButlerRepository {
             "SELECT id, butler_conversation_id, task_conversation_id, title, goal,
                     executor_assistant_id, executor_assistant_source,
                     permission_template_source, handoff_contract_json,
-                    result_handling_mode, notification_policy, created_time
+                    result_handling_mode, notification_policy,
+                    temporary_trusted_paths_json, temporary_skill_identifiers_json, created_time
              FROM butler_task_definition
              WHERE butler_conversation_id = ?1
              ORDER BY created_time DESC, id DESC",
         )?;
         let rows = stmt.query_map(params![butler_conversation_id], |row| {
+            let temporary_trusted_paths =
+                deserialize_string_array(11, row.get(11)?, "temporary_trusted_paths_json")?;
+            let temporary_skill_identifiers =
+                deserialize_string_array(12, row.get(12)?, "temporary_skill_identifiers_json")?;
             Ok(ButlerTaskDefinition {
                 id: row.get(0)?,
                 butler_conversation_id: row.get(1)?,
@@ -2100,7 +2436,9 @@ impl ButlerRepository {
                 handoff_contract_json: row.get(8)?,
                 result_handling_mode: row.get(9)?,
                 notification_policy: row.get(10)?,
-                created_time: get_required_datetime_from_row(row, 11, "created_time")?,
+                temporary_trusted_paths,
+                temporary_skill_identifiers,
+                created_time: get_required_datetime_from_row(row, 13, "created_time")?,
             })
         })?;
         rows.collect()
@@ -2116,11 +2454,22 @@ impl ButlerRepository {
                 "SELECT id, butler_conversation_id, task_conversation_id, title, goal,
                         executor_assistant_id, executor_assistant_source,
                         permission_template_source, handoff_contract_json,
-                        result_handling_mode, notification_policy, created_time
+                        result_handling_mode, notification_policy,
+                        temporary_trusted_paths_json, temporary_skill_identifiers_json, created_time
                  FROM butler_task_definition
                  WHERE task_conversation_id = ?1",
                 params![task_conversation_id],
                 |row| {
+                    let temporary_trusted_paths = deserialize_string_array(
+                        11,
+                        row.get(11)?,
+                        "temporary_trusted_paths_json",
+                    )?;
+                    let temporary_skill_identifiers = deserialize_string_array(
+                        12,
+                        row.get(12)?,
+                        "temporary_skill_identifiers_json",
+                    )?;
                     Ok(ButlerTaskDefinition {
                         id: row.get(0)?,
                         butler_conversation_id: row.get(1)?,
@@ -2133,7 +2482,9 @@ impl ButlerRepository {
                         handoff_contract_json: row.get(8)?,
                         result_handling_mode: row.get(9)?,
                         notification_policy: row.get(10)?,
-                        created_time: get_required_datetime_from_row(row, 11, "created_time")?,
+                        temporary_trusted_paths,
+                        temporary_skill_identifiers,
+                        created_time: get_required_datetime_from_row(row, 13, "created_time")?,
                     })
                 },
             )
@@ -2146,63 +2497,92 @@ impl ButlerRepository {
         origin_butler_conversation_id: i64,
         new_butler_conversation_id: i64,
     ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE butler_task_definition
-             SET butler_conversation_id = ?1
-             WHERE butler_conversation_id = ?2",
-            params![new_butler_conversation_id, origin_butler_conversation_id],
-        )?;
-        Ok(())
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE butler_task_definition
+                 SET butler_conversation_id = ?1
+                 WHERE butler_conversation_id = ?2",
+                params![new_butler_conversation_id, origin_butler_conversation_id],
+            )?;
+            Ok(())
+        })
     }
 
     #[instrument(level = "debug", skip(self, result), fields(task_conversation_id = result.task_conversation_id))]
     pub fn upsert_task_result(&self, result: &ButlerTaskResult) -> Result<ButlerTaskResult> {
-        self.conn.execute(
-            "INSERT INTO butler_task_result (
-                task_conversation_id,
-                handoff_mode,
-                payload_json,
-                summary,
-                structured_output_json,
-                evidence_json,
-                artifact_refs_json,
-                followup_suggestions_json,
-                followup_status,
-                handoff_message_id,
-                final_message_id,
-                created_time,
-                updated_time
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-            ON CONFLICT(task_conversation_id) DO UPDATE SET
-                handoff_mode = excluded.handoff_mode,
-                payload_json = excluded.payload_json,
-                summary = excluded.summary,
-                structured_output_json = excluded.structured_output_json,
-                evidence_json = excluded.evidence_json,
-                artifact_refs_json = excluded.artifact_refs_json,
-                followup_suggestions_json = excluded.followup_suggestions_json,
-                followup_status = excluded.followup_status,
-                handoff_message_id = excluded.handoff_message_id,
-                final_message_id = excluded.final_message_id,
-                updated_time = excluded.updated_time",
-            params![
-                result.task_conversation_id,
-                &result.handoff_mode,
-                &result.payload_json,
-                &result.summary,
-                &result.structured_output_json,
-                &result.evidence_json,
-                &result.artifact_refs_json,
-                &result.followup_suggestions_json,
-                &result.followup_status,
-                &result.handoff_message_id,
-                &result.final_message_id,
-                result.created_time,
-                result.updated_time,
-            ],
-        )?;
-        self.get_task_result(result.task_conversation_id)?
-            .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "INSERT INTO butler_task_result (
+                    task_conversation_id,
+                    handoff_mode,
+                    payload_json,
+                    summary,
+                    structured_output_json,
+                    evidence_json,
+                    artifact_refs_json,
+                    followup_suggestions_json,
+                    followup_status,
+                    handoff_message_id,
+                    final_message_id,
+                    created_time,
+                    updated_time
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                ON CONFLICT(task_conversation_id) DO UPDATE SET
+                    handoff_mode = excluded.handoff_mode,
+                    payload_json = excluded.payload_json,
+                    summary = excluded.summary,
+                    structured_output_json = excluded.structured_output_json,
+                    evidence_json = excluded.evidence_json,
+                    artifact_refs_json = excluded.artifact_refs_json,
+                    followup_suggestions_json = excluded.followup_suggestions_json,
+                    followup_status = excluded.followup_status,
+                    handoff_message_id = excluded.handoff_message_id,
+                    final_message_id = excluded.final_message_id,
+                    updated_time = excluded.updated_time",
+                params![
+                    result.task_conversation_id,
+                    &result.handoff_mode,
+                    &result.payload_json,
+                    &result.summary,
+                    &result.structured_output_json,
+                    &result.evidence_json,
+                    &result.artifact_refs_json,
+                    &result.followup_suggestions_json,
+                    &result.followup_status,
+                    &result.handoff_message_id,
+                    &result.final_message_id,
+                    result.created_time,
+                    result.updated_time,
+                ],
+            )?;
+            conn.query_row(
+                "SELECT id, task_conversation_id, handoff_mode, payload_json, summary,
+                        structured_output_json, evidence_json, artifact_refs_json,
+                        followup_suggestions_json, followup_status, handoff_message_id,
+                        final_message_id, created_time, updated_time
+                 FROM butler_task_result
+                 WHERE task_conversation_id = ?1",
+                params![result.task_conversation_id],
+                |row| {
+                    Ok(ButlerTaskResult {
+                        id: row.get(0)?,
+                        task_conversation_id: row.get(1)?,
+                        handoff_mode: row.get(2)?,
+                        payload_json: row.get(3)?,
+                        summary: row.get(4)?,
+                        structured_output_json: row.get(5)?,
+                        evidence_json: row.get(6)?,
+                        artifact_refs_json: row.get(7)?,
+                        followup_suggestions_json: row.get(8)?,
+                        followup_status: row.get(9)?,
+                        handoff_message_id: row.get(10)?,
+                        final_message_id: row.get(11)?,
+                        created_time: get_required_datetime_from_row(row, 12, "created_time")?,
+                        updated_time: get_required_datetime_from_row(row, 13, "updated_time")?,
+                    })
+                },
+            )
+        })
     }
 
     #[instrument(level = "debug", skip(self), fields(task_conversation_id = task_conversation_id))]
@@ -2246,15 +2626,17 @@ impl ButlerRepository {
         handoff_message_id: Option<i64>,
     ) -> Result<()> {
         let now = Utc::now();
-        self.conn.execute(
-            "UPDATE butler_task_result
-             SET followup_status = ?1,
-                 handoff_message_id = ?2,
-                 updated_time = ?3
-             WHERE task_conversation_id = ?4",
-            params![followup_status, handoff_message_id, now, task_conversation_id],
-        )?;
-        Ok(())
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE butler_task_result
+                 SET followup_status = ?1,
+                     handoff_message_id = ?2,
+                     updated_time = ?3
+                 WHERE task_conversation_id = ?4",
+                params![followup_status, handoff_message_id, now, task_conversation_id],
+            )?;
+            Ok(())
+        })
     }
 
     #[instrument(level = "debug", skip(self), fields(task_conversation_id = task_conversation_id))]
@@ -2264,16 +2646,18 @@ impl ButlerRepository {
         handoff_message_id: Option<i64>,
     ) -> Result<bool> {
         let now = Utc::now();
-        let affected = self.conn.execute(
-            "UPDATE butler_task_result
-             SET followup_status = 'dispatching',
-                 handoff_message_id = COALESCE(?1, handoff_message_id),
-                 updated_time = ?2
-             WHERE task_conversation_id = ?3
-               AND COALESCE(followup_status, 'pending') IN ('pending', 'handoff_injected')",
-            params![handoff_message_id, now, task_conversation_id],
-        )?;
-        Ok(affected > 0)
+        self.with_serialized_write(|conn| {
+            let affected = conn.execute(
+                "UPDATE butler_task_result
+                 SET followup_status = 'dispatching',
+                     handoff_message_id = COALESCE(?1, handoff_message_id),
+                     updated_time = ?2
+                 WHERE task_conversation_id = ?3
+                   AND COALESCE(followup_status, 'pending') IN ('pending', 'handoff_injected')",
+                params![handoff_message_id, now, task_conversation_id],
+            )?;
+            Ok(affected > 0)
+        })
     }
 
     #[instrument(level = "debug", skip(self), fields(task_conversation_id = task_conversation_id, status = status))]
@@ -2285,15 +2669,17 @@ impl ButlerRepository {
         finalized_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
         let now = Utc::now();
-        self.conn.execute(
-            "UPDATE conversation
-             SET butler_task_status = ?1,
-                 butler_task_summary = COALESCE(?2, butler_task_summary),
-                 butler_task_finalized_at = COALESCE(?3, butler_task_finalized_at),
-                 updated_time = ?4
-             WHERE id = ?5",
-            params![status, summary, finalized_at, now, task_conversation_id],
-        )?;
-        Ok(())
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE conversation
+                 SET butler_task_status = ?1,
+                     butler_task_summary = COALESCE(?2, butler_task_summary),
+                     butler_task_finalized_at = COALESCE(?3, butler_task_finalized_at),
+                     updated_time = ?4
+                 WHERE id = ?5",
+                params![status, summary, finalized_at, now, task_conversation_id],
+            )?;
+            Ok(())
+        })
     }
 }

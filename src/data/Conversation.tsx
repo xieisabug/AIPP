@@ -179,6 +179,43 @@ export interface ShineStateSnapshotEvent {
     state: ConversationShineState;
 }
 
+export interface AcpSessionMode {
+    id: string;
+    name: string;
+    description?: string | null;
+}
+
+export interface AcpSessionConfigChoice {
+    value: string;
+    name: string;
+    description?: string | null;
+    group_name?: string | null;
+}
+
+export interface AcpSessionConfigOption {
+    id: string;
+    name: string;
+    description?: string | null;
+    category?: string | null;
+    current_value: string;
+    options: AcpSessionConfigChoice[];
+}
+
+export interface AcpConversationSessionState {
+    conversation_id: number;
+    session_id?: string | null;
+    title?: string | null;
+    updated_at?: string | null;
+    current_mode_id?: string | null;
+    modes: AcpSessionMode[];
+    config_options: AcpSessionConfigOption[];
+    has_active_prompt: boolean;
+}
+
+export interface AcpSessionStateSnapshotEvent {
+    state: AcpConversationSessionState | null;
+}
+
 // 消息类型枚举
 export type MessageType = 'system' | 'user' | 'assistant' | 'reasoning' | 'response' | 'error';
 

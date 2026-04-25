@@ -501,6 +501,37 @@ fn test_mcp_tool_call_with_llm_id() {
     assert_eq!(tool_call.assistant_message_id, Some(100));
 }
 
+/// 测试使用显式 server_id 创建带 LLM ID 的 Tool Call
+///
+/// 验证内容：
+/// - 可以在调用方已解析出 server_id 时直接创建持久化记录
+/// - 展示名与关联的 server_id 可以分离
+#[test]
+fn test_mcp_tool_call_with_explicit_server_id_and_display_name() {
+    let db = create_mcp_db();
+    let server_id = create_test_server(&db);
+
+    let tool_call = db
+        .create_mcp_tool_call_with_server_id_and_llm_id(
+            1,
+            Some(10),
+            server_id,
+            "Read File",
+            "read_file",
+            r#"{"file_path":"/tmp/demo.txt"}"#,
+            Some("call_display_123"),
+            Some(100),
+        )
+        .unwrap();
+
+    assert_eq!(tool_call.server_id, server_id);
+    assert_eq!(tool_call.server_name, "Read File");
+    assert_eq!(tool_call.tool_name, "read_file");
+    assert_eq!(tool_call.parameters, r#"{"file_path":"/tmp/demo.txt"}"#);
+    assert_eq!(tool_call.llm_call_id, Some("call_display_123".to_string()));
+    assert_eq!(tool_call.assistant_message_id, Some(100));
+}
+
 /// 测试按 Conversation 获取 Tool Calls
 ///
 /// 验证内容：

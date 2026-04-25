@@ -31,6 +31,18 @@ interface SidebarData {
     conversationId: string;
 }
 
+const resolveContextPreviewImageSrc = (content?: string, url?: string): string | null => {
+    const normalizedContent = content?.trim();
+    if (normalizedContent) {
+        return normalizedContent.startsWith("data:")
+            ? normalizedContent
+            : `data:image/png;base64,${normalizedContent}`;
+    }
+
+    const normalizedUrl = url?.trim();
+    return normalizedUrl || null;
+};
+
 // Sidebar width constraints
 const DEFAULT_SIDEBAR_WIDTH = 300;
 const MIN_SIDEBAR_WIDTH = 200;
@@ -401,13 +413,15 @@ function SidebarWindow() {
             return <p className="text-muted-foreground">暂无可预览的内容</p>;
         }
 
+        const imagePreviewSrc = resolveContextPreviewImageSrc(previewData.content, previewData.url);
+
         return (
             <div className="space-y-4">
                 {renderPreviewMetadata(context)}
 
-                {previewData.contentType === 'image' && previewData.content && (
+                {previewData.contentType === 'image' && imagePreviewSrc && (
                     <img
-                        src={`data:image/png;base64,${previewData.content}`}
+                        src={imagePreviewSrc}
                         alt={previewData.title || context.name}
                         className="max-w-full h-auto rounded-lg border border-border"
                     />

@@ -39,6 +39,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 - Rust 编译与测试必须使用默认编译位置。禁止为了绕开占用而切换到其他编译目录、临时 `CARGO_TARGET_DIR`、或任何“另一处”构建输出路径。
 - 如果发现已经有别的编译在占用默认编译位置，不要改去别处编译，直接等待占用结束后再继续。
+- 不要随意运行 `cargo fmt` 或做与当前任务无关的批量格式化。只有在用户明确要求，或为修复当前改动直接导致的格式/编译问题而必须时，才进行最小范围的格式化，避免 diff 混入无关改动。
 
 - If you add a standalone Rust binary under `src-tauri/src/bin/` (for example, a debug/preview CLI), keep `src-tauri/Cargo.toml` aligned with `default-run = "Aipp"`.
 - Otherwise `cargo run` becomes ambiguous once multiple binaries exist, which breaks the default Tauri dev flow with errors like: `cargo run could not determine which binary to run`.
@@ -226,13 +227,16 @@ let config = state.configs.lock().await;
 ### Current Implementation
 
 - **Per-conversation process model**: ACP runs one long-lived process per conversation, stored in `AcpSessionState` (keyed by `conversation_id`).
-- **Session handle routing**: ACP prompts are sent through `AcpSessionHandle` to a background task that keeps a single `ClientSideConnection` alive.
+- **Session handle routing**: ACP prompts, `session/cancel`, mode changes, and config option updates are sent through `AcpSessionHandle` to a background task that keeps a single `ClientSideConnection` alive.
 - **Session persistence**: `session_id` is stored in `conversation.db` table `acp_session` keyed by `conversation_id` and updated on session creation/load.
 - **Session load logic**: On ACP startup, the client checks `initialize` capabilities. If `loadSession` is supported and a stored `session_id` exists, it calls `session/load`; otherwise it falls back to `session/new`.
 - **Replay suppression**: During `session/load`, ACP `session/update` notifications are suppressed to avoid replay content polluting UI/DB.
 - **Prompt flow**: Each new user request creates a new response message; ACP streams content into that message, emits `message_update` events, and persists content to DB.
+- **Client capabilities**: ACP initialize now advertises `fs/read_text_file`, `fs/write_text_file`, and `terminal` support.
 - **Tool call mapping**: ACP tool calls are translated to MCP tool call UI events; tool status is mapped to `pending/executing/success/failed`.
-- **File/terminal operations**: ACP file read/write and terminal commands are bridged to built-in operations with permission manager; permission requests are currently auto-denied.
+- **File/terminal operations**: ACP file read/write and terminal commands are bridged to built-in operations with permission manager.
+- **Session metadata sync**: `AcpSessionState` stores both the live handle and a frontend snapshot (`session_id`, title, updated_at, current mode, modes, config options, active prompt state); `SessionInfoUpdate` also updates the local conversation title and emits the global `title_change` event.
+- **Conversation UI controls**: Chat/Butler headers expose ACP session state and allow inline mode/config changes through Tauri commands, without adding `session/list`.
 - **Config inputs**: ACP CLI command, working directory, env vars, and additional args are read from `llm_provider_config` and `assistant_model_config` (provider defaults, assistant overrides).
 - **CLI resolution**: ACP CLI is resolved via absolute path, then `~/.bun/bin`, then `PATH` lookup, then raw command.
 - **Session task runtime**: ACP session task runs on a dedicated single-thread runtime with `LocalSet` to support non-`Send` futures.
@@ -241,11 +245,8 @@ let config = state.configs.lock().await;
 
 - **loadSession support varies**: `claude-code-acp` reports `agent_capabilities.load_session=false`, so session load is skipped and history is not restored by the agent.
 - **Session persistence is local**: Stored `session_id` only helps if the agent supports `loadSession` and maintains session state.
-- **Cancel behavior**: `cancel_ai` currently aborts the ACP session task, which tears down the process for that conversation.
-
-### Planned Fallback (Not Implemented Yet)
-
-- If `loadSession` is unsupported or fails, build a prompt from stored conversation history and send it as context to the ACP agent so it can continue with prior context.
+- **Cancel behavior**: `cancel_ai` sends `session/cancel` for ACP conversations instead of aborting the whole ACP session task; the process is only torn down when the session task really exits.
+- **History fallback**: If `loadSession` is unsupported or fails, AIPP builds a prompt from stored conversation history and sends it as context on the next ACP prompt.
 
 ## Development Guidelines
 
@@ -286,6 +287,39 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - Run **exactly one validation command per shell**. Do not chain validation commands with `&&` or start the next validation before the previous shell has been fully read/stopped.
 - When launching async validation, append an explicit completion marker such as `; Write-Host "__AIPP_DONE__:$LASTEXITCODE"` and keep reading until that marker appears. Do not infer completion from the `pwsh` process state alone, because async sessions stay alive after the child process exits.
 - If a validation shell appears stuck and no `cargo`/`npm` child process remains, stop that shell and rerun with an explicit completion marker.
+
+### Chat scroll perf reproduction
+
+- For long-conversation scroll lag/jump issues, prefer the built-in **desktop Tauri ChatUIWindow harness** over `npm run dev`. It opens the real desktop window, switches to a target conversation, runs the in-app scroll probe, and writes a JSON result file.
+- Run the harness with `cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol` plus `AIPP_CHAT_SCROLL_PERF_*` env vars. Example:
+
+```bash
+# First conversation in the current ChatUI list order
+AIPP_CHAT_SCROLL_PERF_AUTORUN=1 \
+AIPP_CHAT_SCROLL_PERF_INDEX=0 \
+AIPP_CHAT_SCROLL_PERF_DURATION_MS=2200 \
+AIPP_CHAT_SCROLL_PERF_SETTLE_FRAMES=4 \
+AIPP_CHAT_SCROLL_PERF_TIMEOUT_SECS=45 \
+AIPP_CHAT_SCROLL_PERF_RESULT_PATH=tmp/chat-scroll-perf-result-conv1.json \
+cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol
+
+# Fourth conversation in the current ChatUI list order
+AIPP_CHAT_SCROLL_PERF_AUTORUN=1 \
+AIPP_CHAT_SCROLL_PERF_INDEX=3 \
+AIPP_CHAT_SCROLL_PERF_DURATION_MS=2200 \
+AIPP_CHAT_SCROLL_PERF_SETTLE_FRAMES=4 \
+AIPP_CHAT_SCROLL_PERF_TIMEOUT_SECS=45 \
+AIPP_CHAT_SCROLL_PERF_RESULT_PATH=tmp/chat-scroll-perf-result-conv4.json \
+cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol
+```
+
+- `AIPP_CHAT_SCROLL_PERF_INDEX` is **zero-based in the current ChatUI conversation list order**. Confirm the target conversation name from the JSON result instead of assuming the ordinal matches what the user meant.
+- Do **not** run multiple harness commands in parallel. They compete for Cargo's default build/output locks; run them sequentially and wait for each one to finish.
+- Read the JSON result first. Useful fields: `conversationName`, `messageItemCount`, `p95FrameMs`, `worstFrameMs`, `estimatedDroppedFrameCount`, `maxScrollTop`, `finalMaxScrollTop`, and `rowHeightDrift`.
+- A large gap between `maxScrollTop` and `finalMaxScrollTop` means the scrollable height shrank during the probe, which is a strong signal for scrollbar jump caused by virtualization height corrections.
+- For the 2026-04 long-conversation regression, the main causes were:
+  1. historical merged assistant groups were under-estimated because virtualization used only the last message's estimate instead of the whole merged group;
+  2. `ResizeObserver` height shrink updates were applied immediately while the user was actively scrolling, so virtualized total height collapsed mid-scroll and yanked the scrollbar.
 
 ## Common Development Tasks
 

@@ -4,6 +4,13 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 const ORIGIN_FEISHU: &str = "feishu";
+const FEISHU_ASSISTANT_MESSAGE_SOFT_LIMIT: usize = 2800;
+const FEISHU_ASSISTANT_TABLE_BLOCK_SOFT_LIMIT: usize = 5;
+
+struct FeishuAssistantBlockPart {
+    content: String,
+    table_block_count: usize,
+}
 
 #[derive(Debug, Clone)]
 pub struct RenderContext<'a> {
@@ -39,6 +46,11 @@ trait ToolPresenter: Send + Sync {
     fn matches(&self, server_name: &str, tool_name: &str) -> bool;
     fn present_call(&self, tool_call: &ExternalToolCall) -> Option<String>;
     fn present_result(&self, tool_result: &ExternalToolResult) -> Option<String>;
+    /// Return multiple separate messages for a single tool result.
+    /// When Some, each element is sent as an independent Feishu message.
+    fn present_result_parts(&self, _tool_result: &ExternalToolResult) -> Option<Vec<String>> {
+        None
+    }
 }
 
 struct AgentToolPresenter;
@@ -84,19 +96,45 @@ impl ToolPresentationRegistry {
             .and_then(|presenter| presenter.present_result(tool_result))
             .unwrap_or_else(|| self.fallback.present_result(tool_result).unwrap_or_default())
     }
+
+    fn present_result_vec(&self, tool_result: &ExternalToolResult) -> Vec<String> {
+        let server_name = tool_result.server_name.as_deref().unwrap_or_default();
+        let tool_name = tool_result.tool_name.as_deref().unwrap_or_default();
+        if let Some(presenter) = self.presenters.iter().find(|p| p.matches(server_name, tool_name))
+        {
+            if let Some(parts) = presenter.present_result_parts(tool_result) {
+                return parts.into_iter().filter(|s| !s.trim().is_empty()).collect();
+            }
+            return presenter.present_result(tool_result).into_iter().collect();
+        }
+        self.fallback.present_result(tool_result).into_iter().collect()
+    }
+}
+
+pub fn render_preview_file_result_parts_for_feishu(params: &Value) -> Vec<String> {
+    let tool_result = ExternalToolResult {
+        call_id: None,
+        server_name: Some("UI交互工具".to_string()),
+        tool_name: Some("preview_file".to_string()),
+        parameters: Some(params.clone()),
+        raw_parameters: None,
+        success: true,
+        output: String::new(),
+        parsed_output: None,
+    };
+    UiInteractionToolPresenter.present_result_parts(&tool_result).unwrap_or_default()
 }
 
 pub fn render_message_for_external_channel(
     message: &Message,
     context: &RenderContext<'_>,
-) -> Option<String> {
-    let _channel = context.channel;
+) -> Vec<String> {
     match message.message_type.as_str() {
-        "system" | "reasoning" => None,
-        "user" => render_user_message(&message.content, context),
-        "response" | "assistant" => render_assistant_message(&message.content),
+        "system" | "reasoning" => Vec::new(),
+        "user" => render_user_message(&message.content, context).into_iter().collect(),
+        "response" | "assistant" => render_assistant_message(&message.content, context),
         "tool_result" => render_tool_result_message(&message.content),
-        _ => sanitize_plain_text(&message.content),
+        _ => sanitize_plain_text(&message.content).into_iter().collect(),
     }
 }
 
@@ -109,7 +147,7 @@ fn render_user_message(content: &str, context: &RenderContext<'_>) -> Option<Str
     Some(format!("AIPP 用户：\n{}", sanitized))
 }
 
-fn render_assistant_message(content: &str) -> Option<String> {
+fn render_assistant_message(content: &str, context: &RenderContext<'_>) -> Vec<String> {
     let tool_calls = parse_tool_calls_from_response(content);
     let clean_text = sanitize_plain_text(content);
     let registry = ToolPresentationRegistry::new();
@@ -120,23 +158,28 @@ fn render_assistant_message(content: &str) -> Option<String> {
         .filter(|line| !line.trim().is_empty())
         .collect();
 
-    match (clean_text, tool_lines.is_empty()) {
+    let rendered = match (clean_text, tool_lines.is_empty()) {
         (Some(text), true) => Some(text),
         (Some(text), false) => Some(format!("{}\n\n{}", text, tool_lines.join("\n"))),
         (None, false) => Some(tool_lines.join("\n")),
         (None, true) => None,
+    };
+
+    match rendered {
+        Some(text) if context.channel == ORIGIN_FEISHU => {
+            split_assistant_content_for_feishu(&text, FEISHU_ASSISTANT_MESSAGE_SOFT_LIMIT)
+        }
+        Some(text) => vec![text],
+        None => Vec::new(),
     }
 }
 
-fn render_tool_result_message(content: &str) -> Option<String> {
-    let tool_result = parse_tool_result(content)?;
+fn render_tool_result_message(content: &str) -> Vec<String> {
+    let Some(tool_result) = parse_tool_result(content) else {
+        return Vec::new();
+    };
     let registry = ToolPresentationRegistry::new();
-    let rendered = registry.present_result(&tool_result);
-    if rendered.trim().is_empty() {
-        None
-    } else {
-        Some(rendered)
-    }
+    registry.present_result_vec(&tool_result)
 }
 
 fn parse_tool_calls_from_response(content: &str) -> Vec<ExternalToolCall> {
@@ -377,6 +420,337 @@ fn preview_multiline(value: &str, max_lines: usize, max_chars: usize) -> String 
     preview_text(&lines, max_chars)
 }
 
+fn split_content_for_feishu(content: &str, max_chars: usize) -> Vec<String> {
+    if max_chars == 0 {
+        return vec![content.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize;
+
+    for line in content.split_inclusive('\n') {
+        let line_len = line.chars().count();
+        if current_len + line_len <= max_chars {
+            current.push_str(line);
+            current_len += line_len;
+            continue;
+        }
+
+        if !current.is_empty() {
+            chunks.push(current);
+            current = String::new();
+            current_len = 0;
+        }
+
+        if line_len <= max_chars {
+            current.push_str(line);
+            current_len = line_len;
+            continue;
+        }
+
+        let mut line_chunk = String::new();
+        let mut line_chunk_len = 0usize;
+        for ch in line.chars() {
+            line_chunk.push(ch);
+            line_chunk_len += 1;
+            if line_chunk_len == max_chars {
+                chunks.push(line_chunk);
+                line_chunk = String::new();
+                line_chunk_len = 0;
+            }
+        }
+
+        if !line_chunk.is_empty() {
+            current = line_chunk;
+            current_len = line_chunk_len;
+        }
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    if chunks.is_empty() {
+        vec![String::new()]
+    } else {
+        chunks
+    }
+}
+
+fn split_assistant_content_for_feishu(content: &str, max_chars: usize) -> Vec<String> {
+    if max_chars == 0 {
+        return vec![content.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize;
+    let mut current_table_block_count = 0usize;
+
+    for block in split_markdown_blocks_for_feishu(content) {
+        for part in split_markdown_block_for_feishu(&block, max_chars) {
+            let trimmed = part.content.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let separator_len = usize::from(!current.is_empty()) * 2;
+            let part_len = trimmed.chars().count();
+            let next_table_block_count = current_table_block_count + part.table_block_count;
+            if !current.is_empty()
+                && (current_len + separator_len + part_len > max_chars
+                    || next_table_block_count > FEISHU_ASSISTANT_TABLE_BLOCK_SOFT_LIMIT)
+            {
+                chunks.push(current);
+                current = String::new();
+                current_len = 0;
+                current_table_block_count = 0;
+            }
+
+            if !current.is_empty() {
+                current.push_str("\n\n");
+                current_len += 2;
+            }
+            current.push_str(trimmed);
+            current_len += part_len;
+            current_table_block_count += part.table_block_count;
+        }
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    if chunks.is_empty() {
+        sanitize_plain_text(content).into_iter().collect()
+    } else {
+        chunks
+    }
+}
+
+fn split_markdown_blocks_for_feishu(content: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current = Vec::new();
+    let mut in_fence = false;
+    let mut fence_marker = '`';
+    let mut fence_length = 0usize;
+
+    for line in content.lines() {
+        if let Some((marker, length)) = parse_markdown_fence_delimiter(line) {
+            if !in_fence {
+                in_fence = true;
+                fence_marker = marker;
+                fence_length = length;
+            } else if marker == fence_marker && length >= fence_length {
+                in_fence = false;
+            }
+            current.push(line.to_string());
+            continue;
+        }
+
+        if !in_fence && line.trim().is_empty() {
+            flush_feishu_markdown_block(&mut blocks, &mut current);
+            continue;
+        }
+
+        current.push(line.to_string());
+    }
+
+    flush_feishu_markdown_block(&mut blocks, &mut current);
+    blocks
+}
+
+fn flush_feishu_markdown_block(blocks: &mut Vec<String>, current: &mut Vec<String>) {
+    if current.is_empty() {
+        return;
+    }
+
+    let block = current.join("\n");
+    current.clear();
+    let trimmed = block.trim();
+    if !trimmed.is_empty() {
+        blocks.push(trimmed.to_string());
+    }
+}
+
+fn split_markdown_block_for_feishu(block: &str, max_chars: usize) -> Vec<FeishuAssistantBlockPart> {
+    let trimmed = block.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if trimmed.chars().count() <= max_chars {
+        return vec![FeishuAssistantBlockPart {
+            content: trimmed.to_string(),
+            table_block_count: usize::from(looks_like_markdown_table_block(trimmed)),
+        }];
+    }
+    if looks_like_markdown_table_block(trimmed) {
+        return split_markdown_table_block_for_feishu(trimmed, max_chars);
+    }
+    if let Some(parts) = split_fenced_code_block_for_feishu(trimmed, max_chars) {
+        return parts
+            .into_iter()
+            .map(|content| FeishuAssistantBlockPart {
+                content,
+                table_block_count: 0,
+            })
+            .collect();
+    }
+    split_content_for_feishu(trimmed, max_chars)
+        .into_iter()
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .map(|content| FeishuAssistantBlockPart { content, table_block_count: 0 })
+        .collect()
+}
+
+fn looks_like_markdown_table_block(block: &str) -> bool {
+    let mut lines = block.lines();
+    let Some(header) = lines.next() else {
+        return false;
+    };
+    let Some(separator) = lines.next() else {
+        return false;
+    };
+    header.contains('|')
+        && separator.contains('|')
+        && separator.chars().all(|ch| ch == '|' || ch == '-' || ch == ':' || ch == ' ')
+}
+
+fn split_markdown_table_block_for_feishu(
+    block: &str,
+    max_chars: usize,
+) -> Vec<FeishuAssistantBlockPart> {
+    let lines: Vec<&str> = block.lines().collect();
+    if lines.len() < 3 {
+        return split_content_for_feishu(block, max_chars)
+            .into_iter()
+            .map(|content| FeishuAssistantBlockPart { content, table_block_count: 1 })
+            .collect();
+    }
+
+    let header = lines[0].trim_end();
+    let separator = lines[1].trim_end();
+    let repeated_prefix = format!("{}\n{}", header, separator);
+    let prefix_len = repeated_prefix.chars().count();
+    if prefix_len >= max_chars {
+        return split_content_for_feishu(block, max_chars)
+            .into_iter()
+            .map(|content| FeishuAssistantBlockPart { content, table_block_count: 1 })
+            .collect();
+    }
+
+    let mut parts = Vec::new();
+    let mut current = repeated_prefix.clone();
+    let mut current_len = prefix_len;
+    let mut row_count = 0usize;
+
+    for row in lines.iter().skip(2).map(|line| line.trim_end()) {
+        let row_len = row.chars().count();
+        if prefix_len + 1 + row_len > max_chars {
+            return split_content_for_feishu(block, max_chars)
+                .into_iter()
+                .map(|content| FeishuAssistantBlockPart { content, table_block_count: 1 })
+                .collect();
+        }
+
+        if row_count > 0 && current_len + 1 + row_len > max_chars {
+            parts.push(FeishuAssistantBlockPart { content: current, table_block_count: 1 });
+            current = repeated_prefix.clone();
+            current_len = prefix_len;
+            row_count = 0;
+        }
+
+        current.push('\n');
+        current.push_str(row);
+        current_len += 1 + row_len;
+        row_count += 1;
+    }
+
+    if row_count == 0 {
+        return split_content_for_feishu(block, max_chars)
+            .into_iter()
+            .map(|content| FeishuAssistantBlockPart { content, table_block_count: 1 })
+            .collect();
+    }
+
+    parts.push(FeishuAssistantBlockPart { content: current, table_block_count: 1 });
+    parts
+}
+
+fn split_fenced_code_block_for_feishu(block: &str, max_chars: usize) -> Option<Vec<String>> {
+    let mut lines = block.lines();
+    let first_line = lines.next()?;
+    let last_line = block.lines().last()?;
+    let (marker, length) = parse_markdown_fence_delimiter(first_line)?;
+    let (closing_marker, closing_length) = parse_markdown_fence_delimiter(last_line)?;
+    if marker != closing_marker || closing_length < length {
+        return None;
+    }
+
+    let closing_fence = marker.to_string().repeat(length);
+    let wrapper_len = first_line.chars().count() + closing_fence.chars().count() + 2;
+    if wrapper_len >= max_chars {
+        return None;
+    }
+
+    let inner_lines =
+        block.lines().skip(1).take(block.lines().count().saturating_sub(2)).collect::<Vec<_>>();
+    let inner_content = inner_lines.join("\n");
+    let body_limit = max_chars - wrapper_len;
+    if body_limit == 0 {
+        return None;
+    }
+
+    Some(
+        split_content_for_feishu(&inner_content, body_limit)
+            .into_iter()
+            .map(|part| format!("{}\n{}\n{}", first_line, part.trim_end(), closing_fence))
+            .collect(),
+    )
+}
+
+fn parse_markdown_fence_delimiter(line: &str) -> Option<(char, usize)> {
+    let trimmed = line.trim_start();
+    let marker = trimmed.chars().next()?;
+    if marker != '`' && marker != '~' {
+        return None;
+    }
+
+    let length = trimmed.chars().take_while(|ch| *ch == marker).count();
+    (length >= 3).then_some((marker, length))
+}
+
+fn preview_part_suffix(part_index: usize, total_parts: usize) -> String {
+    if total_parts > 1 {
+        format!("（第 {}/{} 部分）", part_index + 1, total_parts)
+    } else {
+        String::new()
+    }
+}
+
+fn task_action_label(action: &str) -> &str {
+    match action {
+        "read" => "查看对话",
+        "reply_prompt" => "发送指令",
+        "mcp_tool_execute" => "执行工具调用",
+        "permission_confirm" | "operate_confirm" => "操作权限审批",
+        "acp_permission_confirm" => "ACP 权限审批",
+        "ask_user_respond" => "回复提问",
+        _ => action,
+    }
+}
+
+fn decision_label(decision: &str) -> &str {
+    match decision {
+        "allow" => "允许",
+        "deny" => "拒绝",
+        "allow_and_save" => "允许并记住",
+        _ => decision,
+    }
+}
+
 fn parse_tag_attributes(attributes: &str) -> HashMap<String, String> {
     let attribute_regex = Regex::new(r#"([A-Za-z_][\w:-]*)="([^"]*)""#).unwrap();
     attribute_regex
@@ -494,6 +868,10 @@ fn tool_result_content_json(tool_result: &ExternalToolResult) -> Option<&Value> 
             _ => None,
         }
     })
+}
+
+fn tool_result_structured_content(tool_result: &ExternalToolResult) -> Option<&Value> {
+    tool_result.parsed_output.as_ref().and_then(|value| value.get("structuredContent"))
 }
 
 fn tool_result_effective_success(tool_result: &ExternalToolResult) -> bool {
@@ -803,6 +1181,127 @@ fn summarize_edit_file_result(tool_result: &ExternalToolResult) -> Option<String
     Some(lines.join("\n"))
 }
 
+fn present_task_conversation_operation_call(params: &Value) -> Option<String> {
+    let task_id = value_u64(params, "task_conversation_id")
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let action = value_string(params, "action").unwrap_or("未知操作");
+
+    match action {
+        "read" => {
+            let count = value_u64(params, "latest_count").unwrap_or(1);
+            if count > 1 {
+                Some(format!("📖 查看子任务 #{} 最新 {} 条对话", task_id, count))
+            } else {
+                Some(format!("📖 查看子任务 #{} 的对话进展", task_id))
+            }
+        }
+        "reply_prompt" => {
+            let prompt = value_string(params, "prompt")
+                .map(|p| format!("\n{}", preview_text(p, 100)))
+                .unwrap_or_default();
+            Some(format!("💬 向子任务 #{} 发送指令{}", task_id, prompt))
+        }
+        "mcp_tool_execute" => Some(format!("⚡ 批准子任务 #{} 的工具调用执行", task_id)),
+        "permission_confirm" | "operate_confirm" => {
+            let d = value_string(params, "decision").map(decision_label).unwrap_or("未知");
+            Some(format!("🔐 审批子任务 #{} 的操作权限：{}", task_id, d))
+        }
+        "acp_permission_confirm" => {
+            let cancelled = params.get("cancelled").and_then(Value::as_bool).unwrap_or(false);
+            if cancelled {
+                Some(format!("🔐 取消子任务 #{} 的 ACP 权限请求", task_id))
+            } else {
+                let option_id = value_string(params, "option_id").unwrap_or("未知选项");
+                Some(format!("🔐 审批子任务 #{} 的 ACP 权限：选择「{}」", task_id, option_id))
+            }
+        }
+        "ask_user_respond" => {
+            let cancelled = params.get("cancelled").and_then(Value::as_bool).unwrap_or(false);
+            if cancelled {
+                Some(format!("💬 取消子任务 #{} 的用户提问", task_id))
+            } else {
+                let answers = params.get("answers").and_then(Value::as_object);
+                match answers {
+                    Some(map) if !map.is_empty() => {
+                        let answer_summary = preview_list(
+                            map.iter().map(|(k, v)| {
+                                let val = v.as_str().unwrap_or("");
+                                format!("{}={}", k, preview_text(val, 40))
+                            }),
+                            3,
+                        );
+                        Some(format!("💬 回复子任务 #{} 的提问：{}", task_id, answer_summary))
+                    }
+                    _ => Some(format!("💬 回复子任务 #{} 的提问", task_id)),
+                }
+            }
+        }
+        _ => Some(format!("📋 操作子任务 #{} — {}", task_id, action)),
+    }
+}
+
+fn present_task_conversation_operation_result(tool_result: &ExternalToolResult) -> Option<String> {
+    let params = tool_result_parameters(tool_result);
+    let task_id = params
+        .as_ref()
+        .and_then(|p| value_u64(p, "task_conversation_id"))
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let action = params.as_ref().and_then(|p| value_string(p, "action")).unwrap_or("未知操作");
+
+    if !tool_result_effective_success(tool_result) {
+        return Some(format!(
+            "❌ 子任务 #{} {}失败\n{}",
+            task_id,
+            task_action_label(action),
+            tool_result_text_preview(tool_result, 180)
+        ));
+    }
+
+    match action {
+        "read" => Some(format!("📖 已查看子任务 #{} 的对话进展", task_id)),
+        "reply_prompt" => {
+            let prompt = params
+                .as_ref()
+                .and_then(|p| value_string(p, "prompt"))
+                .map(|p| format!("\n{}", preview_text(p, 100)))
+                .unwrap_or_default();
+            Some(format!("💬 已向子任务 #{} 发送指令{}", task_id, prompt))
+        }
+        "mcp_tool_execute" => Some(format!("⚡ 已派发子任务 #{} 的工具调用执行", task_id)),
+        "permission_confirm" | "operate_confirm" => {
+            let json = tool_result_content_json(tool_result);
+            let d = json
+                .and_then(|j| value_string(j, "decision"))
+                .map(decision_label)
+                .unwrap_or("未知");
+            Some(format!("🔐 已审批子任务 #{} 的操作权限：{}", task_id, d))
+        }
+        "acp_permission_confirm" => {
+            let json = tool_result_content_json(tool_result);
+            let cancelled =
+                json.and_then(|j| j.get("cancelled")).and_then(Value::as_bool).unwrap_or(false);
+            if cancelled {
+                Some(format!("🔐 已取消子任务 #{} 的 ACP 权限请求", task_id))
+            } else {
+                Some(format!("🔐 已审批子任务 #{} 的 ACP 权限", task_id))
+            }
+        }
+        "ask_user_respond" => {
+            let json = tool_result_content_json(tool_result);
+            let cancelled =
+                json.and_then(|j| j.get("cancelled")).and_then(Value::as_bool).unwrap_or(false);
+            if cancelled {
+                Some(format!("💬 已取消子任务 #{} 的用户提问", task_id))
+            } else {
+                Some(format!("💬 已回复子任务 #{} 的提问", task_id))
+            }
+        }
+        _ => Some(format!("📋 子任务 #{} {} 完成", task_id, task_action_label(action))),
+    }
+}
+
 impl ToolPresenter for AgentToolPresenter {
     fn matches(&self, server_name: &str, _tool_name: &str) -> bool {
         canonical_server_name(server_name) == "agent"
@@ -847,6 +1346,9 @@ impl ToolPresenter for AgentToolPresenter {
                     })
                     .unwrap_or_else(|| "关键词".to_string());
                 Some(format!("🔧 加载工具说明：{}", names))
+            }
+            "task_conversation_operation" => {
+                present_task_conversation_operation_call(&tool_call.parameters)
             }
             _ => None,
         }
@@ -915,6 +1417,9 @@ impl ToolPresenter for AgentToolPresenter {
             Some("load_skill") => {
                 Some(format!("❌ 技能加载失败：{}", tool_result_text_preview(tool_result, 180)))
             }
+            Some("task_conversation_operation") => {
+                present_task_conversation_operation_result(tool_result)
+            }
             _ => None,
         }
     }
@@ -949,6 +1454,13 @@ impl ToolPresenter for UiInteractionToolPresenter {
                         value_len(&tool_call.parameters, "files").max(1)
                     ))
                 }),
+            "preview_code" => {
+                let title = value_string(&tool_call.parameters, "title")
+                    .map(|value| preview_text(value, 80))
+                    .unwrap_or_else(|| "内嵌交互界面".to_string());
+                let renderer = value_string(&tool_call.parameters, "renderer").unwrap_or("html");
+                Some(format!("🎨 展示内嵌 UI「{}」({})", title, renderer))
+            }
             _ => None,
         }
     }
@@ -968,7 +1480,108 @@ impl ToolPresenter for UiInteractionToolPresenter {
             Some("preview_file") => {
                 Some(format!("❌ 预览展示失败：{}", tool_result_text_preview(tool_result, 180)))
             }
+            Some("preview_code") if tool_result_effective_success(tool_result) => {
+                let result = tool_result_content_json(tool_result);
+                let status = result
+                    .as_ref()
+                    .and_then(|value| value_string(value, "status"))
+                    .unwrap_or("submitted");
+                match status {
+                    "dismissed" => Some("🎨 内嵌 UI 已关闭".to_string()),
+                    "submitted" => Some("🎨 已收到内嵌 UI 提交结果".to_string()),
+                    other => Some(format!("🎨 内嵌 UI 已完成：{}", other)),
+                }
+            }
+            Some("preview_code") => {
+                Some(format!("❌ 内嵌 UI 处理失败：{}", tool_result_text_preview(tool_result, 180)))
+            }
             _ => None,
+        }
+    }
+
+    fn present_result_parts(&self, tool_result: &ExternalToolResult) -> Option<Vec<String>> {
+        if tool_result.tool_name.as_deref() != Some("preview_file") {
+            return None;
+        }
+        if !tool_result_effective_success(tool_result) {
+            return None;
+        }
+        let params = tool_result_parameters(tool_result)?;
+        let files = json_array(&params, "files")?;
+        if files.is_empty() {
+            return None;
+        }
+
+        let mut parts = Vec::new();
+        for file in files {
+            let title = value_string(file, "title").unwrap_or("未命名文件");
+            let file_type = value_string(file, "type").unwrap_or("file");
+            let content = value_string(file, "content");
+
+            match content {
+                Some(content) if !content.trim().is_empty() => {
+                    let is_markdown = matches!(file_type, "markdown");
+                    let language = value_string(file, "language").unwrap_or("");
+                    if is_markdown {
+                        let content_parts = split_content_for_feishu(content, 3800);
+                        let total_parts = content_parts.len();
+                        for (part_index, content_part) in content_parts.into_iter().enumerate() {
+                            let header = format!(
+                                "**📄 {}{}**\n\n",
+                                title,
+                                preview_part_suffix(part_index, total_parts)
+                            );
+                            parts.push(format!("{}{}", header, content_part));
+                        }
+                    } else if language.is_empty() || language == "text" || language == "plaintext" {
+                        let label = preview_file_kind_label(file_type);
+                        let content_parts = split_content_for_feishu(content, 3600);
+                        let total_parts = content_parts.len();
+                        for (part_index, content_part) in content_parts.into_iter().enumerate() {
+                            parts.push(format!(
+                                "**📄 {}{}**（{}）\n\n```\n{}\n```",
+                                title,
+                                preview_part_suffix(part_index, total_parts),
+                                label,
+                                content_part
+                            ));
+                        }
+                    } else {
+                        let label = preview_file_kind_label(file_type);
+                        let content_parts = split_content_for_feishu(content, 3600);
+                        let total_parts = content_parts.len();
+                        for (part_index, content_part) in content_parts.into_iter().enumerate() {
+                            parts.push(format!(
+                                "**📄 {}{}**（{}）\n\n```{}\n{}\n```",
+                                title,
+                                preview_part_suffix(part_index, total_parts),
+                                label,
+                                language,
+                                content_part
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    let label = preview_file_kind_label(file_type);
+                    if let Some(description) = value_string(file, "description") {
+                        parts.push(format!(
+                            "📄 {}（{}）\n{}",
+                            title,
+                            label,
+                            preview_text(description, 120)
+                        ));
+                    } else {
+                        parts.push(format!("📄 {}（{}）", title, label));
+                    }
+                }
+            }
+        }
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts)
         }
     }
 }
@@ -1173,6 +1786,7 @@ impl ToolPresenter for ArtifactToolPresenter {
                     .unwrap_or("未知 Artifact");
                 Some(format!("🎨 展示 Artifact：{}", artifact_id))
             }
+            "capture_artifact_screenshot" => Some("📸 截取 Artifact 预览".to_string()),
             _ => None,
         }
     }
@@ -1194,6 +1808,31 @@ impl ToolPresenter for ArtifactToolPresenter {
                 Some("📦 Artifact 工作区已读取".to_string())
             }
             Some("get_artifact_workspace") => Some("❌ Artifact 工作区读取失败".to_string()),
+            Some("capture_artifact_screenshot") if tool_result.success => {
+                let payload = tool_result_structured_content(tool_result);
+                let entry_file =
+                    payload.and_then(|p| value_string(p, "entry_file")).unwrap_or("Artifact");
+                let width = payload.and_then(|p| p.get("width")).and_then(Value::as_u64);
+                let height = payload.and_then(|p| p.get("height")).and_then(Value::as_u64);
+                let path = payload.and_then(|p| value_string(p, "path"));
+                match (width, height, path) {
+                    (Some(width), Some(height), Some(path)) => Some(format!(
+                        "📸 Artifact 截图已生成：{}（{}x{}），已保存到 {}",
+                        entry_file, width, height, path
+                    )),
+                    (Some(width), Some(height), None) => Some(format!(
+                        "📸 Artifact 截图已生成：{}（{}x{}）",
+                        entry_file, width, height
+                    )),
+                    (None, None, Some(path))
+                    | (Some(_), None, Some(path))
+                    | (None, Some(_), Some(path)) => {
+                        Some(format!("📸 Artifact 截图已生成：{}，已保存到 {}", entry_file, path))
+                    }
+                    _ => Some(format!("📸 Artifact 截图已生成：{}", entry_file)),
+                }
+            }
+            Some("capture_artifact_screenshot") => Some("❌ Artifact 截图失败".to_string()),
             _ => None,
         }
     }
@@ -1232,7 +1871,9 @@ impl ToolPresenter for FallbackToolPresenter {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_message_for_external_channel, RenderContext};
+    use super::{
+        render_message_for_external_channel, RenderContext, FEISHU_ASSISTANT_MESSAGE_SOFT_LIMIT,
+    };
     use crate::db::conversation_db::Message;
     use chrono::Utc;
     use serde_json::{json, Value};
@@ -1278,17 +1919,25 @@ mod tests {
         )
     }
 
+    /// Join all rendered parts for assertion convenience.
+    fn render_joined(message: &Message, context: &RenderContext<'_>) -> Option<String> {
+        let parts = render_message_for_external_channel(message, context);
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
+        }
+    }
+
     #[test]
     fn renders_response_without_raw_mcp_comments() {
         let message = build_message(
             "response",
             "先检查一下。<!-- MCP_TOOL_CALL:{\"server_name\":\"aipp:operation\",\"tool_name\":\"read_file\",\"parameters\":\"{\\\"file_path\\\":\\\"C:\\\\\\\\demo.txt\\\"}\"} -->",
         );
-        let rendered = render_message_for_external_channel(
-            &message,
-            &RenderContext { channel: "feishu", relay_origin: "aipp" },
-        )
-        .unwrap();
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
 
         assert!(rendered.contains("先检查一下"));
         assert!(rendered.contains("📖 读取 C:\\demo.txt"));
@@ -1296,12 +1945,91 @@ mod tests {
     }
 
     #[test]
+    fn feishu_response_long_markdown_is_split_into_multiple_messages() {
+        let content = (1..=6)
+            .map(|index| {
+                format!(
+                    "## 第{}部分\n\n这是第{}部分的总结，重点核对数据接入、风险边界与实施建议。\n\n| 维度 | 说明 |\n|------|------|\n| 风险 | {} |\n| 建议 | {} |\n| 备注 | {} |",
+                    index,
+                    index,
+                    "A".repeat(180),
+                    "B".repeat(180),
+                    "C".repeat(180),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let message = build_message("response", &content);
+
+        let parts = render_message_for_external_channel(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        );
+
+        assert!(parts.len() >= 2);
+        assert!(parts[0].contains("## 第1部分"));
+        assert!(parts.last().is_some_and(|part| part.contains("## 第6部分")));
+        assert!(parts
+            .iter()
+            .all(|part| part.chars().count() <= FEISHU_ASSISTANT_MESSAGE_SOFT_LIMIT));
+
+        let other_channel_parts = render_message_for_external_channel(
+            &message,
+            &RenderContext { channel: "wechat", relay_origin: "aipp" },
+        );
+        assert_eq!(other_channel_parts.len(), 1);
+    }
+
+    #[test]
+    fn feishu_response_split_table_repeats_table_header() {
+        let rows = (1..=24)
+            .map(|index| format!("| 项目{} | {} |", index, "超长说明".repeat(18)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = format!("## 表格拆分验证\n\n| 项目 | 说明 |\n|------|------|\n{}", rows);
+        let message = build_message("response", &content);
+
+        let parts = render_message_for_external_channel(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        );
+
+        assert!(parts.len() >= 2);
+        assert!(parts[0].contains("## 表格拆分验证"));
+        assert!(parts.iter().filter(|part| part.contains("| 项目 | 说明 |")).count() >= 2);
+        assert!(parts.iter().filter(|part| part.contains("|------|------|")).count() >= 2);
+    }
+
+    #[test]
+    fn feishu_response_with_six_table_blocks_starts_new_part() {
+        let content = (1..=6)
+            .map(|index| {
+                format!(
+                    "## 小节{}\n\n| 维度 | 说明 |\n|------|------|\n| 项目{} | 简短内容 |",
+                    index, index
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let message = build_message("response", &content);
+
+        let parts = render_message_for_external_channel(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        );
+
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].contains("## 小节1"));
+        assert!(parts[0].contains("## 小节5"));
+        assert!(!parts[0].contains("## 小节6"));
+        assert!(parts[1].contains("## 小节6"));
+    }
+
+    #[test]
     fn skips_feishu_origin_user_echo() {
         let message = build_message("user", "你好");
-        let rendered = render_message_for_external_channel(
-            &message,
-            &RenderContext { channel: "feishu", relay_origin: "feishu" },
-        );
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "feishu" });
 
         assert!(rendered.is_none());
     }
@@ -1312,11 +2040,9 @@ mod tests {
             "tool_result",
             "Tool execution completed:\n\nTool Call ID: call_1\nTool: search_web\nServer: aipp:search\nParameters: {\"query\":\"rust tauri\"}\nResult:\n找到 5 条结果",
         );
-        let rendered = render_message_for_external_channel(
-            &message,
-            &RenderContext { channel: "feishu", relay_origin: "aipp" },
-        )
-        .unwrap();
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
 
         assert!(rendered.contains("🔍 搜索完成"));
         assert!(!rendered.contains("Tool execution completed"));
@@ -1328,11 +2054,9 @@ mod tests {
             "user",
             "请看附件\n<fileattachment name=\"diagram.png\">data:image/png;base64,AAAA</fileattachment>\n<skillattachment skill_name=\"skill-creator\" invocation=\"/skills(skill-creator)\" identifier=\"agents:skill-creator\"># hidden prompt\nsecret body</skillattachment>",
         );
-        let rendered = render_message_for_external_channel(
-            &message,
-            &RenderContext { channel: "feishu", relay_origin: "aipp" },
-        )
-        .unwrap();
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
 
         assert!(rendered.contains("[图片附件] diagram.png"));
         assert!(rendered.contains("[技能附件] skill-creator"));
@@ -1362,11 +2086,9 @@ mod tests {
                 }
             }]),
         );
-        let rendered = render_message_for_external_channel(
-            &message,
-            &RenderContext { channel: "feishu", relay_origin: "aipp" },
-        )
-        .unwrap();
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
 
         assert!(rendered.contains("🔌 已加载 1 个工具集"));
         assert!(rendered.contains("GitHub"));
@@ -1400,11 +2122,9 @@ mod tests {
                 }
             }]),
         );
-        let rendered = render_message_for_external_channel(
-            &message,
-            &RenderContext { channel: "feishu", relay_origin: "aipp" },
-        )
-        .unwrap();
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
 
         assert!(rendered.contains("🔧 已加载 1 个工具说明"));
         assert!(rendered.contains("GitHub/search_code"));
@@ -1429,11 +2149,9 @@ mod tests {
                 "text": "Todo list updated: 1/3 tasks completed (33%)\n\nCurrent task: 创建CSIC数据集下载脚本中"
             }]),
         );
-        let rendered = render_message_for_external_channel(
-            &message,
-            &RenderContext { channel: "feishu", relay_origin: "aipp" },
-        )
-        .unwrap();
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
 
         assert!(rendered.contains("📋 任务列表更新（3 项，1 完成）"));
         assert!(rendered.contains("✅ 修复飞书展示"));
@@ -1460,14 +2178,13 @@ mod tests {
                 "json": {"status": "preview_shown", "request_id": "req_1"}
             }]),
         );
-        let preview_rendered = render_message_for_external_channel(
+        let preview_parts = render_message_for_external_channel(
             &preview_message,
             &RenderContext { channel: "feishu", relay_origin: "aipp" },
-        )
-        .unwrap();
-        assert!(preview_rendered.contains("👁 已展示"));
-        assert!(preview_rendered.contains("README.md"));
-        assert!(preview_rendered.contains("内容摘要"));
+        );
+        assert_eq!(preview_parts.len(), 1);
+        assert!(preview_parts[0].contains("README.md"));
+        assert!(preview_parts[0].contains("# Title\nline1\nline2"));
 
         let bash_message = build_tool_result_message(
             "execute_bash",
@@ -1478,7 +2195,7 @@ mod tests {
                 "text": "Command started in background. Use get_bash_output with bash_id='bash-1' to check output."
             }]),
         );
-        let bash_rendered = render_message_for_external_channel(
+        let bash_rendered = render_joined(
             &bash_message,
             &RenderContext { channel: "feishu", relay_origin: "aipp" },
         )
@@ -1497,11 +2214,9 @@ mod tests {
                 "text": "     1\tfirst line\n     2\tsecond line"
             }]),
         );
-        let rendered = render_message_for_external_channel(
-            &message,
-            &RenderContext { channel: "feishu", relay_origin: "aipp" },
-        )
-        .unwrap();
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
 
         assert!(rendered.contains("📖 已读取 C:\\demo.txt"));
         assert!(rendered.contains("共 2 行"));
@@ -1513,11 +2228,9 @@ mod tests {
             "response",
             "好的，我来处理。<!-- MCP_TOOL_CALL:{\"server_name\":\"Agent 工具\",\"tool_name\":\"todo_write\",\"parameters\":\"{\\\"todos\\\":[{\\\"content\\\":\\\"修复bug\\\",\\\"status\\\":\\\"in_progress\\\",\\\"activeForm\\\":\\\"修复bug中\\\"}]}\"} --><!-- MCP_TOOL_CALL:{\"server_name\":\"aipp:operation\",\"tool_name\":\"read_file\",\"parameters\":\"{\\\"file_path\\\":\\\"src/main.rs\\\"}\"} -->",
         );
-        let rendered = render_message_for_external_channel(
-            &message,
-            &RenderContext { channel: "feishu", relay_origin: "aipp" },
-        )
-        .unwrap();
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
 
         assert!(!rendered.contains("正在执行"));
         assert!(rendered.contains("📋 任务列表更新"));
@@ -1542,11 +2255,9 @@ mod tests {
                 }
             }]),
         );
-        let rendered = render_message_for_external_channel(
-            &message,
-            &RenderContext { channel: "feishu", relay_origin: "aipp" },
-        )
-        .unwrap();
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
 
         assert!(rendered.contains("🔍 搜索完成"));
         assert!(rendered.contains("找到 2 条结果"));
@@ -1562,11 +2273,9 @@ mod tests {
             json!({}),
             json!([{"type": "text", "text": "执行成功"}]),
         );
-        let rendered = render_message_for_external_channel(
-            &message,
-            &RenderContext { channel: "feishu", relay_origin: "aipp" },
-        )
-        .unwrap();
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
 
         assert!(rendered.contains("✅ 外部工具/custom_tool 执行完成"));
         assert!(rendered.contains("执行成功"));
@@ -1581,14 +2290,68 @@ mod tests {
             json!({"file_path": "/tmp/output.txt", "content": "hello"}),
             json!([{"type": "text", "text": "Successfully wrote 5 bytes to /tmp/output.txt"}]),
         );
-        let rendered = render_message_for_external_channel(
-            &message,
-            &RenderContext { channel: "feishu", relay_origin: "aipp" },
-        )
-        .unwrap();
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
 
         assert!(rendered.contains("✏️ 已写入 /tmp/output.txt"));
         assert!(rendered.contains("Successfully wrote 5 bytes"));
+    }
+
+    #[test]
+    fn artifact_screenshot_result_prefers_structured_summary() {
+        let message = build_tool_result_message(
+            "capture_artifact_screenshot",
+            "Artifact 工具",
+            json!({"artifact_key": "demo/card", "entry_file": "src/App.tsx"}),
+            json!({
+                "content": [
+                    {"type": "text", "text": "Captured artifact screenshot for src/App.tsx at 800x600."},
+                    {"type": "image", "mimeType": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAA"}
+                ],
+                "structuredContent": {
+                    "artifact_key": "demo/card",
+                    "entry_file": "src/App.tsx",
+                    "width": 800,
+                    "height": 600
+                }
+            }),
+        );
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
+
+        assert!(rendered.contains("📸 Artifact 截图已生成：src/App.tsx（800x600）"));
+        assert!(!rendered.contains("iVBORw0KGgoAAAANSUhEUgAA"));
+    }
+
+    #[test]
+    fn artifact_screenshot_path_result_mentions_saved_path() {
+        let message = build_tool_result_message(
+            "capture_artifact_screenshot",
+            "Artifact 工具",
+            json!({"artifact_key": "demo/card", "entry_file": "src/App.tsx", "output_mode": "path"}),
+            json!({
+                "content": [
+                    {"type": "text", "text": "Captured artifact screenshot for src/App.tsx at 800x600.\nScreenshot saved to /tmp/aipp/artifact-shot.png."},
+                    {"type": "resource_link", "uri": "file:///tmp/aipp/artifact-shot.png", "name": "src/App.tsx", "mimeType": "image/png"}
+                ],
+                "structuredContent": {
+                    "artifact_key": "demo/card",
+                    "entry_file": "src/App.tsx",
+                    "width": 800,
+                    "height": 600,
+                    "path": "/tmp/aipp/artifact-shot.png"
+                }
+            }),
+        );
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
+
+        assert!(rendered.contains(
+            "📸 Artifact 截图已生成：src/App.tsx（800x600），已保存到 /tmp/aipp/artifact-shot.png"
+        ));
     }
 
     #[test]
@@ -1606,14 +2369,151 @@ mod tests {
                 }
             }]),
         );
-        let rendered = render_message_for_external_channel(
-            &message,
-            &RenderContext { channel: "feishu", relay_origin: "aipp" },
-        )
-        .unwrap();
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
 
         assert!(rendered.contains("✅ 子任务已创建「数据分析」"));
         assert!(rendered.contains("状态：pending"));
         assert!(rendered.contains("任务 ID：42"));
+    }
+
+    #[test]
+    fn preview_file_multi_files_returns_multiple_parts() {
+        let message = build_tool_result_message(
+            "preview_file",
+            "UI交互工具",
+            json!({
+                "files": [
+                    {
+                        "title": "README.md",
+                        "type": "markdown",
+                        "language": "markdown",
+                        "content": "# Hello\nWorld"
+                    },
+                    {
+                        "title": "main.rs",
+                        "type": "text",
+                        "language": "rust",
+                        "content": "fn main() {}"
+                    }
+                ]
+            }),
+            json!([{
+                "type": "json",
+                "json": {"status": "preview_shown", "request_id": "req_2"}
+            }]),
+        );
+        let parts = render_message_for_external_channel(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        );
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].contains("README.md"));
+        assert!(parts[0].contains("# Hello\nWorld"));
+        assert!(parts[1].contains("main.rs"));
+        assert!(parts[1].contains("fn main() {}"));
+        assert!(parts[1].contains("```rust"));
+    }
+
+    #[test]
+    fn preview_file_long_content_is_split_without_truncation() {
+        let long_content = format!("{}\n{}\nEND", "A".repeat(3700), "B".repeat(3700),);
+        let message = build_tool_result_message(
+            "preview_file",
+            "UI交互工具",
+            json!({
+                "files": [{
+                    "title": "main.rs",
+                    "type": "text",
+                    "language": "rust",
+                    "content": long_content
+                }]
+            }),
+            json!([{
+                "type": "json",
+                "json": {"status": "preview_shown", "request_id": "req_long"}
+            }]),
+        );
+
+        let parts = render_message_for_external_channel(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        );
+
+        assert!(parts.len() >= 3);
+        assert!(parts[0].contains("第 1/"));
+        assert!(parts.iter().all(|part| !part.contains("内容过长，已截断")));
+        assert!(parts[0].contains(&"A".repeat(100)));
+        assert!(parts.iter().any(|part| part.contains(&"B".repeat(100))));
+        assert!(parts.iter().any(|part| part.contains("END")));
+    }
+
+    #[test]
+    fn preview_file_text_type_with_md_title_stays_plain_text() {
+        let message = build_tool_result_message(
+            "preview_file",
+            "UI交互工具",
+            json!({
+                "files": [{
+                    "title": "第二章样稿.md",
+                    "type": "text",
+                    "content": "# 这只是原始文本\n**不要按 markdown 渲染**"
+                }]
+            }),
+            json!([{
+                "type": "json",
+                "json": {"status": "preview_shown", "request_id": "req_text_md_title"}
+            }]),
+        );
+
+        let parts = render_message_for_external_channel(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        );
+
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].contains("第二章样稿.md"));
+        assert!(parts[0].contains("```\n# 这只是原始文本"));
+        assert!(!parts[0].contains("**不要按 markdown 渲染**\n\n"));
+    }
+
+    #[test]
+    fn task_conversation_operation_call_is_human_readable() {
+        let message = build_message(
+            "response",
+            "<!-- MCP_TOOL_CALL:{\"server_name\":\"Agent 工具\",\"tool_name\":\"task_conversation_operation\",\"parameters\":\"{\\\"task_conversation_id\\\":42,\\\"action\\\":\\\"reply_prompt\\\",\\\"prompt\\\":\\\"请继续分析数据\\\"}\"} -->",
+        );
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
+
+        assert!(rendered.contains("💬 向子任务 #42 发送指令"));
+        assert!(rendered.contains("请继续分析数据"));
+        assert!(!rendered.contains("task_conversation_operation"));
+    }
+
+    #[test]
+    fn task_conversation_operation_result_is_human_readable() {
+        let message = build_tool_result_message(
+            "task_conversation_operation",
+            "Agent 工具",
+            json!({"task_conversation_id": 42, "action": "permission_confirm", "decision": "allow"}),
+            json!([{
+                "type": "json",
+                "json": {
+                    "status": "permission_confirmed",
+                    "request_id": "req_1",
+                    "decision": "allow",
+                    "resolved": true
+                }
+            }]),
+        );
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
+
+        assert!(rendered.contains("🔐 已审批子任务 #42 的操作权限：允许"));
+        assert!(!rendered.contains("permission_confirmed"));
     }
 }

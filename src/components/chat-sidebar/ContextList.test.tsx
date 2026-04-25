@@ -64,4 +64,32 @@ describe('ContextList skills', () => {
             screen.getByTitle('A long snippet that should still be available in full when the user hovers the clamped text.'),
         ).toBeInTheDocument();
     });
+
+    it('groups assistant generated images under the generated images section', () => {
+        const items: ContextItem[] = [
+            {
+                id: 'generated-image-1',
+                type: 'generated_image',
+                name: '图片 1',
+                details: 'generated-image-1.png',
+                source: 'assistant',
+                attachmentData: {
+                    type: 'Image',
+                    content: 'data:image/png;base64,Zm9v',
+                    url: 'generated-image-1.png',
+                },
+                previewData: {
+                    title: '图片 1',
+                    contentType: 'image',
+                    content: 'data:image/png;base64,Zm9v',
+                },
+            },
+        ];
+
+        render(<ContextList items={items} />);
+
+        expect(screen.getByText('生成图片')).toBeInTheDocument();
+        expect(screen.getByText('图片 1')).toBeInTheDocument();
+        expect(screen.queryByText('用户文件')).not.toBeInTheDocument();
+    });
 });

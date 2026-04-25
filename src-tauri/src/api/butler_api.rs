@@ -25,11 +25,13 @@ use crate::feishu::inherit_latest_feishu_target;
 use crate::mcp::builtin_mcp::OperationState;
 use crate::mcp::registry_api::ensure_agent_load_skill_for_assistant;
 use crate::skills::scanner::SkillScanner;
+use crate::utils::bun_utils::BunUtils;
+use crate::utils::python_utils::{PythonInfo, PythonUtils};
+use crate::utils::uv_utils::UvUtils;
 
 const EXPERIMENTAL_FEATURE_CODE: &str = "experimental";
 const BUTLER_MAIN_SLOT: &str = "default";
 const BUTLER_KIND_MAIN: &str = "butler_main";
-const BUTLER_KIND_MAIN_ARCHIVE: &str = "butler_main_archive";
 const BUTLER_KIND_TASK: &str = "butler_task";
 const STATUS_ACCEPTED: &str = "accepted";
 const STATUS_RUNNING: &str = "running";
@@ -40,6 +42,7 @@ pub(crate) const BUTLER_SYSTEM_ASSISTANT_NAME: &str = "__aipp_internal_butler_sy
 const BUTLER_SYSTEM_ASSISTANT_DESCRIPTION: &str = "AIPP 总管家系统保留助手，请勿展示给普通用户。";
 const TASK_RESULT_DETAIL_LIMIT: usize = 4000;
 const TASK_RESULT_STRUCTURED_OUTPUT_LIMIT: usize = 4000;
+const TASK_RESULT_SUMMARY_LIMIT: usize = 320;
 type ButlerContinuationLockRegistry = Arc<Mutex<HashMap<i64, Arc<Mutex<()>>>>>;
 static BUTLER_MAIN_CONTINUATION_LOCKS: OnceLock<ButlerContinuationLockRegistry> = OnceLock::new();
 static BUTLER_TASK_FINALIZATION_LOCKS: OnceLock<ButlerContinuationLockRegistry> = OnceLock::new();
@@ -54,11 +57,43 @@ const FOLLOWUP_STATUS_ENQUEUED: &str = "enqueued";
 const ATTENTION_DEBOUNCE_SECS: i64 = 10;
 /// Registry tracking the last attention followup timestamp per task_conversation_id.
 static ATTENTION_LAST_ENQUEUED: OnceLock<Arc<Mutex<HashMap<i64, DateTime<Utc>>>>> = OnceLock::new();
+pub(crate) const BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION: &str =
+    "ai的全能工作区域，允许ai使用该区域组织所需要使用的任何事物。";
 
 fn attention_last_enqueued_registry() -> &'static Arc<Mutex<HashMap<i64, DateTime<Utc>>>> {
     ATTENTION_LAST_ENQUEUED.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
-const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，是负责理解目标、拆解任务、选择执行助手、派发子任务、汇总结果并给出建议的内置系统角色，你的核心职责是总控、调度、判断和汇总。
+
+pub(crate) fn active_butler_main_conversation_id(
+    app_handle: &AppHandle,
+) -> Result<Option<i64>, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let butler_repo = db.butler_repo().map_err(|e| e.to_string())?;
+    Ok(butler_repo
+        .get_main_state(BUTLER_MAIN_SLOT)
+        .map_err(|e| e.to_string())?
+        .map(|state| state.butler_conversation_id))
+}
+
+fn is_active_butler_main_conversation_state(
+    active_butler_conversation_id: Option<i64>,
+    conversation: &Conversation,
+) -> bool {
+    conversation.conversation_kind == BUTLER_KIND_MAIN
+        && active_butler_conversation_id == Some(conversation.id)
+}
+
+pub(crate) fn is_current_butler_main_conversation(
+    app_handle: &AppHandle,
+    conversation: &Conversation,
+) -> Result<bool, String> {
+    Ok(is_active_butler_main_conversation_state(
+        active_butler_main_conversation_id(app_handle)?,
+        conversation,
+    ))
+}
+
+const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，名字是 {BUTLER_NAME}，是负责理解目标、拆解任务、选择执行助手、派发子任务、汇总结果并给出建议的内置系统角色，你的核心职责是总控、调度、判断和汇总。
 
 ## 工作原则
 
@@ -77,6 +112,7 @@ const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，是负责�
 13. 即使没有 `manual_review_required=true`，你也必须保持安全优先：默认选择最小授权，不要自动使用 `allow_and_save`，也不要选择 ACP 的持久授权选项（如 `allow_always`）。
 14. 不可以产出非要求格式的结果，比如要求交互展示却只生成了代码让用户去手动执行（正确的做法应该是生成html文件或者Artifact），比如要求交付office文档格式Word、Excel、PowerPoint 却只输出了Markdown或者代码块（应该使用skills或者代码执行能力生成对应的文件），如果实在无法产出对应的文件，应该与用户确认后再生成其他降级的格式。
 15. 当 `<butler_task_attention>` 的 attention_kind 为 `ask_user_question` 时，说明子任务助手正在向你提问并等待回答。你应先使用 `task_conversation_operation read` 查看 `pending_ask_user_questions` 列表，理解问题内容后，使用 `task_conversation_operation` 的 `ask_user_respond` action 提供回答。回答应基于你已有的任务上下文和对话历史做出合理判断；如果确实无法判断，可以将问题转述给用户。
+16. 系统会在定时任务执行完成后，通过 `<butler_scheduled_task_result>` 回流消息把结果送回你，在此之前的任务的权限申请、阻塞提醒等都只需要进行操作响应，而不要进行提前回答，等到任务结束后再进行回答，如果觉得可以进行回答了，也需要将任务停止后再进行回答；收到后应评估结果，决定是否需要汇报给用户、触发后续操作或安静归档。对于常规无异常的定时任务结果，简短记录即可，无需每次都打扰用户。
 
 ## 能力使用规则
 1. 系统会先在上下文中注入可派发助手目录，再注入当前可用的 MCP 工具与 Skills 目录，把它们当作运行时能力目录来使用。
@@ -87,6 +123,8 @@ const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，是负责�
 6. 若任务更适合交给专门助手、专门工具链或独立上下文执行，优先拆解并派发。
 7. 必要时，可以加载 AIPP相关的 skills 来增强完成任务的能力，这些 skills 会让你对整个系统有更清晰的认识。
 8. 如果有类似准备资料、产出文件的任务，你可以使用文件系统来进行辅助，也可使用文件系统来辅助多个助手任务之间的协作。
+9. `schedule_task` 工具可以直接创建、查看、修改和删除定时任务，无需通过 SuperAdmin 接口。适用于需要定期执行的监控、检查、汇总等场景。创建时自动绑定当前会话，执行结果会自动回流。创建 `schedule_type="interval"` 时，必须显式提供 `interval_unit` 和 `interval_value`；例如工作日 09:00 执行要写成 `interval_unit="week"`, `interval_value=1`, `week_days=[1,2,3,4,5]`, `start_time="09:00"`，不要只传 `week_days`。
+10. 修改了文件后，如果不是代码类的超大文件，尽量使用 preview_file 工具来展示修改的文件的全量内容。
 
 ## 沟通风格
 - 直接、有判断、不说空话。
@@ -107,6 +145,19 @@ pub(crate) struct ButlerModelSelection {
     pub(crate) model_code: String,
     pub(crate) provider_id: i64,
     pub(crate) display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ButlerTrustedWorkspace {
+    pub path: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ButlerWorkspaceConfig {
+    pub main_workspace: Option<ButlerTrustedWorkspace>,
+    pub trusted_workspaces: Vec<ButlerTrustedWorkspace>,
+    pub all_trusted_workspaces: Vec<ButlerTrustedWorkspace>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +193,13 @@ pub struct ButlerMainLoadResponse {
     pub model_id: String,
     pub model_display_name: String,
     pub tasks: Vec<ButlerTaskListItem>,
+    pub total_tasks: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaginatedButlerTasksResponse {
+    pub tasks: Vec<ButlerTaskListItem>,
+    pub total: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +212,10 @@ pub struct SpawnButlerTaskRequest {
     pub handoff_contract_json: Option<String>,
     pub result_handling_mode: Option<String>,
     pub notification_policy: Option<String>,
+    #[serde(default)]
+    pub temporary_trusted_paths: Vec<String>,
+    #[serde(default)]
+    pub temporary_skill_identifiers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,6 +314,105 @@ fn parse_bool_flag(value: &str) -> bool {
     normalized == "true" || normalized == "1" || normalized == "yes" || normalized == "on"
 }
 
+fn normalize_workspace_path(value: &str) -> String {
+    value.trim().to_string()
+}
+
+fn normalize_workspace_description(value: &str, fallback: &str) -> String {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        fallback.to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+
+fn workspace_key(path: &str) -> String {
+    path.trim().to_ascii_lowercase()
+}
+
+fn dedupe_workspaces(workspaces: Vec<ButlerTrustedWorkspace>) -> Vec<ButlerTrustedWorkspace> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for workspace in workspaces {
+        let path = normalize_workspace_path(&workspace.path);
+        if path.is_empty() {
+            continue;
+        }
+        let key = workspace_key(&path);
+        if !seen.insert(key) {
+            continue;
+        }
+        normalized.push(ButlerTrustedWorkspace {
+            path,
+            description: workspace.description.trim().to_string(),
+        });
+    }
+
+    normalized
+}
+
+fn normalize_temporary_trusted_paths(paths: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for path in paths {
+        let normalized_path = normalize_workspace_path(path);
+        if normalized_path.is_empty() {
+            continue;
+        }
+        let key = workspace_key(&normalized_path);
+        if !seen.insert(key) {
+            continue;
+        }
+        normalized.push(normalized_path);
+    }
+
+    normalized
+}
+
+fn normalize_temporary_skill_identifiers(skill_identifiers: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for identifier in skill_identifiers {
+        let value = identifier.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if seen.insert(value.to_string()) {
+            normalized.push(value.to_string());
+        }
+    }
+
+    normalized
+}
+
+fn validate_temporary_skill_identifiers(
+    app_handle: &AppHandle,
+    skill_identifiers: &[String],
+) -> Result<Vec<String>, String> {
+    let normalized = normalize_temporary_skill_identifiers(skill_identifiers);
+    if normalized.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let home_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let app_data_dir =
+        app_handle.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let scanner = SkillScanner::new(home_dir, app_data_dir);
+    let available = scanner.scan_all_as_map();
+
+    for identifier in &normalized {
+        if !available.contains_key(identifier) {
+            warn!(identifier = %identifier, "Temporary skill not found during Butler task spawn, keeping identifier for task-scoped retry");
+        }
+    }
+
+    Ok(normalized)
+}
+
 pub(crate) fn is_butler_system_assistant_name(name: &str) -> bool {
     name.trim() == BUTLER_SYSTEM_ASSISTANT_NAME
 }
@@ -281,17 +442,59 @@ async fn ensure_butler_enabled(app_handle: &AppHandle) -> Result<(), String> {
     }
 }
 
+async fn load_butler_workspace_config(app_handle: &AppHandle) -> ButlerWorkspaceConfig {
+    let main_workspace_path =
+        get_experimental_config_value(app_handle, "butler_main_workspace_path").await;
+    let main_workspace_description =
+        get_experimental_config_value(app_handle, "butler_main_workspace_description").await;
+    let trusted_workspaces_raw =
+        get_experimental_config_value(app_handle, "butler_trusted_workspaces")
+            .await
+            .unwrap_or_default();
+
+    build_butler_workspace_config(
+        main_workspace_path.as_deref(),
+        main_workspace_description.as_deref(),
+        &trusted_workspaces_raw,
+    )
+}
+
+async fn ensure_butler_main_workspace_configured(
+    app_handle: &AppHandle,
+) -> Result<ButlerWorkspaceConfig, String> {
+    let workspace_config = load_butler_workspace_config(app_handle).await;
+    if workspace_config.main_workspace.is_some() {
+        Ok(workspace_config)
+    } else {
+        Err("请先在总管家设置中配置主工作区".to_string())
+    }
+}
+
 async fn build_butler_system_prompt(app_handle: &AppHandle) -> Result<String, String> {
+    let workspace_config = ensure_butler_main_workspace_configured(app_handle).await?;
+    let butler_name = get_experimental_config_value(app_handle, "butler_display_name")
+        .await
+        .unwrap_or_else(|| "总管家".to_string());
     let assistant_directory_prompt = build_butler_assistant_directory_prompt(app_handle).await?;
-    let trusted_workspaces_prompt = build_butler_trusted_workspaces_prompt(app_handle).await;
-    Ok(format!(
-        "{}\n\n{}\n\n{}",
-        BUTLER_SYSTEM_PROMPT_BASE, assistant_directory_prompt, trusted_workspaces_prompt,
-    ))
+    let trusted_workspaces_prompt =
+        build_butler_trusted_workspaces_prompt(app_handle, &workspace_config).await;
+    let dev_tools_prompt = build_butler_dev_tools_prompt(app_handle).await;
+    let base = BUTLER_SYSTEM_PROMPT_BASE.replace("{BUTLER_NAME}", &butler_name);
+    if dev_tools_prompt.is_empty() {
+        Ok(format!("{}\n\n{}\n\n{}", base, assistant_directory_prompt, trusted_workspaces_prompt,))
+    } else {
+        Ok(format!(
+            "{}\n\n{}\n\n{}\n\n{}",
+            base, assistant_directory_prompt, trusted_workspaces_prompt, dev_tools_prompt,
+        ))
+    }
 }
 
 /// Build a prompt section informing the Butler about trusted workspaces.
-async fn build_butler_trusted_workspaces_prompt(app_handle: &AppHandle) -> String {
+async fn build_butler_trusted_workspaces_prompt(
+    app_handle: &AppHandle,
+    workspace_config: &ButlerWorkspaceConfig,
+) -> String {
     let trust_all = get_experimental_config_value(app_handle, "butler_trust_all_workspaces")
         .await
         .map(|v| parse_bool_flag(&v))
@@ -301,38 +504,68 @@ async fn build_butler_trusted_workspaces_prompt(app_handle: &AppHandle) -> Strin
         return "可信工作区：当前已开启「信任任何工作区」，所有路径的文件操作均自动放行，无需权限确认。".to_string();
     }
 
-    let raw = get_experimental_config_value(app_handle, "butler_trusted_workspaces")
-        .await
-        .unwrap_or_default();
-
-    let workspaces = parse_trusted_workspaces(&raw);
-
-    if workspaces.is_empty() {
-        return "可信工作区：当前未配置可信工作区，子任务在执行文件操作时可能需要权限确认。"
-            .to_string();
-    }
-
-    let list = workspaces
+    let list = workspace_config
+        .all_trusted_workspaces
         .iter()
-        .map(|(path, desc)| {
-            if desc.is_empty() {
-                format!("- {}", path)
+        .enumerate()
+        .map(|(index, workspace)| {
+            let label = if index == 0 { "主工作区" } else { "额外可信工作区" };
+            if workspace.description.is_empty() {
+                format!("- {}：{}", label, workspace.path)
             } else {
-                format!("- {}（{}）", path, desc)
+                format!("- {}：{}（{}）", label, workspace.path, workspace.description)
             }
         })
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "可信工作区：\n以下路径已被标记为可信工作区，子任务在这些路径下的文件操作将自动放行，无需权限确认。派发任务时，建议优先使用这些目录作为工作目录。\n{}",
+        "可信工作区：\n以下路径已被标记为可信工作区，子任务在这些路径下的文件操作将自动放行，无需权限确认。派发任务时，应优先使用主工作区作为工作目录。\n{}",
         list
     )
 }
 
+/// Build a prompt section informing the Butler about available dev tools (bun, uv).
+async fn build_butler_dev_tools_prompt(app_handle: &AppHandle) -> String {
+    let ah = app_handle.clone();
+
+    let (bun_info, python_info, uv_path) = tokio::task::spawn_blocking(move || {
+        let bun_info =
+            BunUtils::get_bun_executable(&ah).ok().map(|path| path.display().to_string());
+
+        let python_info = PythonUtils::get_python_info(&ah);
+
+        let uv_path = UvUtils::find_uv_executable().map(|p| p.display().to_string());
+
+        (bun_info, python_info, uv_path)
+    })
+    .await
+    .unwrap_or((None, PythonInfo::default(), None));
+
+    let mut sections: Vec<String> = Vec::new();
+
+    if let Some(bun_path) = &bun_info {
+        sections.push(format!("- Bun：已安装，路径 {}", bun_path));
+    }
+
+    if let Some(uv) = &uv_path {
+        let py_versions = if python_info.installed_pythons.is_empty() {
+            "无已安装的 Python 版本".to_string()
+        } else {
+            python_info.installed_pythons.join(", ")
+        };
+        sections.push(format!("- Uv：已安装，路径 {}，已管理的 Python 版本：{}", uv, py_versions));
+    }
+
+    if sections.is_empty() {
+        return String::new();
+    }
+
+    format!("本地开发工具：\n以下工具已安装并可在任务中使用进行辅助。\n{}", sections.join("\n"))
+}
+
 /// Parse trusted workspaces config value. Supports JSON array format
 /// `[{"path":"...","description":"..."}]` and legacy newline-separated plain paths.
-/// Returns Vec<(path, description)>.
-fn parse_trusted_workspaces(raw: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_trusted_workspaces(raw: &str) -> Vec<ButlerTrustedWorkspace> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Vec::new();
@@ -341,35 +574,173 @@ fn parse_trusted_workspaces(raw: &str) -> Vec<(String, String)> {
     // Try JSON array first
     if trimmed.starts_with('[') {
         if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
-            let result: Vec<(String, String)> = arr
+            let result: Vec<ButlerTrustedWorkspace> = arr
                 .iter()
                 .filter_map(|v| {
-                    let path = v.get("path")?.as_str()?.trim().to_string();
+                    let path = normalize_workspace_path(v.get("path")?.as_str()?);
                     if path.is_empty() {
                         return None;
                     }
-                    let desc = v
-                        .get("description")
-                        .and_then(|d| d.as_str())
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
-                    Some((path, desc))
+                    let description = v.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                    Some(ButlerTrustedWorkspace {
+                        path,
+                        description: description.trim().to_string(),
+                    })
                 })
                 .collect();
             if !result.is_empty() {
-                return result;
+                return dedupe_workspaces(result);
             }
         }
     }
 
     // Fallback: newline-separated plain paths
-    trimmed
-        .split('\n')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| (s.to_string(), String::new()))
-        .collect()
+    dedupe_workspaces(
+        trimmed
+            .split('\n')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| ButlerTrustedWorkspace { path: s.to_string(), description: String::new() })
+            .collect(),
+    )
+}
+
+pub(crate) fn build_butler_workspace_config(
+    main_workspace_path: Option<&str>,
+    main_workspace_description: Option<&str>,
+    trusted_workspaces_raw: &str,
+) -> ButlerWorkspaceConfig {
+    let parsed_trusted_workspaces = parse_trusted_workspaces(trusted_workspaces_raw);
+    let explicit_main_workspace_path =
+        main_workspace_path.map(normalize_workspace_path).unwrap_or_default();
+
+    let main_workspace = if !explicit_main_workspace_path.is_empty() {
+        Some(ButlerTrustedWorkspace {
+            path: explicit_main_workspace_path.clone(),
+            description: normalize_workspace_description(
+                main_workspace_description.unwrap_or(""),
+                BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
+            ),
+        })
+    } else {
+        parsed_trusted_workspaces.first().map(|workspace| ButlerTrustedWorkspace {
+            path: workspace.path.clone(),
+            description: normalize_workspace_description(
+                &workspace.description,
+                BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
+            ),
+        })
+    };
+
+    let main_workspace_key =
+        main_workspace.as_ref().map(|workspace| workspace_key(&workspace.path));
+    let trusted_workspace_candidates = if !explicit_main_workspace_path.is_empty() {
+        parsed_trusted_workspaces
+    } else {
+        parsed_trusted_workspaces.into_iter().skip(1).collect()
+    };
+    let trusted_workspaces = trusted_workspace_candidates
+        .into_iter()
+        .filter(|workspace| {
+            main_workspace_key
+                .as_ref()
+                .map(|main_key| workspace_key(&workspace.path) != *main_key)
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    let all_trusted_workspaces = if let Some(main_workspace) = main_workspace.clone() {
+        let mut workspaces = vec![main_workspace];
+        workspaces.extend(trusted_workspaces.clone());
+        workspaces
+    } else {
+        trusted_workspaces.clone()
+    };
+
+    ButlerWorkspaceConfig { main_workspace, trusted_workspaces, all_trusted_workspaces }
+}
+
+pub(crate) fn normalize_butler_experimental_config(
+    config: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, String> {
+    let workspace_config = build_butler_workspace_config(
+        config.get("butler_main_workspace_path").map(String::as_str),
+        config.get("butler_main_workspace_description").map(String::as_str),
+        config.get("butler_trusted_workspaces").map(String::as_str).unwrap_or_default(),
+    );
+    let butler_enabled = config
+        .get("butler_experiment_enabled")
+        .map(|value| parse_bool_flag(value))
+        .unwrap_or(false);
+
+    if butler_enabled && workspace_config.main_workspace.is_none() {
+        return Err("请先配置总管家的主工作区".to_string());
+    }
+
+    let mut normalized = config.clone();
+    normalized.insert(
+        "butler_main_workspace_path".to_string(),
+        workspace_config
+            .main_workspace
+            .as_ref()
+            .map(|workspace| workspace.path.clone())
+            .unwrap_or_default(),
+    );
+    normalized.insert(
+        "butler_main_workspace_description".to_string(),
+        workspace_config
+            .main_workspace
+            .as_ref()
+            .map(|workspace| workspace.description.clone())
+            .unwrap_or_else(|| BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION.to_string()),
+    );
+    normalized.insert(
+        "butler_trusted_workspaces".to_string(),
+        if workspace_config.trusted_workspaces.is_empty() {
+            String::new()
+        } else {
+            serde_json::to_string(&workspace_config.trusted_workspaces).unwrap_or_default()
+        },
+    );
+    Ok(normalized)
+}
+
+#[cfg(test)]
+mod butler_workspace_config_tests {
+    use super::*;
+
+    #[test]
+    fn test_build_butler_workspace_config_promotes_legacy_first_workspace_to_main() {
+        let workspace_config = build_butler_workspace_config(
+            None,
+            None,
+            r#"[{"path":"E:\main","description":""},{"path":"E:\extra","description":"extra"}]"#,
+        );
+
+        assert_eq!(
+            workspace_config.main_workspace,
+            Some(ButlerTrustedWorkspace {
+                path: r"E:\main".to_string(),
+                description: BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION.to_string(),
+            })
+        );
+        assert_eq!(
+            workspace_config.trusted_workspaces,
+            vec![ButlerTrustedWorkspace {
+                path: r"E:\extra".to_string(),
+                description: "extra".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_normalize_butler_experimental_config_requires_main_workspace_when_enabled() {
+        let mut config = HashMap::new();
+        config.insert("butler_experiment_enabled".to_string(), "true".to_string());
+
+        let error = normalize_butler_experimental_config(&config).unwrap_err();
+
+        assert_eq!(error, "请先配置总管家的主工作区");
+    }
 }
 
 pub(crate) async fn get_butler_model_selection(
@@ -630,7 +1001,7 @@ fn summarize_text(text: &str) -> String {
     let compact =
         text.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>().join(" ");
     let mut chars = compact.chars();
-    let summary: String = chars.by_ref().take(160).collect();
+    let summary: String = chars.by_ref().take(TASK_RESULT_SUMMARY_LIMIT).collect();
     if chars.next().is_some() {
         format!("{}...", summary)
     } else if summary.is_empty() {
@@ -672,7 +1043,9 @@ pub(crate) fn resolve_butler_execution_window(app_handle: &AppHandle) -> Result<
     Err("No available window for butler continuation".to_string())
 }
 
-fn resolve_or_create_butler_execution_window(app_handle: &AppHandle) -> Result<Window, String> {
+pub(crate) fn resolve_or_create_butler_execution_window(
+    app_handle: &AppHandle,
+) -> Result<Window, String> {
     if let Ok(window) = resolve_butler_execution_window(app_handle) {
         return Ok(window);
     }
@@ -819,6 +1192,9 @@ async fn enqueue_butler_main_followup(
             return Err("总管家主会话不存在".to_string());
         };
         if main_conversation.conversation_kind != BUTLER_KIND_MAIN {
+            return Err("总管家主会话已归档，无法继续回流".to_string());
+        }
+        if !is_current_butler_main_conversation(&app_handle, &main_conversation)? {
             return Err("总管家主会话已归档，无法继续回流".to_string());
         }
         let assistant_id = main_conversation
@@ -1402,6 +1778,48 @@ async fn list_butler_tasks_internal(
     Ok(tasks)
 }
 
+const DEFAULT_TASK_PAGE_SIZE: i64 = 20;
+
+async fn list_butler_tasks_paginated_internal(
+    app_handle: &AppHandle,
+    butler_conversation_id: i64,
+    limit: i64,
+    offset: i64,
+) -> Result<PaginatedButlerTasksResponse, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
+    let butler_repo = db.butler_repo().map_err(|e| e.to_string())?;
+
+    let total = conversation_repo
+        .count_butler_task_conversations(butler_conversation_id)
+        .map_err(|e| e.to_string())?;
+
+    let task_conversations = conversation_repo
+        .list_butler_task_conversations_paginated(butler_conversation_id, limit, offset)
+        .map_err(|e| e.to_string())?;
+
+    let task_ids: Vec<i64> = task_conversations.iter().map(|c| c.id).collect();
+    let definitions =
+        butler_repo.list_task_definitions(butler_conversation_id).map_err(|e| e.to_string())?;
+    let definition_map: HashMap<i64, ButlerTaskDefinition> = definitions
+        .into_iter()
+        .filter(|d| task_ids.contains(&d.task_conversation_id))
+        .map(|d| (d.task_conversation_id, d))
+        .collect();
+
+    let mut tasks = Vec::new();
+    for conversation in task_conversations {
+        if let Some(definition) = definition_map.get(&conversation.id) {
+            let result = butler_repo.get_task_result(conversation.id).map_err(|e| e.to_string())?;
+            tasks.push(
+                build_task_list_item(app_handle, conversation, definition, result.as_ref()).await?,
+            );
+        }
+    }
+
+    Ok(PaginatedButlerTasksResponse { tasks, total })
+}
+
 pub(crate) async fn load_or_create_butler_main_internal(
     app_handle: &AppHandle,
 ) -> Result<Conversation, String> {
@@ -1919,6 +2337,9 @@ async fn enqueue_butler_task_attention_followup(
     if main_conversation.conversation_kind != BUTLER_KIND_MAIN {
         return Err("总管家主会话已归档，无法继续处理子任务提醒".to_string());
     }
+    if !is_current_butler_main_conversation(&app_handle, &main_conversation)? {
+        return Err("总管家主会话已归档，无法继续处理子任务提醒".to_string());
+    }
     let assistant_id =
         main_conversation.assistant_id.ok_or_else(|| "总管家主会话缺少 assistant".to_string())?;
 
@@ -2277,8 +2698,15 @@ pub(crate) async fn spawn_butler_task_with_window(
     if butler_conversation.conversation_kind != BUTLER_KIND_MAIN {
         return Err("只能在总管家主会话下派发任务".to_string());
     }
+    if !is_current_butler_main_conversation(app_handle, &butler_conversation)? {
+        return Err("总管家主会话已归档，无法继续派发任务".to_string());
+    }
 
     let (executor_assistant, executor_source) = resolve_executor_assistant(app_handle, &request)?;
+    let temporary_trusted_paths =
+        normalize_temporary_trusted_paths(&request.temporary_trusted_paths);
+    let temporary_skill_identifiers =
+        validate_temporary_skill_identifiers(app_handle, &request.temporary_skill_identifiers)?;
     let title = request.title.trim();
     let goal = request.goal.trim();
     if title.is_empty() {
@@ -2319,6 +2747,8 @@ pub(crate) async fn spawn_butler_task_with_window(
                 .notification_policy
                 .clone()
                 .or_else(|| Some("default".to_string())),
+            temporary_trusted_paths,
+            temporary_skill_identifiers,
             created_time: Utc::now(),
         })
         .map_err(|e| e.to_string())?;
@@ -2433,12 +2863,19 @@ pub async fn load_butler_main_conversation(
         reconcile_butler_tasks_once(&app_handle).await?;
     }
     let model_selection = get_butler_model_selection(&app_handle).await?;
-    let tasks = list_butler_tasks_internal(&app_handle, conversation.id).await?;
+    let paginated = list_butler_tasks_paginated_internal(
+        &app_handle,
+        conversation.id,
+        DEFAULT_TASK_PAGE_SIZE,
+        0,
+    )
+    .await?;
     Ok(ButlerMainLoadResponse {
         conversation,
         model_id: model_selection.raw_value,
         model_display_name: model_selection.display_name,
-        tasks,
+        tasks: paginated.tasks,
+        total_tasks: paginated.total,
     })
 }
 
@@ -2461,7 +2898,7 @@ pub async fn reset_butler_main_conversation(
         {
             current_main.name =
                 build_butler_archive_conversation_name(&current_main.name, &archived_at);
-            current_main.conversation_kind = BUTLER_KIND_MAIN_ARCHIVE.to_string();
+            current_main.conversation_kind = BUTLER_KIND_MAIN.to_string();
             current_main.is_hidden_from_normal_chat_list = true;
             current_main.updated_time = archived_at;
             conversation_repo.update(&current_main).map_err(|e| e.to_string())?;
@@ -2501,14 +2938,21 @@ pub async fn reset_butler_main_conversation(
     butler_repo.touch_main_state(BUTLER_MAIN_SLOT).map_err(|e| e.to_string())?;
 
     let model_selection = get_butler_model_selection(&app_handle).await?;
-    let tasks = list_butler_tasks_internal(&app_handle, new_conversation.id).await?;
+    let paginated = list_butler_tasks_paginated_internal(
+        &app_handle,
+        new_conversation.id,
+        DEFAULT_TASK_PAGE_SIZE,
+        0,
+    )
+    .await?;
     let _ = app_handle.emit("butler_main_reset", json!({ "conversation_id": new_conversation.id }));
 
     Ok(ButlerMainLoadResponse {
         conversation: new_conversation,
         model_id: model_selection.raw_value,
         model_display_name: model_selection.display_name,
-        tasks,
+        tasks: paginated.tasks,
+        total_tasks: paginated.total,
     })
 }
 
@@ -2518,6 +2962,18 @@ pub async fn list_butler_tasks(
     butler_conversation_id: i64,
 ) -> Result<Vec<ButlerTaskListItem>, String> {
     list_butler_tasks_internal(&app_handle, butler_conversation_id).await
+}
+
+#[tauri::command]
+pub async fn list_butler_tasks_paginated(
+    app_handle: tauri::AppHandle,
+    butler_conversation_id: i64,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<PaginatedButlerTasksResponse, String> {
+    let limit = limit.unwrap_or(DEFAULT_TASK_PAGE_SIZE).clamp(1, 100);
+    let offset = offset.unwrap_or(0).max(0);
+    list_butler_tasks_paginated_internal(&app_handle, butler_conversation_id, limit, offset).await
 }
 
 #[tauri::command]
@@ -2568,13 +3024,14 @@ mod tests {
         build_butler_task_result_system_message, cleanup_attention_debounce,
         cleanup_butler_main_continuation_lock, cleanup_butler_task_finalization_lock,
         find_latest_attention_message_id, find_latest_handoff_message_id,
-        has_non_system_message_after, parse_task_conversation_id_from_attention_message,
+        has_non_system_message_after, is_active_butler_main_conversation_state,
+        parse_task_conversation_id_from_attention_message,
         parse_task_conversation_id_from_handoff_message, trim_chars, try_claim_attention_debounce,
         try_decide_butler_task_terminal_state, update_butler_task_watcher_state,
         ButlerTaskListItem, FollowupBatchEntry, Message, STATUS_CANCELLED, STATUS_FAILED,
         STATUS_SUCCEEDED, TASK_RESULT_DETAIL_LIMIT, TASK_RESULT_STRUCTURED_OUTPUT_LIMIT,
     };
-    use crate::db::conversation_db::{ButlerTaskDefinition, ButlerTaskResult};
+    use crate::db::conversation_db::{ButlerTaskDefinition, ButlerTaskResult, Conversation};
 
     fn build_message(id: i64, message_type: &str, content: &str, finished: bool) -> Message {
         let now = Utc::now();
@@ -2598,6 +3055,42 @@ mod tests {
             first_token_time: None,
             ttft_ms: None,
         }
+    }
+
+    fn build_conversation(id: i64, kind: &str) -> Conversation {
+        let now = Utc::now();
+        Conversation {
+            id,
+            name: "Test Butler Main".to_string(),
+            assistant_id: Some(1),
+            created_time: now,
+            updated_time: now,
+            conversation_kind: kind.to_string(),
+            parent_butler_conversation_id: None,
+            source_task_title: None,
+            is_hidden_from_normal_chat_list: true,
+            channel_source: None,
+            butler_task_status: None,
+            butler_task_summary: None,
+            butler_task_finalized_at: None,
+        }
+    }
+
+    #[test]
+    fn active_butler_main_requires_current_slot_match() {
+        let conversation = build_conversation(42, "butler_main");
+        assert!(is_active_butler_main_conversation_state(Some(42), &conversation));
+        assert!(!is_active_butler_main_conversation_state(Some(7), &conversation));
+        assert!(!is_active_butler_main_conversation_state(None, &conversation));
+    }
+
+    #[test]
+    fn active_butler_main_rejects_non_main_kind_even_when_slot_matches() {
+        let task_conversation = build_conversation(42, "butler_task");
+        let normal_conversation = build_conversation(42, "normal");
+
+        assert!(!is_active_butler_main_conversation_state(Some(42), &task_conversation));
+        assert!(!is_active_butler_main_conversation_state(Some(42), &normal_conversation));
     }
 
     #[test]
@@ -2838,6 +3331,8 @@ mod tests {
             handoff_contract_json: None,
             result_handling_mode: None,
             notification_policy: None,
+            temporary_trusted_paths: Vec::new(),
+            temporary_skill_identifiers: Vec::new(),
             created_time: Utc::now(),
         }
     }
@@ -2860,6 +3355,36 @@ mod tests {
             created_time: now,
             updated_time: now,
         }
+    }
+
+    #[test]
+    fn normalize_temporary_trusted_paths_trims_and_dedupes_case_insensitive() {
+        let paths = vec![
+            "".to_string(),
+            " C:\\Repo ".to_string(),
+            "c:\\repo".to_string(),
+            "C:\\Other".to_string(),
+        ];
+
+        assert_eq!(
+            super::normalize_temporary_trusted_paths(&paths),
+            vec!["C:\\Repo".to_string(), "C:\\Other".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalize_temporary_skill_identifiers_trims_and_dedupes() {
+        let identifiers = vec![
+            "".to_string(),
+            " aipp:test-skill ".to_string(),
+            "aipp:test-skill".to_string(),
+            "aipp:other-skill".to_string(),
+        ];
+
+        assert_eq!(
+            super::normalize_temporary_skill_identifiers(&identifiers),
+            vec!["aipp:test-skill".to_string(), "aipp:other-skill".to_string()]
+        );
     }
 
     // --- trim_chars tests ---

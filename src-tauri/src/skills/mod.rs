@@ -16,5 +16,6 @@ pub mod types;
 // Re-exports for convenience
 pub use prompt::{
     build_active_skill_attachments, collect_skills_info_for_assistant,
-    compose_user_message_with_active_skills, format_active_skills_prompt, format_skills_prompt,
+    collect_skills_info_for_assistant_with_additions, compose_user_message_with_active_skills,
+    format_active_skills_prompt, format_skills_prompt,
 };

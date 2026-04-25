@@ -19,6 +19,7 @@ import {
     ConversationWithMessages,
     GroupMergeEvent,
     MCPToolCallUpdateEvent,
+    AcpSessionConfigOption,
 } from "../data/Conversation";
 import "katex/dist/katex.min.css";
 import { listen, emit } from "@tauri-apps/api/event";
@@ -47,6 +48,19 @@ import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 import ConversationHeader from "./conversation/ConversationHeader";
 import ConversationContent from "./conversation/ConversationContent";
 import { applyScrollHighlight } from "./conversation/scrollHighlight";
+import IconButton from "./IconButton";
+import { Badge } from "@/components/ui/badge";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
+import { Bot, LoaderCircle } from "lucide-react";
+import { toast } from "sonner";
 
 // 导入 Chat Sidebar 相关
 import { ChatSidebar } from "./chat-sidebar";
@@ -133,6 +147,7 @@ interface ConversationUIProps {
     allowDelete?: boolean;
     headerExtraActions?: ReactNode;
     allowFeishuDebugResend?: boolean;
+    virtualizeMessages?: boolean;
 }
 
 const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
@@ -151,6 +166,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             allowDelete = true,
             headerExtraActions,
             allowFeishuDebugResend = false,
+            virtualizeMessages = false,
         },
         ref
     ) => {
@@ -170,6 +186,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 常规消息列表
         const [messages, setMessages] = useState<Array<Message>>([]);
         const streamingMessagesRef = useRef<Map<number, StreamEvent>>(new Map());
+        const smartScrollRef = useRef<
+            ((forceScroll?: boolean, behaviorOverride?: ScrollBehavior) => void) | null
+        >(null);
 
         // AI响应状态管理
         const [aiIsResponsing, setAiIsResponsing] = useState<boolean>(false);
@@ -329,17 +348,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             [conversation?.id, conversationId]
         );
 
-        // 滚动管理 - 移除依赖项，改为手动调用
-        const {
-            messagesEndRef,
-            scrollContainerRef,
-            handleScroll,
-            handleUserScrollIntent,
-            smartScroll,
-            scrollToUserMessage,
-        } = useScrollManagement();
-        const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
-
         // 使用 useMemo 稳定 options 对象，避免频繁触发 useConversationEvents 内部的 useEffect
         const conversationEventsOptions = useMemo(() => {
             const handleMessageUpdate = (streamEvent: StreamEvent) => {
@@ -362,7 +370,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 }
 
                 // 每次消息更新时手动触发滚动
-                setTimeout(() => smartScroll(), 0);
+                setTimeout(() => smartScrollRef.current?.(), 0);
             };
 
             return {
@@ -405,7 +413,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             handleError,
             handleMessageCompletion,
             conversation?.id,
-            smartScroll,
             // 移除 functionMap 依赖，改为在回调内部访问
         ]);
 
@@ -423,7 +430,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             clearStreamingMessages,
             clearShiningMessages,
             setPendingUserMessage,
+            acpSessionState,
         } = useConversationEvents(conversationEventsOptions);
+
+        const [acpMutationKey, setAcpMutationKey] = useState<string | null>(null);
 
         useEffect(() => {
             streamingMessagesRef.current = streamingMessages;
@@ -478,6 +488,21 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             () => collectSentBatchToolResultMessageIds(messages),
             [messages],
         );
+
+        // 滚动管理 - 移除依赖项，改为手动调用
+        const {
+            messagesEndRef,
+            scrollContainerRef,
+            handleScroll,
+            handleUserScrollIntent,
+            syncScrollState,
+            smartScroll,
+            scrollToUserMessage,
+        } = useScrollManagement({
+            disableTailObservation: virtualizeMessages,
+        });
+        smartScrollRef.current = smartScroll;
+        const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
 
         // ============= Chat Sidebar 数据提取 =============
         
@@ -789,6 +814,202 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 });
         }, [conversation?.assistant_id, selectedAssistant, assistants]);
 
+        const handleAcpModeChange = useCallback(
+            async (modeId: string) => {
+                const conversationIdNum = Number(conversationId);
+                if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
+                    return;
+                }
+                setAcpMutationKey(`mode:${modeId}`);
+                try {
+                    await invoke("set_acp_session_mode", {
+                        conversationId: conversationIdNum,
+                        modeId,
+                    });
+                } catch (error) {
+                    toast.error(`切换 ACP 模式失败: ${String(error)}`);
+                } finally {
+                    setAcpMutationKey(null);
+                }
+            },
+            [conversationId]
+        );
+
+        const handleAcpConfigChange = useCallback(
+            async (option: AcpSessionConfigOption, value: string) => {
+                const conversationIdNum = Number(conversationId);
+                if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
+                    return;
+                }
+                setAcpMutationKey(`config:${option.id}`);
+                try {
+                    await invoke("set_acp_session_config_option", {
+                        conversationId: conversationIdNum,
+                        configId: option.id,
+                        value,
+                    });
+                } catch (error) {
+                    toast.error(`更新 ACP 配置失败: ${String(error)}`);
+                } finally {
+                    setAcpMutationKey(null);
+                }
+            },
+            [conversationId]
+        );
+
+        const acpHeaderActions = useMemo(() => {
+            const isAcpConversation = Boolean(acpWorkingDirectory) || Boolean(acpSessionState);
+            if (!isAcpConversation) {
+                return headerExtraActions;
+            }
+
+            const currentMode = acpSessionState?.modes.find(
+                (mode) => mode.id === acpSessionState.current_mode_id
+            );
+            const hasModeConfigOption = acpSessionState?.config_options.some(
+                (option) => option.category === "mode"
+            );
+            const updatedAtText = acpSessionState?.updated_at
+                ? new Date(acpSessionState.updated_at).toLocaleString()
+                : null;
+
+            return (
+                <>
+                    {headerExtraActions}
+                    <Popover>
+                        <PopoverTrigger asChild>
+                            <span>
+                                <IconButton
+                                    icon={
+                                        acpSessionState?.has_active_prompt ? (
+                                            <LoaderCircle size={16} className="text-icon animate-spin" />
+                                        ) : (
+                                            <Bot size={16} className="text-icon" />
+                                        )
+                                    }
+                                    onClick={() => { }}
+                                    border
+                                    title="ACP 会话控制"
+                                    dataAippSlot="chat-conversation-title-acp"
+                                />
+                            </span>
+                        </PopoverTrigger>
+                        <PopoverContent align="end" className="w-80 space-y-3">
+                            <div className="space-y-1">
+                                <div className="flex items-center justify-between gap-2">
+                                    <span className="text-sm font-medium">ACP 会话</span>
+                                    {acpSessionState?.session_id ? (
+                                        <Badge variant="outline">已连接</Badge>
+                                    ) : (
+                                        <Badge variant="secondary">未启动</Badge>
+                                    )}
+                                </div>
+                                {acpSessionState?.title ? (
+                                    <div className="text-xs text-muted-foreground break-all">
+                                        {acpSessionState.title}
+                                    </div>
+                                ) : null}
+                                {updatedAtText ? (
+                                    <div className="text-xs text-muted-foreground">
+                                        最近活动：{updatedAtText}
+                                    </div>
+                                ) : null}
+                                {acpWorkingDirectory ? (
+                                    <div className="text-xs text-muted-foreground break-all">
+                                        工作目录：{acpWorkingDirectory}
+                                    </div>
+                                ) : null}
+                            </div>
+
+                            {!acpSessionState?.session_id ? (
+                                <div className="text-xs text-muted-foreground">
+                                    首次发送消息后才会创建 ACP 会话。
+                                </div>
+                            ) : (
+                                <>
+                                    {currentMode ? (
+                                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                            <span>当前模式</span>
+                                            <Badge variant="outline">{currentMode.name}</Badge>
+                                        </div>
+                                    ) : null}
+
+                                    {!hasModeConfigOption && acpSessionState.modes.length > 0 ? (
+                                        <div className="space-y-1.5">
+                                            <div className="text-xs font-medium">切换模式</div>
+                                            <Select
+                                                value={acpSessionState.current_mode_id ?? undefined}
+                                                onValueChange={(value) => void handleAcpModeChange(value)}
+                                                disabled={Boolean(acpMutationKey)}
+                                            >
+                                                <SelectTrigger className="w-full">
+                                                    <SelectValue placeholder="选择模式" />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    {acpSessionState.modes.map((mode) => (
+                                                        <SelectItem key={mode.id} value={mode.id}>
+                                                            {mode.name}
+                                                        </SelectItem>
+                                                    ))}
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
+                                    ) : null}
+
+                                    {acpSessionState.config_options.length > 0 ? <Separator /> : null}
+
+                                    <div className="space-y-3">
+                                        {acpSessionState.config_options.map((option) => (
+                                            <div key={option.id} className="space-y-1.5">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-xs font-medium">{option.name}</span>
+                                                    {option.category ? (
+                                                        <Badge variant="outline" className="text-[10px]">
+                                                            {option.category}
+                                                        </Badge>
+                                                    ) : null}
+                                                </div>
+                                                {option.description ? (
+                                                    <div className="text-xs text-muted-foreground">
+                                                        {option.description}
+                                                    </div>
+                                                ) : null}
+                                                <Select
+                                                    value={option.current_value}
+                                                    onValueChange={(value) => void handleAcpConfigChange(option, value)}
+                                                    disabled={Boolean(acpMutationKey)}
+                                                >
+                                                    <SelectTrigger className="w-full">
+                                                        <SelectValue placeholder="选择配置" />
+                                                    </SelectTrigger>
+                                                    <SelectContent>
+                                                        {option.options.map((choice) => (
+                                                            <SelectItem key={`${option.id}:${choice.value}`} value={choice.value}>
+                                                                {choice.group_name
+                                                                    ? `${choice.group_name} / ${choice.name}`
+                                                                    : choice.name}
+                                                            </SelectItem>
+                                                        ))}
+                                                    </SelectContent>
+                                                </Select>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </>
+                            )}
+                        </PopoverContent>
+                    </Popover>
+                </>
+            );
+        }, [
+            acpMutationKey,
+            acpSessionState,
+            acpWorkingDirectory,
+            handleAcpConfigChange,
+            handleAcpModeChange,
+            headerExtraActions,
+        ]);
+
         // 监听错误通知事件
         useEffect(() => {
             const unsubscribe = listen<{ conversation_id: number | null, error_message: string }>("conversation-window-error-notification", (event) => {
@@ -832,6 +1053,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 按消息 ID 定位滚动（用于搜索结果）
         useEffect(() => {
+            if (virtualizeMessages) {
+                return;
+            }
             if (pendingScrollMessageId === null) {
                 return;
             }
@@ -851,7 +1075,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 setShiningMessageIds,
                 clearPendingScrollMessageId: setPendingScrollMessageId,
             });
-        }, [pendingScrollMessageId, allDisplayMessages.length, scrollContainerRef, setShiningMessageIds]);
+        }, [
+            pendingScrollMessageId,
+            allDisplayMessages.length,
+            scrollContainerRef,
+            setShiningMessageIds,
+            virtualizeMessages,
+        ]);
 
         useEffect(() => {
             const lastMessage = allDisplayMessages[allDisplayMessages.length - 1];
@@ -859,11 +1089,20 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 // 在渲染和布局之后执行，避免时间竞态
                 requestAnimationFrame(() =>
                     requestAnimationFrame(() => {
+                        if (virtualizeMessages) {
+                            smartScroll(true, "smooth");
+                            return;
+                        }
                         scrollToUserMessage();
                     })
                 );
             }
-        }, [allDisplayMessages.length, scrollToUserMessage]);
+        }, [
+            allDisplayMessages.length,
+            scrollToUserMessage,
+            smartScroll,
+            virtualizeMessages,
+        ]);
 
         useEffect(() => {
             if (!inlineInteractionVisible) {
@@ -897,7 +1136,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onExportOpenChange={setExportDialogOpen}
                             allowRename={allowRename}
                             allowDelete={allowDelete}
-                            extraActions={headerExtraActions}
+                            extraActions={acpHeaderActions}
                         />
                     )}
 
@@ -905,7 +1144,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         ref={scrollContainerRef}
                         onWheelCapture={handleUserScrollIntent}
                         onTouchMoveCapture={handleUserScrollIntent}
-                        onScroll={handleScroll}
+                        onScroll={virtualizeMessages ? undefined : handleScroll}
                         className={`conversation-scroll-transparent-track h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
                         data-aipp-slot="chat-conversation-scroll"
                     >
@@ -930,6 +1169,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
                             sentBatchToolResultMessageIds={sentBatchToolResultMessageIds}
                             allowFeishuDebugResend={allowFeishuDebugResend}
+                            virtualizeMessages={virtualizeMessages}
+                            scrollContainerRef={scrollContainerRef}
+                            pendingScrollMessageId={pendingScrollMessageId}
+                            clearPendingScrollMessageId={setPendingScrollMessageId}
+                            setShiningMessageIds={setShiningMessageIds}
+                            onScrollStateChange={syncScrollState}
+                            smartScroll={smartScroll}
                             // NewChatComponent props
                             selectedText={selectedText}
                             selectedAssistant={selectedAssistant}

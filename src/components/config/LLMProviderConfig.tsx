@@ -2,8 +2,8 @@ import React, { useCallback, useEffect, useState, useMemo } from 'react';
 import { invoke } from "@tauri-apps/api/core";
 import LLMProviderConfigForm from "./LLMProviderConfigForm";
 import FormDialog from "../FormDialog";
-import CustomSelect from "../CustomSelect";
 import ConfirmDialog from "../ConfirmDialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import ShareDialog from "../ShareDialog";
 import ImportDialog from "../ImportDialog";
 import PasswordDialog from "../PasswordDialog";
@@ -427,11 +427,18 @@ const LLMProviderConfig: React.FC = () => {
                     </div>
                     <div className="space-y-2">
                         <label className="text-sm font-medium text-foreground">API 调用类型</label>
-                        <CustomSelect
-                            options={apiTypes}
-                            value={formApiType}
-                            onChange={setFormApiType}
-                        />
+                        <Select value={formApiType} onValueChange={setFormApiType}>
+                            <SelectTrigger className="w-full">
+                                <SelectValue placeholder="选择 API 类型" />
+                            </SelectTrigger>
+                            <SelectContent>
+                                {apiTypes.map((type) => (
+                                    <SelectItem key={type.value} value={type.value}>
+                                        {type.label}
+                                    </SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
                     </div>
                 </div>
             </FormDialog>

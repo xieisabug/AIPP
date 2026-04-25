@@ -1,5 +1,5 @@
+use crate::db::connection::params;
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
-use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -17,8 +17,16 @@ use crate::api::ai::conversation::{
     build_chat_request_from_messages, ToolCallStrategy, ToolConfig,
 };
 use crate::api::ai::summary::extract_json_from_response;
-use crate::api::ai_api::{build_tools_with_mapping, resolve_tool_name, ToolNameMapping};
+use crate::api::ai::types::AiRequest;
+use crate::api::ai_api::{
+    add_message, ask_ai, build_tools_with_mapping, resolve_tool_name, ToolNameMapping,
+};
 use crate::api::assistant_api::get_assistant;
+use crate::api::butler_api::{
+    active_butler_main_conversation_id, get_butler_main_continuation_lock,
+    is_current_butler_main_conversation,
+    resolve_or_create_butler_execution_window, wait_for_butler_main_to_be_idle,
+};
 use crate::api::genai_client::create_client_with_config;
 use crate::db::assistant_db::AssistantDatabase;
 use crate::db::conversation_db::{
@@ -61,6 +69,7 @@ pub struct ScheduledTaskDTO {
     pub assistant_id: i64,
     pub task_prompt: String,
     pub notify_prompt: String,
+    pub butler_conversation_id: Option<i64>,
     pub created_time: String,
     pub updated_time: String,
 }
@@ -80,6 +89,7 @@ pub struct CreateScheduledTaskRequest {
     pub assistant_id: i64,
     pub task_prompt: String,
     pub notify_prompt: String,
+    pub butler_conversation_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1073,20 +1083,24 @@ fn update_task_run(
 
 fn cleanup_conversation(app_handle: &tauri::AppHandle, conversation_id: i64) -> Result<(), String> {
     let conversation_db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    let conn = conversation_db.get_connection().map_err(|e| e.to_string())?;
-    conn.execute(
-        "DELETE FROM message_attachment WHERE message_id IN (SELECT id FROM message WHERE conversation_id = ?)",
-        params![conversation_id],
-    )
-    .map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM message WHERE conversation_id = ?", params![conversation_id])
-        .map_err(|e| e.to_string())?;
-    conn.execute(
-        "DELETE FROM conversation_summary WHERE conversation_id = ?",
-        params![conversation_id],
-    )
-    .map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM conversation WHERE id = ?", params![conversation_id])
+    conversation_db
+        .with_write_connection(|conn| {
+            conn.execute(
+                "DELETE FROM message_attachment WHERE message_id IN (SELECT id FROM message WHERE conversation_id = ?)",
+                params![conversation_id],
+            )
+            .map_err(crate::errors::AppError::from)?;
+            conn.execute("DELETE FROM message WHERE conversation_id = ?", params![conversation_id])
+                .map_err(crate::errors::AppError::from)?;
+            conn.execute(
+                "DELETE FROM conversation_summary WHERE conversation_id = ?",
+                params![conversation_id],
+            )
+            .map_err(crate::errors::AppError::from)?;
+            conn.execute("DELETE FROM conversation WHERE id = ?", params![conversation_id])
+                .map_err(crate::errors::AppError::from)?;
+            Ok(())
+        })
         .map_err(|e| e.to_string())?;
 
     if let Ok(mcp_db) = MCPDatabase::new(app_handle) {
@@ -1148,7 +1162,7 @@ pub fn compute_next_run_at_with_config(
     config: ScheduleConfig,
     base_time: DateTime<Utc>,
 ) -> Result<Option<DateTime<Utc>>, String> {
-    use chrono::{Datelike, Timelike, Weekday};
+    use chrono::{Datelike, Timelike};
 
     if config.schedule_type == "once" {
         return Ok(config.run_at);
@@ -1157,10 +1171,39 @@ pub fn compute_next_run_at_with_config(
         return Err("不支持的 schedule_type".to_string());
     }
 
-    let value = config.interval_value.ok_or_else(|| "缺少 interval_value".to_string())?;
-    let unit = config.interval_unit.ok_or_else(|| "缺少 interval_unit".to_string())?;
+    let interval_usage_hint = "schedule_type='interval' 时必须显式提供 interval_value 和 interval_unit。常见写法：每天 22:00 => interval_unit='day', interval_value=1, start_time='22:00'；工作日 09:00 => interval_unit='week', interval_value=1, week_days=[1,2,3,4,5], start_time='09:00'。";
+    let has_week_days = config.week_days.as_ref().is_some_and(|days| !days.is_empty());
+    let has_month_days = config.month_days.as_ref().is_some_and(|days| !days.is_empty());
+    let value = config.interval_value.ok_or_else(|| {
+        if has_week_days {
+            format!(
+                "{} 你当前提供了 week_days，但 week_days 不能单独使用，必须与 interval_unit='week' 和 interval_value 一起传入。",
+                interval_usage_hint
+            )
+        } else if has_month_days {
+            format!(
+                "{} 你当前提供了 month_days，但 month_days 不能单独使用，必须与 interval_unit='month' 和 interval_value 一起传入。",
+                interval_usage_hint
+            )
+        } else {
+            interval_usage_hint.to_string()
+        }
+    })?;
+    let unit = config.interval_unit.ok_or_else(|| interval_usage_hint.to_string())?;
     if value <= 0 {
         return Err("interval_value 需要大于 0".to_string());
+    }
+    if has_week_days && unit != "week" {
+        return Err(format!(
+            "week_days 仅在 interval_unit='week' 时有效，当前 interval_unit='{}'。正确示例：interval_unit='week', interval_value=1, week_days=[1,2,3,4,5], start_time='09:00'。",
+            unit
+        ));
+    }
+    if has_month_days && unit != "month" {
+        return Err(format!(
+            "month_days 仅在 interval_unit='month' 时有效，当前 interval_unit='{}'。正确示例：interval_unit='month', interval_value=1, month_days=[1,15], start_time='09:00'。",
+            unit
+        ));
     }
 
     let local_base = base_time.with_timezone(&Local);
@@ -1321,11 +1364,11 @@ pub fn compute_next_run_at_with_config(
     }
 }
 
-fn parse_json_array(s: &Option<String>) -> Option<Vec<i32>> {
+pub(crate) fn parse_json_array(s: &Option<String>) -> Option<Vec<i32>> {
     s.as_ref().and_then(|v| serde_json::from_str(v).ok())
 }
 
-fn to_dto(task: ScheduledTask) -> ScheduledTaskDTO {
+pub(crate) fn to_dto(task: ScheduledTask) -> ScheduledTaskDTO {
     ScheduledTaskDTO {
         id: task.id,
         name: task.name,
@@ -1342,6 +1385,7 @@ fn to_dto(task: ScheduledTask) -> ScheduledTaskDTO {
         assistant_id: task.assistant_id,
         task_prompt: task.task_prompt,
         notify_prompt: task.notify_prompt,
+        butler_conversation_id: task.butler_conversation_id,
         created_time: task.created_time.to_rfc3339(),
         updated_time: task.updated_time.to_rfc3339(),
     }
@@ -1378,6 +1422,16 @@ pub async fn list_scheduled_tasks(
 ) -> Result<Vec<ScheduledTaskDTO>, String> {
     let db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let tasks = db.list_tasks().map_err(|e| e.to_string())?;
+    Ok(tasks.into_iter().map(to_dto).collect())
+}
+
+#[tauri::command]
+pub async fn list_butler_scheduled_tasks(
+    app_handle: tauri::AppHandle,
+    _butler_conversation_id: i64,
+) -> Result<Vec<ScheduledTaskDTO>, String> {
+    let db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let tasks = db.list_butler_tasks().map_err(|e| e.to_string())?;
     Ok(tasks.into_iter().map(to_dto).collect())
 }
 
@@ -1421,6 +1475,20 @@ pub async fn create_scheduled_task(
     request: CreateScheduledTaskRequest,
 ) -> Result<ScheduledTaskDTO, String> {
     validate_assistant_type(&app_handle, request.assistant_id)?;
+    if let Some(butler_conversation_id) = request.butler_conversation_id {
+        let conversation_db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+        let conversation_repo = conversation_db.conversation_repo().map_err(|e| e.to_string())?;
+        let conversation = conversation_repo
+            .read(butler_conversation_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "总管家主会话不存在".to_string())?;
+        if conversation.conversation_kind != "butler_main" {
+            return Err("只能绑定总管家主会话".to_string());
+        }
+        if !is_current_butler_main_conversation(&app_handle, &conversation)? {
+            return Err("总管家主会话已归档，无法绑定新的定时任务".to_string());
+        }
+    }
     let db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let now = Utc::now();
     let run_at = match &request.run_at {
@@ -1459,6 +1527,7 @@ pub async fn create_scheduled_task(
         assistant_id: request.assistant_id,
         task_prompt: request.task_prompt,
         notify_prompt: request.notify_prompt,
+        butler_conversation_id: request.butler_conversation_id,
         created_time: now,
         updated_time: now,
     };
@@ -1513,6 +1582,7 @@ pub async fn update_scheduled_task(
         assistant_id: request.assistant_id,
         task_prompt: request.task_prompt,
         notify_prompt: request.notify_prompt,
+        butler_conversation_id: existing.butler_conversation_id,
         created_time: existing.created_time,
         updated_time: now,
     };
@@ -1545,11 +1615,16 @@ pub async fn run_scheduled_task_now(
     let next_run_at = if task.schedule_type == "once" {
         None
     } else {
-        compute_next_run_at(
-            &task.schedule_type,
-            task.interval_value,
-            task.interval_unit.as_deref(),
-            task.run_at,
+        compute_next_run_at_with_config(
+            ScheduleConfig {
+                schedule_type: &task.schedule_type,
+                interval_value: task.interval_value,
+                interval_unit: task.interval_unit.as_deref(),
+                start_time: task.start_time.as_deref(),
+                week_days: parse_json_array(&task.week_days),
+                month_days: parse_json_array(&task.month_days),
+                run_at: task.run_at,
+            },
             now,
         )?
     };
@@ -1627,6 +1702,11 @@ pub async fn execute_scheduled_task(
             error_message: None,
             started_time: run_started_at,
             finished_time: None,
+            butler_followup_status: if task.butler_conversation_id.is_some() {
+                Some("pending".to_string())
+            } else {
+                None
+            },
         };
         if let Ok(created_run) = log_db.create_run(&running) {
             let _ = app_handle.emit(SCHEDULED_TASK_RUN_CREATED_EVENT, run_to_dto(created_run));
@@ -1751,7 +1831,14 @@ async fn execute_scheduled_task_inner(
         .unwrap_or(false);
 
     let client = create_client_with_config(
-        &model_detail.configs,
+        &crate::api::copilot_token_manager::prepare_provider_configs(
+            app_handle,
+            &model_detail.provider.api_type,
+            &model_detail.configs,
+            network_proxy.as_deref(),
+        )
+        .await
+        .map_err(|e| format!("Copilot token exchange failed: {}", e))?,
         &model_detail.model.code,
         &model_detail.provider.api_type,
         Some(&model_detail.model.request_mode),
@@ -1789,8 +1876,12 @@ async fn execute_scheduled_task_inner(
     let is_gemini = model_code_lc.contains("gemini");
     let capture_usage = !(is_openai_like && is_gemini);
     let has_available_tools = mcp_info.use_native_toolcall && !mcp_info.enabled_servers.is_empty();
-    let chat_options = ConfigBuilder::build_chat_options(&config_map)
+    let chat_options = ConfigBuilder::build_chat_options(&config_map);
+    let capture_reasoning_content =
+        is_openai_like && has_available_tools && config_map.contains_key("reasoning_effort");
+    let chat_options = chat_options
         .with_normalize_reasoning_content(true)
+        .with_capture_reasoning_content(capture_reasoning_content)
         .with_capture_usage(capture_usage)
         .with_capture_tool_calls(has_available_tools);
 
@@ -2020,6 +2111,52 @@ async fn execute_scheduled_task_inner(
         );
     }
 
+    // ── 9. Butler 结果回流 ─────────────────────────────────────────
+    if task.butler_conversation_id.is_some() {
+        let backflow_result = match active_butler_main_conversation_id(app_handle)? {
+            Some(conversation_id) => {
+                enqueue_scheduled_task_butler_followup(
+                    app_handle,
+                    conversation_id,
+                    task,
+                    run_id,
+                    notify,
+                    summary.as_deref(),
+                    Some(task_result.as_str()),
+                    &assistant_detail.assistant.name,
+                )
+                .await
+            }
+            None => Err("当前不存在总管家主会话".to_string()),
+        };
+        match &backflow_result {
+            Ok(()) => {
+                log_task_message(
+                    app_handle,
+                    task.id,
+                    run_id,
+                    "butler_followup",
+                    "已回流至总管家主会话",
+                );
+                if let Ok(sdb) = ScheduledTaskDatabase::new(app_handle) {
+                    let _ = sdb.update_run_butler_followup_status(run_id, "done");
+                }
+            }
+            Err(e) => {
+                if let Ok(sdb) = ScheduledTaskDatabase::new(app_handle) {
+                    let _ = sdb.update_run_butler_followup_status(run_id, "failed");
+                }
+                log_task_message(
+                    app_handle,
+                    task.id,
+                    run_id,
+                    "butler_followup_error",
+                    format!("回流总管家失败: {}", e),
+                );
+            }
+        }
+    }
+
     Ok(RunScheduledTaskResult {
         task_id: task.id,
         success: true,
@@ -2027,4 +2164,155 @@ async fn execute_scheduled_task_inner(
         summary: if notify { summary } else { None },
         error: None,
     })
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Butler backflow: inject scheduled task result into Butler main conversation
+// ────────────────────────────────────────────────────────────────────────────
+
+const SCHEDULED_TASK_RESULT_DETAIL_LIMIT: usize = 4000;
+
+fn build_butler_scheduled_task_result_message(
+    task: &ScheduledTask,
+    run_id: &str,
+    status: &str,
+    notify: bool,
+    summary: Option<&str>,
+    detail: Option<&str>,
+    assistant_name: &str,
+) -> String {
+    let summary_text = summary.filter(|s| !s.trim().is_empty()).unwrap_or("无");
+    let detail_text = detail
+        .filter(|d| !d.trim().is_empty())
+        .map(|d| {
+            if d.len() > SCHEDULED_TASK_RESULT_DETAIL_LIMIT {
+                format!("{}…(truncated)", &d[..SCHEDULED_TASK_RESULT_DETAIL_LIMIT])
+            } else {
+                d.to_string()
+            }
+        })
+        .unwrap_or_else(|| "无".to_string());
+
+    format!(
+        "<butler_scheduled_task_result>\nstatus={status}\nscheduled_task_id={task_id}\nscheduled_task_name={name}\nrun_id={run_id}\nassistant_name={assistant_name}\ntask_prompt={task_prompt}\nnotify_decision={notify}\nsummary={summary}\ndetail_excerpt={detail}\n</butler_scheduled_task_result>",
+        status = status,
+        task_id = task.id,
+        name = task.name,
+        run_id = run_id,
+        assistant_name = assistant_name,
+        task_prompt = if task.task_prompt.len() > 200 {
+            format!("{}…", &task.task_prompt[..200])
+        } else {
+            task.task_prompt.clone()
+        },
+        notify = notify,
+        summary = summary_text,
+        detail = detail_text,
+    )
+}
+
+fn build_butler_scheduled_task_followup_prompt(task: &ScheduledTask, status: &str) -> String {
+    format!(
+        "系统定时任务回流：定时任务《{name}》执行{status_desc}。这不是终端用户的新需求，而是你之前安排的定时任务执行回调。请基于最新注入的 <butler_scheduled_task_result> 信息判断下一步：如果结果重要则向用户汇报，否则简要确认即可。",
+        name = task.name,
+        status_desc = match status {
+            "success" => "成功",
+            "failed" => "失败",
+            _ => status,
+        },
+    )
+}
+
+async fn enqueue_scheduled_task_butler_followup(
+    app_handle: &tauri::AppHandle,
+    butler_conversation_id: i64,
+    task: &ScheduledTask,
+    run_id: &str,
+    notify: bool,
+    summary: Option<&str>,
+    detail: Option<&str>,
+    assistant_name: &str,
+) -> Result<(), String> {
+    let continuation_lock = get_butler_main_continuation_lock(butler_conversation_id).await;
+    let _guard = continuation_lock.lock().await;
+    wait_for_butler_main_to_be_idle(app_handle, butler_conversation_id).await;
+
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
+
+    let main_conversation = conversation_repo
+        .read(butler_conversation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "总管家主会话不存在".to_string())?;
+
+    if main_conversation.conversation_kind != "butler_main" {
+        return Err("总管家主会话已归档，无法回流定时任务结果".to_string());
+    }
+    if !is_current_butler_main_conversation(app_handle, &main_conversation)? {
+        return Err("总管家主会话已归档，无法回流定时任务结果".to_string());
+    }
+    let assistant_id =
+        main_conversation.assistant_id.ok_or_else(|| "总管家主会话缺少 assistant".to_string())?;
+
+    let status = "success";
+    let system_message_content = build_butler_scheduled_task_result_message(
+        task,
+        run_id,
+        status,
+        notify,
+        summary,
+        detail,
+        assistant_name,
+    );
+
+    add_message(
+        app_handle,
+        None,
+        butler_conversation_id,
+        "system".to_string(),
+        system_message_content,
+        None,
+        None,
+        None,
+        None,
+        0,
+        None,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let prompt = build_butler_scheduled_task_followup_prompt(task, status);
+    let window = resolve_or_create_butler_execution_window(app_handle)?;
+    let ai_request = AiRequest {
+        conversation_id: butler_conversation_id.to_string(),
+        assistant_id,
+        prompt,
+        model: None,
+        override_model_id: None,
+        temperature: None,
+        top_p: None,
+        max_tokens: None,
+        stream: Some(true),
+        attachment_list: None,
+    };
+
+    ask_ai(
+        app_handle.clone(),
+        app_handle.state::<crate::AppState>(),
+        app_handle.state::<crate::AcpSessionState>(),
+        app_handle.state::<crate::FeatureConfigState>(),
+        app_handle.state::<crate::state::message_token::MessageTokenManager>(),
+        app_handle.state::<crate::state::activity_state::ConversationActivityManager>(),
+        window,
+        ai_request,
+        None,
+        None,
+        None,
+        None,
+        Some("internal".to_string()),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
 }

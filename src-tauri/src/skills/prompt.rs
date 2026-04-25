@@ -1,6 +1,6 @@
 //! Skills prompt integration - collects and formats skills for AI prompts
 
-use crate::api::skill_api::get_enabled_assistant_skills_internal;
+use crate::api::skill_api::{get_enabled_assistant_skills_internal, scan_skills};
 use crate::db::conversation_db::{AttachmentType, MessageAttachment};
 use crate::errors::AppError;
 use crate::skills::types::ScannedSkill;
@@ -8,7 +8,8 @@ use crate::slash::escape_slash_argument;
 use crate::slash::ActiveSkillInvocation;
 use serde_json;
 use sha2::{Digest, Sha256};
-use tracing::{debug, info, instrument};
+use std::collections::{HashMap, HashSet};
+use tracing::{debug, info, instrument, warn};
 
 /// Skills information for an assistant
 #[derive(Debug, Clone)]
@@ -23,11 +24,77 @@ pub async fn collect_skills_info_for_assistant(
     app_handle: &tauri::AppHandle,
     assistant_id: i64,
 ) -> Result<SkillsInfoForAssistant, AppError> {
+    collect_skills_info_for_assistant_with_additions(app_handle, assistant_id, &[]).await
+}
+
+fn normalize_skill_identifiers(skill_identifiers: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for identifier in skill_identifiers {
+        let value = identifier.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if seen.insert(value.to_string()) {
+            normalized.push(value.to_string());
+        }
+    }
+    normalized
+}
+
+fn merge_temporary_skills(
+    enabled_skills: Vec<ScannedSkill>,
+    available_skills: &HashMap<String, ScannedSkill>,
+    temporary_skill_identifiers: &[String],
+) -> Vec<ScannedSkill> {
+    let mut merged_skills = enabled_skills;
+    let mut existing_identifiers =
+        merged_skills.iter().map(|skill| skill.identifier.clone()).collect::<HashSet<_>>();
+
+    for identifier in normalize_skill_identifiers(temporary_skill_identifiers) {
+        if existing_identifiers.contains(&identifier) {
+            continue;
+        }
+        let Some(skill) = available_skills.get(&identifier).cloned() else {
+            warn!(identifier = %identifier, "Temporary skill not found, skipping");
+            continue;
+        };
+        existing_identifiers.insert(identifier);
+        merged_skills.push(skill);
+    }
+
+    merged_skills
+}
+
+#[instrument(
+    level = "debug",
+    skip(app_handle, temporary_skill_identifiers),
+    fields(assistant_id, temporary_skills = temporary_skill_identifiers.len())
+)]
+pub async fn collect_skills_info_for_assistant_with_additions(
+    app_handle: &tauri::AppHandle,
+    assistant_id: i64,
+    temporary_skill_identifiers: &[String],
+) -> Result<SkillsInfoForAssistant, AppError> {
     let enabled_skills = get_enabled_assistant_skills_internal(app_handle, assistant_id).await?;
+    if normalize_skill_identifiers(temporary_skill_identifiers).is_empty() {
+        debug!(enabled_skills_count = enabled_skills.len(), "Collected skills info for assistant");
+        return Ok(SkillsInfoForAssistant { enabled_skills });
+    }
 
-    debug!(enabled_skills_count = enabled_skills.len(), "Collected skills info for assistant");
+    let available_skills = scan_skills(app_handle.clone())
+        .await
+        .map_err(AppError::UnknownError)?
+        .into_iter()
+        .map(|skill| (skill.identifier.clone(), skill))
+        .collect::<HashMap<_, _>>();
 
-    Ok(SkillsInfoForAssistant { enabled_skills })
+    let merged_skills =
+        merge_temporary_skills(enabled_skills, &available_skills, temporary_skill_identifiers);
+
+    debug!(enabled_skills_count = merged_skills.len(), "Collected skills info for assistant");
+
+    Ok(SkillsInfoForAssistant { enabled_skills: merged_skills })
 }
 
 /// Format skills into the assistant prompt
@@ -191,7 +258,12 @@ pub fn build_active_skill_attachments(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_active_skill_attachments, compose_user_message_with_active_skills};
+    use super::{
+        build_active_skill_attachments, compose_user_message_with_active_skills,
+        merge_temporary_skills, normalize_skill_identifiers,
+    };
+    use crate::skills::types::{ScannedSkill, SkillMetadata, SkillSourceType};
+    use std::collections::HashMap;
     use crate::db::conversation_db::AttachmentType;
     use crate::slash::ActiveSkillInvocation;
 
@@ -239,5 +311,64 @@ mod tests {
         assert_eq!(decoded.identifier, skill.identifier);
         assert_eq!(decoded.additional_files.len(), 1);
         assert_eq!(decoded.additional_files[0].path, "template.md");
+    }
+
+    #[test]
+    fn normalize_skill_identifiers_trims_and_dedupes() {
+        let identifiers = vec![
+            "".to_string(),
+            " aipp:skill-a ".to_string(),
+            "aipp:skill-a".to_string(),
+            "aipp:skill-b".to_string(),
+        ];
+
+        assert_eq!(
+            normalize_skill_identifiers(&identifiers),
+            vec!["aipp:skill-a".to_string(), "aipp:skill-b".to_string()]
+        );
+    }
+
+    fn make_scanned_skill(identifier: &str, display_name: &str) -> ScannedSkill {
+        ScannedSkill {
+            identifier: identifier.to_string(),
+            source_type: SkillSourceType::Agents,
+            source_display_name: "AIPP".to_string(),
+            file_path: "C:\\skills\\skill.md".to_string(),
+            relative_path: "skill.md".to_string(),
+            metadata: SkillMetadata {
+                name: Some(display_name.to_string()),
+                description: Some(format!("{display_name} description")),
+                version: None,
+                author: None,
+                tags: Vec::new(),
+                requires_files: Vec::new(),
+            },
+            display_name: display_name.to_string(),
+            exists: true,
+        }
+    }
+
+    #[test]
+    fn merge_temporary_skills_skips_missing_and_dedupes() {
+        let existing = vec![make_scanned_skill("aipp:skill-a", "Skill A")];
+        let mut available = HashMap::new();
+        available.insert(
+            "aipp:skill-b".to_string(),
+            make_scanned_skill("aipp:skill-b", "Skill B"),
+        );
+
+        let merged = merge_temporary_skills(
+            existing,
+            &available,
+            &[
+                "aipp:skill-a".to_string(),
+                "aipp:skill-b".to_string(),
+                "aipp:missing".to_string(),
+            ],
+        );
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].identifier, "aipp:skill-a");
+        assert_eq!(merged[1].identifier, "aipp:skill-b");
     }
 }

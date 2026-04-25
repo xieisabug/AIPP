@@ -117,6 +117,20 @@ const getAttachmentTypeName = (type: string): string => {
     }
 };
 
+const getAttachmentSourceLabel = (messageType: string): string => {
+    switch (messageType) {
+        case 'user':
+            return '用户附件';
+        case 'response':
+        case 'assistant':
+            return '回复附件';
+        case 'tool_result':
+            return '工具结果附件';
+        default:
+            return '消息附件';
+    }
+};
+
 const parseSkillAttachmentPayload = (
     attachmentContent?: string,
 ): SkillAttachmentPayload | null => {
@@ -376,8 +390,10 @@ export function useContextList({
         // Add attachments from messages (sent files)
         if (messages && messages.length > 0) {
             for (const message of messages) {
-                if (message.message_type !== 'user') continue;
                 if (!message.attachment_list || message.attachment_list.length === 0) continue;
+
+                const attachmentSource = message.message_type === 'user' ? 'user' : 'assistant';
+                const attachmentSourceLabel = getAttachmentSourceLabel(message.message_type);
 
                 for (const attachment of message.attachment_list as Attachment[]) {
                     const attType = attachment.attachment_type || 'File';
@@ -398,7 +414,7 @@ export function useContextList({
                             type: 'skill',
                             name: skillName,
                             details: skillIdentifier,
-                            source: 'user',
+                            source: attachmentSource,
                             previewStatus: 'needs_load',
                             previewData: {
                                 title: skillName,
@@ -406,7 +422,7 @@ export function useContextList({
                                 rawValue: skillIdentifier || attachment.attachment_url || skillName,
                                 contentType: 'file-meta',
                                 metadata: buildMetadata({
-                                    来源: '用户附件',
+                                    来源: attachmentSourceLabel,
                                     标识符: skillIdentifier || attachment.attachment_url,
                                 }),
                             },
@@ -416,13 +432,14 @@ export function useContextList({
 
                     const displayName = `${getAttachmentTypeName(attType)} ${attachmentCounts[attType]}`;
                     const fileTypeName = getAttachmentTypeName(attType);
+                    const isGeneratedImage = message.message_type !== 'user' && attType === 'Image';
 
                     items.push({
                         id: `msg-attachment-${message.id}-${attachmentCounts[attType]}`,
-                        type: 'user_file',
+                        type: isGeneratedImage ? 'generated_image' : 'user_file',
                         name: displayName,
-                        details: getAttachmentTypeName(attType),
-                        source: 'user',
+                        details: attachment.attachment_url || fileTypeName,
+                        source: attachmentSource,
                         attachmentData: {
                             type: attType,
                             content: attachment.attachment_content,
@@ -443,7 +460,7 @@ export function useContextList({
                             path: attachment.attachment_url,
                             url: attachment.attachment_url,
                             metadata: buildMetadata({
-                                来源: '用户附件',
+                                来源: attachmentSourceLabel,
                                 类型: fileTypeName,
                                 路径: attachment.attachment_url,
                             }),

@@ -15,7 +15,7 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 ### 会话句柄路由
 - `AcpSessionHandle` 会话句柄
 - 后台任务保持单个 `ClientSideConnection` 连接活跃
-- ACP 提示通过会话句柄路由到后台任务
+- ACP 提示、取消、模式切换、配置项更新都通过会话句柄路由到后台任务
 
 ### 会话任务运行时
 - ACP 会话任务运行在专用单线程运行时上
@@ -41,6 +41,11 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 - 在 `session/load` 期间，抑制 ACP `session/update` 通知
 - 避免重放内容污染 UI/数据库
 - 加载完成后恢复正常事件通知
+
+### 会话元数据同步
+- `AcpSessionState` 除了保存 session handle，还保存当前 session 的前端快照
+- 同步的内容包括：`session_id`、title、`updated_at`、当前 mode、可选 modes、config options、当前是否有活跃 prompt
+- ACP 的 `SessionInfoUpdate` 会同步更新本地 conversation 标题，并发出统一的 `title_change` 事件
 
 ---
 
@@ -80,10 +85,10 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 - 权限请求对话框
 - 权限决策持久化
 
-### 权限请求自动拒绝（当前）
-- 当前权限请求自动拒绝
-- 预留权限审批接口
-- 未来可实现用户交互审批
+### 权限请求审批
+- ACP 权限请求会通过现有审批流发到前端
+- Butler/Feishu 场景下也会同步转发
+- 当用户取消当前 ACP prompt 时，未完成的 ACP 权限请求会被一起取消
 
 ---
 
@@ -125,17 +130,23 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 - ACP 流式输出内容到该消息
 - 发出 `message_update` 事件
 - 内容持久化到数据库
+- 初始化时会显式声明客户端能力：`fs/read_text_file`、`fs/write_text_file`、`terminal/*`
 
 ### 取消行为
-- `cancel_ai` 当前中止 ACP 会话任务
-- 中止会 tear down 该对话的进程
-- 会话状态清理
+- `cancel_ai` 对 ACP 会话发送 `session/cancel`
+- 正常取消不会 tear down 整个 ACP 进程
+- 只有 session 真正退出时才会清理 `AcpSessionState`
+
+### 会话控制 UI
+- Chat/Butler 的对话标题栏会显示 ACP 会话入口
+- 用户可以查看当前 session 状态、工作目录、当前模式与 config options
+- 支持直接在标题栏切换 ACP mode 和更新 ACP config option
 
 ### 已知限制
 - `loadSession` 支持因代理而异
 - `claude-code-acp` 不支持会话加载
 - 会话持久化仅在代理支持时有效
-- 计划实现：如果不支持 loadSession，从存储的对话历史构建提示词
+- 当代理不支持 `loadSession` 或加载失败时，AIPP 会使用本地 conversation 历史构建一次 history fallback prompt
 
 ---
 相关源码:

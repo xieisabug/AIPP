@@ -68,6 +68,68 @@ describe('useContextList', () => {
         });
     });
 
+    it('includes response image attachments in sidebar context items', async () => {
+        const messages: Message[] = [
+            {
+                id: 2,
+                conversation_id: 1,
+                message_type: 'response',
+                content: '这里是生成的图片',
+                llm_model_id: null,
+                created_time: new Date(),
+                start_time: null,
+                finish_time: null,
+                token_count: 0,
+                input_token_count: 0,
+                output_token_count: 0,
+                regenerate: null,
+                attachment_list: [
+                    {
+                        attachment_type: 'Image',
+                        attachment_url: 'generated-image-1.png',
+                        attachment_content: 'data:image/png;base64,Zm9v',
+                    },
+                ],
+            },
+        ];
+
+        const { result } = renderHook(() =>
+            useContextList({
+                conversationId: 1,
+                userFiles: null,
+                mcpToolCallStates: new Map(),
+                messages,
+                acpWorkingDirectory: null,
+            }),
+        );
+
+        await waitFor(() => {
+            expect(result.current.contextItems).toEqual(
+                expect.arrayContaining([
+                    expect.objectContaining({
+                        type: 'generated_image',
+                        source: 'assistant',
+                        details: 'generated-image-1.png',
+                        attachmentData: expect.objectContaining({
+                            type: 'Image',
+                            content: 'data:image/png;base64,Zm9v',
+                            url: 'generated-image-1.png',
+                        }),
+                        previewData: expect.objectContaining({
+                            contentType: 'image',
+                            content: 'data:image/png;base64,Zm9v',
+                            url: 'generated-image-1.png',
+                            metadata: expect.objectContaining({
+                                来源: '回复附件',
+                                类型: '图片',
+                            }),
+                        }),
+                    }),
+                ]),
+            );
+        });
+    });
+
     it('deduplicates identical file and directory context items while keeping repeated searches', async () => {
         const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
             [1, {

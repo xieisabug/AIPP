@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 fn strip_skill_attachment_tags(content: &str) -> String {
     let regex = Regex::new(
@@ -606,17 +606,26 @@ fn log_selected_messages(conversation_id: i64, selection: &str, messages: &[Mess
     }
 }
 
-pub fn build_message_list_from_db(
+/// Metadata returned alongside the message list for context compaction.
+pub struct MessageListMetadata {
+    /// DB message IDs aligned by index with the message list.
+    pub message_ids: Vec<i64>,
+    /// Input token counts from previous API responses, aligned by index.
+    pub db_token_counts: Vec<i32>,
+}
+
+/// Build a message list with metadata (IDs and token counts) for compaction.
+pub fn build_message_list_with_metadata_from_db(
     all_messages: &[(Message, Option<MessageAttachment>)],
     branch_selection: BranchSelection,
-) -> Vec<(String, String, Vec<MessageAttachment>)> {
+) -> (Vec<(String, String, Vec<MessageAttachment>)>, MessageListMetadata) {
     let conversation_id =
         all_messages.first().map(|(msg, _)| msg.conversation_id).unwrap_or_default();
     debug!(
         conversation_id,
         branch_selection = ?branch_selection,
         total_messages = all_messages.len(),
-        "building message list from db"
+        "building message list with metadata from db"
     );
     match branch_selection {
         BranchSelection::LatestBranch => {
@@ -633,23 +642,72 @@ pub fn build_message_list_from_db(
             }
             filter_tool_results_for_branch(conversation_id, "latest_branch", &mut latest_branch);
             log_selected_messages(conversation_id, "latest_branch", &latest_branch);
-            build_message_list_from_selected_messages(&latest_branch, all_messages)
+            let metadata = MessageListMetadata {
+                message_ids: latest_branch.iter().map(|m| m.id).collect(),
+                db_token_counts: latest_branch.iter().map(|m| m.input_token_count).collect(),
+            };
+            let messages = build_message_list_from_selected_messages(&latest_branch, all_messages);
+
+            // Apply compaction filter: skip messages already covered by a compaction summary
+            let filter_input: Vec<(i64, String, String)> = metadata
+                .message_ids
+                .iter()
+                .zip(messages.iter())
+                .map(|(id, (msg_type, content, _))| (*id, msg_type.clone(), content.clone()))
+                .collect();
+            let kept_indices =
+                crate::api::ai::context_manager::persistence::apply_compaction_filter(
+                    &filter_input,
+                );
+            if kept_indices.len() < messages.len() {
+                info!(
+                    conversation_id,
+                    original = messages.len(),
+                    kept = kept_indices.len(),
+                    "compaction filter removed previously compacted messages"
+                );
+                let messages: Vec<_> = kept_indices.iter().map(|&i| messages[i].clone()).collect();
+                let metadata = MessageListMetadata {
+                    message_ids: kept_indices.iter().map(|&i| metadata.message_ids[i]).collect(),
+                    db_token_counts: kept_indices
+                        .iter()
+                        .map(|&i| metadata.db_token_counts[i])
+                        .collect(),
+                };
+                (messages, metadata)
+            } else {
+                (messages, metadata)
+            }
         }
         BranchSelection::All => {
             let mut seen = HashSet::new();
-            all_messages
+            let mut message_ids = Vec::new();
+            let mut db_token_counts = Vec::new();
+            let messages = all_messages
                 .iter()
                 .filter(|(message, _)| seen.insert(message.id))
                 .map(|(message, attachment)| {
+                    message_ids.push(message.id);
+                    db_token_counts.push(message.input_token_count);
                     (
                         message.message_type.clone(),
                         message.content.clone(),
                         attachment.clone().map(|a| vec![a]).unwrap_or_else(Vec::new),
                     )
                 })
-                .collect()
+                .collect();
+            (messages, MessageListMetadata { message_ids, db_token_counts })
         }
     }
+}
+
+pub fn build_message_list_from_db(
+    all_messages: &[(Message, Option<MessageAttachment>)],
+    branch_selection: BranchSelection,
+) -> Vec<(String, String, Vec<MessageAttachment>)> {
+    let (messages, _metadata) =
+        build_message_list_with_metadata_from_db(all_messages, branch_selection);
+    messages
 }
 
 // Helper function to extract tool call ID from tool result content

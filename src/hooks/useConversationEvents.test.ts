@@ -3,7 +3,10 @@ import { emit } from "@tauri-apps/api/event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MCPToolCall } from "@/data/MCPToolCall";
 import type { ConversationRuntimePhase, ShineTarget } from "@/data/Conversation";
-import { useConversationEvents } from "@/hooks/useConversationEvents";
+import {
+    shouldFlushStreamingMessageImmediately,
+    useConversationEvents,
+} from "@/hooks/useConversationEvents";
 import {
     clearAllMockHandlers,
     mockInvokeHandler,
@@ -756,5 +759,90 @@ describe("useConversationEvents MCP completion reconciliation", () => {
         expect(result.current.activityFocus).toEqual({ focus_type: "none" });
         expect(result.current.runtimeState?.phase).toBe("idle");
         expect(result.current.runtimeState?.is_running).toBe(false);
+    });
+
+    it("clears user-message shine when stream_complete syncs the final idle state", async () => {
+        const conversationId = 19;
+        const userMessageId = 902;
+        let runtimeSyncCount = 0;
+        let shineSyncCount = 0;
+
+        mockInvokeHandler("get_mcp_tool_calls_by_conversation", () => []);
+        mockInvokeHandler("get_shine_state", () => {
+            shineSyncCount += 1;
+            if (shineSyncCount === 1) {
+                return createShineState(conversationId, 1, {
+                    target_type: "message",
+                    message_id: userMessageId,
+                    reason: "user_pending",
+                }, 6);
+            }
+            return createShineState(conversationId, 2, { target_type: "none" }, 6);
+        });
+        mockInvokeHandler("get_conversation_runtime_state", () => {
+            runtimeSyncCount += 1;
+            if (runtimeSyncCount === 1) {
+                return createRuntimeState(conversationId, 1, "user_pending", 6);
+            }
+            return createRuntimeState(conversationId, 2, "idle", 6);
+        });
+
+        const { result } = renderHook(() =>
+            useConversationEvents({
+                conversationId,
+            }),
+        );
+
+        await flushEffects();
+        await flushEffects();
+
+        expect(result.current.shiningMessageIds.has(userMessageId)).toBe(true);
+        expect(result.current.activityFocus).toEqual({
+            focus_type: "user_pending",
+            message_id: userMessageId,
+        });
+
+        await act(async () => {
+            await emit(`conversation_event_${conversationId}`, {
+                type: "stream_complete",
+                data: {
+                    conversation_id: conversationId,
+                    response_message_id: 903,
+                    reasoning_message_id: null,
+                    has_response: true,
+                    has_reasoning: false,
+                    response_length: 0,
+                    reasoning_length: 0,
+                },
+            });
+        });
+
+        await flushEffects();
+        await flushEffects();
+
+        expect(result.current.shiningMessageIds.size).toBe(0);
+        expect(result.current.shiningMcpCallId).toBeNull();
+        expect(result.current.activityFocus).toEqual({ focus_type: "none" });
+        expect(result.current.runtimeState?.phase).toBe("idle");
+        expect(result.current.runtimeState?.is_running).toBe(false);
+    });
+});
+
+describe("useConversationEvents preview_code flush policy", () => {
+    it("flushes preview_code streaming markers immediately", () => {
+        expect(
+            shouldFlushStreamingMessageImmediately(
+                '<!-- MCP_TOOL_CALL_STREAMING:{"tool_name":"preview_code"} -->'
+            )
+        ).toBe(true);
+    });
+
+    it("keeps non-preview streaming markers on transition path", () => {
+        expect(
+            shouldFlushStreamingMessageImmediately(
+                '<!-- MCP_TOOL_CALL_STREAMING:{"tool_name":"demo_tool"} -->'
+            )
+        ).toBe(false);
+        expect(shouldFlushStreamingMessageImmediately("plain text")).toBe(false);
     });
 });

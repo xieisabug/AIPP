@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 interface DisplayConfig {
     theme: string;
@@ -7,6 +8,9 @@ interface DisplayConfig {
     user_message_markdown_render: string;
     code_theme_light: string;
     code_theme_dark: string;
+    merge_assistant_messages: string;
+    show_thinking: string;
+    preview_code_show_toolbar: string;
 }
 
 interface DisplayConfigState {
@@ -21,6 +25,9 @@ const DEFAULT_CONFIG: DisplayConfig = {
     user_message_markdown_render: 'enabled',
     code_theme_light: 'github',
     code_theme_dark: 'github-dark',
+    merge_assistant_messages: 'enabled',
+    show_thinking: 'enabled',
+    preview_code_show_toolbar: 'disabled',
 };
 
 type DisplayConfigStore = {
@@ -83,6 +90,12 @@ const loadConfig = async () => {
                     displayConfigMap.get('user_message_markdown_render') || DEFAULT_CONFIG.user_message_markdown_render,
                 code_theme_light: displayConfigMap.get('code_theme_light') || DEFAULT_CONFIG.code_theme_light,
                 code_theme_dark: displayConfigMap.get('code_theme_dark') || DEFAULT_CONFIG.code_theme_dark,
+                merge_assistant_messages:
+                    displayConfigMap.get('merge_assistant_messages') || DEFAULT_CONFIG.merge_assistant_messages,
+                show_thinking:
+                    displayConfigMap.get('show_thinking') || DEFAULT_CONFIG.show_thinking,
+                preview_code_show_toolbar:
+                    displayConfigMap.get('preview_code_show_toolbar') || DEFAULT_CONFIG.preview_code_show_toolbar,
             };
 
             setState({
@@ -124,15 +137,35 @@ export const useDisplayConfig = () => {
         }
     }, [state.config, state.isLoading]);
 
+    // 监听配置变化事件，实时刷新
+    useEffect(() => {
+        const unsubscribe = listen('display-config-changed', () => {
+            loadConfig();
+        });
+        const unsubscribeTheme = listen('theme-changed', () => {
+            loadConfig();
+        });
+        return () => {
+            unsubscribe.then((fn) => fn());
+            unsubscribeTheme.then((fn) => fn());
+        };
+    }, []);
+
     const refreshConfig = useCallback(() => loadConfig(), []);
 
     const isUserMessageMarkdownEnabled = state.config?.user_message_markdown_render === 'enabled';
+    const isMergeAssistantMessages = state.config?.merge_assistant_messages !== 'disabled';
+    const isShowThinking = state.config?.show_thinking !== 'disabled';
+    const isPreviewCodeShowToolbar = state.config?.preview_code_show_toolbar === 'enabled';
 
     return {
         config: state.config,
         isLoading: state.isLoading,
         error: state.error,
         isUserMessageMarkdownEnabled,
+        isMergeAssistantMessages,
+        isShowThinking,
+        isPreviewCodeShowToolbar,
         refreshConfig,
     };
 };

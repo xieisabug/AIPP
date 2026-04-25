@@ -215,7 +215,7 @@ pub async fn run_artifacts(
     let request_id = Uuid::new_v4().to_string();
 
     if source_window.as_deref() != Some("sidebar") {
-        let _ = crate::window::open_artifact_preview_window(app_handle.clone()).await;
+        let _ = crate::window::open_artifact_preview_window_inner(app_handle.clone()).await;
     }
 
     // Ensure the preview window is visible and focused so it can attach listeners quickly

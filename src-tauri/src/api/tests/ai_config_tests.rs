@@ -83,6 +83,17 @@ fn test_build_chat_options_with_all_configs() {
     assert!(debug_str.contains("ChatOptions"));
 }
 
+/// 测试 reasoning_effort 配置
+#[test]
+fn test_build_chat_options_with_reasoning_effort() {
+    let mut config_map: HashMap<String, String> = HashMap::new();
+    config_map.insert("reasoning_effort".to_string(), "medium".to_string());
+
+    let options = ConfigBuilder::build_chat_options(&config_map);
+
+    assert!(format!("{:?}", options).contains("ChatOptions"));
+}
+
 /// 测试无效的温度值（非数字）
 #[test]
 fn test_build_chat_options_invalid_temperature() {

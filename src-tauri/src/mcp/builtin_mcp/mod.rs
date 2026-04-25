@@ -16,8 +16,9 @@ pub mod templates;
 
 pub use agent::{AgentHandler, TodoHandler, TodoState};
 pub use interaction::{
-    handle_preview_file_relay_request, prepare_preview_file_request_for_ui,
-    submit_ask_user_question_response, InteractionState, PreviewFileRelayState,
+    handle_preview_file_relay_request, list_preview_code_requests_for_conversation,
+    prepare_preview_file_request_for_ui, submit_ask_user_question_response,
+    submit_preview_code_response, InteractionState, PreviewFileRelayState,
     PREVIEW_FILE_RELAY_SCHEME,
 };
 pub use operation::{OperationHandler, OperationState};
@@ -48,6 +49,17 @@ pub fn is_builtin_mcp_call(command: &str) -> bool {
 pub struct BuiltinExecutionResult {
     pub content: Vec<serde_json::Value>,
     pub is_error: bool,
+}
+
+/// Look up conversation_kind for a given conversation_id.
+/// Scopes the Repository trait import to avoid conflicts.
+fn get_conversation_kind(app_handle: &AppHandle, conversation_id: i64) -> Option<String> {
+    use crate::db::conversation_db::Repository;
+    crate::db::conversation_db::ConversationDatabase::new(app_handle)
+        .ok()
+        .and_then(|db| db.conversation_repo().ok())
+        .and_then(|repo| repo.read(conversation_id).ok().flatten())
+        .map(|c| c.conversation_kind)
 }
 
 fn matches_keyword(value: &str, keyword: &str) -> bool {
@@ -98,6 +110,23 @@ fn value_as_i64(value: &serde_json::Value) -> Option<i64> {
 
 fn argument_i64(args: &serde_json::Value, key: &str) -> Option<i64> {
     args.get(key).and_then(value_as_i64)
+}
+
+fn argument_string_array(args: &serde_json::Value, key: &str) -> Result<Vec<String>, String> {
+    let Some(value) = args.get(key) else {
+        return Ok(Vec::new());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| format!("{key} must be an array of strings"))?;
+    array
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(|entry| entry.to_string())
+                .ok_or_else(|| format!("{key} must be an array of strings"))
+        })
+        .collect()
 }
 
 fn build_dynamic_mcp_server_tool_item(tool_name: &str, summary: &str) -> serde_json::Value {
@@ -391,6 +420,72 @@ fn resolve_artifact_tool_conversation_id(
     argument_i64(args, "conversation_id")
         .or(conversation_id)
         .ok_or_else(|| "Artifact tools require conversation context".to_string())
+}
+
+fn build_capture_artifact_screenshot_result(
+    response: &crate::artifacts::workspace::CaptureArtifactScreenshotResponse,
+) -> serde_json::Value {
+    let summary = format!(
+        "Captured artifact screenshot for {} at {}x{}.",
+        response.entry_file, response.width, response.height
+    );
+    let structured = serde_json::json!({
+        "artifact_key": response.artifact_key,
+        "entry_file": response.entry_file,
+        "language": response.language,
+        "preview_type": response.preview_type,
+        "output_mode": response.output_mode,
+        "width": response.width,
+        "height": response.height,
+        "mime_type": response.mime_type,
+        "path": response.path,
+    });
+
+    if let Some(base64) = response.base64.as_deref() {
+        serde_json::json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": summary,
+                },
+                {
+                    "type": "image",
+                    "mimeType": response.mime_type,
+                    "data": base64,
+                }
+            ],
+            "structuredContent": structured,
+            "isError": false
+        })
+    } else if let Some(path) = response.path.as_deref() {
+        serde_json::json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": format!("{}\nScreenshot saved to {}.", summary, path),
+                },
+                {
+                    "type": "resource_link",
+                    "uri": format!("file://{}", path),
+                    "name": response.entry_file,
+                    "mimeType": response.mime_type,
+                }
+            ],
+            "structuredContent": structured,
+            "isError": false
+        })
+    } else {
+        serde_json::json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": summary,
+                }
+            ],
+            "structuredContent": structured,
+            "isError": false
+        })
+    }
 }
 
 fn execute_dynamic_mcp_tool(
@@ -1228,7 +1323,8 @@ pub async fn execute_aipp_builtin_tool(
         }
         "artifact" => {
             use crate::artifacts::workspace::{
-                get_artifact_workspace, show_artifact, ShowArtifactRequest,
+                capture_artifact_screenshot, get_artifact_workspace, show_artifact,
+                CaptureArtifactScreenshotRequest, ShowArtifactRequest,
             };
 
             match tool_name.as_str() {
@@ -1296,6 +1392,55 @@ pub async fn execute_aipp_builtin_tool(
                         }
                     }
                 }
+                "capture_artifact_screenshot" => {
+                    let resolved_conversation_id = resolve_artifact_tool_conversation_id(
+                        tool_name.as_str(),
+                        &args,
+                        conversation_id,
+                    )?;
+                    let artifact_key = args
+                        .get("artifact_key")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing required parameter: artifact_key".to_string())?;
+                    let entry_file = args
+                        .get("entry_file")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing required parameter: entry_file".to_string())?;
+                    let request = CaptureArtifactScreenshotRequest {
+                        conversation_id: resolved_conversation_id,
+                        artifact_key: artifact_key.to_string(),
+                        entry_file: entry_file.to_string(),
+                        language: args
+                            .get("language")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                        preview_type: args
+                            .get("preview_type")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                        output_mode: args
+                            .get("output_mode")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                        selector: args
+                            .get("selector")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string()),
+                        width: args.get("width").and_then(|v| v.as_u64()).map(|v| v as u32),
+                        height: args.get("height").and_then(|v| v.as_u64()).map(|v| v as u32),
+                        delay_ms: args.get("delay_ms").and_then(|v| v.as_u64()),
+                    };
+                    match capture_artifact_screenshot(&app_handle, request).await {
+                        Ok(response) => build_capture_artifact_screenshot_result(&response),
+                        Err(e) => {
+                            error!(error = %e, "capture_artifact_screenshot tool execution failed");
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": e}],
+                                "isError": true
+                            })
+                        }
+                    }
+                }
                 _ => serde_json::json!({
                     "content": [{"type": "text", "text": format!("Unknown artifact tool: {}", tool_name)}],
                     "isError": true
@@ -1355,6 +1500,32 @@ pub async fn execute_aipp_builtin_tool(
                     }
                 }
             }
+            "preview_code" => {
+                use interaction::{request_preview_code, PreviewCodeRequest};
+
+                let request: PreviewCodeRequest = serde_json::from_value(args.clone())
+                    .map_err(|e| format!("Invalid PreviewCode parameters: {}", e))?;
+
+                let state = app_handle
+                    .try_state::<InteractionState>()
+                    .ok_or_else(|| "InteractionState not found".to_string())?;
+
+                match request_preview_code(&app_handle, state.inner(), conversation_id, request)
+                    .await
+                {
+                    Ok(result) => serde_json::json!({
+                        "content": [{"type": "json", "json": result}],
+                        "isError": false
+                    }),
+                    Err(e) => {
+                        error!(error = %e, "PreviewCode tool execution failed");
+                        serde_json::json!({
+                            "content": [{"type": "text", "text": e}],
+                            "isError": true
+                        })
+                    }
+                }
+            }
             _ => serde_json::json!({
                 "content": [{"type": "text", "text": format!("Unknown ui_interaction tool: {}", tool_name)}],
                 "isError": true
@@ -1367,7 +1538,24 @@ pub async fn execute_aipp_builtin_tool(
                 spawn_butler_task_watcher, spawn_butler_task_with_window, SpawnButlerTaskRequest,
             };
             use crate::api::operation_api::{confirm_acp_permission, confirm_operation_permission};
+            use crate::mcp::builtin_mcp::templates::{
+                is_butler_conversation_kind, is_butler_only_agent_tool,
+            };
             use agent::types::*;
+
+            // Runtime guard: butler-only agent tools require butler conversation
+            if is_butler_only_agent_tool(&tool_name) {
+                let is_butler_conv = conversation_id
+                    .and_then(|cid| get_conversation_kind(&app_handle, cid))
+                    .map(|kind| is_butler_conversation_kind(&kind))
+                    .unwrap_or(false);
+                if !is_butler_conv {
+                    return Ok(serde_json::to_string(&serde_json::json!({
+                        "content": [{"type": "text", "text": format!("Tool '{}' is only available in Butler conversations", tool_name)}],
+                        "isError": true
+                    })).unwrap());
+                }
+            }
 
             let handler = AgentHandler::new(app_handle.clone());
 
@@ -1546,6 +1734,14 @@ pub async fn execute_aipp_builtin_tool(
                             .get("notification_policy")
                             .and_then(|v| v.as_str())
                             .map(|v| v.to_string()),
+                        temporary_trusted_paths: argument_string_array(
+                            &args,
+                            "temporary_trusted_paths",
+                        )?,
+                        temporary_skill_identifiers: argument_string_array(
+                            &args,
+                            "temporary_skill_identifiers",
+                        )?,
                     };
 
                     let window = resolve_butler_spawn_window(&app_handle)?;
@@ -1942,13 +2138,386 @@ pub async fn execute_aipp_builtin_tool(
                         }),
                     }
                 }
+                "schedule_task" => {
+                    use crate::api::scheduled_task_api::{
+                        create_scheduled_task, delete_scheduled_task, list_scheduled_tasks,
+                        CreateScheduledTaskRequest, UpdateScheduledTaskRequest,
+                    };
+                    use crate::db::assistant_db::AssistantDatabase;
+                    use crate::db::scheduled_task_db::ScheduledTaskDatabase;
+
+                    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+                    let butler_cid = args
+                        .get("butler_conversation_id")
+                        .and_then(|v| v.as_i64())
+                        .or(conversation_id);
+
+                    match action {
+                        "create" => {
+                            let name =
+                                args.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            if name.is_empty() {
+                                return Ok(r#"{"content":[{"type":"text","text":"缺少必要参数 name"}],"isError":true}"#.to_string());
+                            }
+                            let schedule_type = args
+                                .get("schedule_type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("interval")
+                                .to_string();
+                            let task_prompt = args
+                                .get("task_prompt")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if task_prompt.is_empty() {
+                                return Ok(r#"{"content":[{"type":"text","text":"缺少必要参数 task_prompt"}],"isError":true}"#.to_string());
+                            }
+
+                            // Resolve assistant_id from assistant_name if needed
+                            let mut assistant_id =
+                                args.get("assistant_id").and_then(|v| v.as_i64()).unwrap_or(0);
+                            if assistant_id == 0 {
+                                if let Some(name_str) =
+                                    args.get("assistant_name").and_then(|v| v.as_str())
+                                {
+                                    if let Ok(db) = AssistantDatabase::new(&app_handle) {
+                                        if let Ok(assistants) = db.get_assistants() {
+                                            if let Some(found) =
+                                                assistants.iter().find(|a| a.name == name_str)
+                                            {
+                                                assistant_id = found.id;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if assistant_id == 0 {
+                                return Ok(r#"{"content":[{"type":"text","text":"无法确定执行助手，请提供 assistant_id 或有效的 assistant_name"}],"isError":true}"#.to_string());
+                            }
+
+                            let notify_prompt = args
+                                .get("notify_prompt")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("如果任务结果包含重要信息或需要用户关注的内容则通知")
+                                .to_string();
+
+                            let request = CreateScheduledTaskRequest {
+                                name,
+                                is_enabled: true,
+                                schedule_type,
+                                interval_value: args.get("interval_value").and_then(|v| v.as_i64()),
+                                interval_unit: args
+                                    .get("interval_unit")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
+                                start_time: args
+                                    .get("start_time")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
+                                week_days: args.get("week_days").and_then(|v| v.as_array()).map(
+                                    |arr| {
+                                        arr.iter()
+                                            .filter_map(|v| v.as_i64().map(|n| n as i32))
+                                            .collect()
+                                    },
+                                ),
+                                month_days: args.get("month_days").and_then(|v| v.as_array()).map(
+                                    |arr| {
+                                        arr.iter()
+                                            .filter_map(|v| v.as_i64().map(|n| n as i32))
+                                            .collect()
+                                    },
+                                ),
+                                run_at: args
+                                    .get("run_at")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
+                                assistant_id,
+                                task_prompt,
+                                notify_prompt,
+                                butler_conversation_id: butler_cid,
+                            };
+
+                            match create_scheduled_task(app_handle.clone(), request).await {
+                                Ok(dto) => serde_json::json!({
+                                    "content": [{"type": "json", "json": dto}],
+                                    "isError": false
+                                }),
+                                Err(e) => serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("创建定时任务失败: {}", e)}],
+                                    "isError": true
+                                }),
+                            }
+                        }
+                        "list" => {
+                            if let Some(bcid) = butler_cid {
+                                match crate::api::scheduled_task_api::list_butler_scheduled_tasks(
+                                    app_handle.clone(),
+                                    bcid,
+                                )
+                                .await
+                                {
+                                    Ok(tasks) => serde_json::json!({
+                                        "content": [{"type": "json", "json": tasks}],
+                                        "isError": false
+                                    }),
+                                    Err(e) => serde_json::json!({
+                                        "content": [{"type": "text", "text": format!("列出定时任务失败: {}", e)}],
+                                        "isError": true
+                                    }),
+                                }
+                            } else {
+                                match list_scheduled_tasks(app_handle.clone()).await {
+                                    Ok(tasks) => serde_json::json!({
+                                        "content": [{"type": "json", "json": tasks}],
+                                        "isError": false
+                                    }),
+                                    Err(e) => serde_json::json!({
+                                        "content": [{"type": "text", "text": format!("列出定时任务失败: {}", e)}],
+                                        "isError": true
+                                    }),
+                                }
+                            }
+                        }
+                        "get" => {
+                            let task_id = match args.get("task_id").and_then(|v| v.as_i64()) {
+                                Some(id) => id,
+                                None => return Ok(r#"{"content":[{"type":"text","text":"缺少必要参数 task_id"}],"isError":true}"#.to_string()),
+                            };
+                            let db = ScheduledTaskDatabase::new(&app_handle)
+                                .map_err(|e| e.to_string())?;
+                            match db.read_task(task_id) {
+                                Ok(Some(task)) => {
+                                    let runs = db.list_runs_by_task(task_id, 5).unwrap_or_default();
+                                    let dto = crate::api::scheduled_task_api::to_dto(task);
+                                    serde_json::json!({
+                                        "content": [{"type": "json", "json": {
+                                            "task": dto,
+                                            "recent_runs": runs
+                                        }}],
+                                        "isError": false
+                                    })
+                                }
+                                Ok(None) => serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("定时任务 {} 不存在", task_id)}],
+                                    "isError": true
+                                }),
+                                Err(e) => serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("查询失败: {}", e)}],
+                                    "isError": true
+                                }),
+                            }
+                        }
+                        "update" => {
+                            let task_id = match args.get("task_id").and_then(|v| v.as_i64()) {
+                                Some(id) => id,
+                                None => return Ok(r#"{"content":[{"type":"text","text":"缺少必要参数 task_id"}],"isError":true}"#.to_string()),
+                            };
+                            let db = ScheduledTaskDatabase::new(&app_handle)
+                                .map_err(|e| e.to_string())?;
+                            let existing = match db.read_task(task_id) {
+                                Ok(Some(t)) => t,
+                                Ok(None) => {
+                                    return Ok(format!(
+                                        r#"{{"content":[{{"type":"text","text":"定时任务 {} 不存在"}}],"isError":true}}"#,
+                                        task_id
+                                    ))
+                                }
+                                Err(e) => {
+                                    return Ok(format!(
+                                        r#"{{"content":[{{"type":"text","text":"查询失败: {}"}}],"isError":true}}"#,
+                                        e
+                                    ))
+                                }
+                            };
+
+                            let mut new_assistant_id = args
+                                .get("assistant_id")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(existing.assistant_id);
+                            if let Some(name_str) =
+                                args.get("assistant_name").and_then(|v| v.as_str())
+                            {
+                                if let Ok(adb) = AssistantDatabase::new(&app_handle) {
+                                    if let Ok(assistants) = adb.get_assistants() {
+                                        if let Some(found) =
+                                            assistants.iter().find(|a| a.name == name_str)
+                                        {
+                                            new_assistant_id = found.id;
+                                        }
+                                    }
+                                }
+                            }
+
+                            let request = UpdateScheduledTaskRequest {
+                                id: task_id,
+                                name: args
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&existing.name)
+                                    .to_string(),
+                                is_enabled: existing.is_enabled,
+                                schedule_type: args
+                                    .get("schedule_type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&existing.schedule_type)
+                                    .to_string(),
+                                interval_value: args
+                                    .get("interval_value")
+                                    .and_then(|v| v.as_i64())
+                                    .or(existing.interval_value),
+                                interval_unit: args
+                                    .get("interval_unit")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                                    .or(existing.interval_unit),
+                                start_time: args
+                                    .get("start_time")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                                    .or(existing.start_time),
+                                week_days: args
+                                    .get("week_days")
+                                    .and_then(|v| v.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|v| v.as_i64().map(|n| n as i32))
+                                            .collect()
+                                    })
+                                    .or_else(|| {
+                                        crate::api::scheduled_task_api::parse_json_array(
+                                            &existing.week_days,
+                                        )
+                                    }),
+                                month_days: args
+                                    .get("month_days")
+                                    .and_then(|v| v.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|v| v.as_i64().map(|n| n as i32))
+                                            .collect()
+                                    })
+                                    .or_else(|| {
+                                        crate::api::scheduled_task_api::parse_json_array(
+                                            &existing.month_days,
+                                        )
+                                    }),
+                                run_at: args
+                                    .get("run_at")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                                    .or_else(|| existing.run_at.map(|dt| dt.to_rfc3339())),
+                                assistant_id: new_assistant_id,
+                                task_prompt: args
+                                    .get("task_prompt")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&existing.task_prompt)
+                                    .to_string(),
+                                notify_prompt: args
+                                    .get("notify_prompt")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&existing.notify_prompt)
+                                    .to_string(),
+                            };
+
+                            match crate::api::scheduled_task_api::update_scheduled_task(
+                                app_handle.clone(),
+                                request,
+                            )
+                            .await
+                            {
+                                Ok(dto) => serde_json::json!({
+                                    "content": [{"type": "json", "json": dto}],
+                                    "isError": false
+                                }),
+                                Err(e) => serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("更新定时任务失败: {}", e)}],
+                                    "isError": true
+                                }),
+                            }
+                        }
+                        "delete" => {
+                            let task_id = match args.get("task_id").and_then(|v| v.as_i64()) {
+                                Some(id) => id,
+                                None => return Ok(r#"{"content":[{"type":"text","text":"缺少必要参数 task_id"}],"isError":true}"#.to_string()),
+                            };
+                            match delete_scheduled_task(app_handle.clone(), task_id).await {
+                                Ok(()) => serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("定时任务 {} 已删除", task_id)}],
+                                    "isError": false
+                                }),
+                                Err(e) => serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("删除定时任务失败: {}", e)}],
+                                    "isError": true
+                                }),
+                            }
+                        }
+                        "enable" | "disable" => {
+                            let task_id = match args.get("task_id").and_then(|v| v.as_i64()) {
+                                Some(id) => id,
+                                None => return Ok(r#"{"content":[{"type":"text","text":"缺少必要参数 task_id"}],"isError":true}"#.to_string()),
+                            };
+                            let db = ScheduledTaskDatabase::new(&app_handle)
+                                .map_err(|e| e.to_string())?;
+                            match db.read_task(task_id) {
+                                Ok(Some(mut task)) => {
+                                    task.is_enabled = action == "enable";
+                                    task.updated_time = chrono::Utc::now();
+                                    match db.update_task(&task) {
+                                        Ok(()) => {
+                                            let state_str = if action == "enable" {
+                                                "已启用"
+                                            } else {
+                                                "已禁用"
+                                            };
+                                            serde_json::json!({
+                                                "content": [{"type": "text", "text": format!("定时任务 {} {}", task_id, state_str)}],
+                                                "isError": false
+                                            })
+                                        }
+                                        Err(e) => serde_json::json!({
+                                            "content": [{"type": "text", "text": format!("操作失败: {}", e)}],
+                                            "isError": true
+                                        }),
+                                    }
+                                }
+                                Ok(None) => serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("定时任务 {} 不存在", task_id)}],
+                                    "isError": true
+                                }),
+                                Err(e) => serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("查询失败: {}", e)}],
+                                    "isError": true
+                                }),
+                            }
+                        }
+                        _ => serde_json::json!({
+                            "content": [{"type": "text", "text": format!("Unknown schedule_task action: {}", action)}],
+                            "isError": true
+                        }),
+                    }
+                }
                 _ => serde_json::json!({
                     "content": [{"type": "text", "text": format!("Unknown agent tool: {}", tool_name)}],
                     "isError": true
                 }),
             }
         }
-        "superadmin" => superadmin::dispatch(&app_handle, &tool_name, &args, conversation_id).await,
+        "superadmin" => {
+            // Runtime guard: superadmin tools require butler conversation
+            let is_butler_conv = conversation_id
+                .and_then(|cid| get_conversation_kind(&app_handle, cid))
+                .map(|kind| templates::is_butler_conversation_kind(&kind))
+                .unwrap_or(false);
+            if !is_butler_conv {
+                serde_json::json!({
+                    "content": [{"type": "text", "text": format!("Tool '{}' is only available in Butler conversations", tool_name)}],
+                    "isError": true
+                })
+            } else {
+                superadmin::dispatch(&app_handle, &tool_name, &args, conversation_id).await
+            }
+        }
         _ => serde_json::json!({
             "content": [{"type": "text", "text": format!("Unknown builtin command: {}", cmd_id)}],
             "isError": true
@@ -2062,6 +2631,69 @@ mod tests {
             .expect("show_artifact should resolve string conversation ids");
 
         assert_eq!(resolved, 999);
+    }
+
+    #[test]
+    fn capture_artifact_screenshot_accepts_string_conversation_override() {
+        let args = serde_json::json!({ "conversation_id": "999" });
+        let resolved =
+            resolve_artifact_tool_conversation_id("capture_artifact_screenshot", &args, Some(123))
+                .expect("capture_artifact_screenshot should resolve string conversation ids");
+
+        assert_eq!(resolved, 999);
+    }
+
+    #[test]
+    fn capture_artifact_screenshot_result_uses_mcp_image_content() {
+        let response = crate::artifacts::workspace::CaptureArtifactScreenshotResponse {
+            artifact_key: "demo/card".to_string(),
+            entry_file: "src/App.tsx".to_string(),
+            language: "tsx".to_string(),
+            preview_type: "react".to_string(),
+            output_mode: "base64".to_string(),
+            width: 800,
+            height: 600,
+            mime_type: "image/png".to_string(),
+            base64: Some("iVBORw0KGgoAAAANSUhEUgAA".to_string()),
+            path: None,
+        };
+
+        let result = build_capture_artifact_screenshot_result(&response);
+
+        assert_eq!(result["isError"], false);
+        assert_eq!(result["content"][0]["type"], "text");
+        assert_eq!(result["content"][1]["type"], "image");
+        assert_eq!(result["content"][1]["mimeType"], "image/png");
+        assert_eq!(result["content"][1]["data"], "iVBORw0KGgoAAAANSUhEUgAA");
+        assert_eq!(result["structuredContent"]["artifact_key"], "demo/card");
+        assert_eq!(result["structuredContent"]["entry_file"], "src/App.tsx");
+        assert_eq!(result["structuredContent"]["output_mode"], "base64");
+        assert_eq!(result["structuredContent"]["width"], 800);
+        assert_eq!(result["structuredContent"]["height"], 600);
+    }
+
+    #[test]
+    fn capture_artifact_screenshot_result_can_return_path_resource() {
+        let response = crate::artifacts::workspace::CaptureArtifactScreenshotResponse {
+            artifact_key: "demo/card".to_string(),
+            entry_file: "src/App.tsx".to_string(),
+            language: "tsx".to_string(),
+            preview_type: "react".to_string(),
+            output_mode: "path".to_string(),
+            width: 800,
+            height: 600,
+            mime_type: "image/png".to_string(),
+            base64: None,
+            path: Some("/tmp/aipp/artifact-shot.png".to_string()),
+        };
+
+        let result = build_capture_artifact_screenshot_result(&response);
+
+        assert_eq!(result["isError"], false);
+        assert_eq!(result["content"][1]["type"], "resource_link");
+        assert_eq!(result["content"][1]["uri"], "file:///tmp/aipp/artifact-shot.png");
+        assert_eq!(result["structuredContent"]["output_mode"], "path");
+        assert_eq!(result["structuredContent"]["path"], "/tmp/aipp/artifact-shot.png");
     }
 
     #[test]

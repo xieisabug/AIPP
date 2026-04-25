@@ -1,6 +1,7 @@
 import React, { useCallback, useState } from 'react';
 import ReactMarkdown, { Components } from 'react-markdown';
 import McpToolCall from '@/components/McpToolCall';
+import InlineCodePreviewCard from '@/components/InlineCodePreviewCard';
 import { MCPToolCallUpdateEvent } from '@/data/Conversation';
 import { customUrlTransform } from '@/constants/markdown';
 import { Button } from '@/components/ui/button';
@@ -8,6 +9,7 @@ import { Send, Loader2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import type { InlineInteractionItem } from '@/components/ConversationUI';
 import { getErrorMessage } from '@/utils/error';
+import { parsePreviewCodeStreamingState, type PreviewCodeStreamingState } from '@/utils/previewCode';
 
 interface McpProcessorOptions {
     remarkPlugins: readonly any[];
@@ -18,6 +20,7 @@ interface McpProcessorOptions {
 interface ProcessorContext {
     conversationId?: number;
     messageId?: number;
+    isLastMessage?: boolean;
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>;
     shiningMcpCallId?: number | null;
     inlineInteractionItems?: InlineInteractionItem[];
@@ -32,6 +35,7 @@ interface ToolCallData {
     llm_call_id?: string;
     isStreaming?: boolean;  // 流式工具调用（参数可能不完整）
     fn_arguments?: string;  // 流式工具调用的原始参数
+    preview_state?: PreviewCodeStreamingState;
 }
 
 interface ParsedMcpToolCallComment {
@@ -78,6 +82,7 @@ function normalizeToolCallData(raw: unknown): ToolCallData {
         call_id: callId,
         llm_call_id: typeof llmCallIdRaw === "string" ? llmCallIdRaw : undefined,
         fn_arguments: typeof value.fn_arguments === "string" ? value.fn_arguments : undefined,
+        preview_state: parsePreviewCodeStreamingState(value.preview_state) ?? undefined,
     };
 }
 
@@ -322,11 +327,14 @@ function extractMcpToolCallXmlTags(content: string): ParsedMcpToolCallComment[] 
         const closeStart = content.indexOf(closeTag, openTagEnd + 1);
         if (closeStart === -1) {
             const rawPayload = content.slice(openTagEnd + 1);
+            const data = parsePartialXmlToolCallPayload(rawPayload);
+            // Incomplete XML tag → the model is still generating this tool call
+            data.isStreaming = true;
             tags.push({
                 start,
                 end: content.length,
                 complete: false,
-                data: parsePartialXmlToolCallPayload(rawPayload),
+                data,
             });
             break;
         }
@@ -357,17 +365,55 @@ function extractMcpToolCalls(content: string): ParsedMcpToolCallComment[] {
 
     const deduped: ParsedMcpToolCallComment[] = [];
     let lastEnd = -1;
+    let sealed = false;
     for (const item of merged) {
         if (item.start < lastEnd) {
+            // This item is shadowed by the previous one's range.
+            // When an incomplete XML tag shadows a streaming HTML comment,
+            // merge the richer streaming data (preview_state, llm_call_id, etc.)
+            // into the XML entry so the component receives streaming context.
+            if (
+                deduped.length > 0
+                && !deduped[deduped.length - 1].complete
+                && item.data.isStreaming
+            ) {
+                const prev = deduped[deduped.length - 1].data;
+                prev.isStreaming = true;
+                if (item.data.preview_state && !prev.preview_state) {
+                    prev.preview_state = item.data.preview_state;
+                }
+                if (item.data.fn_arguments && !prev.fn_arguments) {
+                    prev.fn_arguments = item.data.fn_arguments;
+                }
+                if (item.data.llm_call_id && !prev.llm_call_id) {
+                    prev.llm_call_id = item.data.llm_call_id;
+                }
+            }
             continue;
+        }
+        if (sealed) {
+            break;
         }
         deduped.push(item);
         lastEnd = item.end;
         if (!item.complete) {
-            break;
+            // Don't break — continue iterating so shadowed streaming comments
+            // within the incomplete range can still merge their data.
+            sealed = true;
         }
     }
     return deduped;
+}
+
+function getPreviewCodeToolCallKey(
+    data: ToolCallData,
+    messageId: number | undefined,
+    index: number,
+): string {
+    if (data.llm_call_id) {
+        return `mcp-preview-${data.llm_call_id}`;
+    }
+    return `mcp-preview-slot-${messageId ?? "message"}-${index}-${data.server_name ?? "server"}-${data.tool_name ?? "tool"}`;
 }
 
 const McpToolCallResultsButton: React.FC<{
@@ -453,6 +499,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         messageId,
         mcpToolCallStates,
         shiningMcpCallId,
+        isLastMessage,
         inlineInteractionItems,
         sentBatchToolResultMessageIds,
     } = context || {};
@@ -533,22 +580,45 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             // 添加 MCP 工具调用组件
             // 只有最后一个工具调用在执行成功后才触发续写
             const isLastCall = index === mcpCalls.length - 1;
-            parts.push(
-                <McpToolCall
-                    key={`mcp-${data.llm_call_id ?? data.call_id ?? (data.isStreaming ? `streaming-${index}` : `tmp-${index}-${match.start}`)}`}
-                    serverName={data.server_name}
-                    toolName={data.tool_name}
-                    parameters={data.parameters ?? "{}"}
-                    llmCallId={data.llm_call_id}
-                    conversationId={conversationId}
-                    messageId={messageId}
-                    callId={data.call_id} // 传递 callId，如果存在的话
-                    mcpToolCallStates={mcpToolCallStates} // 传递全局 MCP 状态
-                    shiningMcpCallId={shiningMcpCallId}
-                    isLastCall={isLastCall} // 是否是最后一个工具调用
-                    isStreaming={data.isStreaming} // 流式工具调用标记
-                />
-            );
+            if (data.tool_name === "preview_code") {
+                const toolCallKey = getPreviewCodeToolCallKey(data, messageId, index);
+                parts.push(
+                    <InlineCodePreviewCard
+                        key={toolCallKey}
+                        parameters={data.parameters ?? "{}"}
+                        llmCallId={data.llm_call_id}
+                        conversationId={conversationId}
+                        messageId={messageId}
+                        callId={data.call_id}
+                        mcpToolCallStates={mcpToolCallStates}
+                        isStreaming={data.isStreaming}
+                        streamingPreviewState={data.preview_state}
+                        isLastMessage={isLastMessage}
+                    />
+                );
+            } else {
+                const toolCallKey = data.call_id
+                    ? `mcp-call-${data.call_id}`
+                    : data.isStreaming
+                      ? `mcp-stream-${messageId ?? "message"}-${index}-${data.server_name}-${data.tool_name}`
+                      : `mcp-${data.llm_call_id ?? `tmp-${index}-${match.start}`}`;
+                parts.push(
+                    <McpToolCall
+                        key={toolCallKey}
+                        serverName={data.server_name}
+                        toolName={data.tool_name}
+                        parameters={data.parameters ?? "{}"}
+                        llmCallId={data.llm_call_id}
+                        conversationId={conversationId}
+                        messageId={messageId}
+                        callId={data.call_id} // 传递 callId，如果存在的话
+                        mcpToolCallStates={mcpToolCallStates} // 传递全局 MCP 状态
+                        shiningMcpCallId={shiningMcpCallId}
+                        isLastCall={isLastCall} // 是否是最后一个工具调用
+                        isStreaming={data.isStreaming} // 流式工具调用标记
+                    />
+                );
+            }
 
             if (data.call_id && inlineInteractionItems && inlineInteractionItems.length > 0) {
                 const matchedInlineItems = inlineInteractionItems.filter(

@@ -80,6 +80,7 @@ function ConfigWindow() {
     ];
 
     const [selectedMenu, setSelectedMenu] = useState<string>("llm-provider-config");
+    const [subNav, setSubNav] = useState<string | undefined>(undefined);
     const [pluginList, setPluginList] = useState<any[]>([]);
 
     // 监听窗口隐藏事件，重置状态准备下次打开
@@ -93,6 +94,21 @@ function ConfigWindow() {
 
         return () => {
             unlistenHidden.then((unlistenFn) => unlistenFn());
+        };
+    }, []);
+
+    // 监听窗口内导航事件（供子组件跨层级触发导航）
+    useEffect(() => {
+        const unlistenNav = listen<{ menu: string; subNav?: string }>("config-navigate-to", (event) => {
+            const { menu, subNav: sub } = event.payload;
+            if (contentMap[menu]) {
+                setSubNav(sub);
+                setSelectedMenu(menu);
+            }
+        });
+
+        return () => {
+            unlistenNav.then((fn) => fn());
         };
     }, []);
 
@@ -236,6 +252,8 @@ function ConfigWindow() {
                     <SelectedComponent
                         pluginList={stablePluginList}
                         navigateTo={navigateTo}
+                        subNav={subNav}
+                        onSubNavConsumed={() => setSubNav(undefined)}
                     />
                 </div>
             </div>
@@ -261,7 +279,7 @@ function ConfigWindow() {
                 {/* 内容区域 */}
                 <div className="bg-card px-4 md:px-6 lg:px-8 py-6 overflow-y-auto max-h-screen" data-aipp-slot="config-content">
                     {/* 配置组件内容 */}
-                    <SelectedComponent pluginList={stablePluginList} navigateTo={navigateTo} />
+                    <SelectedComponent pluginList={stablePluginList} navigateTo={navigateTo} subNav={subNav} onSubNavConsumed={() => setSubNav(undefined)} />
                 </div>
             </div>
         </div>

@@ -566,3 +566,44 @@ fn test_ensure_conversation_table_migrates_legacy_schema_without_non_constant_de
     assert_eq!(conversation_kind, "normal");
     assert_eq!(is_hidden, 0);
 }
+
+#[test]
+fn test_ensure_conversation_table_rewrites_butler_main_archive_kind() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute(
+        "CREATE TABLE conversation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            assistant_id INTEGER,
+            created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            conversation_kind TEXT NOT NULL DEFAULT 'normal'
+        )",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO conversation (name, assistant_id, created_time, updated_time, conversation_kind)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        (
+            "Archived Butler Main",
+            Option::<i64>::None,
+            "2026-04-11T00:00:00Z",
+            "2026-04-11T00:10:00Z",
+            "butler_main_archive",
+        ),
+    )
+    .unwrap();
+
+    ensure_conversation_table(&conn).unwrap();
+
+    let conversation_kind: String = conn
+        .query_row(
+            "SELECT conversation_kind FROM conversation WHERE name = ?1",
+            ["Archived Butler Main"],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(conversation_kind, "butler_main");
+}

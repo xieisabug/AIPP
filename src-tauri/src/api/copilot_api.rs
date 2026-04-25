@@ -7,6 +7,8 @@ use tauri::{AppHandle, Manager};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
 
+const OAUTH_POLLING_SAFETY_MARGIN_MILLIS: u64 = 3_000;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CopilotDeviceFlowStartResponse {
     pub device_code: String,
@@ -37,6 +39,7 @@ struct GitHubTokenResponse {
 struct GitHubTokenError {
     error: String,
     error_description: Option<String>,
+    interval: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -119,15 +122,18 @@ pub async fn start_github_copilot_device_flow(
         "[Copilot] Device code obtained successfully"
     );
 
-    // 2. 自动打开浏览器
+    // 2. 自动打开浏览器（在阻塞线程中执行，避免阻塞 Tokio 运行时）
     let verification_url = device_response.verification_uri.clone();
     info!(url = %verification_url, "[Copilot] Opening browser for user authorization...");
 
-    if let Err(e) = open::that(&verification_url) {
-        warn!(error = ?e, "[Copilot] Failed to open browser automatically, user needs to open manually");
-    } else {
-        info!("[Copilot] Browser opened successfully");
-    }
+    let url_clone = verification_url.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = open::that(&url_clone) {
+            warn!(error = ?e, "[Copilot] Failed to open browser automatically, user needs to open manually");
+        } else {
+            info!("[Copilot] Browser opened successfully");
+        }
+    });
 
     let resp = CopilotDeviceFlowStartResponse {
         device_code: device_response.device_code,
@@ -181,6 +187,7 @@ pub async fn poll_github_copilot_token(
     // 最多轮询 15 分钟 (900秒 / interval)
     let max_attempts = 900 / interval.max(5);
     let mut attempt = 0;
+    let mut poll_interval_secs = interval.max(5) as u64;
 
     loop {
         attempt += 1;
@@ -192,8 +199,11 @@ pub async fn poll_github_copilot_token(
 
         debug!(attempt, max_attempts, "[Copilot] Polling for access token...");
 
-        // 等待指定的间隔时间
-        sleep(Duration::from_secs(interval as u64)).await;
+        // 等待指定的间隔时间，并留少量安全余量避免因本地计时误差过早轮询。
+        sleep(Duration::from_millis(
+            poll_interval_secs.saturating_mul(1_000) + OAUTH_POLLING_SAFETY_MARGIN_MILLIS,
+        ))
+        .await;
 
         // 请求 access token
         let response = client
@@ -265,9 +275,14 @@ pub async fn poll_github_copilot_token(
                     continue;
                 }
                 "slow_down" => {
-                    warn!(attempt, "[Copilot] Rate limited, slowing down polling");
-                    // GitHub 要求减慢轮询速度，增加等待时间
-                    sleep(Duration::from_secs(5)).await;
+                    let server_interval =
+                        error_response.interval.unwrap_or((poll_interval_secs + 5) as i64);
+                    poll_interval_secs =
+                        server_interval.max((poll_interval_secs + 5) as i64).max(5) as u64;
+                    warn!(
+                        attempt,
+                        poll_interval_secs, "[Copilot] Rate limited, slowing down polling"
+                    );
                     continue;
                 }
                 "expired_token" => {

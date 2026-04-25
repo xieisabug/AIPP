@@ -1,3 +1,4 @@
+use crate::api::butler_api::build_butler_workspace_config;
 use crate::api::operation_api::{
     emit_permission_request_event, OPERATION_PERMISSION_REQUEST_EVENT,
 };
@@ -126,6 +127,50 @@ impl PermissionManager {
         operation_state.is_path_trusted_for_conversation(conversation_id, path).await
     }
 
+    fn is_path_in_butler_task_temporary_trusted_paths(
+        &self,
+        conversation_id: i64,
+        path: &str,
+    ) -> bool {
+        let conversation_db = match ConversationDatabase::new(&self.app_handle) {
+            Ok(db) => db,
+            Err(error) => {
+                warn!(error = %error, "Failed to open conversation database");
+                return false;
+            }
+        };
+        let butler_repo = match conversation_db.butler_repo() {
+            Ok(repo) => repo,
+            Err(error) => {
+                warn!(error = %error, "Failed to open butler repository");
+                return false;
+            }
+        };
+        let definition = match butler_repo.get_task_definition_by_task_conversation_id(conversation_id) {
+            Ok(definition) => definition,
+            Err(error) => {
+                warn!(error = %error, conversation_id, "Failed to load butler task definition");
+                return false;
+            }
+        };
+        let Some(definition) = definition else {
+            return false;
+        };
+        if definition.temporary_trusted_paths.is_empty() {
+            return false;
+        }
+
+        let matched = Self::is_path_in_trusted_dirs(path, &definition.temporary_trusted_paths);
+        if matched {
+            debug!(
+                conversation_id,
+                path = %path,
+                "Path auto-allowed for butler task temporary trusted paths"
+            );
+        }
+        matched
+    }
+
     /// Check if path is in assistant workspace
     fn is_path_in_assistant_workspace(&self, assistant_id: i64, path: &str) -> bool {
         let assistant_db = match AssistantDatabase::new(&self.app_handle) {
@@ -225,19 +270,32 @@ impl PermissionManager {
         }
 
         // 检查可信工作区列表
-        let trusted_paths_raw = match experimental.get("butler_trusted_workspaces") {
-            Some(cfg) => cfg.value.clone(),
-            None => return false,
-        };
+        let trusted_paths_raw = experimental
+            .get("butler_trusted_workspaces")
+            .map(|cfg| cfg.value.clone())
+            .unwrap_or_default();
+        let main_workspace_path =
+            experimental.get("butler_main_workspace_path").map(|cfg| cfg.value.clone());
+        let main_workspace_description =
+            experimental.get("butler_main_workspace_description").map(|cfg| cfg.value.clone());
         drop(config_map);
 
-        Self::is_path_in_trusted_dirs(path, &trusted_paths_raw)
+        let workspace_config = build_butler_workspace_config(
+            main_workspace_path.as_deref(),
+            main_workspace_description.as_deref(),
+            &trusted_paths_raw,
+        );
+        let trusted_paths = workspace_config
+            .all_trusted_workspaces
+            .iter()
+            .map(|workspace| workspace.path.clone())
+            .collect::<Vec<_>>();
+
+        Self::is_path_in_trusted_dirs(path, &trusted_paths)
     }
 
     /// Pure path matching: check if `path` is under any trusted dir.
-    /// Supports JSON array `[{"path":"...","description":"..."}]` and legacy newline-separated paths.
-    fn is_path_in_trusted_dirs(path: &str, trusted_paths_raw: &str) -> bool {
-        let trusted_dirs = Self::extract_trusted_paths(trusted_paths_raw);
+    fn is_path_in_trusted_dirs(path: &str, trusted_dirs: &[String]) -> bool {
         if trusted_dirs.is_empty() {
             return false;
         }
@@ -253,7 +311,7 @@ impl PermissionManager {
             None => return false,
         };
 
-        for dir in &trusted_dirs {
+        for dir in trusted_dirs {
             let trusted = Path::new(dir.as_str());
             let trusted_normalized = if trusted.is_relative() {
                 trusted.canonicalize().ok()
@@ -273,36 +331,6 @@ impl PermissionManager {
         }
 
         false
-    }
-
-    /// Extract path strings from trusted workspaces config value.
-    /// Supports JSON array `[{"path":"..."}]` and legacy newline-separated plain paths.
-    fn extract_trusted_paths(raw: &str) -> Vec<String> {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            return Vec::new();
-        }
-
-        if trimmed.starts_with('[') {
-            if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
-                let paths: Vec<String> = arr
-                    .iter()
-                    .filter_map(|v| {
-                        let p = v.get("path")?.as_str()?.trim().to_string();
-                        if p.is_empty() {
-                            None
-                        } else {
-                            Some(p)
-                        }
-                    })
-                    .collect();
-                if !paths.is_empty() {
-                    return paths;
-                }
-            }
-        }
-
-        trimmed.split('\n').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
     }
 
     /// 检查路径是否在白名单内
@@ -558,7 +586,14 @@ impl PermissionManager {
             }
         }
 
-        // 4. 检查助手工作区信任列表
+        // 4. 检查总管家子任务临时信任路径
+        if let Some(conv_id) = conversation_id {
+            if self.is_path_in_butler_task_temporary_trusted_paths(conv_id, path) {
+                return Ok(true);
+            }
+        }
+
+        // 5. 检查助手工作区信任列表
         if let Some(conv_id) = conversation_id {
             if let Some(assistant_id) = self.get_assistant_id_from_conversation(conv_id) {
                 if self.is_path_in_assistant_workspace(assistant_id, path) {
@@ -572,12 +607,12 @@ impl PermissionManager {
             }
         }
 
-        // 5. 检查全局白名单
+        // 6. 检查全局白名单
         if self.is_path_allowed(path) {
             return Ok(true);
         }
 
-        // 6. 请求用户权限
+        // 7. 请求用户权限
         let decision =
             self.request_permission(operation_state, operation, path, conversation_id).await?;
 
@@ -620,34 +655,39 @@ impl PermissionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::butler_api::parse_trusted_workspaces;
+
+    fn extract_trusted_paths(raw: &str) -> Vec<String> {
+        parse_trusted_workspaces(raw).into_iter().map(|workspace| workspace.path).collect()
+    }
 
     // --- extract_trusted_paths tests ---
 
     #[test]
     fn test_extract_json_format() {
         let json = r#"[{"path":"C:\\proj1","description":"frontend"},{"path":"C:\\proj2","description":""}]"#;
-        let paths = PermissionManager::extract_trusted_paths(json);
+        let paths = extract_trusted_paths(json);
         assert_eq!(paths, vec!["C:\\proj1", "C:\\proj2"]);
     }
 
     #[test]
     fn test_extract_legacy_newline_format() {
         let raw = "C:\\proj1\nC:\\proj2\n";
-        let paths = PermissionManager::extract_trusted_paths(raw);
+        let paths = extract_trusted_paths(raw);
         assert_eq!(paths, vec!["C:\\proj1", "C:\\proj2"]);
     }
 
     #[test]
     fn test_extract_empty() {
-        assert!(PermissionManager::extract_trusted_paths("").is_empty());
-        assert!(PermissionManager::extract_trusted_paths("  ").is_empty());
-        assert!(PermissionManager::extract_trusted_paths("[]").is_empty());
+        assert!(extract_trusted_paths("").is_empty());
+        assert!(extract_trusted_paths("  ").is_empty());
+        assert!(extract_trusted_paths("[]").is_empty());
     }
 
     #[test]
     fn test_extract_json_skips_empty_paths() {
         let json = r#"[{"path":"","description":"empty"},{"path":"C:\\ok","description":"valid"}]"#;
-        let paths = PermissionManager::extract_trusted_paths(json);
+        let paths = extract_trusted_paths(json);
         assert_eq!(paths, vec!["C:\\ok"]);
     }
 
@@ -658,17 +698,19 @@ mod tests {
         #[cfg(windows)]
         {
             let json = r#"[{"path":"C:\\Users\\admin\\projects","description":"my code"}]"#;
+            let paths = extract_trusted_paths(json);
             assert!(PermissionManager::is_path_in_trusted_dirs(
                 "C:\\Users\\admin\\projects\\myapp\\src\\main.rs",
-                json
+                &paths
             ));
         }
         #[cfg(not(windows))]
         {
             let json = r#"[{"path":"/home/user/projects","description":"my code"}]"#;
+            let paths = extract_trusted_paths(json);
             assert!(PermissionManager::is_path_in_trusted_dirs(
                 "/home/user/projects/myapp/src/main.rs",
-                json
+                &paths
             ));
         }
     }
@@ -678,17 +720,19 @@ mod tests {
         #[cfg(windows)]
         {
             let json = r#"[{"path":"C:\\Users\\admin\\projects","description":""}]"#;
+            let paths = extract_trusted_paths(json);
             assert!(!PermissionManager::is_path_in_trusted_dirs(
                 "C:\\Users\\admin\\documents\\secret.txt",
-                json
+                &paths
             ));
         }
         #[cfg(not(windows))]
         {
             let json = r#"[{"path":"/home/user/projects","description":""}]"#;
+            let paths = extract_trusted_paths(json);
             assert!(!PermissionManager::is_path_in_trusted_dirs(
                 "/home/user/documents/secret.txt",
-                json
+                &paths
             ));
         }
     }
@@ -698,28 +742,32 @@ mod tests {
         #[cfg(windows)]
         {
             let json = r#"[{"path":"C:\\Users\\admin\\proj1","description":"fe"},{"path":"C:\\Users\\admin\\proj2","description":"be"}]"#;
+            let paths = extract_trusted_paths(json);
             assert!(PermissionManager::is_path_in_trusted_dirs(
                 "C:\\Users\\admin\\proj2\\file.rs",
-                json
+                &paths
             ));
             assert!(!PermissionManager::is_path_in_trusted_dirs(
                 "C:\\Users\\admin\\proj3\\file.rs",
-                json
+                &paths
             ));
         }
         #[cfg(not(windows))]
         {
             let json = r#"[{"path":"/home/user/proj1","description":"fe"},{"path":"/home/user/proj2","description":"be"}]"#;
-            assert!(PermissionManager::is_path_in_trusted_dirs("/home/user/proj2/file.rs", json));
-            assert!(!PermissionManager::is_path_in_trusted_dirs("/home/user/proj3/file.rs", json));
+            let paths = extract_trusted_paths(json);
+            assert!(PermissionManager::is_path_in_trusted_dirs("/home/user/proj2/file.rs", &paths));
+            assert!(!PermissionManager::is_path_in_trusted_dirs(
+                "/home/user/proj3/file.rs",
+                &paths
+            ));
         }
     }
 
     #[test]
     fn test_trusted_dirs_empty_list() {
-        assert!(!PermissionManager::is_path_in_trusted_dirs("C:\\file.txt", ""));
-        assert!(!PermissionManager::is_path_in_trusted_dirs("C:\\file.txt", "[]"));
-        assert!(!PermissionManager::is_path_in_trusted_dirs("C:\\file.txt", "\n\n  \n"));
+        let empty: Vec<String> = Vec::new();
+        assert!(!PermissionManager::is_path_in_trusted_dirs("C:\\file.txt", &empty));
     }
 
     #[test]
@@ -727,17 +775,19 @@ mod tests {
         #[cfg(windows)]
         {
             let json = r#"[{"path":"C:\\Users\\admin\\projects","description":""}]"#;
+            let paths = extract_trusted_paths(json);
             assert!(!PermissionManager::is_path_in_trusted_dirs(
                 "C:\\Users\\admin\\projects-evil\\malware.exe",
-                json
+                &paths
             ));
         }
         #[cfg(not(windows))]
         {
             let json = r#"[{"path":"/home/user/projects","description":""}]"#;
+            let paths = extract_trusted_paths(json);
             assert!(!PermissionManager::is_path_in_trusted_dirs(
                 "/home/user/projects-evil/malware",
-                json
+                &paths
             ));
         }
     }
@@ -747,17 +797,19 @@ mod tests {
         #[cfg(windows)]
         {
             let legacy = "C:\\Users\\admin\\proj1\nC:\\Users\\admin\\proj2";
+            let paths = extract_trusted_paths(legacy);
             assert!(PermissionManager::is_path_in_trusted_dirs(
                 "C:\\Users\\admin\\proj1\\file.txt",
-                legacy
+                &paths
             ));
         }
         #[cfg(not(windows))]
         {
             let legacy = "/home/user/proj1\n/home/user/proj2";
+            let paths = extract_trusted_paths(legacy);
             assert!(PermissionManager::is_path_in_trusted_dirs(
                 "/home/user/proj1/file.txt",
-                legacy
+                &paths
             ));
         }
     }

@@ -76,6 +76,7 @@ export interface ContextItem {
     id: string;
     type:
         | 'user_file'
+        | 'generated_image'
         | 'skill'
         | 'read_file'
         | 'search'
@@ -89,13 +90,13 @@ export interface ContextItem {
     searchResults?: SearchResultItem[];
     // Optional markdown search result content
     searchMarkdown?: string;
-    // Source: user input, MCP tool call
-    source: 'user' | 'mcp';
+    // Source: user input, assistant response, MCP tool call
+    source: 'user' | 'assistant' | 'mcp';
     // Optional timestamp
     timestamp?: Date;
     previewData?: ContextPreviewData;
     previewStatus?: ContextPreviewStatus;
-    // Attachment data for user files
+    // Attachment data for file/image items
     attachmentData?: {
         type: 'Image' | 'Text' | 'PDF' | 'Word' | 'PowerPoint' | 'Excel' | string;
         content?: string; // base64 for images

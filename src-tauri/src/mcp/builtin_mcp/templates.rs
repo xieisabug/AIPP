@@ -1,6 +1,6 @@
+use crate::db::connection::{params, OptionalExtension};
 use crate::db::mcp_db::MCPDatabase;
 use anyhow::{Context, Result};
-use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tracing::{error, instrument};
@@ -39,6 +39,25 @@ pub struct BuiltinToolInfo {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+}
+
+/// Returns true if the entire builtin command (server) is butler-only.
+pub fn is_butler_only_builtin_command(command: &str) -> bool {
+    matches!(super::builtin_command_id(command).as_deref(), Some("superadmin"))
+}
+
+/// Butler-only tool names within the `aipp:agent` command.
+const BUTLER_ONLY_AGENT_TOOLS: &[&str] =
+    &["spawn_task_conversation", "task_conversation_operation", "schedule_task"];
+
+/// Returns true if the given tool from `aipp:agent` is butler-only.
+pub fn is_butler_only_agent_tool(tool_name: &str) -> bool {
+    BUTLER_ONLY_AGENT_TOOLS.contains(&tool_name)
+}
+
+/// Returns true if the conversation is in butler mode.
+pub fn is_butler_conversation_kind(kind: &str) -> bool {
+    kind == "butler_main" || kind == "butler_task"
 }
 
 fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
@@ -442,6 +461,20 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         "notification_policy": {
                             "type": "string",
                             "description": "Optional notification policy for task result delivery."
+                        },
+                        "temporary_trusted_paths": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Optional additive trusted paths for this task only. They are merged with the assistant's existing trusted workspace paths and do not persist back to the assistant."
+                        },
+                        "temporary_skill_identifiers": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Optional additive skill identifiers for this task only. They are merged with the assistant's existing configured skills and do not persist back to the assistant."
                         }
                     },
                     "required": ["title", "goal"]
@@ -510,6 +543,104 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         }
                     },
                     "required": ["action", "task_conversation_id"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "schedule_task".into(),
+                description: "Manage scheduled tasks (定时任务) that run periodically or at a specific time. Use this to create, list, update, delete, enable, or disable scheduled tasks. Tasks created through this tool are treated as Butler-managed tasks, and each execution result backflows to the latest Butler main conversation at runtime instead of being pinned to an old conversation id. For create/update with schedule_type='interval', always provide interval_unit + interval_value explicitly. Common combinations: every day at 22:00 => interval_unit='day', interval_value=1, start_time='22:00'; weekdays at 09:00 => interval_unit='week', interval_value=1, week_days=[1,2,3,4,5], start_time='09:00'; monthly => interval_unit='month', interval_value=1, month_days=[1,15], start_time='09:00'. Do not pass week_days by itself.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "description": "Parameter matrix for create/update: once => run_at is required. interval => interval_unit + interval_value are required. week_days is only valid with interval_unit='week'. month_days is only valid with interval_unit='month'.",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["create", "list", "get", "update", "delete", "enable", "disable"],
+                            "description": "Action to perform. create: create new task; list: list all Butler-managed tasks; get: get task details + recent runs; update: modify task; delete: remove task; enable/disable: toggle task."
+                        },
+                        "task_id": {
+                            "type": "integer",
+                            "description": "Required for get/update/delete/enable/disable. The scheduled task ID."
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Task name. Required for create."
+                        },
+                        "schedule_type": {
+                            "type": "string",
+                            "enum": ["once", "interval"],
+                            "description": "Required for create. 'once' runs at a specific time and requires run_at. 'interval' runs repeatedly and requires interval_unit + interval_value."
+                        },
+                        "interval_value": {
+                            "type": "integer",
+                            "description": "Required when schedule_type='interval'. The numeric interval value used together with interval_unit (e.g. 1=every day, 2=every 2 hours)."
+                        },
+                        "interval_unit": {
+                            "type": "string",
+                            "enum": ["minute", "hour", "day", "week", "month"],
+                            "description": "Required when schedule_type='interval'. The time unit for the interval. Use 'week' together with week_days; use 'month' together with month_days."
+                        },
+                        "start_time": {
+                            "type": "string",
+                            "description": "For day/week/month intervals. The time of day to run in HH:mm format (e.g. '14:30'). Example daily at 22:00 => interval_unit='day', interval_value=1, start_time='22:00'."
+                        },
+                        "week_days": {
+                            "type": "array",
+                            "items": { "type": "integer" },
+                            "description": "Only valid when interval_unit='week'. Days of the week (0=Sun, 1=Mon, ..., 6=Sat). Cannot be used alone. Example weekdays at 09:00 => interval_unit='week', interval_value=1, week_days=[1,2,3,4,5], start_time='09:00'."
+                        },
+                        "month_days": {
+                            "type": "array",
+                            "items": { "type": "integer" },
+                            "description": "Only valid when interval_unit='month'. Days of the month (1-31). Example: interval_unit='month', interval_value=1, month_days=[1,15], start_time='09:00'."
+                        },
+                        "run_at": {
+                            "type": "string",
+                            "description": "Required when schedule_type='once'. The datetime to run at in 'YYYY-MM-DD HH:mm' format (local time)."
+                        },
+                        "assistant_id": {
+                            "type": "integer",
+                            "description": "The assistant to execute the task. Either assistant_id or assistant_name is required for create."
+                        },
+                        "assistant_name": {
+                            "type": "string",
+                            "description": "Assistant name to look up. Used when assistant_id is not known."
+                        },
+                        "task_prompt": {
+                            "type": "string",
+                            "description": "The prompt/instruction for the scheduled task. Required for create."
+                        },
+                        "notify_prompt": {
+                            "type": "string",
+                            "description": "Optional prompt to decide whether to notify the user after execution. If omitted, a sensible default is used."
+                        },
+                        "butler_conversation_id": {
+                            "type": "integer",
+                            "description": "Optional. Butler main conversation id. If omitted, the current conversation context is used."
+                        }
+                    },
+                    "allOf": [
+                        {
+                            "if": {
+                                "properties": {
+                                    "schedule_type": { "const": "once" }
+                                }
+                            },
+                            "then": {
+                                "required": ["run_at"]
+                            }
+                        },
+                        {
+                            "if": {
+                                "properties": {
+                                    "schedule_type": { "const": "interval" }
+                                }
+                            },
+                            "then": {
+                                "required": ["interval_value", "interval_unit"]
+                            }
+                        }
+                    ],
+                    "required": ["action"]
                 }),
             },
         ],
@@ -652,6 +783,55 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         }
                     },
                     "required": ["files"],
+                    "additionalProperties": false
+                }),
+            },
+            BuiltinToolInfo {
+                name: "preview_code".into(),
+                description: "Render an inline interactive UI inside the chat message. This renderer is streaming-first: the UI should become visible progressively while the tool call is still being generated, then activate scripts only after the final HTML arrives. Optimize for stable incremental DOM growth rather than full-screen visual effects or JavaScript-only bootstrapping.".into(),
+                input_schema: serde_json::json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Stable title/identifier for the inline UI card."
+                        },
+                        "renderer": {
+                            "type": "string",
+                            "enum": ["html"],
+                            "description": "Renderer type. Phase 1 only supports html."
+                        },
+                        "code": {
+                            "type": "string",
+                            "description": "Inline HTML/CSS/JS snippet rendered inside the controlled host container. Output order matters: keep <style> short and first, then emit visible HTML that can progressively render, and place <script> tags last so behavior activates only after finalization. Do not rely on JavaScript to create the initial DOM from scratch. Prefer stable ids/structure, keep the first meaningful UI visible in HTML, and use scripts only to enhance already-rendered content. Avoid HTML comments and avoid flashy effects such as gradients, heavy shadows, blur, or other styling that flickers during streaming DOM patches."
+                        },
+                        "loading_messages": {
+                            "type": "array",
+                            "description": "Optional short status messages shown while the UI is still being generated. Prefer concise progressive messages that match the current build stage of the UI.",
+                            "items": {
+                                "type": "string"
+                            },
+                            "maxItems": 8
+                        },
+                        "interaction_mode": {
+                            "type": "string",
+                            "enum": ["none", "submit_once"],
+                            "default": "submit_once",
+                            "description": "Interaction mode for the widget. submit_once allows one final payload submission; none is display-only except close."
+                        },
+                        "metadata": {
+                            "type": "object",
+                            "properties": {
+                                "origin": {
+                                    "type": "string",
+                                    "description": "Optional source marker."
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["title", "renderer", "code"],
                     "additionalProperties": false
                 }),
             },
@@ -886,6 +1066,57 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                     "required": ["artifact_key", "entry_file"]
                 }),
             },
+            BuiltinToolInfo {
+                name: "capture_artifact_screenshot".into(),
+                description: "按指定分辨率渲染 Artifact 入口，支持可选 selector 点击，并按 output_mode 返回 PNG 截图的 base64 或 temp 文件路径。适合在 artifact 工作区中对页面/组件做预览截图。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "conversation_id": {
+                            "type": "number",
+                            "description": "可选。会话 ID，不提供时会使用当前会话上下文。"
+                        },
+                        "artifact_key": {
+                            "type": "string",
+                            "description": "Artifact 标识，相对路径风格（例如: ui/dashboard）"
+                        },
+                        "entry_file": {
+                            "type": "string",
+                            "description": "Artifact 入口文件，相对 artifact_key 目录（例如: src/App.tsx）"
+                        },
+                        "language": {
+                            "type": "string",
+                            "description": "可选。用于解析的语言类型（如 html/markdown/vue/tsx）"
+                        },
+                        "preview_type": {
+                            "type": "string",
+                            "description": "可选。预览类型，不传则自动推断"
+                        },
+                        "output_mode": {
+                            "type": "string",
+                            "description": "可选。截图输出模式：base64（默认，返回 image content）或 path（保存到 temp 并返回文件路径）",
+                            "enum": ["base64", "path"]
+                        },
+                        "selector": {
+                            "type": "string",
+                            "description": "可选。截图前等待并点击的 CSS 选择器"
+                        },
+                        "width": {
+                            "type": "number",
+                            "description": "可选。截图宽度，默认 800"
+                        },
+                        "height": {
+                            "type": "number",
+                            "description": "可选。截图高度，默认 600"
+                        },
+                        "delay_ms": {
+                            "type": "number",
+                            "description": "可选。页面稳定后以及点击后额外等待的毫秒数，默认 300"
+                        }
+                    },
+                    "required": ["artifact_key", "entry_file"]
+                }),
+            },
         ],
         Some("superadmin") => vec![
             BuiltinToolInfo {
@@ -1064,7 +1295,7 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
         // 检查是否已存在该内置工具集（通过 command 匹配）
         let exists = db.conn
             .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1 AND is_deletable = 0")?
-            .query_row([&tpl.command], |row| row.get::<_, i64>(0))
+            .query_row(params![tpl.command.clone()], |row| row.get::<_, i64>(0))
             .optional()?;
 
         let server_id = if let Some(server_id) = exists {
@@ -1111,7 +1342,7 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
             .with_context(|| format!("Sync builtin server tools failed: {}", tpl.id))?;
     }
 
-    let _ = db.rebuild_dynamic_mcp_catalog();
+    let _ = db.rebuild_dynamic_mcp_catalog_force();
 
     // Builtin tools already have human-written descriptions, so mark their
     // summary_generated_at so they're discoverable via load_mcp_tool/load_mcp_server.
@@ -1120,20 +1351,20 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
         let server_id = db
             .conn
             .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1")?
-            .query_row([&tpl.command], |row| row.get::<_, i64>(0))
+            .query_row(params![tpl.command.clone()], |row| row.get::<_, i64>(0))
             .optional()?;
         if let Some(sid) = server_id {
             let _ = db.conn.execute(
                 "UPDATE mcp_server_capability_epoch_catalog
                  SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
                  WHERE server_id = ?",
-                rusqlite::params![sid],
+                params![sid],
             );
             let _ = db.conn.execute(
                 "UPDATE mcp_tool_catalog
-                 SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
-                 WHERE server_id = ?",
-                rusqlite::params![sid],
+             SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
+             WHERE server_id = ?",
+                params![sid],
             );
         }
     }
@@ -1203,6 +1434,28 @@ pub async fn add_or_update_aipp_builtin_server(
                 Some(&tool.input_schema.to_string()),
             )
             .with_context(|| format!("Upsert server tool failed: {}", tool.name))?;
+        }
+
+        let _ = db.rebuild_dynamic_mcp_catalog_force();
+
+        if let Ok(Some(sid)) = db
+            .conn
+            .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1")?
+            .query_row(params![tpl.command.clone()], |row| row.get::<_, i64>(0))
+            .optional()
+        {
+            let _ = db.conn.execute(
+                "UPDATE mcp_server_capability_epoch_catalog
+                 SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
+                 WHERE server_id = ?",
+                params![sid],
+            );
+            let _ = db.conn.execute(
+                "UPDATE mcp_tool_catalog
+                 SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
+                 WHERE server_id = ?",
+                params![sid],
+            );
         }
 
         Ok(server_id)
@@ -1365,6 +1618,23 @@ mod tests {
             !properties.contains_key("conversation_id"),
             "get_artifact_workspace should not expose conversation_id override"
         );
+    }
+
+    #[test]
+    fn test_capture_artifact_screenshot_schema_has_resolution_options() {
+        let tools = get_builtin_tools_for_command("aipp:artifact");
+        let capture_tool = tools
+            .iter()
+            .find(|t| t.name == "capture_artifact_screenshot")
+            .expect("capture_artifact_screenshot tool should exist");
+
+        let properties = capture_tool.input_schema["properties"]
+            .as_object()
+            .expect("input schema properties should be an object");
+        assert!(properties.contains_key("output_mode"));
+        assert!(properties.contains_key("selector"));
+        assert!(properties.contains_key("width"));
+        assert!(properties.contains_key("height"));
     }
 
     #[test]

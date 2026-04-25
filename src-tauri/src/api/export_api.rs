@@ -128,10 +128,7 @@ async fn convert_markdown_to_pdf(markdown: &str) -> Result<Vec<u8>, AppError> {
 }
 
 #[cfg(desktop)]
-fn build_pdf_html(markdown: &str) -> String {
-    let body_html = render_pdf_markdown_html(markdown);
-    let body_html = inline_html_images_as_data_uri(&body_html);
-
+fn wrap_preview_body_html(body_html: &str) -> String {
     format!(
         r#"<!doctype html>
 <html lang="zh-CN">
@@ -241,7 +238,19 @@ fn build_pdf_html(markdown: &str) -> String {
 }
 
 #[cfg(desktop)]
-fn render_pdf_markdown_html(markdown: &str) -> String {
+fn build_pdf_html(markdown: &str) -> String {
+    let body_html = render_markdown_preview_body_html(markdown);
+    wrap_preview_body_html(&body_html)
+}
+
+#[cfg(desktop)]
+pub fn render_markdown_preview_html(markdown: &str) -> String {
+    let body_html = render_markdown_preview_body_html(markdown);
+    wrap_preview_body_html(&body_html)
+}
+
+#[cfg(desktop)]
+fn render_markdown_preview_body_html(markdown: &str) -> String {
     let parser_options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let events: Vec<_> = Parser::new_ext(markdown, parser_options).collect();

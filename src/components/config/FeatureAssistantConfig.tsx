@@ -10,6 +10,16 @@ import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useVersionManager } from "@/hooks/feature/useVersionManager";
 import { FeatureFormRenderer } from "./feature/FeatureFormRenderer";
 import { APP_SHORTCUT_KEY_PREFIX, SHORTCUT_ACTIONS } from "@/data/Shortcuts";
+import {
+    buildDisplayFormValues,
+    serializeDisplayFormValues,
+} from "./displayConfigFormValues";
+import {
+    buildExperimentalConfigFormValues,
+    EXPERIMENTAL_CONFIG_DEFAULT_VALUES,
+    ExperimentalConfigFormState,
+    saveExperimentalConfigValues,
+} from "./feature/forms/experimentalConfigShared";
 
 interface FeatureItem {
     id: string;
@@ -27,7 +37,7 @@ interface FeatureItem {
     code: string;
 }
 
-const FeatureAssistantConfig: React.FC = () => {
+const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () => void }> = ({ subNav, onSubNavConsumed }) => {
     // 功能列表定义
     const featureList: FeatureItem[] = [
         {
@@ -97,8 +107,19 @@ const FeatureAssistantConfig: React.FC = () => {
 
     const [selectedFeature, setSelectedFeature] = useState<FeatureItem>(featureList[0]);
 
+    // 消费来自父组件的 subNav 导航指令
+    useEffect(() => {
+        if (subNav) {
+            const target = featureList.find(f => f.id === subNav);
+            if (target) {
+                setSelectedFeature(target);
+            }
+            onSubNavConsumed?.();
+        }
+    }, [subNav]);
+
     // 使用新的 hooks
-    const { featureConfig, saveFeatureConfig, loading } = useFeatureConfig();
+    const { featureConfig, saveFeatureConfig, loadFeatureConfig, loading } = useFeatureConfig();
     const versionManager = useVersionManager();
     const defaultAppShortcutValues = useMemo(() => {
         const values: Record<string, string> = {};
@@ -110,14 +131,7 @@ const FeatureAssistantConfig: React.FC = () => {
 
     // 初始化表单
     const displayForm = useForm({
-        defaultValues: {
-            theme: "default",
-            color_mode: "system",
-            user_message_markdown_render: "disabled",
-            notification_on_completion: "false",
-            code_theme_light: "github",
-            code_theme_dark: "github-dark",
-        },
+        defaultValues: buildDisplayFormValues(),
     });
 
     const summaryForm = useForm({
@@ -176,35 +190,8 @@ const FeatureAssistantConfig: React.FC = () => {
         },
     });
 
-    const experimentalForm = useForm({
-        defaultValues: {
-            dynamic_mcp_loading_enabled: "false",
-            mcp_summarizer_model_id: "",
-            assistant_summary_enabled: "false",
-            assistant_summarizer_model_id: "",
-            conversation_summary_enabled: "false",
-            conversation_summary_model: "",
-            butler_experiment_enabled: "false",
-            butler_display_name: "总管家",
-            default_home_window: "ask",
-            butler_model_id: "",
-            butler_feishu_enabled: "false",
-            butler_feishu_app_id: "",
-            butler_feishu_app_secret: "",
-            butler_feishu_base_url: "https://open.feishu.cn",
-            butler_feishu_receive_p2p: "true",
-            butler_feishu_receive_group: "true",
-            butler_feishu_group_require_mention: "true",
-            butler_feishu_only_reply_feishu_originated: "false",
-            butler_feishu_allowed_open_ids: "",
-            butler_feishu_allowed_chat_ids: "",
-            context_compaction_enabled: "false",
-            context_max_input_tokens: "128000",
-            context_compaction_threshold: "0.80",
-            context_tail_ratio: "0.30",
-            butler_trust_all_workspaces: "false",
-            butler_trusted_workspaces: "",
-        },
+    const experimentalForm = useForm<ExperimentalConfigFormState>({
+        defaultValues: { ...EXPERIMENTAL_CONFIG_DEFAULT_VALUES },
     });
 
     const aboutForm = useForm({
@@ -219,19 +206,11 @@ const FeatureAssistantConfig: React.FC = () => {
             // 更新 display 表单
             const displayConfig = featureConfig.get("display");
             if (displayConfig) {
-                displayForm.reset({
-                    theme: displayConfig.get("theme") || "default",
-                    color_mode: displayConfig.get("color_mode") || "system",
-                    user_message_markdown_render: displayConfig.get("user_message_markdown_render") || "disabled",
-                    notification_on_completion: displayConfig.get("notification_on_completion") || "false",
-                    code_theme_light: displayConfig.get("code_theme_light") || "github",
-                    code_theme_dark: displayConfig.get("code_theme_dark") || "github-dark",
-                });
+                displayForm.reset(buildDisplayFormValues(displayConfig));
             }
 
             // 更新 summary 表单 - 支持新旧配置键兼容
             const summaryConfig = featureConfig.get("conversation_summary");
-            const experimentalConfig = featureConfig.get("experimental");
             if (summaryConfig) {
                 // 读取新配置键
                 const titleModel = summaryConfig.get("title_model") || "";
@@ -251,87 +230,21 @@ const FeatureAssistantConfig: React.FC = () => {
                     // ConfigForm's model-select uses value format: `${model.code}%%${model.llm_provider_id}`
                     title_model: modelCode && providerId ? `${modelCode}%%${providerId}` : "",
                     title_summary_length: summaryConfig.get("title_summary_length") || summaryConfig.get("summary_length") || "100",
-                     title_prompt: summaryConfig.get("title_prompt") || summaryConfig.get("prompt") || "",
-                     // 表单自动填写
-                     form_autofill_enabled: summaryConfig.get("form_autofill_enabled") !== "false",
-                     form_autofill_model: summaryConfig.get("form_autofill_model") || "",
-                     // 记忆总结
-                     memory_summary_enabled: summaryConfig.get("memory_summary_enabled") !== "false",
-                     memory_summary_model: (() => {
-                         const model = summaryConfig.get("memory_summary_model") || "";
+                    title_prompt: summaryConfig.get("title_prompt") || summaryConfig.get("prompt") || "",
+                    // 表单自动填写
+                    form_autofill_enabled: summaryConfig.get("form_autofill_enabled") !== "false",
+                    form_autofill_model: summaryConfig.get("form_autofill_model") || "",
+                    // 记忆总结
+                    memory_summary_enabled: summaryConfig.get("memory_summary_enabled") !== "false",
+                    memory_summary_model: (() => {
+                        const model = summaryConfig.get("memory_summary_model") || "";
                         const providerId = summaryConfig.get("memory_summary_provider_id") || "";
                         return model && providerId ? `${model}%%${providerId}` : "";
                     })(),
                 });
             }
 
-            experimentalForm.reset({
-                dynamic_mcp_loading_enabled:
-                    experimentalConfig?.get("dynamic_mcp_loading_enabled") || "false",
-                mcp_summarizer_model_id:
-                    experimentalConfig?.get("mcp_summarizer_model_id") || "",
-                assistant_summary_enabled:
-                    experimentalConfig?.get("assistant_summary_enabled") || "false",
-                assistant_summarizer_model_id:
-                    experimentalConfig?.get("assistant_summarizer_model_id") || "",
-                conversation_summary_enabled:
-                    experimentalConfig?.get("conversation_summary_enabled")
-                    || summaryConfig?.get("conversation_summary_enabled")
-                    || "false",
-                conversation_summary_model: (() => {
-                    const experimentalModel = experimentalConfig?.get("conversation_summary_model") || "";
-                    const experimentalProviderId =
-                        experimentalConfig?.get("conversation_summary_provider_id") || "";
-                    if (experimentalModel && experimentalProviderId) {
-                        return `${experimentalModel}%%${experimentalProviderId}`;
-                    }
-                    const legacyModel = summaryConfig?.get("conversation_summary_model") || "";
-                    const legacyProviderId =
-                        summaryConfig?.get("conversation_summary_provider_id") || "";
-                    return legacyModel && legacyProviderId
-                        ? `${legacyModel}%%${legacyProviderId}`
-                        : "";
-                })(),
-                butler_experiment_enabled:
-                    experimentalConfig?.get("butler_experiment_enabled") || "false",
-                butler_display_name:
-                    experimentalConfig?.get("butler_display_name") || "总管家",
-                default_home_window:
-                    experimentalConfig?.get("default_home_window") || "ask",
-                butler_model_id:
-                    experimentalConfig?.get("butler_model_id") || "",
-                butler_feishu_enabled:
-                    experimentalConfig?.get("butler_feishu_enabled") || "false",
-                butler_feishu_app_id:
-                    experimentalConfig?.get("butler_feishu_app_id") || "",
-                butler_feishu_app_secret: "",
-                butler_feishu_base_url:
-                    experimentalConfig?.get("butler_feishu_base_url") || "https://open.feishu.cn",
-                butler_feishu_receive_p2p:
-                    experimentalConfig?.get("butler_feishu_receive_p2p") || "true",
-                butler_feishu_receive_group:
-                    experimentalConfig?.get("butler_feishu_receive_group") || "true",
-                butler_feishu_group_require_mention:
-                    experimentalConfig?.get("butler_feishu_group_require_mention") || "true",
-                butler_feishu_only_reply_feishu_originated:
-                    experimentalConfig?.get("butler_feishu_only_reply_feishu_originated") || "false",
-                butler_feishu_allowed_open_ids:
-                    experimentalConfig?.get("butler_feishu_allowed_open_ids") || "",
-                butler_feishu_allowed_chat_ids:
-                    experimentalConfig?.get("butler_feishu_allowed_chat_ids") || "",
-                context_compaction_enabled:
-                    experimentalConfig?.get("context_compaction_enabled") || "false",
-                context_max_input_tokens:
-                    experimentalConfig?.get("context_max_input_tokens") || "128000",
-                context_compaction_threshold:
-                    experimentalConfig?.get("context_compaction_threshold") || "0.80",
-                context_tail_ratio:
-                    experimentalConfig?.get("context_tail_ratio") || "0.30",
-                butler_trust_all_workspaces:
-                    experimentalConfig?.get("butler_trust_all_workspaces") || "false",
-                butler_trusted_workspaces:
-                    experimentalConfig?.get("butler_trusted_workspaces") || "",
-            });
+            experimentalForm.reset(buildExperimentalConfigFormValues(featureConfig));
 
             // 更新 preview 表单
             const previewConfig = featureConfig.get("preview");
@@ -410,14 +323,7 @@ const FeatureAssistantConfig: React.FC = () => {
     // 保存功能配置的回调函数
     const handleSaveDisplayConfig = useCallback(async () => {
         const values = displayForm.getValues();
-        await saveFeatureConfig("display", {
-            theme: values.theme,
-            color_mode: values.color_mode,
-            user_message_markdown_render: values.user_message_markdown_render,
-            notification_on_completion: values.notification_on_completion.toString(),
-            code_theme_light: values.code_theme_light,
-            code_theme_dark: values.code_theme_dark,
-        });
+        await saveFeatureConfig("display", serializeDisplayFormValues(values));
     }, [displayForm, saveFeatureConfig]);
 
     const handleSaveSummaryConfig = useCallback(async () => {
@@ -490,46 +396,12 @@ const FeatureAssistantConfig: React.FC = () => {
     }, [shortcutsForm, saveFeatureConfig]);
 
     const handleSaveExperimentalConfig = useCallback(async () => {
-        const v = experimentalForm.getValues();
-        const parseModel = (modelValue: string) => {
-            if (!modelValue) return { model_code: "", provider_id: "" };
-            const parts = modelValue.split("%%");
-            return {
-                model_code: parts[0] || "",
-                provider_id: parts[1] || "",
-            };
-        };
-        const conversationSummaryModel = parseModel(String(v.conversation_summary_model || ""));
-        await saveFeatureConfig("experimental", {
-            dynamic_mcp_loading_enabled: String(v.dynamic_mcp_loading_enabled),
-            mcp_summarizer_model_id: String(v.mcp_summarizer_model_id || ""),
-            assistant_summary_enabled: String(v.assistant_summary_enabled),
-            assistant_summarizer_model_id: String(v.assistant_summarizer_model_id || ""),
-            conversation_summary_enabled: String(v.conversation_summary_enabled),
-            conversation_summary_model: conversationSummaryModel.model_code,
-            conversation_summary_provider_id: conversationSummaryModel.provider_id,
-            butler_experiment_enabled: String(v.butler_experiment_enabled),
-            butler_display_name: String(v.butler_display_name || "总管家"),
-            default_home_window: String(v.default_home_window || "ask"),
-            butler_model_id: String(v.butler_model_id || ""),
-            butler_feishu_enabled: String(v.butler_feishu_enabled),
-            butler_feishu_app_id: String(v.butler_feishu_app_id || ""),
-            butler_feishu_base_url: String(v.butler_feishu_base_url || "https://open.feishu.cn"),
-            butler_feishu_receive_p2p: String(v.butler_feishu_receive_p2p),
-            butler_feishu_receive_group: String(v.butler_feishu_receive_group),
-            butler_feishu_group_require_mention: String(v.butler_feishu_group_require_mention),
-            butler_feishu_only_reply_feishu_originated:
-                String(v.butler_feishu_only_reply_feishu_originated),
-            butler_feishu_allowed_open_ids: String(v.butler_feishu_allowed_open_ids || ""),
-            butler_feishu_allowed_chat_ids: String(v.butler_feishu_allowed_chat_ids || ""),
-            context_compaction_enabled: String(v.context_compaction_enabled),
-            context_max_input_tokens: String(v.context_max_input_tokens || "128000"),
-            context_compaction_threshold: String(v.context_compaction_threshold || "0.80"),
-            context_tail_ratio: String(v.context_tail_ratio || "0.30"),
-            butler_trust_all_workspaces: String(v.butler_trust_all_workspaces),
-            butler_trusted_workspaces: String(v.butler_trusted_workspaces || ""),
-        });
+        await saveExperimentalConfigValues(saveFeatureConfig, experimentalForm.getValues());
     }, [experimentalForm, saveFeatureConfig]);
+
+    const handleOnboardingRefresh = useCallback(() => {
+        void loadFeatureConfig();
+    }, [loadFeatureConfig]);
 
     // 下拉菜单选项
     const selectOptions: SelectOption[] = useMemo(
@@ -599,9 +471,11 @@ const FeatureAssistantConfig: React.FC = () => {
                 onSaveNetwork={handleSaveNetworkConfig}
                 onSaveShortcuts={handleSaveShortcutsConfig}
                 onSaveExperimental={handleSaveExperimentalConfig}
+                saveFeatureConfig={saveFeatureConfig}
+                onConfigRefresh={handleOnboardingRefresh}
             />
         </div>
-    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, otherForm, experimentalForm, aboutForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig, handleSaveExperimentalConfig]);
+    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, otherForm, experimentalForm, aboutForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig, handleSaveExperimentalConfig, saveFeatureConfig, handleOnboardingRefresh]);
 
     return (
         <ConfigPageLayout

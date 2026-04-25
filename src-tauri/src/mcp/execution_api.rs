@@ -468,6 +468,15 @@ fn tool_call_history_id(tool_call: &MCPToolCall) -> String {
     tool_call.llm_call_id.clone().unwrap_or_else(|| format!("mcp_tool_call_{}", tool_call.id))
 }
 
+type ToolResultMessageKey = (String, Option<String>);
+
+fn tool_result_message_key(
+    tool_call_id: String,
+    generation_group_id: Option<String>,
+) -> ToolResultMessageKey {
+    (tool_call_id, generation_group_id)
+}
+
 fn build_tool_result_message_content(tool_call: &MCPToolCall) -> Option<String> {
     let result_content = match tool_call.status.as_str() {
         "success" => tool_call.result.clone().unwrap_or_else(|| "(空)".to_string()),
@@ -490,13 +499,19 @@ fn collect_existing_tool_result_messages(
         crate::db::conversation_db::Message,
         Option<crate::db::conversation_db::MessageAttachment>,
     )],
-) -> HashMap<String, crate::db::conversation_db::Message> {
+) -> HashMap<ToolResultMessageKey, crate::db::conversation_db::Message> {
     messages
         .iter()
         .filter(|(message, _)| message.message_type == "tool_result")
         .filter_map(|(message, _)| {
-            crate::api::ai::conversation::extract_tool_call_id(&message.content)
-                .map(|tool_call_id| (tool_call_id, message.clone()))
+            crate::api::ai::conversation::extract_tool_call_id(&message.content).map(
+                |tool_call_id| {
+                    (
+                        tool_result_message_key(tool_call_id, message.generation_group_id.clone()),
+                        message.clone(),
+                    )
+                },
+            )
         })
         .collect()
 }
@@ -550,12 +565,14 @@ fn ensure_tool_result_messages(
     let mut created_count = 0usize;
     for tool_call in tool_calls {
         let tool_result_id = tool_call_history_id(tool_call);
+        let tool_result_key =
+            tool_result_message_key(tool_result_id.clone(), tool_result_group_id.clone());
         let Some(tool_result_content) = build_tool_result_message_content(tool_call) else {
             continue;
         };
         let now = chrono::Utc::now();
         let tool_result_message = if let Some(mut existing_message) =
-            existing_tool_result_messages.get(&tool_result_id).cloned()
+            existing_tool_result_messages.get(&tool_result_key).cloned()
         {
             existing_message.content = tool_result_content.clone();
             existing_message.finish_time = Some(now);
@@ -617,10 +634,77 @@ fn ensure_tool_result_messages(
         let _ =
             window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
 
-        existing_tool_result_messages.insert(tool_result_id, tool_result_message);
+        existing_tool_result_messages.insert(tool_result_key, tool_result_message);
     }
 
     Ok(created_count)
+}
+
+#[cfg(test)]
+mod tool_result_message_tests {
+    use super::*;
+    use crate::db::conversation_db::Message;
+    use chrono::Utc;
+
+    fn build_tool_result_message(
+        id: i64,
+        tool_call_id: &str,
+        generation_group_id: Option<&str>,
+    ) -> Message {
+        Message {
+            id,
+            parent_id: None,
+            conversation_id: 1,
+            message_type: "tool_result".to_string(),
+            content: format!(
+                "Tool execution completed:\n\nTool Call ID: {}\nTool: preview_file\nServer: builtin\nParameters: {{}}\nResult:\n(ok)",
+                tool_call_id
+            ),
+            llm_model_id: None,
+            llm_model_name: None,
+            created_time: Utc::now(),
+            start_time: None,
+            finish_time: None,
+            token_count: 0,
+            input_token_count: 0,
+            output_token_count: 0,
+            generation_group_id: generation_group_id.map(ToString::to_string),
+            parent_group_id: None,
+            tool_calls_json: None,
+            first_token_time: None,
+            ttft_ms: None,
+        }
+    }
+
+    #[test]
+    fn collect_existing_tool_result_messages_distinguishes_generation_groups() {
+        let messages = vec![
+            (build_tool_result_message(10, "functions.UI__preview_file:5", Some("group-a")), None),
+            (build_tool_result_message(11, "functions.UI__preview_file:5", Some("group-b")), None),
+        ];
+
+        let collected = collect_existing_tool_result_messages(&messages);
+
+        assert_eq!(collected.len(), 2);
+        assert_eq!(
+            collected
+                .get(&tool_result_message_key(
+                    "functions.UI__preview_file:5".to_string(),
+                    Some("group-a".to_string())
+                ))
+                .map(|message| message.id),
+            Some(10)
+        );
+        assert_eq!(
+            collected
+                .get(&tool_result_message_key(
+                    "functions.UI__preview_file:5".to_string(),
+                    Some("group-b".to_string())
+                ))
+                .map(|message| message.id),
+            Some(11)
+        );
+    }
 }
 
 // =============================
@@ -2391,8 +2475,9 @@ async fn execute_builtin_tool(
     let command = server.command.clone().unwrap_or_default();
     // 获取超时配置，使用服务器配置的超时或默认值
     let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
-    // AskUserQuestion 需要等待用户交互，不应受超时限制。
-    let wait_indefinitely = command == "aipp:ui_interaction" && tool_name == "ask_user_question";
+    // UI 交互工具需要等待用户操作，不应受超时限制。
+    let wait_indefinitely = command == "aipp:ui_interaction"
+        && matches!(tool_name, "ask_user_question" | "preview_code");
     let start = std::time::Instant::now();
 
     // 验证是否为内置工具调用

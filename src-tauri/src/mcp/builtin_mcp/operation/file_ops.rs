@@ -75,7 +75,7 @@ impl FileOperations {
         }
 
         // 记录文件已读取
-        state.record_file_read(path).await;
+        state.record_file_read_for_conversation(path, conversation_id).await;
 
         info!(path = %path, start_line = start_idx + 1, end_line = end_idx, total_lines = total_lines, "File read successfully");
 
@@ -114,12 +114,14 @@ impl FileOperations {
         // 如果文件存在，检查是否已读取过（read-before-write 安全机制）
         // 但对于当前会话中新建并写入过的文件，允许继续覆盖写入。
         if Path::new(path).exists() {
-            let has_been_read = state.has_file_been_read(path).await;
-            let has_been_written = state.has_file_been_written(path).await;
+            let has_been_read =
+                state.has_file_been_read_for_conversation(path, conversation_id).await;
+            let has_been_written =
+                state.has_file_been_written_for_conversation(path, conversation_id).await;
             if !has_been_read && !has_been_written {
                 return Err(format!(
                     "Safety check failed: You must read the file before overwriting it. \
-                    Use read_file to read '{}' first, or use write_file only for new/session-created files.",
+                    Use read_file to read '{}' first in this conversation, or use write_file only for new/session-created files.",
                     path
                 ));
             }
@@ -137,7 +139,7 @@ impl FileOperations {
         let mut file = File::create(path).map_err(|e| format!("Failed to create file: {}", e))?;
         let bytes = request.content.as_bytes();
         file.write_all(bytes).map_err(|e| format!("Failed to write file: {}", e))?;
-        state.record_file_write(path).await;
+        state.record_file_write_for_conversation(path, conversation_id).await;
 
         info!(path = %path, bytes = bytes.len(), "File written successfully");
 
@@ -176,10 +178,10 @@ impl FileOperations {
         }
 
         // 检查是否已读取过（read-before-edit 安全机制）
-        if !state.has_file_been_read(path).await {
+        if !state.has_file_been_read_for_conversation(path, conversation_id).await {
             return Err(format!(
                 "Safety check failed: You must read the file before editing it. \
-                Use read_file to read '{}' first.",
+                Use read_file to read '{}' first in this conversation.",
                 path
             ));
         }

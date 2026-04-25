@@ -1,4 +1,5 @@
 import { useRef, useCallback, useEffect } from "react";
+import { CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR } from "@/components/conversation/layoutConstants";
 
 const SMOOTH_SCROLL_LOCK_MS = 350;
 const AUTO_SCROLL_LOCK_MS = 100;
@@ -9,12 +10,20 @@ export interface UseScrollManagementReturn {
     scrollContainerRef: React.RefObject<HTMLDivElement | null>;
     handleScroll: () => void;
     handleUserScrollIntent: () => void;
+    syncScrollState: (container?: HTMLDivElement | null) => void;
     // Allow overriding behavior for specific scenarios (e.g., instant on open)
     smartScroll: (forceScroll?: boolean, behaviorOverride?: ScrollBehavior) => void;
     scrollToUserMessage: () => void;
 }
 
-export function useScrollManagement(): UseScrollManagementReturn {
+interface UseScrollManagementOptions {
+    disableTailObservation?: boolean;
+}
+
+export function useScrollManagement(
+    options: UseScrollManagementOptions = {},
+): UseScrollManagementReturn {
+    const { disableTailObservation = false } = options;
     // 滚动相关状态和逻辑
     const messagesEndRef = useRef<HTMLDivElement | null>(null);
     const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -30,6 +39,32 @@ export function useScrollManagement(): UseScrollManagementReturn {
     const smartScrollRef = useRef<UseScrollManagementReturn["smartScroll"] | null>(
         null,
     );
+
+    useEffect(() => {
+        const container = scrollContainerRef.current;
+        if (!container) {
+            return;
+        }
+
+        const syncViewportHeightVar = () => {
+            container.style.setProperty(
+                CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR,
+                `${container.clientHeight}px`,
+            );
+        };
+
+        syncViewportHeightVar();
+
+        const resizeObserver = new ResizeObserver(() => {
+            syncViewportHeightVar();
+        });
+        resizeObserver.observe(container);
+
+        return () => {
+            resizeObserver.disconnect();
+            container.style.removeProperty(CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR);
+        };
+    }, []);
 
     const queuePendingSmartScroll = useCallback(
         (forceScroll: boolean, behaviorOverride?: ScrollBehavior) => {
@@ -98,6 +133,17 @@ export function useScrollManagement(): UseScrollManagementReturn {
         }
     }, [clearAutoScrollTimeout]);
 
+    const syncScrollState = useCallback((container?: HTMLDivElement | null) => {
+        const target = container ?? scrollContainerRef.current;
+        if (!target) {
+            return;
+        }
+
+        const { scrollTop, scrollHeight, clientHeight } = target;
+        const atBottom = scrollHeight - scrollTop - clientHeight < 10;
+        isUserScrolledUpRef.current = !atBottom;
+    }, []);
+
     // 处理用户滚动事件
     const handleScroll = useCallback(() => {
         // 如果是程序触发的自动滚动，则忽略此次事件
@@ -105,16 +151,8 @@ export function useScrollManagement(): UseScrollManagementReturn {
             return;
         }
 
-        const container = scrollContainerRef.current;
-        if (container) {
-            const { scrollTop, scrollHeight, clientHeight } = container;
-            // 判断是否滚动到了底部，留出 10px 的容差
-            const atBottom = scrollHeight - scrollTop - clientHeight < 10;
-
-            // 直接更新 Ref 的值
-            isUserScrolledUpRef.current = !atBottom;
-        }
-    }, []); // 依赖项为空，函数是稳定的
+        syncScrollState();
+    }, [syncScrollState]);
 
     // 智能滚动函数
     const smartScroll = useCallback((forceScroll: boolean = false, behaviorOverride?: ScrollBehavior) => {
@@ -172,11 +210,13 @@ export function useScrollManagement(): UseScrollManagementReturn {
 
         // 优先观察最后一组容器，其次观察最后一条消息元素
         const lastReplyContainer = container.querySelector('#last-reply-container') as HTMLElement | null;
-        const messageItems = container.querySelectorAll('[data-message-item]');
+        const messageItems = disableTailObservation
+            ? []
+            : container.querySelectorAll('[data-message-item]');
         const lastMessageItem = (messageItems.length > 0
             ? (messageItems[messageItems.length - 1] as HTMLElement)
             : null);
-        const observed: Element | null = lastReplyContainer || lastMessageItem || container.lastElementChild;
+        const observed: Element | null = lastReplyContainer || lastMessageItem || (disableTailObservation ? null : container.lastElementChild);
 
         if (observed) {
             resizeObserverRef.current = new ResizeObserver(() => {
@@ -187,7 +227,7 @@ export function useScrollManagement(): UseScrollManagementReturn {
 
         // 回退：若 ResizeObserver 未触发，下一帧也滚动一次
         requestAnimationFrame(() => scrollToBottom());
-    }, [hasRecentUserScrollIntent, queuePendingSmartScroll, scheduleAutoScrollRelease]);
+    }, [disableTailObservation, hasRecentUserScrollIntent, queuePendingSmartScroll, scheduleAutoScrollRelease]);
 
     smartScrollRef.current = smartScroll;
 
@@ -226,6 +266,7 @@ export function useScrollManagement(): UseScrollManagementReturn {
         scrollContainerRef,
         handleScroll,
         handleUserScrollIntent,
+        syncScrollState,
         smartScroll,
         scrollToUserMessage,
     };

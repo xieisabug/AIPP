@@ -31,7 +31,7 @@ fn get_conversation_summary_config<'a>(
 const IDLE_THRESHOLD_SECONDS: i64 = 600; // 10 分钟
 
 /// 同时进行的最大总结任务数
-const MAX_CONCURRENT_SUMMARIES: usize = 3;
+const MAX_CONCURRENT_SUMMARIES: usize = 1;
 
 /// 执行对话总结定时任务
 ///

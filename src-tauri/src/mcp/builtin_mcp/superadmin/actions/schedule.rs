@@ -152,6 +152,7 @@ impl ActionHandler for ScheduleCreateHandler {
             assistant_id,
             task_prompt: task_prompt.to_string(),
             notify_prompt: notify_prompt.to_string(),
+            butler_conversation_id: None,
             created_time: Utc::now(),
             updated_time: Utc::now(),
         };
@@ -428,6 +429,7 @@ impl ActionHandler for ScheduleDeleteHandler {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
+            butler_conversation_id: snapshot.get("butler_conversation_id").and_then(|v| v.as_i64()),
             created_time: Utc::now(),
             updated_time: Utc::now(),
         };

@@ -24,6 +24,20 @@ interface PermissionResolvedEvent {
     conversation_id?: number;
 }
 
+function isStaleAcpPermissionError(message: string) {
+    return (
+        message.includes("ACP permission request not found or already resolved") ||
+        message.includes("ACP permission receiver dropped before resolution")
+    );
+}
+
+function isStaleOperationPermissionError(message: string) {
+    return (
+        message.includes("Permission request not found or already resolved") ||
+        message.includes("Permission request receiver dropped before resolution")
+    );
+}
+
 function shouldHandleConversationRequest(
     requestConversationId: number | undefined,
     conversationId?: number,
@@ -193,6 +207,11 @@ export function useOperationPermission(options: UseOperationPermissionOptions = 
             } catch (error) {
                 const message = getErrorMessage(error) || "提交权限决策失败";
                 console.error("Failed to send permission decision:", message);
+                if (isStaleOperationPermissionError(message)) {
+                    removeRequestById(requestId);
+                    setDecisionError(null);
+                    return;
+                }
                 setDecisionError(message);
                 setIsSubmitting(false);
             }
@@ -260,6 +279,11 @@ export function useAcpPermission(options: UseAcpPermissionOptions = {}) {
             } catch (error) {
                 const message = getErrorMessage(error) || "提交 ACP 权限决策失败";
                 console.error("Failed to send ACP permission decision:", message);
+                if (isStaleAcpPermissionError(message)) {
+                    removeRequestById(requestId);
+                    setDecisionError(null);
+                    return;
+                }
                 setDecisionError(message);
                 setIsSubmitting(false);
             }

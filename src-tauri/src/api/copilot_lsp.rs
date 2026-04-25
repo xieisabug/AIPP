@@ -22,6 +22,16 @@ pub struct CopilotLspStatus {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopilotOauthTokenCandidate {
+    pub id: String,
+    pub token: String,
+    pub masked_token: String,
+    pub source: String,
+    pub location: String,
+}
+
 /// SignInInitiate 结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status")]
@@ -169,9 +179,12 @@ pub async fn sign_in_initiate(app_handle: AppHandle) -> Result<SignInInitiateRes
             "[CopilotLSP] Device flow started"
         );
 
-        if let Err(e) = open::that(&prompt.verification_uri) {
-            warn!(error = ?e, "[CopilotLSP] Failed to open browser");
-        }
+        let uri = prompt.verification_uri.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = open::that(&uri) {
+                warn!(error = ?e, "[CopilotLSP] Failed to open browser");
+            }
+        });
     }
 
     Ok(sign_in_result)
@@ -264,56 +277,286 @@ pub async fn get_copilot_lsp_status(app_handle: AppHandle) -> Result<CopilotLspS
     }
 }
 
-/// 从 apps.json 读取已存在的 OAuth token
-#[tauri::command]
-pub async fn get_copilot_oauth_token_from_config() -> Result<Option<String>, String> {
-    info!("[CopilotLSP] Reading OAuth token from config...");
+fn is_supported_copilot_token(token: &str) -> bool {
+    let trimmed = token.trim();
+    trimmed.starts_with("gho_") || trimmed.starts_with("ghu_") || trimmed.starts_with("github_pat_")
+}
 
-    // 获取配置文件路径
-    // Windows: %LOCALAPPDATA%\github-copilot\apps.json
-    // macOS/Linux: ~/.config/github-copilot/apps.json
-    let config_path = if cfg!(target_os = "windows") {
-        dirs::data_local_dir()
-            .ok_or("无法获取 LocalAppData 目录")?
-            .join("github-copilot")
-            .join("apps.json")
+fn mask_copilot_token(token: &str) -> String {
+    let trimmed = token.trim();
+    let prefix: String = trimmed.chars().take(5).collect();
+    if trimmed.chars().count() <= 5 {
+        prefix
     } else {
-        dirs::home_dir()
-            .ok_or("无法获取用户主目录")?
-            .join(".config")
-            .join("github-copilot")
-            .join("apps.json")
-    };
-
-    info!(config_path = ?config_path, "[CopilotLSP] Looking for apps.json");
-
-    if !config_path.exists() {
-        info!("[CopilotLSP] apps.json not found at {:?}", config_path);
-        return Ok(None);
+        format!("{}{}", prefix, "********")
     }
+}
 
-    let content =
-        std::fs::read_to_string(&config_path).map_err(|e| format!("读取 apps.json 失败: {}", e))?;
+fn build_token_candidate(
+    token: String,
+    source: impl Into<String>,
+    location: impl Into<String>,
+) -> CopilotOauthTokenCandidate {
+    let source = source.into();
+    let location = location.into();
+    CopilotOauthTokenCandidate {
+        id: format!("{}::{}", source, location),
+        masked_token: mask_copilot_token(&token),
+        token,
+        source,
+        location,
+    }
+}
 
-    let apps: HashMap<String, serde_json::Value> =
-        serde_json::from_str(&content).map_err(|e| format!("解析 apps.json 失败: {}", e))?;
+fn scan_json_for_copilot_token(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(token) if is_supported_copilot_token(token) => {
+            Some(token.trim().to_string())
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(scan_json_for_copilot_token),
+        serde_json::Value::Object(map) => {
+            for value in map.values() {
+                if let Some(token) = scan_json_for_copilot_token(value) {
+                    return Some(token);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
 
-    // 遍历所有以 "github.com:" 开头的 key，查找包含 oauth_token 的配置
-    // 不同的 Copilot 客户端使用不同的 client_id:
-    // - VS Code: Iv1.b507a08c87ecfe98
-    // - JetBrains: Iv23ctfURkiMfJ4xr5mv
-    // - 其他客户端可能使用其他 ID
-    for (key, app) in apps.iter() {
-        if key.starts_with("github.com:") {
-            if let Some(oauth_token) = app.get("oauth_token").and_then(|v| v.as_str()) {
-                info!(key = %key, "[CopilotLSP] Found OAuth token in apps.json");
-                return Ok(Some(oauth_token.to_string()));
+fn try_read_token_from_env() -> Vec<CopilotOauthTokenCandidate> {
+    let mut candidates = Vec::new();
+
+    for env_name in ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
+        if let Ok(value) = std::env::var(env_name) {
+            let trimmed = value.trim();
+            if is_supported_copilot_token(trimmed) {
+                candidates.push(build_token_candidate(
+                    trimmed.to_string(),
+                    "环境变量",
+                    env_name.to_string(),
+                ));
             }
         }
     }
 
-    info!("[CopilotLSP] No OAuth token found in apps.json");
-    Ok(None)
+    candidates
+}
+
+#[cfg(target_os = "macos")]
+fn try_read_token_from_macos_keychain() -> Result<Vec<CopilotOauthTokenCandidate>, String> {
+    let mut candidates = Vec::new();
+
+    // 扫描 VSCode 的 GitHub 认证 keychain 条目
+    let output = Command::new("security")
+        .args(["find-generic-password", "-s", "github.vscode-github-authentication", "-w"])
+        .output()
+        .map_err(|e| format!("调用 macOS Keychain 失败: {}", e))?;
+
+    if output.status.success() {
+        let raw = String::from_utf8(output.stdout)
+            .map_err(|e| format!("解析 macOS Keychain 输出失败: {}", e))?;
+        let trimmed = raw.trim();
+
+        // VSCode 存储的值可能是 JSON 数组，需要解析
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            // 格式: [{"id": "github", "scopes": [...], "accessToken": "ghu_..."}]
+            if let Some(array) = parsed.as_array() {
+                for entry in array {
+                    if let Some(token) = entry.get("accessToken").and_then(|v| v.as_str()) {
+                        if is_supported_copilot_token(token) {
+                            let account =
+                                entry.get("account").and_then(|v| v.as_str()).unwrap_or("unknown");
+                            candidates.push(build_token_candidate(
+                                token.to_string(),
+                                "VSCode Keychain",
+                                format!(
+                                    "service=github.vscode-github-authentication, account={}",
+                                    account
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        } else if is_supported_copilot_token(trimmed) {
+            // 可能是直接的 token 字符串
+            candidates.push(build_token_candidate(
+                trimmed.to_string(),
+                "VSCode Keychain",
+                "service=github.vscode-github-authentication".to_string(),
+            ));
+        }
+    } else {
+        let error_message = String::from_utf8_lossy(&output.stderr);
+        if !error_message.trim().is_empty() {
+            warn!(error = %error_message.trim(), "[CopilotLSP] VSCode keychain entry not found");
+        }
+    }
+
+    Ok(candidates)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn try_read_token_from_macos_keychain() -> Result<Vec<CopilotOauthTokenCandidate>, String> {
+    Ok(Vec::new())
+}
+
+fn get_legacy_apps_json_candidates() -> Result<Vec<PathBuf>, String> {
+    let mut candidates = Vec::new();
+
+    if cfg!(target_os = "windows") {
+        candidates.push(
+            dirs::data_local_dir()
+                .ok_or("无法获取 LocalAppData 目录")?
+                .join("github-copilot")
+                .join("apps.json"),
+        );
+    } else {
+        if let Some(config_dir) = dirs::config_dir() {
+            candidates.push(config_dir.join("github-copilot").join("apps.json"));
+        }
+
+        let home_dir = dirs::home_dir().ok_or("无法获取用户主目录")?;
+        candidates.push(home_dir.join(".config").join("github-copilot").join("apps.json"));
+        candidates.push(
+            home_dir
+                .join("Library")
+                .join("Application Support")
+                .join("github-copilot")
+                .join("apps.json"),
+        );
+        candidates.push(
+            home_dir
+                .join("Library")
+                .join("Application Support")
+                .join("GitHub Copilot")
+                .join("apps.json"),
+        );
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    Ok(candidates)
+}
+
+fn try_read_token_from_legacy_apps_json() -> Result<Vec<CopilotOauthTokenCandidate>, String> {
+    for config_path in get_legacy_apps_json_candidates()? {
+        if !config_path.exists() {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("读取 apps.json 失败 ({}): {}", config_path.display(), e))?;
+        let value: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| format!("解析 apps.json 失败 ({}): {}", config_path.display(), e))?;
+
+        if let Some(token) = scan_json_for_copilot_token(&value) {
+            return Ok(vec![build_token_candidate(
+                token,
+                "旧版 Copilot apps.json",
+                config_path.display().to_string(),
+            )]);
+        }
+    }
+
+    Ok(Vec::new())
+}
+
+fn try_read_token_from_github_cli() -> Result<Vec<CopilotOauthTokenCandidate>, String> {
+    let output = match Command::new("gh").args(["auth", "token"]).output() {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("调用 gh auth token 失败: {}", e)),
+    };
+
+    if !output.status.success() {
+        let error_message = String::from_utf8_lossy(&output.stderr);
+        if !error_message.trim().is_empty() {
+            warn!(error = %error_message.trim(), "[CopilotLSP] gh auth token did not return a usable token");
+        }
+        return Ok(Vec::new());
+    }
+
+    let token = String::from_utf8(output.stdout)
+        .map_err(|e| format!("解析 gh auth token 输出失败: {}", e))?;
+    let trimmed = token.trim();
+
+    if !is_supported_copilot_token(trimmed) {
+        return Ok(Vec::new());
+    }
+
+    Ok(vec![build_token_candidate(trimmed.to_string(), "GitHub CLI", "gh auth token".to_string())])
+}
+
+/// 从当前机器的 Copilot / GitHub 认证来源扫描可复用的 OAuth token 候选
+#[tauri::command]
+pub async fn get_copilot_oauth_token_from_config() -> Result<Vec<CopilotOauthTokenCandidate>, String>
+{
+    info!("[CopilotLSP] Scanning existing Copilot authorization...");
+    let mut candidates = Vec::new();
+
+    let env_candidates = try_read_token_from_env();
+    if !env_candidates.is_empty() {
+        info!(
+            count = env_candidates.len(),
+            "[CopilotLSP] Found Copilot token candidates from environment"
+        );
+        candidates.extend(env_candidates);
+    }
+
+    match try_read_token_from_macos_keychain() {
+        Ok(found_candidates) => {
+            if !found_candidates.is_empty() {
+                info!(
+                    count = found_candidates.len(),
+                    "[CopilotLSP] Found Copilot token candidates from system keychain"
+                );
+                candidates.extend(found_candidates);
+            }
+        }
+        Err(error_message) => {
+            warn!(error = %error_message, "[CopilotLSP] Failed to read token from system keychain");
+        }
+    }
+
+    match try_read_token_from_legacy_apps_json() {
+        Ok(found_candidates) => {
+            if !found_candidates.is_empty() {
+                info!(
+                    count = found_candidates.len(),
+                    "[CopilotLSP] Found Copilot token candidates from legacy apps.json"
+                );
+                candidates.extend(found_candidates);
+            }
+        }
+        Err(error_message) => {
+            warn!(error = %error_message, "[CopilotLSP] Failed to read legacy Copilot apps.json");
+        }
+    }
+
+    match try_read_token_from_github_cli() {
+        Ok(found_candidates) => {
+            if !found_candidates.is_empty() {
+                info!(
+                    count = found_candidates.len(),
+                    "[CopilotLSP] Found Copilot token candidates from GitHub CLI"
+                );
+                candidates.extend(found_candidates);
+            }
+        }
+        Err(error_message) => {
+            warn!(error = %error_message, "[CopilotLSP] Failed to read token from GitHub CLI");
+        }
+    }
+
+    if candidates.is_empty() {
+        info!("[CopilotLSP] No reusable Copilot authorization found");
+    }
+
+    Ok(candidates)
 }
 
 /// 发送 LSP 请求
@@ -433,5 +676,43 @@ fn read_lsp_response(
 
         // 不是我们期望的响应，继续读取
         // 可能是通知或其他请求的响应
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_json_for_copilot_token_finds_nested_oauth_token() {
+        let value = serde_json::json!({
+            "github.com:Iv1.test": {
+                "oauth_token": "gho_nested_token"
+            }
+        });
+
+        assert_eq!(scan_json_for_copilot_token(&value), Some("gho_nested_token".to_string()));
+    }
+
+    #[test]
+    fn scan_json_for_copilot_token_finds_plaintext_cli_token() {
+        let value = serde_json::json!({
+            "token": "github_pat_plaintext",
+            "trusted_folders": ["/tmp/demo"]
+        });
+
+        assert_eq!(scan_json_for_copilot_token(&value), Some("github_pat_plaintext".to_string()));
+    }
+
+    #[test]
+    fn scan_json_for_copilot_token_ignores_unsupported_values() {
+        let value = serde_json::json!({
+            "token": "ghp_classic_pat",
+            "nested": {
+                "oauth_token": "not-a-token"
+            }
+        });
+
+        assert_eq!(scan_json_for_copilot_token(&value), None);
     }
 }

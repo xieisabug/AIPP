@@ -15,11 +15,23 @@ import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { FolderPicker } from "@/components/config/FolderPicker";
-import { AlertTriangle, Plus, Trash2 } from "lucide-react";
+import { ButlerOnboardingWizard } from "@/components/butler/ButlerOnboardingWizard";
+import {
+    buildButlerWorkspaceConfig,
+    BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
+    serializeButlerWorkspaceConfig,
+    type TrustedWorkspace,
+} from "@/components/butler/butlerWorkspaceConfig";
+import { AlertTriangle, Plus, Trash2, Wand2 } from "lucide-react";
 
 interface ExperimentalConfigFormProps {
     form: UseFormReturn<any>;
     onSave: () => Promise<void>;
+    scope?: "all" | "butler";
+    /** When provided, enables the onboarding wizard button inside the butler section. */
+    saveFeatureConfig?: (featureCode: string, config: Record<string, unknown>) => Promise<unknown>;
+    /** Called after the onboarding wizard saves config so the parent can refresh. */
+    onConfigRefresh?: () => void;
 }
 
 interface MCPSummaryProgressPayload {
@@ -102,8 +114,15 @@ const readSummaryEnabledState = (values?: Record<string, unknown>): SummaryEnabl
     conversation: isEnabledValue(values?.conversation_summary_enabled),
 });
 
-export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ form, onSave }) => {
+export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
+    form,
+    onSave,
+    scope = "all",
+    saveFeatureConfig: saveFeatureConfigProp,
+    onConfigRefresh,
+}) => {
     const [isSaving, setIsSaving] = useState(false);
+    const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
     const [summaryProgress, setSummaryProgress] = useState<MCPSummaryProgressPayload | null>(null);
     const [assistantSummaryProgress, setAssistantSummaryProgress] =
         useState<AssistantSummaryProgressPayload | null>(null);
@@ -131,6 +150,11 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
     const assistantSummarizerModelId = form.watch("assistant_summarizer_model_id") || "";
     const conversationSummaryModel = form.watch("conversation_summary_model") || "";
     const butlerModelId = form.watch("butler_model_id") || "";
+    const butlerMainWorkspacePath = String(form.watch("butler_main_workspace_path") || "");
+    const butlerMainWorkspaceDescription = String(
+        form.watch("butler_main_workspace_description")
+        || BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION
+    );
     const feishuAppId = String(form.watch("butler_feishu_app_id") || "");
     const feishuAppSecret = String(form.watch("butler_feishu_app_secret") || "");
     const feishuBaseUrl = String(form.watch("butler_feishu_base_url") || "https://open.feishu.cn");
@@ -326,26 +350,60 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
         triggerSummaryTask,
     ]);
 
-    // Trusted workspace helpers — stored as JSON array [{path, description}]
-    type TrustedWorkspace = { path: string; description: string };
-    const trustedPathsRaw: string = form.watch("butler_trusted_workspaces") || "[]";
-    const trustedWorkspaces: TrustedWorkspace[] = useMemo(() => {
-        try {
-            const parsed = JSON.parse(trustedPathsRaw);
-            if (Array.isArray(parsed)) return parsed;
-        } catch {
-            // Legacy: plain newline-separated paths → migrate to JSON
-            const lines = trustedPathsRaw.split("\n").map(s => s.trim()).filter(Boolean);
-            if (lines.length > 0) return lines.map(p => ({ path: p, description: "" }));
-        }
-        return [];
-    }, [trustedPathsRaw]);
+    const trustedPathsRaw: string = String(form.watch("butler_trusted_workspaces") || "");
+    const workspaceConfig = useMemo(
+        () =>
+            buildButlerWorkspaceConfig({
+                mainWorkspacePath: butlerMainWorkspacePath,
+                mainWorkspaceDescription: butlerMainWorkspaceDescription,
+                trustedWorkspacesRaw: trustedPathsRaw,
+            }),
+        [butlerMainWorkspaceDescription, butlerMainWorkspacePath, trustedPathsRaw]
+    );
+    const trustedWorkspaces = workspaceConfig.trustedWorkspaces;
     const setTrustedWorkspaces = useCallback((ws: TrustedWorkspace[]) => {
-        form.setValue("butler_trusted_workspaces", JSON.stringify(ws), { shouldDirty: true });
-    }, [form]);
+        const nextConfig = serializeButlerWorkspaceConfig({
+            mainWorkspacePath: butlerMainWorkspacePath,
+            mainWorkspaceDescription: butlerMainWorkspaceDescription,
+            trustedWorkspaces: ws,
+        });
+        form.setValue("butler_main_workspace_path", nextConfig.mainWorkspacePath, {
+            shouldDirty: true,
+        });
+        form.setValue(
+            "butler_main_workspace_description",
+            nextConfig.mainWorkspaceDescription || BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
+            { shouldDirty: true }
+        );
+        form.setValue("butler_trusted_workspaces", nextConfig.trustedWorkspacesRaw, {
+            shouldDirty: true,
+        });
+    }, [butlerMainWorkspaceDescription, butlerMainWorkspacePath, form]);
+    const setMainWorkspace = useCallback((path: string, description: string) => {
+        const nextConfig = serializeButlerWorkspaceConfig({
+            mainWorkspacePath: path,
+            mainWorkspaceDescription: description,
+            trustedWorkspaces,
+        });
+        form.setValue("butler_main_workspace_path", nextConfig.mainWorkspacePath, {
+            shouldDirty: true,
+        });
+        form.setValue(
+            "butler_main_workspace_description",
+            nextConfig.mainWorkspaceDescription || BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
+            { shouldDirty: true }
+        );
+        form.setValue("butler_trusted_workspaces", nextConfig.trustedWorkspacesRaw, {
+            shouldDirty: true,
+        });
+    }, [form, trustedWorkspaces]);
     const handleAddTrustedPath = useCallback(() => {
         const trimmed = newTrustedPath.trim();
         if (!trimmed) return;
+        if (trimmed === butlerMainWorkspacePath.trim()) {
+            toast.error("该路径已被设置为主工作区");
+            return;
+        }
         if (trustedWorkspaces.some(w => w.path === trimmed)) {
             toast.error("该路径已存在");
             return;
@@ -353,29 +411,40 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
         setTrustedWorkspaces([...trustedWorkspaces, { path: trimmed, description: newTrustedDesc.trim() }]);
         setNewTrustedPath("");
         setNewTrustedDesc("");
-    }, [newTrustedPath, newTrustedDesc, trustedWorkspaces, setTrustedWorkspaces]);
+    }, [
+        butlerMainWorkspacePath,
+        newTrustedDesc,
+        newTrustedPath,
+        setTrustedWorkspaces,
+        trustedWorkspaces,
+    ]);
     const handleRemoveTrustedPath = useCallback((path: string) => {
         setTrustedWorkspaces(trustedWorkspaces.filter(w => w.path !== path));
     }, [trustedWorkspaces, setTrustedWorkspaces]);
     const handleUpdateDescription = useCallback((path: string, desc: string) => {
         setTrustedWorkspaces(trustedWorkspaces.map(w => w.path === path ? { ...w, description: desc } : w));
     }, [trustedWorkspaces, setTrustedWorkspaces]);
+    const showSummarySection = scope === "all";
 
     const handleSave = useCallback(async () => {
-        if (dynamicEnabled && !summarizerModelId) {
+        if (showSummarySection && dynamicEnabled && !summarizerModelId) {
             toast.error("请先选择 MCP 总结 AI 模型后再保存");
             return;
         }
-        if (assistantSummaryEnabled && !assistantSummarizerModelId) {
+        if (showSummarySection && assistantSummaryEnabled && !assistantSummarizerModelId) {
             toast.error("请先选择助手总结 AI 模型后再保存");
             return;
         }
-        if (conversationSummaryEnabled && !conversationSummaryModel) {
+        if (showSummarySection && conversationSummaryEnabled && !conversationSummaryModel) {
             toast.error("请先选择对话总结模型后再保存");
             return;
         }
         if (butlerEnabled && !butlerModelId) {
             toast.error("请先为总管家模式选择模型");
+            return;
+        }
+        if (butlerEnabled && !butlerMainWorkspacePath.trim()) {
+            toast.error("请先配置总管家的主工作区");
             return;
         }
         if (butlerEnabled && feishuEnabled && !feishuAppId.trim()) {
@@ -436,6 +505,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
         feishuStatus?.secret_configured,
         form,
         onSave,
+        showSummarySection,
         summarizerModelId,
     ]);
 
@@ -520,50 +590,62 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
 
     const saveDisabled =
         isSaving
-        || (dynamicEnabled && !summarizerModelId)
-        || (assistantSummaryEnabled && !assistantSummarizerModelId)
-        || (conversationSummaryEnabled && !conversationSummaryModel)
+        || (showSummarySection && dynamicEnabled && !summarizerModelId)
+        || (showSummarySection && assistantSummaryEnabled && !assistantSummarizerModelId)
+        || (showSummarySection && conversationSummaryEnabled && !conversationSummaryModel)
         || (butlerEnabled && !butlerModelId)
+        || (butlerEnabled && !butlerMainWorkspacePath.trim())
         || (butlerEnabled && feishuEnabled && !feishuAppId.trim())
         || (butlerEnabled && feishuEnabled && !feishuAppSecret.trim() && !feishuStatus?.secret_configured);
 
     return (
         <Form {...form}>
-            <Card className="shadow-none border-l-4 border-l-primary bottom-space">
-                <CardHeader>
-                    <CardTitle className="text-lg font-semibold">实验性功能</CardTitle>
-                    <p className="text-sm text-muted-foreground">新能力可能存在兼容风险，请按需启用。</p>
-                </CardHeader>
+            <Card
+                className={
+                    showSummarySection
+                        ? "bottom-space border-l-4 border-l-primary shadow-none"
+                        : "border-0 shadow-none"
+                }
+            >
+                {showSummarySection ? (
+                    <CardHeader>
+                        <CardTitle className="text-lg font-semibold">实验性功能</CardTitle>
+                        <p className="text-sm text-muted-foreground">
+                            新能力可能存在兼容风险，请按需启用。
+                        </p>
+                    </CardHeader>
+                ) : null}
                 <CardContent className="space-y-6">
-                    <div className="space-y-4">
-                        <div>
-                            <h3 className="text-sm font-medium">摘要与动态加载</h3>
-                            <p className="mt-1 text-sm text-muted-foreground">
-                                将相关实验能力放在一起，先开关、后选模型、再手动触发；首次从关闭切到开启后，保存会自动在后台补跑一次。
-                            </p>
-                        </div>
-
+                    {showSummarySection ? (
                         <div className="space-y-4">
-                            <Controller
-                                control={form.control}
-                                name="dynamic_mcp_loading_enabled"
-                                render={({ field }) => (
-                                    <FormItem className={toggleCardClassName}>
-                                        <div>
-                                            <FormLabel className="text-base">MCP 动态加载（实验）</FormLabel>
-                                            <p className="mt-1 text-sm text-muted-foreground">
-                                                开启后采用 MCP 目录摘要 + 按需加载模式。
-                                            </p>
-                                        </div>
-                                        <FormControl>
-                                            <Switch
-                                                checked={isEnabledValue(field.value)}
-                                                onCheckedChange={field.onChange}
-                                            />
-                                        </FormControl>
-                                    </FormItem>
-                                )}
-                            />
+                            <div>
+                                <h3 className="text-sm font-medium">摘要与动态加载</h3>
+                                <p className="mt-1 text-sm text-muted-foreground">
+                                    将相关实验能力放在一起，先开关、后选模型、再手动触发；首次从关闭切到开启后，保存会自动在后台补跑一次。
+                                </p>
+                            </div>
+
+                            <div className="space-y-4">
+                                <Controller
+                                    control={form.control}
+                                    name="dynamic_mcp_loading_enabled"
+                                    render={({ field }) => (
+                                        <FormItem className={toggleCardClassName}>
+                                            <div>
+                                                <FormLabel className="text-base">MCP 动态加载（实验）</FormLabel>
+                                                <p className="mt-1 text-sm text-muted-foreground">
+                                                    开启后采用 MCP 目录摘要 + 按需加载模式。
+                                                </p>
+                                            </div>
+                                            <FormControl>
+                                                <Switch
+                                                    checked={isEnabledValue(field.value)}
+                                                    onCheckedChange={field.onChange}
+                                                />
+                                            </FormControl>
+                                        </FormItem>
+                                    )}
+                                />
 
                             {dynamicEnabled && (
                                 <div className={nestedGroupClassName}>
@@ -886,8 +968,9 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                     </div>
                                 </div>
                             )}
+                            </div>
                         </div>
-                    </div>
+                    ) : null}
 
                     <div className="space-y-4">
                         <div>
@@ -920,6 +1003,25 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
 
                         {butlerEnabled && (
                             <div className={nestedGroupClassName}>
+                                {saveFeatureConfigProp && (
+                                    <div className="flex items-center gap-3 rounded-lg border border-primary/30 bg-primary/5 p-3">
+                                        <div className="flex-1 space-y-0.5">
+                                            <p className="text-sm font-medium">引导配置</p>
+                                            <p className="text-xs text-muted-foreground">
+                                                通过分步向导快速完成总管家的模型、环境、工作区和飞书配置。
+                                            </p>
+                                        </div>
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => setIsOnboardingOpen(true)}
+                                        >
+                                            <Wand2 className="h-4 w-4 mr-1.5" />
+                                            开始引导
+                                        </Button>
+                                    </div>
+                                )}
                                 <Controller
                                     control={form.control}
                                     name="butler_model_id"
@@ -1142,18 +1244,59 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                         )}
                                     />
 
-                                    {!trustAllWorkspaces && (
-                                        <div className={nestedGroupClassName}>
-                                            <p className="text-sm text-muted-foreground">
-                                                配置可信工作区路径及描述。在这些路径下的文件操作将自动放行，描述会注入到总管家的提示词中帮助 AI 理解工作区用途。
-                                            </p>
-                                            {/* 添加新路径 */}
+                                    <div className={nestedGroupClassName}>
+                                        <p className="text-sm text-muted-foreground">
+                                            主工作区为必填，额外工作区按需补充。在这些路径下的文件操作将自动放行，描述会注入到总管家的提示词中帮助 AI 理解工作区用途。
+                                        </p>
+                                        <div className="space-y-3 rounded-lg border border-primary/20 bg-background p-4">
+                                            <div>
+                                                <p className="text-sm font-medium">主工作区</p>
+                                                <p className="mt-1 text-xs text-muted-foreground">
+                                                    总管家会优先在这里组织任务、文件与产物。
+                                                </p>
+                                            </div>
+                                            <FolderPicker
+                                                value={butlerMainWorkspacePath}
+                                                onChange={(value) =>
+                                                    setMainWorkspace(
+                                                        value,
+                                                        butlerMainWorkspaceDescription
+                                                    )
+                                                }
+                                                placeholder="选择或输入主工作区目录路径"
+                                            />
+                                            <Input
+                                                value={butlerMainWorkspaceDescription}
+                                                onChange={(event) =>
+                                                    setMainWorkspace(
+                                                        butlerMainWorkspacePath,
+                                                        event.target.value
+                                                    )
+                                                }
+                                                placeholder={BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION}
+                                            />
+                                            {!butlerMainWorkspacePath.trim() ? (
+                                                <p className="text-xs text-destructive">
+                                                    请先配置主工作区
+                                                </p>
+                                            ) : null}
+                                        </div>
+
+                                        {!trustAllWorkspaces && (
+                                            <>
+                                                <div className="space-y-2">
+                                                    <p className="text-sm font-medium">额外可信工作区</p>
+                                                    <p className="text-xs text-muted-foreground">
+                                                        用于补充主工作区之外也允许自动放行的目录。
+                                                    </p>
+                                                </div>
+
                                             <div className="space-y-2">
                                                 <div className="flex items-center gap-2">
                                                     <FolderPicker
                                                         value={newTrustedPath}
                                                         onChange={setNewTrustedPath}
-                                                        placeholder="选择或输入可信目录路径"
+                                                        placeholder="选择或输入额外可信目录路径"
                                                     />
                                                     <Button
                                                         type="button"
@@ -1176,7 +1319,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                             <div className="space-y-2 max-h-64 overflow-y-auto">
                                                 {trustedWorkspaces.length === 0 ? (
                                                     <div className="text-sm text-muted-foreground text-center py-3">
-                                                        暂未配置可信工作区
+                                                        暂未配置额外可信工作区
                                                     </div>
                                                 ) : (
                                                     trustedWorkspaces.map((ws) => (
@@ -1208,8 +1351,9 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                                                     ))
                                                 )}
                                             </div>
-                                        </div>
-                                    )}
+                                            </>
+                                        )}
+                                    </div>
                                 </div>
 
                                 <Controller
@@ -1495,14 +1639,17 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                         >
                             {isSaving ? "保存中..." : "保存配置"}
                         </Button>
-                        {dynamicEnabled && !summarizerModelId && (
+                        {showSummarySection && dynamicEnabled && !summarizerModelId && (
                             <p className="text-sm text-destructive mt-2">请先选择 MCP 总结 AI 模型</p>
                         )}
-                        {assistantSummaryEnabled && !assistantSummarizerModelId && (
+                        {showSummarySection && assistantSummaryEnabled && !assistantSummarizerModelId && (
                             <p className="text-sm text-destructive mt-2">请先选择助手总结 AI 模型</p>
                         )}
-                        {conversationSummaryEnabled && !conversationSummaryModel && (
+                        {showSummarySection && conversationSummaryEnabled && !conversationSummaryModel && (
                             <p className="text-sm text-destructive mt-2">请先选择对话总结模型</p>
+                        )}
+                        {butlerEnabled && !butlerMainWorkspacePath.trim() && (
+                            <p className="text-sm text-destructive mt-2">请先配置主工作区</p>
                         )}
                         {butlerEnabled && feishuEnabled && !feishuAppId.trim() && (
                             <p className="text-sm text-destructive mt-2">请先填写飞书 App ID</p>
@@ -1513,6 +1660,25 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({ 
                     </div>
                 </CardContent>
             </Card>
+            {saveFeatureConfigProp && (
+                <ButlerOnboardingWizard
+                    open={isOnboardingOpen}
+                    onOpenChange={setIsOnboardingOpen}
+                    existingModelId={butlerModelId}
+                    existingDisplayName={String(form.watch("butler_display_name") || "总管家")}
+                    existingTrustAll={trustAllWorkspaces}
+                    existingMainWorkspace={workspaceConfig.mainWorkspace}
+                    existingTrustedWorkspaces={trustedWorkspaces}
+                    existingFeishuEnabled={feishuEnabled}
+                    existingFeishuAppId={feishuAppId}
+                    existingFeishuBaseUrl={feishuBaseUrl}
+                    initialValues={form.getValues()}
+                    saveFeatureConfig={saveFeatureConfigProp}
+                    onComplete={() => {
+                        onConfigRefresh?.();
+                    }}
+                />
+            )}
         </Form>
     );
 };

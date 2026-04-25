@@ -38,6 +38,7 @@ interface ScheduledTask {
     assistantId: number;
     taskPrompt: string;
     notifyPrompt: string;
+    butlerConversationId?: number | null;
     createdTime: string;
     updatedTime: string;
 }
@@ -61,6 +62,7 @@ interface ScheduledTaskRun {
     errorMessage?: string | null;
     startedTime: string;
     finishedTime?: string | null;
+    butlerFollowupStatus?: string | null;
 }
 
 interface ScheduledTaskRunUpdateEvent {
@@ -408,10 +410,11 @@ export default function ScheduleWindow() {
         try {
             setIsLoading(true);
             const result = await invoke<ScheduledTask[]>("list_scheduled_tasks");
-            setTasks(result);
-            if (result.length > 0 && !activeTaskId) {
-                setActiveTaskId(result[0].id);
-            } else if (result.length === 0) {
+            const appTasks = result.filter(t => !t.butlerConversationId);
+            setTasks(appTasks);
+            if (appTasks.length > 0 && !activeTaskId) {
+                setActiveTaskId(appTasks[0].id);
+            } else if (appTasks.length === 0) {
                 setActiveTaskId(null);
             }
         } catch (error) {
