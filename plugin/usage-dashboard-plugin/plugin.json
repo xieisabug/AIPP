@@ -1,0 +1,32 @@
+{
+  "id": "usage-dashboard-plugin",
+  "code": "usage-dashboard-plugin",
+  "name": "Usage Dashboard Plugin",
+  "version": "0.1.0",
+  "entry": "dist/main.js",
+  "runtime": {
+    "type": "js",
+    "entry": "dist/main.js"
+  },
+  "description": "读取本地 conversation / assistant / llm 数据，生成多维度使用统计与趋势图。",
+  "pluginTypes": [
+    "interfaceType",
+    "applicationType"
+  ],
+  "permissions": [
+    "data.read.conversation",
+    "data.read.assistant",
+    "data.read.llm",
+    "plugin.storage"
+  ],
+  "contributions": {
+    "views": [
+      {
+        "id": "usage-dashboard",
+        "location": "config.analytics",
+        "title": "Usage Dashboard",
+        "description": "多维度统计本地会话、消息、模型与助手使用情况。"
+      }
+    ]
+  }
+}

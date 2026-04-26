@@ -842,10 +842,8 @@ class PluginRuntime {
 
         const handler = this.hookHandlers.get(this.hookHandlerKey(payload.pluginCode, payload.hookName));
         if (!handler) {
-            await this.submitHookBridgeResult(
-                payload.requestId,
-                null,
-                `JS plugin '${payload.pluginCode}' has no registered handler for hook '${payload.hookName}'`
+            console.debug(
+                `[PluginRuntime] Ignoring hook '${payload.hookName}' for plugin '${payload.pluginCode}' in this window because no handler is registered.`
             );
             return;
         }

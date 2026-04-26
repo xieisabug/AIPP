@@ -113,6 +113,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     ...field,
                     pluginId: plugin.pluginId,
                     pluginCode: plugin.code,
+                    pluginName: plugin.name,
                     formKey: buildPluginAssistantFieldFormKey(plugin.pluginId, field.key),
                 }))
             ),

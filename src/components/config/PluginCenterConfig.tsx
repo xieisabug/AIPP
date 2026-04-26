@@ -276,6 +276,25 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     );
 
     const currentLoadedPlugin = selectedPlugin ? loadedPluginByCode.get(selectedPlugin.code) : null;
+    const selectedPluginViewHostItems = useMemo<LoadedPlugin[]>(() => {
+        if (!selectedPlugin) {
+            return [];
+        }
+        if (currentLoadedPlugin) {
+            return [currentLoadedPlugin];
+        }
+        return [
+            {
+                pluginId: selectedPlugin.pluginId,
+                name: selectedPlugin.name,
+                version: selectedPlugin.version,
+                code: selectedPlugin.code,
+                pluginType: selectedPlugin.pluginType,
+                contributions: selectedPlugin.contributions,
+                instance: null,
+            },
+        ];
+    }, [selectedPlugin, currentLoadedPlugin]);
     const hasInterfacePluginType = selectedPlugin?.pluginType.includes("interfaceType") ?? false;
     const selectedRuntimeType = selectedPlugin?.runtime?.type ?? "js";
     const pluginUiBlockedReason = useMemo(() => {
@@ -537,9 +556,9 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                      </TabsContent>
                     <TabsContent value="views" className="mt-4 space-y-4">
                         <PluginViewHost
-                            pluginList={runtimePlugins}
+                            pluginList={selectedPluginViewHostItems}
                             location="config.analytics"
-                            emptyDescription="当前没有插件在设置页注册扩展视图。"
+                            emptyDescription="当前选中的插件没有在设置页注册扩展视图。"
                         />
                     </TabsContent>
                     <TabsContent value="config" className="mt-4 space-y-4">

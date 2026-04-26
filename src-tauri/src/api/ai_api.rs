@@ -185,29 +185,49 @@ fn messages_to_hook_value(
 }
 
 fn apply_hook_messages(
-    mut messages: Vec<(String, String, Vec<MessageAttachment>)>,
+    messages: Vec<(String, String, Vec<MessageAttachment>)>,
     hook_context: &serde_json::Value,
 ) -> Vec<(String, String, Vec<MessageAttachment>)> {
     let Some(hook_messages) = hook_context.get("messages").and_then(|value| value.as_array()) else {
         return messages;
     };
 
+    let mut rebuilt_messages = Vec::with_capacity(hook_messages.len());
+
     for item in hook_messages {
-        let Some(index) = item.get("index").and_then(|value| value.as_u64()).map(|value| value as usize) else {
+        let original_index = item
+            .get("index")
+            .or_else(|| item.get("sourceIndex"))
+            .and_then(|value| value.as_u64())
+            .map(|value| value as usize);
+        let original_message = original_index.and_then(|index| messages.get(index));
+        let message_type = item
+            .get("messageType")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string())
+            .or_else(|| original_message.map(|message| message.0.clone()));
+        let content = item
+            .get("content")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string())
+            .or_else(|| original_message.map(|message| message.1.clone()));
+
+        let (Some(message_type), Some(content)) = (message_type, content) else {
             continue;
         };
-        let Some(message) = messages.get_mut(index) else {
-            continue;
-        };
-        if let Some(message_type) = item.get("messageType").and_then(|value| value.as_str()) {
-            message.0 = message_type.to_string();
-        }
-        if let Some(content) = item.get("content").and_then(|value| value.as_str()) {
-            message.1 = content.to_string();
-        }
+
+        rebuilt_messages.push((
+            message_type,
+            content,
+            original_message.map(|message| message.2.clone()).unwrap_or_default(),
+        ));
     }
 
-    messages
+    if rebuilt_messages.is_empty() {
+        messages
+    } else {
+        rebuilt_messages
+    }
 }
 
 async fn run_before_model_request_hook(
@@ -2880,4 +2900,85 @@ pub async fn regenerate_conversation_title(
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_hook_messages;
+    use crate::db::conversation_db::{AttachmentType, MessageAttachment};
+
+    fn sample_attachment(hash: &str) -> MessageAttachment {
+        MessageAttachment {
+            id: 0,
+            message_id: 0,
+            attachment_type: AttachmentType::Text,
+            attachment_url: None,
+            attachment_content: Some("attachment".to_string()),
+            attachment_hash: Some(hash.to_string()),
+            use_vector: false,
+            token_count: None,
+        }
+    }
+
+    #[test]
+    fn test_apply_hook_messages_updates_existing_message_and_preserves_attachments() {
+        let messages = vec![(
+            "user".to_string(),
+            "original".to_string(),
+            vec![sample_attachment("keep-me")],
+        )];
+        let hook_context = serde_json::json!({
+            "messages": [
+                {
+                    "index": 0,
+                    "messageType": "user",
+                    "content": "patched"
+                }
+            ]
+        });
+
+        let updated = apply_hook_messages(messages, &hook_context);
+
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].0, "user");
+        assert_eq!(updated[0].1, "patched");
+        assert_eq!(updated[0].2.len(), 1);
+        assert_eq!(updated[0].2[0].attachment_hash.as_deref(), Some("keep-me"));
+    }
+
+    #[test]
+    fn test_apply_hook_messages_can_insert_hidden_message_after_existing_message() {
+        let messages = vec![
+            (
+                "user".to_string(),
+                "question".to_string(),
+                vec![sample_attachment("first")],
+            ),
+            ("assistant".to_string(), "answer".to_string(), Vec::new()),
+        ];
+        let hook_context = serde_json::json!({
+            "messages": [
+                {
+                    "index": 0
+                },
+                {
+                    "messageType": "system",
+                    "content": "<plugin_hidden_context>secret</plugin_hidden_context>"
+                },
+                {
+                    "index": 1
+                }
+            ]
+        });
+
+        let updated = apply_hook_messages(messages, &hook_context);
+
+        assert_eq!(updated.len(), 3);
+        assert_eq!(updated[0].0, "user");
+        assert_eq!(updated[1].0, "system");
+        assert_eq!(updated[1].1, "<plugin_hidden_context>secret</plugin_hidden_context>");
+        assert!(updated[1].2.is_empty());
+        assert_eq!(updated[2].0, "assistant");
+        assert_eq!(updated[0].2[0].attachment_hash.as_deref(), Some("first"));
+    }
 }

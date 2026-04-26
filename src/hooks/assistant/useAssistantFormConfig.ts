@@ -23,6 +23,7 @@ interface UseAssistantFormConfigProps {
         PluginAssistantFormFieldContribution & {
             pluginId: number;
             pluginCode: string;
+            pluginName: string;
             formKey: string;
         }
     >;
@@ -366,7 +367,22 @@ export const useAssistantFormConfig = ({
             });
         }
 
+        const renderedPluginGroups = new Set<number>();
+
         pluginAssistantFormFields.forEach((field) => {
+            if (!renderedPluginGroups.has(field.pluginId)) {
+                renderedPluginGroups.add(field.pluginId);
+                baseConfigs.push({
+                    key: `plugin-group::${field.pluginId}`,
+                    config: {
+                        type: "static" as const,
+                        label: "插件扩展",
+                        value: field.pluginName || field.pluginCode,
+                        className: "border border-dashed border-border bg-muted/40 font-medium text-foreground",
+                    },
+                });
+            }
+
             const resolvedValue =
                 pluginAssistantConfigValues[field.formKey]
                 ?? (() => {
