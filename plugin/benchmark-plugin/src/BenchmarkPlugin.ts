@@ -23,4 +23,11 @@ var BenchmarkPlugin = class BenchmarkPlugin {
     }
     return React.createElement(BenchmarkPanel, { systemApi: this.systemApi });
   }
+
+  renderView(viewId: string) {
+    if (viewId !== "benchmark-dashboard") {
+      return null;
+    }
+    return this.renderComponent();
+  }
 };

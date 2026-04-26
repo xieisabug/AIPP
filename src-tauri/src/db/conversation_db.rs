@@ -154,6 +154,7 @@ pub struct Message {
     pub generation_group_id: Option<String>,
     pub parent_group_id: Option<String>,
     pub tool_calls_json: Option<String>, // 保存原始 tool_calls JSON
+    pub metadata_json: Option<String>,
     #[serde(serialize_with = "serialize_option_datetime_millis")]
     pub first_token_time: Option<DateTime<Utc>>, // 首个 token 到达时间
     pub ttft_ms: Option<i64>,            // Time to First Token (毫秒)
@@ -179,6 +180,7 @@ pub struct MessageDetail {
     pub generation_group_id: Option<String>,
     pub parent_group_id: Option<String>,
     pub tool_calls_json: Option<String>,
+    pub metadata_json: Option<String>,
     #[serde(serialize_with = "serialize_option_datetime_millis")]
     pub first_token_time: Option<DateTime<Utc>>, // 首个 token 到达时间
     pub ttft_ms: Option<i64>, // Time to First Token (毫秒)
@@ -653,13 +655,13 @@ impl MessageRepository {
         &self,
         conversation_id: i64,
     ) -> Result<Vec<(Message, Option<MessageAttachment>)>> {
-        let mut stmt = self.conn.prepare("SELECT message.id, message.parent_id, message.conversation_id, message.message_type, message.content, message.llm_model_id, message.llm_model_name, message.created_time, message.start_time, message.finish_time, message.token_count, message.input_token_count, message.output_token_count, message.generation_group_id, message.parent_group_id, message.tool_calls_json, message.first_token_time, message.ttft_ms, ma.attachment_type, ma.attachment_url, ma.attachment_content, ma.use_vector as attachment_use_vector, ma.token_count as attachment_token_count
+        let mut stmt = self.conn.prepare("SELECT message.id, message.parent_id, message.conversation_id, message.message_type, message.content, message.llm_model_id, message.llm_model_name, message.created_time, message.start_time, message.finish_time, message.token_count, message.input_token_count, message.output_token_count, message.generation_group_id, message.parent_group_id, message.tool_calls_json, message.metadata_json, message.first_token_time, message.ttft_ms, ma.attachment_type, ma.attachment_url, ma.attachment_content, ma.use_vector as attachment_use_vector, ma.token_count as attachment_token_count
                                           FROM message
                                           LEFT JOIN message_attachment ma ON message.id = ma.message_id
                                           WHERE message.conversation_id = ?1
                                           ORDER BY message.created_time ASC")?;
         let rows = stmt.query_map(&[&conversation_id], |row| {
-            let attachment_type_int: Option<i64> = row.get(18).ok();
+            let attachment_type_int: Option<i64> = row.get(19).ok();
             let attachment_type = attachment_type_int.map(AttachmentType::try_from).transpose()?;
             let message = Message {
                 id: row.get(0)?,
@@ -678,19 +680,20 @@ impl MessageRepository {
                 generation_group_id: row.get(13)?,
                 parent_group_id: row.get(14)?,
                 tool_calls_json: row.get(15)?,
-                first_token_time: get_datetime_from_row(row, 16)?,
-                ttft_ms: row.get(17).ok(),
+                metadata_json: row.get(16)?,
+                first_token_time: get_datetime_from_row(row, 17)?,
+                ttft_ms: row.get(18).ok(),
             };
             let attachment = if attachment_type.is_some() {
                 Some(MessageAttachment {
                     id: 0,
                     message_id: row.get(0)?,
                     attachment_type: attachment_type.unwrap(),
-                    attachment_url: row.get(19)?,
-                    attachment_content: row.get(20)?,
+                    attachment_url: row.get(20)?,
+                    attachment_content: row.get(21)?,
                     attachment_hash: None,
-                    use_vector: row.get(21)?,
-                    token_count: row.get(22)?,
+                    use_vector: row.get(22)?,
+                    token_count: row.get(23)?,
                 })
             } else {
                 None
@@ -703,7 +706,7 @@ impl MessageRepository {
     fn insert_message(&self, message: &Message, touch_conversation: bool) -> Result<Message> {
         self.with_serialized_write(|conn| {
             conn.execute(
-                "INSERT INTO message (parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, input_token_count, output_token_count, generation_group_id, parent_group_id, tool_calls_json, first_token_time, ttft_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                "INSERT INTO message (parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, input_token_count, output_token_count, generation_group_id, parent_group_id, tool_calls_json, metadata_json, first_token_time, ttft_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 rusqlite::params![
                     &message.parent_id,
                     &message.conversation_id,
@@ -720,6 +723,7 @@ impl MessageRepository {
                     &message.generation_group_id,
                     &message.parent_group_id,
                     &message.tool_calls_json,
+                    &message.metadata_json,
                     &message.first_token_time,
                     &message.ttft_ms,
                 ],
@@ -748,6 +752,7 @@ impl MessageRepository {
                 generation_group_id: message.generation_group_id.clone(),
                 parent_group_id: message.parent_group_id.clone(),
                 tool_calls_json: message.tool_calls_json.clone(),
+                metadata_json: message.metadata_json.clone(),
                 first_token_time: message.first_token_time,
                 ttft_ms: message.ttft_ms,
             })
@@ -782,6 +787,17 @@ impl MessageRepository {
         })
     }
 
+    #[instrument(level = "debug", skip(self, metadata_json), fields(id = id))]
+    pub fn update_metadata(&self, id: i64, metadata_json: Option<&str>) -> Result<()> {
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE message SET metadata_json = ?1 WHERE id = ?2",
+                rusqlite::params![metadata_json, id],
+            )?;
+            Ok(())
+        })
+    }
+
     /// 更新对话中所有正在进行的消息的 finish_time（用于取消操作）
     /// 只更新 start_time IS NOT NULL 且 finish_time IS NULL 的消息
     #[instrument(level = "debug", skip(self), fields(conversation_id = conversation_id))]
@@ -806,7 +822,7 @@ impl Repository<Message> for MessageRepository {
     #[instrument(level = "debug", skip(self), fields(id = id))]
     fn read(&self, id: i64) -> Result<Option<Message>> {
         self.conn
-            .query_row("SELECT id, parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, input_token_count, output_token_count, generation_group_id, parent_group_id, tool_calls_json, first_token_time, ttft_ms FROM message WHERE id = ?", &[&id], |row| {
+            .query_row("SELECT id, parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, input_token_count, output_token_count, generation_group_id, parent_group_id, tool_calls_json, metadata_json, first_token_time, ttft_ms FROM message WHERE id = ?", &[&id], |row| {
                 Ok(Message {
                     id: row.get(0)?,
                     parent_id: row.get(1)?,
@@ -824,8 +840,9 @@ impl Repository<Message> for MessageRepository {
                     generation_group_id: row.get(13)?,
                     parent_group_id: row.get(14)?,
                     tool_calls_json: row.get(15)?,
-                    first_token_time: get_datetime_from_row(row, 16)?,
-                    ttft_ms: row.get(17).ok(),
+                    metadata_json: row.get(16)?,
+                    first_token_time: get_datetime_from_row(row, 17)?,
+                    ttft_ms: row.get(18).ok(),
                 })
             })
             .optional()
@@ -835,7 +852,7 @@ impl Repository<Message> for MessageRepository {
     fn update(&self, message: &Message) -> Result<()> {
         self.with_serialized_write(|conn| {
             conn.execute(
-                "UPDATE message SET conversation_id = ?1, message_type = ?2, content = ?3, llm_model_id = ?4, llm_model_name = ?5, token_count = ?6, input_token_count = ?7, output_token_count = ?8, tool_calls_json = ?9, first_token_time = ?10, ttft_ms = ?11, start_time = ?12, finish_time = ?13 WHERE id = ?14",
+                "UPDATE message SET conversation_id = ?1, message_type = ?2, content = ?3, llm_model_id = ?4, llm_model_name = ?5, token_count = ?6, input_token_count = ?7, output_token_count = ?8, tool_calls_json = ?9, metadata_json = ?10, first_token_time = ?11, ttft_ms = ?12, start_time = ?13, finish_time = ?14 WHERE id = ?15",
                 rusqlite::params![
                     &message.conversation_id,
                     &message.message_type,
@@ -846,6 +863,7 @@ impl Repository<Message> for MessageRepository {
                     &message.input_token_count,
                     &message.output_token_count,
                     &message.tool_calls_json,
+                    &message.metadata_json,
                     &message.first_token_time,
                     &message.ttft_ms,
                     &message.start_time,
@@ -1179,7 +1197,8 @@ impl ConversationDatabase {
                 llm_model_name  TEXT,
                 generation_group_id TEXT,
                 parent_group_id TEXT,
-                tool_calls_json TEXT
+                tool_calls_json TEXT,
+                metadata_json TEXT
             )",
             [],
         )?;
@@ -1193,7 +1212,7 @@ impl ConversationDatabase {
             [],
         )?;
 
-        // 添加迁移逻辑：如果parent_group_id、tool_calls_json、input_token_count或output_token_count列不存在，则添加它们
+        // 添加迁移逻辑：如果新增列不存在，则按需补齐
         let mut stmt = conn.prepare("PRAGMA table_info(message)")?;
         let column_info: Vec<String> = stmt
             .query_map([], |row| {
@@ -1207,6 +1226,9 @@ impl ConversationDatabase {
         }
         if !column_info.contains(&"tool_calls_json".to_string()) {
             conn.execute("ALTER TABLE message ADD COLUMN tool_calls_json TEXT", [])?;
+        }
+        if !column_info.contains(&"metadata_json".to_string()) {
+            conn.execute("ALTER TABLE message ADD COLUMN metadata_json TEXT", [])?;
         }
         if !column_info.contains(&"input_token_count".to_string()) {
             conn.execute("ALTER TABLE message ADD COLUMN input_token_count INTEGER DEFAULT 0", [])?;

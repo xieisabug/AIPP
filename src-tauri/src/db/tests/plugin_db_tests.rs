@@ -5,6 +5,10 @@
 use chrono::Utc;
 use rusqlite::Connection;
 
+use crate::db::plugin_db::{
+    NewPluginHookAuditLog, NewPluginHookRegistration, PluginDatabase,
+};
+
 // Test helper to create in-memory database and initialize tables
 fn create_test_db() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
@@ -46,6 +50,21 @@ fn create_test_db() -> Connection {
             config_key TEXT NOT NULL,
             config_value TEXT,
             FOREIGN KEY (plugin_id) REFERENCES Plugins(plugin_id)
+        )",
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS PluginAssistantConfigurations (
+            config_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plugin_id INTEGER NOT NULL,
+            assistant_id INTEGER NOT NULL,
+            config_key TEXT NOT NULL,
+            config_value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (plugin_id) REFERENCES Plugins(plugin_id),
+            UNIQUE(plugin_id, assistant_id, config_key)
         )",
         [],
     )
@@ -674,4 +693,120 @@ fn test_null_data_value() {
         .unwrap();
 
     assert!(data_value.is_none());
+}
+
+/// 测试插件 runtime、hook 注册和审计日志表的最小生命周期
+#[test]
+fn test_plugin_hook_lifecycle_tables() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = PluginDatabase { conn };
+    db.create_tables().unwrap();
+
+    let plugin_id = db
+        .add_plugin(
+            "Hook Plugin",
+            "0.1.0",
+            "hook-plugin",
+            Some("hook lifecycle test"),
+            Some("AIPP"),
+        )
+        .unwrap();
+
+    db.upsert_plugin_runtime(
+        plugin_id,
+        "wasm",
+        "dist/plugin.wasm",
+        None,
+        Some("checksum"),
+    )
+    .unwrap();
+    let runtime = db.get_plugin_runtime(plugin_id).unwrap().unwrap();
+    assert_eq!(runtime.runtime_type, "wasm");
+    assert_eq!(runtime.entry, "dist/plugin.wasm");
+
+    db.replace_plugin_hook_registrations(
+        plugin_id,
+        &[NewPluginHookRegistration {
+            hook_name: "chat.beforeSend".to_string(),
+            hook_kind: "guard".to_string(),
+            priority: 10,
+            timeout_ms: 1500,
+            failure_policy: "block".to_string(),
+            is_active: true,
+        }],
+    )
+    .unwrap();
+    let hooks = db.get_plugin_hook_registrations(plugin_id).unwrap();
+    assert_eq!(hooks.len(), 1);
+    assert_eq!(hooks[0].hook_name, "chat.beforeSend");
+    assert_eq!(hooks[0].failure_policy, "block");
+
+    db.add_plugin_hook_audit_log(&NewPluginHookAuditLog {
+        plugin_id,
+        hook_name: "chat.beforeSend".to_string(),
+        conversation_id: Some(42),
+        message_id: Some(7),
+        status: "blocked".to_string(),
+        action: Some("block".to_string()),
+        duration_ms: Some(12),
+        error: Some("blocked by test".to_string()),
+    })
+    .unwrap();
+    let audits = db.list_plugin_hook_audit_logs(10).unwrap();
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0].conversation_id, Some(42));
+    assert_eq!(audits[0].status, "blocked");
+}
+
+/// 测试 assistant 级插件配置的读写与覆盖更新
+#[test]
+fn test_plugin_assistant_configuration_lifecycle() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = PluginDatabase { conn };
+    db.create_tables().unwrap();
+
+    let plugin_id = db
+        .add_plugin(
+            "Assistant Config Plugin",
+            "0.1.0",
+            "assistant-config-plugin",
+            None,
+            None,
+        )
+        .unwrap();
+
+    let config_id = db
+        .set_plugin_assistant_configuration(
+            plugin_id,
+            11,
+            "hidden_context_prompt",
+            Some("prepend this"),
+        )
+        .unwrap();
+    assert!(config_id > 0);
+
+    let configs = db.get_plugin_assistant_configurations(plugin_id, 11).unwrap();
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs[0].config_key, "hidden_context_prompt");
+    assert_eq!(configs[0].config_value.as_deref(), Some("prepend this"));
+
+    let updated_id = db
+        .set_plugin_assistant_configuration(
+            plugin_id,
+            11,
+            "hidden_context_prompt",
+            Some("updated"),
+        )
+        .unwrap();
+    assert_eq!(updated_id, config_id);
+
+    let updated_configs = db.get_plugin_assistant_configurations(plugin_id, 11).unwrap();
+    assert_eq!(updated_configs.len(), 1);
+    assert_eq!(updated_configs[0].config_value.as_deref(), Some("updated"));
+
+    db.delete_plugin_assistant_configurations(plugin_id, 11).unwrap();
+    assert!(db
+        .get_plugin_assistant_configurations(plugin_id, 11)
+        .unwrap()
+        .is_empty());
 }

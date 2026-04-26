@@ -28,6 +28,7 @@ async fn test_regenerate_logic_validation() {
         generation_group_id: Some(group_id.clone()),
         parent_group_id: None,
         tool_calls_json: None,
+        metadata_json: None,
         first_token_time: None,
         ttft_ms: None,
     };
@@ -49,6 +50,7 @@ async fn test_regenerate_logic_validation() {
         generation_group_id: Some(group_id.clone()),
         parent_group_id: None,
         tool_calls_json: None,
+        metadata_json: None,
         first_token_time: None,
         ttft_ms: None,
     };

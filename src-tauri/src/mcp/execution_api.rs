@@ -17,6 +17,7 @@ use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::{ConversationLoadedMCPTool, MCPDatabase, MCPServer, MCPToolCall};
 use crate::mcp::builtin_mcp::{execute_aipp_builtin_tool, is_builtin_mcp_call};
 use crate::mcp::is_dynamic_mcp_loading_enabled_for_assistant;
+use crate::plugin::hook_bus::PluginHookBus;
 use crate::state::activity_state::ConversationActivityManager;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use anyhow::{anyhow, bail, Context, Result};
@@ -477,20 +478,52 @@ fn tool_result_message_key(
     (tool_call_id, generation_group_id)
 }
 
-fn build_tool_result_message_content(tool_call: &MCPToolCall) -> Option<String> {
+async fn build_tool_result_message_content(
+    app_handle: &tauri::AppHandle,
+    tool_call: &MCPToolCall,
+) -> Result<Option<String>> {
     let result_content = match tool_call.status.as_str() {
         "success" => tool_call.result.clone().unwrap_or_else(|| "(空)".to_string()),
         "failed" => format!("Error: {}", tool_call.error.as_deref().unwrap_or("未知错误")),
-        _ => return None,
+        _ => return Ok(None),
     };
 
-    Some(format!(
+    let content = format!(
         "Tool execution completed:\n\nTool Call ID: {}\nTool: {}\nServer: {}\nParameters: {}\nResult:\n{}",
         tool_call_history_id(tool_call),
         tool_call.tool_name,
         tool_call.server_name,
         tool_call.parameters,
         result_content
+    );
+    let hook_result = PluginHookBus::new(app_handle.clone())
+        .run_guard_filter(
+            "tool.beforeResultMessage",
+            serde_json::json!({
+                "conversationId": tool_call.conversation_id,
+                "messageId": tool_call.message_id,
+                "callId": tool_call.id,
+                "serverId": tool_call.server_id,
+                "serverName": tool_call.server_name.clone(),
+                "toolName": tool_call.tool_name.clone(),
+                "parameters": tool_call.parameters.clone(),
+                "status": tool_call.status.clone(),
+                "result": tool_call.result.clone(),
+                "error": tool_call.error.clone(),
+                "content": content.clone(),
+                "metadata": {}
+            }),
+        )
+        .await
+        .map_err(|error| anyhow!("tool.beforeResultMessage hook rejected result message: {}", error))?;
+
+    Ok(Some(
+        hook_result
+            .context
+            .get("content")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string)
+            .unwrap_or(content),
     ))
 }
 
@@ -537,7 +570,7 @@ fn has_followup_response_after_tool_results(
     })
 }
 
-fn ensure_tool_result_messages(
+async fn ensure_tool_result_messages(
     app_handle: &tauri::AppHandle,
     window: &tauri::Window,
     conversation_db: &ConversationDatabase,
@@ -567,7 +600,7 @@ fn ensure_tool_result_messages(
         let tool_result_id = tool_call_history_id(tool_call);
         let tool_result_key =
             tool_result_message_key(tool_result_id.clone(), tool_result_group_id.clone());
-        let Some(tool_result_content) = build_tool_result_message_content(tool_call) else {
+        let Some(tool_result_content) = build_tool_result_message_content(app_handle, tool_call).await? else {
             continue;
         };
         let now = chrono::Utc::now();
@@ -671,6 +704,7 @@ mod tool_result_message_tests {
             generation_group_id: generation_group_id.map(ToString::to_string),
             parent_group_id: None,
             tool_calls_json: None,
+            metadata_json: None,
             first_token_time: None,
             ttft_ms: None,
         }
@@ -975,6 +1009,54 @@ async fn handle_tool_execution_result(
     match execution_result {
         Ok(result) => {
             info!(tool_call_id=tool_call.id, tool_name=%tool_call.tool_name, server=%tool_call.server_name, "工具执行成功");
+            let result = match PluginHookBus::new(app_handle.clone())
+                .run_guard_filter(
+                    "tool.afterCall",
+                    serde_json::json!({
+                        "conversationId": tool_call.conversation_id,
+                        "messageId": tool_call.message_id,
+                        "callId": tool_call.id,
+                        "serverId": tool_call.server_id,
+                        "serverName": tool_call.server_name.clone(),
+                        "toolName": tool_call.tool_name.clone(),
+                        "parameters": tool_call.parameters.clone(),
+                        "result": result.clone(),
+                        "metadata": {}
+                    }),
+                )
+                .await
+            {
+                Ok(hook_result) => hook_result
+                    .context
+                    .get("result")
+                    .map(|value| {
+                        value.as_str().map(ToString::to_string).unwrap_or_else(|| value.to_string())
+                    })
+                    .unwrap_or(result),
+                Err(error) => {
+                    if let Err(e) =
+                        db.update_mcp_tool_call_status(call_id, "failed", None, Some(&error))
+                    {
+                        warn!(
+                            call_id,
+                            error = %e,
+                            "failed to persist tool.afterCall failure for MCP tool call"
+                        );
+                    }
+                    tool_call.status = "failed".to_string();
+                    tool_call.result = None;
+                    tool_call.error = Some(error);
+                    broadcast_mcp_tool_call_update(app_handle, &tool_call);
+                    if let Some(activity_manager) =
+                        app_handle.try_state::<ConversationActivityManager>()
+                    {
+                        activity_manager
+                            .finish_mcp_call(app_handle, tool_call.conversation_id, call_id)
+                            .await;
+                    }
+                    return Ok(tool_call);
+                }
+            };
 
             if let Err(e) = db.update_mcp_tool_call_status(call_id, "success", Some(&result), None)
             {
@@ -1033,6 +1115,22 @@ async fn handle_tool_execution_result(
         }
         Err(error) => {
             error!(tool_call_id=tool_call.id, tool_name=%tool_call.tool_name, server=%tool_call.server_name, %error, "tool execution failed");
+            let _ = PluginHookBus::new(app_handle.clone())
+                .emit_event(
+                    "tool.onError",
+                    serde_json::json!({
+                        "conversationId": tool_call.conversation_id,
+                        "messageId": tool_call.message_id,
+                        "callId": tool_call.id,
+                        "serverId": tool_call.server_id,
+                        "serverName": tool_call.server_name.clone(),
+                        "toolName": tool_call.tool_name.clone(),
+                        "parameters": tool_call.parameters.clone(),
+                        "error": error.clone(),
+                        "metadata": {}
+                    }),
+                )
+                .await;
 
             if let Err(e) = db.update_mcp_tool_call_status(call_id, "failed", None, Some(&error)) {
                 warn!(
@@ -1216,13 +1314,42 @@ pub async fn create_mcp_tool_call(
     app_handle: tauri::AppHandle,
     conversation_id: i64,
     message_id: Option<i64>,
-    server_name: String,
-    tool_name: String,
-    parameters: String,
+    mut server_name: String,
+    mut tool_name: String,
+    mut parameters: String,
     llm_call_id: Option<String>,
     assistant_message_id: Option<i64>,
 ) -> std::result::Result<MCPToolCall, String> {
     let db = MCPDatabase::new(&app_handle).map_err(|e| format!("初始化数据库失败: {}", e))?;
+
+    let before_create_result = PluginHookBus::new(app_handle.clone())
+        .run_guard_filter(
+            "tool.beforeCreateCall",
+            serde_json::json!({
+                "conversationId": conversation_id,
+                "messageId": message_id,
+                "serverName": server_name,
+                "toolName": tool_name,
+                "parameters": parameters,
+                "llmCallId": llm_call_id,
+                "assistantMessageId": assistant_message_id
+            }),
+        )
+        .await
+        .map_err(|error| format!("插件拦截工具调用创建: {}", error))?;
+
+    if let Some(value) = before_create_result.context.get("serverName").and_then(|v| v.as_str()) {
+        server_name = value.to_string();
+    }
+    if let Some(value) = before_create_result.context.get("toolName").and_then(|v| v.as_str()) {
+        tool_name = value.to_string();
+    }
+    if let Some(value) = before_create_result.context.get("parameters") {
+        parameters = value
+            .as_str()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| value.to_string());
+    }
 
     // 查找并验证服务器
     // 支持两种匹配方式：
@@ -1270,6 +1397,23 @@ pub async fn create_mcp_tool_call(
     // 创建后立即广播 pending 状态事件，确保前端能及时显示工具调用
     broadcast_mcp_tool_call_update(&app_handle, &result);
     debug!(call_id = result.id, status = %result.status, "broadcasted pending status event after creation");
+
+    let _ = PluginHookBus::new(app_handle.clone())
+        .emit_event(
+            "tool.afterCreateCall",
+            serde_json::json!({
+                "conversationId": result.conversation_id,
+                "messageId": result.message_id,
+                "toolCallId": result.id,
+                "serverName": result.server_name.clone(),
+                "toolName": result.tool_name.clone(),
+                "parameters": result.parameters.clone(),
+                "status": result.status.clone(),
+                "llmCallId": result.llm_call_id.clone(),
+                "assistantMessageId": result.assistant_message_id
+            }),
+        )
+        .await;
 
     if let Err(error) = crate::api::butler_api::emit_butler_task_pending_mcp_tool_attention(
         &app_handle,
@@ -1496,6 +1640,54 @@ pub async fn execute_mcp_tool_call(
                 )
                 .await;
             }
+        }
+    }
+
+    let before_call_result = PluginHookBus::new(app_handle.clone())
+        .run_guard_filter(
+            "tool.beforeCall",
+            serde_json::json!({
+                "conversationId": tool_call.conversation_id,
+                "messageId": tool_call.message_id,
+                "callId": tool_call.id,
+                "serverId": tool_call.server_id,
+                "serverName": tool_call.server_name.clone(),
+                "toolName": tool_call.tool_name.clone(),
+                "parameters": tool_call.parameters.clone(),
+                "metadata": {}
+            }),
+        )
+        .await;
+    match before_call_result {
+        Ok(hook_result) => {
+            if let Some(parameters) = hook_result.context.get("parameters").map(|value| {
+                value.as_str().map(ToString::to_string).unwrap_or_else(|| value.to_string())
+            }) {
+                if parameters != tool_call.parameters {
+                    tool_call.parameters = parameters;
+                    db.update_mcp_tool_call_metadata(
+                        tool_call.id,
+                        &tool_call.server_name,
+                        &tool_call.tool_name,
+                        &tool_call.parameters,
+                    )
+                    .map_err(|e| format!("更新工具调用参数失败: {}", e))?;
+                }
+            }
+        }
+        Err(error) => {
+            return handle_tool_execution_result(
+                &app_handle,
+                &state,
+                &feature_config_state,
+                &window,
+                call_id,
+                tool_call,
+                Err(error),
+                is_retry,
+                trigger_continuation,
+            )
+            .await;
         }
     }
 
@@ -1772,6 +1964,7 @@ pub async fn send_mcp_tool_results(
         &model_code,
         &tool_calls,
     )
+    .await
     .map_err(|e| e.to_string())?;
 
     let target_tool_result_ids =
@@ -2210,7 +2403,8 @@ pub async fn trigger_conversation_continuation_batch(
         model_id,
         &model_code,
         &tool_calls,
-    )?;
+    )
+    .await?;
     let target_tool_result_ids =
         tool_calls.iter().map(tool_call_history_id).collect::<HashSet<_>>();
     if created_tool_result_count == 0 {

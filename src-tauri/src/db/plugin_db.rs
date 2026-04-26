@@ -33,6 +33,16 @@ pub struct PluginConfiguration {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PluginAssistantConfiguration {
+    pub config_id: i64,
+    pub plugin_id: i64,
+    pub assistant_id: i64,
+    pub config_key: String,
+    pub config_value: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PluginData {
     pub data_id: i64,
     pub plugin_id: i64,
@@ -41,6 +51,64 @@ pub struct PluginData {
     pub data_value: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PluginRuntime {
+    pub plugin_id: i64,
+    pub runtime_type: String,
+    pub entry: String,
+    pub protocol: Option<String>,
+    pub checksum: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PluginHookRegistration {
+    pub id: i64,
+    pub plugin_id: i64,
+    pub hook_name: String,
+    pub hook_kind: String,
+    pub priority: i64,
+    pub timeout_ms: i64,
+    pub failure_policy: String,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct NewPluginHookRegistration {
+    pub hook_name: String,
+    pub hook_kind: String,
+    pub priority: i64,
+    pub timeout_ms: i64,
+    pub failure_policy: String,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct NewPluginHookAuditLog {
+    pub plugin_id: i64,
+    pub hook_name: String,
+    pub conversation_id: Option<i64>,
+    pub message_id: Option<i64>,
+    pub status: String,
+    pub action: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PluginHookAuditLog {
+    pub id: i64,
+    pub plugin_id: i64,
+    pub hook_name: String,
+    pub conversation_id: Option<i64>,
+    pub message_id: Option<i64>,
+    pub status: String,
+    pub action: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 pub struct PluginDatabase {
@@ -95,6 +163,20 @@ impl PluginDatabase {
         )?;
 
         self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS PluginAssistantConfigurations (
+                config_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                plugin_id INTEGER NOT NULL,
+                assistant_id INTEGER NOT NULL,
+                config_key TEXT NOT NULL,
+                config_value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (plugin_id) REFERENCES Plugins(plugin_id),
+                UNIQUE(plugin_id, assistant_id, config_key)
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
             "CREATE TABLE IF NOT EXISTS PluginData (
                 data_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 plugin_id INTEGER,
@@ -103,6 +185,51 @@ impl PluginDatabase {
                 data_value TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (plugin_id) REFERENCES Plugins(plugin_id)
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS PluginRuntime (
+                plugin_id INTEGER PRIMARY KEY,
+                runtime_type TEXT NOT NULL,
+                entry TEXT NOT NULL,
+                protocol TEXT,
+                checksum TEXT,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (plugin_id) REFERENCES Plugins(plugin_id)
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS PluginHookRegistration (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                plugin_id INTEGER NOT NULL,
+                hook_name TEXT NOT NULL,
+                hook_kind TEXT NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 100,
+                timeout_ms INTEGER NOT NULL DEFAULT 3000,
+                failure_policy TEXT NOT NULL DEFAULT 'log',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (plugin_id) REFERENCES Plugins(plugin_id)
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS PluginHookAuditLog (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                plugin_id INTEGER NOT NULL,
+                hook_name TEXT NOT NULL,
+                conversation_id INTEGER,
+                message_id INTEGER,
+                status TEXT NOT NULL,
+                action TEXT,
+                duration_ms INTEGER,
+                error TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (plugin_id) REFERENCES Plugins(plugin_id)
             )",
             [],
@@ -324,6 +451,71 @@ impl PluginDatabase {
         Ok(())
     }
 
+    #[instrument(level = "debug", skip(self), fields(plugin_id, assistant_id))]
+    pub fn get_plugin_assistant_configurations(
+        &self,
+        plugin_id: i64,
+        assistant_id: i64,
+    ) -> Result<Vec<PluginAssistantConfiguration>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT config_id, plugin_id, assistant_id, config_key, config_value, updated_at
+             FROM PluginAssistantConfigurations
+             WHERE plugin_id = ? AND assistant_id = ?
+             ORDER BY config_key ASC",
+        )?;
+        let rows = stmt.query_map(params![plugin_id, assistant_id], |row| {
+            Ok(PluginAssistantConfiguration {
+                config_id: row.get(0)?,
+                plugin_id: row.get(1)?,
+                assistant_id: row.get(2)?,
+                config_key: row.get(3)?,
+                config_value: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>>>()
+    }
+
+    #[instrument(level = "debug", skip(self, config_value), fields(plugin_id, assistant_id, config_key))]
+    pub fn set_plugin_assistant_configuration(
+        &self,
+        plugin_id: i64,
+        assistant_id: i64,
+        config_key: &str,
+        config_value: Option<&str>,
+    ) -> Result<i64> {
+        let updated_at = Utc::now();
+        self.conn.execute(
+            "INSERT INTO PluginAssistantConfigurations
+             (plugin_id, assistant_id, config_key, config_value, updated_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(plugin_id, assistant_id, config_key) DO UPDATE SET
+                config_value = excluded.config_value,
+                updated_at = excluded.updated_at",
+            params![plugin_id, assistant_id, config_key, config_value, updated_at],
+        )?;
+
+        self.conn.query_row(
+            "SELECT config_id FROM PluginAssistantConfigurations
+             WHERE plugin_id = ? AND assistant_id = ? AND config_key = ?",
+            params![plugin_id, assistant_id, config_key],
+            |row| row.get(0),
+        )
+    }
+
+    #[instrument(level = "debug", skip(self), fields(plugin_id, assistant_id))]
+    pub fn delete_plugin_assistant_configurations(
+        &self,
+        plugin_id: i64,
+        assistant_id: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM PluginAssistantConfigurations WHERE plugin_id = ? AND assistant_id = ?",
+            params![plugin_id, assistant_id],
+        )?;
+        Ok(())
+    }
+
     // Data
     #[instrument(level = "debug", skip(self), fields(plugin_id, session_id))]
     pub fn get_plugin_data_by_session(
@@ -388,5 +580,159 @@ impl PluginDatabase {
         let affected = self.conn.execute("DELETE FROM PluginData WHERE data_id = ?", [data_id])?;
         debug!(affected, "Deleted plugin data");
         Ok(())
+    }
+
+    #[instrument(
+        level = "debug",
+        skip(self, protocol, checksum),
+        fields(plugin_id, runtime_type, entry)
+    )]
+    pub fn upsert_plugin_runtime(
+        &self,
+        plugin_id: i64,
+        runtime_type: &str,
+        entry: &str,
+        protocol: Option<&str>,
+        checksum: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO PluginRuntime (plugin_id, runtime_type, entry, protocol, checksum, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(plugin_id) DO UPDATE SET
+                runtime_type = excluded.runtime_type,
+                entry = excluded.entry,
+                protocol = excluded.protocol,
+                checksum = excluded.checksum,
+                updated_at = excluded.updated_at",
+            params![plugin_id, runtime_type, entry, protocol, checksum, Utc::now()],
+        )?;
+        debug!("Upserted plugin runtime");
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip(self), fields(plugin_id))]
+    pub fn get_plugin_runtime(&self, plugin_id: i64) -> Result<Option<PluginRuntime>> {
+        self.conn
+            .query_row(
+                "SELECT plugin_id, runtime_type, entry, protocol, checksum, updated_at
+                 FROM PluginRuntime WHERE plugin_id = ?",
+                [plugin_id],
+                |row| {
+                    Ok(PluginRuntime {
+                        plugin_id: row.get(0)?,
+                        runtime_type: row.get(1)?,
+                        entry: row.get(2)?,
+                        protocol: row.get(3)?,
+                        checksum: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    #[instrument(level = "debug", skip(self, registrations), fields(plugin_id))]
+    pub fn replace_plugin_hook_registrations(
+        &self,
+        plugin_id: i64,
+        registrations: &[NewPluginHookRegistration],
+    ) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM PluginHookRegistration WHERE plugin_id = ?",
+            [plugin_id],
+        )?;
+
+        for registration in registrations {
+            self.conn.execute(
+                "INSERT INTO PluginHookRegistration
+                 (plugin_id, hook_name, hook_kind, priority, timeout_ms, failure_policy, is_active)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    plugin_id,
+                    registration.hook_name,
+                    registration.hook_kind,
+                    registration.priority,
+                    registration.timeout_ms,
+                    registration.failure_policy,
+                    registration.is_active as i64
+                ],
+            )?;
+        }
+
+        debug!(count = registrations.len(), "Replaced plugin hook registrations");
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip(self), fields(plugin_id))]
+    pub fn get_plugin_hook_registrations(
+        &self,
+        plugin_id: i64,
+    ) -> Result<Vec<PluginHookRegistration>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, plugin_id, hook_name, hook_kind, priority, timeout_ms, failure_policy, is_active
+             FROM PluginHookRegistration
+             WHERE plugin_id = ?
+             ORDER BY priority ASC, hook_name ASC",
+        )?;
+        let rows = stmt.query_map([plugin_id], |row| {
+            Ok(PluginHookRegistration {
+                id: row.get(0)?,
+                plugin_id: row.get(1)?,
+                hook_name: row.get(2)?,
+                hook_kind: row.get(3)?,
+                priority: row.get(4)?,
+                timeout_ms: row.get(5)?,
+                failure_policy: row.get(6)?,
+                is_active: row.get::<_, i64>(7)? != 0,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>>>()
+    }
+
+    #[instrument(level = "debug", skip(self, audit), fields(plugin_id = audit.plugin_id, hook_name = %audit.hook_name))]
+    pub fn add_plugin_hook_audit_log(&self, audit: &NewPluginHookAuditLog) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO PluginHookAuditLog
+             (plugin_id, hook_name, conversation_id, message_id, status, action, duration_ms, error, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                audit.plugin_id,
+                audit.hook_name,
+                audit.conversation_id,
+                audit.message_id,
+                audit.status,
+                audit.action,
+                audit.duration_ms,
+                audit.error,
+                Utc::now()
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    #[instrument(level = "debug", skip(self), fields(limit))]
+    pub fn list_plugin_hook_audit_logs(&self, limit: i64) -> Result<Vec<PluginHookAuditLog>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, plugin_id, hook_name, conversation_id, message_id, status, action,
+                    duration_ms, error, created_at
+             FROM PluginHookAuditLog
+             ORDER BY id DESC
+             LIMIT ?",
+        )?;
+        let rows = stmt.query_map([limit], |row| {
+            Ok(PluginHookAuditLog {
+                id: row.get(0)?,
+                plugin_id: row.get(1)?,
+                hook_name: row.get(2)?,
+                conversation_id: row.get(3)?,
+                message_id: row.get(4)?,
+                status: row.get(5)?,
+                action: row.get(6)?,
+                duration_ms: row.get(7)?,
+                error: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>>>()
     }
 }

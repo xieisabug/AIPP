@@ -5,6 +5,7 @@ use crate::db::conversation_db::AttachmentType;
 use crate::db::conversation_db::Repository;
 use crate::db::conversation_db::{Conversation, ConversationDatabase, Message, MessageAttachment};
 use crate::errors::AppError;
+use crate::plugin::hook_bus::PluginHookBus;
 use crate::skills::format_active_skills_prompt;
 use crate::slash::ActiveSkillInvocation;
 use base64::Engine;
@@ -928,6 +929,47 @@ pub async fn handle_message_type_end(
         }
     }
 
+    if message_type == "response" || message_type == "reasoning" {
+        match PluginHookBus::new(app_handle.clone())
+            .run_guard_filter(
+                "chat.beforeResponsePersist",
+                serde_json::json!({
+                    "conversationId": conversation_id,
+                    "messageId": message_id,
+                    "messageType": message_type,
+                    "content": final_content,
+                    "durationMs": duration_ms,
+                    "metadata": {}
+                }),
+            )
+            .await
+        {
+            Ok(hook_result) => {
+                if let Some(content) =
+                    hook_result.context.get("content").and_then(|value| value.as_str())
+                {
+                    final_content = content.to_string();
+                    if let Ok(repo) = conversation_db.message_repo() {
+                        let _ = repo.update_content(message_id, &final_content);
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(
+                    conversation_id,
+                    message_id,
+                    message_type,
+                    error = %error,
+                    "chat.beforeResponsePersist hook rejected message persistence"
+                );
+                return Err(anyhow::anyhow!(
+                    "chat.beforeResponsePersist hook rejected message persistence: {}",
+                    error
+                ));
+            }
+        }
+    }
+
     let type_end_event = crate::api::ai::events::ConversationEvent {
         r#type: "message_type_end".to_string(),
         data: serde_json::to_value(crate::api::ai::events::MessageTypeEndEvent {
@@ -1067,6 +1109,7 @@ pub fn init_conversation(
                 generation_group_id: None,
                 parent_group_id: None,
                 tool_calls_json: None,
+                metadata_json: None,
                 first_token_time: None,
                 ttft_ms: None,
             })

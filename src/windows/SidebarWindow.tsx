@@ -12,6 +12,7 @@ import RawTextRenderer from "../components/RawTextRenderer";
 import UnifiedMarkdown from "../components/UnifiedMarkdown";
 import { cn } from "../utils/utils";
 import { buildPreviewPayloadFromContextItem, hydrateContextPreview } from "../components/chat-sidebar/contextPreview";
+import { pluginRuntime, type LoadedPlugin } from "../services/PluginRuntime";
 
 // Preview mode: 'artifact' shows EmbeddedArtifactPreview, 'context' shows context details
 type PreviewMode = 'artifact' | 'context' | 'none';
@@ -69,6 +70,7 @@ function SidebarWindow() {
     } | null>(null);
     const [dataReceived, setDataReceived] = useState(false);
     const [hasAutoPreviewedLatest, setHasAutoPreviewedLatest] = useState(false);
+    const [pluginList, setPluginList] = useState<LoadedPlugin[]>([]);
     
     // Sidebar resize state
     const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
@@ -85,6 +87,20 @@ function SidebarWindow() {
 
         return () => {
             unlisten.then((f) => f());
+        };
+    }, []);
+
+    useEffect(() => {
+        let mounted = true;
+        pluginRuntime.loadPlugins().then((plugins) => {
+            if (mounted) {
+                setPluginList(plugins);
+            }
+        }).catch((error) => {
+            console.error("[SidebarWindow] Failed to load plugins:", error);
+        });
+        return () => {
+            mounted = false;
         };
     }, []);
 
@@ -584,6 +600,8 @@ function SidebarWindow() {
                             todos={sidebarData.todos}
                             artifacts={sidebarData.artifacts}
                             contextItems={sidebarData.contextItems}
+                            pluginList={pluginList}
+                            conversationId={sidebarData.conversationId}
                             onArtifactClick={handleArtifactClick}
                             onContextClick={handleContextClick}
                         />

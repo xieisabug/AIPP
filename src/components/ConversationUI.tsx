@@ -1211,6 +1211,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             artifacts={artifacts}
                             contextItems={contextItems}
                             conversationId={conversationId}
+                            pluginList={pluginList}
                             toggleRequestVersion={sidebarToggleRequestVersion}
                             onExpandChange={handleSidebarExpandChange}
                             onOpenWindow={handleOpenSidebarWindow}

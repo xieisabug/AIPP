@@ -23,6 +23,7 @@ dirs = "5.0.1"
 tauri = { version = "2", features = [ "test", "protocol-asset", "tray-icon", "devtools"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+wasmtime = "26"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "blocking", "rustls"] }
 openlark-client = { git = "https://github.com/foxzool/open-lark", package = "openlark-client", features = ["websocket"] }
 rustls = "0.23"
@@ -93,6 +94,7 @@ tauri-plugin-updater = "2"
 rstest = "0.18"
 tokio-test = "0.4"
 tempfile = "3.8"
+wat = "1"
 
 [features]
 # This feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!

@@ -377,6 +377,7 @@ impl ActionHandler for ConversationInjectSystemMessageHandler {
             generation_group_id: None,
             parent_group_id: None,
             tool_calls_json: None,
+            metadata_json: None,
             first_token_time: None,
             ttft_ms: None,
         };

@@ -39,6 +39,7 @@ export interface Message {
     regenerate: Array<Message> | null;
     attachment_list?: Array<any>; // 添加附件列表字段
     tool_calls_json?: string | null; // 添加工具调用 JSON 字段
+    metadata_json?: string | null;
     // 性能指标
     first_token_time?: Date | null;
     ttft_ms?: number | null;

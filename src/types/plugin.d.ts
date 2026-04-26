@@ -37,6 +37,106 @@ interface SystemApiRunModelTextOptions {
     context?: string;
 }
 
+interface SystemApiSqlQueryRequest {
+    sql: string;
+    params?: unknown[];
+    maxRows?: number;
+}
+
+interface SystemApiDataQueryRequest extends SystemApiSqlQueryRequest {
+    database: string;
+}
+
+interface SystemApiSqlQueryResult {
+    columns: string[];
+    rows: unknown[][];
+    rowCount: number;
+    truncated: boolean;
+}
+
+interface SystemApiSqlExecuteRequest {
+    sql: string;
+    params?: unknown[];
+}
+
+interface SystemApiSqlExecuteResult {
+    rowsAffected: number;
+    lastInsertRowid: number;
+}
+
+interface SystemApiDatabaseColumnSchema {
+    name: string;
+    dataType: string;
+    notNull: boolean;
+    defaultValue?: string | null;
+    primaryKey: boolean;
+}
+
+interface SystemApiDatabaseTableSchema {
+    name: string;
+    objectType: string;
+    sql?: string | null;
+    columns: SystemApiDatabaseColumnSchema[];
+}
+
+interface SystemApiDatabaseSchema {
+    database: string;
+    tables: SystemApiDatabaseTableSchema[];
+}
+
+interface SystemApiData {
+    query(request: SystemApiDataQueryRequest): Promise<SystemApiSqlQueryResult>;
+    schema(database: string): Promise<SystemApiDatabaseSchema>;
+}
+
+interface SystemApiStorage {
+    query(request: SystemApiSqlQueryRequest): Promise<SystemApiSqlQueryResult>;
+    execute(request: SystemApiSqlExecuteRequest): Promise<SystemApiSqlExecuteResult>;
+    schema(): Promise<SystemApiDatabaseSchema>;
+}
+
+interface SystemApiAssistantConfig {
+    get(assistantId: number | string, key: string): Promise<string | null>;
+    getAll(assistantId: number | string): Promise<Record<string, string | null>>;
+    set(assistantId: number | string, key: string, value: string | null): Promise<void>;
+}
+
+interface SystemApiActions {
+    createConversation(request: {
+        assistantId: number;
+        conversationName?: string;
+    }): Promise<number>;
+    appendMessage(request: {
+        conversationId: number;
+        messageType: string;
+        content: string;
+        metadata?: unknown;
+    }): Promise<Message>;
+    updateMessageMetadata(request: {
+        messageId: number;
+        metadata?: unknown;
+    }): Promise<Message>;
+}
+
+type SystemApiHookAction = "continue" | "replace" | "patch" | "block" | "approvalRequired";
+
+interface SystemApiHookResult {
+    action?: SystemApiHookAction;
+    context?: unknown;
+    patch?: unknown;
+    message?: string | null;
+    metadata?: unknown;
+}
+
+type SystemApiHookHandler = (
+    context: unknown
+) => SystemApiHookResult | void | Promise<SystemApiHookResult | void>;
+
+interface SystemApiHooks {
+    register(hookName: string, handler: SystemApiHookHandler): void;
+    unregister(hookName: string): void;
+}
+
 type SystemApiThemeMode = "light" | "dark" | "both";
 
 interface SystemApiThemeDefinition {
@@ -136,6 +236,11 @@ interface SystemApi {
     registerMarkdownTag(registration: SystemApiMarkdownTagRegistration): void;
     unregisterMarkdownTag(tagName: string): void;
     listMarkdownTags(): Promise<SystemApiMarkdownTagRegistration[]>;
+    hooks: SystemApiHooks;
+    data: SystemApiData;
+    storage: SystemApiStorage;
+    assistantConfig: SystemApiAssistantConfig;
+    actions: SystemApiActions;
     getDisplayConfig(): Promise<SystemApiDisplayConfig>;
     applyTheme(themeId: string): Promise<void>;
     ui?: SystemApiUiKit;
@@ -163,6 +268,8 @@ interface Message {
     parent_id?: number | null;
     regenerate: Array<Message> | null;
     attachment_list?: Array<any>;
+    tool_calls_json?: string | null;
+    metadata_json?: string | null;
 }
 
 interface AddFieldOptions {
@@ -422,6 +529,7 @@ declare class Config {
 declare class AippPlugin {
     onPluginLoad(systemApi: SystemApi): void;
     renderComponent?(): React.ReactNode;
+    renderView?(viewId: string, context?: Record<string, unknown>): React.ReactNode;
     config(): Config;
 }
 

@@ -595,6 +595,12 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
                 // 调用外部的消息添加处理函数
                 callbacksRef.current.onMessageAdd?.(messageAddData);
+            } else if (conversationEvent.type === "message_metadata_update") {
+                const metadataUpdateData = conversationEvent.data as { message_id: number };
+                callbacksRef.current.onMessageAdd?.({
+                    message_id: metadataUpdateData.message_id,
+                    message_type: "metadata_update",
+                });
             } else if (conversationEvent.type === "message_update") {
                 const messageUpdateData =
                     conversationEvent.data as MessageUpdateEvent;
