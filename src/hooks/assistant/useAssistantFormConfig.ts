@@ -47,6 +47,30 @@ export const useAssistantFormConfig = ({
 }: UseAssistantFormConfigProps) => {
     const { getConfigValue } = useFeatureConfig();
 
+    const resolvePluginFieldValue = useCallback(
+        (
+            field: PluginAssistantFormFieldContribution & {
+                pluginId: number;
+                pluginCode: string;
+                pluginName: string;
+                formKey: string;
+            }
+        ) => {
+            const configuredValue = pluginAssistantConfigValues[field.formKey];
+            if (configuredValue !== undefined) {
+                return configuredValue;
+            }
+            if (field.defaultValue === undefined || field.defaultValue === null) {
+                return field.type === "checkbox" || field.type === "switch" ? false : "";
+            }
+            if (field.type === "checkbox" || field.type === "switch") {
+                return field.defaultValue === true || field.defaultValue === "true";
+            }
+            return String(field.defaultValue);
+        },
+        [pluginAssistantConfigValues]
+    );
+
     // 处理配置修改
     const handleConfigChange = useCallback(
         (key: string, value: string | boolean, value_type: string) => {
@@ -367,10 +391,29 @@ export const useAssistantFormConfig = ({
             });
         }
 
+        const pluginGroupCount = new Set(pluginAssistantFormFields.map((field) => field.pluginId)).size;
+        const shouldRenderPluginGroups = pluginGroupCount > 1;
         const renderedPluginGroups = new Set<number>();
+        const pluginFieldsByPluginId = new Map<
+            number,
+            Array<
+                PluginAssistantFormFieldContribution & {
+                    pluginId: number;
+                    pluginCode: string;
+                    pluginName: string;
+                    formKey: string;
+                }
+            >
+        >();
 
         pluginAssistantFormFields.forEach((field) => {
-            if (!renderedPluginGroups.has(field.pluginId)) {
+            const existing = pluginFieldsByPluginId.get(field.pluginId) ?? [];
+            existing.push(field);
+            pluginFieldsByPluginId.set(field.pluginId, existing);
+        });
+
+        pluginAssistantFormFields.forEach((field) => {
+            if (shouldRenderPluginGroups && !renderedPluginGroups.has(field.pluginId)) {
                 renderedPluginGroups.add(field.pluginId);
                 baseConfigs.push({
                     key: `plugin-group::${field.pluginId}`,
@@ -383,17 +426,21 @@ export const useAssistantFormConfig = ({
                 });
             }
 
-            const resolvedValue =
-                pluginAssistantConfigValues[field.formKey]
-                ?? (() => {
-                    if (field.defaultValue === undefined || field.defaultValue === null) {
-                        return field.type === "checkbox" || field.type === "switch" ? false : "";
-                    }
-                    if (field.type === "checkbox" || field.type === "switch") {
-                        return field.defaultValue === true || field.defaultValue === "true";
-                    }
-                    return String(field.defaultValue);
-                })();
+            const resolvedValue = resolvePluginFieldValue(field);
+            const pluginFields = pluginFieldsByPluginId.get(field.pluginId) ?? [];
+            const enabledField = pluginFields.find(
+                (item) =>
+                    item.key === "enabled" &&
+                    (item.type === "checkbox" || item.type === "switch")
+            );
+            const pluginEnabledValue = enabledField
+                ? resolvePluginFieldValue(enabledField)
+                : true;
+            const shouldHideField =
+                field.key !== "enabled" &&
+                Boolean(enabledField) &&
+                pluginEnabledValue !== true &&
+                pluginEnabledValue !== "true";
 
             const fieldType = (
                 ["input", "textarea", "select", "checkbox", "switch", "password"].includes(field.type)
@@ -409,6 +456,7 @@ export const useAssistantFormConfig = ({
                     value: resolvedValue,
                     placeholder: field.placeholder ?? undefined,
                     tooltip: field.tooltip ?? field.description ?? undefined,
+                    hidden: shouldHideField,
                     options: field.options?.map((option) => ({
                         value: option.value,
                         label: option.label,
@@ -434,6 +482,7 @@ export const useAssistantFormConfig = ({
         navigateTo,
         onPromptChange,
         onPluginConfigChange,
+        resolvePluginFieldValue,
         pluginAssistantConfigValues,
         pluginAssistantFormFields,
         getAcpConfigValue,

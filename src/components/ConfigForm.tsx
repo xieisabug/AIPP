@@ -309,7 +309,12 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                             className={`focus:ring-ring/20 ${field.className || ""}`}
                             disabled={field.disabled}
                             checked={fieldRenderData.value}
-                            onCheckedChange={fieldRenderData.onChange}
+                            onCheckedChange={(value) => {
+                                fieldRenderData.onChange(value);
+                                if (field.onChange) {
+                                    field.onChange(value);
+                                }
+                            }}
                         />
                     );
                 case "switch":
