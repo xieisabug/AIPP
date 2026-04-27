@@ -219,6 +219,18 @@ const InputArea = React.memo(
                 });
             }, []);
 
+            const loadBangList = useCallback(async () => {
+                try {
+                    const bangList = await invoke<BangCompletionItem[]>("get_bang_list");
+                    setBangList(bangList);
+                    setOriginalBangList(bangList);
+                } catch (error) {
+                    console.error("[InputArea] Failed to load bang list:", error);
+                    setBangList([]);
+                    setOriginalBangList([]);
+                }
+            }, []);
+
             const loadSlashSkills = useCallback(
                 async (forceRefresh = false) => {
                     try {
@@ -406,11 +418,8 @@ const InputArea = React.memo(
             ]);
 
             useEffect(() => {
-                invoke<BangCompletionItem[]>("get_bang_list").then((bangList) => {
-                    setBangList(bangList);
-                    setOriginalBangList(bangList);
-                });
-                loadSlashSkills();
+                void loadBangList();
+                void loadSlashSkills();
 
                 // Load assistants for @ selection
                 invoke<AssistantItem[]>("get_assistants").then((assistantList) => {
@@ -450,17 +459,26 @@ const InputArea = React.memo(
 
                 const setupSlashListener = async () => {
                     const unlisten = await listen("skills-registry-changed", () => {
-                        loadSlashSkills(true);
+                        void loadSlashSkills(true);
+                    });
+                    return unlisten;
+                };
+
+                const setupPluginListener = async () => {
+                    const unlisten = await listen("plugin_registry_changed", () => {
+                        void loadBangList();
                     });
                     return unlisten;
                 };
 
                 let unlistenPromise: Promise<() => void> | null = null;
                 let slashUnlistenPromise: Promise<() => void> | null = null;
+                let pluginUnlistenPromise: Promise<() => void> | null = null;
 
                 try {
                     unlistenPromise = setupArtifactListener();
                     slashUnlistenPromise = setupSlashListener();
+                    pluginUnlistenPromise = setupPluginListener();
                 } catch (error) {
                     console.warn("Failed to setup artifact listener:", error);
                 }
@@ -474,8 +492,13 @@ const InputArea = React.memo(
                             .then((unlisten) => unlisten())
                             .catch(console.warn);
                     }
+                    if (pluginUnlistenPromise) {
+                        pluginUnlistenPromise
+                            .then((unlisten) => unlisten())
+                            .catch(console.warn);
+                    }
                 };
-            }, [loadSlashSkills]);
+            }, [loadBangList, loadSlashSkills]);
 
             // 监听助手列表变化
             useAssistantListListener({

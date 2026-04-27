@@ -817,8 +817,8 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         "interaction_mode": {
                             "type": "string",
                             "enum": ["none", "submit_once"],
-                            "default": "submit_once",
-                            "description": "Interaction mode for the widget. submit_once allows one final payload submission; none is display-only except close."
+                            "default": "none",
+                            "description": "Interaction mode for the widget. none is display-only; set submit_once explicitly only when the widget must return a final payload."
                         },
                         "metadata": {
                             "type": "object",

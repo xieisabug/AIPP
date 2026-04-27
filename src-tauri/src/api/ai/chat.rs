@@ -706,6 +706,12 @@ fn analyze_preview_code_fragment(code: &str) -> PreviewCodeFragmentAnalysis {
         return PreviewCodeFragmentAnalysis::default();
     }
 
+    let sanitized_for_text_visibility = regex::Regex::new(
+        r"(?is)<script\b[^>]*>.*?</script>|<style\b[^>]*>.*?</style>|<title\b[^>]*>.*?</title>",
+    )
+    .ok()
+    .map(|re| re.replace_all(trimmed, "").into_owned())
+    .unwrap_or_else(|| trimmed.to_string());
     let fragment = Html::parse_fragment(trimmed);
     let contains_script = trimmed.to_ascii_lowercase().contains("<script");
     let has_renderable_element = Selector::parse("*")
@@ -719,7 +725,12 @@ fn analyze_preview_code_fragment(code: &str) -> PreviewCodeFragmentAnalysis {
             })
         })
         .unwrap_or(false);
-    let has_visible_text = !fragment.root_element().text().collect::<String>().trim().is_empty();
+    let has_visible_text = !Html::parse_fragment(&sanitized_for_text_visibility)
+        .root_element()
+        .text()
+        .collect::<String>()
+        .trim()
+        .is_empty();
 
     PreviewCodeFragmentAnalysis {
         has_renderable_dom: has_renderable_element || has_visible_text,
@@ -772,7 +783,7 @@ fn extract_preview_code_streaming_state(
         .or_else(|| {
             extract_partial_string_field(&raw_arguments, &["interaction_mode", "interactionMode"])
         })
-        .unwrap_or_else(|| "submit_once".to_string());
+        .unwrap_or_else(|| "none".to_string());
     let loading_messages = object
         .and_then(|record| {
             record
@@ -1105,6 +1116,18 @@ mod tests {
             "<style>.card{padding:12px;}</style><section class=\"card\"><h2>Revenue</h2><p>42"
         );
         assert_eq!(state.title, "streaming_card");
+    }
+
+    #[test]
+    fn test_extract_preview_code_streaming_state_defaults_omitted_mode_to_none() {
+        let state = extract_preview_code_streaming_state(&serde_json::json!({
+            "title": "display_only",
+            "renderer": "html",
+            "code": "<div>Preview</div>"
+        }))
+        .expect("preview state");
+
+        assert_eq!(state.interaction_mode, "none");
     }
 
     #[test]

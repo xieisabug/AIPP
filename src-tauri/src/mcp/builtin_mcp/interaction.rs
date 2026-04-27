@@ -160,7 +160,7 @@ impl PreviewCodeRequest {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or("submit_once")
+            .unwrap_or("none")
     }
 }
 
@@ -1080,6 +1080,21 @@ mod tests {
             metadata: None,
         };
 
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn preview_code_request_defaults_to_display_only_when_mode_is_omitted() {
+        let request = PreviewCodeRequest {
+            title: "display_only".to_string(),
+            renderer: "html".to_string(),
+            code: "<div>Hello</div>".to_string(),
+            loading_messages: vec![],
+            interaction_mode: None,
+            metadata: None,
+        };
+
+        assert_eq!(request.interaction_mode(), "none");
         assert!(request.validate().is_ok());
     }
 
