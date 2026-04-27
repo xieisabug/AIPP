@@ -49,7 +49,7 @@ export function useScrollManagement(
         const syncViewportHeightVar = () => {
             container.style.setProperty(
                 CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR,
-                `${container.clientHeight}px`,
+                `${container.clientHeight - 10}px`,
             );
         };
 
