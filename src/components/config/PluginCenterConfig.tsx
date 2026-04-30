@@ -1,14 +1,29 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
-import { Puzzle, RefreshCcw, Power, PowerOff, Trash2 } from "lucide-react";
+import { ChevronDown, FolderOpen, Plus, Puzzle, RefreshCcw, Power, PowerOff, Trash2 } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogHeader,
+    DialogTitle,
+} from "../ui/dialog";
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuSeparator,
+    DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
 import {
     AlertDialog,
     AlertDialogAction,
@@ -19,10 +34,12 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from "../ui/alert-dialog";
-import { ConfigPageLayout, EmptyState, ListItemButton, SidebarList, type SelectOption } from "../common";
+import { ConfigPageLayout, ListItemButton, SidebarList, type SelectOption } from "../common";
 import { pluginRuntime } from "../../services/PluginRuntime";
 import PluginViewHost from "../plugin/PluginViewHost";
 import type { LoadedPlugin } from "../../services/PluginRuntime";
+
+const PLUGIN_CENTER_VIEW_LOCATION = "config.plugin-center";
 
 interface PluginCenterConfigProps {
     pluginList: LoadedPlugin[];
@@ -44,6 +61,12 @@ interface PluginRegistryItem {
         checksum?: string | null;
     } | null;
     contributions?: {
+        bangs?: Array<{
+            name: string;
+            aliases?: string[];
+            complete?: string | null;
+            description?: string | null;
+        }>;
         hooks?: Array<{
             name: string;
             kind?: string;
@@ -74,6 +97,95 @@ interface PluginRegistryItem {
     isActive: boolean;
     isInstalled: boolean;
 }
+
+interface PluginInstallRecipeSource {
+    type: "github" | "zip";
+    repo?: string | null;
+    ref?: string;
+    url?: string | null;
+}
+
+interface PluginInstallRecipeDir {
+    from: string;
+    to: string;
+}
+
+interface OfficialPlugin {
+    id: string;
+    code: string;
+    name: string;
+    description: string;
+    version?: string | null;
+    author?: string | null;
+    tags?: string[];
+    pluginTypes: string[];
+    permissions: string[];
+    minAippVersion?: string | null;
+    isExperimental?: boolean;
+    source?: PluginInstallRecipeSource | null;
+    dirs?: PluginInstallRecipeDir[];
+    sourceUrl?: string | null;
+    sha256?: string | null;
+    isInstalled?: boolean;
+    installedVersion?: string | null;
+    isActive?: boolean;
+}
+
+interface PluginInstallValidation {
+    isInstallable: boolean;
+    warnings: string[];
+    errors: string[];
+}
+
+interface PluginInstallPlanPlugin {
+    from: string;
+    to: string;
+    code: string;
+    name: string;
+    version: string;
+    description?: string | null;
+    pluginType: string[];
+    permissions: string[];
+    willReplace: boolean;
+    installedVersion?: string | null;
+    validation: PluginInstallValidation;
+}
+
+interface PluginArchiveInspection {
+    source: PluginInstallRecipeSource;
+    sourceLabel: string;
+    downloadUrl: string;
+    targetDirectory: string;
+    archiveSha256: string;
+    plugins: PluginInstallPlanPlugin[];
+}
+
+interface PluginDetailItem {
+    pluginId?: number | null;
+    code: string;
+    name: string;
+    version: string;
+    description?: string | null;
+    author?: string | null;
+    pluginType: string[];
+    permissions: string[];
+    runtime: {
+        type: string;
+        entry: string;
+        protocol?: string | null;
+        checksum?: string | null;
+    };
+    contributions?: PluginRegistryItem["contributions"];
+    isInstalled: boolean;
+    isActive: boolean;
+    pluginDir: string;
+    entryPath: string;
+    entrySha256?: string | null;
+    configs: PluginConfigItem[];
+    hookRegistrations: PluginHookRegistrationItem[];
+}
+
+type OfficialPluginFetchStatus = "idle" | "loading" | "success" | "timeout" | "error";
 
 interface PluginConfigItem {
     configId: number;
@@ -118,6 +230,55 @@ const PLUGIN_TYPE_LABELS: Record<string, string> = {
 
 const getPluginTypeLabel = (type: string) => PLUGIN_TYPE_LABELS[type] ?? type;
 
+function parsePluginSourceInput(input: string): {
+    source: PluginInstallRecipeSource;
+    dirs?: PluginInstallRecipeDir[];
+    expectedSha256?: string | null;
+} {
+    const value = input.trim();
+    if (!value) {
+        throw new Error("请输入 GitHub 仓库或 ZIP 链接");
+    }
+    if (/^https?:\/\/.+\.zip(\?.*)?$/i.test(value)) {
+        return { source: { type: "zip", url: value } };
+    }
+    const shorthandMatch = value.match(/^([\w.-]+\/[\w.-]+)(?:#(.+))?$/);
+    if (shorthandMatch) {
+        return {
+            source: {
+                type: "github",
+                repo: shorthandMatch[1],
+                ref: shorthandMatch[2] || "main",
+            },
+        };
+    }
+    const url = new URL(value);
+    if (url.hostname !== "github.com") {
+        throw new Error("只支持 GitHub 仓库链接或 ZIP 下载链接");
+    }
+    const segments = url.pathname.split("/").filter(Boolean);
+    if (segments.length < 2) {
+        throw new Error("GitHub 链接必须包含 owner/repo");
+    }
+    const repo = `${segments[0]}/${segments[1]}`;
+    if (segments[2] === "tree" && segments[3]) {
+        const ref = segments[3];
+        const path = segments.slice(4).join("/");
+        return {
+            source: { type: "github", repo, ref },
+            dirs: path
+                ? [
+                    {
+                        from: path,
+                        to: path.split("/").filter(Boolean).pop() || segments[1],
+                    },
+                ]
+                : undefined,
+        };
+    }
+    return { source: { type: "github", repo, ref: "main" } };
+}
+
 const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) => {
     const [plugins, setPlugins] = useState<PluginRegistryItem[]>([]);
     const [runtimePlugins, setRuntimePlugins] = useState<LoadedPlugin[]>(pluginList);
@@ -132,8 +293,21 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     const [hookRegistrations, setHookRegistrations] = useState<PluginHookRegistrationItem[]>([]);
     const [hookAuditLogs, setHookAuditLogs] = useState<PluginHookAuditLogItem[]>([]);
     const [hookDebugLoading, setHookDebugLoading] = useState(false);
+    const [pluginDetail, setPluginDetail] = useState<PluginDetailItem | null>(null);
+    const [pluginDetailLoading, setPluginDetailLoading] = useState(false);
     const [actionBusy, setActionBusy] = useState(false);
     const [pendingUninstallPlugin, setPendingUninstallPlugin] = useState<PluginRegistryItem | null>(null);
+    const [officialPlugins, setOfficialPlugins] = useState<OfficialPlugin[]>([]);
+    const [officialFetchStatus, setOfficialFetchStatus] = useState<OfficialPluginFetchStatus>("idle");
+    const [officialFetchError, setOfficialFetchError] = useState("");
+    const [sourceInput, setSourceInput] = useState("");
+    const [sourceInputError, setSourceInputError] = useState("");
+    const [inspection, setInspection] = useState<PluginArchiveInspection | null>(null);
+    const [inspectionExpectedSha256, setInspectionExpectedSha256] = useState<string | null>(null);
+    const [isInspecting, setIsInspecting] = useState(false);
+    const [isInstallingArchive, setIsInstallingArchive] = useState(false);
+    const [installDialogOpen, setInstallDialogOpen] = useState(false);
+    const [installDialogTab, setInstallDialogTab] = useState<"recommended" | "source">("recommended");
     const missingReminderKeyRef = useRef("");
 
     useEffect(() => {
@@ -199,6 +373,139 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         }
     }, [syncRuntimePlugins]);
 
+    const fetchOfficialPlugins = useCallback(async (useProxy = false) => {
+        setOfficialFetchStatus("loading");
+        setOfficialFetchError("");
+        try {
+            const items = await invoke<OfficialPlugin[]>("fetch_official_plugins", { useProxy });
+            setOfficialPlugins(items);
+            setOfficialFetchStatus("success");
+        } catch (error) {
+            const message = String(error);
+            setOfficialFetchError(message);
+            setOfficialFetchStatus(
+                message.includes("超时") || message.toLowerCase().includes("timeout")
+                    ? "timeout"
+                    : "error"
+            );
+        }
+    }, []);
+
+    const inspectPluginArchive = useCallback(
+        async (
+            source: PluginInstallRecipeSource,
+            dirs?: PluginInstallRecipeDir[],
+            expectedSha256?: string | null,
+            useProxy = false,
+        ) => {
+            setIsInspecting(true);
+            setInspection(null);
+            setInspectionExpectedSha256(expectedSha256 || null);
+            try {
+                const result = await invoke<PluginArchiveInspection>("inspect_plugin_archive_source", {
+                    source,
+                    dirs: dirs && dirs.length > 0 ? dirs : null,
+                    expectedSha256: expectedSha256 || null,
+                    useProxy,
+                });
+                setInspection(result);
+            } catch (error) {
+                toast.error("预览插件失败: " + error);
+            } finally {
+                setIsInspecting(false);
+            }
+        },
+        []
+    );
+
+    const handleInspectOfficialPlugin = useCallback(
+        async (plugin: OfficialPlugin, useProxy = false) => {
+            if (!plugin.source) {
+                toast.error(`推荐插件 ${plugin.name} 缺少安装来源`);
+                return;
+            }
+            await inspectPluginArchive(plugin.source, plugin.dirs, plugin.sha256, useProxy);
+        },
+        [inspectPluginArchive]
+    );
+
+    const handleInspectCustomSource = useCallback(
+        async (useProxy = false) => {
+            let parsed;
+            try {
+                parsed = parsePluginSourceInput(sourceInput);
+                setSourceInputError("");
+            } catch (error) {
+                const message = String(error instanceof Error ? error.message : error);
+                setSourceInputError(message);
+                return;
+            }
+            await inspectPluginArchive(parsed.source, parsed.dirs, parsed.expectedSha256, useProxy);
+        },
+        [inspectPluginArchive, sourceInput]
+    );
+
+    const handleInstallInspection = useCallback(async () => {
+        if (!inspection) {
+            return;
+        }
+        const selections = inspection.plugins
+            .filter((plugin) => plugin.validation.isInstallable)
+            .map<PluginInstallRecipeDir>((plugin) => ({
+                from: plugin.from,
+                to: plugin.to,
+            }));
+        if (selections.length === 0) {
+            toast.error("没有可安装的插件");
+            return;
+        }
+        setIsInstallingArchive(true);
+        try {
+            const result = await invoke<{ installedPlugins: PluginInstallPlanPlugin[] }>(
+                "install_plugin_archive_source",
+                {
+                    source: inspection.source,
+                    selections,
+                    expectedSha256: inspectionExpectedSha256,
+                    useProxy: false,
+                    enableAfterInstall: true,
+                }
+            );
+            toast.success(`已安装 ${result.installedPlugins.length} 个插件`);
+            setInspection(null);
+            setInstallDialogOpen(false);
+            await loadPlugins();
+            await syncRuntimePlugins(true);
+        } catch (error) {
+            toast.error("安装插件失败: " + error);
+        } finally {
+            setIsInstallingArchive(false);
+        }
+    }, [inspection, inspectionExpectedSha256, loadPlugins, syncRuntimePlugins]);
+
+    const handleShowInstallDialog = useCallback(() => {
+        setInstallDialogTab("recommended");
+        setInstallDialogOpen(true);
+    }, []);
+
+    const handleCloseInstallDialog = useCallback((open: boolean) => {
+        setInstallDialogOpen(open);
+        if (!open) {
+            setSourceInputError("");
+            setInspection(null);
+            setInspectionExpectedSha256(null);
+        }
+    }, []);
+
+    const handleOpenPluginFolder = useCallback(async () => {
+        try {
+            const pluginRoot = await invoke<string>("get_plugin_root_dir");
+            await openPath(pluginRoot);
+        } catch (error) {
+            toast.error("打开插件文件夹失败: " + error);
+        }
+    }, []);
+
     const selectedPlugin = useMemo(
         () => plugins.find((item) => item.pluginId === selectedPluginId) || null,
         [plugins, selectedPluginId]
@@ -234,6 +541,20 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         }
     }, []);
 
+    const loadPluginDetail = useCallback(async (code: string) => {
+        setPluginDetailLoading(true);
+        try {
+            const detail = await invoke<PluginDetailItem>("get_plugin_detail", { code });
+            setPluginDetail(detail);
+        } catch (error) {
+            console.error("[PluginCenterConfig] Failed to load plugin detail:", error);
+            setPluginDetail(null);
+            toast.error("加载插件详情失败");
+        } finally {
+            setPluginDetailLoading(false);
+        }
+    }, []);
+
     useEffect(() => {
         loadPlugins();
         const unlistenRegistryChanged = listen("plugin_registry_changed", () => {
@@ -246,14 +567,25 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
 
     useEffect(() => {
         if (selectedPluginId) {
+            const selected = plugins.find((item) => item.pluginId === selectedPluginId);
             loadConfigs(selectedPluginId);
             loadHookDebugInfo(selectedPluginId);
+            if (selected) {
+                loadPluginDetail(selected.code);
+            }
         } else {
             setConfigs([]);
             setHookRegistrations([]);
             setHookAuditLogs([]);
+            setPluginDetail(null);
         }
-    }, [selectedPluginId, loadConfigs, loadHookDebugInfo]);
+    }, [selectedPluginId, plugins, loadConfigs, loadHookDebugInfo, loadPluginDetail]);
+
+    useEffect(() => {
+        if (installDialogOpen && officialFetchStatus === "idle") {
+            fetchOfficialPlugins(false);
+        }
+    }, [fetchOfficialPlugins, installDialogOpen, officialFetchStatus]);
 
     const filteredPlugins = useMemo(() => {
         const query = searchQuery.trim().toLowerCase();
@@ -283,6 +615,14 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     );
 
     const currentLoadedPlugin = selectedPlugin ? loadedPluginByCode.get(selectedPlugin.code) : null;
+    const pluginCenterViews = useMemo(
+        () =>
+            (selectedPlugin?.contributions?.views ?? []).filter(
+                (view) => view.location === PLUGIN_CENTER_VIEW_LOCATION
+            ),
+        [selectedPlugin]
+    );
+    const hasPluginCenterViews = pluginCenterViews.length > 0;
     const selectedPluginViewHostItems = useMemo<LoadedPlugin[]>(() => {
         if (!selectedPlugin) {
             return [];
@@ -302,20 +642,19 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
             },
         ];
     }, [selectedPlugin, currentLoadedPlugin]);
-    const hasInterfacePluginType = selectedPlugin?.pluginType.includes("interfaceType") ?? false;
     const selectedRuntimeType = selectedPlugin?.runtime?.type ?? "js";
-    const pluginUiBlockedReason = useMemo(() => {
+    const pluginViewBlockedReason = useMemo(() => {
         if (!selectedPlugin) {
             return "请选择一个插件。";
+        }
+        if (!hasPluginCenterViews) {
+            return "当前插件没有声明插件中心界面。";
         }
         if (!selectedPlugin.isInstalled) {
             return "插件目录缺失，请先卸载该记录。";
         }
         if (!selectedPlugin.isActive) {
             return "插件已禁用，启用后可使用插件界面。";
-        }
-        if (!hasInterfacePluginType) {
-            return "该插件未提供界面能力。";
         }
         if (selectedRuntimeType !== "js") {
             return "该插件不是 JS 运行时，不会加载前端插件界面。";
@@ -326,12 +665,12 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         if (!currentLoadedPlugin.instance) {
             return "插件加载失败（实例为空），请检查插件脚本导出。";
         }
-        if (typeof currentLoadedPlugin.instance?.renderComponent !== "function") {
-            return "插件已加载，但未实现 renderComponent()。";
+        if (typeof currentLoadedPlugin.instance?.renderView !== "function") {
+            return "插件已加载，但未实现 renderView()。";
         }
         return null;
-    }, [selectedPlugin, currentLoadedPlugin, hasInterfacePluginType, selectedRuntimeType]);
-    const canRenderPluginUI = !pluginUiBlockedReason;
+    }, [selectedPlugin, currentLoadedPlugin, hasPluginCenterViews, selectedRuntimeType]);
+    const canRenderPluginViews = !pluginViewBlockedReason;
 
     const handleTogglePlugin = useCallback(async () => {
         if (!selectedPlugin || actionBusy) {
@@ -405,21 +744,279 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         }
     }, [pendingUninstallPlugin, actionBusy, loadPlugins]);
 
-    const pluginUiNode = useMemo(() => {
-        if (!canRenderPluginUI) {
-            return null;
-        }
-        try {
-            return currentLoadedPlugin.instance.renderComponent?.() ?? null;
-        } catch (error) {
-            console.error("[PluginCenterConfig] Plugin renderComponent failed:", error);
-            return (
-                <div className="text-sm text-destructive">
-                    插件界面渲染失败，请检查插件实现。
+    const pluginDetailContent = pluginDetailLoading ? (
+        <div className="rounded-md border border-border p-3 text-sm text-muted-foreground">
+            加载插件详情中...
+        </div>
+    ) : !pluginDetail ? (
+        <div className="rounded-md border border-border p-3 text-sm text-muted-foreground">
+            暂无插件详情。
+        </div>
+    ) : (
+        <div className="space-y-4">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <div className="rounded-md border border-border p-3 text-sm">
+                    <div className="font-medium">安装目录</div>
+                    <div className="mt-1 break-all text-muted-foreground">{pluginDetail.pluginDir}</div>
                 </div>
-            );
-        }
-    }, [canRenderPluginUI, currentLoadedPlugin]);
+                <div className="rounded-md border border-border p-3 text-sm">
+                    <div className="font-medium">入口文件</div>
+                    <div className="mt-1 break-all text-muted-foreground">{pluginDetail.entryPath}</div>
+                    {pluginDetail.entrySha256 && (
+                        <div className="mt-1 break-all text-xs text-muted-foreground">
+                            {pluginDetail.entrySha256}
+                        </div>
+                    )}
+                </div>
+            </div>
+            <div className="rounded-md border border-border p-3 text-sm">
+                <div className="font-medium">Runtime</div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                    <Badge variant="outline">{pluginDetail.runtime.type}</Badge>
+                    <Badge variant="outline">{pluginDetail.runtime.entry}</Badge>
+                    {pluginDetail.runtime.checksum && (
+                        <Badge variant="secondary">{pluginDetail.runtime.checksum}</Badge>
+                    )}
+                </div>
+            </div>
+            <div className="rounded-md border border-border p-3 text-sm">
+                <div className="font-medium">权限</div>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                    {pluginDetail.permissions.length === 0 ? (
+                        <span className="text-muted-foreground">未声明权限</span>
+                    ) : (
+                        pluginDetail.permissions.map((permission) => (
+                            <Badge key={permission} variant="secondary">
+                                {permission}
+                            </Badge>
+                        ))
+                    )}
+                </div>
+            </div>
+            <div className="rounded-md border border-border p-3 text-sm">
+                <div className="font-medium">贡献点</div>
+                <div className="mt-2 grid grid-cols-2 gap-2 md:grid-cols-5">
+                    <Badge variant="outline">Bangs {pluginDetail.contributions?.bangs?.length ?? 0}</Badge>
+                    <Badge variant="outline">Hooks {pluginDetail.contributions?.hooks?.length ?? 0}</Badge>
+                    <Badge variant="outline">视图 {pluginDetail.contributions?.views?.length ?? 0}</Badge>
+                    <Badge variant="outline">Actions {pluginDetail.contributions?.actions?.length ?? 0}</Badge>
+                    <Badge variant="outline">
+                        Fields {pluginDetail.contributions?.assistantFormFields?.length ?? 0}
+                    </Badge>
+                </div>
+            </div>
+        </div>
+    );
+
+    const inspectionNode = inspection ? (
+        <Card className="shadow-none">
+            <CardHeader>
+                <CardTitle className="text-base">安装预览</CardTitle>
+                <CardDescription>
+                    {inspection.sourceLabel} / {inspection.archiveSha256}
+                </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+                {inspection.plugins.map((plugin) => (
+                    <div key={`${plugin.from}:${plugin.to}`} className="rounded-md border border-border p-3 text-sm">
+                        <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-medium">{plugin.name}</span>
+                            <Badge variant="outline">v{plugin.version}</Badge>
+                            {plugin.willReplace && (
+                                <Badge variant="secondary">
+                                    替换已安装{plugin.installedVersion ? ` v${plugin.installedVersion}` : ""}
+                                </Badge>
+                            )}
+                            {!plugin.validation.isInstallable && <Badge variant="destructive">不可安装</Badge>}
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                            {plugin.from} → {plugin.to}
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                            {plugin.pluginType.map((type) => (
+                                <Badge key={type} variant="outline">
+                                    {getPluginTypeLabel(type)}
+                                </Badge>
+                            ))}
+                            {plugin.permissions.map((permission) => (
+                                <Badge key={permission} variant="secondary">
+                                    {permission}
+                                </Badge>
+                            ))}
+                        </div>
+                        {plugin.validation.warnings.length > 0 && (
+                            <div className="mt-2 text-xs text-muted-foreground">
+                                {plugin.validation.warnings.join("；")}
+                            </div>
+                        )}
+                        {plugin.validation.errors.length > 0 && (
+                            <div className="mt-2 text-xs text-destructive">
+                                {plugin.validation.errors.join("；")}
+                            </div>
+                        )}
+                    </div>
+                ))}
+                <Button onClick={handleInstallInspection} disabled={isInstallingArchive}>
+                    安装可安装插件
+                </Button>
+            </CardContent>
+        </Card>
+    ) : null;
+
+    const recommendedPluginsContent = (
+        <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                    <div className="text-sm font-medium">官方推荐插件</div>
+                    <div className="text-xs text-muted-foreground">
+                        从官方接口获取预编译插件包，预览权限后下载安装到本地插件目录。
+                    </div>
+                </div>
+                <div className="flex gap-2">
+                    <Button variant="outline" size="sm" onClick={() => fetchOfficialPlugins(false)} disabled={officialFetchStatus === "loading"}>
+                        <RefreshCcw className={`h-4 w-4 ${officialFetchStatus === "loading" ? "animate-spin" : ""}`} />
+                        <span className="ml-2">刷新</span>
+                    </Button>
+                    {officialFetchStatus === "timeout" || officialFetchStatus === "error" ? (
+                        <Button variant="outline" size="sm" onClick={() => fetchOfficialPlugins(true)}>
+                            使用代理重试
+                        </Button>
+                    ) : null}
+                </div>
+            </div>
+            {officialFetchStatus === "idle" ? (
+                <div className="rounded-md border border-border p-3 text-sm text-muted-foreground">
+                    点击刷新获取官方推荐插件。
+                </div>
+            ) : officialFetchStatus === "loading" ? (
+                <div className="rounded-md border border-border p-3 text-sm text-muted-foreground">
+                    正在获取推荐插件...
+                </div>
+            ) : officialFetchError ? (
+                <div className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">
+                    {officialFetchError}
+                </div>
+            ) : officialPlugins.length === 0 ? (
+                <div className="rounded-md border border-border p-3 text-sm text-muted-foreground">
+                    暂无官方推荐插件。
+                </div>
+            ) : (
+                <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+                    {officialPlugins.map((plugin) => (
+                        <Card key={plugin.id} className="shadow-none">
+                            <CardHeader>
+                                <div className="flex items-start justify-between gap-3">
+                                    <div>
+                                        <CardTitle className="text-base">{plugin.name}</CardTitle>
+                                        <CardDescription className="mt-1">{plugin.description}</CardDescription>
+                                    </div>
+                                    {plugin.isInstalled && <Badge variant="secondary">已安装</Badge>}
+                                </div>
+                            </CardHeader>
+                            <CardContent className="space-y-3">
+                                <div className="flex flex-wrap gap-1.5">
+                                    {plugin.version && <Badge variant="outline">v{plugin.version}</Badge>}
+                                    {plugin.isExperimental && <Badge variant="secondary">实验性</Badge>}
+                                    {plugin.pluginTypes.map((type) => (
+                                        <Badge key={type} variant="outline">
+                                            {getPluginTypeLabel(type)}
+                                        </Badge>
+                                    ))}
+                                </div>
+                                {plugin.permissions.length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {plugin.permissions.map((permission) => (
+                                            <Badge key={permission} variant="secondary">
+                                                {permission}
+                                            </Badge>
+                                        ))}
+                                    </div>
+                                )}
+                                <Button
+                                    size="sm"
+                                    onClick={() => handleInspectOfficialPlugin(plugin)}
+                                    disabled={isInspecting}
+                                >
+                                    预览安装
+                                </Button>
+                            </CardContent>
+                        </Card>
+                    ))}
+                </div>
+            )}
+            {inspectionNode}
+        </div>
+    );
+
+    const sourceInstallContent = (
+        <div className="space-y-4">
+            <div>
+                <div className="text-sm font-medium">从 GitHub / ZIP 安装</div>
+                <div className="text-xs text-muted-foreground">
+                    支持 owner/repo、owner/repo#ref、GitHub 仓库链接、GitHub tree 路径和 ZIP 链接。
+                </div>
+            </div>
+            <div className="flex flex-col gap-2 md:flex-row">
+                <Input
+                    value={sourceInput}
+                    onChange={(event) => setSourceInput(event.target.value)}
+                    placeholder="owner/repo#main 或 https://example.com/plugin.zip"
+                />
+                <Button onClick={() => handleInspectCustomSource(false)} disabled={isInspecting}>
+                    预览
+                </Button>
+                <Button variant="outline" onClick={() => handleInspectCustomSource(true)} disabled={isInspecting}>
+                    代理预览
+                </Button>
+            </div>
+            {sourceInputError && <div className="text-sm text-destructive">{sourceInputError}</div>}
+            {inspectionNode}
+        </div>
+    );
+
+    const pluginActionDropdown = (
+        <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm" className="gap-2" disabled={loading}>
+                    <ChevronDown className="h-4 w-4" />
+                </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuItem
+                    onClick={loadPlugins}
+                    disabled={loading}
+                    className="flex items-center gap-2 cursor-pointer"
+                >
+                    <RefreshCcw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+                    <div className="flex flex-col">
+                        <span className="font-medium">扫描插件</span>
+                        <span className="text-xs text-muted-foreground">扫描本地插件目录并刷新运行时</span>
+                    </div>
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                    onClick={handleShowInstallDialog}
+                    className="flex items-center gap-2 cursor-pointer"
+                >
+                    <Plus className="h-4 w-4" />
+                    <div className="flex flex-col">
+                        <span className="font-medium">安装</span>
+                        <span className="text-xs text-muted-foreground">从推荐列表、GitHub 或 ZIP 安装插件</span>
+                    </div>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                    onClick={handleOpenPluginFolder}
+                    className="flex items-center gap-2 cursor-pointer"
+                >
+                    <FolderOpen className="h-4 w-4" />
+                    <div className="flex flex-col">
+                        <span className="font-medium">打开插件文件夹</span>
+                        <span className="text-xs text-muted-foreground">手动管理本地插件文件</span>
+                    </div>
+                </DropdownMenuItem>
+            </DropdownMenuContent>
+        </DropdownMenu>
+    );
 
     const sidebar = (
         <SidebarList
@@ -429,11 +1026,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
             searchValue={searchQuery}
             onSearchChange={setSearchQuery}
             searchPlaceholder="搜索插件..."
-            addButton={
-                <Button variant="outline" size="icon" onClick={loadPlugins} disabled={loading}>
-                    <RefreshCcw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-                </Button>
-            }
+            addButton={pluginActionDropdown}
         >
             {filteredPlugins.map((plugin) => (
                 <ListItemButton
@@ -454,11 +1047,26 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     );
 
     const content = !selectedPlugin ? (
-        <EmptyState
-            icon={<Puzzle className="h-8 w-8 text-muted-foreground" />}
-            title="暂无插件"
-            description="请先安装插件，然后在这里进行启停和配置管理。"
-        />
+        <Card className="shadow-none">
+            <CardHeader>
+                <CardTitle className="text-lg">插件商店</CardTitle>
+                <CardDescription>从左侧选择插件查看详情，或通过右上角菜单扫描、安装和打开插件文件夹。</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-wrap gap-2">
+                <Button onClick={handleShowInstallDialog}>
+                    <Plus className="h-4 w-4" />
+                    <span className="ml-2">安装插件</span>
+                </Button>
+                <Button variant="outline" onClick={loadPlugins} disabled={loading}>
+                    <RefreshCcw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+                    <span className="ml-2">扫描插件</span>
+                </Button>
+                <Button variant="outline" onClick={handleOpenPluginFolder}>
+                    <FolderOpen className="h-4 w-4" />
+                    <span className="ml-2">打开插件文件夹</span>
+                </Button>
+            </CardContent>
+        </Card>
     ) : (
         <Card className="shadow-none">
             <CardHeader>
@@ -481,7 +1089,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                                 <Badge variant="outline">{selectedPlugin.contributions?.hooks?.length} Hooks</Badge>
                             )}
                             {(selectedPlugin.contributions?.views?.length ?? 0) > 0 && (
-                                <Badge variant="outline">{selectedPlugin.contributions?.views?.length} Views</Badge>
+                                <Badge variant="outline">{selectedPlugin.contributions?.views?.length} 视图</Badge>
                             )}
                             {(selectedPlugin.contributions?.actions?.length ?? 0) > 0 && (
                                 <Badge variant="outline">{selectedPlugin.contributions?.actions?.length} Actions</Badge>
@@ -527,24 +1135,28 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
             <CardContent>
                 <Tabs defaultValue="plugin-ui" className="w-full">
                     <TabsList>
-                        <TabsTrigger value="plugin-ui">插件界面</TabsTrigger>
-                        <TabsTrigger value="views">扩展视图</TabsTrigger>
+                        <TabsTrigger value="plugin-ui">界面</TabsTrigger>
+                        <TabsTrigger value="detail">详情</TabsTrigger>
                         <TabsTrigger value="config">配置KV</TabsTrigger>
                         <TabsTrigger value="hooks">Hook 调试</TabsTrigger>
                     </TabsList>
                     <TabsContent value="plugin-ui" className="mt-4 space-y-3">
-                        <div className="rounded-lg border border-border/60 bg-background p-3 md:p-4">
-                            {canRenderPluginUI ? (
-                                pluginUiNode
-                            ) : (
+                        {canRenderPluginViews ? (
+                            <PluginViewHost
+                                pluginList={selectedPluginViewHostItems}
+                                location={PLUGIN_CENTER_VIEW_LOCATION}
+                                emptyDescription="当前插件没有声明插件中心界面。"
+                            />
+                        ) : (
+                            <div className="rounded-lg border border-border/60 bg-background p-3 md:p-4">
                                 <div className="text-sm text-muted-foreground">
-                                    {pluginUiBlockedReason}
+                                    {pluginViewBlockedReason}
                                 </div>
-                            )}
-                        </div>
+                            </div>
+                        )}
                         {selectedPlugin.isInstalled &&
                             selectedPlugin.isActive &&
-                            hasInterfacePluginType && (
+                            hasPluginCenterViews && (
                                 <Button
                                     variant="outline"
                                     size="sm"
@@ -564,12 +1176,8 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                                 </Button>
                              )}
                      </TabsContent>
-                    <TabsContent value="views" className="mt-4 space-y-4">
-                        <PluginViewHost
-                            pluginList={selectedPluginViewHostItems}
-                            location="config.analytics"
-                            emptyDescription="当前选中的插件没有在设置页注册扩展视图。"
-                        />
+                    <TabsContent value="detail" className="mt-4">
+                        {pluginDetailContent}
                     </TabsContent>
                     <TabsContent value="config" className="mt-4 space-y-4">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -592,7 +1200,9 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                             {configLoading ? (
                                 <div className="text-sm text-muted-foreground">加载配置中...</div>
                             ) : configs.length === 0 ? (
-                                <div className="text-sm text-muted-foreground">暂无配置项。</div>
+                                <div className="text-sm text-muted-foreground">
+                                    暂无配置项。
+                                </div>
                             ) : (
                                 configs.map((config) => (
                                     <div
@@ -700,6 +1310,31 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                 onSelectOption={(optionId) => setSelectedPluginId(Number(optionId))}
                 selectPlaceholder="选择插件"
             />
+            <Dialog open={installDialogOpen} onOpenChange={handleCloseInstallDialog}>
+                <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-5xl">
+                    <DialogHeader>
+                        <DialogTitle>安装插件</DialogTitle>
+                        <DialogDescription>
+                            安装官方推荐插件，或从 GitHub / ZIP 来源安装已经编译好的插件包。
+                        </DialogDescription>
+                    </DialogHeader>
+                    <Tabs
+                        value={installDialogTab}
+                        onValueChange={(value) => setInstallDialogTab(value as "recommended" | "source")}
+                    >
+                        <TabsList>
+                            <TabsTrigger value="recommended">推荐插件</TabsTrigger>
+                            <TabsTrigger value="source">来源安装</TabsTrigger>
+                        </TabsList>
+                        <TabsContent value="recommended" className="mt-4">
+                            {recommendedPluginsContent}
+                        </TabsContent>
+                        <TabsContent value="source" className="mt-4">
+                            {sourceInstallContent}
+                        </TabsContent>
+                    </Tabs>
+                </DialogContent>
+            </Dialog>
             <AlertDialog
                 open={!!pendingUninstallPlugin}
                 onOpenChange={(open) => {

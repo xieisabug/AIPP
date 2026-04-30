@@ -285,7 +285,10 @@ class MyThemePlugin {
   }
 
   // 可选：展示插件面板（如“一键应用主题”）
-  renderComponent() {
+  renderView(viewId: string) {
+    if (viewId !== "my-theme-panel") {
+      return null;
+    }
     return null;
   }
 }

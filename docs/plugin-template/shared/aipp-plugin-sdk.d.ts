@@ -411,7 +411,6 @@ interface SystemApi {
 interface AippPlugin {
   config?(): { name?: string; type?: string[] };
   onPluginLoad?(systemApi: SystemApi): void | Promise<void>;
-  renderComponent?(): React.ReactNode;
   renderView?(viewId: string, context?: Record<string, unknown>): React.ReactNode;
   renderAction?(actionId: string, context?: Record<string, unknown>): React.ReactNode;
 }

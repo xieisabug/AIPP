@@ -21,7 +21,7 @@
     "views": [
       {
         "id": "benchmark-dashboard",
-        "location": "config.analytics",
+        "location": "config.plugin-center",
         "title": "Benchmark Dashboard",
         "description": "基于插件能力平台渲染的 Benchmark 仪表盘。"
       }

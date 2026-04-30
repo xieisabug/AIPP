@@ -1,26 +1,46 @@
 use crate::db::assistant_db::{AssistantDatabase, AssistantPrompt};
 use crate::db::connection::params;
 use crate::db::conversation_db::{ConversationDatabase, Message, Repository};
+use crate::skills::installer::{copy_dir_recursive, extract_zip_bytes_to_dir};
 use crate::NameCacheState;
 use chrono::Utc;
 use rusqlite::{Connection, OpenFlags, ToSql};
+use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 use tauri::{Emitter, Manager};
 use tracing::warn;
 
+use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::ai::events::{ConversationEvent, MessageAddEvent};
 use crate::db::plugin_db::{
     NewPluginHookRegistration, Plugin, PluginAssistantConfiguration, PluginData, PluginDatabase,
     PluginHookAuditLog, PluginHookRegistration,
 };
+use crate::plugin::runtime::verify_entry_checksum as verify_runtime_entry_checksum;
 
 const PLUGIN_TYPE_CONFIG_KEY: &str = "plugin_type";
 const DEFAULT_PLUGIN_QUERY_MAX_ROWS: usize = 1000;
 const ABSOLUTE_PLUGIN_QUERY_MAX_ROWS: usize = 10000;
+const OFFICIAL_PLUGINS_API: &str = "https://aipp-helper.xiejingyang.com/api/plugins";
+const OFFICIAL_PLUGINS_TIMEOUT_SECS: u64 = 5;
+const PLUGIN_ARCHIVE_DOWNLOAD_TIMEOUT_SECS: u64 = 30;
+const PLUGIN_ARCHIVE_MAX_DISCOVERY_DEPTH: usize = 6;
+const IGNORED_PLUGIN_DISCOVERY_SEGMENTS: &[&str] = &[
+    ".git",
+    ".github",
+    ".vscode",
+    "coverage",
+    "docs",
+    "node_modules",
+    "scripts",
+    "src-tauri",
+    "target",
+];
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -492,6 +512,155 @@ pub struct ResolvedPluginManifest {
     pub activation_events: Vec<String>,
     pub contributions: PluginContributions,
     pub plugin_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfficialPlugin {
+    pub id: String,
+    pub code: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default, alias = "pluginType", alias = "pluginTypes")]
+    pub plugin_types: Vec<String>,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    #[serde(default)]
+    pub min_aipp_version: Option<String>,
+    #[serde(default)]
+    pub source: Option<PluginInstallRecipeSource>,
+    #[serde(default)]
+    pub dirs: Vec<PluginInstallRecipeDir>,
+    #[serde(default)]
+    pub download_url: Option<String>,
+    #[serde(default)]
+    pub source_url: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub signature: Option<String>,
+    #[serde(default)]
+    pub is_experimental: bool,
+    #[serde(default)]
+    pub is_installed: bool,
+    #[serde(default)]
+    pub installed_version: Option<String>,
+    #[serde(default)]
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginInstallRecipeSource {
+    #[serde(rename = "type", alias = "source_type")]
+    pub source_type: PluginInstallRecipeSourceType,
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(rename = "ref", alias = "git_ref", default = "default_git_ref")]
+    pub git_ref: String,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PluginInstallRecipeSourceType {
+    #[serde(rename = "github", alias = "git_hub")]
+    GitHub,
+    #[serde(rename = "zip")]
+    Zip,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginInstallRecipeDir {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallValidation {
+    pub is_installable: bool,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallPlanPlugin {
+    pub from: String,
+    pub to: String,
+    pub code: String,
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub author: Option<String>,
+    pub detected_manifest_file: String,
+    pub detected_entry_file: String,
+    pub normalized_entry_file: String,
+    pub plugin_type: Vec<String>,
+    pub permissions: Vec<String>,
+    pub runtime: PluginRuntimeManifest,
+    pub contributions: PluginContributions,
+    pub will_replace: bool,
+    pub installed_version: Option<String>,
+    pub validation: PluginInstallValidation,
+    pub preview: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginArchiveInspection {
+    pub source: PluginInstallRecipeSource,
+    pub source_label: String,
+    pub download_url: String,
+    pub target_directory: String,
+    pub archive_sha256: String,
+    pub plugins: Vec<PluginInstallPlanPlugin>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginArchiveInstallResult {
+    pub source: PluginInstallRecipeSource,
+    pub source_label: String,
+    pub download_url: String,
+    pub target_directory: String,
+    pub archive_sha256: String,
+    pub installed_plugins: Vec<PluginInstallPlanPlugin>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginDetailItem {
+    pub plugin_id: Option<i64>,
+    pub code: String,
+    pub name: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub plugin_type: Vec<String>,
+    pub permissions: Vec<String>,
+    pub runtime: PluginRuntimeManifest,
+    pub contributions: PluginContributions,
+    pub is_installed: bool,
+    pub is_active: bool,
+    pub plugin_dir: String,
+    pub entry_path: String,
+    pub entry_sha256: Option<String>,
+    pub configs: Vec<PluginConfigItem>,
+    pub hook_registrations: Vec<PluginHookRegistrationItem>,
+}
+
+fn default_git_ref() -> String {
+    "main".to_string()
 }
 
 fn default_hook_active() -> bool {
@@ -1048,6 +1217,573 @@ fn resolve_plugin_manifest_for_code(
         .and_then(|root| resolve_plugin_manifest_from_dir(&root.join(code), code))
 }
 
+impl PluginInstallRecipeSource {
+    fn validate(&self) -> Result<(), String> {
+        match self.source_type {
+            PluginInstallRecipeSourceType::GitHub => {
+                let repo =
+                    self.repo.as_deref().ok_or_else(|| "GitHub source requires repo".to_string())?;
+                validate_github_repo(repo)?;
+                if self.git_ref.trim().is_empty() {
+                    return Err("Git ref cannot be empty".to_string());
+                }
+            }
+            PluginInstallRecipeSourceType::Zip => {
+                let url = self.url.as_deref().ok_or_else(|| "Zip source requires url".to_string())?;
+                validate_zip_url(url)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn archive_url(&self) -> Result<String, String> {
+        self.validate()?;
+        match self.source_type {
+            PluginInstallRecipeSourceType::GitHub => Ok(format!(
+                "https://codeload.github.com/{}/zip/{}",
+                self.repo.as_deref().unwrap_or_default(),
+                self.git_ref
+            )),
+            PluginInstallRecipeSourceType::Zip => Ok(self.url.clone().unwrap_or_default()),
+        }
+    }
+
+    fn source_label(&self) -> String {
+        match self.source_type {
+            PluginInstallRecipeSourceType::GitHub => {
+                format!("{}#{}", self.repo.as_deref().unwrap_or_default(), self.git_ref)
+            }
+            PluginInstallRecipeSourceType::Zip => self.url.clone().unwrap_or_default(),
+        }
+    }
+}
+
+impl OfficialPlugin {
+    fn resolve_source(&self) -> Result<PluginInstallRecipeSource, String> {
+        if let Some(source) = &self.source {
+            source.validate()?;
+            return Ok(source.clone());
+        }
+        if let Some(download_url) = &self.download_url {
+            let source = PluginInstallRecipeSource {
+                source_type: PluginInstallRecipeSourceType::Zip,
+                repo: None,
+                git_ref: default_git_ref(),
+                url: Some(download_url.clone()),
+            };
+            source.validate()?;
+            return Ok(source);
+        }
+        Err(format!("Official plugin {} is missing source information", self.id))
+    }
+
+    fn normalize(mut self, app_handle: &tauri::AppHandle) -> Result<Self, String> {
+        let source = self.resolve_source()?;
+        validate_plugin_install_dirs(&self.dirs, false)?;
+        if self.source_url.is_none() {
+            self.source_url = Some(official_plugin_source_url(&source));
+        }
+        self.source = Some(source);
+        self.plugin_types = normalize_plugin_types(&self.plugin_types);
+        self.permissions = normalize_permissions(&self.permissions);
+        enrich_official_plugin_install_state(&mut self, app_handle)?;
+        Ok(self)
+    }
+}
+
+struct TempPluginExtractDir {
+    path: PathBuf,
+}
+
+impl TempPluginExtractDir {
+    fn new(prefix: &str) -> Result<Self, String> {
+        let path = std::env::temp_dir().join(format!("{}_{}", prefix, uuid::Uuid::new_v4()));
+        fs::create_dir_all(&path).map_err(|e| {
+            format!("Failed to create temporary plugin extraction directory {}: {}", path.display(), e)
+        })?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for TempPluginExtractDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+struct DownloadedPluginArchive {
+    _temp_dir: TempPluginExtractDir,
+    repo_root: PathBuf,
+    download_url: String,
+    archive_sha256: String,
+}
+
+async fn resolve_plugin_proxy_url(
+    app_handle: &tauri::AppHandle,
+    use_proxy: bool,
+) -> Result<Option<String>, String> {
+    if !use_proxy {
+        return Ok(None);
+    }
+    let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+    let config_feature_map = feature_config_state.config_feature_map.lock().await;
+    let proxy_url = get_network_proxy_from_config(&config_feature_map);
+    if proxy_url.is_none() {
+        return Err("当前未配置网络代理，请先在网络设置中填写代理地址".to_string());
+    }
+    Ok(proxy_url)
+}
+
+fn build_plugin_archive_http_client(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder().user_agent("AIPP plugin installer");
+    if let Some(proxy_url) = proxy_url {
+        let proxy = reqwest::Proxy::all(proxy_url).map_err(|e| format!("代理配置失败: {}", e))?;
+        builder = builder.proxy(proxy);
+    }
+    builder.build().map_err(|e| format!("Failed to build HTTP client: {}", e))
+}
+
+async fn download_and_extract_plugin_source(
+    source: &PluginInstallRecipeSource,
+    expected_sha256: Option<&str>,
+    proxy_url: Option<&str>,
+) -> Result<DownloadedPluginArchive, String> {
+    source.validate()?;
+    let download_url = source.archive_url()?;
+    let client = build_plugin_archive_http_client(proxy_url)?;
+    let response = client
+        .get(&download_url)
+        .timeout(Duration::from_secs(PLUGIN_ARCHIVE_DOWNLOAD_TIMEOUT_SECS))
+        .send()
+        .await
+        .map_err(|e| format_plugin_archive_download_error(source, &download_url, &e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "下载插件压缩包失败：{} 返回 HTTP {}。可以尝试检查链接或使用代理后重试",
+            download_url,
+            response.status()
+        ));
+    }
+
+    let archive_bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("读取下载的插件压缩包失败：{}（{}）", download_url, e))?;
+    let actual_sha256 = format!("sha256:{}", hex::encode(Sha256::digest(archive_bytes.as_ref())));
+    if let Some(expected_sha256) = expected_sha256.filter(|value| !value.trim().is_empty()) {
+        verify_sha256_value(&actual_sha256, expected_sha256)?;
+    }
+
+    let temp_dir = TempPluginExtractDir::new("plugin_archive_extract")?;
+    extract_zip_bytes_to_dir(archive_bytes.as_ref(), &temp_dir.path)?;
+    let repo_root = resolve_plugin_archive_root(&temp_dir.path)?;
+    Ok(DownloadedPluginArchive {
+        _temp_dir: temp_dir,
+        repo_root,
+        download_url,
+        archive_sha256: actual_sha256,
+    })
+}
+
+fn format_plugin_archive_download_error(
+    source: &PluginInstallRecipeSource,
+    download_url: &str,
+    error: &reqwest::Error,
+) -> String {
+    let source_label = source.source_label();
+    if error.is_timeout() {
+        format!(
+            "下载插件压缩包超时（{} 秒）：{}（{}）。可以尝试使用代理后重试",
+            PLUGIN_ARCHIVE_DOWNLOAD_TIMEOUT_SECS, source_label, download_url
+        )
+    } else if error.is_connect() {
+        format!(
+            "连接插件压缩包地址失败：{}（{}）。请检查网络或尝试使用代理后重试",
+            source_label, download_url
+        )
+    } else {
+        format!("下载插件压缩包失败：{}（{}）：{}", source_label, download_url, error)
+    }
+}
+
+fn normalize_sha256_value(value: &str) -> String {
+    value
+        .trim()
+        .strip_prefix("sha256:")
+        .unwrap_or_else(|| value.trim())
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn verify_sha256_value(actual: &str, expected: &str) -> Result<(), String> {
+    let actual = normalize_sha256_value(actual);
+    let expected = normalize_sha256_value(expected);
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!("插件包校验失败：expected {}, got {}", expected, actual))
+    }
+}
+
+fn official_plugin_source_url(source: &PluginInstallRecipeSource) -> String {
+    match source.source_type {
+        PluginInstallRecipeSourceType::GitHub => format!(
+            "https://github.com/{}/tree/{}",
+            source.repo.as_deref().unwrap_or_default(),
+            source.git_ref
+        ),
+        PluginInstallRecipeSourceType::Zip => source.url.clone().unwrap_or_default(),
+    }
+}
+
+fn enrich_official_plugin_install_state(
+    plugin: &mut OfficialPlugin,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    let db = PluginDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let plugins = db.get_plugins().map_err(|e| e.to_string())?;
+    if let Some(local) = plugins.into_iter().find(|item| item.folder_name == plugin.code) {
+        plugin.is_installed = plugin_entry_exists(app_handle, &plugin.code);
+        plugin.installed_version = Some(local.version);
+        plugin.is_active = db
+            .get_plugin_status(local.plugin_id)
+            .map_err(|e| e.to_string())?
+            .map(|status| status.is_active)
+            .unwrap_or(true);
+    }
+    Ok(())
+}
+
+fn validate_plugin_install_dirs(
+    dirs: &[PluginInstallRecipeDir],
+    require_non_empty: bool,
+) -> Result<(), String> {
+    if require_non_empty && dirs.is_empty() {
+        return Err("At least one plugin directory mapping is required".to_string());
+    }
+    let mut seen_targets = HashSet::new();
+    for dir in dirs {
+        validate_relative_source_path(&dir.from)?;
+        validate_target_dir_name(&dir.to)?;
+        if !seen_targets.insert(dir.to.clone()) {
+            return Err(format!("Duplicate plugin target directory: {}", dir.to));
+        }
+    }
+    Ok(())
+}
+
+fn validate_github_repo(repo: &str) -> Result<(), String> {
+    let mut segments = repo.split('/');
+    let owner = segments.next().unwrap_or_default().trim();
+    let name = segments.next().unwrap_or_default().trim();
+    if owner.is_empty() || name.is_empty() || segments.next().is_some() {
+        return Err(format!("GitHub source repo must be owner/repo, got: {}", repo));
+    }
+    Ok(())
+}
+
+fn validate_zip_url(url: &str) -> Result<(), String> {
+    let parsed =
+        reqwest::Url::parse(url.trim()).map_err(|e| format!("Zip source url is invalid: {}", e))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(()),
+        scheme => Err(format!("Zip source url must use http or https, got scheme: {}", scheme)),
+    }
+}
+
+fn validate_relative_source_path(path: &str) -> Result<(), String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Plugin source directory cannot be empty".to_string());
+    }
+    if trimmed == "." {
+        return Ok(());
+    }
+    for component in Path::new(trimmed).components() {
+        match component {
+            Component::Normal(_) => {}
+            _ => return Err(format!("Invalid plugin source directory path: {}", path)),
+        }
+    }
+    Ok(())
+}
+
+fn validate_target_dir_name(path: &str) -> Result<(), String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Plugin target directory cannot be empty".to_string());
+    }
+    let mut components = Path::new(trimmed).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(()),
+        _ => Err(format!("Plugin target directory must be a single directory name, got: {}", path)),
+    }
+}
+
+fn resolve_plugin_archive_root(extract_dir: &Path) -> Result<PathBuf, String> {
+    let entries = collect_plugin_directory_entries(extract_dir)?;
+    if entries.is_empty() {
+        return Err(format!("Extracted plugin archive directory {} is empty", extract_dir.display()));
+    }
+    let has_files = entries.iter().any(|path| path.is_file());
+    let dirs: Vec<PathBuf> = entries.into_iter().filter(|path| path.is_dir()).collect();
+    if dirs.len() == 1 && !has_files {
+        Ok(dirs[0].clone())
+    } else {
+        Ok(extract_dir.to_path_buf())
+    }
+}
+
+fn collect_plugin_directory_entries(path: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(path)
+        .map_err(|e| format!("Failed to read directory {}: {}", path.display(), e))?
+    {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        entries.push(entry.path());
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+fn resolve_plugin_recipe_dir(repo_root: &Path, from: &str) -> Result<PathBuf, String> {
+    validate_relative_source_path(from)?;
+    let resolved = if from.trim() == "." { repo_root.to_path_buf() } else { repo_root.join(from) };
+    if !resolved.exists() {
+        return Err(format!("Configured plugin directory {} does not exist in archive", from));
+    }
+    if !resolved.is_dir() {
+        return Err(format!("Configured plugin directory {} is not a directory in archive", from));
+    }
+    let canonical_root = repo_root
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve archive root {}: {}", repo_root.display(), e))?;
+    let canonical_resolved = resolved
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve plugin directory {}: {}", resolved.display(), e))?;
+    if !canonical_resolved.starts_with(&canonical_root) {
+        return Err(format!("Configured plugin directory {} resolves outside archive root", from));
+    }
+    Ok(resolved)
+}
+
+fn build_archive_plan_plugins(
+    configured_dirs: Option<&[PluginInstallRecipeDir]>,
+    repo_root: &Path,
+    plugin_root: &Path,
+) -> Result<Vec<PluginInstallPlanPlugin>, String> {
+    if let Some(dirs) = configured_dirs.filter(|dirs| !dirs.is_empty()) {
+        validate_plugin_install_dirs(dirs, true)?;
+        let mut plugins = Vec::with_capacity(dirs.len());
+        for dir in dirs {
+            let source_dir = resolve_plugin_recipe_dir(repo_root, &dir.from)?;
+            plugins.push(build_plan_plugin(&dir.from, &dir.to, &source_dir, plugin_root)?);
+        }
+        return Ok(plugins);
+    }
+
+    let candidates = discover_archive_plugin_candidates(repo_root)?;
+    if candidates.is_empty() {
+        return Err("未在压缩包中发现可安装插件，请确认包含 plugin.json 和 dist/main.js".to_string());
+    }
+    let mut plugins = Vec::with_capacity(candidates.len());
+    for (from, source_dir) in candidates {
+        let manifest = read_plugin_manifest(&source_dir.join("plugin.json"))
+            .ok_or_else(|| format!("Failed to read plugin manifest in {}", source_dir.display()))?;
+        let fallback_code = source_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("plugin")
+            .to_string();
+        let to = manifest_declared_code(&manifest, &fallback_code);
+        plugins.push(build_plan_plugin(&from, &to, &source_dir, plugin_root)?);
+    }
+    plugins.sort_by(|left, right| left.from.cmp(&right.from));
+    Ok(plugins)
+}
+
+fn discover_archive_plugin_candidates(repo_root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    let mut candidates = Vec::new();
+    discover_archive_plugin_candidates_inner(repo_root, repo_root, 0, &mut candidates)?;
+    Ok(candidates)
+}
+
+fn discover_archive_plugin_candidates_inner(
+    repo_root: &Path,
+    current_dir: &Path,
+    depth: usize,
+    candidates: &mut Vec<(String, PathBuf)>,
+) -> Result<(), String> {
+    if current_dir.join("plugin.json").is_file() {
+        candidates.push((archive_relative_path(repo_root, current_dir)?, current_dir.to_path_buf()));
+        return Ok(());
+    }
+    if depth >= PLUGIN_ARCHIVE_MAX_DISCOVERY_DEPTH {
+        return Ok(());
+    }
+    for entry in collect_plugin_directory_entries(current_dir)? {
+        if !entry.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().and_then(|value| value.to_str()).unwrap_or_default();
+        if IGNORED_PLUGIN_DISCOVERY_SEGMENTS.contains(&name) {
+            continue;
+        }
+        discover_archive_plugin_candidates_inner(repo_root, &entry, depth + 1, candidates)?;
+    }
+    Ok(())
+}
+
+fn archive_relative_path(repo_root: &Path, path: &Path) -> Result<String, String> {
+    let relative = path
+        .strip_prefix(repo_root)
+        .map_err(|e| format!("Failed to build archive relative path: {}", e))?;
+    if relative.as_os_str().is_empty() {
+        return Ok(".".to_string());
+    }
+    let parts: Vec<String> = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
+    Ok(parts.join("/"))
+}
+
+fn manifest_declared_code(manifest: &PluginManifest, fallback: &str) -> String {
+    manifest
+        .code
+        .clone()
+        .or_else(|| manifest.id.clone())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn build_plan_plugin(
+    from: &str,
+    to: &str,
+    source_dir: &Path,
+    plugin_root: &Path,
+) -> Result<PluginInstallPlanPlugin, String> {
+    let manifest_path = source_dir.join("plugin.json");
+    let manifest = read_plugin_manifest(&manifest_path)
+        .ok_or_else(|| format!("插件目录 {} 缺少有效 plugin.json", from))?;
+    let runtime = resolve_runtime_manifest(&manifest);
+    let fallback_code = source_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(to)
+        .to_string();
+    let declared_code = manifest_declared_code(&manifest, &fallback_code);
+    let mut raw_types = manifest.plugin_types.clone();
+    raw_types.extend(manifest.kinds.clone());
+    let plugin_type = normalize_plugin_types(&raw_types);
+    let permissions = normalize_permissions(&manifest.permissions);
+    let entry_path = source_dir.join(&runtime.entry);
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+
+    if declared_code != to {
+        errors.push(format!("插件目录名与 plugin.json code 不一致：目录 {}，manifest {}", to, declared_code));
+    }
+    if !entry_path.is_file() {
+        errors.push(format!("插件入口文件不存在：{}/{}", to, runtime.entry));
+    }
+    if runtime.runtime_type != "js" {
+        warnings.push(format!("当前插件商店第一版主要面向 JS runtime，检测到 {}", runtime.runtime_type));
+    }
+
+    let installed_version =
+        resolve_plugin_manifest_from_dir(&plugin_root.join(to), to).map(|manifest| manifest.version);
+    let preview = build_plugin_preview(source_dir, manifest.description.clone())?;
+    let detected_entry_file = Path::new(&runtime.entry)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("main.js")
+        .to_string();
+
+    Ok(PluginInstallPlanPlugin {
+        from: from.to_string(),
+        to: to.to_string(),
+        code: declared_code,
+        name: manifest.name.unwrap_or_else(|| to.to_string()),
+        version: manifest.version.unwrap_or_else(|| "0.0.0".to_string()),
+        description: manifest.description,
+        author: manifest.author,
+        detected_manifest_file: "plugin.json".to_string(),
+        detected_entry_file,
+        normalized_entry_file: runtime.entry.clone(),
+        plugin_type,
+        permissions,
+        runtime,
+        contributions: manifest.contributions,
+        will_replace: plugin_root.join(to).exists(),
+        installed_version,
+        validation: PluginInstallValidation {
+            is_installable: errors.is_empty(),
+            warnings,
+            errors,
+        },
+        preview,
+    })
+}
+
+fn build_plugin_preview(source_dir: &Path, fallback: Option<String>) -> Result<Option<String>, String> {
+    for name in ["README.md", "readme.md", "README.MD"] {
+        let path = source_dir.join(name);
+        if path.is_file() {
+            let raw = fs::read_to_string(&path)
+                .map_err(|e| format!("Failed to read plugin preview {}: {}", path.display(), e))?;
+            return Ok(Some(raw.chars().take(1200).collect()));
+        }
+    }
+    Ok(fallback)
+}
+
+fn install_plugin_dir_atomic(source_dir: &Path, plugin_root: &Path, code: &str) -> Result<(), String> {
+    fs::create_dir_all(plugin_root)
+        .map_err(|e| format!("Failed to create plugin root {}: {}", plugin_root.display(), e))?;
+    let staging_dir = plugin_root.join(format!("{}.installing-{}", code, uuid::Uuid::new_v4()));
+    let backup_dir = plugin_root.join(format!("{}.backup-{}", code, uuid::Uuid::new_v4()));
+    let target_dir = plugin_root.join(code);
+    if staging_dir.exists() {
+        fs::remove_dir_all(&staging_dir).map_err(|e| {
+            format!("Failed to clean stale staging plugin directory {}: {}", staging_dir.display(), e)
+        })?;
+    }
+    copy_dir_recursive(source_dir, &staging_dir)?;
+
+    let had_existing = target_dir.exists();
+    if had_existing {
+        fs::rename(&target_dir, &backup_dir).map_err(|e| {
+            format!("Failed to backup existing plugin directory {}: {}", target_dir.display(), e)
+        })?;
+    }
+
+    match fs::rename(&staging_dir, &target_dir) {
+        Ok(()) => {
+            if had_existing {
+                let _ = fs::remove_dir_all(&backup_dir);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging_dir);
+            if had_existing && backup_dir.exists() {
+                let _ = fs::rename(&backup_dir, &target_dir);
+            }
+            Err(format!("Failed to install plugin directory {}: {}", code, error))
+        }
+    }
+}
+
+fn calculate_file_sha256(path: &Path) -> Result<String, String> {
+    let bytes =
+        fs::read(path).map_err(|e| format!("Failed to read file {}: {}", path.display(), e))?;
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
+}
+
 fn discover_plugins(app_handle: &tauri::AppHandle) -> Result<Vec<DiscoveredPlugin>, String> {
     let plugin_root = get_plugin_root_path(app_handle)?;
     let mut discovered = Vec::new();
@@ -1323,6 +2059,211 @@ pub fn get_enabled_plugin_manifests(
     }
 
     Ok(manifests)
+}
+
+#[tauri::command]
+pub async fn fetch_official_plugins(
+    app_handle: tauri::AppHandle,
+    use_proxy: bool,
+) -> Result<Vec<OfficialPlugin>, String> {
+    let proxy_url = resolve_plugin_proxy_url(&app_handle, use_proxy).await?;
+    let client = build_plugin_archive_http_client(proxy_url.as_deref())?;
+    let response = client
+        .get(OFFICIAL_PLUGINS_API)
+        .timeout(Duration::from_secs(OFFICIAL_PLUGINS_TIMEOUT_SECS))
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!("请求超时（超过{}秒），请尝试使用代理访问", OFFICIAL_PLUGINS_TIMEOUT_SECS)
+            } else if e.is_connect() {
+                "网络连接失败，请检查网络或尝试使用代理".to_string()
+            } else {
+                format!("获取官方插件列表失败: {}", e)
+            }
+        })?;
+
+    if !response.status().is_success() {
+        return Err(format!("Official plugins API returned error: {}", response.status()));
+    }
+
+    let plugins = response
+        .json::<Vec<OfficialPlugin>>()
+        .await
+        .map_err(|e| format!("Failed to parse official plugins response: {}", e))?;
+    plugins
+        .into_iter()
+        .map(|plugin| plugin.normalize(&app_handle))
+        .collect::<Result<Vec<_>, _>>()
+}
+
+#[tauri::command]
+pub async fn inspect_plugin_archive_source(
+    app_handle: tauri::AppHandle,
+    source: PluginInstallRecipeSource,
+    dirs: Option<Vec<PluginInstallRecipeDir>>,
+    expected_sha256: Option<String>,
+    use_proxy: bool,
+) -> Result<PluginArchiveInspection, String> {
+    let plugin_root = get_plugin_root_path(&app_handle)?;
+    let proxy_url = resolve_plugin_proxy_url(&app_handle, use_proxy).await?;
+    let archive = download_and_extract_plugin_source(
+        &source,
+        expected_sha256.as_deref(),
+        proxy_url.as_deref(),
+    )
+    .await?;
+    let plugins = build_archive_plan_plugins(dirs.as_deref(), &archive.repo_root, &plugin_root)?;
+    Ok(PluginArchiveInspection {
+        source: source.clone(),
+        source_label: source.source_label(),
+        download_url: archive.download_url,
+        target_directory: plugin_root.to_string_lossy().to_string(),
+        archive_sha256: archive.archive_sha256,
+        plugins,
+    })
+}
+
+#[tauri::command]
+pub async fn install_plugin_archive_source(
+    app_handle: tauri::AppHandle,
+    source: PluginInstallRecipeSource,
+    selections: Vec<PluginInstallRecipeDir>,
+    expected_sha256: Option<String>,
+    use_proxy: bool,
+    enable_after_install: bool,
+) -> Result<PluginArchiveInstallResult, String> {
+    validate_plugin_install_dirs(&selections, true)?;
+    let plugin_root = get_plugin_root_path(&app_handle)?;
+    let proxy_url = resolve_plugin_proxy_url(&app_handle, use_proxy).await?;
+    let archive = download_and_extract_plugin_source(
+        &source,
+        expected_sha256.as_deref(),
+        proxy_url.as_deref(),
+    )
+    .await?;
+    let plugins = build_archive_plan_plugins(Some(&selections), &archive.repo_root, &plugin_root)?;
+    let invalid = plugins.iter().find(|plugin| !plugin.validation.is_installable);
+    if let Some(plugin) = invalid {
+        return Err(format!(
+            "插件 {} 不可安装：{}",
+            plugin.to,
+            plugin.validation.errors.join("；")
+        ));
+    }
+
+    for plugin in &plugins {
+        let source_dir = resolve_plugin_recipe_dir(&archive.repo_root, &plugin.from)?;
+        install_plugin_dir_atomic(&source_dir, &plugin_root, &plugin.to)?;
+    }
+
+    let db = PluginDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    sync_registry(&db, &app_handle)?;
+    if enable_after_install {
+        let all_plugins = db.get_plugins().map_err(|e| e.to_string())?;
+        for installed in &plugins {
+            if let Some(plugin) = all_plugins.iter().find(|item| item.folder_name == installed.to) {
+                db.upsert_plugin_status(plugin.plugin_id, true, None).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    emit_plugin_registry_changed(&app_handle, "archive-installed");
+
+    Ok(PluginArchiveInstallResult {
+        source: source.clone(),
+        source_label: source.source_label(),
+        download_url: archive.download_url,
+        target_directory: plugin_root.to_string_lossy().to_string(),
+        archive_sha256: archive.archive_sha256,
+        installed_plugins: plugins,
+    })
+}
+
+#[tauri::command]
+pub async fn get_plugin_detail(
+    app_handle: tauri::AppHandle,
+    code: String,
+) -> Result<PluginDetailItem, String> {
+    let db = PluginDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    sync_registry(&db, &app_handle)?;
+    let plugin_root = get_plugin_root_path(&app_handle)?;
+    let plugin_dir = plugin_root.join(&code);
+    let manifest = resolve_plugin_manifest_from_dir(&plugin_dir, &code)
+        .ok_or_else(|| format!("Plugin manifest not found or invalid: {}", code))?;
+    let plugin = db
+        .get_plugins()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|item| item.folder_name == code);
+    let plugin_id = plugin.as_ref().map(|item| item.plugin_id);
+    let is_active = if let Some(plugin_id) = plugin_id {
+        db.get_plugin_status(plugin_id)
+            .map_err(|e| e.to_string())?
+            .map(|status| status.is_active)
+            .unwrap_or(true)
+    } else {
+        false
+    };
+    let configs = if let Some(plugin_id) = plugin_id {
+        db.get_plugin_configurations(plugin_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|config| PluginConfigItem {
+                config_id: config.config_id,
+                plugin_id: config.plugin_id,
+                config_key: config.config_key,
+                config_value: config.config_value,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let hook_registrations = if let Some(plugin_id) = plugin_id {
+        db.get_plugin_hook_registrations(plugin_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(plugin_hook_registration_to_item)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let entry_path = plugin_dir.join(&manifest.runtime.entry);
+    let entry_sha256 = if entry_path.is_file() {
+        Some(calculate_file_sha256(&entry_path)?)
+    } else {
+        None
+    };
+
+    Ok(PluginDetailItem {
+        plugin_id,
+        code: manifest.code,
+        name: manifest.name,
+        version: manifest.version,
+        description: manifest.description,
+        author: manifest.author,
+        plugin_type: manifest.plugin_type,
+        permissions: manifest.permissions,
+        runtime: manifest.runtime,
+        contributions: manifest.contributions,
+        is_installed: plugin_entry_exists(&app_handle, &code),
+        is_active,
+        plugin_dir: plugin_dir.to_string_lossy().to_string(),
+        entry_path: entry_path.to_string_lossy().to_string(),
+        entry_sha256,
+        configs,
+        hook_registrations,
+    })
+}
+
+#[tauri::command]
+pub async fn verify_plugin_entry_checksum(
+    app_handle: tauri::AppHandle,
+    code: String,
+) -> Result<(), String> {
+    let manifest = resolve_plugin_manifest_for_code(&app_handle, &code)
+        .ok_or_else(|| format!("Plugin manifest not found or invalid: {}", code))?;
+    let entry_path = manifest.plugin_dir.join(&manifest.runtime.entry);
+    verify_runtime_entry_checksum(&entry_path, manifest.runtime.checksum.as_deref())
 }
 
 #[tauri::command]

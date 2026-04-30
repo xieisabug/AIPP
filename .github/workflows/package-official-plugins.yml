@@ -1,0 +1,37 @@
+name: Package official plugins
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "plugins-v*"
+
+jobs:
+  package-plugins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Ensure zip is available
+        run: sudo apt-get update && sudo apt-get install -y zip
+
+      - name: Package official plugins
+        run: node scripts/package-official-plugins.js
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: official-plugins
+          path: dist-official-plugins/**
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/plugins-v')
+        with:
+          files: dist-official-plugins/**

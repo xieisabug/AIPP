@@ -69,14 +69,15 @@ use crate::api::llm_api::{
 };
 use crate::api::operation_api::{confirm_acp_permission, confirm_operation_permission};
 use crate::api::plugin_api::{
-    disable_plugin, enable_plugin, get_enabled_plugins, get_plugin_assistant_configs,
-    get_plugin_config, get_plugin_data, get_plugin_hook_registrations, get_plugin_root_dir,
-    install_plugin, list_plugin_hook_audit_logs, list_plugins, plugin_append_message,
-    plugin_create_conversation, plugin_data_query, plugin_data_schema,
+    disable_plugin, enable_plugin, fetch_official_plugins, get_enabled_plugins,
+    get_plugin_assistant_configs, get_plugin_config, get_plugin_data, get_plugin_detail,
+    get_plugin_hook_registrations, get_plugin_root_dir, inspect_plugin_archive_source,
+    install_plugin, install_plugin_archive_source, list_plugin_hook_audit_logs, list_plugins,
+    plugin_append_message, plugin_create_conversation, plugin_data_query, plugin_data_schema,
     plugin_get_assistant_detail, plugin_get_conversation_with_messages, plugin_storage_execute,
     plugin_storage_query, plugin_storage_schema, plugin_update_assistant_prompt,
     plugin_update_message_metadata, set_plugin_assistant_config, set_plugin_config,
-    set_plugin_data, submit_js_plugin_hook_result, uninstall_plugin,
+    set_plugin_data, submit_js_plugin_hook_result, uninstall_plugin, verify_plugin_entry_checksum,
 };
 use crate::api::scheduled_task_api::{
     create_scheduled_task, delete_scheduled_task, list_butler_scheduled_tasks,
@@ -1167,6 +1168,11 @@ pub fn run() {
             list_scheduled_task_logs,
             list_scheduled_task_runs,
             // Plugin commands
+            fetch_official_plugins,
+            inspect_plugin_archive_source,
+            install_plugin_archive_source,
+            get_plugin_detail,
+            verify_plugin_entry_checksum,
             list_plugins,
             get_enabled_plugins,
             install_plugin,

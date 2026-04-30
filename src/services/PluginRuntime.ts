@@ -390,6 +390,7 @@ class PluginRuntime {
             const cacheBustKey = forceReload
                 ? `${plugin.code}-${plugin.version}-${Date.now()}`
                 : `${plugin.code}-${plugin.version}`;
+            await invoke("verify_plugin_entry_checksum", { code: plugin.code });
             await this.injectScript(pluginScriptPath, cacheBustKey);
             this.loadedScripts.add(pluginScriptPath);
         }

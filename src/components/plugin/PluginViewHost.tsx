@@ -52,7 +52,6 @@ const PluginViewHost: React.FC<PluginViewHostProps> = ({
                 const instance = plugin.instance as
                     | {
                         renderView?: (targetViewId: string, viewContext?: Record<string, unknown>) => React.ReactNode;
-                        renderComponent?: () => React.ReactNode;
                     }
                     | null;
                 let content: React.ReactNode = null;
@@ -61,8 +60,6 @@ const PluginViewHost: React.FC<PluginViewHostProps> = ({
                 try {
                     if (typeof instance?.renderView === "function") {
                         content = instance.renderView(viewId, context);
-                    } else if (location === "config.plugin-panel" && typeof instance?.renderComponent === "function") {
-                        content = instance.renderComponent();
                     } else {
                         errorText = "插件未实现 renderView()。";
                     }
@@ -75,7 +72,7 @@ const PluginViewHost: React.FC<PluginViewHostProps> = ({
                         <CardHeader className="pb-3">
                             <CardTitle className="text-base">{title}</CardTitle>
                             <CardDescription>
-                                {description || `${plugin.name} 提供的扩展视图`}
+                                {description || `${plugin.name} 提供的插件视图`}
                             </CardDescription>
                         </CardHeader>
                         <CardContent>

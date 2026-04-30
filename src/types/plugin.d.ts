@@ -620,7 +620,6 @@ declare class Config {
 
 declare class AippPlugin {
     onPluginLoad(systemApi: SystemApi): void;
-    renderComponent?(): React.ReactNode;
     renderView?(viewId: string, context?: Record<string, unknown>): React.ReactNode;
     renderAction?(actionId: string, context?: Record<string, unknown>): React.ReactNode;
     config(): Config;

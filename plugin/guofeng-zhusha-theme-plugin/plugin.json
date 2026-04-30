@@ -17,5 +17,15 @@
   "kinds": [
     "ui",
     "worker"
-  ]
+  ],
+  "contributions": {
+    "views": [
+      {
+        "id": "guofeng-theme-panel",
+        "location": "config.plugin-center",
+        "title": "国风主题面板",
+        "description": "查看并应用国风·朱砂主题。"
+      }
+    ]
+  }
 }

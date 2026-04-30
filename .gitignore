@@ -12,6 +12,7 @@ stdout
 node_modules
 dist
 dist-ssr
+dist-official-plugins
 *.local
 
 target/*

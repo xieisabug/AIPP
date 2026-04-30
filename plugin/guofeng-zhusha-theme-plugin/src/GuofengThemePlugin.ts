@@ -152,7 +152,10 @@ var GuofengThemePlugin = class GuofengThemePlugin {
     });
   }
 
-  renderComponent() {
+  renderView(viewId: string) {
+    if (viewId !== "guofeng-theme-panel") {
+      return null;
+    }
     var React = (window as any).React;
     if (!React) {
       return null;
