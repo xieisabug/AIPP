@@ -76,6 +76,41 @@ function countPreviewCodeToolCalls(content: string): number {
     );
 }
 
+const CODE_BLOCK_HEIGHT_ESTIMATE_WRAP_CHARS = 96;
+const CODE_BLOCK_COLLAPSED_VISIBLE_LINE_COUNT = 16;
+const CODE_BLOCK_AUTO_COLLAPSE_LINE_THRESHOLD = 18;
+
+function estimateWrappedCodeLineCount(code: string): number {
+    return Math.max(
+        1,
+        code.split(/\r?\n/).reduce((total, line) => {
+            return total + Math.max(
+                1,
+                Math.ceil(line.length / CODE_BLOCK_HEIGHT_ESTIMATE_WRAP_CHARS),
+            );
+        }, 0),
+    );
+}
+
+function normalizeCollapsedCodeBlocksForHeightEstimate(content: string): string {
+    return content.replace(
+        /(^|\n)(`{3,}|~{3,})([^\n]*)\n([\s\S]*?)(?:\n\2(?=\n|$)|$)/g,
+        (match, leading: string, fence: string, meta: string, code: string) => {
+            const visualLineCount = estimateWrappedCodeLineCount(code);
+            if (visualLineCount <= CODE_BLOCK_AUTO_COLLAPSE_LINE_THRESHOLD) {
+                return match;
+            }
+
+            const visiblePlaceholder = Array.from(
+                { length: CODE_BLOCK_COLLAPSED_VISIBLE_LINE_COUNT },
+                () => "code",
+            ).join("\n");
+
+            return `${leading}${fence}${meta}\n${visiblePlaceholder}\n${fence}`;
+        },
+    );
+}
+
 function collectPreviewCodePayloadLengths(content: string): number[] {
     const segments = [
         ...(content.match(/<!--\s*MCP_TOOL_CALL(?:_STREAMING)?[\s\S]*?-->/g) ?? []),
@@ -93,7 +128,9 @@ function estimateMessageHeight(
 ): number {
     const { isLastMessage = false, isReasoningExpanded = false } = options;
     const rawContent = message.content ?? "";
-    const content = stripMcpToolCallMarkup(rawContent);
+    const content = normalizeCollapsedCodeBlocksForHeightEstimate(
+        stripMcpToolCallMarkup(rawContent),
+    );
     const mcpToolCallCount = countMcpToolCalls(rawContent);
     const previewCodePayloadLengths = rawContent.includes("MCP_TOOL_CALL_STREAMING")
         ? []
