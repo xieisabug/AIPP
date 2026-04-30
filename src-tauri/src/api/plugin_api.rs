@@ -1,5 +1,7 @@
+use crate::db::assistant_db::{AssistantDatabase, AssistantPrompt};
 use crate::db::connection::params;
 use crate::db::conversation_db::{ConversationDatabase, Message, Repository};
+use crate::NameCacheState;
 use chrono::Utc;
 use rusqlite::{Connection, OpenFlags, ToSql};
 use serde::{Deserialize, Serialize};
@@ -98,6 +100,17 @@ pub struct PluginAssistantConfigItem {
     pub config_key: String,
     pub config_value: Option<String>,
     pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginUpdateAssistantPromptRequest {
+    pub assistant_id: i64,
+    pub prompt: String,
+    #[serde(default)]
+    pub expected_prompt_id: Option<i64>,
+    #[serde(default)]
+    pub expected_old_prompt: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -250,6 +263,8 @@ pub struct PluginContributions {
     #[serde(default)]
     pub views: Vec<PluginViewContribution>,
     #[serde(default)]
+    pub actions: Vec<PluginActionContribution>,
+    #[serde(default)]
     pub assistant_form_fields: Vec<PluginAssistantFormFieldContribution>,
     #[serde(default)]
     pub legacy_assistant_type: bool,
@@ -263,6 +278,18 @@ pub struct PluginViewContribution {
     pub title: String,
     #[serde(default)]
     pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginActionContribution {
+    pub id: String,
+    pub location: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub order: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1500,6 +1527,110 @@ pub async fn set_plugin_assistant_config(
     let db = PluginDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.set_plugin_assistant_configuration(plugin_id, assistant_id, &key, value.as_deref())
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn plugin_get_conversation_with_messages(
+    app_handle: tauri::AppHandle,
+    name_cache_state: tauri::State<'_, NameCacheState>,
+    plugin_id: i64,
+    conversation_id: i64,
+) -> Result<crate::api::conversation_api::ConversationWithMessages, String> {
+    assert_plugin_permission(&app_handle, plugin_id, "conversation.read")?;
+    crate::api::conversation_api::get_conversation_with_messages(
+        app_handle,
+        name_cache_state,
+        conversation_id,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn plugin_get_assistant_detail(
+    app_handle: tauri::AppHandle,
+    plugin_id: i64,
+    assistant_id: i64,
+) -> Result<crate::api::assistant_api::AssistantDetail, String> {
+    assert_plugin_permission(&app_handle, plugin_id, "assistant.read")?;
+    crate::api::assistant_api::get_assistant(app_handle, assistant_id)
+}
+
+#[tauri::command]
+pub async fn plugin_update_assistant_prompt(
+    app_handle: tauri::AppHandle,
+    plugin_id: i64,
+    request: PluginUpdateAssistantPromptRequest,
+) -> Result<AssistantPrompt, String> {
+    assert_plugin_permission(&app_handle, plugin_id, "assistant.prompt.write")?;
+
+    let prompt = request.prompt.trim().to_string();
+    if prompt.is_empty() {
+        return Err("Assistant prompt cannot be empty".to_string());
+    }
+
+    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    assistant_db
+        .get_assistant(request.assistant_id)
+        .map_err(|e| format!("Failed to load assistant {}: {}", request.assistant_id, e))?;
+
+    let existing_prompt = assistant_db
+        .get_assistant_prompt(request.assistant_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .next();
+
+    if let Some(expected_prompt_id) = request.expected_prompt_id {
+        match existing_prompt.as_ref() {
+            Some(prompt_item) if prompt_item.id == expected_prompt_id => {}
+            Some(prompt_item) => {
+                return Err(format!(
+                    "Assistant prompt changed while editing (expected prompt id {}, found {})",
+                    expected_prompt_id, prompt_item.id
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "Assistant prompt changed while editing (expected prompt id {}, found none)",
+                    expected_prompt_id
+                ));
+            }
+        }
+    }
+
+    if let Some(expected_old_prompt) = request.expected_old_prompt.as_ref() {
+        let current_prompt = existing_prompt
+            .as_ref()
+            .map(|prompt_item| prompt_item.prompt.as_str())
+            .unwrap_or("");
+        if current_prompt != expected_old_prompt {
+            return Err("Assistant prompt changed while editing; please reopen the optimizer.".to_string());
+        }
+    }
+
+    let updated_prompt = match existing_prompt {
+        Some(mut prompt_item) => {
+            if prompt_item.prompt.as_str() != prompt.as_str() {
+                assistant_db
+                    .update_assistant_prompt(prompt_item.id, &prompt)
+                    .map_err(|e| e.to_string())?;
+                prompt_item.prompt = prompt.clone();
+            }
+            prompt_item
+        }
+        None => {
+            let prompt_id = assistant_db
+                .add_assistant_prompt(request.assistant_id, &prompt)
+                .map_err(|e| e.to_string())?;
+            AssistantPrompt {
+                id: prompt_id,
+                assistant_id: request.assistant_id,
+                prompt,
+                created_time: None,
+            }
+        }
+    };
+
+    Ok(updated_prompt)
 }
 
 #[tauri::command]

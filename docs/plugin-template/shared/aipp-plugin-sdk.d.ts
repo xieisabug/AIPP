@@ -113,6 +113,91 @@ interface AippSystemApiAssistantConfig {
   set(assistantId: number | string, key: string, value: string | null): Promise<void>;
 }
 
+interface AippSystemApiAssistantRecord {
+  id: number;
+  name: string;
+  description: string | null;
+  assistant_type: number | null;
+  is_addition: boolean;
+  created_time: string;
+}
+
+interface AippSystemApiAssistantPrompt {
+  id: number;
+  assistant_id: number;
+  prompt: string;
+  created_time?: string | null;
+}
+
+interface AippSystemApiAssistantModel {
+  id: number;
+  assistant_id: number;
+  provider_id: number;
+  model_code: string;
+  alias: string;
+}
+
+interface AippSystemApiAssistantModelConfig {
+  id: number;
+  assistant_id: number;
+  assistant_model_id: number;
+  name: string;
+  value: string | null;
+  value_type: string;
+}
+
+interface AippSystemApiAssistantPromptParam {
+  id: number;
+  assistant_id: number;
+  assistant_prompt_id: number;
+  param_name: string;
+  param_type: string | null;
+  param_value: string | null;
+}
+
+interface AippSystemApiAssistantMcpConfig {
+  id: number;
+  assistant_id: number;
+  mcp_server_id: number;
+  is_enabled: boolean;
+}
+
+interface AippSystemApiAssistantMcpToolConfig {
+  id: number;
+  assistant_id: number;
+  mcp_tool_id: number;
+  is_enabled: boolean;
+  is_auto_run: boolean;
+}
+
+interface AippSystemApiAssistantDetail {
+  assistant: AippSystemApiAssistantRecord;
+  prompts: AippSystemApiAssistantPrompt[];
+  model: AippSystemApiAssistantModel[];
+  model_configs: AippSystemApiAssistantModelConfig[];
+  prompt_params: AippSystemApiAssistantPromptParam[];
+  mcp_configs: AippSystemApiAssistantMcpConfig[];
+  mcp_tool_configs: AippSystemApiAssistantMcpToolConfig[];
+}
+
+interface AippSystemApiAssistantUpdatePromptRequest {
+  assistantId: number | string;
+  prompt: string;
+  expectedPromptId?: number;
+  expectedOldPrompt?: string;
+}
+
+interface AippSystemApiAssistants {
+  getDetail(assistantId: number | string): Promise<AippSystemApiAssistantDetail>;
+  updatePrompt(
+    request: AippSystemApiAssistantUpdatePromptRequest
+  ): Promise<AippSystemApiAssistantPrompt>;
+}
+
+interface AippSystemApiConversations {
+  getWithMessages(conversationId: number | string): Promise<ConversationWithMessages>;
+}
+
 interface AippSystemApiMessage {
   id: number;
   conversation_id: number;
@@ -143,6 +228,19 @@ interface AippSystemApiActions {
     messageId: number;
     metadata?: unknown;
   }): Promise<AippSystemApiMessage>;
+}
+
+interface AippSystemApiConversationSummary {
+  id: number;
+  name: string;
+  assistant_id: number | null;
+  assistant_name: string;
+  created_time: string | Date;
+}
+
+interface ConversationWithMessages {
+  conversation: AippSystemApiConversationSummary;
+  messages: Array<AippSystemApiMessage>;
 }
 
 type AippSystemApiHookAction =
@@ -232,6 +330,16 @@ interface AippSystemApiUiKit {
       asChild?: boolean;
     }
   >;
+  IconButton?: React.ComponentType<{
+    icon: React.ReactNode;
+    onClick: React.MouseEventHandler<HTMLButtonElement>;
+    className?: string;
+    border?: boolean;
+    type?: "button" | "submit" | "reset";
+    dataAippSlot?: string;
+    disabled?: boolean;
+    title?: string;
+  }>;
   Card?: React.ComponentType<React.ComponentProps<"div">>;
   CardContent?: React.ComponentType<React.ComponentProps<"div">>;
   CardDescription?: React.ComponentType<React.ComponentProps<"div">>;
@@ -284,10 +392,18 @@ interface SystemApi {
   hooks: AippSystemApiHooks;
   data: AippSystemApiData;
   storage: AippSystemApiStorage;
+  conversations: AippSystemApiConversations;
+  assistants: AippSystemApiAssistants;
   assistantConfig: AippSystemApiAssistantConfig;
   actions: AippSystemApiActions;
   getDisplayConfig(): Promise<AippSystemApiDisplayConfig>;
   applyTheme(themeId: string): Promise<void>;
+  toast?: {
+    success(message: string): void;
+    error(message: string): void;
+    info(message: string): void;
+    warning(message: string): void;
+  };
   ui?: AippSystemApiUiKit;
   invoke<T = unknown>(command: string, args?: Record<string, unknown>): Promise<T>;
 }
@@ -297,4 +413,5 @@ interface AippPlugin {
   onPluginLoad?(systemApi: SystemApi): void | Promise<void>;
   renderComponent?(): React.ReactNode;
   renderView?(viewId: string, context?: Record<string, unknown>): React.ReactNode;
+  renderAction?(actionId: string, context?: Record<string, unknown>): React.ReactNode;
 }

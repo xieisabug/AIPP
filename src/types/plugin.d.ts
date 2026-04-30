@@ -101,6 +101,89 @@ interface SystemApiAssistantConfig {
     set(assistantId: number | string, key: string, value: string | null): Promise<void>;
 }
 
+interface SystemApiAssistantRecord {
+    id: number;
+    name: string;
+    description: string | null;
+    assistant_type: number | null;
+    is_addition: boolean;
+    created_time: string;
+}
+
+interface SystemApiAssistantPrompt {
+    id: number;
+    assistant_id: number;
+    prompt: string;
+    created_time?: string | null;
+}
+
+interface SystemApiAssistantModel {
+    id: number;
+    assistant_id: number;
+    provider_id: number;
+    model_code: string;
+    alias: string;
+}
+
+interface SystemApiAssistantModelConfig {
+    id: number;
+    assistant_id: number;
+    assistant_model_id: number;
+    name: string;
+    value: string | null;
+    value_type: string;
+}
+
+interface SystemApiAssistantPromptParam {
+    id: number;
+    assistant_id: number;
+    assistant_prompt_id: number;
+    param_name: string;
+    param_type: string | null;
+    param_value: string | null;
+}
+
+interface SystemApiAssistantMcpConfig {
+    id: number;
+    assistant_id: number;
+    mcp_server_id: number;
+    is_enabled: boolean;
+}
+
+interface SystemApiAssistantMcpToolConfig {
+    id: number;
+    assistant_id: number;
+    mcp_tool_id: number;
+    is_enabled: boolean;
+    is_auto_run: boolean;
+}
+
+interface SystemApiAssistantDetail {
+    assistant: SystemApiAssistantRecord;
+    prompts: SystemApiAssistantPrompt[];
+    model: SystemApiAssistantModel[];
+    model_configs: SystemApiAssistantModelConfig[];
+    prompt_params: SystemApiAssistantPromptParam[];
+    mcp_configs: SystemApiAssistantMcpConfig[];
+    mcp_tool_configs: SystemApiAssistantMcpToolConfig[];
+}
+
+interface SystemApiAssistantUpdatePromptRequest {
+    assistantId: number | string;
+    prompt: string;
+    expectedPromptId?: number;
+    expectedOldPrompt?: string;
+}
+
+interface SystemApiAssistants {
+    getDetail(assistantId: number | string): Promise<SystemApiAssistantDetail>;
+    updatePrompt(request: SystemApiAssistantUpdatePromptRequest): Promise<SystemApiAssistantPrompt>;
+}
+
+interface SystemApiConversations {
+    getWithMessages(conversationId: number | string): Promise<ConversationWithMessages>;
+}
+
 interface SystemApiActions {
     createConversation(request: {
         assistantId: number;
@@ -190,6 +273,7 @@ interface SystemApiUiKit {
     AlertTitle?: React.ComponentType<any>;
     Badge?: React.ComponentType<any>;
     Button?: React.ComponentType<any>;
+    IconButton?: React.ComponentType<any>;
     Card?: React.ComponentType<any>;
     CardContent?: React.ComponentType<any>;
     CardDescription?: React.ComponentType<any>;
@@ -239,10 +323,18 @@ interface SystemApi {
     hooks: SystemApiHooks;
     data: SystemApiData;
     storage: SystemApiStorage;
+    conversations: SystemApiConversations;
+    assistants: SystemApiAssistants;
     assistantConfig: SystemApiAssistantConfig;
     actions: SystemApiActions;
     getDisplayConfig(): Promise<SystemApiDisplayConfig>;
     applyTheme(themeId: string): Promise<void>;
+    toast?: {
+        success(message: string): void;
+        error(message: string): void;
+        info(message: string): void;
+        warning(message: string): void;
+    };
     ui?: SystemApiUiKit;
     invoke<T = unknown>(command: string, args?: Record<string, unknown>): Promise<T>;
 }
@@ -530,6 +622,7 @@ declare class AippPlugin {
     onPluginLoad(systemApi: SystemApi): void;
     renderComponent?(): React.ReactNode;
     renderView?(viewId: string, context?: Record<string, unknown>): React.ReactNode;
+    renderAction?(actionId: string, context?: Record<string, unknown>): React.ReactNode;
     config(): Config;
 }
 

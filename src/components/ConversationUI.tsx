@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
+    Fragment,
     useCallback,
     useEffect,
     useMemo,
@@ -857,10 +858,79 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             [conversationId]
         );
 
+        const pluginHeaderActions = useMemo(() => {
+            const actionContext = {
+                conversationId: conversation?.id ?? null,
+                assistantId: conversation?.assistant_id ?? null,
+                conversationName: conversation?.name ?? "",
+                assistantName: conversation?.assistant_name ?? "",
+            };
+            const actionEntries = pluginList
+                .flatMap((plugin) =>
+                    (plugin.contributions?.actions ?? []).map((action: {
+                        id: string;
+                        location: string;
+                        order?: number | null;
+                    }) => ({
+                        plugin,
+                        action,
+                    }))
+                )
+                .filter(({ action }) => action.location === "conversation.title-actions")
+                .sort((left, right) => {
+                    const leftOrder = left.action.order ?? 100;
+                    const rightOrder = right.action.order ?? 100;
+                    if (leftOrder !== rightOrder) {
+                        return leftOrder - rightOrder;
+                    }
+                    return String(left.plugin.code ?? "").localeCompare(String(right.plugin.code ?? ""));
+                });
+
+            if (actionEntries.length === 0) {
+                return null;
+            }
+
+            return actionEntries.map(({ plugin, action }) => {
+                const instance = plugin.instance as
+                    | {
+                        renderAction?: (actionId: string, context?: Record<string, unknown>) => React.ReactNode;
+                    }
+                    | null;
+                if (typeof instance?.renderAction !== "function") {
+                    return null;
+                }
+                try {
+                    const rendered = instance.renderAction(action.id, actionContext);
+                    if (!rendered) {
+                        return null;
+                    }
+                    return <Fragment key={`${plugin.code}:${action.id}:${conversation?.id ?? "none"}`}>{rendered}</Fragment>;
+                } catch (error) {
+                    console.error(
+                        `[ConversationUI] Failed to render plugin action '${action.id}' from '${plugin.code}':`,
+                        error
+                    );
+                    return null;
+                }
+            });
+        }, [conversation, pluginList]);
+
+        const combinedHeaderActions = useMemo(() => {
+            if (!pluginHeaderActions && !headerExtraActions) {
+                return null;
+            }
+            return (
+                <>
+                    {pluginHeaderActions}
+                    {headerExtraActions}
+                </>
+            );
+        }, [headerExtraActions, pluginHeaderActions]);
+
         const acpHeaderActions = useMemo(() => {
             const isAcpConversation = Boolean(acpWorkingDirectory) || Boolean(acpSessionState);
             if (!isAcpConversation) {
-                return headerExtraActions;
+                return combinedHeaderActions;
             }
 
             const currentMode = acpSessionState?.modes.find(
@@ -875,7 +945,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
             return (
                 <>
-                    {headerExtraActions}
+                    {combinedHeaderActions}
                     <Popover>
                         <PopoverTrigger asChild>
                             <span>
@@ -1005,9 +1075,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             acpMutationKey,
             acpSessionState,
             acpWorkingDirectory,
+            combinedHeaderActions,
             handleAcpConfigChange,
             handleAcpModeChange,
-            headerExtraActions,
         ]);
 
         // 监听错误通知事件

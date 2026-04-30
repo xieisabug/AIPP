@@ -21,6 +21,10 @@ import {
 import { Separator } from "../components/ui/separator";
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Textarea } from "../components/ui/textarea";
+import IconButton from "../components/IconButton";
+import { toast } from "sonner";
+import type { AssistantDetail, AssistantPrompt } from "@/data/Assistant";
+import type { ConversationWithMessages } from "@/data/Conversation";
 import { markdownRegistry, type MarkdownTagRegistration } from "./markdownRegistry";
 
 type PluginConstructor = new () => AippPlugin | AippAssistantTypePlugin;
@@ -55,6 +59,14 @@ export interface PluginViewContribution {
     description?: string | null;
 }
 
+export interface PluginActionContribution {
+    id: string;
+    location: string;
+    title: string;
+    description?: string | null;
+    order?: number | null;
+}
+
 export interface PluginAssistantFormFieldContribution {
     key: string;
     label: string;
@@ -76,6 +88,7 @@ export interface PluginContributions {
         isActive?: boolean;
     }>;
     views?: PluginViewContribution[];
+    actions?: PluginActionContribution[];
     assistantFormFields?: PluginAssistantFormFieldContribution[];
 }
 
@@ -96,6 +109,13 @@ interface PluginAssistantConfigItem {
     configKey: string;
     configValue: string | null;
     updatedAt: string;
+}
+
+interface PluginUpdateAssistantPromptRequest {
+    assistantId: number | string;
+    prompt: string;
+    expectedPromptId?: number;
+    expectedOldPrompt?: string;
 }
 
 interface AssistantSystemItem {
@@ -460,6 +480,13 @@ class PluginRuntime {
     private createSystemApi(plugin: BackendPluginItem): SystemApi {
         const pluginId = plugin.pluginId;
         const pluginCode = plugin.code;
+        const normalizePositiveId = (value: number | string, fieldName: string): number => {
+            const normalizedValue = Number(value);
+            if (!Number.isFinite(normalizedValue) || normalizedValue <= 0) {
+                throw new Error(`${fieldName} must be a positive number`);
+            }
+            return normalizedValue;
+        };
 
         return {
             pluginId,
@@ -588,13 +615,44 @@ class PluginRuntime {
                     });
                 },
             },
+            conversations: {
+                getWithMessages: async (conversationId: number | string) => {
+                    this.assertPluginPermission(plugin, "conversation.read");
+                    return invoke<ConversationWithMessages>("plugin_get_conversation_with_messages", {
+                        pluginId,
+                        conversationId: normalizePositiveId(conversationId, "conversationId"),
+                    });
+                },
+            },
+            assistants: {
+                getDetail: async (assistantId: number | string) => {
+                    this.assertPluginPermission(plugin, "assistant.read");
+                    return invoke<AssistantDetail>("plugin_get_assistant_detail", {
+                        pluginId,
+                        assistantId: normalizePositiveId(assistantId, "assistantId"),
+                    });
+                },
+                updatePrompt: async (request: PluginUpdateAssistantPromptRequest) => {
+                    this.assertPluginPermission(plugin, "assistant.prompt.write");
+                    const prompt = String(request.prompt || "").trim();
+                    if (!prompt) {
+                        throw new Error("prompt is required");
+                    }
+                    return invoke<AssistantPrompt>("plugin_update_assistant_prompt", {
+                        pluginId,
+                        request: {
+                            assistantId: normalizePositiveId(request.assistantId, "assistantId"),
+                            prompt,
+                            expectedPromptId: request.expectedPromptId,
+                            expectedOldPrompt: request.expectedOldPrompt,
+                        },
+                    });
+                },
+            },
             assistantConfig: {
                 get: async (assistantId: number | string, key: string) => {
                     this.assertPluginPermission(plugin, "assistant.config");
-                    const normalizedAssistantId = Number(assistantId);
-                    if (!Number.isFinite(normalizedAssistantId) || normalizedAssistantId <= 0) {
-                        throw new Error("assistantId must be a positive number");
-                    }
+                    const normalizedAssistantId = normalizePositiveId(assistantId, "assistantId");
                     const configs = await invoke<PluginAssistantConfigItem[]>("get_plugin_assistant_configs", {
                         pluginId,
                         assistantId: normalizedAssistantId,
@@ -603,10 +661,7 @@ class PluginRuntime {
                 },
                 getAll: async (assistantId: number | string) => {
                     this.assertPluginPermission(plugin, "assistant.config");
-                    const normalizedAssistantId = Number(assistantId);
-                    if (!Number.isFinite(normalizedAssistantId) || normalizedAssistantId <= 0) {
-                        throw new Error("assistantId must be a positive number");
-                    }
+                    const normalizedAssistantId = normalizePositiveId(assistantId, "assistantId");
                     const configs = await invoke<PluginAssistantConfigItem[]>("get_plugin_assistant_configs", {
                         pluginId,
                         assistantId: normalizedAssistantId,
@@ -619,10 +674,7 @@ class PluginRuntime {
                 },
                 set: async (assistantId: number | string, key: string, value: string | null) => {
                     this.assertPluginPermission(plugin, "assistant.config");
-                    const normalizedAssistantId = Number(assistantId);
-                    if (!Number.isFinite(normalizedAssistantId) || normalizedAssistantId <= 0) {
-                        throw new Error("assistantId must be a positive number");
-                    }
+                    const normalizedAssistantId = normalizePositiveId(assistantId, "assistantId");
                     await invoke("set_plugin_assistant_config", {
                         pluginId,
                         assistantId: normalizedAssistantId,
@@ -656,12 +708,19 @@ class PluginRuntime {
             },
             getDisplayConfig: async () => this.getDisplayConfig(),
             applyTheme: async (themeId: string) => this.applyDisplayTheme(themeId),
+            toast: {
+                success: (message: string) => toast.success(message),
+                error: (message: string) => toast.error(message),
+                info: (message: string) => toast.info(message),
+                warning: (message: string) => toast.warning(message),
+            },
             ui: {
                 Alert,
                 AlertDescription,
                 AlertTitle,
                 Badge,
                 Button,
+                IconButton,
                 Card,
                 CardContent,
                 CardDescription,

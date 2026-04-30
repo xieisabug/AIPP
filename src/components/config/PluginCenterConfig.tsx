@@ -58,6 +58,13 @@ interface PluginRegistryItem {
             title: string;
             description?: string | null;
         }>;
+        actions?: Array<{
+            id: string;
+            location: string;
+            title: string;
+            description?: string | null;
+            order?: number | null;
+        }>;
         assistantFormFields?: Array<{
             key: string;
             label: string;
@@ -475,6 +482,9 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                             )}
                             {(selectedPlugin.contributions?.views?.length ?? 0) > 0 && (
                                 <Badge variant="outline">{selectedPlugin.contributions?.views?.length} Views</Badge>
+                            )}
+                            {(selectedPlugin.contributions?.actions?.length ?? 0) > 0 && (
+                                <Badge variant="outline">{selectedPlugin.contributions?.actions?.length} Actions</Badge>
                             )}
                             {(selectedPlugin.contributions?.assistantFormFields?.length ?? 0) > 0 && (
                                 <Badge variant="outline">

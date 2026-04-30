@@ -155,6 +155,9 @@ window.HelloAssistantPlugin = HelloAssistantPlugin;
 - `set_plugin_config`
 - `get_plugin_data`
 - `set_plugin_data`
+- `plugin_get_conversation_with_messages`
+- `plugin_get_assistant_detail`
+- `plugin_update_assistant_prompt`
 
 ---
 
@@ -169,6 +172,9 @@ window.HelloAssistantPlugin = HelloAssistantPlugin;
 - `systemApi.setData(key, value, sessionId?)`
 - `systemApi.runAssistantText({ assistantId, prompt, systemPrompt?, context? })`
 - `systemApi.runModelText({ modelId, prompt, systemPrompt?, context? })`
+- `systemApi.conversations.getWithMessages(conversationId)`
+- `systemApi.assistants.getDetail(assistantId)`
+- `systemApi.assistants.updatePrompt({ assistantId, prompt, expectedPromptId?, expectedOldPrompt? })`
 - `systemApi.registerTheme({ id, label, mode?, variables, extraCss?, windowCss? })`
 - `systemApi.ui`（宿主 UI 组件集：Button/Input/Textarea/Card/Badge/Alert/...）
 - `systemApi.invoke(command, args?)`
@@ -176,7 +182,8 @@ window.HelloAssistantPlugin = HelloAssistantPlugin;
 说明：
 
 - `runAssistantText` / `runModelText` 走无会话持久化路径，默认不会写入对话列表；
-- 需要对话能力时，可继续通过 `systemApi.invoke(...)` 调用现有会话相关命令；
+- 对话标题栏可通过 `contributions.actions` + `renderAction()` 注入小型操作按钮，例如手动触发优化流程；
+- 读取会话详情与助手详情、更新助手 prompt，优先使用 `systemApi.conversations` / `systemApi.assistants` 的受限 API，而不是直接 `invoke(...)`；
 - `systemApi.ui` 让插件可复用宿主 shadcn 风格组件，避免“原生 UI 风格割裂”。
 - `registerTheme.windowCss` 支持按窗口 label 精细覆写样式（例如 `chat_ui`、`config`），建议在 CSS 里使用 `:scope` 做作用域替换。
 
