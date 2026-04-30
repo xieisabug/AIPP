@@ -566,6 +566,8 @@ pub struct PluginInstallRecipeSource {
     pub git_ref: String,
     #[serde(default)]
     pub url: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -574,6 +576,8 @@ pub enum PluginInstallRecipeSourceType {
     GitHub,
     #[serde(rename = "zip")]
     Zip,
+    #[serde(rename = "localZip", alias = "local_zip", alias = "file")]
+    LocalZip,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1232,6 +1236,13 @@ impl PluginInstallRecipeSource {
                 let url = self.url.as_deref().ok_or_else(|| "Zip source requires url".to_string())?;
                 validate_zip_url(url)?;
             }
+            PluginInstallRecipeSourceType::LocalZip => {
+                let path = self
+                    .path
+                    .as_deref()
+                    .ok_or_else(|| "Local zip source requires path".to_string())?;
+                validate_local_zip_path(path)?;
+            }
         }
         Ok(())
     }
@@ -1245,6 +1256,7 @@ impl PluginInstallRecipeSource {
                 self.git_ref
             )),
             PluginInstallRecipeSourceType::Zip => Ok(self.url.clone().unwrap_or_default()),
+            PluginInstallRecipeSourceType::LocalZip => Ok(self.path.clone().unwrap_or_default()),
         }
     }
 
@@ -1254,6 +1266,7 @@ impl PluginInstallRecipeSource {
                 format!("{}#{}", self.repo.as_deref().unwrap_or_default(), self.git_ref)
             }
             PluginInstallRecipeSourceType::Zip => self.url.clone().unwrap_or_default(),
+            PluginInstallRecipeSourceType::LocalZip => self.path.clone().unwrap_or_default(),
         }
     }
 }
@@ -1270,6 +1283,7 @@ impl OfficialPlugin {
                 repo: None,
                 git_ref: default_git_ref(),
                 url: Some(download_url.clone()),
+                path: None,
             };
             source.validate()?;
             return Ok(source);
@@ -1350,26 +1364,32 @@ async fn download_and_extract_plugin_source(
 ) -> Result<DownloadedPluginArchive, String> {
     source.validate()?;
     let download_url = source.archive_url()?;
-    let client = build_plugin_archive_http_client(proxy_url)?;
-    let response = client
-        .get(&download_url)
-        .timeout(Duration::from_secs(PLUGIN_ARCHIVE_DOWNLOAD_TIMEOUT_SECS))
-        .send()
-        .await
-        .map_err(|e| format_plugin_archive_download_error(source, &download_url, &e))?;
+    let archive_bytes = if source.source_type == PluginInstallRecipeSourceType::LocalZip {
+        let bytes = fs::read(&download_url)
+            .map_err(|e| format!("读取本地插件 ZIP 失败：{}（{}）", download_url, e))?;
+        bytes.into()
+    } else {
+        let client = build_plugin_archive_http_client(proxy_url)?;
+        let response = client
+            .get(&download_url)
+            .timeout(Duration::from_secs(PLUGIN_ARCHIVE_DOWNLOAD_TIMEOUT_SECS))
+            .send()
+            .await
+            .map_err(|e| format_plugin_archive_download_error(source, &download_url, &e))?;
 
-    if !response.status().is_success() {
-        return Err(format!(
-            "下载插件压缩包失败：{} 返回 HTTP {}。可以尝试检查链接或使用代理后重试",
-            download_url,
-            response.status()
-        ));
-    }
+        if !response.status().is_success() {
+            return Err(format!(
+                "下载插件压缩包失败：{} 返回 HTTP {}。可以尝试检查链接或使用代理后重试",
+                download_url,
+                response.status()
+            ));
+        }
 
-    let archive_bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("读取下载的插件压缩包失败：{}（{}）", download_url, e))?;
+        response
+            .bytes()
+            .await
+            .map_err(|e| format!("读取下载的插件压缩包失败：{}（{}）", download_url, e))?
+    };
     let actual_sha256 = format!("sha256:{}", hex::encode(Sha256::digest(archive_bytes.as_ref())));
     if let Some(expected_sha256) = expected_sha256.filter(|value| !value.trim().is_empty()) {
         verify_sha256_value(&actual_sha256, expected_sha256)?;
@@ -1434,6 +1454,7 @@ fn official_plugin_source_url(source: &PluginInstallRecipeSource) -> String {
             source.git_ref
         ),
         PluginInstallRecipeSourceType::Zip => source.url.clone().unwrap_or_default(),
+        PluginInstallRecipeSourceType::LocalZip => source.path.clone().unwrap_or_default(),
     }
 }
 
@@ -1490,6 +1511,26 @@ fn validate_zip_url(url: &str) -> Result<(), String> {
         "http" | "https" => Ok(()),
         scheme => Err(format!("Zip source url must use http or https, got scheme: {}", scheme)),
     }
+}
+
+fn validate_local_zip_path(path: &str) -> Result<(), String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Local zip path cannot be empty".to_string());
+    }
+    let path = Path::new(trimmed);
+    if !path.is_file() {
+        return Err(format!("Local zip file does not exist: {}", trimmed));
+    }
+    if path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| !value.eq_ignore_ascii_case("zip"))
+        .unwrap_or(true)
+    {
+        return Err(format!("Local plugin archive must be a .zip file: {}", trimmed));
+    }
+    Ok(())
 }
 
 fn validate_relative_source_path(path: &str) -> Result<(), String> {

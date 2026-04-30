@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import { ChevronDown, FolderOpen, Plus, Puzzle, RefreshCcw, Power, PowerOff, Trash2 } from "lucide-react";
@@ -40,6 +41,7 @@ import PluginViewHost from "../plugin/PluginViewHost";
 import type { LoadedPlugin } from "../../services/PluginRuntime";
 
 const PLUGIN_CENTER_VIEW_LOCATION = "config.plugin-center";
+const DEFAULT_PLUGIN_DETAIL_TAB = "plugin-ui";
 
 interface PluginCenterConfigProps {
     pluginList: LoadedPlugin[];
@@ -99,10 +101,11 @@ interface PluginRegistryItem {
 }
 
 interface PluginInstallRecipeSource {
-    type: "github" | "zip";
+    type: "github" | "zip" | "localZip";
     repo?: string | null;
     ref?: string;
     url?: string | null;
+    path?: string | null;
 }
 
 interface PluginInstallRecipeDir {
@@ -308,11 +311,16 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     const [isInstallingArchive, setIsInstallingArchive] = useState(false);
     const [installDialogOpen, setInstallDialogOpen] = useState(false);
     const [installDialogTab, setInstallDialogTab] = useState<"recommended" | "source">("recommended");
+    const [activePluginDetailTab, setActivePluginDetailTab] = useState(DEFAULT_PLUGIN_DETAIL_TAB);
     const missingReminderKeyRef = useRef("");
 
     useEffect(() => {
         setRuntimePlugins(pluginList);
     }, [pluginList]);
+
+    useEffect(() => {
+        setActivePluginDetailTab(DEFAULT_PLUGIN_DETAIL_TAB);
+    }, [selectedPluginId]);
 
     const loadedPluginByCode = useMemo(() => {
         const map = new Map<string, any>();
@@ -355,7 +363,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                     .slice(0, 3)
                     .join("、");
                 const suffix = missingPlugins.length > 3 ? ` 等${missingPlugins.length}个` : "";
-                toast.warning(`发现插件目录缺失，请在插件中心手动卸载：${preview}${suffix}`);
+                toast.warning(`发现插件目录缺失，请在插件中手动卸载：${preview}${suffix}`);
             }
             missingReminderKeyRef.current = reminderKey;
             setSelectedPluginId((prev) => {
@@ -444,6 +452,38 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         },
         [inspectPluginArchive, sourceInput]
     );
+
+    const handleSelectLocalZip = useCallback(async () => {
+        try {
+            const selected = await open({
+                multiple: false,
+                directory: false,
+                filters: [
+                    {
+                        name: "ZIP 插件包",
+                        extensions: ["zip"],
+                    },
+                ],
+            });
+            if (!selected || typeof selected !== "string") {
+                return;
+            }
+            setSourceInput(selected);
+            setSourceInputError("");
+            await inspectPluginArchive(
+                {
+                    type: "localZip",
+                    path: selected,
+                    ref: "main",
+                },
+                undefined,
+                null,
+                false
+            );
+        } catch (error) {
+            toast.error("选择插件 ZIP 失败: " + error);
+        }
+    }, [inspectPluginArchive]);
 
     const handleInstallInspection = useCallback(async () => {
         if (!inspection) {
@@ -648,7 +688,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
             return "请选择一个插件。";
         }
         if (!hasPluginCenterViews) {
-            return "当前插件没有声明插件中心界面。";
+            return "当前插件没有声明插件界面。";
         }
         if (!selectedPlugin.isInstalled) {
             return "插件目录缺失，请先卸载该记录。";
@@ -953,7 +993,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
             <div>
                 <div className="text-sm font-medium">从 GitHub / ZIP 安装</div>
                 <div className="text-xs text-muted-foreground">
-                    支持 owner/repo、owner/repo#ref、GitHub 仓库链接、GitHub tree 路径和 ZIP 链接。
+                    支持 owner/repo、owner/repo#ref、GitHub 仓库链接、GitHub tree 路径、ZIP 链接和本地 ZIP 文件。
                 </div>
             </div>
             <div className="flex flex-col gap-2 md:flex-row">
@@ -967,6 +1007,9 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                 </Button>
                 <Button variant="outline" onClick={() => handleInspectCustomSource(true)} disabled={isInspecting}>
                     代理预览
+                </Button>
+                <Button variant="outline" onClick={handleSelectLocalZip} disabled={isInspecting || isInstallingArchive}>
+                    选择 ZIP 文件
                 </Button>
             </div>
             {sourceInputError && <div className="text-sm text-destructive">{sourceInputError}</div>}
@@ -987,7 +1030,6 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                     disabled={loading}
                     className="flex items-center gap-2 cursor-pointer"
                 >
-                    <RefreshCcw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
                     <div className="flex flex-col">
                         <span className="font-medium">扫描插件</span>
                         <span className="text-xs text-muted-foreground">扫描本地插件目录并刷新运行时</span>
@@ -998,7 +1040,6 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                     onClick={handleShowInstallDialog}
                     className="flex items-center gap-2 cursor-pointer"
                 >
-                    <Plus className="h-4 w-4" />
                     <div className="flex flex-col">
                         <span className="font-medium">安装</span>
                         <span className="text-xs text-muted-foreground">从推荐列表、GitHub 或 ZIP 安装插件</span>
@@ -1008,7 +1049,6 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                     onClick={handleOpenPluginFolder}
                     className="flex items-center gap-2 cursor-pointer"
                 >
-                    <FolderOpen className="h-4 w-4" />
                     <div className="flex flex-col">
                         <span className="font-medium">打开插件文件夹</span>
                         <span className="text-xs text-muted-foreground">手动管理本地插件文件</span>
@@ -1020,7 +1060,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
 
     const sidebar = (
         <SidebarList
-            title="插件中心"
+            title="插件"
             description="统一管理已安装插件及其配置"
             icon={<Puzzle className="h-5 w-5" />}
             searchValue={searchQuery}
@@ -1133,7 +1173,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                 </div>
             </CardHeader>
             <CardContent>
-                <Tabs defaultValue="plugin-ui" className="w-full">
+                <Tabs value={activePluginDetailTab} onValueChange={setActivePluginDetailTab} className="w-full">
                     <TabsList>
                         <TabsTrigger value="plugin-ui">界面</TabsTrigger>
                         <TabsTrigger value="detail">详情</TabsTrigger>
@@ -1145,7 +1185,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                             <PluginViewHost
                                 pluginList={selectedPluginViewHostItems}
                                 location={PLUGIN_CENTER_VIEW_LOCATION}
-                                emptyDescription="当前插件没有声明插件中心界面。"
+                                emptyDescription="当前插件没有声明插件界面。"
                             />
                         ) : (
                             <div className="rounded-lg border border-border/60 bg-background p-3 md:p-4">
@@ -1311,7 +1351,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                 selectPlaceholder="选择插件"
             />
             <Dialog open={installDialogOpen} onOpenChange={handleCloseInstallDialog}>
-                <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-5xl">
+                <DialogContent className="flex h-[85vh] max-h-[85vh] flex-col overflow-hidden sm:max-w-5xl">
                     <DialogHeader>
                         <DialogTitle>安装插件</DialogTitle>
                         <DialogDescription>
@@ -1321,15 +1361,16 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                     <Tabs
                         value={installDialogTab}
                         onValueChange={(value) => setInstallDialogTab(value as "recommended" | "source")}
+                        className="flex min-h-0 flex-1 flex-col overflow-hidden"
                     >
                         <TabsList>
                             <TabsTrigger value="recommended">推荐插件</TabsTrigger>
                             <TabsTrigger value="source">来源安装</TabsTrigger>
                         </TabsList>
-                        <TabsContent value="recommended" className="mt-4">
+                        <TabsContent value="recommended" className="mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
                             {recommendedPluginsContent}
                         </TabsContent>
-                        <TabsContent value="source" className="mt-4">
+                        <TabsContent value="source" className="mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
                             {sourceInstallContent}
                         </TabsContent>
                     </Tabs>

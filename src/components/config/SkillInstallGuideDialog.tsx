@@ -988,7 +988,7 @@ const SkillInstallGuideDialog: React.FC<SkillInstallGuideDialogProps> = ({
 
     return (
         <Dialog open={isOpen} onOpenChange={(open) => !open && handleCloseDialog()}>
-            <DialogContent className="!w-[50vw] !max-w-[50vw] max-h-[85vh] overflow-hidden flex flex-col">
+            <DialogContent className="!w-[50vw] !max-w-[50vw] h-[85vh] max-h-[85vh] overflow-hidden flex flex-col">
                 <DialogHeader>
                     <DialogTitle className="flex items-center gap-2">
                         <BookOpen className="h-5 w-5" />
