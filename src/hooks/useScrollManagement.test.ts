@@ -1,4 +1,5 @@
 import { act, renderHook } from "@testing-library/react";
+import type { WheelEvent } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useScrollManagement } from "./useScrollManagement";
 
@@ -146,5 +147,37 @@ describe("useScrollManagement", () => {
             top: 1000,
             behavior: "auto",
         });
+    });
+
+    it("keeps normal smartScroll disabled after the user wheels upward from bottom", () => {
+        const container = {
+            scrollTop: 600,
+            scrollHeight: 1000,
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: null,
+        } as unknown as HTMLDivElement;
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            result.current.handleUserScrollIntent({
+                deltaY: -80,
+            } as WheelEvent<HTMLDivElement>);
+        });
+
+        act(() => {
+            vi.advanceTimersByTime(251);
+            result.current.smartScroll();
+        });
+
+        expect(container.scrollTo).not.toHaveBeenCalled();
     });
 });

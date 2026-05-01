@@ -34,7 +34,6 @@ export interface UseMessageListElementsProps {
     onMessageFork: (messageId: number) => void;
     onToggleReasoningExpand: (messageId: number) => void;
     inlineInteractionItems?: InlineInteractionItem[];
-    sentBatchToolResultMessageIds?: ReadonlySet<number>;
     allowFeishuDebugResend?: boolean;
 }
 
@@ -178,7 +177,7 @@ function estimateMessageHeight(
             : previewCodeToolCallCount * previewCodeBaseHeight
         : 0;
     const toolCallContribution = mcpToolCallCount > 0
-        ? previewCodeContribution + genericToolCallCount * 88 + (mcpToolCallCount >= 2 ? 44 : 0)
+        ? previewCodeContribution + genericToolCallCount * 88
         : 0;
 
     switch (message.message_type) {
@@ -224,7 +223,6 @@ export function useMessageListElements({
     onMessageFork,
     onToggleReasoningExpand,
     inlineInteractionItems,
-    sentBatchToolResultMessageIds,
     allowFeishuDebugResend = false,
 }: UseMessageListElementsProps) {
     const { isMergeAssistantMessages } = useDisplayConfig();
@@ -323,9 +321,6 @@ export function useMessageListElements({
                             inlineInteractionItems={messageInlineInteractionMap.get(
                                 message.id,
                             )}
-                            sentBatchToolResultMessageIds={
-                                sentBatchToolResultMessageIds
-                            }
                             allowFeishuDebugResend={allowFeishuDebugResend}
                         />
                     ),
@@ -396,9 +391,6 @@ export function useMessageListElements({
                                         inlineInteractionItems={messageInlineInteractionMap.get(
                                             message.id,
                                         )}
-                                        sentBatchToolResultMessageIds={
-                                            sentBatchToolResultMessageIds
-                                        }
                                         allowFeishuDebugResend={allowFeishuDebugResend}
                                         mergedMode
                                     />
@@ -500,9 +492,6 @@ export function useMessageListElements({
                             inlineInteractionItems={messageInlineInteractionMap.get(
                                 message.id,
                             )}
-                            sentBatchToolResultMessageIds={
-                                sentBatchToolResultMessageIds
-                            }
                             allowFeishuDebugResend={allowFeishuDebugResend}
                         />
                     ),
@@ -530,7 +519,6 @@ export function useMessageListElements({
         shiningMcpCallId,
         messageInlineInteractionMap,
         estimatedHeightByMessageId,
-        sentBatchToolResultMessageIds,
         allowFeishuDebugResend,
         lastMessageId,
         isMergeAssistantMessages,

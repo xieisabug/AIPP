@@ -1,14 +1,10 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback } from 'react';
 import ReactMarkdown, { Components } from 'react-markdown';
 import McpToolCall from '@/components/McpToolCall';
 import InlineCodePreviewCard from '@/components/InlineCodePreviewCard';
 import { MCPToolCallUpdateEvent } from '@/data/Conversation';
 import { customUrlTransform } from '@/constants/markdown';
-import { Button } from '@/components/ui/button';
-import { Send, Loader2 } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
 import type { InlineInteractionItem } from '@/components/ConversationUI';
-import { getErrorMessage } from '@/utils/error';
 import { parsePreviewCodeStreamingState, type PreviewCodeStreamingState } from '@/utils/previewCode';
 
 interface McpProcessorOptions {
@@ -24,7 +20,6 @@ interface ProcessorContext {
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>;
     shiningMcpCallId?: number | null;
     inlineInteractionItems?: InlineInteractionItem[];
-    sentBatchToolResultMessageIds?: ReadonlySet<number>;
 }
 
 interface ToolCallData {
@@ -416,82 +411,6 @@ function getPreviewCodeToolCallKey(
     return `mcp-preview-slot-${messageId ?? "message"}-${index}-${data.server_name ?? "server"}-${data.tool_name ?? "tool"}`;
 }
 
-const McpToolCallResultsButton: React.FC<{
-    toolCallIds: number[];
-    mcpToolCallStates: Map<number, MCPToolCallUpdateEvent> | undefined;
-    messageId: number | undefined;
-}> = ({ toolCallIds, mcpToolCallStates, messageId }) => {
-    const [isSending, setIsSending] = useState(false);
-
-    // 检查是否所有工具调用都已完成（非 pending/executing）
-    const allCompleted = React.useMemo(() => {
-        if (!mcpToolCallStates || toolCallIds.length === 0) {
-            return false;
-        }
-        // 只有当工具调用数量 >= 2 时才显示按钮
-        if (toolCallIds.length < 2) {
-            return false;
-        }
-        return toolCallIds.every((id) => {
-            const state = mcpToolCallStates.get(id);
-            return state && (state.status === 'success' || state.status === 'failed');
-        });
-    }, [mcpToolCallStates, toolCallIds]);
-
-    const handleSendResults = useCallback(async () => {
-        if (!messageId || isSending) {
-            return;
-        }
-        setIsSending(true);
-        try {
-            await invoke('send_mcp_tool_results', { messageId });
-        } catch (error) {
-            console.error('Failed to send tool results:', error);
-            const errorMessage = getErrorMessage(error) || '发送结果失败';
-            console.error(errorMessage);
-        } finally {
-            setIsSending(false);
-        }
-    }, [messageId, isSending]);
-
-    if (!allCompleted) {
-        return null;
-    }
-
-    // 统计成功和失败数量
-    const successCount = toolCallIds.filter((id) => {
-        const state = mcpToolCallStates?.get(id);
-        return state?.status === 'success';
-    }).length;
-    const failedCount = toolCallIds.length - successCount;
-
-    return (
-        <div className="w-full max-w-[600px] mt-2 mb-2 flex justify-center">
-            <Button
-                onClick={handleSendResults}
-                disabled={isSending}
-                variant="default"
-                className="flex items-center gap-2"
-            >
-                {isSending ? (
-                    <>
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        发送中...
-                    </>
-                ) : (
-                    <>
-                        <Send className="h-4 w-4" />
-                        发送结果
-                    </>
-                )}
-                <span className="text-xs opacity-70">
-                    ({successCount} 成功, {failedCount} 失败)
-                </span>
-            </Button>
-        </div>
-    );
-};
-
 export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: ProcessorContext) => {
     const { remarkPlugins, rehypePlugins, markdownComponents } = options;
     const {
@@ -501,7 +420,6 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         shiningMcpCallId,
         isLastMessage,
         inlineInteractionItems,
-        sentBatchToolResultMessageIds,
     } = context || {};
 
     const processContent = useCallback((
@@ -545,9 +463,6 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             { conversationId, messageId },
         );
 
-        // 收集所有工具调用数据
-        const toolCallDataList: ToolCallData[] = [];
-        const toolCallIds: number[] = [];
         const renderedInlineKeys = new Set<string>();
 
         // 将注释替换为实际的 React 组件
@@ -556,10 +471,6 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
 
         for (const [index, match] of mcpCalls.entries()) {
             const data = match.data;
-            toolCallDataList.push(data);
-            if (data.call_id) {
-                toolCallIds.push(data.call_id);
-            }
 
             const beforeComment = markdownContent.slice(lastIndex, match.start);
 
@@ -667,21 +578,6 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             }
         }
 
-        // 添加"发送结果"按钮（如果有多工具调用且都已完成）
-        if (
-            toolCallIds.length >= 2 &&
-            !(typeof messageId === "number" && sentBatchToolResultMessageIds?.has(messageId))
-        ) {
-            parts.push(
-                <McpToolCallResultsButton
-                    key="send-results-button"
-                    toolCallIds={toolCallIds}
-                    mcpToolCallStates={mcpToolCallStates}
-                    messageId={messageId}
-                />
-            );
-        }
-
         return <div>{parts}</div>;
     }, [
         remarkPlugins,
@@ -692,7 +588,6 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         mcpToolCallStates,
         shiningMcpCallId,
         inlineInteractionItems,
-        sentBatchToolResultMessageIds,
     ]);
 
     return { processContent };

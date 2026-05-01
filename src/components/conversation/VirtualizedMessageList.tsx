@@ -153,6 +153,7 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
     const lastKnownScrollTopRef = useRef(0);
     const userMovedAwayFromBottomRef = useRef(false);
     const lastScrollActivityAtRef = useRef<number | null>(null);
+    const lastTouchClientYRef = useRef<number | null>(null);
     const scrollMetricsFrameRef = useRef<number | null>(null);
     const measuredHeightFlushFrameRef = useRef<number | null>(null);
     const shrinkFlushTimeoutRef = useRef<number | null>(null);
@@ -224,8 +225,31 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
         const handleScroll = () => {
             scheduleScrollMetricsUpdate();
         };
+        const handleWheel = (event: WheelEvent) => {
+            if (event.deltaY < 0) {
+                userMovedAwayFromBottomRef.current = true;
+            }
+        };
+        const handleTouchStart = (event: TouchEvent) => {
+            lastTouchClientYRef.current = event.touches[0]?.clientY ?? null;
+        };
+        const handleTouchMove = (event: TouchEvent) => {
+            const nextClientY = event.touches[0]?.clientY ?? null;
+            const previousClientY = lastTouchClientYRef.current;
+            if (
+                nextClientY !== null
+                && previousClientY !== null
+                && nextClientY > previousClientY + 1
+            ) {
+                userMovedAwayFromBottomRef.current = true;
+            }
+            lastTouchClientYRef.current = nextClientY;
+        };
 
         container.addEventListener("scroll", handleScroll, { passive: true });
+        container.addEventListener("wheel", handleWheel, { passive: true });
+        container.addEventListener("touchstart", handleTouchStart, { passive: true });
+        container.addEventListener("touchmove", handleTouchMove, { passive: true });
         const resizeObserver = new ResizeObserver(() => {
             scheduleScrollMetricsUpdate();
         });
@@ -237,6 +261,9 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
                 scrollMetricsFrameRef.current = null;
             }
             container.removeEventListener("scroll", handleScroll);
+            container.removeEventListener("wheel", handleWheel);
+            container.removeEventListener("touchstart", handleTouchStart);
+            container.removeEventListener("touchmove", handleTouchMove);
             resizeObserver.disconnect();
         };
     }, [scheduleScrollMetricsUpdate, scrollContainerRef, syncScrollMetrics]);
@@ -380,9 +407,11 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
             currentMaxScrollTop - currentScrollTop,
         );
         const shouldPinBottom =
-            ((previousDistanceToBottom <= 10
-                && !userMovedAwayFromBottomRef.current)
-                || currentDistanceToBottom <= NEAR_BOTTOM_PIN_PX);
+            !userMovedAwayFromBottomRef.current
+            && (
+                previousDistanceToBottom <= 10
+                || currentDistanceToBottom <= NEAR_BOTTOM_PIN_PX
+            );
 
         if (shouldPinBottom) {
             userMovedAwayFromBottomRef.current = false;

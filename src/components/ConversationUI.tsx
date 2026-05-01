@@ -91,49 +91,6 @@ export interface InlineInteractionItem {
     content: ReactNode;
 }
 
-function collectSentBatchToolResultMessageIds(messages: Message[]): Set<number> {
-    const messagesByGenerationGroup = new Map<string, Message[]>();
-    [...messages]
-        .sort((a, b) => a.id - b.id)
-        .forEach((message) => {
-            const generationGroupId = message.generation_group_id;
-            if (!generationGroupId) {
-                return;
-            }
-            const existing = messagesByGenerationGroup.get(generationGroupId) ?? [];
-            existing.push(message);
-            messagesByGenerationGroup.set(generationGroupId, existing);
-        });
-
-    const sentMessageIds = new Set<number>();
-    messagesByGenerationGroup.forEach((groupMessages) => {
-        const toolResults = groupMessages.filter(
-            (message) => message.message_type === "tool_result"
-        );
-        if (toolResults.length === 0) {
-            return;
-        }
-
-        const lastToolResultId = toolResults[toolResults.length - 1].id;
-        const hasFollowupResponse = groupMessages.some(
-            (message) =>
-                message.message_type === "response" && message.id > lastToolResultId
-        );
-        if (!hasFollowupResponse) {
-            return;
-        }
-
-        groupMessages
-            .filter(
-                (message) =>
-                    message.message_type === "response" && message.id < lastToolResultId
-            )
-            .forEach((message) => sentMessageIds.add(message.id));
-    });
-
-    return sentMessageIds;
-}
-
 interface ConversationUIProps {
     conversationId: string;
     onChangeConversationId: (conversationId: string) => void;
@@ -485,11 +442,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             groupRootMessageIds: messageGroupsData.groupRootMessageIds,
             getMessageVersionInfo: messageGroupsData.getMessageVersionInfo,
         });
-        const sentBatchToolResultMessageIds = useMemo(
-            () => collectSentBatchToolResultMessageIds(messages),
-            [messages],
-        );
-
         // 滚动管理 - 移除依赖项，改为手动调用
         const {
             messagesEndRef,
@@ -1237,7 +1189,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onMessageFork={handleMessageFork}
                             onToggleReasoningExpand={toggleReasoningExpand}
                             inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
-                            sentBatchToolResultMessageIds={sentBatchToolResultMessageIds}
                             allowFeishuDebugResend={allowFeishuDebugResend}
                             virtualizeMessages={virtualizeMessages}
                             scrollContainerRef={scrollContainerRef}
