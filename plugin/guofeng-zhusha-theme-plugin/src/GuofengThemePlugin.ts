@@ -105,6 +105,89 @@ var GUOFENG_THEME_EXTRA_CSS = `
 
 var GUOFENG_THEME_WINDOW_CSS: Record<string, string> = {
   chat_ui: `
+:scope [data-aipp-slot="chat-input-send-button"][data-custom-visual="true"] {
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  overflow: visible;
+}
+
+:scope .guofeng-send-button-visual {
+  width: 66px;
+  height: 66px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  transform-origin: 50% 62%;
+  filter: drop-shadow(0 10px 12px rgba(126, 20, 24, 0.24));
+}
+
+:scope .guofeng-send-button-visual img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  user-select: none;
+}
+
+:scope .guofeng-send-button-visual.responding {
+  animation: guofeng-leaf-drift 2.8s ease-in-out infinite;
+}
+
+@keyframes guofeng-leaf-drift {
+  0%, 100% { transform: translateX(0) translateY(0) rotate(-6deg); }
+  42% { transform: translateX(-5px) translateY(-2px) rotate(7deg); }
+  72% { transform: translateX(4px) translateY(1px) rotate(2deg); }
+}
+
+:scope .input-area-send-button {
+  box-shadow:
+    0 12px 24px -14px rgba(192, 30, 37, 0.72),
+    0 0 0 1px rgba(255, 255, 240, 0.65) inset;
+}
+
+:scope [data-theme-slot="input-area-container"] {
+  border-color: hsl(357 54% 52% / 0.62);
+}
+`,
+  butler_experiment: `
+:scope [data-aipp-slot="chat-input-send-button"][data-custom-visual="true"] {
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  overflow: visible;
+}
+
+:scope .guofeng-send-button-visual {
+  width: 66px;
+  height: 66px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  transform-origin: 50% 62%;
+  filter: drop-shadow(0 10px 12px rgba(126, 20, 24, 0.24));
+}
+
+:scope .guofeng-send-button-visual img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  user-select: none;
+}
+
+:scope .guofeng-send-button-visual.responding {
+  animation: guofeng-leaf-drift 2.8s ease-in-out infinite;
+}
+
+@keyframes guofeng-leaf-drift {
+  0%, 100% { transform: translateX(0) translateY(0) rotate(-6deg); }
+  42% { transform: translateX(-5px) translateY(-2px) rotate(7deg); }
+  72% { transform: translateX(4px) translateY(1px) rotate(2deg); }
+}
+
 :scope .input-area-send-button {
   box-shadow:
     0 12px 24px -14px rgba(192, 30, 37, 0.72),
@@ -165,5 +248,38 @@ var GuofengThemePlugin = class GuofengThemePlugin {
       themeId: GUOFENG_THEME_ID,
       themeName: GUOFENG_THEME_NAME,
     });
+  }
+
+  renderSlot(slotId: string, context?: Record<string, unknown>) {
+    if (slotId !== "guofeng-send-button-icon") {
+      return null;
+    }
+    var React = (window as any).React;
+    if (!React || !this.systemApi || typeof this.systemApi.assetUrl !== "function") {
+      return null;
+    }
+    var isResponding = Boolean(context && context.isResponding);
+    var assetPath = "assets/send-leaf.svg";
+    return React.createElement(
+      "span",
+      {
+        className: "guofeng-send-button-visual " + (isResponding ? "responding" : "idle"),
+        "data-aipp-slot": isResponding ? "guofeng-stop-visual" : "guofeng-send-visual",
+        style: {
+          width: 66,
+          height: 66,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          pointerEvents: "none",
+        },
+      },
+      React.createElement("img", {
+        src: this.systemApi.assetUrl(assetPath),
+        alt: "",
+        style: { width: "100%", height: "100%", objectFit: "contain", userSelect: "none" },
+        draggable: false,
+      })
+    );
   }
 };

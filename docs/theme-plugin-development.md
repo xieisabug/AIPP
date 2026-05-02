@@ -203,6 +203,7 @@ windowCss: {
 当前已接入的窗口作用域（来自 `useTheme("<label>")`）：
 
 - `ask`
+- `butler_experiment`
 - `chat_ui`
 - `config`
 - `sidebar`
@@ -230,6 +231,23 @@ windowCss: {
 - `data-theme-slot="settings-menu-container"`（移动端 + 桌面端均有）
 
 建议优先使用这些 `data-theme-slot` 选择器，而不是写深层 class 链。
+
+### 9.3 Chat 发送按钮 Slot
+
+如果只是改发送按钮的背景、阴影、圆角，继续使用 `data-theme-slot="input-area-send-button"`。
+
+如果要替换整个按钮视觉层（例如把圆形按钮改成叶子、折扇、品牌图形），使用插件 UI slot：
+
+- `contributions.slots[].location = "chat.input.send-button-visual"`
+- 插件实现 `renderSlot(slotId, context)`
+- `context.isResponding` 表示当前按钮处于停止生成状态
+- `context.windowLabel` 可区分 `chat_ui` 与 `butler_experiment`
+- 图片资源优先放在插件目录内，并通过 `systemApi.assetUrl("assets/xxx.svg")` 引用
+- 宿主按钮在 visual slot 存在时会设置 `data-custom-visual="true"` 并移除默认红色圆形背景，插件返回的节点就是完整按钮视觉层
+
+如果只想替换默认箭头/停止方块图标，不改变按钮本体，使用 `chat.input.send-button-icon`。
+
+宿主仍负责按钮位置、点击行为、发送/停止逻辑与无障碍状态；slot 只负责返回按钮内部的视觉节点。
 
 ---
 

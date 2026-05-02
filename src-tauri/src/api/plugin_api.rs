@@ -285,6 +285,8 @@ pub struct PluginContributions {
     #[serde(default)]
     pub actions: Vec<PluginActionContribution>,
     #[serde(default)]
+    pub slots: Vec<PluginSlotContribution>,
+    #[serde(default)]
     pub assistant_form_fields: Vec<PluginAssistantFormFieldContribution>,
     #[serde(default)]
     pub legacy_assistant_type: bool,
@@ -306,6 +308,19 @@ pub struct PluginActionContribution {
     pub id: String,
     pub location: String,
     pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub order: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSlotContribution {
+    pub id: String,
+    pub location: String,
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -2930,6 +2945,14 @@ mod tests {
                       }
                     }
                   }
+                ],
+                "slots": [
+                  {
+                    "id": "demo-send-icon",
+                    "location": "chat.input.send-button-icon",
+                    "title": "Demo Send Icon",
+                    "order": 10
+                  }
                 ]
               }
             }
@@ -2956,6 +2979,11 @@ mod tests {
         assert_eq!(manifest.contributions.hooks[0].kind, "guard");
         assert_eq!(manifest.contributions.bangs.len(), 1);
         assert_eq!(manifest.contributions.bangs[0].aliases, vec!["dir"]);
+        assert_eq!(manifest.contributions.slots.len(), 1);
+        assert_eq!(
+            manifest.contributions.slots[0].location,
+            "chat.input.send-button-icon"
+        );
     }
 
     #[test]

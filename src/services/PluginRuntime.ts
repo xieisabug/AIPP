@@ -67,6 +67,14 @@ export interface PluginActionContribution {
     order?: number | null;
 }
 
+export interface PluginSlotContribution {
+    id: string;
+    location: string;
+    title?: string | null;
+    description?: string | null;
+    order?: number | null;
+}
+
 export interface PluginAssistantFormFieldContribution {
     key: string;
     label: string;
@@ -89,6 +97,7 @@ export interface PluginContributions {
     }>;
     views?: PluginViewContribution[];
     actions?: PluginActionContribution[];
+    slots?: PluginSlotContribution[];
     assistantFormFields?: PluginAssistantFormFieldContribution[];
 }
 
@@ -411,7 +420,7 @@ class PluginRuntime {
 
         try {
             const instance = new PluginCtor();
-            await this.callOnPluginLoad(instance, plugin);
+            await this.callOnPluginLoad(instance, plugin, normalizedBaseDir);
             return {
                 pluginId: plugin.pluginId,
                 name: plugin.name,
@@ -466,7 +475,8 @@ class PluginRuntime {
 
     private async callOnPluginLoad(
         instance: AippPlugin | AippAssistantTypePlugin,
-        plugin: BackendPluginItem
+        plugin: BackendPluginItem,
+        normalizedBaseDir: string
     ): Promise<void> {
         const pluginInstance = instance as {
             onPluginLoad?: (systemApi: SystemApi) => void | Promise<void>;
@@ -474,11 +484,11 @@ class PluginRuntime {
         if (typeof pluginInstance.onPluginLoad !== "function") {
             return;
         }
-        const systemApi = this.createSystemApi(plugin);
+        const systemApi = this.createSystemApi(plugin, normalizedBaseDir);
         await Promise.resolve(pluginInstance.onPluginLoad(systemApi));
     }
 
-    private createSystemApi(plugin: BackendPluginItem): SystemApi {
+    private createSystemApi(plugin: BackendPluginItem, normalizedBaseDir: string): SystemApi {
         const pluginId = plugin.pluginId;
         const pluginCode = plugin.code;
         const normalizePositiveId = (value: number | string, fieldName: string): number => {
@@ -497,6 +507,10 @@ class PluginRuntime {
             getData: async (key: string, sessionId = "global") => {
                 const dataMap = await this.getPluginDataMap(pluginId, sessionId);
                 return dataMap.get(key) ?? null;
+            },
+            assetUrl: (relativePath: string) => {
+                const normalizedRelativePath = this.normalizePluginAssetPath(relativePath);
+                return convertFileSrc(`${normalizedBaseDir}/plugin/${pluginCode}/${normalizedRelativePath}`);
             },
             getAllData: async (sessionId = "global") => {
                 const dataMap = await this.getPluginDataMap(pluginId, sessionId);
@@ -1120,6 +1134,17 @@ class PluginRuntime {
             .replace(/[^a-z0-9_-]+/g, "-")
             .replace(/-{2,}/g, "-")
             .replace(/^[-_]+|[-_]+$/g, "");
+    }
+
+    private normalizePluginAssetPath(relativePath: string): string {
+        const normalized = String(relativePath || "")
+            .trim()
+            .replace(/\\/g, "/")
+            .replace(/^\/+/, "");
+        if (!normalized || normalized.split("/").some((segment) => segment === "..")) {
+            throw new Error("asset path must be a relative plugin path");
+        }
+        return normalized;
     }
 
     private normalizeThemeId(rawThemeId: string): string {

@@ -309,6 +309,7 @@ interface SystemApi {
     pluginCode: string;
     listAssistants(): Promise<SystemApiAssistantItem[]>;
     listModels(): Promise<SystemApiModelItem[]>;
+    assetUrl(relativePath: string): string;
     getData(key: string, sessionId?: string): Promise<string | null>;
     getAllData(sessionId?: string): Promise<Record<string, string | null>>;
     setData(key: string, value: string | null, sessionId?: string): Promise<void>;
@@ -622,6 +623,7 @@ declare class AippPlugin {
     onPluginLoad(systemApi: SystemApi): void;
     renderView?(viewId: string, context?: Record<string, unknown>): React.ReactNode;
     renderAction?(actionId: string, context?: Record<string, unknown>): React.ReactNode;
+    renderSlot?(slotId: string, context?: Record<string, unknown>): React.ReactNode;
     config(): Config;
 }
 

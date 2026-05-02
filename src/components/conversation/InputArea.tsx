@@ -49,7 +49,7 @@
  * - 此解决方案参考了业界最佳实践（Cherry Studio 等项目的处理方式）
  */
 
-import React, { useRef, useEffect, useState, useCallback, forwardRef, useImperativeHandle } from "react";
+import React, { useRef, useEffect, useState, useCallback, forwardRef, useImperativeHandle, type ReactNode } from "react";
 import "../../styles/InputArea.css";
 import CircleButton from "../CircleButton";
 import { Plus, Square, ArrowUp } from "lucide-react";
@@ -95,6 +95,8 @@ interface InputAreaProps {
     isMobile?: boolean;
     sidebarWidth?: number;
     sidebarVisible?: boolean;
+    sendButtonIcon?: ReactNode;
+    sendButtonVisual?: ReactNode;
 }
 const IMAGE_AREA_HEIGHT = 80;
 
@@ -114,6 +116,8 @@ const InputArea = React.memo(
                 isMobile = false,
                 sidebarWidth = 0,
                 sidebarVisible = false,
+                sendButtonIcon,
+                sendButtonVisual,
             },
             ref
         ) => {
@@ -1206,6 +1210,11 @@ const InputArea = React.memo(
             }, [textareaRef]);
 
             const baseRight = sidebarVisible ? 130 : 170;
+            const defaultSendButtonIcon = aiIsResponsing ? (
+                <Square size={20} className="text-action-foreground" />
+            ) : (
+                <ArrowUp size={20} className="text-action-foreground" />
+            );
 
             return (
                 <div
@@ -1271,17 +1280,13 @@ const InputArea = React.memo(
                     <CircleButton
                         size={placement === "bottom" ? "large" : "medium"}
                         onClick={handleSend}
-                        icon={
-                            aiIsResponsing ? (
-                                <Square size={20} className="text-action-foreground" />
-                            ) : (
-                                <ArrowUp size={20} className="text-action-foreground" />
-                            )
-                        }
+                        icon={sendButtonVisual ?? sendButtonIcon ?? defaultSendButtonIcon}
                         primary
-                        className={`input-area-send-button ${placement}`}
+                        className={`input-area-send-button ${placement} ${sendButtonVisual ? "has-custom-visual" : ""}`}
                         dataThemeSlot="input-area-send-button"
                         dataAippSlot="chat-input-send-button"
+                        dataState={aiIsResponsing ? "responding" : "idle"}
+                        customVisual={Boolean(sendButtonVisual)}
                         style={
                             placement === "bottom" && !isMobile
                                 ? { right: (sidebarVisible ? 70 : 107) + sidebarWidth }

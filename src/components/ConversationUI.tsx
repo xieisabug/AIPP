@@ -106,6 +106,7 @@ interface ConversationUIProps {
     headerExtraActions?: ReactNode;
     allowFeishuDebugResend?: boolean;
     virtualizeMessages?: boolean;
+    windowLabel?: string;
 }
 
 const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
@@ -125,6 +126,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             headerExtraActions,
             allowFeishuDebugResend = false,
             virtualizeMessages = false,
+            windowLabel = "chat_ui",
         },
         ref
     ) => {
@@ -408,6 +410,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             runtimeState?.is_running,
             conversationId,
         ]);
+        const attachedFileCount = Array.isArray(fileInfoList) ? fileInfoList.length : 0;
 
         // 当 functionMap 变化时更新事件处理器
         useEffect(() => {
@@ -879,6 +882,85 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             );
         }, [headerExtraActions, pluginHeaderActions]);
 
+        const sendButtonSlotContext = useMemo(
+            () => ({
+                conversationId: conversation?.id ?? null,
+                assistantId: conversation?.assistant_id ?? null,
+                conversationName: conversation?.name ?? "",
+                assistantName: conversation?.assistant_name ?? "",
+                isResponding: effectiveAiIsResponsing,
+                inputText,
+                fileCount: attachedFileCount,
+                placement: "bottom",
+                isMobile,
+                windowLabel,
+            }),
+            [
+                attachedFileCount,
+                conversation,
+                effectiveAiIsResponsing,
+                inputText,
+                isMobile,
+                windowLabel,
+            ]
+        );
+
+        const renderSendButtonSlot = useCallback((location: string) => {
+            const slotEntries = pluginList
+                .flatMap((plugin) =>
+                    (plugin.contributions?.slots ?? []).map((slot: {
+                        id: string;
+                        location: string;
+                        order?: number | null;
+                    }) => ({
+                        plugin,
+                        slot,
+                    }))
+                )
+                .filter(({ slot }) => slot.location === location)
+                .sort((left, right) => {
+                    const leftOrder = left.slot.order ?? 100;
+                    const rightOrder = right.slot.order ?? 100;
+                    if (leftOrder !== rightOrder) {
+                        return leftOrder - rightOrder;
+                    }
+                    return String(left.plugin.code ?? "").localeCompare(String(right.plugin.code ?? ""));
+                });
+
+            for (const { plugin, slot } of slotEntries) {
+                const instance = plugin.instance as
+                    | {
+                        renderSlot?: (slotId: string, context?: Record<string, unknown>) => ReactNode;
+                    }
+                    | null;
+                if (typeof instance?.renderSlot !== "function") {
+                    continue;
+                }
+                try {
+                    const rendered = instance.renderSlot(slot.id, sendButtonSlotContext);
+                    if (rendered) {
+                        return rendered;
+                    }
+                } catch (error) {
+                    console.error(
+                        `[ConversationUI] Failed to render plugin slot '${slot.id}' from '${plugin.code}':`,
+                        error
+                    );
+                }
+            }
+            return null;
+        }, [pluginList, sendButtonSlotContext]);
+
+        const sendButtonVisualSlot = useMemo(
+            () => renderSendButtonSlot("chat.input.send-button-visual"),
+            [renderSendButtonSlot]
+        );
+
+        const sendButtonIconSlot = useMemo(
+            () => renderSendButtonSlot("chat.input.send-button-icon"),
+            [renderSendButtonSlot]
+        );
+
         const acpHeaderActions = useMemo(() => {
             const isAcpConversation = Boolean(acpWorkingDirectory) || Boolean(acpSessionState);
             if (!isAcpConversation) {
@@ -1222,6 +1304,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         isMobile={isMobile}
                         sidebarWidth={sidebarWidth}
                         sidebarVisible={!isMobile && !hideSidebar && Boolean(conversationId)}
+                        sendButtonIcon={sendButtonIconSlot}
+                        sendButtonVisual={sendButtonVisualSlot}
                     />
                 </div>
 

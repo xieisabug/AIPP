@@ -175,6 +175,7 @@ window.HelloAssistantPlugin = HelloAssistantPlugin;
 - `systemApi.conversations.getWithMessages(conversationId)`
 - `systemApi.assistants.getDetail(assistantId)`
 - `systemApi.assistants.updatePrompt({ assistantId, prompt, expectedPromptId?, expectedOldPrompt? })`
+- `systemApi.assetUrl(relativePath)`：将当前插件目录内的相对资源路径转换成可在宿主窗口中加载的 URL
 - `systemApi.registerTheme({ id, label, mode?, variables, extraCss?, windowCss? })`
 - `systemApi.ui`（宿主 UI 组件集：Button/Input/Textarea/Card/Badge/Alert/...）
 - `systemApi.invoke(command, args?)`
@@ -186,6 +187,35 @@ window.HelloAssistantPlugin = HelloAssistantPlugin;
 - 读取会话详情与助手详情、更新助手 prompt，优先使用 `systemApi.conversations` / `systemApi.assistants` 的受限 API，而不是直接 `invoke(...)`；
 - `systemApi.ui` 让插件可复用宿主 shadcn 风格组件，避免“原生 UI 风格割裂”。
 - `registerTheme.windowCss` 支持按窗口 label 精细覆写样式（例如 `chat_ui`、`config`），建议在 CSS 里使用 `:scope` 做作用域替换。
+- 对话输入区的发送按钮可通过 `contributions.slots` + `renderSlot()` 定制。完整替换按钮视觉层使用 `chat.input.send-button-visual`；只替换内置箭头/停止图标时使用 `chat.input.send-button-icon`。宿主仍负责发送/停止行为、点击区域和布局。
+
+示例：
+
+```json
+"contributions": {
+  "slots": [
+    {
+      "id": "leaf-send-icon",
+      "location": "chat.input.send-button-visual",
+      "title": "叶子发送按钮",
+      "order": 10
+    }
+  ]
+}
+```
+
+```js
+renderSlot(slotId, context) {
+  if (slotId !== "leaf-send-icon") return null;
+  const React = window.React;
+  const asset = context?.isResponding ? "assets/stop-fan.svg" : "assets/send-leaf.svg";
+  return React.createElement(
+    "span",
+    { className: context?.isResponding ? "send-visual responding" : "send-visual idle" },
+    React.createElement("img", { src: this.systemApi.assetUrl(asset), alt: "" })
+  );
+}
+```
 
 ---
 

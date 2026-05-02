@@ -1495,6 +1495,7 @@ function ButlerExperimentWindow() {
                                         showFeishuStatus && isMainConversationFeishuBound
                                     }
                                     virtualizeMessages
+                                    windowLabel="butler_experiment"
                                 />
                             </div>
                         </>
