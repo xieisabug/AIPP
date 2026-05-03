@@ -226,6 +226,7 @@ export interface AcpConversationSessionState {
     title?: string | null;
     updated_at?: string | null;
     load_session_supported: boolean;
+    session_resume_supported?: boolean;
     prompt_capabilities: AcpPromptCapabilities;
     current_mode_id?: string | null;
     modes: AcpSessionMode[];

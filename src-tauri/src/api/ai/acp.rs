@@ -555,6 +555,7 @@ pub struct AcpConversationSessionState {
     pub title: Option<String>,
     pub updated_at: Option<String>,
     pub load_session_supported: bool,
+    pub session_resume_supported: bool,
     pub prompt_capabilities: AcpPromptCapabilitiesPayload,
     pub current_mode_id: Option<String>,
     pub modes: Vec<AcpSessionModePayload>,
@@ -1253,6 +1254,48 @@ fn tool_status_to_string(status: acp::ToolCallStatus) -> String {
     }
 }
 
+fn acp_tool_status_to_aipp_status(
+    status: acp::ToolCallStatus,
+    meta: Option<&acp::Meta>,
+) -> String {
+    match status {
+        acp::ToolCallStatus::Pending => {
+            if meta_requires_confirmation(meta) == Some(true) {
+                "pending".to_string()
+            } else {
+                "executing".to_string()
+            }
+        }
+        other => tool_status_to_string(other),
+    }
+}
+
+fn acp_tool_update_status_to_aipp_status(
+    status: Option<&acp::ToolCallStatus>,
+    meta: Option<&acp::Meta>,
+    existing_status: Option<String>,
+    has_progress_content: bool,
+) -> String {
+    if let Some(status) = status {
+        return acp_tool_status_to_aipp_status(status.clone(), meta);
+    }
+
+    let existing_status = existing_status.unwrap_or_else(|| "executing".to_string());
+    if matches!(existing_status.as_str(), "success" | "failed") {
+        return existing_status;
+    }
+
+    if meta_requires_confirmation(meta) == Some(true) && !has_progress_content {
+        return "pending".to_string();
+    }
+
+    if has_progress_content || existing_status == "pending" {
+        return "executing".to_string();
+    }
+
+    existing_status
+}
+
 /// Convert ACP ToolCallId to i64 for frontend
 fn tool_call_id_to_i64(id: &acp::ToolCallId) -> i64 {
     id.0.parse().unwrap_or_else(|_| {
@@ -1686,6 +1729,7 @@ impl AcpTauriClient {
         &self,
         session_id: &str,
         load_session_supported: bool,
+        session_resume_supported: bool,
         prompt_capabilities: &acp::PromptCapabilities,
         config_options: Option<&[acp::SessionConfigOption]>,
     ) {
@@ -1693,6 +1737,7 @@ impl AcpTauriClient {
             .update_session_state(|snapshot| {
                 snapshot.session_id = Some(session_id.to_string());
                 snapshot.load_session_supported = load_session_supported;
+                snapshot.session_resume_supported = session_resume_supported;
                 snapshot.prompt_capabilities = prompt_capabilities_payload(prompt_capabilities);
                 apply_config_options_to_snapshot(snapshot, config_options);
             })
@@ -2287,12 +2332,8 @@ impl AcpClient for AcpTauriClient {
                         );
                     }
 
-                    let mut status_str = tool_status_to_string(tool_call.status);
-                    if status_str == "pending" {
-                        if let Some(false) = meta_requires_confirmation(tool_call.meta.as_ref()) {
-                            status_str = "executing".to_string();
-                        }
-                    }
+                    let status_str =
+                        acp_tool_status_to_aipp_status(tool_call.status, tool_call.meta.as_ref());
 
                     let (finished_time, result, error) = match tool_call.status {
                         acp::ToolCallStatus::Completed => {
@@ -2411,13 +2452,10 @@ impl AcpClient for AcpTauriClient {
                             }
                         };
 
-                        let mut status_str = tool_status_to_string(tool_call.status);
-                        if status_str == "pending" {
-                            if let Some(false) = meta_requires_confirmation(tool_call.meta.as_ref())
-                            {
-                                status_str = "executing".to_string();
-                            }
-                        }
+                        let status_str = acp_tool_status_to_aipp_status(
+                            tool_call.status,
+                            tool_call.meta.as_ref(),
+                        );
 
                         let (finished_time, result, error) = match tool_call.status {
                             acp::ToolCallStatus::Completed => {
@@ -2470,12 +2508,16 @@ impl AcpClient for AcpTauriClient {
                         Err(e) => {
                             tracing::warn!(error = %e, "ACP failed to create MCP tool call record");
                             let call_id = tool_call_id_to_i64(&tool_call.tool_call_id);
+                            let status_str = acp_tool_status_to_aipp_status(
+                                tool_call.status,
+                                tool_call.meta.as_ref(),
+                            );
                             let event = ConversationEvent {
                                 r#type: "mcp_tool_call_update".to_string(),
                                 data: serde_json::to_value(MCPToolCallUpdateEvent {
                                     call_id,
                                     conversation_id: self.conversation_id,
-                                    status: "pending".to_string(),
+                                    status: status_str.clone(),
                                     llm_call_id: None,
                                     server_name: Some(display_name),
                                     tool_name: Some(tool_name),
@@ -2489,7 +2531,7 @@ impl AcpClient for AcpTauriClient {
                             };
 
                             self.emit_event(event).await;
-                            self.sync_tool_shine_status(call_id, "pending").await;
+                            self.sync_tool_shine_status(call_id, &status_str).await;
                             return Ok(());
                         }
                     };
@@ -2508,12 +2550,8 @@ impl AcpClient for AcpTauriClient {
                 )
                 .await;
 
-                let mut status_str = tool_status_to_string(tool_call.status);
-                if status_str == "pending" {
-                    if let Some(false) = meta_requires_confirmation(tool_call.meta.as_ref()) {
-                        status_str = "executing".to_string();
-                    }
-                }
+                let status_str =
+                    acp_tool_status_to_aipp_status(tool_call.status, tool_call.meta.as_ref());
 
                 let (finished_time, result, error) = match tool_call.status {
                     acp::ToolCallStatus::Completed => {
@@ -2692,21 +2730,19 @@ impl AcpClient for AcpTauriClient {
                 let call_id =
                     call_id_opt.unwrap_or_else(|| tool_call_id_to_i64(&update.tool_call_id));
 
-                let mut status_str = if let Some(status) = update.fields.status.as_ref() {
-                    tool_status_to_string(status.clone())
-                } else if let Ok(db) = MCPDatabase::new(&self.app_handle) {
+                let existing_status = if let Ok(db) = MCPDatabase::new(&self.app_handle) {
                     db.get_mcp_tool_call(call_id)
                         .map(|call| call.status)
-                        .unwrap_or_else(|_| "executing".to_string())
+                        .ok()
                 } else {
-                    "executing".to_string()
+                    None
                 };
-
-                if status_str == "pending" {
-                    if let Some(false) = meta_requires_confirmation(update.meta.as_ref()) {
-                        status_str = "executing".to_string();
-                    }
-                }
+                let mut status_str = acp_tool_update_status_to_aipp_status(
+                    update.fields.status.as_ref(),
+                    update.meta.as_ref(),
+                    existing_status,
+                    update.fields.content.is_some() || update.fields.raw_output.is_some(),
+                );
 
                 let meta_result = extract_tool_response_from_meta(update.meta.as_ref());
 
@@ -3547,11 +3583,21 @@ async fn run_acp_session(
                 init_response.protocol_version
             );
             info!(
-                "ACP: Agent capabilities load_session={}",
-                init_response.agent_capabilities.load_session
+                "ACP: Agent capabilities load_session={}, session_resume={}",
+                init_response.agent_capabilities.load_session,
+                init_response
+                    .agent_capabilities
+                    .session_capabilities
+                    .resume
+                    .is_some()
             );
             let agent_prompt_capabilities =
                 init_response.agent_capabilities.prompt_capabilities.clone();
+            let session_resume_supported = init_response
+                .agent_capabilities
+                .session_capabilities
+                .resume
+                .is_some();
 
             let conversation_db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
             let mut session_id: Option<String> = None;
@@ -3592,9 +3638,42 @@ async fn run_acp_session(
                             should_build_history_fallback = true;
                         }
                     }
+                } else if session_resume_supported {
+                    info!(
+                        "ACP: Resuming existing session (conversation_id={}, session_id={})",
+                        conversation_id, stored_session_id
+                    );
+                    client_handle.set_suppress_updates(true).await;
+                    let resume_result = conn
+                        .resume_session(acp::ResumeSessionRequest::new(
+                            stored_session_id.clone(),
+                            acp_config.working_directory.clone(),
+                        ))
+                        .await;
+                    client_handle.set_suppress_updates(false).await;
+
+                    match resume_result {
+                        Ok(response) => {
+                            initial_config_options = response.config_options.clone();
+                            session_id = Some(stored_session_id);
+                            conversation_db.upsert_acp_session_id(
+                                conversation_id,
+                                session_id.as_deref().unwrap_or_default(),
+                            )?;
+                            info!(
+                                "ACP: session/resume succeeded (conversation_id={}, session_id={})",
+                                conversation_id,
+                                session_id.as_deref().unwrap_or_default()
+                            );
+                        }
+                        Err(error) => {
+                            error!("ACP: session/resume failed: {:?}", error);
+                            should_build_history_fallback = true;
+                        }
+                    }
                 } else {
                     info!(
-                        "ACP: Agent does not support loadSession; creating new session (conversation_id={})",
+                        "ACP: Agent does not support loadSession or session/resume; creating new session (conversation_id={})",
                         conversation_id
                     );
                     should_build_history_fallback = true;
@@ -3635,6 +3714,7 @@ async fn run_acp_session(
                 .set_session_bootstrap(
                     &session_id,
                     init_response.agent_capabilities.load_session,
+                    session_resume_supported,
                     &agent_prompt_capabilities,
                     initial_config_options.as_deref(),
                 )
@@ -4105,6 +4185,7 @@ pub fn extract_acp_config(
 #[cfg(test)]
 mod tests {
     use super::{
+        acp_tool_status_to_aipp_status, acp_tool_update_status_to_aipp_status,
         append_buffered_content, apply_network_proxy_to_env_vars, build_acp_launch_plan,
         build_prompt_to_send, extract_acp_config, extract_content_text, get_claude_model_override,
         load_claude_settings_env_vars_from_path, AcpPermissionDecision, AcpPermissionRequestEvent,
@@ -4451,6 +4532,23 @@ mod tests {
         );
 
         assert_eq!(prompt, "历史摘要\n\n当前用户请求:\nSummarize the workspace");
+    }
+
+    #[test]
+    fn acp_pending_tool_without_confirmation_meta_is_treated_as_executing() {
+        assert_eq!(
+            acp_tool_status_to_aipp_status(acp::ToolCallStatus::Pending, None),
+            "executing"
+        );
+        assert_eq!(
+            acp_tool_update_status_to_aipp_status(
+                None,
+                None,
+                Some("pending".to_string()),
+                false,
+            ),
+            "executing"
+        );
     }
 
     #[tokio::test]

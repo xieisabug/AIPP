@@ -401,7 +401,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, [streamingMessages]);
 
         useEffect(() => {
-            if (!acpSessionState?.session_id || acpSessionState.load_session_supported) {
+            const canRestoreAcpSession =
+                acpSessionState?.load_session_supported ||
+                acpSessionState?.session_resume_supported;
+            if (!acpSessionState?.session_id || canRestoreAcpSession) {
                 return;
             }
 
@@ -411,11 +414,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             }
 
             acpLoadUnsupportedNoticeRef.current = noticeKey;
-            toast.info("该 Agent 不支持加载历史 ACP 会话", {
+            toast.info("该 Agent 不支持恢复历史 ACP 会话", {
                 description: "AIPP 会使用本地对话上下文继续当前请求。",
             });
         }, [
             acpSessionState?.load_session_supported,
+            acpSessionState?.session_resume_supported,
             acpSessionState?.session_id,
             conversationId,
         ]);
@@ -1066,9 +1070,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                         工作目录：{acpWorkingDirectory}
                                     </div>
                                 ) : null}
-                                {acpSessionState?.session_id && !acpSessionState.load_session_supported ? (
+                                {acpSessionState?.session_id &&
+                                !(
+                                    acpSessionState.load_session_supported ||
+                                    acpSessionState.session_resume_supported
+                                ) ? (
                                     <div className="text-xs text-muted-foreground">
-                                        该 Agent 不支持加载历史 ACP 会话，新会话会使用 AIPP 对话上下文继续。
+                                        该 Agent 不支持恢复历史 ACP 会话，新会话会使用 AIPP 对话上下文继续。
                                     </div>
                                 ) : null}
                             </div>

@@ -34,11 +34,12 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 ### 会话加载逻辑
 - ACP 启动时检查 `initialize` capabilities
 - 如果 `loadSession` 能力支持且存在存储的 `session_id`，调用 `session/load`
-- 否则回退到 `session/new` 创建新会话
-- `claude-code-acp` 报告 `agent_capabilities.load_session=false`，因此跳过加载
+- 如果不支持 `loadSession`，但支持 `sessionCapabilities.resume`，调用 `session/resume`
+- 两种恢复能力都不支持或恢复失败时，回退到 `session/new` 创建新会话，并用 AIPP 本地 conversation 历史构建一次 history fallback prompt
+- `claude-code-acp` 不支持旧的 `loadSession`，但可通过 `session/resume` 恢复已有 session
 
 ### 会话重放抑制
-- 在 `session/load` 期间，抑制 ACP `session/update` 通知
+- 在 `session/load` / `session/resume` 期间，抑制 ACP `session/update` 通知
 - 避免重放内容污染 UI/数据库
 - 加载完成后恢复正常事件通知
 
@@ -60,6 +61,7 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 - ACP 工具状态映射到：pending/executing/success/failed
 - 状态流转与 MCP 工具一致
 - 状态图标和提示复用
+- ACP `Pending` 只有在明确需要确认时映射为 AIPP 的 pending，否则按 executing 展示，以便运行中的工具显示闪亮边框
 
 ### 工具调用事件
 - 工具调用事件发送到前端
@@ -144,9 +146,9 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 
 ### 已知限制
 - `loadSession` 支持因代理而异
-- `claude-code-acp` 不支持会话加载
-- 会话持久化仅在代理支持时有效
-- 当代理不支持 `loadSession` 或加载失败时，AIPP 会使用本地 conversation 历史构建一次 history fallback prompt
+- 部分代理只支持 `session/resume`，不能通过 `session/load` 回放历史消息
+- 会话持久化仅在代理支持 `loadSession` 或 `session/resume` 时有效
+- 当代理不支持恢复能力或恢复失败时，AIPP 会使用本地 conversation 历史构建一次 history fallback prompt
 
 ---
 相关源码:
