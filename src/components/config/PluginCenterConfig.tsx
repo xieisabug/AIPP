@@ -4,7 +4,22 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
-import { ChevronDown, FolderOpen, Plus, Puzzle, RefreshCcw, Power, PowerOff, Trash2 } from "lucide-react";
+import {
+    CheckCircle2,
+    ChevronDown,
+    Download,
+    ExternalLink,
+    FolderOpen,
+    Loader2,
+    Plus,
+    Power,
+    PowerOff,
+    Puzzle,
+    RefreshCcw,
+    RefreshCw,
+    Trash2,
+    XCircle,
+} from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
@@ -154,15 +169,6 @@ interface PluginInstallPlanPlugin {
     validation: PluginInstallValidation;
 }
 
-interface PluginArchiveInspection {
-    source: PluginInstallRecipeSource;
-    sourceLabel: string;
-    downloadUrl: string;
-    targetDirectory: string;
-    archiveSha256: string;
-    plugins: PluginInstallPlanPlugin[];
-}
-
 interface PluginDetailItem {
     pluginId?: number | null;
     code: string;
@@ -189,6 +195,14 @@ interface PluginDetailItem {
 }
 
 type OfficialPluginFetchStatus = "idle" | "loading" | "success" | "timeout" | "error";
+type PluginArchiveInstallStatus = "idle" | "installing" | "installed" | "failed";
+
+interface PluginArchiveRequest {
+    source: PluginInstallRecipeSource;
+    dirs?: PluginInstallRecipeDir[];
+    expectedSha256?: string | null;
+    useProxy: boolean;
+}
 
 interface PluginConfigItem {
     configId: number;
@@ -305,10 +319,11 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     const [officialFetchError, setOfficialFetchError] = useState("");
     const [sourceInput, setSourceInput] = useState("");
     const [sourceInputError, setSourceInputError] = useState("");
-    const [inspection, setInspection] = useState<PluginArchiveInspection | null>(null);
-    const [inspectionExpectedSha256, setInspectionExpectedSha256] = useState<string | null>(null);
-    const [isInspecting, setIsInspecting] = useState(false);
     const [isInstallingArchive, setIsInstallingArchive] = useState(false);
+    const [sourceInstallError, setSourceInstallError] = useState("");
+    const [lastSourceInstallRequest, setLastSourceInstallRequest] = useState<PluginArchiveRequest | null>(null);
+    const [officialInstallStatusMap, setOfficialInstallStatusMap] = useState<Record<string, PluginArchiveInstallStatus>>({});
+    const [officialInstallErrorMap, setOfficialInstallErrorMap] = useState<Record<string, string>>({});
     const [installDialogOpen, setInstallDialogOpen] = useState(false);
     const [installDialogTab, setInstallDialogTab] = useState<"recommended" | "source">("recommended");
     const [activePluginDetailTab, setActivePluginDetailTab] = useState(DEFAULT_PLUGIN_DETAIL_TAB);
@@ -399,60 +414,6 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         }
     }, []);
 
-    const inspectPluginArchive = useCallback(
-        async (
-            source: PluginInstallRecipeSource,
-            dirs?: PluginInstallRecipeDir[],
-            expectedSha256?: string | null,
-            useProxy = false,
-        ) => {
-            setIsInspecting(true);
-            setInspection(null);
-            setInspectionExpectedSha256(expectedSha256 || null);
-            try {
-                const result = await invoke<PluginArchiveInspection>("inspect_plugin_archive_source", {
-                    source,
-                    dirs: dirs && dirs.length > 0 ? dirs : null,
-                    expectedSha256: expectedSha256 || null,
-                    useProxy,
-                });
-                setInspection(result);
-            } catch (error) {
-                toast.error("预览插件失败: " + error);
-            } finally {
-                setIsInspecting(false);
-            }
-        },
-        []
-    );
-
-    const handleInspectOfficialPlugin = useCallback(
-        async (plugin: OfficialPlugin, useProxy = false) => {
-            if (!plugin.source) {
-                toast.error(`推荐插件 ${plugin.name} 缺少安装来源`);
-                return;
-            }
-            await inspectPluginArchive(plugin.source, plugin.dirs, plugin.sha256, useProxy);
-        },
-        [inspectPluginArchive]
-    );
-
-    const handleInspectCustomSource = useCallback(
-        async (useProxy = false) => {
-            let parsed;
-            try {
-                parsed = parsePluginSourceInput(sourceInput);
-                setSourceInputError("");
-            } catch (error) {
-                const message = String(error instanceof Error ? error.message : error);
-                setSourceInputError(message);
-                return;
-            }
-            await inspectPluginArchive(parsed.source, parsed.dirs, parsed.expectedSha256, useProxy);
-        },
-        [inspectPluginArchive, sourceInput]
-    );
-
     const handleSelectLocalZip = useCallback(async () => {
         try {
             const selected = await open({
@@ -470,58 +431,126 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
             }
             setSourceInput(selected);
             setSourceInputError("");
-            await inspectPluginArchive(
-                {
-                    type: "localZip",
-                    path: selected,
-                    ref: "main",
-                },
-                undefined,
-                null,
-                false
-            );
         } catch (error) {
             toast.error("选择插件 ZIP 失败: " + error);
         }
-    }, [inspectPluginArchive]);
+    }, []);
 
-    const handleInstallInspection = useCallback(async () => {
-        if (!inspection) {
-            return;
-        }
-        const selections = inspection.plugins
-            .filter((plugin) => plugin.validation.isInstallable)
-            .map<PluginInstallRecipeDir>((plugin) => ({
-                from: plugin.from,
-                to: plugin.to,
-            }));
-        if (selections.length === 0) {
-            toast.error("没有可安装的插件");
-            return;
-        }
-        setIsInstallingArchive(true);
-        try {
+    const installPluginArchiveRequest = useCallback(
+        async (request: PluginArchiveRequest) => {
             const result = await invoke<{ installedPlugins: PluginInstallPlanPlugin[] }>(
                 "install_plugin_archive_source",
                 {
-                    source: inspection.source,
-                    selections,
-                    expectedSha256: inspectionExpectedSha256,
-                    useProxy: false,
+                    source: request.source,
+                    selections: request.dirs && request.dirs.length > 0 ? request.dirs : [],
+                    expectedSha256: request.expectedSha256 || null,
+                    useProxy: request.useProxy,
                     enableAfterInstall: true,
                 }
             );
-            toast.success(`已安装 ${result.installedPlugins.length} 个插件`);
-            setInspection(null);
-            setInstallDialogOpen(false);
             await loadPlugins();
-            await syncRuntimePlugins(true);
+            return result;
+        },
+        [loadPlugins]
+    );
+
+    const handleInstallOfficialPlugin = useCallback(
+        async (plugin: OfficialPlugin, useProxy = false) => {
+            if (!plugin.source) {
+                toast.error(`推荐插件 ${plugin.name} 缺少安装来源`);
+                return;
+            }
+
+            const request: PluginArchiveRequest = {
+                source: plugin.source,
+                dirs: plugin.dirs,
+                expectedSha256: plugin.sha256 || null,
+                useProxy,
+            };
+
+            setOfficialInstallStatusMap((prev) => ({ ...prev, [plugin.id]: "installing" }));
+            setOfficialInstallErrorMap((prev) => {
+                const next = { ...prev };
+                delete next[plugin.id];
+                return next;
+            });
+
+            try {
+                const result = await installPluginArchiveRequest(request);
+                setOfficialInstallStatusMap((prev) => ({ ...prev, [plugin.id]: "installed" }));
+                setOfficialPlugins((prev) =>
+                    prev.map((item) =>
+                        item.id === plugin.id
+                            ? {
+                                ...item,
+                                isInstalled: true,
+                                isActive: true,
+                                installedVersion: result.installedPlugins[0]?.version ?? item.installedVersion,
+                            }
+                            : item
+                    )
+                );
+                toast.success(`已安装 ${result.installedPlugins.length} 个插件`);
+            } catch (error) {
+                const message = String(error instanceof Error ? error.message : error);
+                setOfficialInstallStatusMap((prev) => ({ ...prev, [plugin.id]: "failed" }));
+                setOfficialInstallErrorMap((prev) => ({ ...prev, [plugin.id]: message }));
+            }
+        },
+        [installPluginArchiveRequest]
+    );
+
+    const installCustomSource = useCallback(async (request: PluginArchiveRequest) => {
+        setIsInstallingArchive(true);
+        setSourceInstallError("");
+        setLastSourceInstallRequest(request);
+        try {
+            const result = await installPluginArchiveRequest(request);
+            toast.success(`已安装 ${result.installedPlugins.length} 个插件`);
+            setInstallDialogOpen(false);
         } catch (error) {
-            toast.error("安装插件失败: " + error);
+            const message = String(error instanceof Error ? error.message : error);
+            setSourceInstallError(message);
+            toast.error("安装插件失败: " + message);
         } finally {
             setIsInstallingArchive(false);
         }
-    }, [inspection, inspectionExpectedSha256, loadPlugins, syncRuntimePlugins]);
+    }, [installPluginArchiveRequest]);
+
+    const handleInstallCustomSource = useCallback(
+        async (useProxy = false) => {
+            let parsed;
+            try {
+                parsed = parsePluginSourceInput(sourceInput);
+                setSourceInputError("");
+            } catch (error) {
+                const message = String(error instanceof Error ? error.message : error);
+                setSourceInputError(message);
+                return;
+            }
+
+            await installCustomSource({
+                source: parsed.source,
+                dirs: parsed.dirs,
+                expectedSha256: parsed.expectedSha256 || null,
+                useProxy,
+            });
+        },
+        [installCustomSource, sourceInput]
+    );
+
+    const handleRetryCustomSourceInstall = useCallback(
+        async (useProxy: boolean) => {
+            if (!lastSourceInstallRequest) {
+                return;
+            }
+            await installCustomSource({
+                ...lastSourceInstallRequest,
+                useProxy,
+            });
+        },
+        [installCustomSource, lastSourceInstallRequest]
+    );
 
     const handleShowInstallDialog = useCallback(() => {
         setInstallDialogTab("recommended");
@@ -532,8 +561,8 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         setInstallDialogOpen(open);
         if (!open) {
             setSourceInputError("");
-            setInspection(null);
-            setInspectionExpectedSha256(null);
+            setSourceInstallError("");
+            setLastSourceInstallRequest(null);
         }
     }, []);
 
@@ -545,6 +574,32 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
             toast.error("打开插件文件夹失败: " + error);
         }
     }, []);
+
+    const getOfficialPluginRepositoryUrl = useCallback((plugin: OfficialPlugin) => {
+        if (plugin.sourceUrl) {
+            return plugin.sourceUrl;
+        }
+        if (plugin.source?.type === "github" && plugin.source.repo) {
+            return `https://github.com/${plugin.source.repo}`;
+        }
+        return null;
+    }, []);
+
+    const handleOpenOfficialPluginRepository = useCallback(
+        async (plugin: OfficialPlugin) => {
+            const url = getOfficialPluginRepositoryUrl(plugin);
+            if (!url) {
+                toast.error(`${plugin.name} 缺少仓库链接`);
+                return;
+            }
+            try {
+                await invoke("open_source_url", { url });
+            } catch (error) {
+                toast.error("打开插件仓库失败: " + error);
+            }
+        },
+        [getOfficialPluginRepositoryUrl]
+    );
 
     const selectedPlugin = useMemo(
         () => plugins.find((item) => item.pluginId === selectedPluginId) || null,
@@ -848,68 +903,13 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         </div>
     );
 
-    const inspectionNode = inspection ? (
-        <Card className="shadow-none">
-            <CardHeader>
-                <CardTitle className="text-base">安装预览</CardTitle>
-                <CardDescription>
-                    {inspection.sourceLabel} / {inspection.archiveSha256}
-                </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-                {inspection.plugins.map((plugin) => (
-                    <div key={`${plugin.from}:${plugin.to}`} className="rounded-md border border-border p-3 text-sm">
-                        <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-medium">{plugin.name}</span>
-                            <Badge variant="outline">v{plugin.version}</Badge>
-                            {plugin.willReplace && (
-                                <Badge variant="secondary">
-                                    替换已安装{plugin.installedVersion ? ` v${plugin.installedVersion}` : ""}
-                                </Badge>
-                            )}
-                            {!plugin.validation.isInstallable && <Badge variant="destructive">不可安装</Badge>}
-                        </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                            {plugin.from} → {plugin.to}
-                        </div>
-                        <div className="mt-2 flex flex-wrap gap-1.5">
-                            {plugin.pluginType.map((type) => (
-                                <Badge key={type} variant="outline">
-                                    {getPluginTypeLabel(type)}
-                                </Badge>
-                            ))}
-                            {plugin.permissions.map((permission) => (
-                                <Badge key={permission} variant="secondary">
-                                    {permission}
-                                </Badge>
-                            ))}
-                        </div>
-                        {plugin.validation.warnings.length > 0 && (
-                            <div className="mt-2 text-xs text-muted-foreground">
-                                {plugin.validation.warnings.join("；")}
-                            </div>
-                        )}
-                        {plugin.validation.errors.length > 0 && (
-                            <div className="mt-2 text-xs text-destructive">
-                                {plugin.validation.errors.join("；")}
-                            </div>
-                        )}
-                    </div>
-                ))}
-                <Button onClick={handleInstallInspection} disabled={isInstallingArchive}>
-                    安装可安装插件
-                </Button>
-            </CardContent>
-        </Card>
-    ) : null;
-
     const recommendedPluginsContent = (
         <div className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                     <div className="text-sm font-medium">官方推荐插件</div>
                     <div className="text-xs text-muted-foreground">
-                        从官方接口获取预编译插件包，预览权限后下载安装到本地插件目录。
+                        从官方接口获取预编译插件包，并下载安装到本地插件目录。
                     </div>
                 </div>
                 <div className="flex gap-2">
@@ -942,49 +942,117 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                 </div>
             ) : (
                 <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-                    {officialPlugins.map((plugin) => (
-                        <Card key={plugin.id} className="shadow-none">
-                            <CardHeader>
-                                <div className="flex items-start justify-between gap-3">
-                                    <div>
-                                        <CardTitle className="text-base">{plugin.name}</CardTitle>
-                                        <CardDescription className="mt-1">{plugin.description}</CardDescription>
+                    {officialPlugins.map((plugin) => {
+                        const status = officialInstallStatusMap[plugin.id] ?? "idle";
+                        const error = officialInstallErrorMap[plugin.id];
+                        const isBusy = status === "installing";
+                        const hasSource = !!plugin.source;
+                        const repositoryUrl = getOfficialPluginRepositoryUrl(plugin);
+
+                        return (
+                            <Card key={plugin.id} className="shadow-none">
+                                <CardHeader>
+                                    <div className="flex items-start justify-between gap-3">
+                                        <div>
+                                            <CardTitle className="text-base">{plugin.name}</CardTitle>
+                                            <CardDescription className="mt-1">{plugin.description}</CardDescription>
+                                        </div>
+                                        <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+                                            {plugin.isInstalled && <Badge variant="secondary">已安装</Badge>}
+                                            {status === "installed" && (
+                                                <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                                                    <CheckCircle2 className="h-3.5 w-3.5" />
+                                                    已完成
+                                                </span>
+                                            )}
+                                        </div>
                                     </div>
-                                    {plugin.isInstalled && <Badge variant="secondary">已安装</Badge>}
-                                </div>
-                            </CardHeader>
-                            <CardContent className="space-y-3">
-                                <div className="flex flex-wrap gap-1.5">
-                                    {plugin.version && <Badge variant="outline">v{plugin.version}</Badge>}
-                                    {plugin.isExperimental && <Badge variant="secondary">实验性</Badge>}
-                                    {plugin.pluginTypes.map((type) => (
-                                        <Badge key={type} variant="outline">
-                                            {getPluginTypeLabel(type)}
-                                        </Badge>
-                                    ))}
-                                </div>
-                                {plugin.permissions.length > 0 && (
+                                </CardHeader>
+                                <CardContent className="space-y-3">
                                     <div className="flex flex-wrap gap-1.5">
-                                        {plugin.permissions.map((permission) => (
-                                            <Badge key={permission} variant="secondary">
-                                                {permission}
+                                        {plugin.version && <Badge variant="outline">v{plugin.version}</Badge>}
+                                        {plugin.isExperimental && <Badge variant="secondary">实验性</Badge>}
+                                        {plugin.pluginTypes.map((type) => (
+                                            <Badge key={type} variant="outline">
+                                                {getPluginTypeLabel(type)}
                                             </Badge>
                                         ))}
                                     </div>
-                                )}
-                                <Button
-                                    size="sm"
-                                    onClick={() => handleInspectOfficialPlugin(plugin)}
-                                    disabled={isInspecting}
-                                >
-                                    预览安装
-                                </Button>
-                            </CardContent>
-                        </Card>
-                    ))}
+                                    {plugin.permissions.length > 0 && (
+                                        <div className="flex flex-wrap gap-1.5">
+                                            {plugin.permissions.map((permission) => (
+                                                <Badge key={permission} variant="secondary">
+                                                    {permission}
+                                                </Badge>
+                                            ))}
+                                        </div>
+                                    )}
+                                    <div className="flex flex-wrap gap-2">
+                                        <Button
+                                            size="sm"
+                                            onClick={() => handleInstallOfficialPlugin(plugin)}
+                                            disabled={!hasSource || isBusy || status === "installed"}
+                                            className="gap-1.5"
+                                        >
+                                            {isBusy ? (
+                                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                            ) : status === "installed" ? (
+                                                <CheckCircle2 className="h-3.5 w-3.5" />
+                                            ) : (
+                                                <Download className="h-3.5 w-3.5" />
+                                            )}
+                                            {status === "installing"
+                                                ? "安装中"
+                                                : status === "installed"
+                                                    ? "已完成"
+                                                    : plugin.isInstalled
+                                                        ? "重新安装"
+                                                        : "安装"}
+                                        </Button>
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => handleOpenOfficialPluginRepository(plugin)}
+                                            disabled={!repositoryUrl}
+                                            className="gap-1.5"
+                                        >
+                                            <ExternalLink className="h-3.5 w-3.5" />
+                                            前往仓库
+                                        </Button>
+                                    </div>
+                                    {status === "failed" && error && (
+                                        <div className="flex items-start gap-2 text-xs text-destructive">
+                                            <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                                            <div className="min-w-0 flex-1 space-y-1">
+                                                <div className="break-words">{error}</div>
+                                                <div className="flex flex-wrap gap-2 pt-1">
+                                                    <Button
+                                                        variant="outline"
+                                                        size="sm"
+                                                        className="h-6 text-xs"
+                                                        onClick={() => handleInstallOfficialPlugin(plugin)}
+                                                    >
+                                                        重试
+                                                    </Button>
+                                                    <Button
+                                                        variant="outline"
+                                                        size="sm"
+                                                        className="h-6 gap-1 text-xs"
+                                                        onClick={() => handleInstallOfficialPlugin(plugin, true)}
+                                                    >
+                                                        <RefreshCw className="h-3 w-3" />
+                                                        使用代理重试
+                                                    </Button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </CardContent>
+                            </Card>
+                        );
+                    })}
                 </div>
             )}
-            {inspectionNode}
         </div>
     );
 
@@ -1002,18 +1070,48 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                     onChange={(event) => setSourceInput(event.target.value)}
                     placeholder="owner/repo#main 或 https://example.com/plugin.zip"
                 />
-                <Button onClick={() => handleInspectCustomSource(false)} disabled={isInspecting}>
-                    预览
+                <Button onClick={() => handleInstallCustomSource(false)} disabled={isInstallingArchive} className="gap-2">
+                    {isInstallingArchive && <Loader2 className="h-4 w-4 animate-spin" />}
+                    {isInstallingArchive ? "安装中" : "安装"}
                 </Button>
-                <Button variant="outline" onClick={() => handleInspectCustomSource(true)} disabled={isInspecting}>
-                    代理预览
+                <Button variant="outline" onClick={() => handleInstallCustomSource(true)} disabled={isInstallingArchive}>
+                    使用代理安装
                 </Button>
-                <Button variant="outline" onClick={handleSelectLocalZip} disabled={isInspecting || isInstallingArchive}>
+                <Button variant="outline" onClick={handleSelectLocalZip} disabled={isInstallingArchive}>
                     选择 ZIP 文件
                 </Button>
             </div>
             {sourceInputError && <div className="text-sm text-destructive">{sourceInputError}</div>}
-            {inspectionNode}
+            {sourceInstallError && (
+                <div className="rounded-md border border-border bg-muted/30 p-3 text-sm">
+                    <div className="font-medium">安装失败</div>
+                    <div className="mt-1 break-words text-xs text-muted-foreground">{sourceInstallError}</div>
+                    {lastSourceInstallRequest && (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => handleRetryCustomSourceInstall(lastSourceInstallRequest.useProxy)}
+                                disabled={isInstallingArchive}
+                            >
+                                重试安装
+                            </Button>
+                            {!lastSourceInstallRequest.useProxy && (
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => handleRetryCustomSourceInstall(true)}
+                                    disabled={isInstallingArchive}
+                                    className="gap-1"
+                                >
+                                    <RefreshCw className="h-3.5 w-3.5" />
+                                    使用代理重试
+                                </Button>
+                            )}
+                        </div>
+                    )}
+                </div>
+            )}
         </div>
     );
 

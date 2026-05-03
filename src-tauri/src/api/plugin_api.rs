@@ -2189,7 +2189,7 @@ pub async fn install_plugin_archive_source(
     use_proxy: bool,
     enable_after_install: bool,
 ) -> Result<PluginArchiveInstallResult, String> {
-    validate_plugin_install_dirs(&selections, true)?;
+    validate_plugin_install_dirs(&selections, false)?;
     let plugin_root = get_plugin_root_path(&app_handle)?;
     let proxy_url = resolve_plugin_proxy_url(&app_handle, use_proxy).await?;
     let archive = download_and_extract_plugin_source(
