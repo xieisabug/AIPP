@@ -876,8 +876,13 @@ pub async fn ask_ai(
         };
         let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
 
-        // Clone prompt before moving into session dispatcher
-        let prompt_clone = processed_request.prompt.clone();
+        let prompt_clone = runtime_prompt_result.clone();
+        let acp_attachments = init_message_list
+            .iter()
+            .rev()
+            .find(|(message_type, _, _)| message_type == "user")
+            .map(|(_, _, attachments)| attachments.clone())
+            .unwrap_or_default();
 
         let session_handle = {
             let mut sessions = acp_session_state.sessions.lock().await;
@@ -900,6 +905,7 @@ pub async fn ask_ai(
         if let Err(e) = session_handle.send_prompt(
             response_message.id,
             prompt_clone.clone(),
+            acp_attachments.clone(),
             window_clone.clone(),
         ) {
             warn!(conversation_id, error = %e, "ACP session send prompt failed, respawning session");
@@ -917,7 +923,7 @@ pub async fn ask_ai(
                 handle
             };
             replacement_handle
-                .send_prompt(response_message.id, prompt_clone, window_clone)
+                .send_prompt(response_message.id, prompt_clone, acp_attachments, window_clone)
                 .map_err(|error| {
                     error!(conversation_id, error = %error, "ACP session resend prompt failed");
                     error

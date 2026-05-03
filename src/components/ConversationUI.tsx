@@ -394,10 +394,31 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         } = useConversationEvents(conversationEventsOptions);
 
         const [acpMutationKey, setAcpMutationKey] = useState<string | null>(null);
+        const acpLoadUnsupportedNoticeRef = useRef<string | null>(null);
 
         useEffect(() => {
             streamingMessagesRef.current = streamingMessages;
         }, [streamingMessages]);
+
+        useEffect(() => {
+            if (!acpSessionState?.session_id || acpSessionState.load_session_supported) {
+                return;
+            }
+
+            const noticeKey = `${conversationId}:${acpSessionState.session_id}`;
+            if (acpLoadUnsupportedNoticeRef.current === noticeKey) {
+                return;
+            }
+
+            acpLoadUnsupportedNoticeRef.current = noticeKey;
+            toast.info("该 Agent 不支持加载历史 ACP 会话", {
+                description: "AIPP 会使用本地对话上下文继续当前请求。",
+            });
+        }, [
+            acpSessionState?.load_session_supported,
+            acpSessionState?.session_id,
+            conversationId,
+        ]);
 
         const effectiveAiIsResponsing = useMemo(() => {
             if (runtimeState && runtimeState.conversation_id === Number(conversationId || 0)) {
@@ -770,27 +791,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 });
         }, [conversation?.assistant_id, selectedAssistant, assistants]);
 
-        const handleAcpModeChange = useCallback(
-            async (modeId: string) => {
-                const conversationIdNum = Number(conversationId);
-                if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
-                    return;
-                }
-                setAcpMutationKey(`mode:${modeId}`);
-                try {
-                    await invoke("set_acp_session_mode", {
-                        conversationId: conversationIdNum,
-                        modeId,
-                    });
-                } catch (error) {
-                    toast.error(`切换 ACP 模式失败: ${String(error)}`);
-                } finally {
-                    setAcpMutationKey(null);
-                }
-            },
-            [conversationId]
-        );
-
         const handleAcpConfigChange = useCallback(
             async (option: AcpSessionConfigOption, value: string) => {
                 const conversationIdNum = Number(conversationId);
@@ -967,15 +967,58 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 return combinedHeaderActions;
             }
 
-            const currentMode = acpSessionState?.modes.find(
-                (mode) => mode.id === acpSessionState.current_mode_id
+            const modelOption = acpSessionState?.config_options.find((option) => option.category === "model");
+            const modeOption = acpSessionState?.config_options.find((option) => option.category === "mode");
+            const thoughtOption = acpSessionState?.config_options.find((option) => option.category === "thought_level");
+            const primaryOptionIds = new Set(
+                [modelOption?.id, modeOption?.id, thoughtOption?.id].filter(Boolean)
             );
-            const hasModeConfigOption = acpSessionState?.config_options.some(
-                (option) => option.category === "mode"
-            );
+            const otherOptions = acpSessionState?.config_options.filter(
+                (option) => !primaryOptionIds.has(option.id)
+            ) ?? [];
             const updatedAtText = acpSessionState?.updated_at
                 ? new Date(acpSessionState.updated_at).toLocaleString()
                 : null;
+            const renderAcpConfigSelect = (option: AcpSessionConfigOption) => (
+                <div key={option.id} className="space-y-1.5">
+                    <div className="flex items-center gap-2">
+                        <span className="text-xs font-medium">{option.name}</span>
+                        {option.category ? (
+                            <Badge variant="outline" className="text-[10px]">
+                                {option.category}
+                            </Badge>
+                        ) : null}
+                    </div>
+                    {option.description ? (
+                        <div className="text-xs text-muted-foreground">
+                            {option.description}
+                        </div>
+                    ) : null}
+                    <Select
+                        value={option.current_value}
+                        onValueChange={(value) => void handleAcpConfigChange(option, value)}
+                        disabled={Boolean(acpMutationKey)}
+                    >
+                        <SelectTrigger className="w-full">
+                            <SelectValue placeholder="选择配置" />
+                        </SelectTrigger>
+                        <SelectContent>
+                            {option.options.map((choice) => (
+                                <SelectItem key={`${option.id}:${choice.value}`} value={choice.value}>
+                                    {choice.group_name
+                                        ? `${choice.group_name} / ${choice.name}`
+                                        : choice.name}
+                                </SelectItem>
+                            ))}
+                        </SelectContent>
+                    </Select>
+                </div>
+            );
+            const statusLabel = (status: string) => {
+                if (status === "completed") return "完成";
+                if (status === "in_progress") return "进行中";
+                return "待处理";
+            };
 
             return (
                 <>
@@ -1023,6 +1066,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                         工作目录：{acpWorkingDirectory}
                                     </div>
                                 ) : null}
+                                {acpSessionState?.session_id && !acpSessionState.load_session_supported ? (
+                                    <div className="text-xs text-muted-foreground">
+                                        该 Agent 不支持加载历史 ACP 会话，新会话会使用 AIPP 对话上下文继续。
+                                    </div>
+                                ) : null}
                             </div>
 
                             {!acpSessionState?.session_id ? (
@@ -1031,74 +1079,49 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 </div>
                             ) : (
                                 <>
-                                    {currentMode ? (
-                                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                                            <span>当前模式</span>
-                                            <Badge variant="outline">{currentMode.name}</Badge>
+                                    {acpSessionState.config_options.length === 0 ? (
+                                        <div className="text-xs text-muted-foreground">
+                                            该 Agent 不支持新版会话配置。
                                         </div>
-                                    ) : null}
+                                    ) : (
+                                        <div className="space-y-3">
+                                            {[modelOption, modeOption, thoughtOption]
+                                                .filter((option): option is AcpSessionConfigOption => Boolean(option))
+                                                .map(renderAcpConfigSelect)}
+                                            {otherOptions.length > 0 ? <Separator /> : null}
+                                            {otherOptions.map(renderAcpConfigSelect)}
+                                        </div>
+                                    )}
 
-                                    {!hasModeConfigOption && acpSessionState.modes.length > 0 ? (
-                                        <div className="space-y-1.5">
-                                            <div className="text-xs font-medium">切换模式</div>
-                                            <Select
-                                                value={acpSessionState.current_mode_id ?? undefined}
-                                                onValueChange={(value) => void handleAcpModeChange(value)}
-                                                disabled={Boolean(acpMutationKey)}
-                                            >
-                                                <SelectTrigger className="w-full">
-                                                    <SelectValue placeholder="选择模式" />
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    {acpSessionState.modes.map((mode) => (
-                                                        <SelectItem key={mode.id} value={mode.id}>
-                                                            {mode.name}
-                                                        </SelectItem>
+                                    {acpSessionState.plan.length > 0 ? (
+                                        <>
+                                            <Separator />
+                                            <div className="space-y-2">
+                                                <div className="text-xs font-medium">执行计划</div>
+                                                <div className="space-y-1.5">
+                                                    {acpSessionState.plan.map((entry, index) => (
+                                                        <div key={`${entry.content}:${index}`} className="flex items-start gap-2 text-xs">
+                                                            <Badge variant="outline" className="mt-0.5 text-[10px]">
+                                                                {statusLabel(entry.status)}
+                                                            </Badge>
+                                                            <span className="min-w-0 flex-1 text-muted-foreground">
+                                                                {entry.content}
+                                                            </span>
+                                                        </div>
                                                     ))}
-                                                </SelectContent>
-                                            </Select>
-                                        </div>
+                                                </div>
+                                            </div>
+                                        </>
                                     ) : null}
 
-                                    {acpSessionState.config_options.length > 0 ? <Separator /> : null}
-
-                                    <div className="space-y-3">
-                                        {acpSessionState.config_options.map((option) => (
-                                            <div key={option.id} className="space-y-1.5">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-xs font-medium">{option.name}</span>
-                                                    {option.category ? (
-                                                        <Badge variant="outline" className="text-[10px]">
-                                                            {option.category}
-                                                        </Badge>
-                                                    ) : null}
-                                                </div>
-                                                {option.description ? (
-                                                    <div className="text-xs text-muted-foreground">
-                                                        {option.description}
-                                                    </div>
-                                                ) : null}
-                                                <Select
-                                                    value={option.current_value}
-                                                    onValueChange={(value) => void handleAcpConfigChange(option, value)}
-                                                    disabled={Boolean(acpMutationKey)}
-                                                >
-                                                    <SelectTrigger className="w-full">
-                                                        <SelectValue placeholder="选择配置" />
-                                                    </SelectTrigger>
-                                                    <SelectContent>
-                                                        {option.options.map((choice) => (
-                                                            <SelectItem key={`${option.id}:${choice.value}`} value={choice.value}>
-                                                                {choice.group_name
-                                                                    ? `${choice.group_name} / ${choice.name}`
-                                                                    : choice.name}
-                                                            </SelectItem>
-                                                        ))}
-                                                    </SelectContent>
-                                                </Select>
+                                    {acpSessionState.available_commands.length > 0 ? (
+                                        <>
+                                            <Separator />
+                                            <div className="text-xs text-muted-foreground">
+                                                可用 ACP 命令：{acpSessionState.available_commands.length} 个，可在输入框输入 / 选择。
                                             </div>
-                                        ))}
-                                    </div>
+                                        </>
+                                    ) : null}
                                 </>
                             )}
                         </PopoverContent>
@@ -1111,7 +1134,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             acpWorkingDirectory,
             combinedHeaderActions,
             handleAcpConfigChange,
-            handleAcpModeChange,
         ]);
 
         // 监听错误通知事件
@@ -1306,6 +1328,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         sidebarVisible={!isMobile && !hideSidebar && Boolean(conversationId)}
                         sendButtonIcon={sendButtonIconSlot}
                         sendButtonVisual={sendButtonVisualSlot}
+                        acpAvailableCommands={acpSessionState?.available_commands ?? []}
                     />
                 </div>
 

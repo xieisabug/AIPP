@@ -2,6 +2,8 @@ export interface SlashNamespaceItem {
     name: string;
     description: string;
     isEnabled: boolean;
+    source?: "aipp" | "acp";
+    inputHint?: string | null;
 }
 
 export interface SlashSkillCompletionItem {

@@ -202,14 +202,36 @@ export interface AcpSessionConfigOption {
     options: AcpSessionConfigChoice[];
 }
 
+export interface AcpPromptCapabilities {
+    image: boolean;
+    audio: boolean;
+    embedded_context: boolean;
+}
+
+export interface AcpPlanEntry {
+    content: string;
+    priority: "high" | "medium" | "low" | string;
+    status: "pending" | "in_progress" | "completed" | string;
+}
+
+export interface AcpAvailableCommand {
+    name: string;
+    description: string;
+    input_hint?: string | null;
+}
+
 export interface AcpConversationSessionState {
     conversation_id: number;
     session_id?: string | null;
     title?: string | null;
     updated_at?: string | null;
+    load_session_supported: boolean;
+    prompt_capabilities: AcpPromptCapabilities;
     current_mode_id?: string | null;
     modes: AcpSessionMode[];
     config_options: AcpSessionConfigOption[];
+    plan: AcpPlanEntry[];
+    available_commands: AcpAvailableCommand[];
     has_active_prompt: boolean;
 }
 
