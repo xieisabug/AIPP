@@ -4,6 +4,10 @@
   "name": "国风·朱砂 主题插件",
   "version": "0.1.0",
   "entry": "dist/main.js",
+  "runtime": {
+    "type": "js",
+    "entry": "dist/main.js"
+  },
   "description": "以朱砂红与象牙白为主色的一键国风主题插件。",
   "pluginTypes": [
     "themeType",
@@ -13,5 +17,24 @@
   "kinds": [
     "ui",
     "worker"
-  ]
+  ],
+  "contributions": {
+    "views": [
+      {
+        "id": "guofeng-theme-panel",
+        "location": "config.plugin-center",
+        "title": "国风主题面板",
+        "description": "查看并应用国风·朱砂主题。"
+      }
+    ],
+    "slots": [
+      {
+        "id": "guofeng-send-button-icon",
+        "location": "chat.input.send-button-visual",
+        "title": "国风发送按钮视觉",
+        "description": "在 Chat UI 与总管家输入区使用叶子/折扇图像替换发送按钮本体。",
+        "order": 10
+      }
+    ]
+  }
 }

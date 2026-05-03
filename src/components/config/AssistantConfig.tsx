@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { invoke } from "@tauri-apps/api/core";
 import { AssistantDetail, AssistantListItem } from "../../data/Assistant";
 import { useAssistantListListener } from "../../hooks/useAssistantListListener";
 import { Bot, Settings, User, Download } from "lucide-react";
@@ -21,14 +22,48 @@ import { useDialogStates } from "@/hooks/assistant/useDialogStates";
 import { AssistantFormRenderer } from "./assistant/AssistantFormRenderer";
 import { AssistantDialogs } from "./assistant/AssistantDialogs";
 import { AssistantConfigApi } from "@/types/forms";
+import type { LoadedPlugin, PluginAssistantFormFieldContribution } from "@/services/PluginRuntime";
 
 interface AssistantConfigProps {
-    pluginList: any[];
+    pluginList: LoadedPlugin[];
     navigateTo: (menuKey: string) => void;
 }
+
+interface PluginAssistantConfigItem {
+    configId: number;
+    pluginId: number;
+    assistantId: number;
+    configKey: string;
+    configValue?: string | null;
+}
+
+const buildPluginAssistantFieldFormKey = (pluginId: number, fieldKey: string) =>
+    `plugin::${pluginId}::${fieldKey}`;
+
+const normalizePluginAssistantFieldValue = (
+    field: PluginAssistantFormFieldContribution,
+    rawValue: string | null | undefined,
+) => {
+    if (field.type === "checkbox" || field.type === "switch") {
+        if (rawValue == null) {
+            return field.defaultValue === true || field.defaultValue === "true";
+        }
+        return rawValue === "true";
+    }
+
+    if (rawValue == null) {
+        if (field.defaultValue === undefined || field.defaultValue === null) {
+            return "";
+        }
+        return String(field.defaultValue);
+    }
+
+    return rawValue;
+};
 const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateTo }) => {
     const form = useForm();
     const [searchQuery, setSearchQuery] = useState('');
+    const [pluginAssistantConfigValues, setPluginAssistantConfigValues] = useState<Record<string, string | boolean>>({});
 
     const {
         assistantTypes,
@@ -71,6 +106,54 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         closeImportDialog,
     } = useDialogStates();
 
+    const pluginAssistantFormFields = useMemo(
+        () =>
+            pluginList.flatMap((plugin) =>
+                (plugin.contributions?.assistantFormFields ?? []).map((field) => ({
+                    ...field,
+                    pluginId: plugin.pluginId,
+                    pluginCode: plugin.code,
+                    pluginName: plugin.name,
+                    formKey: buildPluginAssistantFieldFormKey(plugin.pluginId, field.key),
+                }))
+            ),
+        [pluginList]
+    );
+
+    const loadPluginAssistantConfigValues = useCallback(
+        async (assistantId: number) => {
+            if (pluginAssistantFormFields.length === 0) {
+                setPluginAssistantConfigValues({});
+                return {};
+            }
+
+            const pluginIds = [...new Set(pluginAssistantFormFields.map((field) => field.pluginId))];
+            const configGroups = await Promise.all(
+                pluginIds.map(async (pluginId) => ({
+                    pluginId,
+                    configs: await invoke<PluginAssistantConfigItem[]>("get_plugin_assistant_configs", {
+                        pluginId,
+                        assistantId,
+                    }),
+                }))
+            );
+            const configMap = new Map<number, PluginAssistantConfigItem[]>(
+                configGroups.map((entry) => [entry.pluginId, entry.configs])
+            );
+            const nextValues: Record<string, string | boolean> = {};
+            pluginAssistantFormFields.forEach((field) => {
+                const rawValue = configMap
+                    .get(field.pluginId)
+                    ?.find((item) => item.configKey === field.key)
+                    ?.configValue;
+                nextValues[field.formKey] = normalizePluginAssistantFieldValue(field, rawValue);
+            });
+            setPluginAssistantConfigValues(nextValues);
+            return nextValues;
+        },
+        [pluginAssistantFormFields]
+    );
+
     // 助手配置 API
     const assistantConfigApi: AssistantConfigApi = useMemo(
         () => ({
@@ -97,7 +180,10 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
     const handleChooseAssistant = useCallback(
         (assistant: AssistantListItem) => {
             if (!currentAssistant || currentAssistant.assistant.id !== assistant.id) {
-                loadAssistantDetail(assistant.id).then((assistantDetail) => {
+                loadAssistantDetail(assistant.id).then(async (assistantDetail) => {
+                    const pluginConfigValues = await loadPluginAssistantConfigValues(
+                        assistantDetail.assistant.id
+                    );
                     form.reset({
                         assistantType: assistantDetail.assistant.assistant_type,
                         model:
@@ -118,6 +204,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                                         ?.value ?? "";
                             return acc;
                         }, {} as Record<string, any>),
+                        ...pluginConfigValues,
                         dynamic_mcp_loading_enabled: (() => {
                             const raw = assistantDetail.model_configs.find(
                                 (config) => config.name === "dynamic_mcp_loading_enabled"
@@ -138,6 +225,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             assistantTypeApi,
             form,
             loadAssistantDetail,
+            loadPluginAssistantConfigValues,
         ]
     );
 
@@ -233,6 +321,17 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         [currentAssistant, setCurrentAssistant]
     );
 
+    const handlePluginConfigChange = useCallback(
+        (formKey: string, value: string | boolean) => {
+            form.setValue(formKey, value);
+            setPluginAssistantConfigValues((prev) => ({
+                ...prev,
+                [formKey]: value,
+            }));
+        },
+        [form]
+    );
+
     // 使用新的 hook 生成表单配置
     const { formConfig } = useAssistantFormConfig({
         currentAssistant,
@@ -244,6 +343,9 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         navigateTo,
         onConfigChange: handleConfigChange,
         onPromptChange: handlePromptChange,
+        pluginAssistantFormFields,
+        pluginAssistantConfigValues,
+        onPluginConfigChange: handlePluginConfigChange,
     });
 
     // 保存助手
@@ -283,7 +385,13 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             })(),
             model_configs: Object.entries(values)
                 .filter(
-                    ([key]) => key !== "assistantType" && key !== "model" && key !== "prompt" && key !== "mcp_config" && key !== "skills_config"
+                    ([key]) =>
+                        !key.startsWith("plugin::")
+                        && key !== "assistantType"
+                        && key !== "model"
+                        && key !== "prompt"
+                        && key !== "mcp_config"
+                        && key !== "skills_config"
                 )
                 .filter(([key]) => {
                     const config = currentAssistant.model_configs.find((config) => config.name === key);
@@ -368,12 +476,28 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 },
             ],
         })
-            .then(() => {
+            .then(async () => {
+                await Promise.all(
+                    pluginAssistantFormFields.map((field) =>
+                        invoke("set_plugin_assistant_config", {
+                            pluginId: field.pluginId,
+                            assistantId: currentAssistant.assistant.id,
+                            key: field.key,
+                            value:
+                                values[field.formKey] == null
+                                    ? null
+                                    : typeof values[field.formKey] === "boolean"
+                                        ? String(values[field.formKey])
+                                        : String(values[field.formKey]),
+                        })
+                    )
+                );
                 toast.success("保存成功");
-                loadAssistantDetail(currentAssistant.assistant.id);
+                await loadAssistantDetail(currentAssistant.assistant.id);
+                await loadPluginAssistantConfigValues(currentAssistant.assistant.id);
             })
             .catch((error) => toast.error("保存失败: " + error));
-    }, [currentAssistant, form, saveAssistant, assistantTypeCustomField, loadAssistantDetail]);
+    }, [currentAssistant, form, saveAssistant, assistantTypeCustomField, loadAssistantDetail, loadPluginAssistantConfigValues, pluginAssistantFormFields]);
 
     // 删除助手
     const handleDelete = useCallback(() => {
@@ -393,6 +517,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
     const handleAssistantAdded = useCallback(
         (assistantDetail: AssistantDetail) => {
             addAssistant(assistantDetail);
+            setPluginAssistantConfigValues({});
 
             // 重置表单状态为新助手的配置
             form.reset({

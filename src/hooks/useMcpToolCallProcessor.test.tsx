@@ -560,7 +560,7 @@ describe("useMcpToolCallProcessor MCP identity", () => {
         const conversationId = 29;
         mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
         const markdown =
-            '<!-- MCP_TOOL_CALL_STREAMING:{"server_name":"ui_interaction","tool_name":"preview_code","fn_arguments":"{\\"title\\":\\"script_only\\",\\"renderer\\":\\"html\\",\\"code\\":\\"<script>console.log(\\\\\\"boot\\\\\\")</script>\\"}","llm_call_id":"preview_call_fallback","preview_state":{"title":"script_only","renderer":"html","code":"<script>console.log(\\"boot\\")</script>","loadingMessages":["正在生成交互面板"],"interactionMode":"submit_once","hasRenderableDom":false,"containsScript":true,"renderableHtml":"","sourceExcerpt":"<script>console.log(\\"boot\\")</script>"}} -->';
+            '<!-- MCP_TOOL_CALL_STREAMING:{"server_name":"ui_interaction","tool_name":"preview_code","fn_arguments":"{\\"title\\":\\"script_only\\",\\"renderer\\":\\"html\\",\\"code\\":\\"<script>console.log(\\\\\\"boot\\\\\\")</script>\\"}","llm_call_id":"preview_call_fallback","preview_state":{"title":"script_only","renderer":"html","code":"<script>console.log(\\"boot\\")</script>","loadingMessages":["正在生成交互面板"],"interactionMode":"none","hasRenderableDom":false,"containsScript":true,"renderableHtml":"","sourceExcerpt":"<script>console.log(\\"boot\\")</script>"}} -->';
 
         render(
             <ProcessorHarness

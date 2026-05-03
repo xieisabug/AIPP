@@ -33,6 +33,7 @@ use crate::errors::AppError;
 use crate::feishu::maybe_schedule_butler_feishu_relay_for_aipp_turn;
 use crate::mcp::execution_api::cancel_mcp_tool_calls_by_conversation;
 use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt, MCPInfoForAssistant};
+use crate::plugin::hook_bus::PluginHookBus;
 use crate::skills::{
     build_active_skill_attachments, collect_skills_info_for_assistant_with_additions,
     compose_user_message_with_active_skills, format_skills_prompt,
@@ -165,6 +166,109 @@ fn build_prompt_with_attachment_context(prompt: &str, context: &str) -> String {
     } else {
         format!("{}\n{}", prompt, context)
     }
+}
+
+fn messages_to_hook_value(
+    messages: &[(String, String, Vec<MessageAttachment>)],
+) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .enumerate()
+        .map(|(index, (message_type, content, _))| {
+            serde_json::json!({
+                "index": index,
+                "messageType": message_type,
+                "content": content,
+            })
+        })
+        .collect()
+}
+
+fn apply_hook_messages(
+    messages: Vec<(String, String, Vec<MessageAttachment>)>,
+    hook_context: &serde_json::Value,
+) -> Vec<(String, String, Vec<MessageAttachment>)> {
+    let Some(hook_messages) = hook_context.get("messages").and_then(|value| value.as_array()) else {
+        return messages;
+    };
+
+    let mut rebuilt_messages = Vec::with_capacity(hook_messages.len());
+
+    for item in hook_messages {
+        let original_index = item
+            .get("index")
+            .or_else(|| item.get("sourceIndex"))
+            .and_then(|value| value.as_u64())
+            .map(|value| value as usize);
+        let original_message = original_index.and_then(|index| messages.get(index));
+        let message_type = item
+            .get("messageType")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string())
+            .or_else(|| original_message.map(|message| message.0.clone()));
+        let content = item
+            .get("content")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string())
+            .or_else(|| original_message.map(|message| message.1.clone()));
+
+        let (Some(message_type), Some(content)) = (message_type, content) else {
+            continue;
+        };
+
+        rebuilt_messages.push((
+            message_type,
+            content,
+            original_message.map(|message| message.2.clone()).unwrap_or_default(),
+        ));
+    }
+
+    if rebuilt_messages.is_empty() {
+        messages
+    } else {
+        rebuilt_messages
+    }
+}
+
+async fn run_before_model_request_hook(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    assistant_id: i64,
+    messages: Vec<(String, String, Vec<MessageAttachment>)>,
+) -> anyhow::Result<Vec<(String, String, Vec<MessageAttachment>)>> {
+    let context = serde_json::json!({
+        "conversationId": conversation_id,
+        "assistantId": assistant_id,
+        "messageCount": messages.len(),
+        "messages": messages_to_hook_value(&messages),
+        "metadata": {}
+    });
+    let result = PluginHookBus::new(app_handle.clone())
+        .run_guard_filter("chat.beforeModelRequest", context)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+    Ok(apply_hook_messages(messages, &result.context))
+}
+
+async fn emit_chat_context_event(
+    app_handle: &tauri::AppHandle,
+    hook_name: &'static str,
+    conversation_id: i64,
+    assistant_id: i64,
+    messages: &[(String, String, Vec<MessageAttachment>)],
+) {
+    let _ = PluginHookBus::new(app_handle.clone())
+        .emit_event(
+            hook_name,
+            serde_json::json!({
+                "conversationId": conversation_id,
+                "assistantId": assistant_id,
+                "messageCount": messages.len(),
+                "messages": messages_to_hook_value(messages),
+                "metadata": {}
+            }),
+        )
+        .await;
 }
 
 fn persist_active_skill_attachments(
@@ -429,6 +533,7 @@ pub async fn ask_ai(
         ?relay_origin,
         "ask_ai input parameters"
     );
+    let mut runtime_user_prompt_prefix = runtime_user_prompt_prefix;
 
     let assistants = get_assistants(app_handle.clone())
         .map_err(|e| AppError::UnknownError(format!("Failed to get assistants: {}", e)))?;
@@ -444,6 +549,42 @@ pub async fn ask_ai(
     let mut processed_request = request.clone();
     processed_request.assistant_id = actual_assistant_id;
     processed_request.prompt = slash_parse_result.runtime_user_prompt.clone();
+
+    let before_send_context = serde_json::json!({
+        "conversationId": processed_request.conversation_id.clone(),
+        "assistantId": processed_request.assistant_id,
+        "prompt": processed_request.prompt.clone(),
+        "source": relay_origin.as_deref().unwrap_or("chat_ui"),
+        "relayOrigin": relay_origin.clone(),
+        "attachments": processed_request.attachment_list.clone().unwrap_or_default(),
+        "runtimeUserPromptPrefix": runtime_user_prompt_prefix.clone(),
+        "metadata": {}
+    });
+    let before_send_result = PluginHookBus::new(app_handle.clone())
+        .run_guard_filter("chat.beforeSend", before_send_context)
+        .await
+        .map_err(AppError::UnknownError)?;
+    if let Some(assistant_id) =
+        before_send_result.context.get("assistantId").and_then(|value| value.as_i64())
+    {
+        processed_request.assistant_id = assistant_id;
+    }
+    if let Some(prompt) = before_send_result.context.get("prompt").and_then(|value| value.as_str()) {
+        processed_request.prompt = prompt.to_string();
+    }
+    if let Some(prefix) = before_send_result
+        .context
+        .get("runtimeUserPromptPrefix")
+        .and_then(|value| value.as_str())
+    {
+        runtime_user_prompt_prefix = Some(prefix.to_string());
+    }
+    if let Some(attachments) =
+        before_send_result.context.get("attachments").and_then(|value| value.as_array())
+    {
+        let attachment_ids = attachments.iter().filter_map(|value| value.as_i64()).collect();
+        processed_request.attachment_list = Some(attachment_ids);
+    }
 
     let template_engine = build_template_engine(&app_handle)
         .map_err(|e| AppError::UnknownError(format!("Failed to build template engine: {}", e)))?;
@@ -613,6 +754,19 @@ pub async fn ask_ai(
         active_skill_attachments,
     )
     .await?;
+
+    let _ = PluginHookBus::new(app_handle.clone())
+        .emit_event(
+            "chat.afterUserMessageCreated",
+            serde_json::json!({
+                "conversationId": conversation_id,
+                "messageId": user_message_id,
+                "assistantId": processed_request.assistant_id,
+                "prompt": request_prompt_result_with_context.clone(),
+                "metadata": {}
+            }),
+        )
+        .await;
 
     // 设置用户消息的活动状态（闪亮边框）
     activity_manager.set_user_pending(&app_handle, conversation_id, user_message_id).await;
@@ -974,6 +1128,14 @@ pub async fn ask_ai(
             is_butler,
             message_ids: init_message_ids,
         };
+        emit_chat_context_event(
+            &app_handle_clone,
+            "chat.beforeBuildContext",
+            conversation_id,
+            processed_request.assistant_id,
+            &init_message_list,
+        )
+        .await;
         let fit_result = context_manager::fit_to_budget_with_compaction(
             init_message_list,
             &budget,
@@ -981,7 +1143,21 @@ pub async fn ask_ai(
             compaction_ctx,
         )
         .await;
-        let init_message_list = fit_result.messages;
+        emit_chat_context_event(
+            &app_handle_clone,
+            "chat.afterBuildContext",
+            conversation_id,
+            processed_request.assistant_id,
+            &fit_result.messages,
+        )
+        .await;
+        let init_message_list = run_before_model_request_hook(
+            &app_handle_clone,
+            conversation_id,
+            processed_request.assistant_id,
+            fit_result.messages,
+        )
+        .await?;
         if fit_result.estimated_tokens > 0 {
             debug!(
                 conversation_id,
@@ -1039,6 +1215,20 @@ pub async fn ask_ai(
             )
             .await?;
         }
+
+        let _ = PluginHookBus::new(app_handle_clone.clone())
+            .emit_event(
+                "chat.afterResponseCompleted",
+                serde_json::json!({
+                    "conversationId": conversation_id,
+                    "userMessageId": user_message_id,
+                    "assistantId": processed_request.assistant_id,
+                    "modelId": model_id,
+                    "modelCode": model_code,
+                    "metadata": {}
+                }),
+            )
+            .await;
 
         Ok::<(), anyhow::Error>(())
     });
@@ -1393,6 +1583,14 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         is_butler: is_butler_cont,
         message_ids: init_metadata.message_ids,
     };
+    emit_chat_context_event(
+        &app_handle,
+        "chat.beforeBuildContext",
+        conversation_id_i64,
+        assistant_detail.assistant.id,
+        &init_message_list,
+    )
+    .await;
     let fit_result = context_manager::fit_to_budget_with_compaction(
         init_message_list,
         &budget,
@@ -1400,7 +1598,21 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         compaction_ctx,
     )
     .await;
-    let init_message_list = fit_result.messages;
+    emit_chat_context_event(
+        &app_handle,
+        "chat.afterBuildContext",
+        conversation_id_i64,
+        assistant_detail.assistant.id,
+        &fit_result.messages,
+    )
+    .await;
+    let init_message_list = run_before_model_request_hook(
+        &app_handle,
+        conversation_id_i64,
+        assistant_detail.assistant.id,
+        fit_result.messages,
+    )
+    .await?;
     if fit_result.compacted {
         info!(
             conversation_id = conversation_id_i64,
@@ -1718,6 +1930,14 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         is_butler: is_butler_batch,
         message_ids: init_metadata.message_ids,
     };
+    emit_chat_context_event(
+        &app_handle,
+        "chat.beforeBuildContext",
+        conversation_id,
+        assistant_detail.assistant.id,
+        &init_message_list,
+    )
+    .await;
     let fit_result = context_manager::fit_to_budget_with_compaction(
         init_message_list,
         &budget,
@@ -1725,7 +1945,21 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         compaction_ctx,
     )
     .await;
-    let init_message_list = fit_result.messages;
+    emit_chat_context_event(
+        &app_handle,
+        "chat.afterBuildContext",
+        conversation_id,
+        assistant_detail.assistant.id,
+        &fit_result.messages,
+    )
+    .await;
+    let init_message_list = run_before_model_request_hook(
+        &app_handle,
+        conversation_id,
+        assistant_detail.assistant.id,
+        fit_result.messages,
+    )
+    .await?;
     if fit_result.compacted {
         info!(
             conversation_id,
@@ -2185,6 +2419,14 @@ pub async fn regenerate_ai(
             is_butler: is_butler_regen,
             message_ids: init_metadata.message_ids,
         };
+        emit_chat_context_event(
+            &app_handle_clone,
+            "chat.beforeBuildContext",
+            conversation_id,
+            assistant_detail.assistant.id,
+            &init_message_list,
+        )
+        .await;
         let fit_result = context_manager::fit_to_budget_with_compaction(
             init_message_list,
             &budget,
@@ -2192,7 +2434,21 @@ pub async fn regenerate_ai(
             compaction_ctx,
         )
         .await;
-        let init_message_list = fit_result.messages;
+        emit_chat_context_event(
+            &app_handle_clone,
+            "chat.afterBuildContext",
+            conversation_id,
+            assistant_detail.assistant.id,
+            &fit_result.messages,
+        )
+        .await;
+        let init_message_list = run_before_model_request_hook(
+            &app_handle_clone,
+            conversation_id,
+            assistant_detail.assistant.id,
+            fit_result.messages,
+        )
+        .await?;
 
         let ChatRequestBuildResult { chat_request, tool_name_mapping } =
             build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
@@ -2289,6 +2545,7 @@ pub(crate) fn add_message(
             generation_group_id,
             parent_group_id,
             tool_calls_json: None,
+            metadata_json: None,
             first_token_time: None,
             ttft_ms: None,
         })
@@ -2439,6 +2696,7 @@ async fn initialize_conversation(
                     generation_group_id: None,
                     parent_group_id: None,
                     tool_calls_json: None,
+                    metadata_json: None,
                     first_token_time: None,
                     ttft_ms: None,
                 })
@@ -2642,4 +2900,85 @@ pub async fn regenerate_conversation_title(
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_hook_messages;
+    use crate::db::conversation_db::{AttachmentType, MessageAttachment};
+
+    fn sample_attachment(hash: &str) -> MessageAttachment {
+        MessageAttachment {
+            id: 0,
+            message_id: 0,
+            attachment_type: AttachmentType::Text,
+            attachment_url: None,
+            attachment_content: Some("attachment".to_string()),
+            attachment_hash: Some(hash.to_string()),
+            use_vector: false,
+            token_count: None,
+        }
+    }
+
+    #[test]
+    fn test_apply_hook_messages_updates_existing_message_and_preserves_attachments() {
+        let messages = vec![(
+            "user".to_string(),
+            "original".to_string(),
+            vec![sample_attachment("keep-me")],
+        )];
+        let hook_context = serde_json::json!({
+            "messages": [
+                {
+                    "index": 0,
+                    "messageType": "user",
+                    "content": "patched"
+                }
+            ]
+        });
+
+        let updated = apply_hook_messages(messages, &hook_context);
+
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].0, "user");
+        assert_eq!(updated[0].1, "patched");
+        assert_eq!(updated[0].2.len(), 1);
+        assert_eq!(updated[0].2[0].attachment_hash.as_deref(), Some("keep-me"));
+    }
+
+    #[test]
+    fn test_apply_hook_messages_can_insert_hidden_message_after_existing_message() {
+        let messages = vec![
+            (
+                "user".to_string(),
+                "question".to_string(),
+                vec![sample_attachment("first")],
+            ),
+            ("assistant".to_string(), "answer".to_string(), Vec::new()),
+        ];
+        let hook_context = serde_json::json!({
+            "messages": [
+                {
+                    "index": 0
+                },
+                {
+                    "messageType": "system",
+                    "content": "<plugin_hidden_context>secret</plugin_hidden_context>"
+                },
+                {
+                    "index": 1
+                }
+            ]
+        });
+
+        let updated = apply_hook_messages(messages, &hook_context);
+
+        assert_eq!(updated.len(), 3);
+        assert_eq!(updated[0].0, "user");
+        assert_eq!(updated[1].0, "system");
+        assert_eq!(updated[1].1, "<plugin_hidden_context>secret</plugin_hidden_context>");
+        assert!(updated[1].2.is_empty());
+        assert_eq!(updated[2].0, "assistant");
+        assert_eq!(updated[0].2[0].attachment_hash.as_deref(), Some("first"));
+    }
 }

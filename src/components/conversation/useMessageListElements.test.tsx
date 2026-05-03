@@ -194,4 +194,47 @@ describe("useMessageListElements merged assistant preview state", () => {
             singleItem?.estimatedHeight ?? 0,
         );
     });
+
+    it("caps historical row height estimates for auto-collapsed code blocks", () => {
+        const longCodeBlock = [
+            "```ts",
+            ...Array.from({ length: 240 }, (_, index) => `const value${index} = ${index};`),
+            "```",
+        ].join("\n");
+        const longPlainText = Array.from(
+            { length: 240 },
+            (_, index) => `plain response line ${index}`,
+        ).join("\n");
+
+        const { result: codeResult } = renderHook(() =>
+            useMessageListElements(
+                makeHookProps([
+                    makeMessage({ id: 1, message_type: "user", content: "user-1" }),
+                    makeMessage({ id: 2, message_type: "response", content: longCodeBlock }),
+                    makeMessage({ id: 3, message_type: "user", content: "user-2" }),
+                ]),
+            ),
+        );
+        const { result: plainResult } = renderHook(() =>
+            useMessageListElements(
+                makeHookProps([
+                    makeMessage({ id: 1, message_type: "user", content: "user-1" }),
+                    makeMessage({ id: 2, message_type: "response", content: longPlainText }),
+                    makeMessage({ id: 3, message_type: "user", content: "user-2" }),
+                ]),
+            ),
+        );
+
+        const codeItem = codeResult.current.renderItems.find(
+            (item) => item.key === "message-2",
+        );
+        const plainItem = plainResult.current.renderItems.find(
+            (item) => item.key === "message-2",
+        );
+
+        expect(codeItem?.estimatedHeight ?? 0).toBeLessThan(1500);
+        expect(codeItem?.estimatedHeight ?? 0).toBeLessThan(
+            plainItem?.estimatedHeight ?? 0,
+        );
+    });
 });

@@ -4,6 +4,10 @@
   "name": "Run Script Bang Plugin",
   "version": "0.1.0",
   "entry": "dist/main.js",
+  "runtime": {
+    "type": "js",
+    "entry": "dist/main.js"
+  },
   "description": "Adds !run_script, !rs and !bash bangs backed by the built-in execute_bash tool.",
   "pluginTypes": [
     "toolType",

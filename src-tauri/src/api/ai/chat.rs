@@ -11,6 +11,7 @@ use crate::db::conversation_db::{
 };
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
+use crate::plugin::hook_bus::PluginHookBus;
 use crate::state::activity_state::ConversationActivityManager;
 use crate::state::message_token::MessageTokenManager;
 use crate::utils::window_utils::send_error_to_appropriate_window;
@@ -476,6 +477,7 @@ async fn ensure_stream_message(
             generation_group_id: Some(generation_group_id.to_string()),
             parent_group_id: parent_group_id_override,
             tool_calls_json: None,
+            metadata_json: None,
             first_token_time,
             ttft_ms,
         })
@@ -535,6 +537,70 @@ fn persist_and_emit_update(
     window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event)?;
 
     Ok(())
+}
+
+fn spawn_plugin_event(app_handle: tauri::AppHandle, hook_name: &'static str, context: serde_json::Value) {
+    tauri::async_runtime::spawn(async move {
+        let _ = PluginHookBus::new(app_handle).emit_event(hook_name, context).await;
+    });
+}
+
+async fn run_before_response_persist_hook(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    message_id: i64,
+    message_type: &str,
+    content: String,
+) -> anyhow::Result<String> {
+    let original_content = content.clone();
+    let hook_result = PluginHookBus::new(app_handle.clone())
+        .run_guard_filter(
+            "chat.beforeResponsePersist",
+            serde_json::json!({
+                "conversationId": conversation_id,
+                "messageId": message_id,
+                "messageType": message_type,
+                "content": content,
+                "metadata": {}
+            }),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+    Ok(hook_result
+        .context
+        .get("content")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            hook_result
+                .context
+                .get("content")
+                .map(|value| value.to_string())
+                .unwrap_or(original_content)
+        }))
+}
+
+fn emit_chat_error_hook(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    message_id: Option<i64>,
+    phase: &str,
+    error: &str,
+    model_name: &str,
+) {
+    spawn_plugin_event(
+        app_handle.clone(),
+        "chat.onError",
+        serde_json::json!({
+            "conversationId": conversation_id,
+            "messageId": message_id,
+            "phase": phase,
+            "error": error,
+            "modelName": model_name,
+            "metadata": {}
+        }),
+    );
 }
 
 fn normalize_tool_arguments_json(arguments: &serde_json::Value) -> String {
@@ -640,6 +706,12 @@ fn analyze_preview_code_fragment(code: &str) -> PreviewCodeFragmentAnalysis {
         return PreviewCodeFragmentAnalysis::default();
     }
 
+    let sanitized_for_text_visibility = regex::Regex::new(
+        r"(?is)<script\b[^>]*>.*?</script>|<style\b[^>]*>.*?</style>|<title\b[^>]*>.*?</title>",
+    )
+    .ok()
+    .map(|re| re.replace_all(trimmed, "").into_owned())
+    .unwrap_or_else(|| trimmed.to_string());
     let fragment = Html::parse_fragment(trimmed);
     let contains_script = trimmed.to_ascii_lowercase().contains("<script");
     let has_renderable_element = Selector::parse("*")
@@ -653,7 +725,12 @@ fn analyze_preview_code_fragment(code: &str) -> PreviewCodeFragmentAnalysis {
             })
         })
         .unwrap_or(false);
-    let has_visible_text = !fragment.root_element().text().collect::<String>().trim().is_empty();
+    let has_visible_text = !Html::parse_fragment(&sanitized_for_text_visibility)
+        .root_element()
+        .text()
+        .collect::<String>()
+        .trim()
+        .is_empty();
 
     PreviewCodeFragmentAnalysis {
         has_renderable_dom: has_renderable_element || has_visible_text,
@@ -706,7 +783,7 @@ fn extract_preview_code_streaming_state(
         .or_else(|| {
             extract_partial_string_field(&raw_arguments, &["interaction_mode", "interactionMode"])
         })
-        .unwrap_or_else(|| "submit_once".to_string());
+        .unwrap_or_else(|| "none".to_string());
     let loading_messages = object
         .and_then(|record| {
             record
@@ -1039,6 +1116,18 @@ mod tests {
             "<style>.card{padding:12px;}</style><section class=\"card\"><h2>Revenue</h2><p>42"
         );
         assert_eq!(state.title, "streaming_card");
+    }
+
+    #[test]
+    fn test_extract_preview_code_streaming_state_defaults_omitted_mode_to_none() {
+        let state = extract_preview_code_streaming_state(&serde_json::json!({
+            "title": "display_only",
+            "renderer": "html",
+            "code": "<div>Preview</div>"
+        }))
+        .expect("preview state");
+
+        assert_eq!(state.interaction_mode, "none");
     }
 
     #[test]
@@ -2409,6 +2498,14 @@ pub async fn handle_stream_chat(
                         window,
                     )
                     .await;
+                    emit_chat_error_hook(
+                        app_handle,
+                        conversation_id,
+                        None,
+                        "stream",
+                        &payload,
+                        &llm_model_name,
+                    );
 
                     if need_generate_title {
                         if let Err(err) = maybe_generate_title_from_conversation_if_needed(
@@ -2628,6 +2725,22 @@ async fn attempt_stream_chat(
                         }
 
                         response_content.push_str(&chunk.content);
+                        if response_chunk_count == 1 || response_chunk_count % 20 == 0 {
+                            spawn_plugin_event(
+                                app_handle.clone(),
+                                "chat.onResponseChunk",
+                                serde_json::json!({
+                                    "conversationId": conversation_id,
+                                    "messageId": response_message_id,
+                                    "messageType": "response",
+                                    "chunkType": "response",
+                                    "chunkIndex": response_chunk_count,
+                                    "content": chunk.content,
+                                    "totalChars": response_char_count,
+                                    "metadata": { "sampled": response_chunk_count > 1 }
+                                }),
+                            );
+                        }
 
                         if response_message_id.is_none() {
                             // 如果有 reasoning 结束时间，使用它作为 response 的 start_time
@@ -2660,6 +2773,17 @@ async fn attempt_stream_chat(
                             .await
                             {
                                 response_message_id = Some(new_id);
+                                spawn_plugin_event(
+                                    app_handle.clone(),
+                                    "chat.onResponseStarted",
+                                    serde_json::json!({
+                                        "conversationId": conversation_id,
+                                        "messageId": new_id,
+                                        "messageType": "response",
+                                        "modelName": llm_model_name,
+                                        "metadata": {}
+                                    }),
+                                );
 
                                 if is_regeneration && !group_merge_event_emitted {
                                     if let Some(ref parent_group_id) = parent_group_id_override {
@@ -2713,6 +2837,22 @@ async fn attempt_stream_chat(
                         }
 
                         reasoning_content.push_str(&reasoning_chunk.content);
+                        if reasoning_chunk_count == 1 || reasoning_chunk_count % 20 == 0 {
+                            spawn_plugin_event(
+                                app_handle.clone(),
+                                "chat.onResponseChunk",
+                                serde_json::json!({
+                                    "conversationId": conversation_id,
+                                    "messageId": reasoning_message_id,
+                                    "messageType": "reasoning",
+                                    "chunkType": "reasoning",
+                                    "chunkIndex": reasoning_chunk_count,
+                                    "content": reasoning_chunk.content,
+                                    "totalChars": reasoning_char_count,
+                                    "metadata": { "sampled": reasoning_chunk_count > 1 }
+                                }),
+                            );
+                        }
 
                         if reasoning_message_id.is_none() {
                             let now = chrono::Utc::now();
@@ -2735,6 +2875,17 @@ async fn attempt_stream_chat(
                             .await
                             {
                                 reasoning_message_id = Some(new_id);
+                                spawn_plugin_event(
+                                    app_handle.clone(),
+                                    "chat.onResponseStarted",
+                                    serde_json::json!({
+                                        "conversationId": conversation_id,
+                                        "messageId": new_id,
+                                        "messageType": "reasoning",
+                                        "modelName": llm_model_name,
+                                        "metadata": {}
+                                    }),
+                                );
                             }
                         }
 
@@ -2803,6 +2954,17 @@ async fn attempt_stream_chat(
                             .await
                             {
                                 response_message_id = Some(new_id);
+                                spawn_plugin_event(
+                                    app_handle.clone(),
+                                    "chat.onResponseStarted",
+                                    serde_json::json!({
+                                        "conversationId": conversation_id,
+                                        "messageId": new_id,
+                                        "messageType": "response",
+                                        "modelName": llm_model_name,
+                                        "metadata": { "reason": "toolCallChunk" }
+                                    }),
+                                );
                             }
                         }
 
@@ -2900,6 +3062,17 @@ async fn attempt_stream_chat(
                             .await
                             {
                                 response_message_id = Some(new_id);
+                                spawn_plugin_event(
+                                    app_handle.clone(),
+                                    "chat.onResponseStarted",
+                                    serde_json::json!({
+                                        "conversationId": conversation_id,
+                                        "messageId": new_id,
+                                        "messageType": "response",
+                                        "modelName": llm_model_name,
+                                        "metadata": { "reason": "streamEnd" }
+                                    }),
+                                );
 
                                 if is_regeneration && !group_merge_event_emitted {
                                     if let Some(ref parent_group_id) = parent_group_id_override {
@@ -3139,7 +3312,20 @@ async fn attempt_stream_chat(
                                 )
                                 .await
                                 {
-                                    Ok(new_id) => response_message_id = Some(new_id),
+                                    Ok(new_id) => {
+                                        response_message_id = Some(new_id);
+                                        spawn_plugin_event(
+                                            app_handle.clone(),
+                                            "chat.onResponseStarted",
+                                            serde_json::json!({
+                                                "conversationId": conversation_id,
+                                                "messageId": new_id,
+                                                "messageType": "response",
+                                                "modelName": llm_model_name,
+                                                "metadata": { "reason": "capturedToolCalls" }
+                                            }),
+                                        );
+                                    }
                                     Err(e) => {
                                         warn!(
                                             "Failed to create response message for MCP hints: {}",
@@ -3422,6 +3608,7 @@ async fn create_error_message(
         generation_group_id: Some(generation_group_id),
         parent_group_id: parent_group_id_override,
         tool_calls_json: None,
+        metadata_json: None,
         first_token_time: None,
         ttft_ms: None,
     }) {
@@ -3666,6 +3853,7 @@ pub async fn handle_non_stream_chat(
                     generation_group_id: Some(generation_group_id.clone()),
                     parent_group_id: parent_group_id_override.clone(),
                     tool_calls_json: None,
+                    metadata_json: None,
                     first_token_time: None, // non-stream: unknown, fallback to start_time
                     ttft_ms,
                 })
@@ -3679,6 +3867,31 @@ pub async fn handle_non_stream_chat(
                 "Token usage captured for non-streaming response"
             );
             let response_message_id = response_message.id;
+            spawn_plugin_event(
+                app_handle.clone(),
+                "chat.onResponseStarted",
+                serde_json::json!({
+                    "conversationId": conversation_id,
+                    "messageId": response_message_id,
+                    "messageType": "response",
+                    "modelName": llm_model_name,
+                    "metadata": { "stream": false }
+                }),
+            );
+            spawn_plugin_event(
+                app_handle.clone(),
+                "chat.onResponseChunk",
+                serde_json::json!({
+                    "conversationId": conversation_id,
+                    "messageId": response_message_id,
+                    "messageType": "response",
+                    "chunkType": "response",
+                    "chunkIndex": 1,
+                    "content": content.clone(),
+                    "totalChars": content.chars().count(),
+                    "metadata": { "stream": false, "sampled": false }
+                }),
+            );
 
             match persist_response_image_attachments(
                 conversation_db,
@@ -3802,6 +4015,15 @@ pub async fn handle_non_stream_chat(
                 }
             }
 
+            content = run_before_response_persist_hook(
+                app_handle,
+                conversation_id,
+                response_message_id,
+                "response",
+                content,
+            )
+            .await?;
+
             let mut message =
                 conversation_db.message_repo().unwrap().read(response_message_id).unwrap().unwrap();
             message.content = content.clone();
@@ -3913,6 +4135,7 @@ pub async fn handle_non_stream_chat(
                     generation_group_id: Some(generation_group_id.clone()),
                     parent_group_id: parent_group_id_override.clone(),
                     tool_calls_json: None,
+                    metadata_json: None,
                     first_token_time: None,
                     ttft_ms: None,
                 })
@@ -3946,6 +4169,14 @@ pub async fn handle_non_stream_chat(
             };
             let _ = window
                 .emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+            emit_chat_error_hook(
+                app_handle,
+                conversation_id,
+                Some(error_message.id),
+                "non_stream",
+                &err_msg,
+                &llm_model_name,
+            );
 
             if need_generate_title {
                 if let Err(err) = maybe_generate_title_from_conversation_if_needed(

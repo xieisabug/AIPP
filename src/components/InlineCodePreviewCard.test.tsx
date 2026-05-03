@@ -227,6 +227,31 @@ describe("InlineCodePreviewCard", () => {
         );
     });
 
+    it("treats omitted interaction_mode as display-only", async () => {
+        mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
+
+        render(
+            <InlineCodePreviewCard
+                parameters={JSON.stringify({
+                    title: "default_display_only",
+                    renderer: "html",
+                    code: "<div>Display Only By Default</div>",
+                })}
+                conversationId={15}
+                messageId={115}
+                mcpToolCallStates={new Map()}
+                isStreaming={false}
+            />
+        );
+
+        expect(await screen.findByText("default_display_only")).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "关闭并继续" })).not.toBeInTheDocument();
+        expect(invoke).not.toHaveBeenCalledWith(
+            "submit_preview_code_response",
+            expect.anything()
+        );
+    });
+
     it("keeps scripted historical previews static while collapsed and enables interaction after expand", async () => {
         mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
 

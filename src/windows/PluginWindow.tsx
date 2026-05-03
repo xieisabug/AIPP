@@ -23,7 +23,7 @@ function PluginWindow() {
                     const instance = new SamplePlugin();
                     if (typeof instance.onPluginLoad === 'function') {
                         instance.onPluginLoad();
-                        setPluginNode(instance.renderComponent());
+                        setPluginNode(instance.renderView("main"));
                     }
                 }
             };

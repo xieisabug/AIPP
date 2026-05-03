@@ -16,7 +16,10 @@ var BenchmarkPlugin = class BenchmarkPlugin {
     this.systemApi = systemApi || null;
   }
 
-  renderComponent() {
+  renderView(viewId: string) {
+    if (viewId !== "benchmark-dashboard") {
+      return null;
+    }
     const React = (window as any).React;
     if (!React) {
       return null;

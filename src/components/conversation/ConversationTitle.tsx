@@ -80,9 +80,9 @@ const ConversationTitle: React.FC<{
                     <div className="text-xs text-muted-foreground overflow-hidden text-ellipsis whitespace-nowrap mt-0.5" data-aipp-slot="chat-conversation-title-subtext">{displayAssistantName}</div>
                 </div>
                 <div className="flex items-center flex-none shrink-0 justify-end gap-2 pl-4" data-aipp-slot="chat-conversation-title-actions">
+                    {extraActions}
                     <ConversationStatsDialog conversationId={conversation?.id.toString() || ""} externalOpen={statsOpen} onExternalOpenChange={onStatsOpenChange} />
                     <ConversationExportDialog conversationId={conversation?.id.toString() || ""} externalOpen={exportOpen} onExternalOpenChange={onExportOpenChange} />
-                    {extraActions}
                     {allowRename ? (
                         <IconButton icon={<Edit2 size={16} className="text-icon" />} onClick={onEdit} border dataAippSlot="chat-conversation-title-edit" />
                     ) : null}

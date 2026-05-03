@@ -25,7 +25,6 @@ export interface ConversationContentProps {
     onMessageFork: (messageId: number) => void;
     onToggleReasoningExpand: (messageId: number) => void;
     inlineInteractionItems?: InlineInteractionItem[];
-    sentBatchToolResultMessageIds?: ReadonlySet<number>;
     allowFeishuDebugResend?: boolean;
     virtualizeMessages?: boolean;
     scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
@@ -60,7 +59,6 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     onMessageFork,
     onToggleReasoningExpand,
     inlineInteractionItems,
-    sentBatchToolResultMessageIds,
     allowFeishuDebugResend = false,
     virtualizeMessages = false,
     scrollContainerRef,
@@ -101,9 +99,6 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
                             onMessageFork={onMessageFork}
                             onToggleReasoningExpand={onToggleReasoningExpand}
                             inlineInteractionItems={inlineInteractionItems}
-                            sentBatchToolResultMessageIds={
-                                sentBatchToolResultMessageIds
-                            }
                             allowFeishuDebugResend={allowFeishuDebugResend}
                             scrollContainerRef={scrollContainerRef}
                             pendingScrollMessageId={pendingScrollMessageId}
@@ -134,9 +129,6 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
                             onMessageFork={onMessageFork}
                             onToggleReasoningExpand={onToggleReasoningExpand}
                             inlineInteractionItems={inlineInteractionItems}
-                            sentBatchToolResultMessageIds={
-                                sentBatchToolResultMessageIds
-                            }
                             allowFeishuDebugResend={allowFeishuDebugResend}
                         />
                     )}

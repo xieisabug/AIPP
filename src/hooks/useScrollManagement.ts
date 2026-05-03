@@ -1,4 +1,5 @@
 import { useRef, useCallback, useEffect } from "react";
+import type { TouchEvent, WheelEvent } from "react";
 import { CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR } from "@/components/conversation/layoutConstants";
 
 const SMOOTH_SCROLL_LOCK_MS = 350;
@@ -9,7 +10,9 @@ export interface UseScrollManagementReturn {
     messagesEndRef: React.RefObject<HTMLDivElement | null>;
     scrollContainerRef: React.RefObject<HTMLDivElement | null>;
     handleScroll: () => void;
-    handleUserScrollIntent: () => void;
+    handleUserScrollIntent: (
+        event?: WheelEvent<HTMLDivElement> | TouchEvent<HTMLDivElement>,
+    ) => void;
     syncScrollState: (container?: HTMLDivElement | null) => void;
     // Allow overriding behavior for specific scenarios (e.g., instant on open)
     smartScroll: (forceScroll?: boolean, behaviorOverride?: ScrollBehavior) => void;
@@ -49,7 +52,7 @@ export function useScrollManagement(
         const syncViewportHeightVar = () => {
             container.style.setProperty(
                 CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR,
-                `${container.clientHeight}px`,
+                `${container.clientHeight - 10}px`,
             );
         };
 
@@ -122,11 +125,23 @@ export function useScrollManagement(
         );
     }, []);
 
-    const handleUserScrollIntent = useCallback(() => {
+    const handleUserScrollIntent = useCallback((
+        event?: WheelEvent<HTMLDivElement> | TouchEvent<HTMLDivElement>,
+    ) => {
         lastUserScrollIntentAtRef.current = performance.now();
         pendingSmartScrollRef.current = null;
         clearAutoScrollTimeout();
         isAutoScrolling.current = false;
+        const container = scrollContainerRef.current;
+        if (container) {
+            const distanceToBottom =
+                container.scrollHeight - container.scrollTop - container.clientHeight;
+            const isWheelUp =
+                !!event && "deltaY" in event && event.deltaY < 0;
+            if (isWheelUp || distanceToBottom >= 10) {
+                isUserScrolledUpRef.current = true;
+            }
+        }
         if (resizeObserverRef.current) {
             resizeObserverRef.current.disconnect();
             resizeObserverRef.current = null;

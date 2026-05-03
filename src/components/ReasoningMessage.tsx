@@ -16,7 +16,6 @@ interface ReasoningMessageProps {
     mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>;
     shiningMcpCallId?: number | null;
     inlineInteractionItems?: InlineInteractionItem[];
-    sentBatchToolResultMessageIds?: ReadonlySet<number>;
     useRawTextRenderer?: boolean; // 脱敏内容使用纯文本渲染，避免 Markdown 解析问题
 }
 
@@ -31,7 +30,6 @@ const ReasoningMessage = React.memo(
         mcpToolCallStates,
         shiningMcpCallId,
         inlineInteractionItems,
-        sentBatchToolResultMessageIds,
         useRawTextRenderer = false,
     }: ReasoningMessageProps) => {
         const [currentTime, setCurrentTime] = useState(new Date());
@@ -59,7 +57,6 @@ const ReasoningMessage = React.memo(
             mcpToolCallStates,
             shiningMcpCallId,
             inlineInteractionItems,
-            sentBatchToolResultMessageIds,
         });
 
         // 为正在思考的消息添加定时器，实时更新显示时间 - 优化更新频率

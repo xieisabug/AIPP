@@ -34,7 +34,6 @@ interface MessageItemProps {
     shiningMcpCallId?: number | null;
     isLastMessage?: boolean; // 防泄露模式：是否为最后一条消息
     inlineInteractionItems?: InlineInteractionItem[];
-    sentBatchToolResultMessageIds?: ReadonlySet<number>;
     allowFeishuDebugResend?: boolean;
     mergedMode?: boolean; // 合并模式：不渲染外层气泡包装
 }
@@ -80,7 +79,6 @@ const MessageItem = React.memo<MessageItemProps>(
         shiningMcpCallId,
         isLastMessage = false,
         inlineInteractionItems,
-        sentBatchToolResultMessageIds,
         allowFeishuDebugResend = false,
         mergedMode = false,
     }) => {
@@ -117,7 +115,6 @@ const MessageItem = React.memo<MessageItemProps>(
             mcpToolCallStates,
             shiningMcpCallId,
             inlineInteractionItems,
-            sentBatchToolResultMessageIds,
         });
 
         // 处理自定义标签解析
@@ -242,6 +239,19 @@ const MessageItem = React.memo<MessageItemProps>(
             streamEvent?.tps,
         ]);
 
+        const speakerLabel = useMemo(() => {
+            if (!message.metadata_json) {
+                return null;
+            }
+            try {
+                const parsed = JSON.parse(message.metadata_json) as Record<string, unknown>;
+                const rawLabel = parsed.speakerLabel ?? parsed.speaker_name ?? parsed.speakerName;
+                return typeof rawLabel === "string" && rawLabel.trim() ? rawLabel.trim() : null;
+            } catch {
+                return null;
+            }
+        }, [message.metadata_json]);
+
         const canResendToFeishuDebug =
             allowFeishuDebugResend
             && (message.message_type === "response" || message.message_type === "tool_result");
@@ -316,7 +326,6 @@ const MessageItem = React.memo<MessageItemProps>(
                     mcpToolCallStates={mcpToolCallStates}
                     shiningMcpCallId={shiningMcpCallId}
                     inlineInteractionItems={inlineInteractionItems}
-                    sentBatchToolResultMessageIds={sentBatchToolResultMessageIds}
                     useRawTextRenderer={shouldMaskContent}
                 />
             );
@@ -356,6 +365,12 @@ const MessageItem = React.memo<MessageItemProps>(
                             borderWidth={DEFAULT_SHINE_BORDER_CONFIG.borderWidth}
                             duration={DEFAULT_SHINE_BORDER_CONFIG.duration}
                         />
+                    )}
+
+                    {speakerLabel && (
+                        <div className="mb-2 text-xs font-medium text-muted-foreground">
+                            {speakerLabel}
+                        </div>
                     )}
 
                     <div className="prose prose-sm max-w-none text-foreground break-all">

@@ -1,0 +1,66 @@
+{
+  "id": "hidden-first-turn-context-plugin",
+  "code": "hidden-first-turn-context-plugin",
+  "name": "Hidden First Turn Context Plugin",
+  "version": "0.1.0",
+  "entry": "dist/main.js",
+  "runtime": {
+    "type": "js",
+    "entry": "dist/main.js"
+  },
+  "description": "为助手配置首轮隐藏上下文，并只在首轮模型请求时注入，不改动聊天界面里的用户消息。",
+  "pluginTypes": [
+    "applicationType"
+  ],
+  "permissions": [
+    "assistant.config",
+    "data.read.conversation",
+    "hook.chat.beforeModelRequest"
+  ],
+  "contributions": {
+    "hooks": [
+      {
+        "name": "chat.beforeModelRequest",
+        "kind": "filter",
+        "priority": 100,
+        "timeoutMs": 1500,
+        "failurePolicy": "log",
+        "isActive": true
+      }
+    ],
+    "assistantFormFields": [
+      {
+        "key": "enabled",
+        "label": "启用首轮隐藏上下文",
+        "type": "checkbox",
+        "description": "打开后，仅在该助手的第一轮模型请求中注入隐藏上下文。",
+        "defaultValue": false
+      },
+      {
+        "key": "hiddenContext",
+        "label": "首轮隐藏上下文",
+        "type": "textarea",
+        "description": "不会直接显示在聊天 UI 中，只会在首轮请求发给模型时附加。",
+        "placeholder": "例如：优先按公司知识库规范回答；如果用户提到排期，请先给出风险清单。",
+        "defaultValue": ""
+      },
+      {
+        "key": "injectionRole",
+        "label": "注入角色",
+        "type": "select",
+        "description": "决定隐藏上下文以 system 还是 user 消息注入到模型请求。",
+        "defaultValue": "system",
+        "options": [
+          {
+            "value": "system",
+            "label": "System"
+          },
+          {
+            "value": "user",
+            "label": "User"
+          }
+        ]
+      }
+    ]
+  }
+}

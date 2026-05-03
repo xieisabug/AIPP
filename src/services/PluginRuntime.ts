@@ -1,7 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { appDataDir } from "@tauri-apps/api/path";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
@@ -21,6 +21,10 @@ import {
 import { Separator } from "../components/ui/separator";
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Textarea } from "../components/ui/textarea";
+import IconButton from "../components/IconButton";
+import { toast } from "sonner";
+import type { AssistantDetail, AssistantPrompt } from "@/data/Assistant";
+import type { ConversationWithMessages } from "@/data/Conversation";
 import { markdownRegistry, type MarkdownTagRegistration } from "./markdownRegistry";
 
 type PluginConstructor = new () => AippPlugin | AippAssistantTypePlugin;
@@ -32,7 +36,69 @@ interface BackendPluginItem {
     code: string;
     pluginType: string[];
     permissions: string[];
+    runtime?: {
+        type: string;
+        entry: string;
+        protocol?: string | null;
+        checksum?: string | null;
+    } | null;
+    contributions?: PluginContributions;
     isActive: boolean;
+}
+
+export interface PluginSelectOption {
+    value: string;
+    label: string;
+    tooltip?: string | null;
+}
+
+export interface PluginViewContribution {
+    id: string;
+    location: string;
+    title: string;
+    description?: string | null;
+}
+
+export interface PluginActionContribution {
+    id: string;
+    location: string;
+    title: string;
+    description?: string | null;
+    order?: number | null;
+}
+
+export interface PluginSlotContribution {
+    id: string;
+    location: string;
+    title?: string | null;
+    description?: string | null;
+    order?: number | null;
+}
+
+export interface PluginAssistantFormFieldContribution {
+    key: string;
+    label: string;
+    type: string;
+    placeholder?: string | null;
+    description?: string | null;
+    tooltip?: string | null;
+    defaultValue?: unknown;
+    options?: PluginSelectOption[];
+}
+
+export interface PluginContributions {
+    hooks?: Array<{
+        name: string;
+        kind?: string;
+        priority?: number;
+        timeoutMs?: number;
+        failurePolicy?: string;
+        isActive?: boolean;
+    }>;
+    views?: PluginViewContribution[];
+    actions?: PluginActionContribution[];
+    slots?: PluginSlotContribution[];
+    assistantFormFields?: PluginAssistantFormFieldContribution[];
 }
 
 interface PluginDataItem {
@@ -43,6 +109,22 @@ interface PluginDataItem {
     dataValue: string | null;
     createdAt: string;
     updatedAt: string;
+}
+
+interface PluginAssistantConfigItem {
+    configId: number;
+    pluginId: number;
+    assistantId: number;
+    configKey: string;
+    configValue: string | null;
+    updatedAt: string;
+}
+
+interface PluginUpdateAssistantPromptRequest {
+    assistantId: number | string;
+    prompt: string;
+    expectedPromptId?: number;
+    expectedOldPrompt?: string;
 }
 
 interface AssistantSystemItem {
@@ -82,6 +164,89 @@ interface RunModelTextOptions {
     prompt: string;
     systemPrompt?: string;
     context?: string;
+}
+
+interface PluginSqlQueryRequest {
+    sql: string;
+    params?: unknown[];
+    maxRows?: number;
+}
+
+interface PluginDataQueryRequest extends PluginSqlQueryRequest {
+    database: string;
+}
+
+interface PluginSqlQueryResult {
+    columns: string[];
+    rows: unknown[][];
+    rowCount: number;
+    truncated: boolean;
+}
+
+interface PluginSqlExecuteRequest {
+    sql: string;
+    params?: unknown[];
+}
+
+interface PluginSqlExecuteResult {
+    rowsAffected: number;
+    lastInsertRowid: number;
+}
+
+interface PluginCreateConversationRequest {
+    assistantId: number;
+    conversationName?: string;
+}
+
+interface PluginAppendMessageRequest {
+    conversationId: number;
+    messageType: string;
+    content: string;
+    metadata?: unknown;
+}
+
+interface PluginUpdateMessageMetadataRequest {
+    messageId: number;
+    metadata?: unknown;
+}
+
+interface PluginDatabaseColumnSchema {
+    name: string;
+    dataType: string;
+    notNull: boolean;
+    defaultValue?: string | null;
+    primaryKey: boolean;
+}
+
+interface PluginDatabaseTableSchema {
+    name: string;
+    objectType: string;
+    sql?: string | null;
+    columns: PluginDatabaseColumnSchema[];
+}
+
+interface PluginDatabaseSchema {
+    database: string;
+    tables: PluginDatabaseTableSchema[];
+}
+
+type HookAction = "continue" | "replace" | "patch" | "block" | "approvalRequired";
+
+interface PluginHookResult {
+    action?: HookAction;
+    context?: unknown;
+    patch?: unknown;
+    message?: string | null;
+    metadata?: unknown;
+}
+
+type PluginHookHandler = (context: unknown) => PluginHookResult | void | Promise<PluginHookResult | void>;
+
+interface JsPluginHookRequest {
+    requestId: string;
+    pluginCode: string;
+    hookName: string;
+    context: unknown;
 }
 
 type PluginThemeMode = "light" | "dark" | "both";
@@ -133,6 +298,7 @@ export interface LoadedPlugin {
     version: string;
     code: string;
     pluginType: string[];
+    contributions?: PluginContributions;
     instance: AippPlugin | AippAssistantTypePlugin | null;
 }
 
@@ -141,6 +307,8 @@ class PluginRuntime {
     private loadPromise: Promise<LoadedPlugin[]> | null = null;
     private loadedScripts = new Set<string>();
     private pluginThemes = new Map<string, RegisteredPluginTheme>();
+    private hookHandlers = new Map<string, PluginHookHandler>();
+    private hookBridgeStarted = false;
 
     async loadPlugins(forceReload = false): Promise<LoadedPlugin[]> {
         if (!forceReload && this.plugins.length > 0) {
@@ -163,7 +331,10 @@ class PluginRuntime {
     private async loadPluginsInternal(forceReload: boolean): Promise<LoadedPlugin[]> {
         this.exposeReactGlobals();
         const pluginItems = await invoke<BackendPluginItem[]>("get_enabled_plugins");
-        const activeItems = pluginItems.filter((plugin) => plugin.isActive);
+        const activeItems = pluginItems.filter((plugin) => {
+            const runtimeType = plugin.runtime?.type ?? "js";
+            return plugin.isActive && runtimeType === "js";
+        });
         const activeCodes = new Set(activeItems.map((plugin) => plugin.code));
         const baseDir = await appDataDir();
         const normalizedBaseDir = baseDir.endsWith("/") ? baseDir.slice(0, -1) : baseDir;
@@ -172,10 +343,13 @@ class PluginRuntime {
         if (forceReload) {
             this.plugins.forEach((loadedPlugin) => this.clearPluginThemesForPlugin(loadedPlugin.code));
             this.plugins.forEach((loadedPlugin) => this.clearMarkdownTagsForPlugin(loadedPlugin.code));
+            this.plugins.forEach((loadedPlugin) => this.clearHookHandlersForPlugin(loadedPlugin.code));
             this.plugins = [];
         }
         this.clearStalePluginThemes(activeCodes);
         this.clearStaleMarkdownTags(activeCodes);
+        this.clearStaleHookHandlers(activeCodes);
+        this.startHookBridge();
 
         for (const plugin of activeItems) {
             try {
@@ -189,6 +363,7 @@ class PluginRuntime {
                     version: plugin.version,
                     code: plugin.code,
                     pluginType: plugin.pluginType,
+                    contributions: plugin.contributions,
                     instance: null,
                 });
             }
@@ -212,7 +387,8 @@ class PluginRuntime {
         normalizedBaseDir: string,
         forceReload: boolean
     ): Promise<LoadedPlugin> {
-        const pluginScriptPath = `${normalizedBaseDir}/plugin/${plugin.code}/dist/main.js`;
+        const entry = plugin.runtime?.entry || "dist/main.js";
+        const pluginScriptPath = `${normalizedBaseDir}/plugin/${plugin.code}/${entry}`;
         if (forceReload) {
             this.loadedScripts.delete(pluginScriptPath);
             this.removeInjectedScripts(pluginScriptPath);
@@ -223,6 +399,7 @@ class PluginRuntime {
             const cacheBustKey = forceReload
                 ? `${plugin.code}-${plugin.version}-${Date.now()}`
                 : `${plugin.code}-${plugin.version}`;
+            await invoke("verify_plugin_entry_checksum", { code: plugin.code });
             await this.injectScript(pluginScriptPath, cacheBustKey);
             this.loadedScripts.add(pluginScriptPath);
         }
@@ -236,19 +413,21 @@ class PluginRuntime {
                 version: plugin.version,
                 code: plugin.code,
                 pluginType: plugin.pluginType,
+                contributions: plugin.contributions,
                 instance: null,
             };
         }
 
         try {
             const instance = new PluginCtor();
-            await this.callOnPluginLoad(instance, plugin);
+            await this.callOnPluginLoad(instance, plugin, normalizedBaseDir);
             return {
                 pluginId: plugin.pluginId,
                 name: plugin.name,
                 version: plugin.version,
                 code: plugin.code,
                 pluginType: plugin.pluginType,
+                contributions: plugin.contributions,
                 instance,
             };
         } catch (error) {
@@ -259,6 +438,7 @@ class PluginRuntime {
                 version: plugin.version,
                 code: plugin.code,
                 pluginType: plugin.pluginType,
+                contributions: plugin.contributions,
                 instance: null,
             };
         }
@@ -295,7 +475,8 @@ class PluginRuntime {
 
     private async callOnPluginLoad(
         instance: AippPlugin | AippAssistantTypePlugin,
-        plugin: BackendPluginItem
+        plugin: BackendPluginItem,
+        normalizedBaseDir: string
     ): Promise<void> {
         const pluginInstance = instance as {
             onPluginLoad?: (systemApi: SystemApi) => void | Promise<void>;
@@ -303,13 +484,20 @@ class PluginRuntime {
         if (typeof pluginInstance.onPluginLoad !== "function") {
             return;
         }
-        const systemApi = this.createSystemApi(plugin);
+        const systemApi = this.createSystemApi(plugin, normalizedBaseDir);
         await Promise.resolve(pluginInstance.onPluginLoad(systemApi));
     }
 
-    private createSystemApi(plugin: BackendPluginItem): SystemApi {
+    private createSystemApi(plugin: BackendPluginItem, normalizedBaseDir: string): SystemApi {
         const pluginId = plugin.pluginId;
         const pluginCode = plugin.code;
+        const normalizePositiveId = (value: number | string, fieldName: string): number => {
+            const normalizedValue = Number(value);
+            if (!Number.isFinite(normalizedValue) || normalizedValue <= 0) {
+                throw new Error(`${fieldName} must be a positive number`);
+            }
+            return normalizedValue;
+        };
 
         return {
             pluginId,
@@ -319,6 +507,10 @@ class PluginRuntime {
             getData: async (key: string, sessionId = "global") => {
                 const dataMap = await this.getPluginDataMap(pluginId, sessionId);
                 return dataMap.get(key) ?? null;
+            },
+            assetUrl: (relativePath: string) => {
+                const normalizedRelativePath = this.normalizePluginAssetPath(relativePath);
+                return convertFileSrc(`${normalizedBaseDir}/plugin/${pluginCode}/${normalizedRelativePath}`);
             },
             getAllData: async (sessionId = "global") => {
                 const dataMap = await this.getPluginDataMap(pluginId, sessionId);
@@ -387,14 +579,163 @@ class PluginRuntime {
                         attributes: [...tag.attributes],
                         render: tag.render,
                     })),
+            hooks: {
+                register: (hookName: string, handler: PluginHookHandler) => {
+                    this.registerHookHandler(plugin, hookName, handler);
+                },
+                unregister: (hookName: string) => {
+                    this.unregisterHookHandler(plugin.code, hookName);
+                },
+            },
+            data: {
+                query: async (request: PluginDataQueryRequest) => {
+                    const database = this.normalizeDataDatabaseName(request.database);
+                    this.assertPluginPermission(plugin, `data.read.${database}`);
+                    return invoke<PluginSqlQueryResult>("plugin_data_query", {
+                        pluginId,
+                        request: {
+                            ...request,
+                            database,
+                        },
+                    });
+                },
+                schema: async (databaseName: string) => {
+                    const database = this.normalizeDataDatabaseName(databaseName);
+                    this.assertPluginPermission(plugin, `data.read.${database}`);
+                    return invoke<PluginDatabaseSchema>("plugin_data_schema", {
+                        pluginId,
+                        database,
+                    });
+                },
+            },
+            storage: {
+                query: async (request: PluginSqlQueryRequest) => {
+                    this.assertPluginPermission(plugin, "plugin.storage");
+                    return invoke<PluginSqlQueryResult>("plugin_storage_query", {
+                        pluginId,
+                        request,
+                    });
+                },
+                execute: async (request: PluginSqlExecuteRequest) => {
+                    this.assertPluginPermission(plugin, "plugin.storage");
+                    return invoke<PluginSqlExecuteResult>("plugin_storage_execute", {
+                        pluginId,
+                        request,
+                    });
+                },
+                schema: async () => {
+                    this.assertPluginPermission(plugin, "plugin.storage");
+                    return invoke<PluginDatabaseSchema>("plugin_storage_schema", {
+                        pluginId,
+                    });
+                },
+            },
+            conversations: {
+                getWithMessages: async (conversationId: number | string) => {
+                    this.assertPluginPermission(plugin, "conversation.read");
+                    return invoke<ConversationWithMessages>("plugin_get_conversation_with_messages", {
+                        pluginId,
+                        conversationId: normalizePositiveId(conversationId, "conversationId"),
+                    });
+                },
+            },
+            assistants: {
+                getDetail: async (assistantId: number | string) => {
+                    this.assertPluginPermission(plugin, "assistant.read");
+                    return invoke<AssistantDetail>("plugin_get_assistant_detail", {
+                        pluginId,
+                        assistantId: normalizePositiveId(assistantId, "assistantId"),
+                    });
+                },
+                updatePrompt: async (request: PluginUpdateAssistantPromptRequest) => {
+                    this.assertPluginPermission(plugin, "assistant.prompt.write");
+                    const prompt = String(request.prompt || "").trim();
+                    if (!prompt) {
+                        throw new Error("prompt is required");
+                    }
+                    return invoke<AssistantPrompt>("plugin_update_assistant_prompt", {
+                        pluginId,
+                        request: {
+                            assistantId: normalizePositiveId(request.assistantId, "assistantId"),
+                            prompt,
+                            expectedPromptId: request.expectedPromptId,
+                            expectedOldPrompt: request.expectedOldPrompt,
+                        },
+                    });
+                },
+            },
+            assistantConfig: {
+                get: async (assistantId: number | string, key: string) => {
+                    this.assertPluginPermission(plugin, "assistant.config");
+                    const normalizedAssistantId = normalizePositiveId(assistantId, "assistantId");
+                    const configs = await invoke<PluginAssistantConfigItem[]>("get_plugin_assistant_configs", {
+                        pluginId,
+                        assistantId: normalizedAssistantId,
+                    });
+                    return configs.find((item) => item.configKey === key)?.configValue ?? null;
+                },
+                getAll: async (assistantId: number | string) => {
+                    this.assertPluginPermission(plugin, "assistant.config");
+                    const normalizedAssistantId = normalizePositiveId(assistantId, "assistantId");
+                    const configs = await invoke<PluginAssistantConfigItem[]>("get_plugin_assistant_configs", {
+                        pluginId,
+                        assistantId: normalizedAssistantId,
+                    });
+                    const result: Record<string, string | null> = {};
+                    configs.forEach((item) => {
+                        result[item.configKey] = item.configValue ?? null;
+                    });
+                    return result;
+                },
+                set: async (assistantId: number | string, key: string, value: string | null) => {
+                    this.assertPluginPermission(plugin, "assistant.config");
+                    const normalizedAssistantId = normalizePositiveId(assistantId, "assistantId");
+                    await invoke("set_plugin_assistant_config", {
+                        pluginId,
+                        assistantId: normalizedAssistantId,
+                        key,
+                        value,
+                    });
+                },
+            },
+            actions: {
+                createConversation: async (request: PluginCreateConversationRequest) => {
+                    this.assertPluginPermission(plugin, "conversation.write");
+                    return invoke<number>("plugin_create_conversation", {
+                        pluginId,
+                        request,
+                    });
+                },
+                appendMessage: async (request: PluginAppendMessageRequest) => {
+                    this.assertPluginPermission(plugin, "conversation.write");
+                    return invoke<Message>("plugin_append_message", {
+                        pluginId,
+                        request,
+                    });
+                },
+                updateMessageMetadata: async (request: PluginUpdateMessageMetadataRequest) => {
+                    this.assertPluginPermission(plugin, "conversation.write");
+                    return invoke<Message>("plugin_update_message_metadata", {
+                        pluginId,
+                        request,
+                    });
+                },
+            },
             getDisplayConfig: async () => this.getDisplayConfig(),
             applyTheme: async (themeId: string) => this.applyDisplayTheme(themeId),
+            toast: {
+                success: (message: string) => toast.success(message),
+                error: (message: string) => toast.error(message),
+                info: (message: string) => toast.info(message),
+                warning: (message: string) => toast.warning(message),
+            },
             ui: {
                 Alert,
                 AlertDescription,
                 AlertTitle,
                 Badge,
                 Button,
+                IconButton,
                 Card,
                 CardContent,
                 CardDescription,
@@ -514,12 +855,147 @@ class PluginRuntime {
         markdownRegistry.clearStaleTags(activePluginCodes);
     }
 
-    private assertPluginPermission(plugin: BackendPluginItem, permission: string): void {
-        const permissions = Array.isArray(plugin.permissions) ? plugin.permissions : [];
-        if (permissions.includes(permission)) {
+    private hookHandlerKey(pluginCode: string, hookName: string): string {
+        return `${pluginCode}:${String(hookName || "").trim()}`;
+    }
+
+    private registerHookHandler(
+        plugin: BackendPluginItem,
+        hookName: string,
+        handler: PluginHookHandler
+    ): void {
+        const normalizedHookName = String(hookName || "").trim();
+        if (!normalizedHookName) {
+            throw new Error("hookName is required");
+        }
+        if (typeof handler !== "function") {
+            throw new Error(`hook handler for '${normalizedHookName}' must be a function`);
+        }
+        this.assertPluginPermission(plugin, `hook.${normalizedHookName}`);
+        this.hookHandlers.set(this.hookHandlerKey(plugin.code, normalizedHookName), handler);
+    }
+
+    private unregisterHookHandler(pluginCode: string, hookName: string): void {
+        this.hookHandlers.delete(this.hookHandlerKey(pluginCode, hookName));
+    }
+
+    private clearHookHandlersForPlugin(pluginCode: string): void {
+        [...this.hookHandlers.keys()]
+            .filter((key) => key.startsWith(`${pluginCode}:`))
+            .forEach((key) => this.hookHandlers.delete(key));
+    }
+
+    private clearStaleHookHandlers(activePluginCodes: Set<string>): void {
+        [...this.hookHandlers.keys()].forEach((key) => {
+            const [pluginCode] = key.split(":", 1);
+            if (!activePluginCodes.has(pluginCode)) {
+                this.hookHandlers.delete(key);
+            }
+        });
+    }
+
+    private startHookBridge(): void {
+        if (this.hookBridgeStarted || typeof window === "undefined") {
             return;
         }
-        throw new Error(`plugin '${plugin.code}' lacks required permission '${permission}'`);
+        this.hookBridgeStarted = true;
+        listen<JsPluginHookRequest>("plugin_hook_request", async (event) => {
+            await this.handleHookBridgeRequest(event.payload);
+        }).catch((error) => {
+            this.hookBridgeStarted = false;
+            console.error("[PluginRuntime] Failed to start JS hook bridge:", error);
+        });
+    }
+
+    private async handleHookBridgeRequest(payload: JsPluginHookRequest): Promise<void> {
+        if (this.loadPromise) {
+            await this.loadPromise.catch((error) => {
+                console.warn("[PluginRuntime] Plugin load failed before hook dispatch:", error);
+            });
+        }
+
+        const handler = this.hookHandlers.get(this.hookHandlerKey(payload.pluginCode, payload.hookName));
+        if (!handler) {
+            console.debug(
+                `[PluginRuntime] Ignoring hook '${payload.hookName}' for plugin '${payload.pluginCode}' in this window because no handler is registered.`
+            );
+            return;
+        }
+
+        try {
+            const rawResult = await Promise.resolve(handler(payload.context));
+            await this.submitHookBridgeResult(payload.requestId, this.normalizeHookResult(rawResult), null);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            await this.submitHookBridgeResult(payload.requestId, null, message);
+        }
+    }
+
+    private normalizeHookResult(result: PluginHookResult | void): PluginHookResult {
+        if (!result) {
+            return { action: "continue", metadata: {} };
+        }
+        return {
+            action: result.action || "continue",
+            context: result.context,
+            patch: result.patch,
+            message: result.message ?? null,
+            metadata: result.metadata ?? {},
+        };
+    }
+
+    private async submitHookBridgeResult(
+        requestId: string,
+        result: PluginHookResult | null,
+        error: string | null
+    ): Promise<void> {
+        try {
+            await invoke("submit_js_plugin_hook_result", {
+                requestId,
+                result,
+                error,
+            });
+        } catch (submitError) {
+            if (String(submitError).includes("Unknown or expired JS hook request")) {
+                return;
+            }
+            console.warn("[PluginRuntime] Failed to submit JS hook result:", submitError);
+        }
+    }
+
+    private assertPluginPermission(plugin: BackendPluginItem, permission: string): void {
+        const required = String(permission || "").trim().toLowerCase();
+        const permissions = Array.isArray(plugin.permissions)
+            ? plugin.permissions.map((item) => String(item || "").trim().toLowerCase())
+            : [];
+        const hasPermission = permissions.some((granted) => {
+            if (granted === "*" || granted === required) {
+                return true;
+            }
+            if (granted.endsWith(".*")) {
+                const prefix = granted.slice(0, -2);
+                return required.startsWith(`${prefix}.`);
+            }
+            return false;
+        });
+        if (hasPermission) {
+            return;
+        }
+        throw new Error(`plugin '${plugin.code}' lacks required permission '${required}'`);
+    }
+
+    private normalizeDataDatabaseName(database: string): string {
+        const normalized = String(database || "").trim().toLowerCase();
+        if (["scheduled_task", "scheduled-tasks", "scheduledtasks"].includes(normalized)) {
+            return "conversation";
+        }
+        if (["model", "models"].includes(normalized)) {
+            return "llm";
+        }
+        if (normalized === "artifact") {
+            return "artifacts";
+        }
+        return normalized;
     }
 
     private upsertThemeStyleElement(theme: RegisteredPluginTheme): void {
@@ -658,6 +1134,17 @@ class PluginRuntime {
             .replace(/[^a-z0-9_-]+/g, "-")
             .replace(/-{2,}/g, "-")
             .replace(/^[-_]+|[-_]+$/g, "");
+    }
+
+    private normalizePluginAssetPath(relativePath: string): string {
+        const normalized = String(relativePath || "")
+            .trim()
+            .replace(/\\/g, "/")
+            .replace(/^\/+/, "");
+        if (!normalized || normalized.split("/").some((segment) => segment === "..")) {
+            throw new Error("asset path must be a relative plugin path");
+        }
+        return normalized;
     }
 
     private normalizeThemeId(rawThemeId: string): string {

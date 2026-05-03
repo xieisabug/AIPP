@@ -18,6 +18,18 @@ interface RustCodeBlockProps {
     disableCollapse?: boolean;
 }
 
+const COLLAPSED_MAX_HEIGHT = 320;
+const INITIAL_COLLAPSE_WRAP_CHARS = 96;
+const INITIAL_COLLAPSE_LINE_THRESHOLD = 18;
+
+function shouldStartCollapsed(code: string): boolean {
+    const visualLineCount = code.split(/\r?\n/).reduce((total, line) => {
+        return total + Math.max(1, Math.ceil(line.length / INITIAL_COLLAPSE_WRAP_CHARS));
+    }, 0);
+
+    return visualLineCount > INITIAL_COLLAPSE_LINE_THRESHOLD;
+}
+
 const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
     language,
     children,
@@ -41,8 +53,9 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
     const rustHighlight = useRustHighlight();
 
     // 折叠逻辑相关
-    const COLLAPSED_MAX_HEIGHT = 320; // px，固定高度容器
-    const [isCollapsed, setIsCollapsed] = useState(false);
+    const [isCollapsed, setIsCollapsed] = useState(
+        () => !disableCollapse && shouldStartCollapsed(code),
+    );
     const [isOverflow, setIsOverflow] = useState(false);
     const userToggledRef = useRef(false);
     const streamingAutoCollapsedOnceRef = useRef(false);

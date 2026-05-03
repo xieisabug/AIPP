@@ -4,6 +4,10 @@
   "name": "Benchmark Plugin",
   "version": "0.1.0",
   "entry": "dist/main.js",
+  "runtime": {
+    "type": "js",
+    "entry": "dist/main.js"
+  },
   "description": "QA benchmark plugin with dataset management, scoring, and leaderboards.",
   "pluginTypes": [
     "interfaceType",
@@ -12,5 +16,15 @@
   "kinds": [
     "ui",
     "worker"
-  ]
+  ],
+  "contributions": {
+    "views": [
+      {
+        "id": "benchmark-dashboard",
+        "location": "config.plugin-center",
+        "title": "Benchmark Dashboard",
+        "description": "基于插件能力平台渲染的 Benchmark 仪表盘。"
+      }
+    ]
+  }
 }

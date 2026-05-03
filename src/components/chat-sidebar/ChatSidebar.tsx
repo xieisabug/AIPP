@@ -4,12 +4,14 @@ import { Button } from '@/components/ui/button';
 import { PanelRightClose, ExternalLink, ChevronLeft } from 'lucide-react';
 import ChatSidebarContent from './ChatSidebarContent';
 import { TodoItem, CodeArtifact, ContextItem } from './types';
+import type { LoadedPlugin } from '@/services/PluginRuntime';
 
 interface ChatSidebarProps {
     todos: TodoItem[];
     artifacts: CodeArtifact[];
     contextItems: ContextItem[];
     conversationId: string;
+    pluginList?: LoadedPlugin[];
     toggleRequestVersion?: number;
     className?: string;
     onOpenWindow?: () => void;
@@ -28,6 +30,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
     artifacts,
     contextItems,
     conversationId,
+    pluginList = [],
     toggleRequestVersion,
     className,
     onOpenWindow,
@@ -200,6 +203,8 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
                             todos={todos}
                             artifacts={artifacts}
                             contextItems={contextItems}
+                            pluginList={pluginList}
+                            conversationId={conversationId}
                             onArtifactClick={onArtifactClick}
                             onContextClick={onContextClick}
                         />

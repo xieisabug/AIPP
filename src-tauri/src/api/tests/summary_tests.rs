@@ -27,6 +27,7 @@ fn build_message(
         generation_group_id: generation_group_id.map(str::to_string),
         parent_group_id: parent_group_id.map(str::to_string),
         tool_calls_json: None,
+        metadata_json: None,
         first_token_time: None,
         ttft_ms: None,
     }

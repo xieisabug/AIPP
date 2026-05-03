@@ -1,0 +1,35 @@
+{
+  "id": "prompt-optimizer-plugin",
+  "code": "prompt-optimizer-plugin",
+  "name": "Prompt Optimizer Plugin",
+  "version": "0.1.0",
+  "entry": "dist/main.js",
+  "runtime": {
+    "type": "js",
+    "entry": "dist/main.js"
+  },
+  "description": "Manual assistant prompt optimizer with model-based review and diff preview.",
+  "pluginTypes": [
+    "interfaceType"
+  ],
+  "kinds": [
+    "ui"
+  ],
+  "permissions": [
+    "assistant.config",
+    "conversation.read",
+    "assistant.read",
+    "assistant.prompt.write"
+  ],
+  "contributions": {
+    "actions": [
+      {
+        "id": "prompt-optimizer",
+        "location": "conversation.title-actions",
+        "title": "优化提示词",
+        "description": "分析当前对话并生成提示词优化建议。",
+        "order": 40
+      }
+    ]
+  }
+}

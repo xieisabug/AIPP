@@ -4,6 +4,10 @@
   "name": "Directory Bang Plugin",
   "version": "0.1.0",
   "entry": "dist/main.js",
+  "runtime": {
+    "type": "js",
+    "entry": "dist/main.js"
+  },
   "description": "Adds !directory and !dir bangs backed by the built-in list_directory tool.",
   "pluginTypes": [
     "toolType",

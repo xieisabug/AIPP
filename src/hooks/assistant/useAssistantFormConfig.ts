@@ -7,6 +7,7 @@ import AssistantMCPFieldDisplay from "@/components/config/AssistantMCPFieldDispl
 import AssistantSkillsFieldDisplay from "@/components/config/AssistantSkillsFieldDisplay";
 import AssistantWorkspaceFieldDisplay from "@/components/config/AssistantWorkspaceFieldDisplay";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
+import type { PluginAssistantFormFieldContribution } from "@/services/PluginRuntime";
 
 interface UseAssistantFormConfigProps {
     currentAssistant: AssistantDetail | null;
@@ -18,6 +19,16 @@ interface UseAssistantFormConfigProps {
     navigateTo: (menuKey: string) => void;
     onConfigChange: (key: string, value: string | boolean, value_type: string) => void;
     onPromptChange: (value: string) => void;
+    pluginAssistantFormFields: Array<
+        PluginAssistantFormFieldContribution & {
+            pluginId: number;
+            pluginCode: string;
+            pluginName: string;
+            formKey: string;
+        }
+    >;
+    pluginAssistantConfigValues: Record<string, string | boolean>;
+    onPluginConfigChange: (formKey: string, value: string | boolean) => void;
 }
 
 export const useAssistantFormConfig = ({
@@ -30,8 +41,35 @@ export const useAssistantFormConfig = ({
     navigateTo,
     onConfigChange,
     onPromptChange,
+    pluginAssistantFormFields,
+    pluginAssistantConfigValues,
+    onPluginConfigChange,
 }: UseAssistantFormConfigProps) => {
     const { getConfigValue } = useFeatureConfig();
+
+    const resolvePluginFieldValue = useCallback(
+        (
+            field: PluginAssistantFormFieldContribution & {
+                pluginId: number;
+                pluginCode: string;
+                pluginName: string;
+                formKey: string;
+            }
+        ) => {
+            const configuredValue = pluginAssistantConfigValues[field.formKey];
+            if (configuredValue !== undefined) {
+                return configuredValue;
+            }
+            if (field.defaultValue === undefined || field.defaultValue === null) {
+                return field.type === "checkbox" || field.type === "switch" ? false : "";
+            }
+            if (field.type === "checkbox" || field.type === "switch") {
+                return field.defaultValue === true || field.defaultValue === "true";
+            }
+            return String(field.defaultValue);
+        },
+        [pluginAssistantConfigValues]
+    );
 
     // 处理配置修改
     const handleConfigChange = useCallback(
@@ -353,6 +391,83 @@ export const useAssistantFormConfig = ({
             });
         }
 
+        const pluginGroupCount = new Set(pluginAssistantFormFields.map((field) => field.pluginId)).size;
+        const shouldRenderPluginGroups = pluginGroupCount > 1;
+        const renderedPluginGroups = new Set<number>();
+        const pluginFieldsByPluginId = new Map<
+            number,
+            Array<
+                PluginAssistantFormFieldContribution & {
+                    pluginId: number;
+                    pluginCode: string;
+                    pluginName: string;
+                    formKey: string;
+                }
+            >
+        >();
+
+        pluginAssistantFormFields.forEach((field) => {
+            const existing = pluginFieldsByPluginId.get(field.pluginId) ?? [];
+            existing.push(field);
+            pluginFieldsByPluginId.set(field.pluginId, existing);
+        });
+
+        pluginAssistantFormFields.forEach((field) => {
+            if (shouldRenderPluginGroups && !renderedPluginGroups.has(field.pluginId)) {
+                renderedPluginGroups.add(field.pluginId);
+                baseConfigs.push({
+                    key: `plugin-group::${field.pluginId}`,
+                    config: {
+                        type: "static" as const,
+                        label: "插件扩展",
+                        value: field.pluginName || field.pluginCode,
+                        className: "border border-dashed border-border bg-muted/40 font-medium text-foreground",
+                    },
+                });
+            }
+
+            const resolvedValue = resolvePluginFieldValue(field);
+            const pluginFields = pluginFieldsByPluginId.get(field.pluginId) ?? [];
+            const enabledField = pluginFields.find(
+                (item) =>
+                    item.key === "enabled" &&
+                    (item.type === "checkbox" || item.type === "switch")
+            );
+            const pluginEnabledValue = enabledField
+                ? resolvePluginFieldValue(enabledField)
+                : true;
+            const shouldHideField =
+                field.key !== "enabled" &&
+                Boolean(enabledField) &&
+                pluginEnabledValue !== true &&
+                pluginEnabledValue !== "true";
+
+            const fieldType = (
+                ["input", "textarea", "select", "checkbox", "switch", "password"].includes(field.type)
+                    ? field.type
+                    : "input"
+            ) as "input" | "textarea" | "select" | "checkbox" | "switch" | "password";
+
+            baseConfigs.push({
+                key: field.formKey,
+                config: {
+                    type: fieldType,
+                    label: field.label,
+                    value: resolvedValue,
+                    placeholder: field.placeholder ?? undefined,
+                    tooltip: field.tooltip ?? field.description ?? undefined,
+                    hidden: shouldHideField,
+                    options: field.options?.map((option) => ({
+                        value: option.value,
+                        label: option.label,
+                        tooltip: option.tooltip ?? undefined,
+                    })),
+                    onChange: (value: string | boolean) => onPluginConfigChange(field.formKey, value),
+                    onBlur: (value: string | boolean) => onPluginConfigChange(field.formKey, value),
+                },
+            });
+        });
+
         return baseConfigs;
     }, [
         currentAssistant,
@@ -366,6 +481,10 @@ export const useAssistantFormConfig = ({
         handleModelChange,
         navigateTo,
         onPromptChange,
+        onPluginConfigChange,
+        resolvePluginFieldValue,
+        pluginAssistantConfigValues,
+        pluginAssistantFormFields,
         getAcpConfigValue,
     ]);
 

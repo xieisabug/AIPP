@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
+    Fragment,
     useCallback,
     useEffect,
     useMemo,
@@ -90,49 +91,6 @@ export interface InlineInteractionItem {
     content: ReactNode;
 }
 
-function collectSentBatchToolResultMessageIds(messages: Message[]): Set<number> {
-    const messagesByGenerationGroup = new Map<string, Message[]>();
-    [...messages]
-        .sort((a, b) => a.id - b.id)
-        .forEach((message) => {
-            const generationGroupId = message.generation_group_id;
-            if (!generationGroupId) {
-                return;
-            }
-            const existing = messagesByGenerationGroup.get(generationGroupId) ?? [];
-            existing.push(message);
-            messagesByGenerationGroup.set(generationGroupId, existing);
-        });
-
-    const sentMessageIds = new Set<number>();
-    messagesByGenerationGroup.forEach((groupMessages) => {
-        const toolResults = groupMessages.filter(
-            (message) => message.message_type === "tool_result"
-        );
-        if (toolResults.length === 0) {
-            return;
-        }
-
-        const lastToolResultId = toolResults[toolResults.length - 1].id;
-        const hasFollowupResponse = groupMessages.some(
-            (message) =>
-                message.message_type === "response" && message.id > lastToolResultId
-        );
-        if (!hasFollowupResponse) {
-            return;
-        }
-
-        groupMessages
-            .filter(
-                (message) =>
-                    message.message_type === "response" && message.id < lastToolResultId
-            )
-            .forEach((message) => sentMessageIds.add(message.id));
-    });
-
-    return sentMessageIds;
-}
-
 interface ConversationUIProps {
     conversationId: string;
     onChangeConversationId: (conversationId: string) => void;
@@ -148,6 +106,7 @@ interface ConversationUIProps {
     headerExtraActions?: ReactNode;
     allowFeishuDebugResend?: boolean;
     virtualizeMessages?: boolean;
+    windowLabel?: string;
 }
 
 const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
@@ -167,6 +126,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             headerExtraActions,
             allowFeishuDebugResend = false,
             virtualizeMessages = false,
+            windowLabel = "chat_ui",
         },
         ref
     ) => {
@@ -450,6 +410,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             runtimeState?.is_running,
             conversationId,
         ]);
+        const attachedFileCount = Array.isArray(fileInfoList) ? fileInfoList.length : 0;
 
         // 当 functionMap 变化时更新事件处理器
         useEffect(() => {
@@ -484,11 +445,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             groupRootMessageIds: messageGroupsData.groupRootMessageIds,
             getMessageVersionInfo: messageGroupsData.getMessageVersionInfo,
         });
-        const sentBatchToolResultMessageIds = useMemo(
-            () => collectSentBatchToolResultMessageIds(messages),
-            [messages],
-        );
-
         // 滚动管理 - 移除依赖项，改为手动调用
         const {
             messagesEndRef,
@@ -857,10 +813,158 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             [conversationId]
         );
 
+        const pluginHeaderActions = useMemo(() => {
+            const actionContext = {
+                conversationId: conversation?.id ?? null,
+                assistantId: conversation?.assistant_id ?? null,
+                conversationName: conversation?.name ?? "",
+                assistantName: conversation?.assistant_name ?? "",
+            };
+            const actionEntries = pluginList
+                .flatMap((plugin) =>
+                    (plugin.contributions?.actions ?? []).map((action: {
+                        id: string;
+                        location: string;
+                        order?: number | null;
+                    }) => ({
+                        plugin,
+                        action,
+                    }))
+                )
+                .filter(({ action }) => action.location === "conversation.title-actions")
+                .sort((left, right) => {
+                    const leftOrder = left.action.order ?? 100;
+                    const rightOrder = right.action.order ?? 100;
+                    if (leftOrder !== rightOrder) {
+                        return leftOrder - rightOrder;
+                    }
+                    return String(left.plugin.code ?? "").localeCompare(String(right.plugin.code ?? ""));
+                });
+
+            if (actionEntries.length === 0) {
+                return null;
+            }
+
+            return actionEntries.map(({ plugin, action }) => {
+                const instance = plugin.instance as
+                    | {
+                        renderAction?: (actionId: string, context?: Record<string, unknown>) => React.ReactNode;
+                    }
+                    | null;
+                if (typeof instance?.renderAction !== "function") {
+                    return null;
+                }
+                try {
+                    const rendered = instance.renderAction(action.id, actionContext);
+                    if (!rendered) {
+                        return null;
+                    }
+                    return <Fragment key={`${plugin.code}:${action.id}:${conversation?.id ?? "none"}`}>{rendered}</Fragment>;
+                } catch (error) {
+                    console.error(
+                        `[ConversationUI] Failed to render plugin action '${action.id}' from '${plugin.code}':`,
+                        error
+                    );
+                    return null;
+                }
+            });
+        }, [conversation, pluginList]);
+
+        const combinedHeaderActions = useMemo(() => {
+            if (!pluginHeaderActions && !headerExtraActions) {
+                return null;
+            }
+            return (
+                <>
+                    {pluginHeaderActions}
+                    {headerExtraActions}
+                </>
+            );
+        }, [headerExtraActions, pluginHeaderActions]);
+
+        const sendButtonSlotContext = useMemo(
+            () => ({
+                conversationId: conversation?.id ?? null,
+                assistantId: conversation?.assistant_id ?? null,
+                conversationName: conversation?.name ?? "",
+                assistantName: conversation?.assistant_name ?? "",
+                isResponding: effectiveAiIsResponsing,
+                inputText,
+                fileCount: attachedFileCount,
+                placement: "bottom",
+                isMobile,
+                windowLabel,
+            }),
+            [
+                attachedFileCount,
+                conversation,
+                effectiveAiIsResponsing,
+                inputText,
+                isMobile,
+                windowLabel,
+            ]
+        );
+
+        const renderSendButtonSlot = useCallback((location: string) => {
+            const slotEntries = pluginList
+                .flatMap((plugin) =>
+                    (plugin.contributions?.slots ?? []).map((slot: {
+                        id: string;
+                        location: string;
+                        order?: number | null;
+                    }) => ({
+                        plugin,
+                        slot,
+                    }))
+                )
+                .filter(({ slot }) => slot.location === location)
+                .sort((left, right) => {
+                    const leftOrder = left.slot.order ?? 100;
+                    const rightOrder = right.slot.order ?? 100;
+                    if (leftOrder !== rightOrder) {
+                        return leftOrder - rightOrder;
+                    }
+                    return String(left.plugin.code ?? "").localeCompare(String(right.plugin.code ?? ""));
+                });
+
+            for (const { plugin, slot } of slotEntries) {
+                const instance = plugin.instance as
+                    | {
+                        renderSlot?: (slotId: string, context?: Record<string, unknown>) => ReactNode;
+                    }
+                    | null;
+                if (typeof instance?.renderSlot !== "function") {
+                    continue;
+                }
+                try {
+                    const rendered = instance.renderSlot(slot.id, sendButtonSlotContext);
+                    if (rendered) {
+                        return rendered;
+                    }
+                } catch (error) {
+                    console.error(
+                        `[ConversationUI] Failed to render plugin slot '${slot.id}' from '${plugin.code}':`,
+                        error
+                    );
+                }
+            }
+            return null;
+        }, [pluginList, sendButtonSlotContext]);
+
+        const sendButtonVisualSlot = useMemo(
+            () => renderSendButtonSlot("chat.input.send-button-visual"),
+            [renderSendButtonSlot]
+        );
+
+        const sendButtonIconSlot = useMemo(
+            () => renderSendButtonSlot("chat.input.send-button-icon"),
+            [renderSendButtonSlot]
+        );
+
         const acpHeaderActions = useMemo(() => {
             const isAcpConversation = Boolean(acpWorkingDirectory) || Boolean(acpSessionState);
             if (!isAcpConversation) {
-                return headerExtraActions;
+                return combinedHeaderActions;
             }
 
             const currentMode = acpSessionState?.modes.find(
@@ -875,7 +979,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
             return (
                 <>
-                    {headerExtraActions}
+                    {combinedHeaderActions}
                     <Popover>
                         <PopoverTrigger asChild>
                             <span>
@@ -1005,9 +1109,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             acpMutationKey,
             acpSessionState,
             acpWorkingDirectory,
+            combinedHeaderActions,
             handleAcpConfigChange,
             handleAcpModeChange,
-            headerExtraActions,
         ]);
 
         // 监听错误通知事件
@@ -1167,7 +1271,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onMessageFork={handleMessageFork}
                             onToggleReasoningExpand={toggleReasoningExpand}
                             inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
-                            sentBatchToolResultMessageIds={sentBatchToolResultMessageIds}
                             allowFeishuDebugResend={allowFeishuDebugResend}
                             virtualizeMessages={virtualizeMessages}
                             scrollContainerRef={scrollContainerRef}
@@ -1201,6 +1304,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         isMobile={isMobile}
                         sidebarWidth={sidebarWidth}
                         sidebarVisible={!isMobile && !hideSidebar && Boolean(conversationId)}
+                        sendButtonIcon={sendButtonIconSlot}
+                        sendButtonVisual={sendButtonVisualSlot}
                     />
                 </div>
 
@@ -1211,6 +1316,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             artifacts={artifacts}
                             contextItems={contextItems}
                             conversationId={conversationId}
+                            pluginList={pluginList}
                             toggleRequestVersion={sidebarToggleRequestVersion}
                             onExpandChange={handleSidebarExpandChange}
                             onOpenWindow={handleOpenSidebarWindow}

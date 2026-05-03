@@ -56,7 +56,7 @@ function decodeJsonStringFragment(raw: string): string {
 }
 
 function normalizeInteractionMode(raw: unknown): PreviewCodeInteractionMode {
-    return raw === "none" ? "none" : "submit_once";
+    return raw === "submit_once" ? "submit_once" : "none";
 }
 
 function extractStringField(raw: string, fieldNames: string[]): string | undefined {

@@ -6,11 +6,15 @@ import TodoList from './TodoList';
 import ArtifactList from './ArtifactList';
 import ContextList from './ContextList';
 import { TodoItem, CodeArtifact, ContextItem } from './types';
+import PluginViewHost from '@/components/plugin/PluginViewHost';
+import type { LoadedPlugin } from '@/services/PluginRuntime';
 
 interface ChatSidebarContentProps {
     todos: TodoItem[];
     artifacts: CodeArtifact[];
     contextItems: ContextItem[];
+    pluginList?: LoadedPlugin[];
+    conversationId?: string;
     className?: string;
     onArtifactClick?: (artifact: CodeArtifact) => void;
     onContextClick?: (item: ContextItem) => void;
@@ -84,6 +88,8 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
     todos,
     artifacts,
     contextItems,
+    pluginList = [],
+    conversationId,
     className,
     onArtifactClick,
     onContextClick,
@@ -105,9 +111,22 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
         if (contextItems.length > 0 && !contextOpen) setContextOpen(true);
     }, [contextItems.length]);
 
+    const sidebarPluginViews = useMemo(
+        () =>
+            pluginList.flatMap((plugin) =>
+                (plugin.contributions?.views ?? []).filter((view) => view.location === "conversation.sidebar")
+            ),
+        [pluginList]
+    );
+    const [pluginViewsOpen, setPluginViewsOpen] = React.useState(sidebarPluginViews.length > 0);
+
+    React.useEffect(() => {
+        if (sidebarPluginViews.length > 0 && !pluginViewsOpen) setPluginViewsOpen(true);
+    }, [sidebarPluginViews.length]);
+
     const openCount = useMemo(() => {
-        return [todoOpen, artifactOpen, contextOpen].filter(Boolean).length;
-    }, [todoOpen, artifactOpen, contextOpen]);
+        return [todoOpen, artifactOpen, contextOpen, pluginViewsOpen].filter(Boolean).length;
+    }, [todoOpen, artifactOpen, contextOpen, pluginViewsOpen]);
 
     const contextValue = useMemo(() => ({
         sections: [],
@@ -146,6 +165,24 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
                 >
                     <ContextList items={contextItems} onItemClick={onContextClick} />
                 </CollapsibleSection>
+
+                {sidebarPluginViews.length > 0 && (
+                    <CollapsibleSection
+                        title="插件视图"
+                        count={sidebarPluginViews.length}
+                        isOpen={pluginViewsOpen}
+                        onOpenChange={setPluginViewsOpen}
+                    >
+                        <div className="p-2">
+                            <PluginViewHost
+                                pluginList={pluginList}
+                                location="conversation.sidebar"
+                                context={{ conversationId }}
+                                emptyDescription="当前没有侧边栏插件视图。"
+                            />
+                        </div>
+                    </CollapsibleSection>
+                )}
             </div>
         </SectionsContext.Provider>
     );

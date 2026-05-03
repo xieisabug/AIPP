@@ -37,6 +37,189 @@ interface SystemApiRunModelTextOptions {
     context?: string;
 }
 
+interface SystemApiSqlQueryRequest {
+    sql: string;
+    params?: unknown[];
+    maxRows?: number;
+}
+
+interface SystemApiDataQueryRequest extends SystemApiSqlQueryRequest {
+    database: string;
+}
+
+interface SystemApiSqlQueryResult {
+    columns: string[];
+    rows: unknown[][];
+    rowCount: number;
+    truncated: boolean;
+}
+
+interface SystemApiSqlExecuteRequest {
+    sql: string;
+    params?: unknown[];
+}
+
+interface SystemApiSqlExecuteResult {
+    rowsAffected: number;
+    lastInsertRowid: number;
+}
+
+interface SystemApiDatabaseColumnSchema {
+    name: string;
+    dataType: string;
+    notNull: boolean;
+    defaultValue?: string | null;
+    primaryKey: boolean;
+}
+
+interface SystemApiDatabaseTableSchema {
+    name: string;
+    objectType: string;
+    sql?: string | null;
+    columns: SystemApiDatabaseColumnSchema[];
+}
+
+interface SystemApiDatabaseSchema {
+    database: string;
+    tables: SystemApiDatabaseTableSchema[];
+}
+
+interface SystemApiData {
+    query(request: SystemApiDataQueryRequest): Promise<SystemApiSqlQueryResult>;
+    schema(database: string): Promise<SystemApiDatabaseSchema>;
+}
+
+interface SystemApiStorage {
+    query(request: SystemApiSqlQueryRequest): Promise<SystemApiSqlQueryResult>;
+    execute(request: SystemApiSqlExecuteRequest): Promise<SystemApiSqlExecuteResult>;
+    schema(): Promise<SystemApiDatabaseSchema>;
+}
+
+interface SystemApiAssistantConfig {
+    get(assistantId: number | string, key: string): Promise<string | null>;
+    getAll(assistantId: number | string): Promise<Record<string, string | null>>;
+    set(assistantId: number | string, key: string, value: string | null): Promise<void>;
+}
+
+interface SystemApiAssistantRecord {
+    id: number;
+    name: string;
+    description: string | null;
+    assistant_type: number | null;
+    is_addition: boolean;
+    created_time: string;
+}
+
+interface SystemApiAssistantPrompt {
+    id: number;
+    assistant_id: number;
+    prompt: string;
+    created_time?: string | null;
+}
+
+interface SystemApiAssistantModel {
+    id: number;
+    assistant_id: number;
+    provider_id: number;
+    model_code: string;
+    alias: string;
+}
+
+interface SystemApiAssistantModelConfig {
+    id: number;
+    assistant_id: number;
+    assistant_model_id: number;
+    name: string;
+    value: string | null;
+    value_type: string;
+}
+
+interface SystemApiAssistantPromptParam {
+    id: number;
+    assistant_id: number;
+    assistant_prompt_id: number;
+    param_name: string;
+    param_type: string | null;
+    param_value: string | null;
+}
+
+interface SystemApiAssistantMcpConfig {
+    id: number;
+    assistant_id: number;
+    mcp_server_id: number;
+    is_enabled: boolean;
+}
+
+interface SystemApiAssistantMcpToolConfig {
+    id: number;
+    assistant_id: number;
+    mcp_tool_id: number;
+    is_enabled: boolean;
+    is_auto_run: boolean;
+}
+
+interface SystemApiAssistantDetail {
+    assistant: SystemApiAssistantRecord;
+    prompts: SystemApiAssistantPrompt[];
+    model: SystemApiAssistantModel[];
+    model_configs: SystemApiAssistantModelConfig[];
+    prompt_params: SystemApiAssistantPromptParam[];
+    mcp_configs: SystemApiAssistantMcpConfig[];
+    mcp_tool_configs: SystemApiAssistantMcpToolConfig[];
+}
+
+interface SystemApiAssistantUpdatePromptRequest {
+    assistantId: number | string;
+    prompt: string;
+    expectedPromptId?: number;
+    expectedOldPrompt?: string;
+}
+
+interface SystemApiAssistants {
+    getDetail(assistantId: number | string): Promise<SystemApiAssistantDetail>;
+    updatePrompt(request: SystemApiAssistantUpdatePromptRequest): Promise<SystemApiAssistantPrompt>;
+}
+
+interface SystemApiConversations {
+    getWithMessages(conversationId: number | string): Promise<ConversationWithMessages>;
+}
+
+interface SystemApiActions {
+    createConversation(request: {
+        assistantId: number;
+        conversationName?: string;
+    }): Promise<number>;
+    appendMessage(request: {
+        conversationId: number;
+        messageType: string;
+        content: string;
+        metadata?: unknown;
+    }): Promise<Message>;
+    updateMessageMetadata(request: {
+        messageId: number;
+        metadata?: unknown;
+    }): Promise<Message>;
+}
+
+type SystemApiHookAction = "continue" | "replace" | "patch" | "block" | "approvalRequired";
+
+interface SystemApiHookResult {
+    action?: SystemApiHookAction;
+    context?: unknown;
+    patch?: unknown;
+    message?: string | null;
+    metadata?: unknown;
+}
+
+type SystemApiHookHandler = (
+    context: unknown
+) => SystemApiHookResult | void | Promise<SystemApiHookResult | void>;
+
+interface SystemApiHooks {
+    register(hookName: string, handler: SystemApiHookHandler): void;
+    unregister(hookName: string): void;
+}
+
 type SystemApiThemeMode = "light" | "dark" | "both";
 
 interface SystemApiThemeDefinition {
@@ -90,6 +273,7 @@ interface SystemApiUiKit {
     AlertTitle?: React.ComponentType<any>;
     Badge?: React.ComponentType<any>;
     Button?: React.ComponentType<any>;
+    IconButton?: React.ComponentType<any>;
     Card?: React.ComponentType<any>;
     CardContent?: React.ComponentType<any>;
     CardDescription?: React.ComponentType<any>;
@@ -125,6 +309,7 @@ interface SystemApi {
     pluginCode: string;
     listAssistants(): Promise<SystemApiAssistantItem[]>;
     listModels(): Promise<SystemApiModelItem[]>;
+    assetUrl(relativePath: string): string;
     getData(key: string, sessionId?: string): Promise<string | null>;
     getAllData(sessionId?: string): Promise<Record<string, string | null>>;
     setData(key: string, value: string | null, sessionId?: string): Promise<void>;
@@ -136,8 +321,21 @@ interface SystemApi {
     registerMarkdownTag(registration: SystemApiMarkdownTagRegistration): void;
     unregisterMarkdownTag(tagName: string): void;
     listMarkdownTags(): Promise<SystemApiMarkdownTagRegistration[]>;
+    hooks: SystemApiHooks;
+    data: SystemApiData;
+    storage: SystemApiStorage;
+    conversations: SystemApiConversations;
+    assistants: SystemApiAssistants;
+    assistantConfig: SystemApiAssistantConfig;
+    actions: SystemApiActions;
     getDisplayConfig(): Promise<SystemApiDisplayConfig>;
     applyTheme(themeId: string): Promise<void>;
+    toast?: {
+        success(message: string): void;
+        error(message: string): void;
+        info(message: string): void;
+        warning(message: string): void;
+    };
     ui?: SystemApiUiKit;
     invoke<T = unknown>(command: string, args?: Record<string, unknown>): Promise<T>;
 }
@@ -163,6 +361,8 @@ interface Message {
     parent_id?: number | null;
     regenerate: Array<Message> | null;
     attachment_list?: Array<any>;
+    tool_calls_json?: string | null;
+    metadata_json?: string | null;
 }
 
 interface AddFieldOptions {
@@ -421,7 +621,9 @@ declare class Config {
 
 declare class AippPlugin {
     onPluginLoad(systemApi: SystemApi): void;
-    renderComponent?(): React.ReactNode;
+    renderView?(viewId: string, context?: Record<string, unknown>): React.ReactNode;
+    renderAction?(actionId: string, context?: Record<string, unknown>): React.ReactNode;
+    renderSlot?(slotId: string, context?: Record<string, unknown>): React.ReactNode;
     config(): Config;
 }
 

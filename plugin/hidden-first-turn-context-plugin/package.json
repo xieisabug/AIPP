@@ -1,0 +1,11 @@
+{
+  "name": "@aipp/hidden-first-turn-context-plugin",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Hidden first-turn context plugin source project (builds to dist/main.js)",
+  "scripts": {
+    "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
+    "watch": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json --watch",
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\""
+  }
+}

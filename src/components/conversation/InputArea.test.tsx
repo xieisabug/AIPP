@@ -2,6 +2,7 @@ import { useState } from "react";
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { emit } from "@tauri-apps/api/event";
 import InputArea from "./InputArea";
 import { clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 
@@ -30,9 +31,12 @@ function InputAreaHarness({ initialText = "" }: { initialText?: string }) {
 }
 
 describe("InputArea slash completion", () => {
+    let bangList: [string, string, string, unknown?][];
+
     beforeEach(() => {
+        bangList = [];
         clearAllMockHandlers();
-        mockInvokeHandler("get_bang_list", () => []);
+        mockInvokeHandler("get_bang_list", () => bangList);
         mockInvokeHandler("get_assistants", () => []);
         mockInvokeHandler("get_artifacts_for_completion", () => []);
         mockInvokeHandler("get_skills_for_slash_completion", () => [
@@ -95,5 +99,30 @@ describe("InputArea slash completion", () => {
         await user.keyboard("{Enter}");
         await new Promise((resolve) => setTimeout(resolve, 0));
         expect(textarea.value).toBe("/skills(React Best Practices)");
+    });
+
+    it("refreshes bang completions when plugin registry changes", async () => {
+        const user = userEvent.setup();
+        render(<InputAreaHarness />);
+
+        await act(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+
+        bangList = [
+            ["run_script", "run_script(|)", "执行一段 shell 命令，并将输出直接注入到提示词上下文。"],
+        ];
+
+        await act(async () => {
+            await emit("plugin_registry_changed");
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+
+        const textarea = screen.getByRole("textbox");
+        await user.type(textarea, "!run");
+
+        expect(
+            await screen.findByText("执行一段 shell 命令，并将输出直接注入到提示词上下文。"),
+        ).toBeInTheDocument();
     });
 });

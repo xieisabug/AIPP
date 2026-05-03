@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "none",
+    "outFile": "dist/main.js",
+    "strict": false,
+    "noEmitOnError": true,
+    "skipLibCheck": true,
+    "sourceMap": false
+  },
+  "files": [
+    "../../docs/plugin-template/shared/aipp-plugin-sdk.d.ts",
+    "src/main.ts"
+  ]
+}

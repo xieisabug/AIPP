@@ -669,6 +669,7 @@ mod tests {
             generation_group_id: None,
             parent_group_id: None,
             tool_calls_json: None,
+            metadata_json: None,
             first_token_time: None,
             ttft_ms: None,
         };
@@ -705,6 +706,7 @@ mod tests {
             generation_group_id: Some("group-1".to_string()),
             parent_group_id: None,
             tool_calls_json: None,
+            metadata_json: None,
             first_token_time: None,
             ttft_ms: None,
         };
@@ -749,6 +751,7 @@ mod tests {
             generation_group_id: Some("group-1".to_string()),
             parent_group_id: None,
             tool_calls_json: None,
+            metadata_json: None,
             first_token_time: None,
             ttft_ms: None,
         };
@@ -783,6 +786,7 @@ mod tests {
             generation_group_id: Some("group-1".to_string()),
             parent_group_id: None,
             tool_calls_json: None,
+            metadata_json: None,
             first_token_time: None,
             ttft_ms: None,
         };
@@ -818,6 +822,7 @@ mod tests {
             generation_group_id: Some("group-1".to_string()),
             parent_group_id: None,
             tool_calls_json: None,
+            metadata_json: None,
             first_token_time: None,
             ttft_ms: None,
         };

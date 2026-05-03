@@ -303,6 +303,7 @@ pub async fn get_conversation_with_messages(
             generation_group_id: message.generation_group_id,
             parent_group_id: message.parent_group_id,
             tool_calls_json: message.tool_calls_json,
+            metadata_json: message.metadata_json,
             first_token_time: message.first_token_time,
             ttft_ms: message.ttft_ms,
             attachment_list,
@@ -521,6 +522,7 @@ pub async fn create_message(
         generation_group_id: None,
         parent_group_id: None,
         tool_calls_json: None,
+        metadata_json: None,
         first_token_time: None,
         ttft_ms: None,
     };

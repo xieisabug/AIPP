@@ -36,6 +36,7 @@ fn create_message_detail(
         attachment_list: Vec::new(),
         regenerate: Vec::new(),
         tool_calls_json: None,
+        metadata_json: None,
         first_token_time: None,
         ttft_ms: None,
     }
