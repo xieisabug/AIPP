@@ -1,6 +1,7 @@
 use super::assistant_api::AssistantDetail;
 use crate::api::ai::acp::{
-    apply_network_proxy_to_env_vars, extract_acp_config, spawn_acp_session_task,
+    apply_network_proxy_to_env_vars, extract_acp_config, spawn_acp_idle_reaper_once,
+    spawn_acp_session_task,
 };
 use crate::api::ai::chat::{
     extract_assistant_from_message, handle_non_stream_chat as ai_handle_non_stream_chat,
@@ -884,9 +885,12 @@ pub async fn ask_ai(
             .map(|(_, _, attachments)| attachments.clone())
             .unwrap_or_default();
 
+        spawn_acp_idle_reaper_once(app_handle_clone.clone());
+
         let session_handle = {
             let mut sessions = acp_session_state.sessions.lock().await;
-            if let Some(entry) = sessions.get(&conversation_id) {
+            if let Some(entry) = sessions.get_mut(&conversation_id) {
+                entry.touch();
                 entry.handle.clone()
             } else {
                 let handle = spawn_acp_session_task(

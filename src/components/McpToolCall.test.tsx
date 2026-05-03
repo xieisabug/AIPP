@@ -141,6 +141,80 @@ describe("McpToolCall call_id binding", () => {
         expect(screen.queryByTestId("shine-border")).not.toBeInTheDocument();
     });
 
+    it("keeps a successful result when a later success update omits result", async () => {
+        const conversationId = 18;
+        const callId = 152;
+        const resultText = "{\"items\":[\"search-result\"]}";
+
+        mockInvokeHandler("get_mcp_tool_call", () => ({
+            id: callId,
+            conversation_id: conversationId,
+            message_id: 22,
+            server_id: 1,
+            server_name: "search",
+            tool_name: "search_web",
+            parameters: "{\"query\":\"hello\"}",
+            status: "success",
+            result: resultText,
+            created_time: "2024-01-01T00:00:00.000Z",
+        }));
+
+        const firstState = new Map<number, MCPToolCallUpdateEvent>([
+            [callId, {
+                call_id: callId,
+                conversation_id: conversationId,
+                status: "success",
+                server_name: "search",
+                tool_name: "search_web",
+                parameters: "{\"query\":\"hello\"}",
+                result: resultText,
+            }],
+        ]);
+
+        const { rerender } = render(
+            <McpToolCall
+                conversationId={conversationId}
+                messageId={22}
+                callId={callId}
+                serverName="search"
+                toolName="search_web"
+                parameters='{"query":"hello"}'
+                mcpToolCallStates={firstState}
+                shiningMcpCallId={null}
+            />
+        );
+
+        await flushEffects();
+        expect(screen.getByText(/search-result/)).toBeInTheDocument();
+
+        const laterState = new Map<number, MCPToolCallUpdateEvent>([
+            [callId, {
+                call_id: callId,
+                conversation_id: conversationId,
+                status: "success",
+                server_name: "search",
+                tool_name: "search_web",
+                parameters: "{\"query\":\"hello\"}",
+            }],
+        ]);
+
+        rerender(
+            <McpToolCall
+                conversationId={conversationId}
+                messageId={22}
+                callId={callId}
+                serverName="search"
+                toolName="search_web"
+                parameters='{"query":"hello"}'
+                mcpToolCallStates={laterState}
+                shiningMcpCallId={null}
+            />
+        );
+
+        await flushEffects();
+        expect(screen.getByText(/search-result/)).toBeInTheDocument();
+    });
+
     it("renders streaming state with '生成中' badge and shine border", async () => {
         const conversationId = 9;
 

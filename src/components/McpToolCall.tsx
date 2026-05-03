@@ -186,7 +186,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     break;
                 case "success":
                     setExecutionState("success");
-                    setExecutionResult(globalState.result ?? null);
+                    setExecutionResult((prev) => globalState.result ?? prev ?? null);
                     setExecutionError(null);
                     // 成功后不改变展开状态，保持用户的选择或使用3秒自动收起逻辑
                     break;
@@ -229,7 +229,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     });
 
                     if (result.status === "success") {
-                        setExecutionResult(result.result ?? null);
+                        setExecutionResult((prev) => result.result ?? prev ?? null);
                         setExecutionError(null);
                         setExecutionState("success");
                         if (result.result) {
@@ -347,7 +347,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             });
 
             if (result.status === "success") {
-                setExecutionResult(result.result ?? null);
+                setExecutionResult((prev) => result.result ?? prev ?? null);
                 setExecutionError(null);
                 setExecutionState("success");
             } else if (result.status === "failed") {

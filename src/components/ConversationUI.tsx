@@ -21,6 +21,7 @@ import {
     GroupMergeEvent,
     MCPToolCallUpdateEvent,
     AcpSessionConfigOption,
+    AcpConversationSessionState,
 } from "../data/Conversation";
 import "katex/dist/katex.min.css";
 import { listen, emit } from "@tauri-apps/api/event";
@@ -64,7 +65,7 @@ import { Bot, LoaderCircle } from "lucide-react";
 import { toast } from "sonner";
 
 // 导入 Chat Sidebar 相关
-import { ChatSidebar } from "./chat-sidebar";
+import { ChatSidebar, type TodoItem } from "./chat-sidebar";
 import { useTodoList } from "@/hooks/useTodoList";
 import { useArtifactExtractor } from "@/hooks/useArtifactExtractor";
 import { useExplicitArtifacts } from "@/hooks/useExplicitArtifacts";
@@ -391,10 +392,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             clearShiningMessages,
             setPendingUserMessage,
             acpSessionState,
+            applyAcpSessionState,
         } = useConversationEvents(conversationEventsOptions);
 
         const [acpMutationKey, setAcpMutationKey] = useState<string | null>(null);
         const acpLoadUnsupportedNoticeRef = useRef<string | null>(null);
+        const acpRestoreNoticeRef = useRef<string | null>(null);
+        const acpAutoConnectKeyRef = useRef<string | null>(null);
 
         useEffect(() => {
             streamingMessagesRef.current = streamingMessages;
@@ -420,6 +424,32 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, [
             acpSessionState?.load_session_supported,
             acpSessionState?.session_resume_supported,
+            acpSessionState?.session_id,
+            conversationId,
+        ]);
+
+        useEffect(() => {
+            const method = acpSessionState?.restored_session_method;
+            if (!acpSessionState?.session_id || !method) {
+                return;
+            }
+
+            const noticeKey = `${conversationId}:${acpSessionState.session_id}:${method}`;
+            if (acpRestoreNoticeRef.current === noticeKey) {
+                return;
+            }
+
+            acpRestoreNoticeRef.current = noticeKey;
+            const methodLabel = method === "resume" ? "session/resume" : "session/load";
+            const description =
+                method === "resume"
+                    ? "AIPP 保留本地对话展示，Agent 仅恢复内部上下文。"
+                    : "AIPP 已抑制历史回放，避免重复写入当前对话。";
+            toast.success(`已通过 ${methodLabel} 恢复 ACP 会话`, {
+                description,
+            });
+        }, [
+            acpSessionState?.restored_session_method,
             acpSessionState?.session_id,
             conversationId,
         ]);
@@ -789,11 +819,37 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             invoke<string>("get_acp_working_directory", { assistantId })
                 .then((workingDirectory) => {
                     setAcpWorkingDirectory(workingDirectory);
+                    const conversationIdNum = Number(conversationId);
+                    if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
+                        return;
+                    }
+                    const connectKey = `${conversationIdNum}:${assistantId}`;
+                    if (acpAutoConnectKeyRef.current === connectKey) {
+                        return;
+                    }
+                    acpAutoConnectKeyRef.current = connectKey;
+                    void invoke<AcpConversationSessionState | null>("ensure_acp_session_connected", {
+                        conversationId: conversationIdNum,
+                        assistantId,
+                    })
+                        .then((state) => {
+                            if (acpAutoConnectKeyRef.current !== connectKey) {
+                                return;
+                            }
+                            acpAutoConnectKeyRef.current = null;
+                            applyAcpSessionState(state);
+                        })
+                        .catch((error) => {
+                            if (acpAutoConnectKeyRef.current === connectKey) {
+                                acpAutoConnectKeyRef.current = null;
+                            }
+                            console.warn("[ACP] Auto connect failed", error);
+                        });
                 })
                 .catch(() => {
                     setAcpWorkingDirectory(null);
                 });
-        }, [conversation?.assistant_id, selectedAssistant, assistants]);
+        }, [conversation?.assistant_id, selectedAssistant, assistants, conversationId, applyAcpSessionState]);
 
         const handleAcpConfigChange = useCallback(
             async (option: AcpSessionConfigOption, value: string) => {
@@ -983,6 +1039,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             const updatedAtText = acpSessionState?.updated_at
                 ? new Date(acpSessionState.updated_at).toLocaleString()
                 : null;
+            const configOptionCount = acpSessionState?.config_options.length ?? 0;
             const renderAcpConfigSelect = (option: AcpSessionConfigOption) => (
                 <div key={option.id} className="space-y-1.5">
                     <div className="flex items-center gap-2">
@@ -1081,26 +1138,38 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 ) : null}
                             </div>
 
-                            {!acpSessionState?.session_id ? (
-                                <div className="text-xs text-muted-foreground">
-                                    首次发送消息后才会创建 ACP 会话。
-                                </div>
-                            ) : (
-                                <>
-                                    {acpSessionState.config_options.length === 0 ? (
-                                        <div className="text-xs text-muted-foreground">
-                                            该 Agent 不支持新版会话配置。
-                                        </div>
-                                    ) : (
-                                        <div className="space-y-3">
-                                            {[modelOption, modeOption, thoughtOption]
-                                                .filter((option): option is AcpSessionConfigOption => Boolean(option))
-                                                .map(renderAcpConfigSelect)}
-                                            {otherOptions.length > 0 ? <Separator /> : null}
-                                            {otherOptions.map(renderAcpConfigSelect)}
-                                        </div>
-                                    )}
+                            <Separator />
 
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between gap-2">
+                                    <span className="text-xs font-medium">会话配置</span>
+                                    <Badge variant="secondary" className="text-[10px]">
+                                        {configOptionCount} 项
+                                    </Badge>
+                                </div>
+                                {!acpSessionState?.session_id ? (
+                                    <div className="text-xs text-muted-foreground">
+                                        正在连接 ACP session；连接成功后会读取 Agent 返回的 configOptions。
+                                    </div>
+                                ) : configOptionCount === 0 ? (
+                                    <div className="text-xs text-muted-foreground">
+                                        {acpSessionState.restored_session_method
+                                            ? `该 Agent 本次通过 session/${acpSessionState.restored_session_method} 恢复，但没有返回可配置的 configOptions。`
+                                            : "该 Agent 当前没有返回可配置的 configOptions。"}
+                                    </div>
+                                ) : (
+                                    <div className="space-y-3">
+                                        {[modelOption, modeOption, thoughtOption]
+                                            .filter((option): option is AcpSessionConfigOption => Boolean(option))
+                                            .map(renderAcpConfigSelect)}
+                                        {otherOptions.length > 0 ? <Separator /> : null}
+                                        {otherOptions.map(renderAcpConfigSelect)}
+                                    </div>
+                                )}
+                            </div>
+
+                            {acpSessionState?.session_id ? (
+                                <>
                                     {acpSessionState.plan.length > 0 ? (
                                         <>
                                             <Separator />
@@ -1131,7 +1200,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                         </>
                                     ) : null}
                                 </>
-                            )}
+                            ) : null}
                         </PopoverContent>
                     </Popover>
                 </>
@@ -1143,6 +1212,20 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             combinedHeaderActions,
             handleAcpConfigChange,
         ]);
+
+        const sidebarTodos = useMemo<TodoItem[]>(() => {
+            const acpPlanTodos: TodoItem[] = (acpSessionState?.plan ?? []).map((entry) => ({
+                content: entry.content,
+                status:
+                    entry.status === "completed"
+                        ? "completed"
+                        : entry.status === "in_progress"
+                          ? "in_progress"
+                          : "pending",
+                activeForm: entry.priority ? `ACP ${entry.priority}` : "ACP Plan",
+            }));
+            return [...acpPlanTodos, ...todos];
+        }, [acpSessionState?.plan, todos]);
 
         // 监听错误通知事件
         useEffect(() => {
@@ -1343,7 +1426,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 {/* Right sidebar - only show on desktop when sidebar window is not open */}
                 {!isMobile && !hideSidebar && conversationId && !sidebarWindowOpen && (
                         <ChatSidebar
-                            todos={todos}
+                            todos={sidebarTodos}
                             artifacts={artifacts}
                             contextItems={contextItems}
                             conversationId={conversationId}

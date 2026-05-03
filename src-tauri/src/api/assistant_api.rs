@@ -1,6 +1,6 @@
 use crate::api::ai::acp::{
     apply_network_proxy_to_env_vars, build_acp_launch_plan, extract_acp_config,
-    resolve_acp_cli_path,
+    resolve_acp_cli_path, spawn_acp_idle_reaper_once, spawn_acp_session_task, AcpSessionEntry,
 };
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::{
@@ -654,6 +654,77 @@ pub fn get_acp_working_directory(
         .map_err(|e| e.to_string())?;
 
     Ok(acp_config.working_directory.display().to_string())
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle, window, acp_session_state), fields(conversation_id, assistant_id))]
+pub async fn ensure_acp_session_connected(
+    window: tauri::Window,
+    app_handle: tauri::AppHandle,
+    acp_session_state: tauri::State<'_, crate::AcpSessionState>,
+    conversation_id: i64,
+    assistant_id: i64,
+) -> Result<Option<crate::api::ai::acp::AcpConversationSessionState>, String> {
+    spawn_acp_idle_reaper_once(app_handle.clone());
+
+    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let assistant = assistant_db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
+
+    if assistant.assistant_type != Some(4) {
+        return Ok(None);
+    }
+
+    let model_configs =
+        assistant_db.get_assistant_model_configs(assistant_id).map_err(|e| e.to_string())?;
+    let provider_configs = if let Some(model) =
+        assistant_db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?.first()
+    {
+        let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+        llm_db.get_llm_provider_config(model.provider_id).map_err(|e| e.to_string())?
+    } else {
+        Vec::new()
+    };
+
+    let proxy_enabled = provider_configs
+        .iter()
+        .find(|config| config.name == "proxy_enabled")
+        .and_then(|config| config.value.parse::<bool>().ok())
+        .unwrap_or(false);
+
+    let feature_config_state = app_handle.state::<FeatureConfigState>();
+    let config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
+    let network_proxy =
+        proxy_enabled.then(|| get_network_proxy_from_config(&config_feature_map)).flatten();
+
+    let mut acp_config = extract_acp_config(&model_configs, &provider_configs)
+        .map_err(|e| e.to_string())?;
+    if let Some(proxy_url) = network_proxy.as_deref() {
+        apply_network_proxy_to_env_vars(&mut acp_config.env_vars, proxy_url);
+    }
+
+    let handle = {
+        let mut sessions = acp_session_state.sessions.lock().await;
+        if let Some(entry) = sessions.get_mut(&conversation_id) {
+            entry.touch();
+            entry.handle.clone()
+        } else {
+            let handle = spawn_acp_session_task(
+                app_handle.clone(),
+                conversation_id,
+                acp_config,
+            );
+            sessions.insert(
+                conversation_id,
+                AcpSessionEntry::new(handle.clone(), conversation_id),
+            );
+            handle
+        }
+    };
+
+    handle.start(window).await.map_err(|error| error.to_string())?;
+
+    let sessions = acp_session_state.sessions.lock().await;
+    Ok(sessions.get(&conversation_id).map(|entry| entry.snapshot.clone()))
 }
 
 #[tauri::command]

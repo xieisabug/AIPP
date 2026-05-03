@@ -55,7 +55,6 @@ pub async fn run_summary_task(
         get_conversations_needing_summary(app_handle, scheduler_state).await?;
 
     if conversations_to_summarize.is_empty() {
-        debug!("没有需要总结的对话");
         return Ok(());
     }
 
@@ -193,8 +192,6 @@ async fn get_conversations_needing_summary(
         })?
         .filter_map(|r| r.ok())
         .collect();
-
-    debug!(count = conversation_ids.len(), "查询到需要总结的对话数量");
 
     Ok(conversation_ids)
 }

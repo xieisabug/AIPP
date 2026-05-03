@@ -41,7 +41,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
@@ -556,6 +557,7 @@ pub struct AcpConversationSessionState {
     pub updated_at: Option<String>,
     pub load_session_supported: bool,
     pub session_resume_supported: bool,
+    pub restored_session_method: Option<String>,
     pub prompt_capabilities: AcpPromptCapabilitiesPayload,
     pub current_mode_id: Option<String>,
     pub modes: Vec<AcpSessionModePayload>,
@@ -571,6 +573,10 @@ struct AcpSessionStateSnapshotEvent {
 }
 
 enum AcpSessionCommand {
+    Start {
+        window: tauri::Window,
+        response: oneshot::Sender<Result<(), String>>,
+    },
     Prompt {
         message_id: i64,
         prompt: String,
@@ -578,10 +584,6 @@ enum AcpSessionCommand {
         window: tauri::Window,
     },
     CancelCurrentPrompt {
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    SetMode {
-        mode_id: String,
         response: oneshot::Sender<Result<(), String>>,
     },
     SetConfigOption {
@@ -597,6 +599,16 @@ pub struct AcpSessionHandle {
 }
 
 impl AcpSessionHandle {
+    pub async fn start(&self, window: tauri::Window) -> Result<(), AppError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(AcpSessionCommand::Start { window, response: tx })
+            .map_err(|_| AppError::UnknownError("ACP session closed".to_string()))?;
+        rx.await
+            .map_err(|_| AppError::UnknownError("ACP session closed".to_string()))?
+            .map_err(AppError::UnknownError)
+    }
+
     pub fn send_prompt(
         &self,
         message_id: i64,
@@ -613,16 +625,6 @@ impl AcpSessionHandle {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(AcpSessionCommand::CancelCurrentPrompt { response: tx })
-            .map_err(|_| AppError::UnknownError("ACP session closed".to_string()))?;
-        rx.await
-            .map_err(|_| AppError::UnknownError("ACP session closed".to_string()))?
-            .map_err(AppError::UnknownError)
-    }
-
-    pub async fn set_mode(&self, mode_id: String) -> Result<(), AppError> {
-        let (tx, rx) = oneshot::channel();
-        self.sender
-            .send(AcpSessionCommand::SetMode { mode_id, response: tx })
             .map_err(|_| AppError::UnknownError("ACP session closed".to_string()))?;
         rx.await
             .map_err(|_| AppError::UnknownError("ACP session closed".to_string()))?
@@ -652,6 +654,7 @@ impl AcpSessionHandle {
 pub struct AcpSessionEntry {
     pub handle: AcpSessionHandle,
     pub snapshot: AcpConversationSessionState,
+    pub last_activity: Instant,
 }
 
 impl AcpSessionEntry {
@@ -659,7 +662,16 @@ impl AcpSessionEntry {
         Self {
             handle,
             snapshot: AcpConversationSessionState { conversation_id, ..Default::default() },
+            last_activity: Instant::now(),
         }
+    }
+
+    pub fn touch(&mut self) {
+        self.last_activity = Instant::now();
+    }
+
+    pub fn is_idle_for(&self, idle_timeout: Duration) -> bool {
+        !self.snapshot.has_active_prompt && self.last_activity.elapsed() >= idle_timeout
     }
 }
 
@@ -804,6 +816,49 @@ fn emit_acp_session_state_snapshot(
             data: serde_json::to_value(AcpSessionStateSnapshotEvent { state }).unwrap(),
         },
     );
+}
+
+static ACP_IDLE_REAPER_STARTED: OnceLock<()> = OnceLock::new();
+const ACP_IDLE_SESSION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const ACP_IDLE_REAPER_INTERVAL: Duration = Duration::from_secs(60);
+
+pub fn spawn_acp_idle_reaper_once(app_handle: tauri::AppHandle) {
+    if ACP_IDLE_REAPER_STARTED.set(()).is_err() {
+        return;
+    }
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(ACP_IDLE_REAPER_INTERVAL);
+        loop {
+            interval.tick().await;
+
+            let expired_conversation_ids = {
+                let session_state = app_handle.state::<crate::AcpSessionState>();
+                let mut sessions = session_state.sessions.lock().await;
+                let expired = sessions
+                    .iter()
+                    .filter_map(|(conversation_id, entry)| {
+                        entry.is_idle_for(ACP_IDLE_SESSION_TIMEOUT).then_some(*conversation_id)
+                    })
+                    .collect::<Vec<_>>();
+
+                for conversation_id in &expired {
+                    sessions.remove(conversation_id);
+                }
+
+                expired
+            };
+
+            for conversation_id in expired_conversation_ids {
+                info!(
+                    conversation_id,
+                    idle_minutes = 15,
+                    "ACP session idle timeout reached; releasing session"
+                );
+                emit_acp_session_state_snapshot(&app_handle, conversation_id, None);
+            }
+        }
+    });
 }
 
 /// Resolve ACP CLI command to its full path
@@ -1273,17 +1328,25 @@ fn acp_tool_status_to_aipp_status(
 fn acp_tool_update_status_to_aipp_status(
     status: Option<&acp::ToolCallStatus>,
     meta: Option<&acp::Meta>,
-    existing_status: Option<String>,
+    existing_status: Option<&str>,
     has_progress_content: bool,
 ) -> String {
+    let incoming_is_terminal = status.is_some_and(|status| {
+        matches!(
+            status,
+            acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
+        )
+    });
+
+    if matches!(existing_status, Some("success" | "failed")) && !incoming_is_terminal {
+        return existing_status.unwrap_or_default().to_string();
+    }
+
     if let Some(status) = status {
         return acp_tool_status_to_aipp_status(status.clone(), meta);
     }
 
-    let existing_status = existing_status.unwrap_or_else(|| "executing".to_string());
-    if matches!(existing_status.as_str(), "success" | "failed") {
-        return existing_status;
-    }
+    let existing_status = existing_status.unwrap_or("executing");
 
     if meta_requires_confirmation(meta) == Some(true) && !has_progress_content {
         return "pending".to_string();
@@ -1293,7 +1356,7 @@ fn acp_tool_update_status_to_aipp_status(
         return "executing".to_string();
     }
 
-    existing_status
+    existing_status.to_string()
 }
 
 /// Convert ACP ToolCallId to i64 for frontend
@@ -1717,6 +1780,7 @@ impl AcpTauriClient {
         let session_state = self.app_handle.state::<crate::AcpSessionState>();
         let mut sessions = session_state.sessions.lock().await;
         let entry = sessions.get_mut(&self.conversation_id)?;
+        entry.touch();
         update(&mut entry.snapshot);
         Some(entry.snapshot.clone())
     }
@@ -1730,6 +1794,7 @@ impl AcpTauriClient {
         session_id: &str,
         load_session_supported: bool,
         session_resume_supported: bool,
+        restored_session_method: Option<&str>,
         prompt_capabilities: &acp::PromptCapabilities,
         config_options: Option<&[acp::SessionConfigOption]>,
     ) {
@@ -1738,6 +1803,8 @@ impl AcpTauriClient {
                 snapshot.session_id = Some(session_id.to_string());
                 snapshot.load_session_supported = load_session_supported;
                 snapshot.session_resume_supported = session_resume_supported;
+                snapshot.restored_session_method =
+                    restored_session_method.map(|method| method.to_string());
                 snapshot.prompt_capabilities = prompt_capabilities_payload(prompt_capabilities);
                 apply_config_options_to_snapshot(snapshot, config_options);
             })
@@ -2345,8 +2412,20 @@ impl AcpClient for AcpTauriClient {
                         _ => (None, None, None),
                     };
 
-                    let result_str = result.map(|r| r.to_string());
-                    let error_str = error.map(|e| e.to_string());
+                    let mut result_str = result.map(|r| r.to_string());
+                    let mut error_str = error.map(|e| e.to_string());
+                    if matches!(status_str.as_str(), "success" | "failed") {
+                        if let Ok(db) = MCPDatabase::new(&self.app_handle) {
+                            if let Ok(existing_call) = db.get_mcp_tool_call(existing_call_id) {
+                                if status_str == "success" && result_str.is_none() {
+                                    result_str = existing_call.result;
+                                }
+                                if status_str == "failed" && error_str.is_none() {
+                                    error_str = existing_call.error;
+                                }
+                            }
+                        }
+                    }
 
                     if let Ok(db) = MCPDatabase::new(&self.app_handle) {
                         let _ = db.update_mcp_tool_call_status(
@@ -2730,17 +2809,15 @@ impl AcpClient for AcpTauriClient {
                 let call_id =
                     call_id_opt.unwrap_or_else(|| tool_call_id_to_i64(&update.tool_call_id));
 
-                let existing_status = if let Ok(db) = MCPDatabase::new(&self.app_handle) {
-                    db.get_mcp_tool_call(call_id)
-                        .map(|call| call.status)
-                        .ok()
+                let existing_call = if let Ok(db) = MCPDatabase::new(&self.app_handle) {
+                    db.get_mcp_tool_call(call_id).ok()
                 } else {
                     None
                 };
                 let mut status_str = acp_tool_update_status_to_aipp_status(
                     update.fields.status.as_ref(),
                     update.meta.as_ref(),
-                    existing_status,
+                    existing_call.as_ref().map(|call| call.status.as_str()),
                     update.fields.content.is_some() || update.fields.raw_output.is_some(),
                 );
 
@@ -2825,7 +2902,13 @@ impl AcpClient for AcpTauriClient {
                         status_str = "success".to_string();
                     }
                 }
-                let error_str = error.map(|e| e.to_string());
+                let mut error_str = error.map(|e| e.to_string());
+                if status_str == "success" && result_str.is_none() {
+                    result_str = existing_call.as_ref().and_then(|call| call.result.clone());
+                }
+                if status_str == "failed" && error_str.is_none() {
+                    error_str = existing_call.as_ref().and_then(|call| call.error.clone());
+                }
 
                 if let Ok(db) = MCPDatabase::new(&self.app_handle) {
                     let _ = db.update_mcp_tool_call_status(
@@ -3303,16 +3386,25 @@ async fn run_acp_session(
 ) -> Result<(), AppError> {
     info!("ACP session task started: conversation_id={}", conversation_id);
 
-    let (first_message_id, first_prompt, first_attachments, first_window) = loop {
+    let mut startup_responses: Vec<oneshot::Sender<Result<(), String>>> = Vec::new();
+    let mut startup_window: Option<tauri::Window> = None;
+    let mut first_prompt: Option<(i64, String, Vec<MessageAttachment>, tauri::Window)> = None;
+
+    loop {
         match receiver.recv().await {
+            Some(AcpSessionCommand::Start { window, response }) => {
+                startup_window = Some(window);
+                startup_responses.push(response);
+                break;
+            }
             Some(AcpSessionCommand::Prompt { message_id, prompt, attachments, window }) => {
-                break (message_id, prompt, attachments, window);
+                first_prompt = Some((message_id, prompt, attachments, window));
+                break;
             }
             Some(AcpSessionCommand::CancelCurrentPrompt { response }) => {
                 let _ = response.send(Ok(()));
             }
-            Some(AcpSessionCommand::SetMode { response, .. })
-            | Some(AcpSessionCommand::SetConfigOption { response, .. }) => {
+            Some(AcpSessionCommand::SetConfigOption { response, .. }) => {
                 let _ = response.send(Err("ACP session is not ready yet".to_string()));
             }
             None => {
@@ -3320,32 +3412,52 @@ async fn run_acp_session(
                 return Ok(());
             }
         }
+    }
+
+    let initial_message_id = first_prompt.as_ref().map(|(message_id, _, _, _)| *message_id).unwrap_or(0);
+    let initial_window = first_prompt
+        .as_ref()
+        .map(|(_, _, _, window)| window.clone())
+        .or(startup_window)
+        .ok_or_else(|| AppError::InternalError("ACP session has no startup window".to_string()))?;
+
+    let send_startup_error = |msg: &str| {
+        if let Some((message_id, _, _, window)) = first_prompt.as_ref() {
+            if let Ok(db) = ConversationDatabase::new(&app_handle) {
+                if let Ok(repo) = db.message_repo() {
+                    let _ = repo.update_content(*message_id, msg);
+                }
+            }
+            let event = ConversationEvent {
+                r#type: "message_update".to_string(),
+                data: serde_json::to_value(MessageUpdateEvent {
+                    message_id: *message_id,
+                    message_type: "error".to_string(),
+                    content: msg.to_string(),
+                    is_done: true,
+                    token_count: None,
+                    input_token_count: None,
+                    output_token_count: None,
+                    ttft_ms: None,
+                    tps: None,
+                })
+                .unwrap(),
+            };
+            let event_name = format!("conversation_event_{}", conversation_id);
+            let _ = window.emit(&event_name, event);
+        }
     };
 
-    let send_startup_error = |window: &tauri::Window, message_id: i64, msg: &str| {
-        if let Ok(db) = ConversationDatabase::new(&app_handle) {
-            if let Ok(repo) = db.message_repo() {
-                let _ = repo.update_content(message_id, msg);
+    macro_rules! fail_startup {
+        ($err_msg:expr) => {{
+            let err_msg = $err_msg;
+            send_startup_error(&err_msg);
+            for response in startup_responses.drain(..) {
+                let _ = response.send(Err(err_msg.clone()));
             }
-        }
-        let event = ConversationEvent {
-            r#type: "message_update".to_string(),
-            data: serde_json::to_value(MessageUpdateEvent {
-                message_id,
-                message_type: "error".to_string(),
-                content: msg.to_string(),
-                is_done: true,
-                token_count: None,
-                input_token_count: None,
-                output_token_count: None,
-                ttft_ms: None,
-                tps: None,
-            })
-            .unwrap(),
-        };
-        let event_name = format!("conversation_event_{}", conversation_id);
-        let _ = window.emit(&event_name, event);
-    };
+            return Err(AppError::UnknownError(err_msg));
+        }};
+    }
 
     let operation_state = Arc::new(
         app_handle
@@ -3379,8 +3491,7 @@ async fn run_acp_session(
             acp_config.working_directory.display()
         );
         error!("ACP: {}", err_msg);
-        send_startup_error(&first_window, first_message_id, &err_msg);
-        return Err(AppError::UnknownError(err_msg));
+        fail_startup!(err_msg);
     }
     if !acp_config.working_directory.is_dir() {
         let err_msg = format!(
@@ -3388,8 +3499,7 @@ async fn run_acp_session(
             acp_config.working_directory.display()
         );
         error!("ACP: {}", err_msg);
-        send_startup_error(&first_window, first_message_id, &err_msg);
-        return Err(AppError::UnknownError(err_msg));
+        fail_startup!(err_msg);
     }
 
     let trusted_working_directory = acp_config
@@ -3459,8 +3569,7 @@ async fn run_acp_session(
                 help_msg
             );
             error!("ACP: {}", err_msg);
-            send_startup_error(&first_window, first_message_id, &err_msg);
-            return Err(AppError::UnknownError(err_msg));
+            fail_startup!(err_msg);
         }
     };
     info!("ACP: Process spawned successfully, PID={:?}", child.id());
@@ -3469,40 +3578,53 @@ async fn run_acp_session(
         Some(value) => value,
         None => {
             let err_msg = "Failed to open stdin for ACP process".to_string();
-            send_startup_error(&first_window, first_message_id, &err_msg);
-            return Err(AppError::UnknownError(err_msg));
+            fail_startup!(err_msg);
         }
     };
     let stdout = match child.stdout.take() {
         Some(value) => value,
         None => {
             let err_msg = "Failed to open stdout for ACP process".to_string();
-            send_startup_error(&first_window, first_message_id, &err_msg);
-            return Err(AppError::UnknownError(err_msg));
+            fail_startup!(err_msg);
         }
     };
     let stderr = match child.stderr.take() {
         Some(value) => value,
         None => {
             let err_msg = "Failed to open stderr for ACP process".to_string();
-            send_startup_error(&first_window, first_message_id, &err_msg);
-            return Err(AppError::UnknownError(err_msg));
+            fail_startup!(err_msg);
         }
     };
+    let _ = send_startup_error;
 
     let client_impl = AcpTauriClient::new(
         app_handle.clone(),
         conversation_id,
-        first_message_id,
-        first_window.clone(),
+        initial_message_id,
+        initial_window.clone(),
         operation_state,
         permission_manager,
     );
     let client_handle = client_impl.clone();
+    let has_initial_prompt = first_prompt.is_some();
 
     let local_set = tokio::task::LocalSet::new();
     let session_result = local_set
         .run_until(async move {
+            let mut startup_responses = startup_responses;
+            macro_rules! fail_connected_startup {
+                ($err_msg:expr) => {{
+                    let err_msg = $err_msg;
+                    if has_initial_prompt {
+                        client_handle.send_error_event(&err_msg).await;
+                    }
+                    for response in startup_responses.drain(..) {
+                        let _ = response.send(Err(err_msg.clone()));
+                    }
+                    return Err(AppError::UnknownError(err_msg));
+                }};
+            }
+
             info!("ACP: Creating ClientSideConnection...");
             let (conn, handle_io) = ClientSideConnection::new(
                 client_impl,
@@ -3564,8 +3686,7 @@ async fn run_acp_session(
                 Err(_) => {
                     let err_msg = "ACP initialize timed out after 30 seconds. The CLI might not support ACP protocol or needs '--mcp' flag.".to_string();
                     error!("ACP: {}", err_msg);
-                    client_handle.send_error_event(&err_msg).await;
-                    return Err(AppError::UnknownError(err_msg));
+                    fail_connected_startup!(err_msg);
                 }
             };
 
@@ -3574,8 +3695,7 @@ async fn run_acp_session(
                 Err(error) => {
                     let err_msg = format!("ACP initialize failed: {error:?}");
                     error!("ACP: {}", err_msg);
-                    client_handle.send_error_event(&err_msg).await;
-                    return Err(AppError::UnknownError(err_msg));
+                    fail_connected_startup!(err_msg);
                 }
             };
             info!(
@@ -3601,44 +3721,12 @@ async fn run_acp_session(
 
             let conversation_db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
             let mut session_id: Option<String> = None;
+            let mut restored_session_method: Option<&'static str> = None;
             let mut should_build_history_fallback = false;
             let mut initial_config_options: Option<Vec<acp::SessionConfigOption>> = None;
 
             if let Some(stored_session_id) = conversation_db.get_acp_session_id(conversation_id)? {
-                if init_response.agent_capabilities.load_session {
-                    info!(
-                        "ACP: Loading existing session (conversation_id={}, session_id={})",
-                        conversation_id, stored_session_id
-                    );
-                    client_handle.set_suppress_updates(true).await;
-                    let load_result = conn
-                        .load_session(acp::LoadSessionRequest::new(
-                            stored_session_id.clone(),
-                            acp_config.working_directory.clone(),
-                        ))
-                        .await;
-                    client_handle.set_suppress_updates(false).await;
-
-                    match load_result {
-                        Ok(response) => {
-                            initial_config_options = response.config_options.clone();
-                            session_id = Some(stored_session_id);
-                            conversation_db.upsert_acp_session_id(
-                                conversation_id,
-                                session_id.as_deref().unwrap_or_default(),
-                            )?;
-                            info!(
-                                "ACP: session/load succeeded (conversation_id={}, session_id={})",
-                                conversation_id,
-                                session_id.as_deref().unwrap_or_default()
-                            );
-                        }
-                        Err(error) => {
-                            error!("ACP: session/load failed: {:?}", error);
-                            should_build_history_fallback = true;
-                        }
-                    }
-                } else if session_resume_supported {
+                if session_resume_supported {
                     info!(
                         "ACP: Resuming existing session (conversation_id={}, session_id={})",
                         conversation_id, stored_session_id
@@ -3654,8 +3742,11 @@ async fn run_acp_session(
 
                     match resume_result {
                         Ok(response) => {
-                            initial_config_options = response.config_options.clone();
-                            session_id = Some(stored_session_id);
+                            if response.config_options.is_some() {
+                                initial_config_options = response.config_options.clone();
+                            }
+                            session_id = Some(stored_session_id.clone());
+                            restored_session_method = Some("resume");
                             conversation_db.upsert_acp_session_id(
                                 conversation_id,
                                 session_id.as_deref().unwrap_or_default(),
@@ -3668,14 +3759,58 @@ async fn run_acp_session(
                         }
                         Err(error) => {
                             error!("ACP: session/resume failed: {:?}", error);
+                        }
+                    }
+                }
+
+                if session_id.is_none() && init_response.agent_capabilities.load_session {
+                    info!(
+                        "ACP: Loading existing session (conversation_id={}, session_id={})",
+                        conversation_id, stored_session_id
+                    );
+                    client_handle.set_suppress_updates(true).await;
+                    let load_result = conn
+                        .load_session(acp::LoadSessionRequest::new(
+                            stored_session_id.clone(),
+                            acp_config.working_directory.clone(),
+                        ))
+                        .await;
+                    client_handle.set_suppress_updates(false).await;
+
+                    match load_result {
+                        Ok(response) => {
+                            if response.config_options.is_some() {
+                                initial_config_options = response.config_options.clone();
+                            }
+                            session_id = Some(stored_session_id);
+                            restored_session_method = Some("load");
+                            conversation_db.upsert_acp_session_id(
+                                conversation_id,
+                                session_id.as_deref().unwrap_or_default(),
+                            )?;
+                            info!(
+                                "ACP: session/load succeeded (conversation_id={}, session_id={})",
+                                conversation_id,
+                                session_id.as_deref().unwrap_or_default()
+                            );
+                        }
+                        Err(error) => {
+                            error!("ACP: session/load failed: {:?}", error);
                             should_build_history_fallback = true;
                         }
                     }
-                } else {
+                }
+
+                if session_id.is_none()
+                    && !session_resume_supported
+                    && !init_response.agent_capabilities.load_session
+                {
                     info!(
                         "ACP: Agent does not support loadSession or session/resume; creating new session (conversation_id={})",
                         conversation_id
                     );
+                    should_build_history_fallback = true;
+                } else if session_id.is_none() {
                     should_build_history_fallback = true;
                 }
             } else {
@@ -3698,11 +3833,12 @@ async fn run_acp_session(
                     Err(error) => {
                         let err_msg = format!("ACP new_session failed: {error:?}");
                         error!("ACP: {}", err_msg);
-                        client_handle.send_error_event(&err_msg).await;
-                        return Err(AppError::UnknownError(err_msg));
+                        fail_connected_startup!(err_msg);
                     }
                 };
-                initial_config_options = session_response.config_options.clone();
+                if session_response.config_options.is_some() {
+                    initial_config_options = session_response.config_options.clone();
+                }
                 let session_id = session_response.session_id.to_string();
                 info!("ACP: Session created, session_id={:?}", session_id);
 
@@ -3715,6 +3851,7 @@ async fn run_acp_session(
                     &session_id,
                     init_response.agent_capabilities.load_session,
                     session_resume_supported,
+                    restored_session_method,
                     &agent_prompt_capabilities,
                     initial_config_options.as_deref(),
                 )
@@ -3743,25 +3880,24 @@ async fn run_acp_session(
                         ))
                         .await;
 
-                    if let Err(error) = &set_model_result {
-                        let err_msg = format!(
-                            "ACP set_session_config_option failed for Claude model '{}': {:?}",
-                            model_id, error
-                        );
-                        error!("ACP: {}", err_msg);
-                        client_handle.send_error_event(&err_msg).await;
-                        return Err(AppError::UnknownError(err_msg));
-                    }
+                    let response_payload = match set_model_result {
+                        Ok(response_payload) => response_payload,
+                        Err(error) => {
+                            let err_msg = format!(
+                                "ACP set_session_config_option failed for Claude model '{}': {:?}",
+                                model_id, error
+                            );
+                            error!("ACP: {}", err_msg);
+                            fail_connected_startup!(err_msg);
+                        }
+                    };
 
                     let state = client_handle
                         .update_session_state(|snapshot| {
-                            if let Some(option) = snapshot
-                                .config_options
-                                .iter_mut()
-                                .find(|option| option.id == model_config.id.to_string())
-                            {
-                                option.current_value = model_id.clone();
-                            }
+                            apply_config_options_to_snapshot(
+                                snapshot,
+                                Some(&response_payload.config_options),
+                            );
                         })
                         .await;
                     client_handle.publish_session_state(state).await;
@@ -3773,6 +3909,10 @@ async fn run_acp_session(
                 }
             }
 
+            for response in startup_responses.drain(..) {
+                let _ = response.send(Ok(()));
+            }
+
             let history_fallback_prompt = if should_build_history_fallback {
                 build_acp_history_prompt(&app_handle, conversation_id)
             } else {
@@ -3780,13 +3920,11 @@ async fn run_acp_session(
             };
 
             let conn = Rc::new(conn);
-            let mut prompt_queue = VecDeque::from([(
-                first_message_id,
-                first_prompt,
-                first_attachments,
-                first_window,
-                history_fallback_prompt,
-            )]);
+            let mut prompt_queue = if let Some((message_id, prompt, attachments, window)) = first_prompt {
+                VecDeque::from([(message_id, prompt, attachments, window, history_fallback_prompt)])
+            } else {
+                VecDeque::new()
+            };
             let mut active_prompt: Option<oneshot::Receiver<Result<(), AppError>>> = None;
 
             loop {
@@ -3831,6 +3969,9 @@ async fn run_acp_session(
                                 Some(AcpSessionCommand::Prompt { message_id, prompt, attachments, window }) => {
                                     prompt_queue.push_back((message_id, prompt, attachments, window, None));
                                 }
+                                Some(AcpSessionCommand::Start { response, .. }) => {
+                                    let _ = response.send(Ok(()));
+                                }
                                 Some(AcpSessionCommand::CancelCurrentPrompt { response }) => {
                                     prompt_queue.clear();
                                     if let Some(permission_state) = app_handle.try_state::<AcpPermissionState>() {
@@ -3844,24 +3985,6 @@ async fn run_acp_session(
                                         .map_err(|error| format!("ACP cancel failed: {error:?}"));
                                     let _ = response.send(result);
                                 }
-                                Some(AcpSessionCommand::SetMode { mode_id, response }) => {
-                                    let result = conn
-                                        .set_session_mode(acp::SetSessionModeRequest::new(
-                                            session_id.clone(),
-                                            mode_id.clone(),
-                                        ))
-                                        .await
-                                        .map_err(|error| format!("ACP set_session_mode failed: {error:?}"));
-                                    if result.is_ok() {
-                                        let state = client_handle
-                                            .update_session_state(|snapshot| {
-                                                snapshot.current_mode_id = Some(mode_id.clone());
-                                            })
-                                            .await;
-                                        client_handle.publish_session_state(state).await;
-                                    }
-                                    let _ = response.send(result.map(|_| ()));
-                                }
                                 Some(AcpSessionCommand::SetConfigOption { config_id, value, response }) => {
                                     let result = conn
                                         .set_session_config_option(acp::SetSessionConfigOptionRequest::new(
@@ -3871,21 +3994,23 @@ async fn run_acp_session(
                                         ))
                                         .await
                                         .map_err(|error| format!("ACP set_session_config_option failed: {error:?}"));
-                                    if result.is_ok() {
-                                        let state = client_handle
-                                            .update_session_state(|snapshot| {
-                                                if let Some(option) = snapshot
-                                                    .config_options
-                                                    .iter_mut()
-                                                    .find(|option| option.id == config_id)
-                                                {
-                                                    option.current_value = value.clone();
-                                                }
-                                            })
-                                            .await;
-                                        client_handle.publish_session_state(state).await;
+                                    match result {
+                                        Ok(response_payload) => {
+                                            let state = client_handle
+                                                .update_session_state(|snapshot| {
+                                                    apply_config_options_to_snapshot(
+                                                        snapshot,
+                                                        Some(&response_payload.config_options),
+                                                    );
+                                                })
+                                                .await;
+                                            client_handle.publish_session_state(state).await;
+                                            let _ = response.send(Ok(()));
+                                        }
+                                        Err(error) => {
+                                            let _ = response.send(Err(error));
+                                        }
                                     }
-                                    let _ = response.send(result.map(|_| ()));
                                 }
                                 None => {}
                             }
@@ -3909,26 +4034,11 @@ async fn run_acp_session(
                         Some(AcpSessionCommand::Prompt { message_id, prompt, attachments, window }) => {
                             prompt_queue.push_back((message_id, prompt, attachments, window, None));
                         }
-                        Some(AcpSessionCommand::CancelCurrentPrompt { response }) => {
+                        Some(AcpSessionCommand::Start { response, .. }) => {
                             let _ = response.send(Ok(()));
                         }
-                        Some(AcpSessionCommand::SetMode { mode_id, response }) => {
-                            let result = conn
-                                .set_session_mode(acp::SetSessionModeRequest::new(
-                                    session_id.clone(),
-                                    mode_id.clone(),
-                                ))
-                                .await
-                                .map_err(|error| format!("ACP set_session_mode failed: {error:?}"));
-                            if result.is_ok() {
-                                let state = client_handle
-                                    .update_session_state(|snapshot| {
-                                        snapshot.current_mode_id = Some(mode_id.clone());
-                                    })
-                                    .await;
-                                client_handle.publish_session_state(state).await;
-                            }
-                            let _ = response.send(result.map(|_| ()));
+                        Some(AcpSessionCommand::CancelCurrentPrompt { response }) => {
+                            let _ = response.send(Ok(()));
                         }
                         Some(AcpSessionCommand::SetConfigOption { config_id, value, response }) => {
                             let result = conn
@@ -3939,21 +4049,23 @@ async fn run_acp_session(
                                 ))
                                 .await
                                 .map_err(|error| format!("ACP set_session_config_option failed: {error:?}"));
-                            if result.is_ok() {
-                                let state = client_handle
-                                    .update_session_state(|snapshot| {
-                                        if let Some(option) = snapshot
-                                            .config_options
-                                            .iter_mut()
-                                            .find(|option| option.id == config_id)
-                                        {
-                                            option.current_value = value.clone();
-                                        }
-                                    })
-                                    .await;
-                                client_handle.publish_session_state(state).await;
+                            match result {
+                                Ok(response_payload) => {
+                                    let state = client_handle
+                                        .update_session_state(|snapshot| {
+                                            apply_config_options_to_snapshot(
+                                                snapshot,
+                                                Some(&response_payload.config_options),
+                                            );
+                                        })
+                                        .await;
+                                    client_handle.publish_session_state(state).await;
+                                    let _ = response.send(Ok(()));
+                                }
+                                Err(error) => {
+                                    let _ = response.send(Err(error));
+                                }
                             }
-                            let _ = response.send(result.map(|_| ()));
                         }
                         None => break,
                     }
@@ -3985,36 +4097,11 @@ pub async fn get_acp_session_state(
     acp_session_state: tauri::State<'_, crate::AcpSessionState>,
     conversation_id: i64,
 ) -> Result<Option<AcpConversationSessionState>, String> {
-    let sessions = acp_session_state.sessions.lock().await;
-    Ok(sessions.get(&conversation_id).map(|entry| entry.snapshot.clone()))
-}
-
-#[tauri::command]
-pub async fn set_acp_session_mode(
-    app_handle: tauri::AppHandle,
-    acp_session_state: tauri::State<'_, crate::AcpSessionState>,
-    conversation_id: i64,
-    mode_id: String,
-) -> Result<(), String> {
-    let handle = {
-        let sessions = acp_session_state.sessions.lock().await;
-        sessions.get(&conversation_id).map(|entry| entry.handle.clone())
-    }
-    .ok_or_else(|| "ACP session not found".to_string())?;
-
-    handle.set_mode(mode_id.clone()).await.map_err(|error| error.to_string())?;
-
-    let state = {
-        let mut sessions = acp_session_state.sessions.lock().await;
-        if let Some(entry) = sessions.get_mut(&conversation_id) {
-            entry.snapshot.current_mode_id = Some(mode_id.clone());
-            Some(entry.snapshot.clone())
-        } else {
-            None
-        }
-    };
-    emit_acp_session_state_snapshot(&app_handle, conversation_id, state);
-    Ok(())
+    let mut sessions = acp_session_state.sessions.lock().await;
+    Ok(sessions.get_mut(&conversation_id).map(|entry| {
+        entry.touch();
+        entry.snapshot.clone()
+    }))
 }
 
 #[tauri::command]
@@ -4026,31 +4113,22 @@ pub async fn set_acp_session_config_option(
     value: String,
 ) -> Result<(), String> {
     let handle = {
-        let sessions = acp_session_state.sessions.lock().await;
-        sessions.get(&conversation_id).map(|entry| entry.handle.clone())
+        let mut sessions = acp_session_state.sessions.lock().await;
+        sessions.get_mut(&conversation_id).map(|entry| {
+            entry.touch();
+            entry.handle.clone()
+        })
     }
     .ok_or_else(|| "ACP session not found".to_string())?;
 
     handle
-        .set_config_option(config_id.clone(), value.clone())
+        .set_config_option(config_id, value)
         .await
         .map_err(|error| error.to_string())?;
 
     let state = {
-        let mut sessions = acp_session_state.sessions.lock().await;
-        if let Some(entry) = sessions.get_mut(&conversation_id) {
-            if let Some(option) = entry
-                .snapshot
-                .config_options
-                .iter_mut()
-                .find(|option| option.id == config_id)
-            {
-                option.current_value = value;
-            }
-            Some(entry.snapshot.clone())
-        } else {
-            None
-        }
+        let sessions = acp_session_state.sessions.lock().await;
+        sessions.get(&conversation_id).map(|entry| entry.snapshot.clone())
     };
     emit_acp_session_state_snapshot(&app_handle, conversation_id, state);
     Ok(())
@@ -4189,7 +4267,7 @@ mod tests {
         append_buffered_content, apply_network_proxy_to_env_vars, build_acp_launch_plan,
         build_prompt_to_send, extract_acp_config, extract_content_text, get_claude_model_override,
         load_claude_settings_env_vars_from_path, AcpPermissionDecision, AcpPermissionRequestEvent,
-        AcpPermissionState,
+        AcpPermissionState, AcpSessionEntry, AcpSessionHandle,
     };
     use crate::db::assistant_db::AssistantModelConfig;
     use crate::db::llm_db::LLMProviderConfig;
@@ -4198,9 +4276,10 @@ mod tests {
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
     use tempfile::NamedTempFile;
     use tokio::io::duplex;
-    use tokio::sync::{oneshot, Notify};
+    use tokio::sync::{mpsc, oneshot, Notify};
     use tokio::time::{timeout, Duration};
     use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -4485,6 +4564,34 @@ mod tests {
         assert_eq!(get_claude_model_override("claude-code-acp", &env_vars), None);
     }
 
+    #[test]
+    fn acp_session_entry_idle_timeout_ignores_active_prompt() {
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let handle = AcpSessionHandle { sender };
+        let mut entry = AcpSessionEntry::new(handle, 42);
+        let idle_timeout = Duration::from_secs(15 * 60);
+
+        entry.last_activity = Instant::now() - Duration::from_secs(16 * 60);
+        assert!(entry.is_idle_for(idle_timeout));
+
+        entry.snapshot.has_active_prompt = true;
+        assert!(!entry.is_idle_for(idle_timeout));
+    }
+
+    #[test]
+    fn acp_session_entry_touch_resets_idle_timeout() {
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let handle = AcpSessionHandle { sender };
+        let mut entry = AcpSessionEntry::new(handle, 43);
+        let idle_timeout = Duration::from_secs(15 * 60);
+
+        entry.last_activity = Instant::now() - Duration::from_secs(16 * 60);
+        assert!(entry.is_idle_for(idle_timeout));
+
+        entry.touch();
+        assert!(!entry.is_idle_for(idle_timeout));
+    }
+
     #[tokio::test]
     async fn append_buffered_content_accumulates_text_chunks() {
         let mut buffer = String::new();
@@ -4544,10 +4651,19 @@ mod tests {
             acp_tool_update_status_to_aipp_status(
                 None,
                 None,
-                Some("pending".to_string()),
+                Some("pending"),
                 false,
             ),
             "executing"
+        );
+        assert_eq!(
+            acp_tool_update_status_to_aipp_status(
+                Some(&acp::ToolCallStatus::Pending),
+                None,
+                Some("success"),
+                false,
+            ),
+            "success"
         );
     }
 

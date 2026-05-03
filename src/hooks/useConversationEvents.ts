@@ -49,6 +49,49 @@ export function shouldFlushStreamingMessageImmediately(content: string): boolean
         && messageContainsPreviewCode(content);
 }
 
+function normalizeAcpSessionState(state: any): AcpConversationSessionState | null {
+    if (!state) {
+        return null;
+    }
+
+    const promptCapabilities = state.prompt_capabilities ?? state.promptCapabilities ?? {};
+    const configOptions = state.config_options ?? state.configOptions ?? [];
+    const availableCommands = state.available_commands ?? state.availableCommands ?? [];
+
+    return {
+        ...state,
+        conversation_id: state.conversation_id ?? state.conversationId,
+        session_id: state.session_id ?? state.sessionId ?? null,
+        updated_at: state.updated_at ?? state.updatedAt ?? null,
+        load_session_supported: state.load_session_supported ?? state.loadSessionSupported ?? false,
+        session_resume_supported: state.session_resume_supported ?? state.sessionResumeSupported ?? false,
+        restored_session_method: state.restored_session_method ?? state.restoredSessionMethod ?? null,
+        prompt_capabilities: {
+            image: Boolean(promptCapabilities.image),
+            audio: Boolean(promptCapabilities.audio),
+            embedded_context: Boolean(
+                promptCapabilities.embedded_context ?? promptCapabilities.embeddedContext
+            ),
+        },
+        current_mode_id: state.current_mode_id ?? state.currentModeId ?? null,
+        modes: state.modes ?? [],
+        config_options: configOptions.map((option: any) => ({
+            ...option,
+            current_value: option.current_value ?? option.currentValue ?? "",
+            options: (option.options ?? []).map((choice: any) => ({
+                ...choice,
+                group_name: choice.group_name ?? choice.groupName ?? null,
+            })),
+        })),
+        plan: state.plan ?? [],
+        available_commands: availableCommands.map((command: any) => ({
+            ...command,
+            input_hint: command.input_hint ?? command.inputHint ?? null,
+        })),
+        has_active_prompt: state.has_active_prompt ?? state.hasActivePrompt ?? false,
+    };
+}
+
 export function useConversationEvents(options: UseConversationEventsOptions) {
     // 流式消息状态管理，存储正在流式传输的消息
     const [streamingMessages, setStreamingMessages] = useState<
@@ -357,7 +400,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         })
             .then((state) => {
                 if (acpSessionSyncRequestIdRef.current !== requestId) return;
-                setAcpSessionState(state);
+                setAcpSessionState(normalizeAcpSessionState(state));
             })
             .catch((error) => {
                 if (acpSessionSyncRequestIdRef.current !== requestId) return;
@@ -887,7 +930,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 }
             } else if (conversationEvent.type === "acp_session_state_snapshot") {
                 const snapshotEvent = conversationEvent.data as AcpSessionStateSnapshotEvent;
-                setAcpSessionState(snapshotEvent?.state ?? null);
+                setAcpSessionState(normalizeAcpSessionState(snapshotEvent?.state));
             } else if (conversationEvent.type === "activity_focus_change") {
                 // 处理活动焦点变化事件 - 由后端统一管理闪亮边框状态
                 const focusEvent = conversationEvent.data as ActivityFocusChangeEvent;
@@ -1143,6 +1186,11 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         functionMapRef.current = functionMap;
     }, []);
 
+    const applyAcpSessionState = useCallback((state: AcpConversationSessionState | null) => {
+        acpSessionSyncRequestIdRef.current += 1;
+        setAcpSessionState(normalizeAcpSessionState(state));
+    }, []);
+
     return {
         streamingMessages,
         shiningMessageIds,
@@ -1157,6 +1205,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         activityFocus, // 导出活动焦点状态（后端驱动）
         runtimeState, // 导出后端语义化运行态（发送按钮等）
         acpSessionState,
+        applyAcpSessionState,
         clearStreamingMessages,
         clearShiningMessages,
         handleError,
