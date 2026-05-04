@@ -190,6 +190,12 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                             assistantDetail.model.length > 0
                                 ? `${assistantDetail.model[0].model_code}%%${assistantDetail.model[0].provider_id}`
                                 : "-1",
+                        acp_provider:
+                            assistantDetail.assistant.assistant_type === 4 &&
+                            assistantDetail.model.length > 0 &&
+                            assistantDetail.model[0].provider_id > 0
+                                ? assistantDetail.model[0].provider_id.toString()
+                                : "-1",
                         prompt: assistantDetail.prompts[0].prompt,
                         ...assistantDetail.model_configs.reduce((acc, config) => {
                             acc[config.name] = config.value_type === "boolean" ? config.value == "true" : config.value;
@@ -363,6 +369,22 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 description: currentAssistant.assistant.description,
             },
             model: (() => {
+                if (Number(values.assistantType) === 4) {
+                    const providerId = parseInt(String(values.acp_provider ?? ""), 10);
+                    if (Number.isFinite(providerId) && providerId > 0) {
+                        const existingModel = currentAssistant.model[0];
+                        return [{
+                            id: existingModel?.id ?? 0,
+                            assistant_id: existingModel?.assistant_id ?? currentAssistant.assistant.id,
+                            model_code: "",
+                            provider_id: providerId,
+                            alias: "",
+                        }];
+                    }
+
+                    return currentAssistant.model;
+                }
+
                 // 如果模型选择是 "-1" 或无效，保留原有模型信息
                 const modelValue = values.model;
                 const modelParts = modelValue?.split("%%") || [];
@@ -387,8 +409,10 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 .filter(
                     ([key]) =>
                         !key.startsWith("plugin::")
+                        && !key.startsWith("acp_session_")
                         && key !== "assistantType"
                         && key !== "model"
+                        && key !== "acp_provider"
                         && key !== "prompt"
                         && key !== "mcp_config"
                         && key !== "skills_config"
@@ -525,6 +549,12 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 model:
                     assistantDetail.model.length > 0
                         ? `${assistantDetail.model[0].model_code}%%${assistantDetail.model[0].provider_id}`
+                        : "-1",
+                acp_provider:
+                    assistantDetail.assistant.assistant_type === 4 &&
+                    assistantDetail.model.length > 0 &&
+                    assistantDetail.model[0].provider_id > 0
+                        ? assistantDetail.model[0].provider_id.toString()
                         : "-1",
                 prompt: assistantDetail.prompts[0]?.prompt || "",
                 ...assistantDetail.model_configs.reduce((acc, config) => {

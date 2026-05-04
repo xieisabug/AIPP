@@ -213,6 +213,28 @@ fn test_llm_provider_config_operations() {
     assert_eq!(updated_key.value, "sk-new-key");
 }
 
+/// 测试 ACP provider 即使没有 llm_model 记录也能出现在助手模型选择列表
+///
+/// 验证内容：
+/// - ACP 助手需要 provider 级别配置，不应因为缺少模型行而无法选择 provider
+/// - 生成的占位 code 不影响 ACP 运行时，运行时只使用 provider_id 读取 ACP 配置
+#[test]
+fn test_filtered_models_for_acp_includes_provider_without_model() {
+    let db = create_llm_db();
+
+    db.add_llm_provider("Codex", "acp", "ACP", false, true).unwrap();
+    let providers = db.get_llm_providers().unwrap();
+    let provider_id = providers[0].0;
+
+    let models = db.get_filtered_models_for_select(4).unwrap();
+
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].0, "Codex");
+    assert_eq!(models[0].1, "acp");
+    assert_eq!(models[0].2, 0);
+    assert_eq!(models[0].3, provider_id);
+}
+
 /// 测试 Model Detail 查询
 ///
 /// 验证内容：

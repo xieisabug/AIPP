@@ -1,7 +1,7 @@
 use super::assistant_api::AssistantDetail;
 use crate::api::ai::acp::{
-    apply_network_proxy_to_env_vars, extract_acp_config, spawn_acp_idle_reaper_once,
-    spawn_acp_session_task,
+    apply_network_proxy_to_env_vars, extract_acp_config, refresh_acp_config_signature,
+    spawn_acp_idle_reaper_once, spawn_acp_session_task,
 };
 use crate::api::ai::chat::{
     extract_assistant_from_message, handle_non_stream_chat as ai_handle_non_stream_chat,
@@ -22,7 +22,7 @@ use crate::api::ai::events::{
 };
 use crate::api::ai::title::{generate_title, maybe_generate_title_from_conversation_if_needed};
 use crate::api::ai::types::{AiRequest, AiResponse, McpOverrideConfig};
-use crate::api::assistant_api::{get_assistant, get_assistants};
+use crate::api::assistant_api::{get_assistant, get_assistants, resolve_acp_provider_id};
 use crate::api::butler_api::{is_butler_system_assistant_name, mark_butler_task_cancelled};
 
 use crate::api::genai_client;
@@ -804,8 +804,9 @@ pub async fn ask_ai(
 
         // 获取 provider 配置
         // ACP 配置可能在 llm_provider_config 表中（如 acp_cli_command）
-        let provider_configs = if let Some(model) = assistant_detail.model.first() {
-            let provider_id = model.provider_id;
+        let provider_configs = if let Some(provider_id) =
+            resolve_acp_provider_id(&assistant_detail.model, &assistant_detail.model_configs)
+        {
             debug!("ACP: Getting provider config for provider_id={}", provider_id);
 
             let llm_db = LLMDatabase::new(&app_handle).map_err(|e| {
@@ -817,7 +818,7 @@ pub async fn ask_ai(
                 Vec::new()
             })
         } else {
-            debug!("ACP: No model found, using empty provider configs");
+            debug!("ACP: No ACP provider found, using empty provider configs");
             Vec::new()
         };
 
@@ -842,6 +843,7 @@ pub async fn ask_ai(
                 "ACP proxy env vars applied"
             );
         }
+        refresh_acp_config_signature(&mut acp_config);
         info!(
             "ACP config: cli_command={}, working_directory={}, env_vars={}, additional_args={}",
             acp_config.cli_command,
@@ -889,10 +891,20 @@ pub async fn ask_ai(
 
         let session_handle = {
             let mut sessions = acp_session_state.sessions.lock().await;
-            if let Some(entry) = sessions.get_mut(&conversation_id) {
+            if sessions
+                .get(&conversation_id)
+                .is_some_and(|entry| entry.config_signature == acp_config.session_signature)
+            {
+                let entry = sessions.get_mut(&conversation_id).expect("checked above");
                 entry.touch();
                 entry.handle.clone()
             } else {
+                if sessions.contains_key(&conversation_id) {
+                    info!(
+                        conversation_id,
+                        "ACP session config changed; replacing existing session"
+                    );
+                }
                 let handle = spawn_acp_session_task(
                     app_handle_clone.clone(),
                     conversation_id,
@@ -900,7 +912,11 @@ pub async fn ask_ai(
                 );
                 sessions.insert(
                     conversation_id,
-                    crate::api::ai::acp::AcpSessionEntry::new(handle.clone(), conversation_id),
+                    crate::api::ai::acp::AcpSessionEntry::new(
+                        handle.clone(),
+                        conversation_id,
+                        acp_config.session_signature.clone(),
+                    ),
                 );
                 handle
             }
@@ -922,7 +938,11 @@ pub async fn ask_ai(
                 );
                 sessions.insert(
                     conversation_id,
-                    crate::api::ai::acp::AcpSessionEntry::new(handle.clone(), conversation_id),
+                    crate::api::ai::acp::AcpSessionEntry::new(
+                        handle.clone(),
+                        conversation_id,
+                        acp_config.session_signature.clone(),
+                    ),
                 );
                 handle
             };

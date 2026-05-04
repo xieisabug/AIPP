@@ -20,8 +20,8 @@ import {
     ConversationWithMessages,
     GroupMergeEvent,
     MCPToolCallUpdateEvent,
-    AcpSessionConfigOption,
     AcpConversationSessionState,
+    AcpSessionConfigOption,
 } from "../data/Conversation";
 import "katex/dist/katex.min.css";
 import { listen, emit } from "@tauri-apps/api/event";
@@ -53,13 +53,7 @@ import { applyScrollHighlight } from "./conversation/scrollHighlight";
 import IconButton from "./IconButton";
 import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import {
-    Select,
-    SelectContent,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
-} from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Bot, LoaderCircle } from "lucide-react";
 import { toast } from "sonner";
@@ -143,6 +137,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // ACP assistant working directory (resolved by backend)
         const [acpWorkingDirectory, setAcpWorkingDirectory] = useState<string | null>(null);
+        const [acpMutationKey, setAcpMutationKey] = useState<string | null>(null);
 
         // 常规消息列表
         const [messages, setMessages] = useState<Array<Message>>([]);
@@ -395,10 +390,32 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             applyAcpSessionState,
         } = useConversationEvents(conversationEventsOptions);
 
-        const [acpMutationKey, setAcpMutationKey] = useState<string | null>(null);
         const acpLoadUnsupportedNoticeRef = useRef<string | null>(null);
         const acpRestoreNoticeRef = useRef<string | null>(null);
         const acpAutoConnectKeyRef = useRef<string | null>(null);
+        const acpConnectionErrorNoticeRef = useRef<string | null>(null);
+
+        const showAcpConnectionError = useCallback(
+            (assistantId: number, error: unknown) => {
+                const errorMessage =
+                    error instanceof Error
+                        ? error.message
+                        : typeof error === "string"
+                          ? error
+                          : JSON.stringify(error) || "未知错误";
+                const noticeKey = `${conversationId}:${assistantId}:${errorMessage}`;
+                if (acpConnectionErrorNoticeRef.current === noticeKey) {
+                    return;
+                }
+
+                acpConnectionErrorNoticeRef.current = noticeKey;
+                toast.error("ACP 会话启动失败", {
+                    description: errorMessage,
+                    position: "bottom-right",
+                });
+            },
+            [conversationId]
+        );
 
         useEffect(() => {
             streamingMessagesRef.current = streamingMessages;
@@ -808,10 +825,20 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             ),
         });
 
+        const activeAssistantId = conversation?.assistant_id ?? selectedAssistant;
+        const isAcpAssistant = useMemo(() => {
+            if (!activeAssistantId) {
+                return false;
+            }
+            return assistants.some(
+                (assistant) => assistant.id === activeAssistantId && assistant.assistant_type === 4
+            );
+        }, [activeAssistantId, assistants]);
+
         // Fetch ACP working directory for current assistant
         useEffect(() => {
-            const assistantId = conversation?.assistant_id ?? selectedAssistant;
-            if (!assistantId) {
+            const assistantId = activeAssistantId;
+            if (!assistantId || !isAcpAssistant) {
                 setAcpWorkingDirectory(null);
                 return;
             }
@@ -844,12 +871,20 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 acpAutoConnectKeyRef.current = null;
                             }
                             console.warn("[ACP] Auto connect failed", error);
+                            showAcpConnectionError(assistantId, error);
                         });
                 })
-                .catch(() => {
+                .catch((error) => {
                     setAcpWorkingDirectory(null);
+                    showAcpConnectionError(assistantId, error);
                 });
-        }, [conversation?.assistant_id, selectedAssistant, assistants, conversationId, applyAcpSessionState]);
+        }, [
+            activeAssistantId,
+            isAcpAssistant,
+            conversationId,
+            applyAcpSessionState,
+            showAcpConnectionError,
+        ]);
 
         const handleAcpConfigChange = useCallback(
             async (option: AcpSessionConfigOption, value: string) => {
@@ -857,6 +892,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
                     return;
                 }
+
                 setAcpMutationKey(`config:${option.id}`);
                 try {
                     await invoke("set_acp_session_config_option", {
@@ -865,7 +901,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         value,
                     });
                 } catch (error) {
-                    toast.error(`更新 ACP 配置失败: ${String(error)}`);
+                    toast.error("更新 ACP 配置失败", {
+                        description: String(error),
+                        position: "bottom-right",
+                    });
                 } finally {
                     setAcpMutationKey(null);
                 }
@@ -1022,7 +1061,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         );
 
         const acpHeaderActions = useMemo(() => {
-            const isAcpConversation = Boolean(acpWorkingDirectory) || Boolean(acpSessionState);
+            const isAcpConversation =
+                isAcpAssistant || Boolean(acpWorkingDirectory) || Boolean(acpSessionState);
             if (!isAcpConversation) {
                 return combinedHeaderActions;
             }
@@ -1211,6 +1251,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             acpWorkingDirectory,
             combinedHeaderActions,
             handleAcpConfigChange,
+            isAcpAssistant,
         ]);
 
         const sidebarTodos = useMemo<TodoItem[]>(() => {

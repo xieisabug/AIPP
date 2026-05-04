@@ -1,6 +1,7 @@
 use crate::api::ai::acp::{
     apply_network_proxy_to_env_vars, build_acp_launch_plan, extract_acp_config,
-    resolve_acp_cli_path, spawn_acp_idle_reaper_once, spawn_acp_session_task, AcpSessionEntry,
+    refresh_acp_config_signature, resolve_acp_cli_path, spawn_acp_idle_reaper_once,
+    spawn_acp_session_task, AcpSessionEntry,
 };
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::{
@@ -28,6 +29,66 @@ fn reject_reserved_butler_assistant_name(name: &str) -> Result<(), String> {
         Err("该助手名称为系统保留名称，不能创建或修改".to_string())
     } else {
         Ok(())
+    }
+}
+
+pub(crate) fn resolve_acp_provider_id(
+    models: &[AssistantModel],
+    model_configs: &[AssistantModelConfig],
+) -> Option<i64> {
+    models
+        .first()
+        .map(|model| model.provider_id)
+        .filter(|provider_id| *provider_id > 0)
+        .or_else(|| {
+            model_configs
+                .iter()
+                .find(|config| config.name == "acp_provider")
+                .and_then(|config| config.value.as_deref())
+                .and_then(|value| value.trim().parse::<i64>().ok())
+                .filter(|provider_id| *provider_id > 0)
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assistant_model(provider_id: i64) -> AssistantModel {
+        AssistantModel {
+            id: 1,
+            assistant_id: 1,
+            provider_id,
+            model_code: String::new(),
+            alias: String::new(),
+        }
+    }
+
+    fn model_config(name: &str, value: Option<&str>) -> AssistantModelConfig {
+        AssistantModelConfig {
+            id: 1,
+            assistant_id: 1,
+            assistant_model_id: 1,
+            name: name.to_string(),
+            value: value.map(str::to_string),
+            value_type: "string".to_string(),
+        }
+    }
+
+    #[test]
+    fn resolve_acp_provider_id_prefers_model_provider_id() {
+        let models = vec![assistant_model(7)];
+        let model_configs = vec![model_config("acp_provider", Some("9"))];
+
+        assert_eq!(resolve_acp_provider_id(&models, &model_configs), Some(7));
+    }
+
+    #[test]
+    fn resolve_acp_provider_id_uses_legacy_model_config_when_model_provider_is_empty() {
+        let models = vec![assistant_model(0)];
+        let model_configs = vec![model_config("acp_provider", Some("9"))];
+
+        assert_eq!(resolve_acp_provider_id(&models, &model_configs), Some(9));
     }
 }
 
@@ -641,11 +702,13 @@ pub fn get_acp_working_directory(
 
     let model_configs =
         assistant_db.get_assistant_model_configs(assistant_id).map_err(|e| e.to_string())?;
-    let provider_configs = if let Some(model) =
-        assistant_db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?.first()
+    let assistant_models =
+        assistant_db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?;
+    let provider_configs = if let Some(provider_id) =
+        resolve_acp_provider_id(&assistant_models, &model_configs)
     {
         let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-        llm_db.get_llm_provider_config(model.provider_id).map_err(|e| e.to_string())?
+        llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?
     } else {
         Vec::new()
     };
@@ -676,11 +739,13 @@ pub async fn ensure_acp_session_connected(
 
     let model_configs =
         assistant_db.get_assistant_model_configs(assistant_id).map_err(|e| e.to_string())?;
-    let provider_configs = if let Some(model) =
-        assistant_db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?.first()
+    let assistant_models =
+        assistant_db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?;
+    let provider_configs = if let Some(provider_id) =
+        resolve_acp_provider_id(&assistant_models, &model_configs)
     {
         let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-        llm_db.get_llm_provider_config(model.provider_id).map_err(|e| e.to_string())?
+        llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?
     } else {
         Vec::new()
     };
@@ -701,21 +766,36 @@ pub async fn ensure_acp_session_connected(
     if let Some(proxy_url) = network_proxy.as_deref() {
         apply_network_proxy_to_env_vars(&mut acp_config.env_vars, proxy_url);
     }
+    refresh_acp_config_signature(&mut acp_config);
 
     let handle = {
         let mut sessions = acp_session_state.sessions.lock().await;
-        if let Some(entry) = sessions.get_mut(&conversation_id) {
+        if sessions
+            .get(&conversation_id)
+            .is_some_and(|entry| entry.config_signature == acp_config.session_signature)
+        {
+            let entry = sessions.get_mut(&conversation_id).expect("checked above");
             entry.touch();
             entry.handle.clone()
         } else {
+            if sessions.contains_key(&conversation_id) {
+                info!(
+                    conversation_id,
+                    "ACP session config changed during auto-connect; replacing existing session"
+                );
+            }
             let handle = spawn_acp_session_task(
                 app_handle.clone(),
                 conversation_id,
-                acp_config,
+                acp_config.clone(),
             );
             sessions.insert(
                 conversation_id,
-                AcpSessionEntry::new(handle.clone(), conversation_id),
+                AcpSessionEntry::new(
+                    handle.clone(),
+                    conversation_id,
+                    acp_config.session_signature.clone(),
+                ),
             );
             handle
         }
@@ -744,10 +824,8 @@ pub async fn get_acp_launch_diagnostics(
         assistant_db.get_assistant_model_configs(assistant_id).map_err(|e| e.to_string())?;
     let assistant_models =
         assistant_db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?;
-    let provider_id = assistant_models
-        .first()
-        .map(|model| model.provider_id)
-        .ok_or_else(|| "ACP assistant has no provider model configured".to_string())?;
+    let provider_id = resolve_acp_provider_id(&assistant_models, &assistant_model_configs)
+        .ok_or_else(|| "ACP assistant has no provider configured".to_string())?;
 
     let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let provider_configs =

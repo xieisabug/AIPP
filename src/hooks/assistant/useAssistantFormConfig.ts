@@ -117,9 +117,15 @@ export const useAssistantFormConfig = ({
         // ACP 助手类型 (assistant_type === 4) 的专用配置
         if (currentAssistant?.assistant.assistant_type === 4) {
             // 获取当前选择的提供商 ID
-            const currentProviderId = currentAssistant?.model.length ?? 0 > 0
-                ? currentAssistant.model[0].provider_id.toString()
-                : "-1";
+            const modelProviderId = currentAssistant.model[0]?.provider_id ?? 0;
+            const legacyProviderId =
+                currentAssistant.model_configs.find((config) => config.name === "acp_provider")?.value?.trim() ?? "";
+            const currentProviderId =
+                modelProviderId > 0
+                    ? modelProviderId.toString()
+                    : Number.parseInt(legacyProviderId, 10) > 0
+                      ? legacyProviderId
+                      : "-1";
 
             return [
                 {
@@ -136,11 +142,6 @@ export const useAssistantFormConfig = ({
                         type: "provider-select" as const,
                         label: "选择提供商",
                         value: currentProviderId,
-                        onChange: (value: string | boolean) => {
-                            // 保存提供商 ID 到 model 字段的 provider_id 部分
-                            // 使用特殊格式 "%%{provider_id}" 让保存逻辑正确处理
-                            onConfigChange("model", `%%${value}` as string, "string");
-                        },
                     },
                 },
                 {

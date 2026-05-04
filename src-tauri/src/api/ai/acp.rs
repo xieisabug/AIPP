@@ -59,6 +59,7 @@ pub struct AcpConfig {
     pub working_directory: PathBuf,
     pub env_vars: HashMap<String, String>,
     pub additional_args: Vec<String>,
+    pub session_signature: String,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +90,10 @@ const CLAUDE_SETTINGS_AUTH_MODE: &str = "claude_settings";
 const CLAUDE_ENV_AUTH_MODE: &str = "env_vars";
 const CLAUDE_AUTH_ENV_KEYS: [&str; 3] =
     ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"];
+const CODEX_CONFIG_AUTH_MODE: &str = "codex_config_toml";
+const CODEX_ENV_AUTH_MODE: &str = "env_vars";
+const CODEX_AUTH_ENV_KEYS: [&str; 5] =
+    ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_PROJECT", "CODEX_HOME"];
 
 fn env_blob_contains_any_key(raw: &str, keys: &[&str]) -> bool {
     raw.lines().any(|line| {
@@ -160,6 +165,123 @@ fn resolve_claude_auth_mode(
     } else {
         Some(CLAUDE_SETTINGS_AUTH_MODE.to_string())
     }
+}
+
+fn has_explicit_codex_auth_override(
+    provider_configs: &[LLMProviderConfig],
+    model_configs: &[AssistantModelConfig],
+) -> bool {
+    let has_provider_override = provider_configs.iter().any(|config| {
+        if config.name == "acp_codex_env_vars" {
+            return !config.value.trim().is_empty();
+        }
+
+        if config.name == "acp_env_vars" {
+            return env_blob_contains_any_key(&config.value, &CODEX_AUTH_ENV_KEYS);
+        }
+
+        config.name.strip_prefix("acp_env_").is_some_and(|key| {
+            CODEX_AUTH_ENV_KEYS.iter().any(|candidate| key.eq_ignore_ascii_case(candidate))
+        })
+    });
+
+    let has_model_override = model_configs.iter().any(|config| {
+        if config.name == "acp_codex_env_vars" {
+            return config.value.as_deref().is_some_and(|value| !value.trim().is_empty());
+        }
+
+        if config.name == "acp_env_vars" {
+            return config
+                .value
+                .as_deref()
+                .is_some_and(|value| env_blob_contains_any_key(value, &CODEX_AUTH_ENV_KEYS));
+        }
+
+        config.name.strip_prefix("acp_env_").is_some_and(|key| {
+            CODEX_AUTH_ENV_KEYS.iter().any(|candidate| key.eq_ignore_ascii_case(candidate))
+        }) && config.value.as_deref().is_some_and(|value| !value.trim().is_empty())
+    });
+
+    has_provider_override || has_model_override
+}
+
+fn resolve_codex_auth_mode(
+    cli_command: &str,
+    explicit_mode: Option<String>,
+    provider_configs: &[LLMProviderConfig],
+    model_configs: &[AssistantModelConfig],
+) -> Option<String> {
+    if cli_command != "codex-acp" {
+        return None;
+    }
+
+    if let Some(mode) = explicit_mode.filter(|mode| !mode.trim().is_empty()) {
+        return Some(mode);
+    }
+
+    if has_explicit_codex_auth_override(provider_configs, model_configs) {
+        Some(CODEX_ENV_AUTH_MODE.to_string())
+    } else {
+        Some(CODEX_CONFIG_AUTH_MODE.to_string())
+    }
+}
+
+fn codex_toml_value_to_env_string(value: &toml::Value) -> Option<String> {
+    if let Some(value) = value.as_str() {
+        return Some(value.to_string());
+    }
+    if let Some(value) = value.as_integer() {
+        return Some(value.to_string());
+    }
+    if let Some(value) = value.as_float() {
+        return Some(value.to_string());
+    }
+    if let Some(value) = value.as_bool() {
+        return Some(value.to_string());
+    }
+    None
+}
+
+fn load_codex_config_env_vars_from_path(
+    path: &Path,
+) -> Result<HashMap<String, String>, AppError> {
+    let raw = fs::read_to_string(path).map_err(|e| {
+        AppError::UnknownError(format!(
+            "读取 Codex config.toml 失败 ({}): {}",
+            path.display(),
+            e
+        ))
+    })?;
+    let parsed: toml::Value = toml::from_str(&raw).map_err(|e| {
+        AppError::UnknownError(format!(
+            "解析 Codex config.toml 失败 ({}): {}",
+            path.display(),
+            e
+        ))
+    })?;
+
+    let mut env_vars = HashMap::new();
+    if let Some(env_table) = parsed.get("env").and_then(|value| value.as_table()) {
+        for (key, value) in env_table {
+            if let Some(value) = codex_toml_value_to_env_string(value) {
+                env_vars.insert(key.to_string(), value);
+            }
+        }
+    }
+
+    if let Some(codex_home) = path.parent() {
+        env_vars
+            .entry("CODEX_HOME".to_string())
+            .or_insert_with(|| codex_home.to_string_lossy().to_string());
+    }
+
+    Ok(env_vars)
+}
+
+fn load_codex_config_env_vars() -> Result<HashMap<String, String>, AppError> {
+    let home_dir = dirs::home_dir()
+        .ok_or_else(|| AppError::UnknownError("无法确定用户 home 目录".to_string()))?;
+    load_codex_config_env_vars_from_path(&home_dir.join(".codex").join("config.toml"))
 }
 
 fn load_claude_settings_env_vars_from_path(
@@ -596,6 +718,7 @@ enum AcpSessionCommand {
 #[derive(Clone)]
 pub struct AcpSessionHandle {
     sender: mpsc::UnboundedSender<AcpSessionCommand>,
+    run_id: String,
 }
 
 impl AcpSessionHandle {
@@ -655,14 +778,19 @@ pub struct AcpSessionEntry {
     pub handle: AcpSessionHandle,
     pub snapshot: AcpConversationSessionState,
     pub last_activity: Instant,
+    pub config_signature: String,
+    pub run_id: String,
 }
 
 impl AcpSessionEntry {
-    pub fn new(handle: AcpSessionHandle, conversation_id: i64) -> Self {
+    pub fn new(handle: AcpSessionHandle, conversation_id: i64, config_signature: impl Into<String>) -> Self {
+        let run_id = handle.run_id.clone();
         Self {
             handle,
             snapshot: AcpConversationSessionState { conversation_id, ..Default::default() },
             last_activity: Instant::now(),
+            config_signature: config_signature.into(),
+            run_id,
         }
     }
 
@@ -729,6 +857,27 @@ fn session_config_option_payload(
         }),
         _ => None,
     }
+}
+
+fn acp_config_signature(config: &AcpConfig) -> String {
+    let mut env_entries = config
+        .env_vars
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>();
+    env_entries.sort();
+
+    format!(
+        "cli={}\ncwd={}\nargs={}\nenv={}",
+        config.cli_command,
+        config.working_directory.display(),
+        config.additional_args.join("\u{1f}"),
+        env_entries.join("\u{1f}")
+    )
+}
+
+pub fn refresh_acp_config_signature(config: &mut AcpConfig) {
+    config.session_signature = acp_config_signature(config);
 }
 
 fn apply_config_options_to_snapshot(
@@ -1133,6 +1282,13 @@ fn extract_content_text(content: &acp::ContentBlock) -> String {
 fn append_buffered_content(buffer: &mut String, content: &acp::ContentBlock) -> String {
     buffer.push_str(&extract_content_text(content));
     buffer.clone()
+}
+
+fn is_codex_model_metadata_warning(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.starts_with("Model metadata for ")
+        && trimmed.contains(" not found. Defaulting to fallback metadata;")
+        && trimmed.contains("this can degrade performance and cause issues")
 }
 
 fn build_prompt_to_send(prompt: String, history_prefix: Option<String>) -> String {
@@ -2284,6 +2440,10 @@ impl AcpClient for AcpTauriClient {
             // Agent response streaming - accumulate, persist to DB, and emit to frontend
             acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk { content, .. }) => {
                 let text = extract_content_text(&content);
+                if is_codex_model_metadata_warning(&text) {
+                    warn!("ACP Codex metadata warning suppressed from chat response: {}", text.trim());
+                    return Ok(());
+                }
                 info!("ACP AgentMessageChunk: {} chars", text.len());
 
                 // Accumulate content
@@ -3302,7 +3462,8 @@ pub fn spawn_acp_session_task(
     acp_config: AcpConfig,
 ) -> AcpSessionHandle {
     let (sender, receiver) = mpsc::unbounded_channel();
-    let handle = AcpSessionHandle { sender };
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let handle = AcpSessionHandle { sender, run_id: run_id.clone() };
 
     let cleanup_handle = app_handle.clone();
     tokio::task::spawn_blocking(move || {
@@ -3326,12 +3487,22 @@ pub fn spawn_acp_session_task(
                 notify_cancelled_acp_permission_requests(&cleanup_handle, resolutions).await;
             }
 
-            {
+            let removed_current_entry = {
                 let session_state = cleanup_handle.state::<crate::AcpSessionState>();
                 let mut sessions = session_state.sessions.lock().await;
-                sessions.remove(&conversation_id);
+                if sessions
+                    .get(&conversation_id)
+                    .is_some_and(|entry| entry.run_id == run_id)
+                {
+                    sessions.remove(&conversation_id);
+                    true
+                } else {
+                    false
+                }
+            };
+            if removed_current_entry {
+                emit_acp_session_state_snapshot(&cleanup_handle, conversation_id, None);
             }
-            emit_acp_session_state_snapshot(&cleanup_handle, conversation_id, None);
 
             result
         })
@@ -4148,12 +4319,24 @@ pub fn extract_acp_config(
 
     // Helper to get value from provider_configs
     let get_provider_config = |name: &str| -> Option<String> {
-        provider_configs.iter().find(|c| c.name == name).map(|c| c.value.clone())
+        provider_configs
+            .iter()
+            .find(|c| c.name == name)
+            .and_then(|c| {
+                let value = c.value.trim();
+                (!value.is_empty()).then(|| value.to_string())
+            })
     };
 
     // Helper to get value from model_configs
     let get_model_config = |name: &str| -> Option<String> {
-        model_configs.iter().find(|c| c.name == name).and_then(|c| c.value.clone())
+        model_configs
+            .iter()
+            .find(|c| c.name == name)
+            .and_then(|c| c.value.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
     };
 
     // 获取 CLI 命令
@@ -4162,8 +4345,12 @@ pub fn extract_acp_config(
     // - Claude Code: 需要安装 @zed-industries/claude-code-acp，命令是 "claude-code-acp"
     // - Codex: 需要安装 @zed-industries/codex-acp，命令是 "codex-acp"
     // - Gemini: 原生支持 ACP，命令是 "gemini"
-    let cli_command =
-        get_provider_config("acp_cli_command").unwrap_or_else(|| "claude-code-acp".to_string());
+    let cli_command = get_provider_config("acp_cli_command").ok_or_else(|| {
+        AppError::UnknownError(
+            "当前 ACP 助手没有拿到有效的 provider CLI 配置：请先在助手配置里选择 ACP 提供商，再到模型提供商配置里选择 codex-acp、claude-code-acp 或其他 ACP CLI"
+                .to_string(),
+        )
+    })?;
 
     debug!("ACP: cli_command from provider_config: {:?}", get_provider_config("acp_cli_command"));
     debug!("ACP: final cli_command: {}", cli_command);
@@ -4172,6 +4359,13 @@ pub fn extract_acp_config(
         &cli_command,
         get_model_config("acp_claude_auth_mode")
             .or_else(|| get_provider_config("acp_claude_auth_mode")),
+        provider_configs,
+        model_configs,
+    );
+    let codex_auth_mode = resolve_codex_auth_mode(
+        &cli_command,
+        get_model_config("acp_codex_auth_mode")
+            .or_else(|| get_provider_config("acp_codex_auth_mode")),
         provider_configs,
         model_configs,
     );
@@ -4196,10 +4390,26 @@ pub fn extract_acp_config(
         env_vars.extend(settings_env);
     }
 
+    if codex_auth_mode.as_deref() == Some(CODEX_CONFIG_AUTH_MODE) {
+        let config_env = load_codex_config_env_vars()?;
+        info!(
+            "ACP Codex config env loaded from ~/.codex/config.toml: {} vars",
+            config_env.len()
+        );
+        env_vars.extend(config_env);
+    }
+
     // 先从 provider_configs 收集
     for config in provider_configs {
         if config.name == "acp_claude_env_vars" {
             if claude_auth_mode.as_deref() == Some(CLAUDE_ENV_AUTH_MODE) {
+                merge_acp_env_blob(&mut env_vars, &config.value);
+            }
+            continue;
+        }
+
+        if config.name == "acp_codex_env_vars" {
+            if codex_auth_mode.as_deref() == Some(CODEX_ENV_AUTH_MODE) {
                 merge_acp_env_blob(&mut env_vars, &config.value);
             }
             continue;
@@ -4219,6 +4429,15 @@ pub fn extract_acp_config(
     for config in model_configs {
         if config.name == "acp_claude_env_vars" {
             if claude_auth_mode.as_deref() == Some(CLAUDE_ENV_AUTH_MODE) {
+                if let Some(value) = &config.value {
+                    merge_acp_env_blob(&mut env_vars, value);
+                }
+            }
+            continue;
+        }
+
+        if config.name == "acp_codex_env_vars" {
+            if codex_auth_mode.as_deref() == Some(CODEX_ENV_AUTH_MODE) {
                 if let Some(value) = &config.value {
                     merge_acp_env_blob(&mut env_vars, value);
                 }
@@ -4249,15 +4468,25 @@ pub fn extract_acp_config(
 
     // Log the extracted configuration for debugging
     info!(
-        "extract_acp_config: cli_command='{}', working_directory='{}', env_vars={}, additional_args={:?}, claude_auth_mode={:?}",
+        "extract_acp_config: cli_command='{}', working_directory='{}', env_vars={}, additional_args={:?}, claude_auth_mode={:?}, codex_auth_mode={:?}",
         cli_command,
         working_directory.display(),
         env_vars.len(),
         additional_args,
-        claude_auth_mode
+        claude_auth_mode,
+        codex_auth_mode
     );
 
-    Ok(AcpConfig { cli_command, working_directory, env_vars, additional_args })
+    let mut config = AcpConfig {
+        cli_command,
+        working_directory,
+        env_vars,
+        additional_args,
+        session_signature: String::new(),
+    };
+    config.session_signature = acp_config_signature(&config);
+
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -4266,8 +4495,9 @@ mod tests {
         acp_tool_status_to_aipp_status, acp_tool_update_status_to_aipp_status,
         append_buffered_content, apply_network_proxy_to_env_vars, build_acp_launch_plan,
         build_prompt_to_send, extract_acp_config, extract_content_text, get_claude_model_override,
-        load_claude_settings_env_vars_from_path, AcpPermissionDecision, AcpPermissionRequestEvent,
-        AcpPermissionState, AcpSessionEntry, AcpSessionHandle,
+        load_claude_settings_env_vars_from_path, load_codex_config_env_vars_from_path,
+        AcpPermissionDecision, AcpPermissionRequestEvent, AcpPermissionState, AcpSessionEntry,
+        AcpSessionHandle,
     };
     use crate::db::assistant_db::AssistantModelConfig;
     use crate::db::llm_db::LLMProviderConfig;
@@ -4423,6 +4653,7 @@ mod tests {
     fn extract_acp_config_parses_multiline_env_blob_and_model_overrides() {
         let provider_configs = vec![
             provider_config("acp_cli_command", "codex-acp"),
+            provider_config("acp_codex_auth_mode", "env_vars"),
             provider_config("acp_env_vars", "FOO=provider\nSHARED=provider"),
         ];
         let model_configs =
@@ -4434,6 +4665,16 @@ mod tests {
         assert_eq!(config.env_vars.get("BAR"), Some(&"model".to_string()));
         assert_eq!(config.env_vars.get("SHARED"), Some(&"model".to_string()));
         assert!(!config.env_vars.contains_key("INVALID"));
+    }
+
+    #[test]
+    fn extract_acp_config_errors_when_cli_command_is_missing() {
+        let error = extract_acp_config(&[], &[]).unwrap_err();
+
+        assert!(
+            error.to_string().contains("没有拿到有效的 provider CLI 配置"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -4528,6 +4769,25 @@ mod tests {
     }
 
     #[test]
+    fn load_codex_config_env_vars_from_path_reads_env_table() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "[env]\nOPENAI_API_KEY = \"test-key\"\nOPENAI_BASE_URL = \"https://proxy.example.com\""
+        )
+        .unwrap();
+
+        let env_vars = load_codex_config_env_vars_from_path(file.path()).unwrap();
+
+        assert_eq!(env_vars.get("OPENAI_API_KEY"), Some(&"test-key".to_string()));
+        assert_eq!(
+            env_vars.get("OPENAI_BASE_URL"),
+            Some(&"https://proxy.example.com".to_string())
+        );
+        assert!(env_vars.contains_key("CODEX_HOME"));
+    }
+
+    #[test]
     fn extract_acp_config_merges_manual_claude_env_vars_when_selected() {
         let provider_configs = vec![
             provider_config("acp_cli_command", "claude-code-acp"),
@@ -4550,6 +4810,28 @@ mod tests {
     }
 
     #[test]
+    fn extract_acp_config_merges_manual_codex_env_vars_when_selected() {
+        let provider_configs = vec![
+            provider_config("acp_cli_command", "codex-acp"),
+            provider_config("acp_codex_auth_mode", "env_vars"),
+            provider_config(
+                "acp_codex_env_vars",
+                "OPENAI_API_KEY=provider-key\nOPENAI_BASE_URL=https://provider.example.com",
+            ),
+        ];
+        let model_configs =
+            vec![model_config("acp_codex_env_vars", "OPENAI_API_KEY=model-key")];
+
+        let config = extract_acp_config(&model_configs, &provider_configs).unwrap();
+
+        assert_eq!(config.env_vars.get("OPENAI_API_KEY"), Some(&"model-key".to_string()));
+        assert_eq!(
+            config.env_vars.get("OPENAI_BASE_URL"),
+            Some(&"https://provider.example.com".to_string())
+        );
+    }
+
+    #[test]
     fn get_claude_model_override_returns_custom_model_only_for_claude() {
         let mut env_vars = HashMap::new();
         env_vars.insert("ANTHROPIC_MODEL".to_string(), "glm-5".to_string());
@@ -4567,8 +4849,8 @@ mod tests {
     #[test]
     fn acp_session_entry_idle_timeout_ignores_active_prompt() {
         let (sender, _receiver) = mpsc::unbounded_channel();
-        let handle = AcpSessionHandle { sender };
-        let mut entry = AcpSessionEntry::new(handle, 42);
+        let handle = AcpSessionHandle { sender, run_id: "test-run".to_string() };
+        let mut entry = AcpSessionEntry::new(handle, 42, "test-signature");
         let idle_timeout = Duration::from_secs(15 * 60);
 
         entry.last_activity = Instant::now() - Duration::from_secs(16 * 60);
@@ -4581,8 +4863,8 @@ mod tests {
     #[test]
     fn acp_session_entry_touch_resets_idle_timeout() {
         let (sender, _receiver) = mpsc::unbounded_channel();
-        let handle = AcpSessionHandle { sender };
-        let mut entry = AcpSessionEntry::new(handle, 43);
+        let handle = AcpSessionHandle { sender, run_id: "test-run".to_string() };
+        let mut entry = AcpSessionEntry::new(handle, 43, "test-signature");
         let idle_timeout = Duration::from_secs(15 * 60);
 
         entry.last_activity = Instant::now() - Duration::from_secs(16 * 60);

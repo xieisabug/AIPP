@@ -586,27 +586,50 @@ impl LLMDatabase {
     }
 
     /// 根据助手类型获取过滤后的模型列表
-    /// ACP 助手 (assistant_type = 4): 只返回 ACP 提供商 (api_type = 'acp') 的模型
+    /// ACP 助手 (assistant_type = 4): 返回 ACP 提供商；如果没有模型行，也生成一个可选择项
     /// 普通助手: 排除 ACP 提供商的模型
     #[instrument(level = "debug", skip(self))]
     pub fn get_filtered_models_for_select(
         &self,
         assistant_type: i64,
     ) -> Result<Vec<(String, String, i64, i64)>, String> {
-        let (filter_condition, exclude_condition) = if assistant_type == 4 {
-            // ACP 助手：只要 ACP 提供商
-            ("p.api_type = 'acp'", "")
-        } else {
-            // 普通助手：排除 ACP 提供商
-            ("", "p.api_type != 'acp'")
-        };
+        if assistant_type == 4 {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "
+                    SELECT
+                        CASE
+                            WHEN m.id IS NULL THEN p.name
+                            ELSE (p.name || ' / ' || m.name)
+                        END AS name,
+                        COALESCE(NULLIF(m.code, ''), 'acp') AS code,
+                        COALESCE(m.id, 0) AS id,
+                        p.id AS llm_provider_id
+                    FROM
+                        llm_provider p
+                    LEFT JOIN
+                        llm_model m ON m.llm_provider_id = p.id
+                    WHERE
+                        p.is_enabled = 1 AND p.api_type = 'acp'
+                    ORDER BY
+                        p.id, m.id
+                    ",
+                )
+                .map_err(|e| e.to_string())?;
 
-        let where_clause = match (filter_condition, exclude_condition) {
-            ("", "") => "p.is_enabled = 1".to_string(),
-            (f, "") => format!("p.is_enabled = 1 AND {}", f),
-            ("", e) => format!("p.is_enabled = 1 AND {}", e),
-            (f, e) => format!("p.is_enabled = 1 AND {} AND {}", f, e),
-        };
+            let models = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+                .map_err(|e| e.to_string())?;
+
+            let mut result = Vec::new();
+            for model in models {
+                result.push(model.map_err(|e| e.to_string())?);
+            }
+            return Ok(result);
+        }
+
+        let where_clause = "p.is_enabled = 1 AND p.api_type != 'acp'";
 
         let sql = format!(
             "
