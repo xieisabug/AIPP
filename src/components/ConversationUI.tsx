@@ -16,6 +16,7 @@ import {
     Conversation,
     ConversationCancelEvent,
     Message,
+    QueuedConversationMessage,
     StreamEvent,
     ConversationWithMessages,
     GroupMergeEvent,
@@ -102,6 +103,7 @@ interface ConversationUIProps {
     allowFeishuDebugResend?: boolean;
     virtualizeMessages?: boolean;
     windowLabel?: string;
+    busySendBehavior?: "queue" | "interrupt";
 }
 
 const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
@@ -122,6 +124,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             allowFeishuDebugResend = false,
             virtualizeMessages = false,
             windowLabel = "chat_ui",
+            busySendBehavior = "queue",
         },
         ref
     ) => {
@@ -141,6 +144,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 常规消息列表
         const [messages, setMessages] = useState<Array<Message>>([]);
+        const [queuedMessages, setQueuedMessages] = useState<QueuedConversationMessage[]>([]);
         const streamingMessagesRef = useRef<Map<number, StreamEvent>>(new Map());
         const smartScrollRef = useRef<
             ((forceScroll?: boolean, behaviorOverride?: ScrollBehavior) => void) | null
@@ -286,6 +290,22 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             // MCP状态更新已经在useConversationEvents中处理，这里可以添加额外的逻辑
         }, []);
 
+        const upsertQueuedMessage = useCallback((queued: QueuedConversationMessage) => {
+            setQueuedMessages((current) => {
+                const withoutCurrent = current.filter((item) => item.id !== queued.id);
+                return [...withoutCurrent, queued].sort((left, right) => left.id - right.id);
+            });
+        }, []);
+
+        const handleQueuedMessageRemove = useCallback(
+            (payload: { id: number; conversation_id: number }) => {
+                setQueuedMessages((current) =>
+                    current.filter((item) => item.id !== payload.id)
+                );
+            },
+            []
+        );
+
         // ============= 消息处理逻辑 =============
 
         // 处理消息完成时的状态更新，确保消息在streamingMessages清理后仍能显示
@@ -358,6 +378,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 onAiResponseStart: handleAiResponseStart,
                 onAiResponseComplete: handleAiResponseComplete,
                 onError: handleError,
+                onQueuedMessageAdd: upsertQueuedMessage,
+                onQueuedMessageUpdate: upsertQueuedMessage,
+                onQueuedMessageRemove: handleQueuedMessageRemove,
             };
         }, [
             conversationId,
@@ -368,6 +391,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             handleAiResponseComplete,
             handleError,
             handleMessageCompletion,
+            upsertQueuedMessage,
+            handleQueuedMessageRemove,
             conversation?.id,
             // 移除 functionMap 依赖，改为在回调内部访问
         ]);
@@ -394,6 +419,36 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const acpRestoreNoticeRef = useRef<string | null>(null);
         const acpAutoConnectKeyRef = useRef<string | null>(null);
         const acpConnectionErrorNoticeRef = useRef<string | null>(null);
+
+        useEffect(() => {
+            const conversationIdNum = Number(conversationId);
+            if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
+                setQueuedMessages([]);
+                return;
+            }
+
+            let cancelled = false;
+            invoke<QueuedConversationMessage[]>("list_queued_conversation_messages", {
+                conversationId: conversationIdNum,
+            })
+                .then((items) => {
+                    if (cancelled) {
+                        return;
+                    }
+                    setQueuedMessages(items.sort((left, right) => left.id - right.id));
+                })
+                .catch((error) => {
+                    if (cancelled) {
+                        return;
+                    }
+                    console.warn("Failed to load queued conversation messages:", error);
+                    setQueuedMessages([]);
+                });
+
+            return () => {
+                cancelled = true;
+            };
+        }, [conversationId]);
 
         const showAcpConnectionError = useCallback(
             (assistantId: number, error: unknown) => {
@@ -484,6 +539,41 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         ]);
         const attachedFileCount = Array.isArray(fileInfoList) ? fileInfoList.length : 0;
 
+        const queuedDisplayMessages = useMemo<Message[]>(() => {
+            return queuedMessages.map((queued) => {
+                const queueKind = queued.queue_kind === "interrupt" ? "interrupt" : "normal";
+                const createdTime = queued.created_time ? new Date(queued.created_time) : new Date();
+                return {
+                    id: -queued.id,
+                    conversation_id: queued.conversation_id,
+                    message_type: "user",
+                    content: queued.prompt,
+                    llm_model_id: null,
+                    created_time: createdTime,
+                    start_time: null,
+                    finish_time: null,
+                    token_count: 0,
+                    input_token_count: 0,
+                    output_token_count: 0,
+                    generation_group_id: null,
+                    parent_group_id: null,
+                    parent_id: null,
+                    regenerate: null,
+                    attachment_list: [],
+                    metadata_json: JSON.stringify({
+                        queue_status: "queued",
+                        queue_kind: queueKind,
+                        queue_id: queued.id,
+                    }),
+                };
+            });
+        }, [queuedMessages]);
+
+        const messagesWithQueued = useMemo(
+            () => [...messages, ...queuedDisplayMessages],
+            [messages, queuedDisplayMessages]
+        );
+
         // 当 functionMap 变化时更新事件处理器
         useEffect(() => {
             updateFunctionMap(functionMap);
@@ -494,7 +584,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 第一步：消息处理 - 获取合并的消息用于分组
         const { combinedMessagesForGrouping } = useMessageProcessing({
-            messages,
+            messages: messagesWithQueued,
             streamingMessages,
             conversation,
             generationGroups: new Map(), // 第一步只需要合并消息用于分组
@@ -510,7 +600,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 第三步：基于分组信息与选择的版本，计算最终需要展示的消息列表
         const { allDisplayMessages } = useMessageProcessing({
-            messages,
+            messages: messagesWithQueued,
             streamingMessages,
             conversation,
             generationGroups: messageGroupsData.generationGroups,
@@ -620,6 +710,17 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             setAiIsResponsing,
         });
 
+        const handleQueuedMessagePromote = useCallback((queueId: number) => {
+            void invoke<QueuedConversationMessage>("promote_queued_conversation_message", {
+                queueId,
+            }).catch((error) => {
+                toast.error("提升打断消息失败", {
+                    description: String(error),
+                    position: "bottom-right",
+                });
+            });
+        }, []);
+
         // 对话操作
         const {
             handleDeleteConversationSuccess,
@@ -654,6 +755,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             clearShiningMessages,
             assistantTypePluginMap,
             assistantRunApi,
+            busySendBehavior,
         });
 
         // ============= 初始化和生命周期逻辑 =============
@@ -840,6 +942,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             const assistantId = activeAssistantId;
             if (!assistantId || !isAcpAssistant) {
                 setAcpWorkingDirectory(null);
+                applyAcpSessionState(null);
                 return;
             }
 
@@ -1061,9 +1164,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         );
 
         const acpHeaderActions = useMemo(() => {
-            const isAcpConversation =
-                isAcpAssistant || Boolean(acpWorkingDirectory) || Boolean(acpSessionState);
-            if (!isAcpConversation) {
+            if (!isAcpAssistant) {
                 return combinedHeaderActions;
             }
 

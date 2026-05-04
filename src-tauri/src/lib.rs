@@ -29,8 +29,10 @@ use crate::api::ai::acp::{
     get_acp_session_state, set_acp_session_config_option, AcpPermissionState,
 };
 use crate::api::ai_api::{
-    ask_ai, cancel_ai, get_activity_focus, get_conversation_runtime_state, get_shine_state,
-    regenerate_ai, regenerate_conversation_title, tool_result_continue_ask_ai,
+    ask_ai, cancel_ai, enqueue_conversation_message, get_activity_focus,
+    get_conversation_runtime_state, get_shine_state, list_queued_conversation_messages,
+    promote_queued_conversation_message, regenerate_ai, regenerate_conversation_title,
+    tool_result_continue_ask_ai,
 };
 use crate::api::assistant_api::{
     add_assistant, add_assistant_workspace, bulk_update_assistant_mcp_tools, copy_assistant,
@@ -902,6 +904,9 @@ pub fn run() {
     let app = app
         .invoke_handler(tauri::generate_handler![
             ask_ai,
+            enqueue_conversation_message,
+            list_queued_conversation_messages,
+            promote_queued_conversation_message,
             tool_result_continue_ask_ai,
             regenerate_ai,
             get_activity_focus,

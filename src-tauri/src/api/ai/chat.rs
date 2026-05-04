@@ -4,7 +4,10 @@ use crate::api::ai::title::{
     maybe_generate_title_from_conversation_if_needed, spawn_title_generation,
 };
 use crate::api::ai::types::McpOverrideConfig;
-use crate::api::ai_api::{resolve_tool_name, sanitize_tool_name, ToolNameMapping};
+use crate::api::ai_api::{
+    resolve_tool_name, sanitize_tool_name, try_dispatch_queued_message_after_completion,
+    ToolNameMapping,
+};
 use crate::db::assistant_db::Assistant;
 use crate::db::conversation_db::{
     AttachmentType, ConversationDatabase, Message, MessageAttachment, Repository,
@@ -3542,6 +3545,19 @@ async fn attempt_stream_chat(
                             stream_complete_event,
                         );
 
+                        if try_dispatch_queued_message_after_completion(
+                            &app_handle,
+                            &window,
+                            conversation_id,
+                        )
+                        .await
+                        {
+                            info!(
+                                conversation_id,
+                                "queued conversation message dispatched after stream completion"
+                            );
+                        }
+
                         return Ok(());
                     }
                 }
@@ -4085,6 +4101,15 @@ pub async fn handle_non_stream_chat(
 
             if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
                 activity_manager.clear_message_focus_keep_mcp(app_handle, conversation_id).await;
+            }
+
+            if try_dispatch_queued_message_after_completion(app_handle, window, conversation_id)
+                .await
+            {
+                info!(
+                    conversation_id,
+                    "queued conversation message dispatched after non-stream completion"
+                );
             }
 
             Ok(())

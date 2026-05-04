@@ -46,6 +46,20 @@ export interface Message {
     tps?: number | null;
 }
 
+export type QueuedConversationMessageKind = "normal" | "interrupt";
+
+export interface QueuedConversationMessage {
+    id: number;
+    conversation_id: number;
+    queue_kind: QueuedConversationMessageKind | string;
+    status: string;
+    request_json: string;
+    prompt: string;
+    assistant_id: number;
+    created_time: Date | string;
+    updated_time: Date | string;
+}
+
 // 流式事件数据类型
 export interface StreamEvent {
     message_id: number;

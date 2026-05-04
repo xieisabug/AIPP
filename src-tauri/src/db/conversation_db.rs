@@ -200,6 +200,21 @@ pub struct MessageAttachment {
     pub token_count: Option<i32>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct QueuedConversationMessage {
+    pub id: i64,
+    pub conversation_id: i64,
+    pub queue_kind: String,
+    pub status: String,
+    pub request_json: String,
+    pub prompt: String,
+    pub assistant_id: i64,
+    #[serde(serialize_with = "serialize_datetime_millis")]
+    pub created_time: DateTime<Utc>,
+    #[serde(serialize_with = "serialize_datetime_millis")]
+    pub updated_time: DateTime<Utc>,
+}
+
 pub trait Repository<T> {
     fn create(&self, item: &T) -> Result<T>;
     fn read(&self, id: i64) -> Result<Option<T>>;
@@ -1019,6 +1034,176 @@ impl Repository<MessageAttachment> for MessageAttachmentRepository {
     }
 }
 
+pub struct QueuedConversationMessageRepository {
+    conn: Connection,
+    write_lock: Arc<Mutex<()>>,
+}
+
+impl QueuedConversationMessageRepository {
+    #[instrument(level = "debug", skip(conn, write_lock))]
+    pub fn new_with_write_lock(conn: Connection, write_lock: Arc<Mutex<()>>) -> Self {
+        QueuedConversationMessageRepository { conn, write_lock }
+    }
+
+    fn with_serialized_write<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T>,
+    {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| sqlite_write_lock_poisoned_error("conversation.db"))?;
+        f(&self.conn)
+    }
+
+    fn queued_message_from_row(row: &rusqlite::Row<'_>) -> Result<QueuedConversationMessage> {
+        Ok(QueuedConversationMessage {
+            id: row.get(0)?,
+            conversation_id: row.get(1)?,
+            queue_kind: row.get(2)?,
+            status: row.get(3)?,
+            request_json: row.get(4)?,
+            prompt: row.get(5)?,
+            assistant_id: row.get(6)?,
+            created_time: get_required_datetime_from_row(row, 7)?,
+            updated_time: get_required_datetime_from_row(row, 8)?,
+        })
+    }
+
+    #[instrument(level = "debug", skip(self, request_json, prompt), fields(conversation_id, queue_kind, assistant_id))]
+    pub fn enqueue(
+        &self,
+        conversation_id: i64,
+        queue_kind: &str,
+        request_json: &str,
+        prompt: &str,
+        assistant_id: i64,
+    ) -> Result<QueuedConversationMessage> {
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "INSERT INTO queued_conversation_message
+                    (conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time)
+                 VALUES (?1, ?2, 'queued', ?3, ?4, ?5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                params![conversation_id, queue_kind, request_json, prompt, assistant_id],
+            )?;
+            let id = conn.last_insert_rowid();
+            conn.query_row(
+                "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
+                 FROM queued_conversation_message
+                 WHERE id = ?1",
+                params![id],
+                Self::queued_message_from_row,
+            )
+        })
+    }
+
+    #[instrument(level = "debug", skip(self), fields(conversation_id))]
+    pub fn list_queued_by_conversation(
+        &self,
+        conversation_id: i64,
+    ) -> Result<Vec<QueuedConversationMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
+             FROM queued_conversation_message
+             WHERE conversation_id = ?1 AND status = 'queued'
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![conversation_id], Self::queued_message_from_row)?;
+        rows.collect()
+    }
+
+    #[instrument(level = "debug", skip(self), fields(id))]
+    pub fn promote_to_interrupt(&self, id: i64) -> Result<Option<QueuedConversationMessage>> {
+        self.with_serialized_write(|conn| {
+            let changed = conn.execute(
+                "UPDATE queued_conversation_message
+                 SET queue_kind = 'interrupt', updated_time = CURRENT_TIMESTAMP
+                 WHERE id = ?1 AND status = 'queued'",
+                params![id],
+            )?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            conn.query_row(
+                "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
+                 FROM queued_conversation_message
+                 WHERE id = ?1",
+                params![id],
+                Self::queued_message_from_row,
+            )
+            .optional()
+        })
+    }
+
+    #[instrument(level = "debug", skip(self), fields(conversation_id, interrupt_only))]
+    pub fn take_next_for_dispatch(
+        &self,
+        conversation_id: i64,
+        interrupt_only: bool,
+    ) -> Result<Option<QueuedConversationMessage>> {
+        self.with_serialized_write(|conn| {
+            let sql = if interrupt_only {
+                "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
+                 FROM queued_conversation_message
+                 WHERE conversation_id = ?1 AND status = 'queued' AND queue_kind = 'interrupt'
+                 ORDER BY id ASC
+                 LIMIT 1"
+            } else {
+                "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
+                 FROM queued_conversation_message
+                 WHERE conversation_id = ?1 AND status = 'queued'
+                 ORDER BY CASE queue_kind WHEN 'interrupt' THEN 0 ELSE 1 END, id ASC
+                 LIMIT 1"
+            };
+            let queued = conn
+                .query_row(sql, params![conversation_id], Self::queued_message_from_row)
+                .optional()?;
+            let Some(mut queued) = queued else {
+                return Ok(None);
+            };
+            let changed = conn.execute(
+                "UPDATE queued_conversation_message
+                 SET status = 'dispatching', updated_time = CURRENT_TIMESTAMP
+                 WHERE id = ?1 AND status = 'queued'",
+                params![queued.id],
+            )?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            queued.status = "dispatching".to_string();
+            Ok(Some(queued))
+        })
+    }
+
+    #[instrument(level = "debug", skip(self), fields(id))]
+    pub fn finish_dispatch(&self, id: i64) -> Result<()> {
+        self.with_serialized_write(|conn| {
+            conn.execute("DELETE FROM queued_conversation_message WHERE id = ?1", params![id])?;
+            Ok(())
+        })
+    }
+
+    #[instrument(level = "debug", skip(self), fields(id))]
+    pub fn reset_dispatch(&self, id: i64) -> Result<Option<QueuedConversationMessage>> {
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE queued_conversation_message
+                 SET status = 'queued', updated_time = CURRENT_TIMESTAMP
+                 WHERE id = ?1",
+                params![id],
+            )?;
+            conn.query_row(
+                "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
+                 FROM queued_conversation_message
+                 WHERE id = ?1",
+                params![id],
+                Self::queued_message_from_row,
+            )
+            .optional()
+        })
+    }
+}
+
 pub struct ConversationDatabase {
     db_path: PathBuf,
     write_lock: Arc<Mutex<()>>,
@@ -1163,6 +1348,12 @@ impl ConversationDatabase {
     }
 
     #[instrument(level = "debug", skip(self), err)]
+    pub fn queued_message_repo(&self) -> Result<QueuedConversationMessageRepository, AppError> {
+        let conn = self.get_connection().map_err(AppError::from)?;
+        Ok(QueuedConversationMessageRepository::new_with_write_lock(conn, self.write_lock()))
+    }
+
+    #[instrument(level = "debug", skip(self), err)]
     pub fn conversation_summary_repo(&self) -> Result<ConversationSummaryRepository, AppError> {
         let conn = self.get_connection().map_err(AppError::from)?;
         Ok(ConversationSummaryRepository::new_with_write_lock(conn, self.write_lock()))
@@ -1275,6 +1466,26 @@ impl ConversationDatabase {
         conn.execute("CREATE INDEX IF NOT EXISTS idx_message_parent_id ON message(parent_id)", [])?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_message_attachment_message_id ON message_attachment(message_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS queued_conversation_message (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                queue_kind TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                request_json TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                assistant_id INTEGER NOT NULL,
+                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (conversation_id) REFERENCES conversation(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_queued_conversation_message_pending
+             ON queued_conversation_message(conversation_id, status, queue_kind, id)",
             [],
         )?;
         conn.execute(

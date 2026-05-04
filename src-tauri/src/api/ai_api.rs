@@ -27,7 +27,9 @@ use crate::api::butler_api::{is_butler_system_assistant_name, mark_butler_task_c
 
 use crate::api::genai_client;
 use crate::db::conversation_db::{AttachmentType, Repository};
-use crate::db::conversation_db::{ConversationDatabase, Message, MessageAttachment};
+use crate::db::conversation_db::{
+    ConversationDatabase, Message, MessageAttachment, QueuedConversationMessage,
+};
 use crate::db::llm_db::LLMDatabase;
 use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
@@ -52,6 +54,9 @@ use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
 use tracing::{debug, error, info, instrument, warn};
+
+const QUEUE_KIND_NORMAL: &str = "normal";
+const QUEUE_KIND_INTERRUPT: &str = "interrupt";
 
 /// 计算字符串的简短 hash（用于确保唯一性）
 fn short_hash(s: &str) -> String {
@@ -169,6 +174,69 @@ fn build_prompt_with_attachment_context(prompt: &str, context: &str) -> String {
     }
 }
 
+fn normalize_queue_kind(queue_kind: &str) -> Result<&'static str, AppError> {
+    match queue_kind {
+        QUEUE_KIND_NORMAL => Ok(QUEUE_KIND_NORMAL),
+        QUEUE_KIND_INTERRUPT => Ok(QUEUE_KIND_INTERRUPT),
+        other => Err(AppError::UnknownError(format!("不支持的消息队列类型: {}", other))),
+    }
+}
+
+fn emit_queued_message_event(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    event_type: &str,
+    data: serde_json::Value,
+) {
+    send_conversation_event_to_chat_windows(
+        app_handle,
+        conversation_id,
+        ConversationEvent { r#type: event_type.to_string(), data },
+    );
+}
+
+fn emit_queued_message_payload(
+    app_handle: &tauri::AppHandle,
+    event_type: &str,
+    queued: &QueuedConversationMessage,
+) {
+    emit_queued_message_event(
+        app_handle,
+        queued.conversation_id,
+        event_type,
+        serde_json::to_value(queued).unwrap_or_else(|_| serde_json::Value::Null),
+    );
+}
+
+fn emit_queued_message_remove(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    queue_id: i64,
+) {
+    emit_queued_message_event(
+        app_handle,
+        conversation_id,
+        "queued_message_remove",
+        serde_json::json!({
+            "id": queue_id,
+            "conversation_id": conversation_id,
+        }),
+    );
+}
+
+fn has_active_mcp_calls(app_handle: &tauri::AppHandle, conversation_id: i64) -> bool {
+    let Ok(db) = MCPDatabase::new(app_handle) else {
+        return false;
+    };
+    db.get_mcp_tool_calls_by_conversation(conversation_id)
+        .map(|calls| {
+            calls
+                .iter()
+                .any(|call| call.status == "pending" || call.status == "executing")
+        })
+        .unwrap_or(false)
+}
+
 fn messages_to_hook_value(
     messages: &[(String, String, Vec<MessageAttachment>)],
 ) -> Vec<serde_json::Value> {
@@ -270,6 +338,174 @@ async fn emit_chat_context_event(
             }),
         )
         .await;
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle), fields(conversation_id))]
+pub async fn list_queued_conversation_messages(
+    app_handle: tauri::AppHandle,
+    conversation_id: i64,
+) -> Result<Vec<QueuedConversationMessage>, AppError> {
+    let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
+    db.queued_message_repo()?.list_queued_by_conversation(conversation_id).map_err(AppError::from)
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle, request), fields(conversation_id = %request.conversation_id, assistant_id = request.assistant_id, queue_kind = %queue_kind))]
+pub async fn enqueue_conversation_message(
+    app_handle: tauri::AppHandle,
+    request: AiRequest,
+    queue_kind: String,
+) -> Result<QueuedConversationMessage, AppError> {
+    let queue_kind = normalize_queue_kind(&queue_kind)?;
+    if request.prompt.trim().is_empty() {
+        return Err(AppError::UnknownError("排队消息不能为空".to_string()));
+    }
+    let conversation_id = request
+        .conversation_id
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| AppError::UnknownError("排队消息必须关联已有对话".to_string()))?;
+    if conversation_id <= 0 {
+        return Err(AppError::UnknownError("排队消息必须关联已有对话".to_string()));
+    }
+
+    let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
+    let conversation = db
+        .conversation_repo()?
+        .read(conversation_id)?
+        .ok_or_else(|| AppError::DatabaseError("对话未找到".to_string()))?;
+    let assistant_id = if request.assistant_id > 0 {
+        request.assistant_id
+    } else {
+        conversation
+            .assistant_id
+            .ok_or_else(|| AppError::DatabaseError("对话未关联助手".to_string()))?
+    };
+    let mut queued_request = request;
+    queued_request.conversation_id = conversation_id.to_string();
+    queued_request.assistant_id = assistant_id;
+    let request_json = serde_json::to_string(&queued_request)
+        .map_err(|error| AppError::UnknownError(format!("序列化排队消息失败: {}", error)))?;
+    let queued = db.queued_message_repo()?.enqueue(
+        conversation_id,
+        queue_kind,
+        &request_json,
+        &queued_request.prompt,
+        assistant_id,
+    )?;
+
+    emit_queued_message_payload(&app_handle, "queued_message_add", &queued);
+    Ok(queued)
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle), fields(queue_id))]
+pub async fn promote_queued_conversation_message(
+    app_handle: tauri::AppHandle,
+    queue_id: i64,
+) -> Result<QueuedConversationMessage, AppError> {
+    let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
+    let queued = db
+        .queued_message_repo()?
+        .promote_to_interrupt(queue_id)?
+        .ok_or_else(|| AppError::DatabaseError("排队消息不存在或已经被消费".to_string()))?;
+    emit_queued_message_payload(&app_handle, "queued_message_update", &queued);
+    Ok(queued)
+}
+
+async fn dispatch_queued_message(
+    app_handle: tauri::AppHandle,
+    window: tauri::Window,
+    queued: QueuedConversationMessage,
+) -> Result<AiResponse, AppError> {
+    emit_queued_message_remove(&app_handle, queued.conversation_id, queued.id);
+
+    let request: AiRequest = serde_json::from_str(&queued.request_json)
+        .map_err(|error| AppError::UnknownError(format!("解析排队消息失败: {}", error)))?;
+
+    let response = ask_ai(
+        app_handle.clone(),
+        app_handle.state::<AppState>(),
+        app_handle.state::<AcpSessionState>(),
+        app_handle.state::<FeatureConfigState>(),
+        app_handle.state::<MessageTokenManager>(),
+        app_handle.state::<ConversationActivityManager>(),
+        window,
+        request,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
+    match response {
+        Ok(response) => {
+            db.queued_message_repo()?.finish_dispatch(queued.id)?;
+            Ok(response)
+        }
+        Err(error) => {
+            if let Some(reset) = db.queued_message_repo()?.reset_dispatch(queued.id)? {
+                emit_queued_message_payload(&app_handle, "queued_message_add", &reset);
+            }
+            Err(error)
+        }
+    }
+}
+
+pub(crate) async fn try_dispatch_queued_message(
+    app_handle: &tauri::AppHandle,
+    window: &tauri::Window,
+    conversation_id: i64,
+    interrupt_only: bool,
+) -> bool {
+    let result = async {
+        let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
+        let queued = db
+            .queued_message_repo()?
+            .take_next_for_dispatch(conversation_id, interrupt_only)?;
+        let Some(queued) = queued else {
+            return Ok(false);
+        };
+
+        dispatch_queued_message(app_handle.clone(), window.clone(), queued).await?;
+        Ok::<bool, AppError>(true)
+    }
+    .await;
+
+    match result {
+        Ok(dispatched) => dispatched,
+        Err(error) => {
+            warn!(
+                conversation_id,
+                interrupt_only,
+                error = %error,
+                "failed to dispatch queued conversation message"
+            );
+            false
+        }
+    }
+}
+
+pub(crate) async fn try_dispatch_queued_message_after_completion(
+    app_handle: &tauri::AppHandle,
+    window: &tauri::Window,
+    conversation_id: i64,
+) -> bool {
+    if has_active_mcp_calls(app_handle, conversation_id) {
+        return false;
+    }
+    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+        let runtime_state = activity_manager.get_runtime_state(conversation_id).await;
+        if runtime_state.is_running {
+            return false;
+        }
+    }
+
+    try_dispatch_queued_message(app_handle, window, conversation_id, false).await
 }
 
 fn persist_active_skill_attachments(
@@ -1379,6 +1615,18 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     };
     let _ =
         window.emit(format!("conversation_event_{}", conversation_id_i64).as_str(), update_event);
+
+    if try_dispatch_queued_message(&app_handle, &window, conversation_id_i64, true).await {
+        info!(
+            conversation_id = conversation_id_i64,
+            tool_call_id = %tool_call_id,
+            "interrupt queued message dispatched before tool-result continuation"
+        );
+        return Ok(AiResponse {
+            conversation_id: conversation_id_i64,
+            request_prompt_result_with_context: "Queued interrupt message dispatched".to_string(),
+        });
+    }
 
     // Get all existing messages
     let all_messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id_i64)?;

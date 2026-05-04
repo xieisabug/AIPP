@@ -19,6 +19,7 @@ import {
     ShineStateSnapshotEvent,
     AcpConversationSessionState,
     AcpSessionStateSnapshotEvent,
+    QueuedConversationMessage,
 } from "../data/Conversation";
 import { MCPToolCall } from "@/data/MCPToolCall";
 import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
@@ -36,6 +37,9 @@ export interface UseConversationEventsOptions {
     onAiResponseStart?: () => void;
     onAiResponseComplete?: () => void;
     onError?: (errorMessage: string) => void;
+    onQueuedMessageAdd?: (message: QueuedConversationMessage) => void;
+    onQueuedMessageUpdate?: (message: QueuedConversationMessage) => void;
+    onQueuedMessageRemove?: (payload: { id: number; conversation_id: number }) => void;
 }
 
 const MCP_POLL_BASE_INTERVAL_MS = 1200;
@@ -644,6 +648,18 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     message_id: metadataUpdateData.message_id,
                     message_type: "metadata_update",
                 });
+            } else if (conversationEvent.type === "queued_message_add") {
+                callbacksRef.current.onQueuedMessageAdd?.(
+                    conversationEvent.data as QueuedConversationMessage,
+                );
+            } else if (conversationEvent.type === "queued_message_update") {
+                callbacksRef.current.onQueuedMessageUpdate?.(
+                    conversationEvent.data as QueuedConversationMessage,
+                );
+            } else if (conversationEvent.type === "queued_message_remove") {
+                callbacksRef.current.onQueuedMessageRemove?.(
+                    conversationEvent.data as { id: number; conversation_id: number },
+                );
             } else if (conversationEvent.type === "message_update") {
                 const messageUpdateData =
                     conversationEvent.data as MessageUpdateEvent;

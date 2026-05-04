@@ -618,8 +618,16 @@ fn call_proxy_tool(
 
 fn parse_tool_content(raw: &str) -> serde_json::Value {
     match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(serde_json::Value::Array(items)) if items.is_empty() => json!([{
+            "type": "text",
+            "text": "Tool completed successfully with no output."
+        }]),
         Ok(value) if value.is_array() => value,
         Ok(value) => json!([{ "type": "json", "json": value }]),
+        Err(_) if raw.trim().is_empty() => json!([{
+            "type": "text",
+            "text": "Tool completed successfully with no output."
+        }]),
         Err(_) => json!([{ "type": "text", "text": raw }]),
     }
 }
@@ -737,5 +745,23 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["load_mcp_server", "load_mcp_tool"]);
+    }
+
+    #[test]
+    fn parse_tool_content_replaces_empty_results_with_text() {
+        assert_eq!(
+            parse_tool_content("[]"),
+            json!([{
+                "type": "text",
+                "text": "Tool completed successfully with no output."
+            }])
+        );
+        assert_eq!(
+            parse_tool_content("   "),
+            json!([{
+                "type": "text",
+                "text": "Tool completed successfully with no output."
+            }])
+        );
     }
 }
