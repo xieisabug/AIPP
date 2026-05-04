@@ -113,6 +113,9 @@ export const useAssistantFormConfig = ({
             globalDynamicMcpEnabled &&
             (assistantDynamicRaw == null ||
                 (assistantDynamicRaw !== "false" && assistantDynamicRaw !== "0"));
+        const assistantAippMcpDynamicEnabled =
+            assistantDynamicRaw == null ||
+            (assistantDynamicRaw !== "false" && assistantDynamicRaw !== "0");
 
         // ACP 助手类型 (assistant_type === 4) 的专用配置
         if (currentAssistant?.assistant.assistant_type === 4) {
@@ -176,6 +179,17 @@ export const useAssistantFormConfig = ({
                         tooltip: "传递给 CLI 的额外参数，空格分隔",
                         onChange: (value: string | boolean) =>
                             handleConfigChange("acp_additional_args", value, "string"),
+                    },
+                },
+                {
+                    key: "dynamic_mcp_loading_enabled",
+                    config: {
+                        type: "switch" as const,
+                        label: "动态加载 AIPP MCP 工具",
+                        value: assistantAippMcpDynamicEnabled,
+                        tooltip: "开启后通过 ACP 的 mcp_servers 注入 AIPP 动态 MCP loader，按需加载非重复工具",
+                        onChange: (value: string | boolean) =>
+                            handleConfigChange("dynamic_mcp_loading_enabled", value, "boolean"),
                     },
                 },
             ];

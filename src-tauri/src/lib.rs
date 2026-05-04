@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+pub mod acp_mcp_bridge;
 mod api;
 mod artifacts;
 mod db;

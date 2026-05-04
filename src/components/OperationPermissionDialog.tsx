@@ -71,6 +71,11 @@ const operationLabels: Record<string, string> = {
 
 const permissionDialogClassName =
     "grid !max-h-[calc(100dvh-2rem)] !w-[calc(100vw-2rem)] grid-rows-[minmax(0,1fr)_auto] overflow-hidden";
+const permissionDialogHeaderClassName = "min-h-0 min-w-0 overflow-hidden";
+const permissionDialogBodyClassName = "min-h-0 min-w-0 space-y-3 overflow-y-auto overflow-x-hidden pr-1";
+const permissionDetailPanelClassName = "min-w-0 space-y-2 overflow-hidden rounded-md bg-muted p-3";
+const permissionCodeBlockClassName =
+    "mt-2 max-h-56 w-full max-w-full overflow-auto rounded-md bg-background p-2 font-mono text-xs whitespace-pre-wrap break-all";
 const neutralActionClassName =
     "flex !h-auto min-h-9 w-full items-center !justify-start gap-2 !whitespace-normal !border-border !bg-background py-2 text-left !text-foreground hover:!bg-muted hover:!text-foreground";
 const denyActionClassName =
@@ -116,15 +121,15 @@ export function OperationPermissionDialog({
     return (
         <AlertDialog open={isOpen}>
             <AlertDialogContent className={`${permissionDialogClassName} !max-w-lg`}>
-                <AlertDialogHeader className="min-h-0">
+                <AlertDialogHeader className={permissionDialogHeaderClassName}>
                     <AlertDialogTitle className="flex items-center gap-2">
                         <Shield className="h-5 w-5 text-yellow-500" />
                         操作权限请求
                     </AlertDialogTitle>
                     <AlertDialogDescription asChild>
-                        <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
+                        <div className={permissionDialogBodyClassName}>
                             <p>AI 助手请求执行以下操作：</p>
-                            <div className="space-y-2 rounded-md bg-muted p-3">
+                            <div className={permissionDetailPanelClassName}>
                                 <div className="flex items-start gap-2 text-sm">
                                     <span className="shrink-0 font-medium text-foreground">操作:</span>
                                     <span className="min-w-0 text-muted-foreground">{operationLabel}</span>
@@ -239,16 +244,16 @@ export function AcpPermissionDialog({
 
     return (
         <AlertDialog open={isOpen}>
-            <AlertDialogContent className={`${permissionDialogClassName} sm:!max-w-2xl`}>
-                <AlertDialogHeader className="min-h-0">
+            <AlertDialogContent className={`${permissionDialogClassName} sm:!max-w-xl`}>
+                <AlertDialogHeader className={permissionDialogHeaderClassName}>
                     <AlertDialogTitle className="flex items-center gap-2">
                         <Shield className="h-5 w-5 text-yellow-500" />
                         ACP 工具权限请求
                     </AlertDialogTitle>
                     <AlertDialogDescription asChild>
-                        <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
+                        <div className={permissionDialogBodyClassName}>
                             <p>AI 助手请求执行以下工具调用：</p>
-                            <div className="space-y-2 rounded-md bg-muted p-3">
+                            <div className={permissionDetailPanelClassName}>
                                 <div className="flex items-start gap-2 text-sm">
                                     <span className="shrink-0 font-medium text-foreground">标题:</span>
                                     <span className="min-w-0 break-words text-muted-foreground">
@@ -268,9 +273,9 @@ export function AcpPermissionDialog({
                                     </span>
                                 </div>
                                 {request.parameters && (
-                                    <div className="text-sm">
+                                    <div className="min-w-0 text-sm">
                                         <span className="font-medium text-foreground">参数:</span>
-                                        <pre className="mt-2 max-h-60 overflow-auto rounded-md bg-background p-2 font-mono text-xs whitespace-pre-wrap break-words">
+                                        <pre className={permissionCodeBlockClassName}>
                                             {request.parameters}
                                         </pre>
                                     </div>
@@ -282,8 +287,8 @@ export function AcpPermissionDialog({
                         </div>
                     </AlertDialogDescription>
                 </AlertDialogHeader>
-                <AlertDialogFooter>
-                    <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2">
+                <AlertDialogFooter className="min-w-0 overflow-hidden">
+                    <div className="grid min-w-0 w-full grid-cols-1 gap-2 sm:grid-cols-2">
                         <Button
                             variant="outline"
                             onClick={() => onDecision(request.request_id, undefined, true)}
