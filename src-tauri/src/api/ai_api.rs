@@ -2026,6 +2026,17 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         return Err(AppError::NoModelFound);
     }
 
+    if try_dispatch_queued_message(&app_handle, &window, conversation_id, true).await {
+        info!(
+            conversation_id,
+            "interrupt queued message dispatched before batch tool-result continuation"
+        );
+        return Ok(AiResponse {
+            conversation_id,
+            request_prompt_result_with_context: "Queued interrupt message dispatched".to_string(),
+        });
+    }
+
     // Get all existing messages (including the just-created tool_result messages)
     let all_messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id)?;
 
