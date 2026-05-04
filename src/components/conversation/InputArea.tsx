@@ -1232,7 +1232,7 @@ const InputArea = React.memo(
             }, [textareaRef]);
 
             const baseRight = sidebarVisible ? 130 : 170;
-            const defaultSendButtonIcon = aiIsResponsing ? (
+            const defaultSendButtonIcon = aiIsResponsing && !inputText.trim() ? (
                 <Square size={20} className="text-action-foreground" />
             ) : (
                 <ArrowUp size={20} className="text-action-foreground" />

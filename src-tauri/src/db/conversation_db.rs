@@ -1065,8 +1065,8 @@ impl QueuedConversationMessageRepository {
             request_json: row.get(4)?,
             prompt: row.get(5)?,
             assistant_id: row.get(6)?,
-            created_time: get_required_datetime_from_row(row, 7)?,
-            updated_time: get_required_datetime_from_row(row, 8)?,
+            created_time: get_required_datetime_from_row(row, 7, "created_time")?,
+            updated_time: get_required_datetime_from_row(row, 8, "updated_time")?,
         })
     }
 

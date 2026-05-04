@@ -17,7 +17,13 @@ import { useFeishuDebugResend } from "../hooks/useFeishuDebugResend";
 import { useAntiLeakage } from "../contexts/AntiLeakageContext";
 import { maskContent } from "../utils/antiLeakage";
 import type { InlineInteractionItem } from "./ConversationUI";
-import { Loader2 } from "lucide-react";
+import { ListEnd, Loader2, Zap } from "lucide-react";
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 interface MessageItemProps {
     message: Message;
@@ -26,6 +32,7 @@ interface MessageItemProps {
     onMessageRegenerate?: () => void;
     onMessageEdit?: () => void;
     onMessageFork?: () => void;
+    onQueuedMessagePromote?: (queueId: number) => void;
     isReasoningExpanded?: boolean;
     onToggleReasoningExpand?: () => void;
     shouldShowShineBorder?: boolean;
@@ -36,6 +43,52 @@ interface MessageItemProps {
     inlineInteractionItems?: InlineInteractionItem[];
     allowFeishuDebugResend?: boolean;
     mergedMode?: boolean; // 合并模式：不渲染外层气泡包装
+}
+
+interface QueueMessageMeta {
+    queueId: number;
+    queueKind: "normal" | "interrupt";
+}
+
+function QueuedMessageIndicator({
+    meta,
+    onPromote,
+}: {
+    meta: QueueMessageMeta;
+    onPromote?: (queueId: number) => void;
+}) {
+    if (meta.queueKind === "interrupt") {
+        return (
+            <div
+                className="mt-3 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-background text-muted-foreground"
+                title="打断消息"
+                aria-label="打断消息"
+            >
+                <Zap className="h-3.5 w-3.5" />
+            </div>
+        );
+    }
+
+    return (
+        <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+                <button
+                    type="button"
+                    className="mt-3 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-background text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                    title="排队消息"
+                    aria-label="排队消息"
+                >
+                    <ListEnd className="h-3.5 w-3.5" />
+                </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => onPromote?.(meta.queueId)}>
+                    <Zap className="h-4 w-4" />
+                    提升为打断消息
+                </DropdownMenuItem>
+            </DropdownMenuContent>
+        </DropdownMenu>
+    );
 }
 
 function areAttachmentListsEqual(prevAttachments?: Array<any>, nextAttachments?: Array<any>) {
@@ -71,6 +124,7 @@ const MessageItem = React.memo<MessageItemProps>(
         onMessageRegenerate,
         onMessageEdit,
         onMessageFork,
+        onQueuedMessagePromote,
         isReasoningExpanded = false,
         onToggleReasoningExpand,
         shouldShowShineBorder = false,
@@ -256,6 +310,28 @@ const MessageItem = React.memo<MessageItemProps>(
             allowFeishuDebugResend
             && (message.message_type === "response" || message.message_type === "tool_result");
 
+        const queuedMessageMeta = useMemo<QueueMessageMeta | null>(() => {
+            if (!message.metadata_json) {
+                return null;
+            }
+            try {
+                const parsed = JSON.parse(message.metadata_json) as Record<string, unknown>;
+                if (parsed.queue_status !== "queued") {
+                    return null;
+                }
+                const queueId = Number(parsed.queue_id);
+                if (!Number.isFinite(queueId) || queueId <= 0) {
+                    return null;
+                }
+                return {
+                    queueId,
+                    queueKind: parsed.queue_kind === "interrupt" ? "interrupt" : "normal",
+                };
+            } catch {
+                return null;
+            }
+        }, [message.metadata_json]);
+
         const handleFeishuDebugResend = useCallback(async () => {
             if (isFeishuDebugSending || !canResendToFeishuDebug) {
                 return;
@@ -353,12 +429,10 @@ const MessageItem = React.memo<MessageItemProps>(
             );
         }
 
-        return (
-            <div className="flex flex-col" data-message-item data-message-id={message.id} data-message-type={message.message_type}>
-                <div
-                    className={`group relative py-4 px-5 rounded-2xl inline-block max-w-[65%] transition-all duration-200 bg-background text-foreground border border-border ${isUserMessage ? "self-end" : "self-start"
-                        }`}
-                >
+        const bubbleElement = (
+            <div
+                className="group relative inline-block max-w-[65%] rounded-2xl border border-border bg-background px-5 py-4 text-foreground transition-all duration-200"
+            >
                     {shouldShowShineBorder && (
                         <ShineBorder
                             shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}
@@ -403,7 +477,23 @@ const MessageItem = React.memo<MessageItemProps>(
                         finishTime={message.finish_time}
                         messageContent={message.content}
                     />
-                </div>
+            </div>
+        );
+
+        return (
+            <div
+                className={`flex items-start gap-2 ${isUserMessage ? "justify-end" : "justify-start"}`}
+                data-message-item
+                data-message-id={message.id}
+                data-message-type={message.message_type}
+            >
+                {isUserMessage && queuedMessageMeta ? (
+                    <QueuedMessageIndicator
+                        meta={queuedMessageMeta}
+                        onPromote={onQueuedMessagePromote}
+                    />
+                ) : null}
+                {bubbleElement}
             </div>
         );
     }
@@ -415,6 +505,7 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
     if (prevProps.message.id !== nextProps.message.id) return false;
     if (prevProps.message.content !== nextProps.message.content) return false;
     if (prevProps.message.message_type !== nextProps.message.message_type) return false;
+    if (prevProps.message.metadata_json !== nextProps.message.metadata_json) return false;
     if (!areAttachmentListsEqual(prevProps.message.attachment_list, nextProps.message.attachment_list)) {
         return false;
     }
@@ -444,6 +535,7 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
     if (prevProps.shiningMcpCallId !== nextProps.shiningMcpCallId) return false;
 
     if (prevProps.inlineInteractionItems !== nextProps.inlineInteractionItems) return false;
+    if (prevProps.onQueuedMessagePromote !== nextProps.onQueuedMessagePromote) return false;
 
     // 防泄露模式：isLastMessage 变化时需要重新渲染
     if (prevProps.isLastMessage !== nextProps.isLastMessage) return false;

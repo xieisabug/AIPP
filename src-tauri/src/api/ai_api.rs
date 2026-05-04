@@ -414,46 +414,87 @@ pub async fn promote_queued_conversation_message(
     Ok(queued)
 }
 
-async fn dispatch_queued_message(
+fn dispatch_queued_message(
     app_handle: tauri::AppHandle,
     window: tauri::Window,
     queued: QueuedConversationMessage,
-) -> Result<AiResponse, AppError> {
+) -> Result<(), AppError> {
     emit_queued_message_remove(&app_handle, queued.conversation_id, queued.id);
 
     let request: AiRequest = serde_json::from_str(&queued.request_json)
         .map_err(|error| AppError::UnknownError(format!("解析排队消息失败: {}", error)))?;
 
-    let response = ask_ai(
-        app_handle.clone(),
-        app_handle.state::<AppState>(),
-        app_handle.state::<AcpSessionState>(),
-        app_handle.state::<FeatureConfigState>(),
-        app_handle.state::<MessageTokenManager>(),
-        app_handle.state::<ConversationActivityManager>(),
-        window,
-        request,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await;
+    tokio::spawn(async move {
+        let queued_id = queued.id;
+        let response = ask_ai(
+            app_handle.clone(),
+            app_handle.state::<AppState>(),
+            app_handle.state::<AcpSessionState>(),
+            app_handle.state::<FeatureConfigState>(),
+            app_handle.state::<MessageTokenManager>(),
+            app_handle.state::<ConversationActivityManager>(),
+            window,
+            request,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
 
-    let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
-    match response {
-        Ok(response) => {
-            db.queued_message_repo()?.finish_dispatch(queued.id)?;
-            Ok(response)
-        }
-        Err(error) => {
-            if let Some(reset) = db.queued_message_repo()?.reset_dispatch(queued.id)? {
-                emit_queued_message_payload(&app_handle, "queued_message_add", &reset);
+        let db = match ConversationDatabase::new(&app_handle).map_err(AppError::from) {
+            Ok(db) => db,
+            Err(error) => {
+                warn!(queued_id, error = %error, "failed to open conversation db after queued dispatch");
+                return;
             }
-            Err(error)
+        };
+
+        match response {
+            Ok(_) => {
+                match db.queued_message_repo() {
+                    Ok(repo) => {
+                        if let Err(error) = repo.finish_dispatch(queued_id) {
+                            warn!(queued_id, error = %error, "failed to finish queued message dispatch");
+                        }
+                    }
+                    Err(error) => {
+                        warn!(queued_id, error = %error, "failed to get queued message repo after dispatch");
+                    }
+                }
+            }
+            Err(error) => match db.queued_message_repo() {
+                Ok(repo) => match repo.reset_dispatch(queued_id) {
+                    Ok(Some(reset)) => {
+                        emit_queued_message_payload(&app_handle, "queued_message_add", &reset);
+                        warn!(queued_id, error = %error, "queued message dispatch failed and was reset");
+                    }
+                    Ok(None) => {
+                        warn!(queued_id, error = %error, "queued message dispatch failed but queue row was not reset");
+                    }
+                    Err(reset_error) => {
+                        warn!(
+                            queued_id,
+                            error = %error,
+                            reset_error = %reset_error,
+                            "queued message dispatch failed and reset also failed"
+                        );
+                    }
+                },
+                Err(reset_error) => {
+                    warn!(
+                        queued_id,
+                        error = %error,
+                        reset_error = %reset_error,
+                        "queued message dispatch failed and queued repo could not be opened"
+                    );
+                }
+            },
         }
-    }
+    });
+
+    Ok(())
 }
 
 pub(crate) async fn try_dispatch_queued_message(
@@ -471,7 +512,7 @@ pub(crate) async fn try_dispatch_queued_message(
             return Ok(false);
         };
 
-        dispatch_queued_message(app_handle.clone(), window.clone(), queued).await?;
+        dispatch_queued_message(app_handle.clone(), window.clone(), queued)?;
         Ok::<bool, AppError>(true)
     }
     .await;

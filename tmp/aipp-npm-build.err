@@ -1,0 +1,13 @@
+[31mfailed to load config from E:\workspace\rust\aipp\vite.config.ts[39m
+[31merror during build:
+Error: spawn EPERM
+    at ChildProcess.spawn (node:internal/child_process:420:11)
+    at Object.spawn (node:child_process:796:9)
+    at ensureServiceIsRunning (E:\workspace\rust\aipp\node_modules\.pnpm\esbuild@0.25.8\node_modules\esbuild\lib\main.js:1978:29)
+    at build (E:\workspace\rust\aipp\node_modules\.pnpm\esbuild@0.25.8\node_modules\esbuild\lib\main.js:1876:26)
+    at bundleConfigFile (file:///E:/workspace/rust/aipp/node_modules/.pnpm/vite@7.0.6_@types+node@24.9_102793df0d6a39fd5e98a46bde380416/node_modules/vite/dist/node/chunks/dep-BHkUv4Z8.js:36384:23)
+    at async bundleAndLoadConfigFile (file:///E:/workspace/rust/aipp/node_modules/.pnpm/vite@7.0.6_@types+node@24.9_102793df0d6a39fd5e98a46bde380416/node_modules/vite/dist/node/chunks/dep-BHkUv4Z8.js:36372:18)
+    at async loadConfigFromFile (file:///E:/workspace/rust/aipp/node_modules/.pnpm/vite@7.0.6_@types+node@24.9_102793df0d6a39fd5e98a46bde380416/node_modules/vite/dist/node/chunks/dep-BHkUv4Z8.js:36340:42)
+    at async resolveConfig (file:///E:/workspace/rust/aipp/node_modules/.pnpm/vite@7.0.6_@types+node@24.9_102793df0d6a39fd5e98a46bde380416/node_modules/vite/dist/node/chunks/dep-BHkUv4Z8.js:35996:22)
+    at async createBuilder (file:///E:/workspace/rust/aipp/node_modules/.pnpm/vite@7.0.6_@types+node@24.9_102793df0d6a39fd5e98a46bde380416/node_modules/vite/dist/node/chunks/dep-BHkUv4Z8.js:34454:19)
+    at async CAC.<anonymous> (file:///E:/workspace/rust/aipp/node_modules/.pnpm/vite@7.0.6_@types+node@24.9_102793df0d6a39fd5e98a46bde380416/node_modules/vite/dist/node/cli.js:641:19)[39m

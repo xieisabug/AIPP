@@ -246,6 +246,13 @@ export function useConversationOperations({
                 } catch (e) {
                     console.warn("extractAssistantFromMessage failed for queued message, fallback original", e);
                 }
+                const assistantData = assistants.find((assistant) => assistant.id === parsedAssistantId);
+                const assistantType = assistantData?.assistant_type;
+                const isPluginAssistant = assistantType !== undefined && assistantType !== 0 && assistantType !== 4;
+                if (isPluginAssistant) {
+                    toast.error("插件助手暂不支持消息排队");
+                    return;
+                }
 
                 invoke("enqueue_conversation_message", {
                     request: {

@@ -1,0 +1,5 @@
+
+> ai-assistant@1.0.0 build
+> tsc && vite build
+
+__AIPP_DONE__:1

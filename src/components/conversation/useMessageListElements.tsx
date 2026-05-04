@@ -32,6 +32,7 @@ export interface UseMessageListElementsProps {
     onMessageRegenerate: (messageId: number) => void;
     onMessageEdit: (message: Message) => void;
     onMessageFork: (messageId: number) => void;
+    onQueuedMessagePromote?: (queueId: number) => void;
     onToggleReasoningExpand: (messageId: number) => void;
     inlineInteractionItems?: InlineInteractionItem[];
     allowFeishuDebugResend?: boolean;
@@ -221,6 +222,7 @@ export function useMessageListElements({
     onMessageRegenerate,
     onMessageEdit,
     onMessageFork,
+    onQueuedMessagePromote,
     onToggleReasoningExpand,
     inlineInteractionItems,
     allowFeishuDebugResend = false,
@@ -307,6 +309,7 @@ export function useMessageListElements({
                             onMessageRegenerate={() => onMessageRegenerate(message.id)}
                             onMessageEdit={() => onMessageEdit(message)}
                             onMessageFork={() => onMessageFork(message.id)}
+                            onQueuedMessagePromote={onQueuedMessagePromote}
                             isReasoningExpanded={
                                 reasoningExpandStates.get(message.id) || false
                             }
@@ -377,6 +380,7 @@ export function useMessageListElements({
                                         onMessageRegenerate={() => onMessageRegenerate(message.id)}
                                         onMessageEdit={() => onMessageEdit(message)}
                                         onMessageFork={() => onMessageFork(message.id)}
+                                        onQueuedMessagePromote={onQueuedMessagePromote}
                                         isReasoningExpanded={
                                             reasoningExpandStates.get(message.id) || false
                                         }
@@ -478,6 +482,7 @@ export function useMessageListElements({
                             onMessageRegenerate={() => onMessageRegenerate(message.id)}
                             onMessageEdit={() => onMessageEdit(message)}
                             onMessageFork={() => onMessageFork(message.id)}
+                            onQueuedMessagePromote={onQueuedMessagePromote}
                             isReasoningExpanded={
                                 reasoningExpandStates.get(message.id) || false
                             }
@@ -513,6 +518,7 @@ export function useMessageListElements({
         onMessageRegenerate,
         onMessageEdit,
         onMessageFork,
+        onQueuedMessagePromote,
         reasoningExpandStates,
         onToggleReasoningExpand,
         mcpToolCallStates,

@@ -1524,6 +1524,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onMessageRegenerate={handleMessageRegenerate}
                             onMessageEdit={handleMessageEdit}
                             onMessageFork={handleMessageFork}
+                            onQueuedMessagePromote={handleQueuedMessagePromote}
                             onToggleReasoningExpand={toggleReasoningExpand}
                             inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
                             allowFeishuDebugResend={allowFeishuDebugResend}
