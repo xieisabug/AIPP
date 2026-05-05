@@ -1,7 +1,8 @@
 use super::assistant_api::AssistantDetail;
 use crate::api::ai::acp::{
     apply_network_proxy_to_env_vars, extract_acp_config, refresh_acp_config_signature,
-    spawn_acp_idle_reaper_once, spawn_acp_session_task,
+    refresh_acp_selected_mcp_tools_payload, spawn_acp_idle_reaper_once,
+    spawn_acp_session_task,
 };
 use crate::api::ai::chat::{
     extract_assistant_from_message, handle_non_stream_chat as ai_handle_non_stream_chat,
@@ -1120,6 +1121,12 @@ pub async fn ask_ai(
                 "ACP proxy env vars applied"
             );
         }
+        refresh_acp_selected_mcp_tools_payload(
+            &app_handle,
+            assistant_detail.assistant.id,
+            &mut acp_config,
+        )
+        .map_err(AppError::UnknownError)?;
         refresh_acp_config_signature(&mut acp_config);
         info!(
             "ACP config: cli_command={}, working_directory={}, env_vars={}, additional_args={}",

@@ -1,7 +1,7 @@
 use crate::api::ai::acp::{
     apply_network_proxy_to_env_vars, build_acp_launch_plan, extract_acp_config,
-    refresh_acp_config_signature, resolve_acp_cli_path, spawn_acp_idle_reaper_once,
-    spawn_acp_session_task, AcpSessionEntry,
+    refresh_acp_config_signature, refresh_acp_selected_mcp_tools_payload, resolve_acp_cli_path,
+    spawn_acp_idle_reaper_once, spawn_acp_session_task, AcpSessionEntry,
 };
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::{
@@ -766,6 +766,7 @@ pub async fn ensure_acp_session_connected(
     if let Some(proxy_url) = network_proxy.as_deref() {
         apply_network_proxy_to_env_vars(&mut acp_config.env_vars, proxy_url);
     }
+    refresh_acp_selected_mcp_tools_payload(&app_handle, assistant_id, &mut acp_config)?;
     refresh_acp_config_signature(&mut acp_config);
 
     let handle = {

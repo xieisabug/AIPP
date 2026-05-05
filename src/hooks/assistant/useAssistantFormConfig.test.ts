@@ -144,13 +144,13 @@ describe("useAssistantFormConfig plugin field visibility", () => {
     });
 });
 
-describe("useAssistantFormConfig ACP dynamic MCP option", () => {
+describe("useAssistantFormConfig ACP MCP option", () => {
     beforeEach(() => {
         clearAllMockHandlers();
         mockInvokeHandler("get_all_feature_config", () => []);
     });
 
-    it("shows AIPP MCP dynamic loading switch for ACP assistants", async () => {
+    it("shows manual MCP selector for ACP assistants", async () => {
         const onConfigChange = vi.fn();
         const acpAssistant: AssistantDetail = {
             ...baseAssistantDetail,
@@ -158,16 +158,7 @@ describe("useAssistantFormConfig ACP dynamic MCP option", () => {
                 ...baseAssistantDetail.assistant,
                 assistant_type: 4,
             },
-            model_configs: [
-                {
-                    id: 10,
-                    assistant_id: 1,
-                    assistant_model_id: 1,
-                    name: "dynamic_mcp_loading_enabled",
-                    value: "false",
-                    value_type: "boolean",
-                },
-            ],
+            model_configs: [],
         };
 
         const { result } = renderHook(() =>
@@ -191,17 +182,11 @@ describe("useAssistantFormConfig ACP dynamic MCP option", () => {
             expect(result.current.formConfig.length).toBeGreaterThan(0);
         });
 
-        const field = result.current.formConfig.find(
-            (item) => item.key === "dynamic_mcp_loading_enabled"
-        );
-        expect(field?.config.label).toBe("动态加载 AIPP MCP 工具");
-        expect(field?.config.value).toBe(false);
-
-        field?.config.onChange?.(true);
-        expect(onConfigChange).toHaveBeenCalledWith(
-            "dynamic_mcp_loading_enabled",
-            true,
-            "boolean"
-        );
+        const mcpField = result.current.formConfig.find((item) => item.key === "mcp_config");
+        expect(mcpField?.config.label).toBe("MCP工具");
+        expect(mcpField?.config.type).toBe("custom");
+        expect(
+            result.current.formConfig.some((item) => item.key === "dynamic_mcp_loading_enabled")
+        ).toBe(false);
     });
 });

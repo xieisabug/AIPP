@@ -211,12 +211,6 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                             return acc;
                         }, {} as Record<string, any>),
                         ...pluginConfigValues,
-                        dynamic_mcp_loading_enabled: (() => {
-                            const raw = assistantDetail.model_configs.find(
-                                (config) => config.name === "dynamic_mcp_loading_enabled"
-                            )?.value;
-                            return raw ? raw === "true" : true;
-                        })(),
                     });
                     setAssistantTypeCustomField([]);
                     const plugin = assistantTypePluginMap.get(assistantDetail.assistant.assistant_type);
@@ -432,10 +426,6 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         return true;
                     }
 
-                    if (key === "dynamic_mcp_loading_enabled") {
-                        return true;
-                    }
-
                     if (key === "use_native_toolcall") {
                         return true;
                     }
@@ -465,8 +455,6 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     const isAcpField = key.startsWith("acp_") && currentAssistant.assistant.assistant_type === 4;
                     if (isAcpField) {
                         valueType = "string";
-                    } else if (key === "dynamic_mcp_loading_enabled") {
-                        valueType = "boolean";
                     } else if (key === "use_native_toolcall") {
                         valueType = "boolean";
                     } else if (customField) {

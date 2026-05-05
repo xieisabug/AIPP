@@ -2,9 +2,9 @@
 //! Handles communication with ACP-compatible agents via stdio
 
 use crate::acp_mcp_bridge::{
-    ensure_proxy_server, ACP_DYNAMIC_MCP_BRIDGE_ARG, ACP_MCP_CONVERSATION_ID_ENV,
-    ACP_MCP_DB_PATH_ENV, ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV, ACP_MCP_PROXY_ADDR_ENV,
-    ACP_MCP_PROXY_TOKEN_ENV,
+    ensure_proxy_server, ACP_MCP_BRIDGE_ARG, ACP_MCP_CONVERSATION_ID_ENV, ACP_MCP_DB_PATH_ENV,
+    ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV, ACP_MCP_PROXY_ADDR_ENV, ACP_MCP_PROXY_TOKEN_ENV,
+    ACP_MCP_SELECTED_TOOLS_ENV,
 };
 use crate::api::ai::config::build_proxy_env_vars;
 use crate::api::ai::conversation::{
@@ -17,7 +17,7 @@ use crate::api::operation_api::{
     emit_permission_request_event, emit_permission_resolved_event, PermissionResolvedEvent,
     ACP_PERMISSION_REQUEST_EVENT, ACP_PERMISSION_RESOLVED_EVENT,
 };
-use crate::db::assistant_db::AssistantModelConfig;
+use crate::db::assistant_db::{AssistantDatabase, AssistantModelConfig};
 use crate::db::conversation_db::{
     AttachmentType, ConversationDatabase, MessageAttachment, Repository,
 };
@@ -64,7 +64,7 @@ pub struct AcpConfig {
     pub working_directory: PathBuf,
     pub env_vars: HashMap<String, String>,
     pub additional_args: Vec<String>,
-    pub dynamic_mcp_loading_enabled: bool,
+    pub selected_mcp_tools_payload: String,
     pub session_signature: String,
 }
 
@@ -76,33 +76,40 @@ pub struct AcpLaunchPlan {
     pub proxy_strategy: String,
 }
 
-async fn build_acp_dynamic_mcp_servers(
+async fn build_acp_manual_mcp_servers(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
+    selected_mcp_tools_payload: &str,
 ) -> Result<Vec<acp::McpServer>, String> {
+    if selected_mcp_tools_payload.trim().is_empty() || selected_mcp_tools_payload.trim() == "[]" {
+        return Ok(Vec::new());
+    }
+
     let bridge_command = std::env::current_exe()
         .map_err(|error| format!("Failed to resolve AIPP executable for ACP MCP bridge: {error}"))?;
     let mcp_db_path = MCPDatabase::db_path(app_handle)?;
     let proxy_config = ensure_proxy_server(app_handle.clone()).await?;
-    Ok(build_acp_dynamic_mcp_servers_from_parts(
+    Ok(build_acp_manual_mcp_servers_from_parts(
         bridge_command,
         mcp_db_path,
         conversation_id,
         proxy_config.addr,
         proxy_config.token,
+        selected_mcp_tools_payload.to_string(),
     ))
 }
 
-fn build_acp_dynamic_mcp_servers_from_parts(
+fn build_acp_manual_mcp_servers_from_parts(
     bridge_command: PathBuf,
     mcp_db_path: PathBuf,
     conversation_id: i64,
     proxy_addr: String,
     proxy_token: String,
+    selected_mcp_tools_payload: String,
 ) -> Vec<acp::McpServer> {
     vec![acp::McpServer::Stdio(
-        acp::McpServerStdio::new("AIPP Dynamic MCP Loader", bridge_command)
-            .args(vec![ACP_DYNAMIC_MCP_BRIDGE_ARG.to_string()])
+        acp::McpServerStdio::new("AIPP MCP Tools", bridge_command)
+            .args(vec![ACP_MCP_BRIDGE_ARG.to_string()])
             .env(vec![
                 acp::EnvVariable::new(
                     ACP_MCP_DB_PATH_ENV,
@@ -115,8 +122,60 @@ fn build_acp_dynamic_mcp_servers_from_parts(
                 acp::EnvVariable::new(ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV, "1"),
                 acp::EnvVariable::new(ACP_MCP_PROXY_ADDR_ENV, proxy_addr),
                 acp::EnvVariable::new(ACP_MCP_PROXY_TOKEN_ENV, proxy_token),
+                acp::EnvVariable::new(ACP_MCP_SELECTED_TOOLS_ENV, selected_mcp_tools_payload),
             ]),
     )]
+}
+
+pub fn refresh_acp_selected_mcp_tools_payload(
+    app_handle: &tauri::AppHandle,
+    assistant_id: i64,
+    config: &mut AcpConfig,
+) -> Result<(), String> {
+    let assistant_db = AssistantDatabase::new(app_handle).map_err(|error| error.to_string())?;
+    let servers = assistant_db
+        .get_assistant_mcp_servers_with_tools(assistant_id)
+        .map_err(|error| error.to_string())?;
+
+    let payload = servers
+        .into_iter()
+        .filter(|(_, server_name, server_command, server_enabled, _)| {
+            *server_enabled
+                && server_name != "MCP 动态加载工具"
+                && server_command.as_deref() != Some("aipp:dynamic_mcp")
+        })
+        .filter_map(|(server_id, server_name, _, _, tools)| {
+            let enabled_tools = tools
+                .into_iter()
+                .filter(|(_, _, _, tool_enabled, _, _)| *tool_enabled)
+                .map(|(tool_id, tool_name, tool_description, _, _, parameters)| {
+                    serde_json::json!({
+                        "tool_id": tool_id,
+                        "server_id": server_id,
+                        "server_name": server_name.clone(),
+                        "tool_name": tool_name,
+                        "tool_description": tool_description,
+                        "parameters": parameters,
+                        "is_enabled": true,
+                    })
+                })
+                .collect::<Vec<_>>();
+            if enabled_tools.is_empty() {
+                None
+            } else {
+                Some(serde_json::json!({
+                    "server_id": server_id,
+                    "server_name": server_name,
+                    "is_enabled": true,
+                    "tools": enabled_tools,
+                }))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    config.selected_mcp_tools_payload =
+        serde_json::to_string(&payload).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn merge_acp_env_blob(env_vars: &mut HashMap<String, String>, raw: &str) {
@@ -917,10 +976,10 @@ fn acp_config_signature(config: &AcpConfig) -> String {
     env_entries.sort();
 
     format!(
-        "cli={}\ncwd={}\ndynamic_mcp={}\nargs={}\nenv={}",
+        "cli={}\ncwd={}\nselected_mcp={}\nargs={}\nenv={}",
         config.cli_command,
         config.working_directory.display(),
-        config.dynamic_mcp_loading_enabled,
+        config.selected_mcp_tools_payload,
         config.additional_args.join("\u{1f}"),
         env_entries.join("\u{1f}")
     )
@@ -3939,18 +3998,19 @@ async fn run_acp_session(
                 .session_capabilities
                 .resume
                 .is_some();
-            let acp_mcp_servers = if acp_config.dynamic_mcp_loading_enabled {
-                match build_acp_dynamic_mcp_servers(&app_handle, conversation_id).await {
-                    Ok(servers) => servers,
-                    Err(error) => {
-                        let err_msg =
-                            format!("ACP dynamic MCP loader injection failed: {error}");
-                        error!("ACP: {}", err_msg);
-                        fail_connected_startup!(err_msg);
-                    }
+            let acp_mcp_servers = match build_acp_manual_mcp_servers(
+                &app_handle,
+                conversation_id,
+                &acp_config.selected_mcp_tools_payload,
+            )
+            .await
+            {
+                Ok(servers) => servers,
+                Err(error) => {
+                    let err_msg = format!("ACP MCP tool bridge injection failed: {error}");
+                    error!("ACP: {}", err_msg);
+                    fail_connected_startup!(err_msg);
                 }
-            } else {
-                Vec::new()
             };
             info!(
                 "ACP: Injecting {} MCP server(s) via session mcp_servers",
@@ -4414,18 +4474,6 @@ pub fn extract_acp_config(
             .filter(|value| !value.is_empty())
             .map(str::to_string)
     };
-    let get_model_bool = |name: &str, default_value: bool| -> bool {
-        model_configs
-            .iter()
-            .find(|c| c.name == name)
-            .and_then(|c| c.value.as_deref())
-            .map(|value| {
-                let value = value.trim().to_lowercase();
-                !(value == "false" || value == "0" || value == "off")
-            })
-            .unwrap_or(default_value)
-    };
-
     // 获取 CLI 命令
     // 只从 llm_provider_config 获取，因为这是提供商级别的配置
     // 注意：不同的 agent 需要不同的命令：
@@ -4552,17 +4600,13 @@ pub fn extract_acp_config(
         .or_else(|| get_provider_config("acp_additional_args"))
         .map(|args| args.split_whitespace().map(|s| s.to_string()).collect())
         .unwrap_or_default();
-    let dynamic_mcp_loading_enabled =
-        get_model_bool("dynamic_mcp_loading_enabled", true);
-
     // Log the extracted configuration for debugging
     info!(
-        "extract_acp_config: cli_command='{}', working_directory='{}', env_vars={}, additional_args={:?}, dynamic_mcp_loading_enabled={}, claude_auth_mode={:?}, codex_auth_mode={:?}",
+        "extract_acp_config: cli_command='{}', working_directory='{}', env_vars={}, additional_args={:?}, claude_auth_mode={:?}, codex_auth_mode={:?}",
         cli_command,
         working_directory.display(),
         env_vars.len(),
         additional_args,
-        dynamic_mcp_loading_enabled,
         claude_auth_mode,
         codex_auth_mode
     );
@@ -4572,7 +4616,7 @@ pub fn extract_acp_config(
         working_directory,
         env_vars,
         additional_args,
-        dynamic_mcp_loading_enabled,
+        selected_mcp_tools_payload: "[]".to_string(),
         session_signature: String::new(),
     };
     config.session_signature = acp_config_signature(&config);
@@ -4584,7 +4628,7 @@ pub fn extract_acp_config(
 mod tests {
     use super::{
         acp_tool_status_to_aipp_status, acp_tool_update_status_to_aipp_status,
-        append_buffered_content, apply_network_proxy_to_env_vars, build_acp_dynamic_mcp_servers_from_parts,
+        append_buffered_content, apply_network_proxy_to_env_vars, build_acp_manual_mcp_servers_from_parts,
         build_acp_launch_plan, build_prompt_to_send, extract_acp_config, extract_content_text, get_claude_model_override,
         load_claude_settings_env_vars_from_path, load_codex_config_env_vars_from_path,
         AcpPermissionDecision, AcpPermissionRequestEvent, AcpPermissionState, AcpSessionEntry,
@@ -4756,18 +4800,18 @@ mod tests {
         assert_eq!(config.env_vars.get("BAR"), Some(&"model".to_string()));
         assert_eq!(config.env_vars.get("SHARED"), Some(&"model".to_string()));
         assert!(!config.env_vars.contains_key("INVALID"));
-        assert!(config.dynamic_mcp_loading_enabled);
+        assert_eq!(config.selected_mcp_tools_payload, "[]");
     }
 
     #[test]
-    fn extract_acp_config_reads_dynamic_mcp_loading_switch() {
+    fn extract_acp_config_ignores_legacy_dynamic_mcp_loading_switch() {
         let provider_configs = vec![provider_config("acp_cli_command", "codex-acp")];
         let model_configs = vec![model_config("dynamic_mcp_loading_enabled", "false")];
 
         let config = extract_acp_config(&model_configs, &provider_configs).unwrap();
 
-        assert!(!config.dynamic_mcp_loading_enabled);
-        assert!(config.session_signature.contains("dynamic_mcp=false"));
+        assert_eq!(config.selected_mcp_tools_payload, "[]");
+        assert!(!config.session_signature.contains("dynamic_mcp"));
     }
 
     #[test]
@@ -4816,21 +4860,22 @@ mod tests {
     }
 
     #[test]
-    fn build_acp_dynamic_mcp_servers_injects_stdio_loader_bridge() {
-        let servers = build_acp_dynamic_mcp_servers_from_parts(
+    fn build_acp_manual_mcp_servers_injects_stdio_tool_bridge() {
+        let servers = build_acp_manual_mcp_servers_from_parts(
             PathBuf::from("Aipp.exe"),
             PathBuf::from("C:/Users/test/AppData/Roaming/aipp/db/mcp.db"),
             42,
             "127.0.0.1:12345".to_string(),
             "token-1".to_string(),
+            "[{\"server_id\":7,\"server_name\":\"Search\",\"tools\":[]}]".to_string(),
         );
 
         assert_eq!(servers.len(), 1);
         let acp::McpServer::Stdio(server) = &servers[0] else {
-            panic!("dynamic MCP loader should use stdio");
+            panic!("manual MCP bridge should use stdio");
         };
-        assert_eq!(server.name, "AIPP Dynamic MCP Loader");
-        assert!(server.args.iter().any(|arg| arg == "--aipp-acp-dynamic-mcp-bridge"));
+        assert_eq!(server.name, "AIPP MCP Tools");
+        assert!(server.args.iter().any(|arg| arg == "--aipp-acp-mcp-bridge"));
         assert!(
             server
                 .env
@@ -4842,6 +4887,9 @@ mod tests {
         }));
         assert!(server.env.iter().any(|env| {
             env.name == "AIPP_ACP_MCP_PROXY_ADDR" && env.value == "127.0.0.1:12345"
+        }));
+        assert!(server.env.iter().any(|env| {
+            env.name == "AIPP_ACP_SELECTED_MCP_TOOLS" && env.value.contains("\"server_id\":7")
         }));
     }
 

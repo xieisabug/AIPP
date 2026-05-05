@@ -106,16 +106,17 @@ export const useAssistantFormConfig = ({
 
         const globalDynamicMcpEnabled =
             getConfigValue("experimental", "dynamic_mcp_loading_enabled") === "true";
-        const assistantDynamicRaw = currentAssistant.model_configs.find(
-            (config) => config.name === "dynamic_mcp_loading_enabled"
-        )?.value;
         const assistantDynamicEnabled =
             globalDynamicMcpEnabled &&
-            (assistantDynamicRaw == null ||
-                (assistantDynamicRaw !== "false" && assistantDynamicRaw !== "0"));
-        const assistantAippMcpDynamicEnabled =
-            assistantDynamicRaw == null ||
-            (assistantDynamicRaw !== "false" && assistantDynamicRaw !== "0");
+            (() => {
+                const assistantDynamicRaw = currentAssistant.model_configs.find(
+                    (config) => config.name === "dynamic_mcp_loading_enabled"
+                )?.value;
+                return (
+                    assistantDynamicRaw == null ||
+                    (assistantDynamicRaw !== "false" && assistantDynamicRaw !== "0")
+                );
+            })();
 
         // ACP 助手类型 (assistant_type === 4) 的专用配置
         if (currentAssistant?.assistant.assistant_type === 4) {
@@ -182,14 +183,19 @@ export const useAssistantFormConfig = ({
                     },
                 },
                 {
-                    key: "dynamic_mcp_loading_enabled",
+                    key: "mcp_config",
                     config: {
-                        type: "switch" as const,
-                        label: "动态加载 AIPP MCP 工具",
-                        value: assistantAippMcpDynamicEnabled,
-                        tooltip: "开启后通过 ACP 的 mcp_servers 注入 AIPP 动态 MCP loader，按需加载非重复工具",
-                        onChange: (value: string | boolean) =>
-                            handleConfigChange("dynamic_mcp_loading_enabled", value, "boolean"),
+                        type: "custom" as const,
+                        label: "MCP工具",
+                        customRender: () => {
+                            return React.createElement(AssistantMCPFieldDisplay, {
+                                assistantId: currentAssistant?.assistant.id ?? 0,
+                                onConfigChange: () => {
+                                    console.log("MCP configuration changed");
+                                },
+                                navigateTo: navigateTo,
+                            });
+                        },
                     },
                 },
             ];
