@@ -249,6 +249,10 @@ export interface AcpConversationSessionState {
     plan: AcpPlanEntry[];
     available_commands: AcpAvailableCommand[];
     has_active_prompt: boolean;
+    context_tokens_used?: number | null;
+    context_window_size?: number | null;
+    session_cost_amount?: number | null;
+    session_cost_currency?: string | null;
 }
 
 export interface AcpSessionStateSnapshotEvent {
@@ -285,7 +289,11 @@ export interface ConversationTokenStats {
     total_tokens: number;
     input_tokens: number;
     output_tokens: number;
+    thought_tokens: number;
+    cached_read_tokens: number;
+    cached_write_tokens: number;
     by_model: ModelTokenBreakdown[];
+    estimated_message_count: number;
     message_count: number;
     // 按消息类型统计
     system_message_count: number;
@@ -307,6 +315,9 @@ export interface ModelTokenBreakdown {
     total_tokens: number;
     input_tokens: number;
     output_tokens: number;
+    thought_tokens: number;
+    cached_read_tokens: number;
+    cached_write_tokens: number;
     message_count: number;
     percentage?: number; // 用于UI显示的百分比
     // 性能指标统计
@@ -319,6 +330,10 @@ export interface MessageTokenStats {
     total_tokens: number;
     input_tokens: number;
     output_tokens: number;
+    thought_tokens: number;
+    cached_read_tokens: number;
+    cached_write_tokens: number;
+    usage_source?: "reported" | "estimated" | string | null;
     model_name: string | null;
     // 性能指标
     ttft_ms?: number;

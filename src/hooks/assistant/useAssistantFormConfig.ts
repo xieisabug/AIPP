@@ -151,9 +151,10 @@ export const useAssistantFormConfig = ({
                 {
                     key: "acp_working_directory",
                     config: {
-                        type: "input" as const,
+                        type: "folder-picker" as const,
                         label: "工作目录",
                         value: getAcpConfigValue("acp_working_directory", ""),
+                        placeholder: "选择工作目录",
                         tooltip: "Agent 将在此目录下运行",
                         onChange: (value: string | boolean) =>
                             handleConfigChange("acp_working_directory", value, "string"),

@@ -607,6 +607,22 @@ pub fn split_tool_name(fn_name: &str) -> (String, String) {
 pub fn resolve_tool_name(sanitized_full_name: &str, mapping: &ToolNameMapping) -> (String, String) {
     if let Some((server, tool)) = mapping.get(sanitized_full_name) {
         (server.clone(), tool.clone())
+    } else if !sanitized_full_name.contains("__") {
+        let mut matched_tools: Vec<(String, String)> = mapping
+            .values()
+            .filter(|(_, tool)| {
+                tool == sanitized_full_name || sanitize_tool_name(tool) == sanitized_full_name
+            })
+            .cloned()
+            .collect();
+        matched_tools.sort();
+        matched_tools.dedup();
+        if matched_tools.len() == 1 {
+            matched_tools.remove(0)
+        } else {
+            // 回退：从 sanitized 名称中分割
+            split_tool_name(sanitized_full_name)
+        }
     } else {
         // 回退：从 sanitized 名称中分割
         split_tool_name(sanitized_full_name)
@@ -3241,7 +3257,7 @@ pub async fn regenerate_conversation_title(
 
 #[cfg(test)]
 mod tests {
-    use super::apply_hook_messages;
+    use super::{apply_hook_messages, resolve_tool_name, ToolNameMapping};
     use crate::db::conversation_db::{AttachmentType, MessageAttachment};
 
     fn sample_attachment(hash: &str) -> MessageAttachment {
@@ -3317,5 +3333,57 @@ mod tests {
         assert!(updated[1].2.is_empty());
         assert_eq!(updated[2].0, "assistant");
         assert_eq!(updated[0].2[0].attachment_hash.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn test_resolve_tool_name_recovers_unique_bare_tool_name_from_mapping() {
+        let mut mapping = ToolNameMapping::new();
+        mapping.insert(
+            "operation__list_directory".to_string(),
+            ("operation".to_string(), "list_directory".to_string()),
+        );
+
+        let resolved = resolve_tool_name("list_directory", &mapping);
+
+        assert_eq!(
+            resolved,
+            ("operation".to_string(), "list_directory".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_tool_name_recovers_unique_sanitized_bare_tool_name_from_mapping() {
+        let mut mapping = ToolNameMapping::new();
+        mapping.insert(
+            "server__list_directory".to_string(),
+            ("文件工具".to_string(), "list directory".to_string()),
+        );
+
+        let resolved = resolve_tool_name("list_directory", &mapping);
+
+        assert_eq!(
+            resolved,
+            ("文件工具".to_string(), "list directory".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_tool_name_keeps_default_fallback_for_ambiguous_bare_tool_name() {
+        let mut mapping = ToolNameMapping::new();
+        mapping.insert(
+            "operation__list_directory".to_string(),
+            ("operation".to_string(), "list_directory".to_string()),
+        );
+        mapping.insert(
+            "workspace__list_directory".to_string(),
+            ("workspace".to_string(), "list_directory".to_string()),
+        );
+
+        let resolved = resolve_tool_name("list_directory", &mapping);
+
+        assert_eq!(
+            resolved,
+            ("default".to_string(), "list_directory".to_string())
+        );
     }
 }

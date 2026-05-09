@@ -66,6 +66,7 @@ pub fn create_test_db() -> Connection {
             generation_group_id TEXT,
             parent_group_id TEXT,
             tool_calls_json TEXT,
+            metadata_json TEXT,
             first_token_time TEXT,
             ttft_ms INTEGER
         )",

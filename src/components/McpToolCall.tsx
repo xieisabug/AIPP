@@ -140,6 +140,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const displayServerName = maskedData.serverName;
     const displayToolName = maskedData.toolName;
     const displayParameters = maskedData.parameters;
+    const headerTitle = `${displayServerName} - ${displayToolName}`;
 
     const [executionState, setExecutionState] = useState<ExecutionState>(isStreaming ? "streaming" : "idle");
     const [executionResult, setExecutionResult] = useState<string | null>(null);
@@ -439,11 +440,11 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 />
             )}
             <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-sm min-w-0 flex-1">
+                <div className="flex items-center gap-2 text-sm min-w-0 flex-1" title={headerTitle}>
                     <Blocks className="h-4 w-4 flex-shrink-0" />
-                    <span className="truncate">{displayServerName}</span>
+                    <span className="truncate" title={displayServerName}>{displayServerName}</span>
                     <span className="text-xs font-bold text-muted-foreground flex-shrink-0"> - </span>
-                    <span className="truncate">{displayToolName}</span>
+                    <span className="truncate" title={displayToolName}>{displayToolName}</span>
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
                     <StatusIndicator state={executionState} />
@@ -492,6 +493,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         size="sm"
                         variant="ghost"
                         className="h-7 w-7 p-0 flex-shrink-0"
+                        title={isExpanded ? "收起详情" : "展开详情"}
                     >
                         {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                     </Button>

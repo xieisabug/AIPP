@@ -356,28 +356,54 @@ fn compute_tail_count(
         count += 1;
     }
 
-    // Ensure tool_use/tool_result atomicity: if the boundary splits a pair,
-    // walk backwards to include the response that owns the tool_use.
+    // Ensure atomicity at the tail boundary so we do not split:
+    // 1. response/assistant <-> following tool_result messages
+    // 2. reasoning <-> the response/assistant it belongs to
     let tail_start = messages.len() - count;
-    if tail_start > head_count && tail_start < messages.len() {
-        let (msg_type, _, _) = &messages[tail_start];
-        if msg_type == "tool_result" {
-            // Walk backwards from tail_start to find the response with tool_use
-            let mut extra = 0;
-            let mut pos = tail_start;
-            while pos > head_count {
-                pos -= 1;
-                extra += 1;
-                let (t, _, _) = &messages[pos];
-                if t == "response" || t == "assistant" {
-                    break; // Found the response that contains the tool_use
-                }
-            }
-            count += extra;
-        }
+    let expanded_tail_start = expand_tail_start_for_atomic_group(messages, head_count, tail_start);
+    if expanded_tail_start < tail_start {
+        count += tail_start - expanded_tail_start;
     }
 
     count
+}
+
+fn expand_tail_start_for_atomic_group(
+    messages: &[MessageTuple],
+    head_count: usize,
+    mut tail_start: usize,
+) -> usize {
+    if tail_start <= head_count || tail_start >= messages.len() {
+        return tail_start;
+    }
+
+    let (msg_type, _, _) = &messages[tail_start];
+    if msg_type == "tool_result" {
+        // Walk backwards to include the full response/assistant + tool_result block.
+        while tail_start > head_count {
+            let prev = tail_start - 1;
+            tail_start = prev;
+            let (prev_type, _, _) = &messages[tail_start];
+            if prev_type == "response" || prev_type == "assistant" {
+                break;
+            }
+        }
+    }
+
+    let (msg_type, _, _) = &messages[tail_start];
+    if msg_type == "response" || msg_type == "assistant" {
+        // Include the reasoning message(s) immediately preceding this response.
+        while tail_start > head_count {
+            let prev = tail_start - 1;
+            let (prev_type, _, _) = &messages[prev];
+            if prev_type != "reasoning" {
+                break;
+            }
+            tail_start = prev;
+        }
+    }
+
+    tail_start
 }
 
 /// Estimate total tokens for a message list with optional DB token data.
@@ -525,6 +551,26 @@ mod tests {
         let count = compute_tail_count(&messages, &db_tokens, 1, 250);
         // Should keep: user + tool_result + response = 3 (not split at tool_result)
         assert!(count >= 3, "tail should not split tool_result from its response, got {count}");
+    }
+
+    #[test]
+    fn compute_tail_does_not_split_reasoning_response_pair() {
+        let messages = vec![
+            msg("system", "sys"),
+            msg("user", "hello"),
+            msg("reasoning", "let me think"),
+            msg("response", "calling tool"),
+            msg("tool_result", "tool output"),
+            msg("user", "next question"),
+        ];
+        // Budget fits user + tool_result + response, but not the preceding reasoning
+        // unless atomic expansion pulls it in.
+        let db_tokens = vec![0, 100, 100, 100, 100, 100];
+        let count = compute_tail_count(&messages, &db_tokens, 1, 300);
+        assert!(
+            count >= 4,
+            "tail should keep reasoning + response + tool_result + user together, got {count}"
+        );
     }
 
     #[test]

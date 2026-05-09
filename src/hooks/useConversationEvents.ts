@@ -93,6 +93,10 @@ function normalizeAcpSessionState(state: any): AcpConversationSessionState | nul
             input_hint: command.input_hint ?? command.inputHint ?? null,
         })),
         has_active_prompt: state.has_active_prompt ?? state.hasActivePrompt ?? false,
+        context_tokens_used: state.context_tokens_used ?? state.contextTokensUsed ?? null,
+        context_window_size: state.context_window_size ?? state.contextWindowSize ?? null,
+        session_cost_amount: state.session_cost_amount ?? state.sessionCostAmount ?? null,
+        session_cost_currency: state.session_cost_currency ?? state.sessionCostCurrency ?? null,
     };
 }
 

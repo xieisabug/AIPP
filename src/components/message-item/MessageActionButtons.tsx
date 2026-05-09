@@ -5,6 +5,7 @@ import { MessageTokenTooltip } from "../token-statistics";
 import MessageExportDialog from "./MessageExportDialog";
 
 interface MessageActionButtonsProps {
+    messageId: number;
     messageType: string;
     isUserMessage: boolean;
     copyIconState: "copy" | "ok";
@@ -14,17 +15,11 @@ interface MessageActionButtonsProps {
     onFork?: () => void;
     onResendToFeishuDebug?: () => void;
     isResendToFeishuDebugPending?: boolean;
-    tokenCount: number;
-    inputTokenCount: number;
-    outputTokenCount: number;
-    ttftMs?: number | null;
-    tps?: number | null;
-    startTime?: Date | null;
-    finishTime?: Date | null;
     messageContent?: string;
 }
 
 const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
+    messageId,
     messageType,
     isUserMessage,
     copyIconState,
@@ -34,13 +29,6 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
     onFork,
     onResendToFeishuDebug,
     isResendToFeishuDebugPending = false,
-    tokenCount,
-    inputTokenCount,
-    outputTokenCount,
-    ttftMs,
-    tps,
-    startTime,
-    finishTime,
     messageContent,
 }) => {
     const showEditRegenerate = messageType === "assistant" || messageType === "response" || messageType === "user";
@@ -76,14 +64,8 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
                 />
             )}
             <MessageTokenTooltip
-                tokenCount={tokenCount}
-                inputTokenCount={inputTokenCount}
-                outputTokenCount={outputTokenCount}
+                messageId={messageId}
                 messageType={messageType}
-                ttftMs={ttftMs}
-                tps={tps}
-                startTime={startTime}
-                finishTime={finishTime}
                 onOpenChange={setIsTokenTooltipOpen}
             />
             {messageContent && (

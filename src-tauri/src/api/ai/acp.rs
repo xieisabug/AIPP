@@ -10,6 +10,7 @@ use crate::api::ai::config::build_proxy_env_vars;
 use crate::api::ai::conversation::{
     extract_tool_result, infer_media_type_from_url, parse_data_url,
 };
+use crate::api::ai::context_manager::token_estimator::estimate_by_content;
 use crate::api::ai::events::{
     ConversationEvent, MCPToolCallUpdateEvent, MessageUpdateEvent, TITLE_CHANGE_EVENT,
 };
@@ -40,6 +41,7 @@ use agent_client_protocol::{
 };
 use base64::Engine;
 use regex::Regex;
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::Path;
@@ -779,6 +781,17 @@ pub struct AcpAvailableCommandPayload {
     pub input_hint: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct AcpPromptUsageSummary {
+    total_tokens: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    thought_tokens: Option<i64>,
+    cached_read_tokens: Option<i64>,
+    cached_write_tokens: Option<i64>,
+    usage_source: &'static str,
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct AcpConversationSessionState {
     pub conversation_id: i64,
@@ -795,6 +808,10 @@ pub struct AcpConversationSessionState {
     pub plan: Vec<AcpPlanEntryPayload>,
     pub available_commands: Vec<AcpAvailableCommandPayload>,
     pub has_active_prompt: bool,
+    pub context_tokens_used: Option<u64>,
+    pub context_window_size: Option<u64>,
+    pub session_cost_amount: Option<f64>,
+    pub session_cost_currency: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1408,6 +1425,69 @@ fn build_prompt_to_send(prompt: String, history_prefix: Option<String>) -> Strin
     }
 }
 
+fn estimate_tokens_for_content_block(content: &acp::ContentBlock) -> usize {
+    match content {
+        acp::ContentBlock::Text(text_content) => estimate_by_content(&text_content.text),
+        acp::ContentBlock::Resource(resource) => match &resource.resource {
+            acp::EmbeddedResourceResource::TextResourceContents(text) => {
+                estimate_by_content(&text.text)
+            }
+            acp::EmbeddedResourceResource::BlobResourceContents(_) => 0,
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+fn merge_acp_usage_metadata(
+    existing_metadata_json: Option<&str>,
+    usage_summary: &AcpPromptUsageSummary,
+) -> Result<String, AppError> {
+    let mut map = match existing_metadata_json {
+        Some(raw) if !raw.trim().is_empty() => match serde_json::from_str::<JsonValue>(raw) {
+            Ok(JsonValue::Object(map)) => map,
+            Ok(_) => JsonMap::new(),
+            Err(error) => {
+                warn!("ACP: Failed to parse existing metadata_json, replacing it: {}", error);
+                JsonMap::new()
+            }
+        },
+        _ => JsonMap::new(),
+    };
+
+    map.insert(
+        "usage_source".to_string(),
+        JsonValue::String(usage_summary.usage_source.to_string()),
+    );
+    if let Some(thought_tokens) = usage_summary.thought_tokens {
+        map.insert(
+            "thought_tokens".to_string(),
+            JsonValue::Number(thought_tokens.into()),
+        );
+    } else {
+        map.remove("thought_tokens");
+    }
+    if let Some(cached_read_tokens) = usage_summary.cached_read_tokens {
+        map.insert(
+            "cached_read_tokens".to_string(),
+            JsonValue::Number(cached_read_tokens.into()),
+        );
+    } else {
+        map.remove("cached_read_tokens");
+    }
+    if let Some(cached_write_tokens) = usage_summary.cached_write_tokens {
+        map.insert(
+            "cached_write_tokens".to_string(),
+            JsonValue::Number(cached_write_tokens.into()),
+        );
+    } else {
+        map.remove("cached_write_tokens");
+    }
+
+    serde_json::to_string(&JsonValue::Object(map))
+        .map_err(|error| AppError::UnknownError(format!("Failed to serialize ACP usage metadata: {error}")))
+}
+
 fn attachment_display_name(attachment: &MessageAttachment) -> String {
     attachment
         .attachment_url
@@ -1561,6 +1641,44 @@ fn build_acp_prompt_blocks(
     }
 
     Ok(blocks)
+}
+
+fn summarize_acp_prompt_usage(
+    prompt_response: &acp::PromptResponse,
+    prompt_blocks: &[acp::ContentBlock],
+    final_content: &str,
+    reasoning_content: &str,
+) -> AcpPromptUsageSummary {
+    if let Some(usage) = prompt_response.usage.as_ref() {
+        return AcpPromptUsageSummary {
+            total_tokens: usage.total_tokens as i64,
+            input_tokens: usage.input_tokens as i64,
+            output_tokens: usage.output_tokens as i64,
+            thought_tokens: usage.thought_tokens.map(|value| value as i64),
+            cached_read_tokens: usage.cached_read_tokens.map(|value| value as i64),
+            cached_write_tokens: usage.cached_write_tokens.map(|value| value as i64),
+            usage_source: "reported",
+        };
+    }
+
+    let input_tokens = prompt_blocks
+        .iter()
+        .map(estimate_tokens_for_content_block)
+        .sum::<usize>() as i64;
+    let output_tokens = estimate_by_content(final_content) as i64;
+    let thought_tokens = (!reasoning_content.trim().is_empty())
+        .then(|| estimate_by_content(reasoning_content) as i64);
+    let total_tokens = input_tokens + output_tokens + thought_tokens.unwrap_or(0);
+
+    AcpPromptUsageSummary {
+        total_tokens,
+        input_tokens,
+        output_tokens,
+        thought_tokens,
+        cached_read_tokens: None,
+        cached_write_tokens: None,
+        usage_source: "estimated",
+    }
 }
 
 /// Convert ACP ToolCallStatus to string for frontend
@@ -2011,6 +2129,35 @@ impl AcpTauriClient {
         }
     }
 
+    async fn persist_message_usage_in_db(
+        &self,
+        usage_summary: &AcpPromptUsageSummary,
+        final_content: &str,
+    ) -> Result<(), AppError> {
+        let message_id = *self.message_id.lock().await;
+        let db = ConversationDatabase::new(&self.app_handle).map_err(AppError::from)?;
+        let repo = db.message_repo()?;
+        let Some(mut message) = repo.read(message_id).map_err(AppError::from)? else {
+            return Err(AppError::UnknownError(format!(
+                "ACP response message not found for usage persistence: {message_id}"
+            )));
+        };
+
+        message.content = final_content.to_string();
+        message.token_count = usage_summary.total_tokens as i32;
+        message.input_token_count = usage_summary.input_tokens as i32;
+        message.output_token_count = usage_summary.output_tokens as i32;
+        if message.finish_time.is_none() {
+            message.finish_time = Some(chrono::Utc::now());
+        }
+        message.metadata_json = Some(merge_acp_usage_metadata(
+            message.metadata_json.as_deref(),
+            usage_summary,
+        )?);
+        repo.update(&message).map_err(AppError::from)?;
+        Ok(())
+    }
+
     /// Get the accumulated response content
     pub async fn get_response_content(&self) -> String {
         self.response_content_buffer.lock().await.clone()
@@ -2123,6 +2270,19 @@ impl AcpTauriClient {
         self.publish_session_state(state).await;
     }
 
+    async fn apply_usage_update(&self, usage_update: &acp::UsageUpdate) {
+        let state = self
+            .update_session_state(|snapshot| {
+                snapshot.context_tokens_used = Some(usage_update.used);
+                snapshot.context_window_size = Some(usage_update.size);
+                snapshot.session_cost_amount = usage_update.cost.as_ref().map(|cost| cost.amount);
+                snapshot.session_cost_currency =
+                    usage_update.cost.as_ref().map(|cost| cost.currency.clone());
+            })
+            .await;
+        self.publish_session_state(state).await;
+    }
+
     async fn update_conversation_title(&self, title: &str) {
         let Ok(db) = ConversationDatabase::new(&self.app_handle) else {
             return;
@@ -2207,6 +2367,71 @@ impl AcpTauriClient {
                 }
                 _ => {}
             }
+        }
+    }
+
+    async fn finish_unfinished_tool_calls(&self, status: &str, error: Option<&str>) {
+        let call_ids = {
+            let map = self.tool_call_id_map.lock().await;
+            map.values().copied().collect::<Vec<_>>()
+        };
+        if call_ids.is_empty() {
+            return;
+        }
+
+        let Ok(db) = MCPDatabase::new(&self.app_handle) else {
+            return;
+        };
+
+        for call_id in call_ids {
+            let Ok(call) = db.get_mcp_tool_call(call_id) else {
+                continue;
+            };
+            if !matches!(call.status.as_str(), "pending" | "executing" | "unknown") {
+                continue;
+            }
+
+            let error_text = if status == "failed" {
+                error
+                    .unwrap_or("ACP prompt ended before the agent sent a final tool status")
+                    .to_string()
+            } else {
+                String::new()
+            };
+            let result = if status == "success" { call.result.as_deref() } else { None };
+            let error_for_db = (status == "failed").then_some(error_text.as_str());
+
+            if let Err(update_error) =
+                db.update_mcp_tool_call_status(call_id, status, result, error_for_db)
+            {
+                warn!(
+                    call_id,
+                    status,
+                    error = %update_error,
+                    "ACP failed to finish unfinished tool call"
+                );
+                continue;
+            }
+
+            let event = ConversationEvent {
+                r#type: "mcp_tool_call_update".to_string(),
+                data: serde_json::to_value(MCPToolCallUpdateEvent {
+                    call_id,
+                    conversation_id: self.conversation_id,
+                    status: status.to_string(),
+                    llm_call_id: call.llm_call_id.clone(),
+                    server_name: Some(call.server_name.clone()),
+                    tool_name: Some(call.tool_name.clone()),
+                    parameters: Some(call.parameters.clone()),
+                    result: call.result.clone(),
+                    error: (status == "failed").then_some(error_text),
+                    started_time: None,
+                    finished_time: Some(chrono::Utc::now()),
+                })
+                .unwrap(),
+            };
+            self.emit_event(event).await;
+            self.sync_tool_shine_status(call_id, status).await;
         }
     }
 
@@ -2464,7 +2689,12 @@ impl AcpTauriClient {
     }
 
     /// Send completion event to frontend
-    pub async fn send_done_event(&self, message_type: &str, content: &str) {
+    async fn send_done_event(
+        &self,
+        message_type: &str,
+        content: &str,
+        usage_summary: Option<&AcpPromptUsageSummary>,
+    ) {
         let message_id = *self.message_id.lock().await;
         let event = ConversationEvent {
             r#type: "message_update".to_string(),
@@ -2473,9 +2703,9 @@ impl AcpTauriClient {
                 message_type: message_type.to_string(),
                 content: content.to_string(),
                 is_done: true,
-                token_count: None,
-                input_token_count: None,
-                output_token_count: None,
+                token_count: usage_summary.map(|usage| usage.total_tokens as i32),
+                input_token_count: usage_summary.map(|usage| usage.input_tokens as i32),
+                output_token_count: usage_summary.map(|usage| usage.output_tokens as i32),
                 ttft_ms: None,
                 tps: None,
             })
@@ -3248,6 +3478,16 @@ impl AcpClient for AcpTauriClient {
                 self.apply_config_option_update(&config_update).await;
             }
 
+            acp::SessionUpdate::UsageUpdate(usage_update) => {
+                debug!(
+                    "ACP UsageUpdate: used={}, size={}, cost={:?}",
+                    usage_update.used,
+                    usage_update.size,
+                    usage_update.cost
+                );
+                self.apply_usage_update(&usage_update).await;
+            }
+
             // Catch-all for any future variants
             _ => {
                 debug!("ACP SessionNotification: unhandled variant");
@@ -3641,20 +3881,56 @@ async fn process_acp_prompt(
 
     info!("ACP: Sending prompt (conversation_id={}, message_id={})", conversation_id, message_id);
     let prompt_response = conn
-        .prompt(acp::PromptRequest::new(session_id.to_string(), prompt_blocks))
+        .prompt(acp::PromptRequest::new(session_id.to_string(), prompt_blocks.clone()))
         .await;
 
     if let Err(e) = &prompt_response {
         let err_msg = format!("ACP prompt failed: {:?}", e);
         error!("ACP: {}", err_msg);
+        client_handle
+            .finish_unfinished_tool_calls("failed", Some(&err_msg))
+            .await;
         client_handle.send_error_event(&err_msg).await;
         return Err(AppError::UnknownError(err_msg));
     }
     info!("ACP: Prompt completed successfully");
 
+    let prompt_response = prompt_response.expect("checked above");
     let final_content = client_handle.get_response_content().await;
-    client_handle.update_message_in_db(&final_content).await;
-    client_handle.send_done_event("response", &final_content).await;
+    let reasoning_content = client_handle.get_reasoning_content().await;
+    let usage_summary = summarize_acp_prompt_usage(
+        &prompt_response,
+        &prompt_blocks,
+        &final_content,
+        &reasoning_content,
+    );
+    client_handle
+        .persist_message_usage_in_db(&usage_summary, &final_content)
+        .await?;
+    match prompt_response.stop_reason {
+        acp::StopReason::Cancelled => {
+            client_handle
+                .finish_unfinished_tool_calls(
+                    "failed",
+                    Some("ACP prompt was cancelled before the agent sent a final tool status"),
+                )
+                .await;
+        }
+        acp::StopReason::Refusal => {
+            client_handle
+                .finish_unfinished_tool_calls(
+                    "failed",
+                    Some("ACP prompt was refused before the agent sent a final tool status"),
+                )
+                .await;
+        }
+        _ => {
+            client_handle.finish_unfinished_tool_calls("success", None).await;
+        }
+    }
+    client_handle
+        .send_done_event("response", &final_content, Some(&usage_summary))
+        .await;
     Ok(())
 }
 
@@ -4631,6 +4907,7 @@ mod tests {
         append_buffered_content, apply_network_proxy_to_env_vars, build_acp_manual_mcp_servers_from_parts,
         build_acp_launch_plan, build_prompt_to_send, extract_acp_config, extract_content_text, get_claude_model_override,
         load_claude_settings_env_vars_from_path, load_codex_config_env_vars_from_path,
+        merge_acp_usage_metadata, summarize_acp_prompt_usage, AcpPromptUsageSummary,
         AcpPermissionDecision, AcpPermissionRequestEvent, AcpPermissionState, AcpSessionEntry,
         AcpSessionHandle,
     };
@@ -5244,5 +5521,88 @@ mod tests {
                 assert_eq!(response, "Hello world");
             })
             .await;
+    }
+
+    #[test]
+    fn summarize_acp_prompt_usage_prefers_reported_usage() {
+        let prompt_response = acp::PromptResponse::new(acp::StopReason::EndTurn).usage(
+            acp::Usage::new(120, 40, 50)
+                .thought_tokens(Some(20))
+                .cached_read_tokens(Some(8))
+                .cached_write_tokens(Some(2)),
+        );
+
+        let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+            "ignored because usage is reported".to_string(),
+        ))];
+
+        let summary = summarize_acp_prompt_usage(
+            &prompt_response,
+            &prompt_blocks,
+            "final response",
+            "reasoning",
+        );
+
+        assert_eq!(summary.total_tokens, 120);
+        assert_eq!(summary.input_tokens, 40);
+        assert_eq!(summary.output_tokens, 50);
+        assert_eq!(summary.thought_tokens, Some(20));
+        assert_eq!(summary.cached_read_tokens, Some(8));
+        assert_eq!(summary.cached_write_tokens, Some(2));
+        assert_eq!(summary.usage_source, "reported");
+    }
+
+    #[test]
+    fn summarize_acp_prompt_usage_estimates_when_usage_missing() {
+        let prompt_response = acp::PromptResponse::new(acp::StopReason::EndTurn);
+        let prompt_blocks = vec![
+            acp::ContentBlock::Text(acp::TextContent::new("hello world".to_string())),
+            acp::ContentBlock::Text(acp::TextContent::new("你好".to_string())),
+        ];
+
+        let summary = summarize_acp_prompt_usage(
+            &prompt_response,
+            &prompt_blocks,
+            "assistant output",
+            "internal reasoning",
+        );
+
+        assert_eq!(summary.usage_source, "estimated");
+        assert!(summary.input_tokens > 0);
+        assert!(summary.output_tokens > 0);
+        assert!(summary.thought_tokens.unwrap_or(0) > 0);
+        assert_eq!(
+            summary.total_tokens,
+            summary.input_tokens + summary.output_tokens + summary.thought_tokens.unwrap_or(0)
+        );
+        assert_eq!(summary.cached_read_tokens, None);
+        assert_eq!(summary.cached_write_tokens, None);
+    }
+
+    #[test]
+    fn merge_acp_usage_metadata_preserves_unrelated_fields() {
+        let summary = AcpPromptUsageSummary {
+            total_tokens: 120,
+            input_tokens: 40,
+            output_tokens: 50,
+            thought_tokens: Some(20),
+            cached_read_tokens: Some(8),
+            cached_write_tokens: Some(2),
+            usage_source: "reported",
+        };
+
+        let merged = merge_acp_usage_metadata(
+            Some(r#"{"speakerLabel":"ACP","existing":true}"#),
+            &summary,
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
+
+        assert_eq!(parsed["speakerLabel"], "ACP");
+        assert_eq!(parsed["existing"], true);
+        assert_eq!(parsed["usage_source"], "reported");
+        assert_eq!(parsed["thought_tokens"], 20);
+        assert_eq!(parsed["cached_read_tokens"], 8);
+        assert_eq!(parsed["cached_write_tokens"], 2);
     }
 }

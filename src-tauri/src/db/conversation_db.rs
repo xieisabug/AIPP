@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{prelude::*, SecondsFormat};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize, Serializer};
+use serde_json::Value as JsonValue;
 use tracing::{debug, instrument};
 
 use crate::errors::AppError;
@@ -111,6 +112,39 @@ fn sqlite_write_lock_poisoned_error(db_name: &str) -> rusqlite::Error {
         std::io::ErrorKind::Other,
         format!("{db_name} write lock poisoned"),
     )))
+}
+
+#[derive(Debug, Default, Clone)]
+struct PersistedUsageMetadata {
+    usage_source: Option<String>,
+    thought_tokens: i64,
+    cached_read_tokens: i64,
+    cached_write_tokens: i64,
+}
+
+fn parse_persisted_usage_metadata(raw: Option<&str>) -> PersistedUsageMetadata {
+    let Some(raw) = raw else {
+        return PersistedUsageMetadata::default();
+    };
+    let Ok(JsonValue::Object(map)) = serde_json::from_str::<JsonValue>(raw) else {
+        return PersistedUsageMetadata::default();
+    };
+
+    PersistedUsageMetadata {
+        usage_source: map
+            .get("usage_source")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        thought_tokens: map.get("thought_tokens").and_then(|value| value.as_i64()).unwrap_or(0),
+        cached_read_tokens: map
+            .get("cached_read_tokens")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0),
+        cached_write_tokens: map
+            .get("cached_write_tokens")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0),
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1797,6 +1831,41 @@ impl ConversationDatabase {
             },
         )?;
 
+        let mut thought_tokens_total: i64 = 0;
+        let mut cached_read_tokens_total: i64 = 0;
+        let mut cached_write_tokens_total: i64 = 0;
+        let mut estimated_message_count: i64 = 0;
+        let mut metadata_by_model: HashMap<Option<i64>, PersistedUsageMetadata> = HashMap::new();
+
+        let mut metadata_stmt = conn.prepare(
+            "SELECT llm_model_id, metadata_json
+             FROM message
+             WHERE conversation_id = ?1 AND message_type IN ('response', 'reasoning')",
+        )?;
+
+        let metadata_rows = metadata_stmt.query_map(&[&conversation_id], |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })?;
+
+        for row in metadata_rows {
+            let (model_id, metadata_json) = row?;
+            let metadata = parse_persisted_usage_metadata(metadata_json.as_deref());
+            thought_tokens_total += metadata.thought_tokens;
+            cached_read_tokens_total += metadata.cached_read_tokens;
+            cached_write_tokens_total += metadata.cached_write_tokens;
+            if metadata.usage_source.as_deref() == Some("estimated") {
+                estimated_message_count += 1;
+            }
+
+            let entry = metadata_by_model.entry(model_id).or_default();
+            entry.thought_tokens += metadata.thought_tokens;
+            entry.cached_read_tokens += metadata.cached_read_tokens;
+            entry.cached_write_tokens += metadata.cached_write_tokens;
+        }
+
         // 获取对话的开始时间和结束时间
         let (start_time, finish_time): (Option<String>, Option<String>) = conn
             .query_row(
@@ -1852,12 +1921,17 @@ impl ConversationDatabase {
 
         let mut by_model = stmt
             .query_map(&[&conversation_id], |row| {
+                let model_id: Option<i64> = row.get(0)?;
+                let extra_usage = metadata_by_model.get(&model_id).cloned().unwrap_or_default();
                 Ok(ModelTokenBreakdown {
-                    model_id: row.get(0)?,
+                    model_id,
                     model_name: row.get(1).unwrap_or_else(|_| "Unknown".to_string()),
                     total_tokens: row.get(2)?,
                     input_tokens: row.get(3)?,
                     output_tokens: row.get(4)?,
+                    thought_tokens: extra_usage.thought_tokens,
+                    cached_read_tokens: extra_usage.cached_read_tokens,
+                    cached_write_tokens: extra_usage.cached_write_tokens,
                     message_count: row.get(5)?,
                     avg_ttft_ms: row.get(6).ok(),
                     avg_tps: row.get(7).ok(),
@@ -2022,7 +2096,11 @@ impl ConversationDatabase {
             total_tokens: total_tokens as i32,
             input_tokens: input_tokens as i32,
             output_tokens: output_tokens as i32,
+            thought_tokens: thought_tokens_total as i32,
+            cached_read_tokens: cached_read_tokens_total as i32,
+            cached_write_tokens: cached_write_tokens_total as i32,
             by_model,
+            estimated_message_count: estimated_message_count as i32,
             message_count: message_count as i32,
             system_message_count: system_count as i32,
             user_message_count: user_count as i32,
@@ -2046,6 +2124,7 @@ impl ConversationDatabase {
                 token_count,
                 input_token_count,
                 output_token_count,
+                metadata_json,
                 llm_model_name,
                 ttft_ms,
                 first_token_time,
@@ -2059,12 +2138,13 @@ impl ConversationDatabase {
                 let total_tokens: i32 = row.get(1)?;
                 let input_tokens: i32 = row.get(2)?;
                 let output_tokens: i32 = row.get(3)?;
-                let first_token_time = get_datetime_from_row(row, 6)?;
-                let finish_time = get_datetime_from_row(row, 7)?;
-                let start_time = get_datetime_from_row(row, 8)?;
-                let created_time = get_required_datetime_from_row(row, 9, "created_time")?;
+                let metadata = parse_persisted_usage_metadata(row.get::<_, Option<String>>(4)?.as_deref());
+                let first_token_time = get_datetime_from_row(row, 7)?;
+                let finish_time = get_datetime_from_row(row, 8)?;
+                let start_time = get_datetime_from_row(row, 9)?;
+                let created_time = get_required_datetime_from_row(row, 10, "created_time")?;
                 let ttft_ms: Option<i64> =
-                    row.get(5).ok().or_else(|| match (start_time, first_token_time) {
+                    row.get(6).ok().or_else(|| match (start_time, first_token_time) {
                         (Some(start), Some(first_token)) => {
                             Some((first_token.timestamp_millis() - start.timestamp_millis()).max(0))
                         }
@@ -2123,7 +2203,11 @@ impl ConversationDatabase {
                     total_tokens,
                     input_tokens,
                     output_tokens,
-                    model_name: row.get(4).ok(),
+                    thought_tokens: metadata.thought_tokens as i32,
+                    cached_read_tokens: metadata.cached_read_tokens as i32,
+                    cached_write_tokens: metadata.cached_write_tokens as i32,
+                    usage_source: metadata.usage_source,
+                    model_name: row.get(5).ok(),
                     ttft_ms,
                     tps,
                     start_time,
@@ -2264,7 +2348,11 @@ pub struct ConversationTokenStats {
     pub total_tokens: i32,
     pub input_tokens: i32,
     pub output_tokens: i32,
+    pub thought_tokens: i32,
+    pub cached_read_tokens: i32,
+    pub cached_write_tokens: i32,
     pub by_model: Vec<ModelTokenBreakdown>,
+    pub estimated_message_count: i32,
     pub message_count: i32,
     // 按消息类型统计
     pub system_message_count: i32,
@@ -2290,6 +2378,9 @@ pub struct ModelTokenBreakdown {
     pub total_tokens: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub thought_tokens: i64,
+    pub cached_read_tokens: i64,
+    pub cached_write_tokens: i64,
     pub message_count: i64,
     // 性能指标统计
     pub avg_ttft_ms: Option<f64>,
@@ -2303,6 +2394,10 @@ pub struct MessageTokenStats {
     pub total_tokens: i32,
     pub input_tokens: i32,
     pub output_tokens: i32,
+    pub thought_tokens: i32,
+    pub cached_read_tokens: i32,
+    pub cached_write_tokens: i32,
+    pub usage_source: Option<String>,
     pub model_name: Option<String>,
     pub ttft_ms: Option<i64>, // Time to First Token (毫秒)
     pub tps: Option<f64>,     // Tokens Per Second

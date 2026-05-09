@@ -43,6 +43,10 @@ function baseAcpSessionState(
         plan: [],
         available_commands: [],
         has_active_prompt: false,
+        context_tokens_used: 2048,
+        context_window_size: 8192,
+        session_cost_amount: 1.25,
+        session_cost_currency: "USD",
         ...overrides,
     };
 }
@@ -57,6 +61,12 @@ const HookHarness = () => {
             <div data-testid="session-id">{acpSessionState?.session_id ?? "none"}</div>
             <div data-testid="config-count">
                 {acpSessionState?.config_options.length ?? 0}
+            </div>
+            <div data-testid="context-used">
+                {acpSessionState?.context_tokens_used ?? "none"}
+            </div>
+            <div data-testid="context-size">
+                {acpSessionState?.context_window_size ?? "none"}
             </div>
             <button
                 type="button"
@@ -97,6 +107,8 @@ describe("useConversationEvents ACP session state", () => {
         fireEvent.click(screen.getByText("apply session"));
         expect(screen.getByTestId("session-id")).toHaveTextContent("session-resume");
         expect(screen.getByTestId("config-count")).toHaveTextContent("1");
+        expect(screen.getByTestId("context-used")).toHaveTextContent("2048");
+        expect(screen.getByTestId("context-size")).toHaveTextContent("8192");
 
         await act(async () => {
             staleAcpSync.resolve(null);
@@ -105,5 +117,7 @@ describe("useConversationEvents ACP session state", () => {
 
         expect(screen.getByTestId("session-id")).toHaveTextContent("session-resume");
         expect(screen.getByTestId("config-count")).toHaveTextContent("1");
+        expect(screen.getByTestId("context-used")).toHaveTextContent("2048");
+        expect(screen.getByTestId("context-size")).toHaveTextContent("8192");
     });
 });

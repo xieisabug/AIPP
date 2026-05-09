@@ -30,6 +30,7 @@ interface ConfigField {
     | "select"
     | "textarea"
     | "input"
+    | "folder-picker"
     | "password"
     | "checkbox"
     | "radio"
@@ -303,6 +304,19 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                             {...fieldRenderData}
                         />
                     );
+                case "folder-picker":
+                    return (
+                        <FolderPicker
+                            value={(fieldRenderData.value as string) || ""}
+                            onChange={(value) => {
+                                fieldRenderData.onChange(value);
+                                field.onChange?.(value);
+                            }}
+                            placeholder={field.placeholder || "选择文件夹"}
+                            disabled={field.disabled}
+                            className={field.className}
+                        />
+                    );
                 case "checkbox":
                     return (
                         <Checkbox
@@ -384,16 +398,6 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                         </div>
                     );
                 case "custom":
-                    // 特殊处理：ACP 工作目录使用文件夹选择器
-                    if (name === "acp_working_directory") {
-                        return (
-                            <FolderPicker
-                                value={fieldRenderData.value as string || ""}
-                                onChange={(value) => fieldRenderData.onChange(value)}
-                                placeholder="选择工作目录"
-                            />
-                        );
-                    }
                     const customElement = useMemo(() => {
                         return field.customRender ? field.customRender(fieldRenderData) : null;
                     }, [field.customRender, fieldRenderData]);

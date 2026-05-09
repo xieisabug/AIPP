@@ -412,6 +412,7 @@ export function useMessageListElements({
 
                             return (
                                 <MessageActionButtons
+                                    messageId={toolbarMessage.id}
                                     messageType={lastResponse ? "response" : toolbarMessage.message_type}
                                     isUserMessage={false}
                                     copyIconState="copy"
@@ -432,9 +433,6 @@ export function useMessageListElements({
                                             : undefined
                                     }
                                     isResendToFeishuDebugPending={pendingMessageId === resendTargetMessage?.id}
-                                    tokenCount={toolbarMessage.token_count}
-                                    inputTokenCount={toolbarMessage.input_token_count}
-                                    outputTokenCount={toolbarMessage.output_token_count}
                                     messageContent={toolbarMessage.content}
                                 />
                             );
