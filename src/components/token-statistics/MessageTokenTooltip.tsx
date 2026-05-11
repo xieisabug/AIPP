@@ -65,6 +65,8 @@ export function MessageTokenTooltip({
     };
 
     const usageSourceLabel = stats?.usage_source === "estimated" ? "估算" : "精确";
+    const cachedInputTokens = stats ? (stats.cached_input_tokens ?? stats.cached_read_tokens) : 0;
+    const regularInputTokens = stats ? Math.max(stats.input_tokens - cachedInputTokens, 0) : 0;
 
     if (messageType !== "response") {
         return null;
@@ -100,7 +102,11 @@ export function MessageTokenTooltip({
                             </div>
                             <div className="flex justify-between gap-4">
                                 <span className="text-muted-foreground">输入</span>
-                                <span className="font-medium">{formatNumber(stats.input_tokens)}</span>
+                                <span className="font-medium">{formatNumber(regularInputTokens)}</span>
+                            </div>
+                            <div className="flex justify-between gap-4">
+                                <span className="text-muted-foreground">Cached input</span>
+                                <span className="font-medium">{formatNumber(cachedInputTokens)}</span>
                             </div>
                             <div className="flex justify-between gap-4">
                                 <span className="text-muted-foreground">输出</span>
@@ -110,12 +116,6 @@ export function MessageTokenTooltip({
                                 <div className="flex justify-between gap-4">
                                     <span className="text-muted-foreground">思考 Token</span>
                                     <span className="font-medium">{formatNumber(stats.thought_tokens)}</span>
-                                </div>
-                            )}
-                            {stats.cached_read_tokens > 0 && (
-                                <div className="flex justify-between gap-4">
-                                    <span className="text-muted-foreground">缓存读取</span>
-                                    <span className="font-medium">{formatNumber(stats.cached_read_tokens)}</span>
                                 </div>
                             )}
                             {stats.cached_write_tokens > 0 && (

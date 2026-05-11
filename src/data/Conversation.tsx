@@ -290,6 +290,7 @@ export interface ConversationTokenStats {
     input_tokens: number;
     output_tokens: number;
     thought_tokens: number;
+    cached_input_tokens?: number;
     cached_read_tokens: number;
     cached_write_tokens: number;
     by_model: ModelTokenBreakdown[];
@@ -316,6 +317,7 @@ export interface ModelTokenBreakdown {
     input_tokens: number;
     output_tokens: number;
     thought_tokens: number;
+    cached_input_tokens?: number;
     cached_read_tokens: number;
     cached_write_tokens: number;
     message_count: number;
@@ -331,6 +333,7 @@ export interface MessageTokenStats {
     input_tokens: number;
     output_tokens: number;
     thought_tokens: number;
+    cached_input_tokens?: number;
     cached_read_tokens: number;
     cached_write_tokens: number;
     usage_source?: "reported" | "estimated" | string | null;

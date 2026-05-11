@@ -1469,10 +1469,15 @@ fn merge_acp_usage_metadata(
     }
     if let Some(cached_read_tokens) = usage_summary.cached_read_tokens {
         map.insert(
+            "cached_input_tokens".to_string(),
+            JsonValue::Number(cached_read_tokens.into()),
+        );
+        map.insert(
             "cached_read_tokens".to_string(),
             JsonValue::Number(cached_read_tokens.into()),
         );
     } else {
+        map.remove("cached_input_tokens");
         map.remove("cached_read_tokens");
     }
     if let Some(cached_write_tokens) = usage_summary.cached_write_tokens {
@@ -5602,6 +5607,7 @@ mod tests {
         assert_eq!(parsed["existing"], true);
         assert_eq!(parsed["usage_source"], "reported");
         assert_eq!(parsed["thought_tokens"], 20);
+        assert_eq!(parsed["cached_input_tokens"], 8);
         assert_eq!(parsed["cached_read_tokens"], 8);
         assert_eq!(parsed["cached_write_tokens"], 2);
     }

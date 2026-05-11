@@ -100,7 +100,7 @@ export function ConversationStatsDialog({
             <DialogTrigger asChild>
                 <IconButton icon={<Info className="h-4 w-4 text-icon" />} onClick={() => { }} border />
             </DialogTrigger>
-            <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
+            <DialogContent className="max-h-[85vh] flex flex-col sm:min-w-2xl sm:max-w-[50vw]">
                 <DialogHeader>
                     <DialogTitle>对话信息</DialogTitle>
                     <DialogDescription>
@@ -168,7 +168,7 @@ export function ConversationStatsDialog({
                                 input={stats.input_tokens}
                                 output={stats.output_tokens}
                                 thought={stats.thought_tokens}
-                                cachedRead={stats.cached_read_tokens}
+                                cachedInput={stats.cached_input_tokens ?? stats.cached_read_tokens}
                                 cachedWrite={stats.cached_write_tokens}
                                 showPercentage={true}
                             />
@@ -251,7 +251,7 @@ export function ConversationStatsDialog({
                                                     input={model.input_tokens}
                                                     output={model.output_tokens}
                                                     thought={model.thought_tokens}
-                                                    cachedRead={model.cached_read_tokens}
+                                                    cachedInput={model.cached_input_tokens ?? model.cached_read_tokens}
                                                     cachedWrite={model.cached_write_tokens}
                                                     compact={true}
                                                 />

@@ -15,6 +15,7 @@ describe("ConversationStatsDialog", () => {
             input_tokens: 180,
             output_tokens: 220,
             thought_tokens: 80,
+            cached_input_tokens: 15,
             cached_read_tokens: 15,
             cached_write_tokens: 5,
             estimated_message_count: 2,
@@ -26,6 +27,7 @@ describe("ConversationStatsDialog", () => {
                     input_tokens: 180,
                     output_tokens: 220,
                     thought_tokens: 80,
+                    cached_input_tokens: 15,
                     cached_read_tokens: 15,
                     cached_write_tokens: 5,
                     message_count: 3,
@@ -76,6 +78,7 @@ describe("ConversationStatsDialog", () => {
         });
 
         expect(screen.getByText("含估算 2 条")).toBeInTheDocument();
+        expect(screen.getAllByText("Cached input").length).toBeGreaterThan(0);
         expect(screen.getByText("ACP 会话 Usage")).toBeInTheDocument();
         expect(screen.getByText("2,048")).toBeInTheDocument();
         expect(screen.getByText("8,192")).toBeInTheDocument();

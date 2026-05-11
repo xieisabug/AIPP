@@ -16,6 +16,7 @@ describe("MessageTokenTooltip", () => {
             input_tokens: 40,
             output_tokens: 50,
             thought_tokens: 20,
+            cached_input_tokens: 8,
             cached_read_tokens: 8,
             cached_write_tokens: 2,
             usage_source: "reported",
@@ -36,6 +37,7 @@ describe("MessageTokenTooltip", () => {
 
         expect(screen.getByText("精确")).toBeInTheDocument();
         expect(screen.getByText("120")).toBeInTheDocument();
+        expect(screen.getByText("Cached input")).toBeInTheDocument();
         expect(screen.getByText("20")).toBeInTheDocument();
         expect(screen.getByText("8")).toBeInTheDocument();
         expect(screen.getByText("2")).toBeInTheDocument();
@@ -48,6 +50,7 @@ describe("MessageTokenTooltip", () => {
             input_tokens: 30,
             output_tokens: 40,
             thought_tokens: 18,
+            cached_input_tokens: 0,
             cached_read_tokens: 0,
             cached_write_tokens: 0,
             usage_source: "estimated",

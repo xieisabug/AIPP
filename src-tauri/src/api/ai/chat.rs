@@ -21,7 +21,7 @@ use crate::utils::window_utils::send_error_to_appropriate_window;
 use anyhow::Context as _;
 use futures::StreamExt;
 use genai::chat::ChatStreamEvent;
-use genai::chat::{Binary, BinarySource, ChatOptions, ChatRequest, ContentPart, ToolCall};
+use genai::chat::{Binary, BinarySource, ChatOptions, ChatRequest, ContentPart, ToolCall, Usage};
 use genai::Client;
 use scraper::{Html, Selector};
 use serde::Serialize;
@@ -40,6 +40,76 @@ pub struct HttpErrorDetails {
     pub response_body: Option<String>,
     pub endpoint: Option<String>,
     pub request_id: Option<String>,
+}
+
+fn positive_token_count(value: i32) -> Option<i32> {
+    (value > 0).then_some(value)
+}
+
+fn cache_creation_tokens_from_usage(usage: &Usage) -> Option<i32> {
+    let details = usage.prompt_tokens_details.as_ref()?;
+    let explicit = details.cache_creation_tokens.unwrap_or(0);
+    let by_ttl = details
+        .cache_creation_details
+        .as_ref()
+        .map(|ttl| {
+            ttl.ephemeral_5m_tokens.unwrap_or(0) + ttl.ephemeral_1h_tokens.unwrap_or(0)
+        })
+        .unwrap_or(0);
+
+    positive_token_count(explicit.max(by_ttl))
+}
+
+fn merge_chat_usage_metadata(existing_metadata_json: Option<&str>, usage: &Usage) -> Option<String> {
+    let thought_tokens = usage
+        .completion_tokens_details
+        .as_ref()
+        .and_then(|details| details.reasoning_tokens)
+        .and_then(positive_token_count);
+    let cached_input_tokens = usage
+        .prompt_tokens_details
+        .as_ref()
+        .and_then(|details| details.cached_tokens)
+        .and_then(positive_token_count);
+    let cached_write_tokens = cache_creation_tokens_from_usage(usage);
+
+    if thought_tokens.is_none() && cached_input_tokens.is_none() && cached_write_tokens.is_none() {
+        return existing_metadata_json.map(ToOwned::to_owned);
+    }
+
+    let mut map = match existing_metadata_json {
+        Some(raw) if !raw.trim().is_empty() => match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(serde_json::Value::Object(map)) => map,
+            Ok(_) | Err(_) => serde_json::Map::new(),
+        },
+        _ => serde_json::Map::new(),
+    };
+
+    map.insert("usage_source".to_string(), serde_json::json!("reported"));
+
+    if let Some(value) = thought_tokens {
+        map.insert("thought_tokens".to_string(), serde_json::json!(value));
+    } else {
+        map.remove("thought_tokens");
+    }
+
+    if let Some(value) = cached_input_tokens {
+        map.insert("cached_input_tokens".to_string(), serde_json::json!(value));
+        map.insert("cached_read_tokens".to_string(), serde_json::json!(value));
+    } else {
+        map.remove("cached_input_tokens");
+        map.remove("cached_read_tokens");
+    }
+
+    if let Some(value) = cached_write_tokens {
+        map.insert("cache_creation_tokens".to_string(), serde_json::json!(value));
+        map.insert("cached_write_tokens".to_string(), serde_json::json!(value));
+    } else {
+        map.remove("cache_creation_tokens");
+        map.remove("cached_write_tokens");
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(map)).ok()
 }
 
 /// 从 genai::Error 中提取 HTTP 错误详情
@@ -948,6 +1018,38 @@ mod tests {
         tool_name_mapping: &ToolNameMapping,
     ) -> String {
         build_streaming_tool_call_display(response_content, streaming_tool_calls, tool_name_mapping)
+    }
+
+    #[test]
+    fn test_merge_chat_usage_metadata_records_cache_and_reasoning() {
+        let usage = Usage {
+            prompt_tokens: Some(120),
+            prompt_tokens_details: Some(genai::chat::PromptTokensDetails {
+                cache_creation_tokens: Some(5),
+                cache_creation_details: None,
+                cached_tokens: Some(30),
+                audio_tokens: None,
+            }),
+            completion_tokens: Some(40),
+            completion_tokens_details: Some(genai::chat::CompletionTokensDetails {
+                accepted_prediction_tokens: None,
+                rejected_prediction_tokens: None,
+                reasoning_tokens: Some(12),
+                audio_tokens: None,
+            }),
+            total_tokens: Some(160),
+        };
+
+        let merged = merge_chat_usage_metadata(Some(r#"{"existing":true}"#), &usage).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
+
+        assert_eq!(parsed["existing"], true);
+        assert_eq!(parsed["usage_source"], "reported");
+        assert_eq!(parsed["thought_tokens"], 12);
+        assert_eq!(parsed["cached_input_tokens"], 30);
+        assert_eq!(parsed["cached_read_tokens"], 30);
+        assert_eq!(parsed["cache_creation_tokens"], 5);
+        assert_eq!(parsed["cached_write_tokens"], 5);
     }
 
     #[test]
@@ -3014,7 +3116,7 @@ async fn attempt_stream_chat(
                             let output_tokens = usage.completion_tokens.unwrap_or(0);
                             let total_tokens =
                                 usage.total_tokens.unwrap_or(input_tokens + output_tokens);
-                            (input_tokens, output_tokens, total_tokens)
+                            (input_tokens, output_tokens, total_tokens, usage.clone())
                         });
 
                         let mut captured_binaries: Vec<Binary> = Vec::new();
@@ -3138,7 +3240,7 @@ async fn attempt_stream_chat(
                         }
 
                         // Store the extracted token data
-                        if let Some((input_tokens, output_tokens, total_tokens)) = token_data {
+                        if let Some((input_tokens, output_tokens, total_tokens, usage)) = token_data {
                             // Update the response or reasoning message with token data
                             // 优先更新 response 消息，如果没有则更新 reasoning 消息
                             let target_msg_id = response_message_id.or(reasoning_message_id);
@@ -3154,6 +3256,10 @@ async fn attempt_stream_chat(
                                         message.input_token_count = input_tokens;
                                         message.output_token_count = output_tokens;
                                         message.token_count = total_tokens;
+                                        message.metadata_json = merge_chat_usage_metadata(
+                                            message.metadata_json.as_deref(),
+                                            &usage,
+                                        );
 
                                         // Ensure the message used for metrics reflects the whole assistant generation
                                         // (reasoning + response), not just the response segment.
@@ -3869,7 +3975,7 @@ pub async fn handle_non_stream_chat(
                     generation_group_id: Some(generation_group_id.clone()),
                     parent_group_id: parent_group_id_override.clone(),
                     tool_calls_json: None,
-                    metadata_json: None,
+                    metadata_json: merge_chat_usage_metadata(None, usage),
                     first_token_time: None, // non-stream: unknown, fallback to start_time
                     ttft_ms,
                 })

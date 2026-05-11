@@ -118,6 +118,7 @@ fn sqlite_write_lock_poisoned_error(db_name: &str) -> rusqlite::Error {
 struct PersistedUsageMetadata {
     usage_source: Option<String>,
     thought_tokens: i64,
+    cached_input_tokens: i64,
     cached_read_tokens: i64,
     cached_write_tokens: i64,
 }
@@ -130,18 +131,23 @@ fn parse_persisted_usage_metadata(raw: Option<&str>) -> PersistedUsageMetadata {
         return PersistedUsageMetadata::default();
     };
 
+    let cached_input_tokens = map
+        .get("cached_input_tokens")
+        .or_else(|| map.get("cached_read_tokens"))
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0);
+
     PersistedUsageMetadata {
         usage_source: map
             .get("usage_source")
             .and_then(|value| value.as_str())
             .map(ToOwned::to_owned),
         thought_tokens: map.get("thought_tokens").and_then(|value| value.as_i64()).unwrap_or(0),
-        cached_read_tokens: map
-            .get("cached_read_tokens")
-            .and_then(|value| value.as_i64())
-            .unwrap_or(0),
+        cached_input_tokens,
+        cached_read_tokens: cached_input_tokens,
         cached_write_tokens: map
             .get("cached_write_tokens")
+            .or_else(|| map.get("cache_creation_tokens"))
             .and_then(|value| value.as_i64())
             .unwrap_or(0),
     }
@@ -1832,6 +1838,7 @@ impl ConversationDatabase {
         )?;
 
         let mut thought_tokens_total: i64 = 0;
+        let mut cached_input_tokens_total: i64 = 0;
         let mut cached_read_tokens_total: i64 = 0;
         let mut cached_write_tokens_total: i64 = 0;
         let mut estimated_message_count: i64 = 0;
@@ -1854,6 +1861,7 @@ impl ConversationDatabase {
             let (model_id, metadata_json) = row?;
             let metadata = parse_persisted_usage_metadata(metadata_json.as_deref());
             thought_tokens_total += metadata.thought_tokens;
+            cached_input_tokens_total += metadata.cached_input_tokens;
             cached_read_tokens_total += metadata.cached_read_tokens;
             cached_write_tokens_total += metadata.cached_write_tokens;
             if metadata.usage_source.as_deref() == Some("estimated") {
@@ -1862,6 +1870,7 @@ impl ConversationDatabase {
 
             let entry = metadata_by_model.entry(model_id).or_default();
             entry.thought_tokens += metadata.thought_tokens;
+            entry.cached_input_tokens += metadata.cached_input_tokens;
             entry.cached_read_tokens += metadata.cached_read_tokens;
             entry.cached_write_tokens += metadata.cached_write_tokens;
         }
@@ -1930,6 +1939,7 @@ impl ConversationDatabase {
                     input_tokens: row.get(3)?,
                     output_tokens: row.get(4)?,
                     thought_tokens: extra_usage.thought_tokens,
+                    cached_input_tokens: extra_usage.cached_input_tokens,
                     cached_read_tokens: extra_usage.cached_read_tokens,
                     cached_write_tokens: extra_usage.cached_write_tokens,
                     message_count: row.get(5)?,
@@ -2097,6 +2107,7 @@ impl ConversationDatabase {
             input_tokens: input_tokens as i32,
             output_tokens: output_tokens as i32,
             thought_tokens: thought_tokens_total as i32,
+            cached_input_tokens: cached_input_tokens_total as i32,
             cached_read_tokens: cached_read_tokens_total as i32,
             cached_write_tokens: cached_write_tokens_total as i32,
             by_model,
@@ -2204,6 +2215,7 @@ impl ConversationDatabase {
                     input_tokens,
                     output_tokens,
                     thought_tokens: metadata.thought_tokens as i32,
+                    cached_input_tokens: metadata.cached_input_tokens as i32,
                     cached_read_tokens: metadata.cached_read_tokens as i32,
                     cached_write_tokens: metadata.cached_write_tokens as i32,
                     usage_source: metadata.usage_source,
@@ -2349,6 +2361,7 @@ pub struct ConversationTokenStats {
     pub input_tokens: i32,
     pub output_tokens: i32,
     pub thought_tokens: i32,
+    pub cached_input_tokens: i32,
     pub cached_read_tokens: i32,
     pub cached_write_tokens: i32,
     pub by_model: Vec<ModelTokenBreakdown>,
@@ -2379,6 +2392,7 @@ pub struct ModelTokenBreakdown {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub thought_tokens: i64,
+    pub cached_input_tokens: i64,
     pub cached_read_tokens: i64,
     pub cached_write_tokens: i64,
     pub message_count: i64,
@@ -2395,6 +2409,7 @@ pub struct MessageTokenStats {
     pub input_tokens: i32,
     pub output_tokens: i32,
     pub thought_tokens: i32,
+    pub cached_input_tokens: i32,
     pub cached_read_tokens: i32,
     pub cached_write_tokens: i32,
     pub usage_source: Option<String>,
