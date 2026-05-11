@@ -21,6 +21,9 @@ interface RustCodeBlockProps {
 const COLLAPSED_MAX_HEIGHT = 320;
 const INITIAL_COLLAPSE_WRAP_CHARS = 96;
 const INITIAL_COLLAPSE_LINE_THRESHOLD = 18;
+const COLLAPSED_PREVIEW_MAX_LINES = 120;
+const COLLAPSED_PREVIEW_MAX_CHARS = 8000;
+const PLAIN_TEXT_LANGUAGES = new Set(["", "text", "txt", "plain", "plaintext"]);
 
 function shouldStartCollapsed(code: string): boolean {
     const visualLineCount = code.split(/\r?\n/).reduce((total, line) => {
@@ -28,6 +31,28 @@ function shouldStartCollapsed(code: string): boolean {
     }, 0);
 
     return visualLineCount > INITIAL_COLLAPSE_LINE_THRESHOLD;
+}
+
+function getCollapsedPreviewCode(code: string): { code: string; truncated: boolean } {
+    const lines = code.split(/\r?\n/);
+    const lineLimited = lines.length > COLLAPSED_PREVIEW_MAX_LINES;
+    let preview = lineLimited
+        ? lines.slice(0, COLLAPSED_PREVIEW_MAX_LINES).join("\n")
+        : code;
+
+    const charLimited = preview.length > COLLAPSED_PREVIEW_MAX_CHARS;
+    if (charLimited) {
+        preview = preview.slice(0, COLLAPSED_PREVIEW_MAX_CHARS);
+    }
+
+    return {
+        code: preview,
+        truncated: lineLimited || charLimited || preview.length < code.length,
+    };
+}
+
+function isPlainTextLanguage(language: string): boolean {
+    return PLAIN_TEXT_LANGUAGES.has(language.trim().toLowerCase());
 }
 
 const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
@@ -51,15 +76,21 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
     const rafRef = useRef<number | null>(null);
     const { currentTheme } = useCodeTheme();
     const rustHighlight = useRustHighlight();
+    const shouldUsePlainText = isPlainTextLanguage(language);
 
     // 折叠逻辑相关
+    const shouldCollapseInitially = useMemo(() => shouldStartCollapsed(code), [code]);
     const [isCollapsed, setIsCollapsed] = useState(
-        () => !disableCollapse && shouldStartCollapsed(code),
+        () => !disableCollapse && shouldCollapseInitially,
     );
     const [isOverflow, setIsOverflow] = useState(false);
     const userToggledRef = useRef(false);
     const streamingAutoCollapsedOnceRef = useRef(false);
     const hasInitialDecisionRef = useRef(false); // 非流式时仅在首次渲染做一次自动判断
+    const collapsedPreview = useMemo(() => getCollapsedPreviewCode(code), [code]);
+    const renderCode = !disableCollapse && isCollapsed ? collapsedPreview.code : code;
+    const isPreviewTruncated = !disableCollapse && isCollapsed && collapsedPreview.truncated;
+    const canCollapse = !disableCollapse && (isOverflow || isPreviewTruncated || shouldCollapseInitially);
     const metaLabel = useMemo(() => {
         if (!meta) return null;
         const title = meta.title || meta.filename;
@@ -71,10 +102,16 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
     }, [meta]);
 
     useEffect(() => {
+        if (shouldUsePlainText) {
+            setHtml("");
+            return;
+        }
+
         let cancelled = false;
+        setHtml("");
         (async () => {
             try {
-                const result = await rustHighlight(language, code, resolvedTheme === "dark", currentTheme);
+                const result = await rustHighlight(language, renderCode, resolvedTheme === "dark", currentTheme);
                 if (!cancelled) setHtml(result);
             } catch (e) {
                 console.warn("[RustCodeBlock] highlight failed, fallback to plain text", e);
@@ -84,7 +121,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
         return () => {
             cancelled = true;
         };
-    }, [language, code, resolvedTheme, currentTheme]);
+    }, [language, renderCode, resolvedTheme, currentTheme, shouldUsePlainText, rustHighlight]);
 
     // 计算是否超出折叠阈值，并在需要时进行自动折叠
     useEffect(() => {
@@ -99,7 +136,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
 
         const measure = () => {
             const contentHeight = el.scrollHeight; // 实际内容高度
-            const overflow = contentHeight > COLLAPSED_MAX_HEIGHT + 4; // 允许少量误差
+            const overflow = contentHeight > COLLAPSED_MAX_HEIGHT + 4 || shouldCollapseInitially; // 允许少量误差
             setIsOverflow(overflow);
 
             // 用户手动切换后，不再自动改变折叠状态
@@ -140,7 +177,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
             window.removeEventListener('resize', onResize);
         };
         // 依赖 html 与 code，在代码或高亮结果变化时重新测量
-    }, [html, code, isStreaming, disableCollapse]);
+    }, [html, code, renderCode, isStreaming, disableCollapse, shouldCollapseInitially]);
 
     // 监听滚动判断是否需要 sticky - 使用 RAF 节流
     useEffect(() => {
@@ -260,17 +297,17 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                     />
                 ) : (
                     <pre ref={codeRef as any} className="text-sm font-mono p-3 bg-transparent">
-                        <code>{code}</code>
+                        <code>{renderCode}</code>
                     </pre>
                 )}
                 {/* Gradient overlay when collapsed */}
-                {!disableCollapse && isCollapsed && isOverflow && (
+                {!disableCollapse && isCollapsed && canCollapse && (
                     <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-muted to-transparent pointer-events-none" />
                 )}
             </div>
 
             {/* Expand/Collapse control */}
-            {!disableCollapse && isOverflow && (
+            {canCollapse && (
                 <div className="flex justify-center pt-2 pb-1 bg-muted">
                     <button
                         type="button"
