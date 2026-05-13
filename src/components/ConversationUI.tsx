@@ -51,6 +51,7 @@ import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 import ConversationHeader from "./conversation/ConversationHeader";
 import ConversationContent from "./conversation/ConversationContent";
 import { applyScrollHighlight } from "./conversation/scrollHighlight";
+import { ToolErrorContinueProvider } from "./McpToolCall";
 import IconButton from "./IconButton";
 import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -66,6 +67,7 @@ import { useArtifactExtractor } from "@/hooks/useArtifactExtractor";
 import { useExplicitArtifacts } from "@/hooks/useExplicitArtifacts";
 import { useContextList } from "@/hooks/useContextList";
 import { mergeMessagesWithStreamingState } from "@/utils/streamingMessageState";
+import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 
 // 暴露给外部的方法接口
 export interface ConversationUIRef {
@@ -179,6 +181,25 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 防泄露模式：获取重置函数
         const { resetReveal } = useAntiLeakage();
+        const {
+            getConfigValue,
+            loadFeatureConfig,
+            loading: featureConfigLoading,
+        } = useFeatureConfig();
+        const continueOnToolErrorEnabled = featureConfigLoading
+            ? true
+            : !["false", "0"].includes(
+                getConfigValue("tool_error_continue", "enabled", "true").trim().toLowerCase(),
+            );
+
+        useEffect(() => {
+            const unlisten = listen("feature_config_changed", () => {
+                void loadFeatureConfig();
+            });
+            return () => {
+                unlisten.then((f) => f());
+            };
+        }, [loadFeatureConfig]);
 
         // ============= Chat Sidebar Hooks =============
         
@@ -1475,11 +1496,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // ============= 组件渲染 =============
 
         return (
-            <div
-                ref={dropRef}
-                className={`h-full relative flex bg-background ${isMobile ? '' : 'rounded-xl'}`}
-                data-aipp-slot="chat-conversation-root"
-            >
+            <ToolErrorContinueProvider value={continueOnToolErrorEnabled}>
+                <div
+                    ref={dropRef}
+                    className={`h-full relative flex bg-background ${isMobile ? '' : 'rounded-xl'}`}
+                    data-aipp-slot="chat-conversation-root"
+                >
                 {/* Main content area */}
                 <div className="flex-1 flex flex-col min-w-0" data-aipp-slot="chat-conversation-main">
                     {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}
@@ -1606,7 +1628,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         <div className="text-primary text-base font-medium">加载中...</div>
                     </div>
                 ) : null}
-            </div>
+                </div>
+            </ToolErrorContinueProvider>
         );
     }
 );

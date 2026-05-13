@@ -1,6 +1,6 @@
 import { act, render, screen } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import McpToolCall from "@/components/McpToolCall";
+import McpToolCall, { ToolErrorContinueProvider } from "@/components/McpToolCall";
 import type { MCPToolCallUpdateEvent } from "@/data/Conversation";
 import { clearAllMockHandlers, invoke, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 
@@ -302,5 +302,107 @@ describe("McpToolCall call_id binding", () => {
         expect(screen.getByText("执行中")).toBeInTheDocument();
         expect(screen.getByTestId("shine-border")).toBeInTheDocument();
         expect(screen.getByText(/bound-from-state/)).toBeInTheDocument();
+    });
+
+    it("auto-collapses failed calls and hides failed actions when tool error continuation is enabled", async () => {
+        const conversationId = 19;
+        const callId = 162;
+        mockInvokeHandler("get_mcp_tool_call", () => ({
+            id: callId,
+            conversation_id: conversationId,
+            message_id: 23,
+            server_id: 1,
+            server_name: "demo-server",
+            tool_name: "demo-tool",
+            parameters: "{\"query\":\"hello\"}",
+            status: "failed",
+            error: "boom",
+            created_time: "2024-01-01T00:00:00.000Z",
+        }));
+
+        const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
+            [callId, {
+                call_id: callId,
+                conversation_id: conversationId,
+                status: "failed",
+                server_name: "demo-server",
+                tool_name: "demo-tool",
+                parameters: "{\"query\":\"hello\"}",
+                error: "boom",
+            }],
+        ]);
+
+        render(
+            <McpToolCall
+                conversationId={conversationId}
+                messageId={23}
+                callId={callId}
+                serverName="demo-server"
+                toolName="demo-tool"
+                parameters='{"query":"hello"}'
+                mcpToolCallStates={mcpToolCallStates}
+                shiningMcpCallId={null}
+            />
+        );
+
+        await flushEffects();
+
+        expect(screen.getByText("失败")).toBeInTheDocument();
+        expect(screen.getByTitle("展开详情")).toBeInTheDocument();
+        expect(screen.queryByTitle("重新执行")).not.toBeInTheDocument();
+        expect(screen.queryByTitle("以错误继续对话")).not.toBeInTheDocument();
+        expect(screen.queryByText("重新执行")).not.toBeInTheDocument();
+        expect(screen.queryByText("以错误继续")).not.toBeInTheDocument();
+    });
+
+    it("keeps failed calls expanded with failed actions when tool error continuation is disabled", async () => {
+        const conversationId = 20;
+        const callId = 172;
+        mockInvokeHandler("get_mcp_tool_call", () => ({
+            id: callId,
+            conversation_id: conversationId,
+            message_id: 24,
+            server_id: 1,
+            server_name: "demo-server",
+            tool_name: "demo-tool",
+            parameters: "{\"query\":\"hello\"}",
+            status: "failed",
+            error: "boom",
+            created_time: "2024-01-01T00:00:00.000Z",
+        }));
+
+        const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
+            [callId, {
+                call_id: callId,
+                conversation_id: conversationId,
+                status: "failed",
+                server_name: "demo-server",
+                tool_name: "demo-tool",
+                parameters: "{\"query\":\"hello\"}",
+                error: "boom",
+            }],
+        ]);
+
+        render(
+            <ToolErrorContinueProvider value={false}>
+                <McpToolCall
+                    conversationId={conversationId}
+                    messageId={24}
+                    callId={callId}
+                    serverName="demo-server"
+                    toolName="demo-tool"
+                    parameters='{"query":"hello"}'
+                    mcpToolCallStates={mcpToolCallStates}
+                    shiningMcpCallId={null}
+                />
+            </ToolErrorContinueProvider>
+        );
+
+        await flushEffects();
+
+        expect(screen.getByText("失败")).toBeInTheDocument();
+        expect(screen.getByTitle("收起详情")).toBeInTheDocument();
+        expect(screen.getByText("重新执行")).toBeInTheDocument();
+        expect(screen.getByText("以错误继续")).toBeInTheDocument();
     });
 });

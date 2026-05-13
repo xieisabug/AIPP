@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect, useRef, useLayoutEffect } from "react";
+import React, { createContext, useState, useCallback, useMemo, useEffect, useRef, useLayoutEffect, useContext } from "react";
 import { Play, Loader2, CheckCircle, XCircle, Blocks, ChevronDown, ChevronUp, RotateCcw, Square, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -26,6 +26,12 @@ interface McpToolCallProps {
 }
 
 type ExecutionState = "idle" | "pending" | "executing" | "success" | "failed" | "streaming";
+
+const ToolErrorContinueContext = createContext(true);
+
+export const ToolErrorContinueProvider = ToolErrorContinueContext.Provider;
+
+const useToolErrorContinueEnabled = () => useContext(ToolErrorContinueContext);
 
 const JsonDisplay: React.FC<{ content: string; maxHeight?: string; className?: string }> = ({
     content,
@@ -107,6 +113,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     isLastCall = true, // 默认为 true，向后兼容
     isStreaming = false, // 默认非流式
 }) => {
+    const continueOnToolErrorEnabled = useToolErrorContinueEnabled();
     const [createdCallId, setCreatedCallId] = useState<number | null>(null);
     const matchedStateByLlmCallId = useMemo(() => {
         if (!mcpToolCallStates || !llmCallId || callId || createdCallId) {
@@ -200,7 +207,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         setExecutionError(globalState.error || "执行失败");
                     }
                     setExecutionResult(null);
-                    setIsExpanded(true); // 失败的调用默认展开，方便查看错误
+                    setIsExpanded(!continueOnToolErrorEnabled); // 开启失败继续时，失败调用会自动续写并收起
                     break;
                 case "unknown":
                 default:
@@ -212,12 +219,14 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 mapKeys: Array.from(mcpToolCallStates.keys()),
             });
         }
-    }, [mcpToolCallStates, effectiveCallId, conversationId, messageId, serverName, toolName, llmCallId]);
+    }, [mcpToolCallStates, effectiveCallId, conversationId, messageId, serverName, toolName, llmCallId, continueOnToolErrorEnabled]);
 
     // 检查执行状态
     const isFailed = executionState === "failed";
     const isExecuting = executionState === "executing";
     const canExecute = executionState === "idle" || executionState === "pending" || executionState === "failed"; // idle/pending/failed 状态都可以执行
+    const shouldHideFailedActions = isFailed && continueOnToolErrorEnabled;
+    const canShowExecutionActions = canExecute && !shouldHideFailedActions;
     const isRunning = effectiveCallId !== null && shiningMcpCallId === effectiveCallId; // 闪亮由全局 shine snapshot 决定
 
     // 如果提供了 callId，尝试获取已有的执行结果
@@ -240,7 +249,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         setExecutionError(result.error || "执行失败");
                         setExecutionResult(null);
                         setExecutionState("failed");
-                        setIsExpanded(true);
+                        setIsExpanded(!continueOnToolErrorEnabled);
                     } else if (result.status === "executing") {
                         setExecutionState("executing");
                         setExecutionResult(null);
@@ -259,7 +268,13 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
 
             fetchExistingResult();
         }
-    }, [effectiveCallId, executionState]);
+    }, [effectiveCallId, executionState, continueOnToolErrorEnabled]);
+
+    useEffect(() => {
+        if (executionState === "failed") {
+            setIsExpanded(!continueOnToolErrorEnabled);
+        }
+    }, [executionState, continueOnToolErrorEnabled]);
 
     // 成功后3秒自动收起
     useEffect(() => {
@@ -355,6 +370,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 setExecutionError(result.error || "执行失败");
                 setExecutionResult(null);
                 setExecutionState("failed");
+                setIsExpanded(!continueOnToolErrorEnabled);
             } else if (result.status === "pending") {
                 setExecutionState("pending");
                 setExecutionResult(null);
@@ -368,8 +384,9 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             const errorMessage = getErrorMessage(error) || "执行失败";
             setExecutionError(errorMessage);
             setExecutionState("failed");
+            setIsExpanded(!continueOnToolErrorEnabled);
         }
-    }, [conversationId, messageId, serverName, toolName, parameters, effectiveCallId, isLastCall]);
+    }, [conversationId, messageId, serverName, toolName, parameters, effectiveCallId, isLastCall, continueOnToolErrorEnabled]);
 
     const handleStop = useCallback(async () => {
         if (!effectiveCallId) {
@@ -459,7 +476,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             <Square className="h-3 w-3 fill-current" />
                         </Button>
                     )}
-                    {!isExpanded && canExecute && (
+                    {!isExpanded && canShowExecutionActions && (
                         <Button
                             onClick={handleExecute}
                             disabled={isExecuting}
@@ -477,7 +494,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             )}
                         </Button>
                     )}
-                    {!isExpanded && isFailed && (
+                    {!isExpanded && isFailed && !shouldHideFailedActions && (
                         <Button
                             onClick={handleContinueWithError}
                             size="sm"
@@ -514,7 +531,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         <span className="text-xs font-medium mb-1 text-muted-foreground">参数:</span>
                         <JsonDisplay content={displayParameters} maxHeight="120px" className="mt-1" />
                     </div>
-                    {canExecute && (
+                    {canShowExecutionActions && (
                         <div className="flex items-center gap-2">
                             {isExecuting ? (
                                 <>
@@ -543,7 +560,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                                         )}
                                         {isFailed ? "重新执行" : "执行"}
                                     </Button>
-                                    {isFailed && (
+                                    {isFailed && !shouldHideFailedActions && (
                                         <Button
                                             onClick={handleContinueWithError}
                                             size="sm"
