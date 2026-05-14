@@ -22,6 +22,7 @@ import {
     GroupMergeEvent,
     MCPToolCallUpdateEvent,
     AcpConversationSessionState,
+    AcpSessionConfigChoice,
     AcpSessionConfigOption,
 } from "../data/Conversation";
 import "katex/dist/katex.min.css";
@@ -55,10 +56,11 @@ import { ToolErrorContinueProvider } from "./McpToolCall";
 import IconButton from "./IconButton";
 import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import { Bot, LoaderCircle } from "lucide-react";
+import { Bot, Check, ChevronDown, LoaderCircle } from "lucide-react";
 import { toast } from "sonner";
+import { cn } from "@/utils/utils";
 
 // 导入 Chat Sidebar 相关
 import { ChatSidebar, type TodoItem } from "./chat-sidebar";
@@ -87,6 +89,104 @@ export interface InlineInteractionItem {
     callId?: number | null;
     messageId?: number | null;
     content: ReactNode;
+}
+
+interface AcpConfigSelectProps {
+    option: AcpSessionConfigOption;
+    disabled: boolean;
+    onChange: (option: AcpSessionConfigOption, value: string) => void;
+}
+
+function formatAcpConfigChoice(choice: AcpSessionConfigChoice) {
+    return choice.group_name ? `${choice.group_name} / ${choice.name}` : choice.name;
+}
+
+const ACP_CONFIG_VISIBLE_CHOICE_LIMIT = 80;
+
+function AcpConfigSelect({ option, disabled, onChange }: AcpConfigSelectProps) {
+    const [open, setOpen] = useState(false);
+    const [query, setQuery] = useState("");
+    const currentChoice = useMemo(
+        () => option.options.find((choice) => choice.value === option.current_value),
+        [option.current_value, option.options]
+    );
+    const currentLabel = currentChoice ? formatAcpConfigChoice(currentChoice) : option.current_value || "选择配置";
+    const normalizedQuery = query.trim().toLowerCase();
+    const matchingChoices = useMemo(() => {
+        if (!normalizedQuery) {
+            return option.options;
+        }
+        return option.options.filter((choice) => {
+            const label = formatAcpConfigChoice(choice).toLowerCase();
+            return label.includes(normalizedQuery) || choice.value.toLowerCase().includes(normalizedQuery);
+        });
+    }, [normalizedQuery, option.options]);
+    const visibleChoices = matchingChoices.slice(0, ACP_CONFIG_VISIBLE_CHOICE_LIMIT);
+
+    const handleOpenChange = (nextOpen: boolean) => {
+        setOpen(nextOpen);
+        if (!nextOpen) {
+            setQuery("");
+        }
+    };
+
+    const handleSelect = (value: string) => {
+        onChange(option, value);
+        setOpen(false);
+        setQuery("");
+    };
+
+    return (
+        <Popover open={open} onOpenChange={handleOpenChange}>
+            <PopoverTrigger asChild>
+                <button
+                    type="button"
+                    disabled={disabled}
+                    className="border-input focus-visible:border-ring focus-visible:ring-ring/50 flex h-9 w-full items-center justify-between gap-2 rounded-md border bg-transparent px-3 py-2 text-left text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                    <span className="min-w-0 truncate">{currentLabel}</span>
+                    <ChevronDown className="size-4 shrink-0 opacity-50" />
+                </button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] p-1">
+                <Input
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder="搜索配置"
+                    className="mb-1 h-8"
+                />
+                <div className="max-h-72 overflow-y-auto">
+                    {visibleChoices.length === 0 ? (
+                        <div className="px-2 py-6 text-center text-sm text-muted-foreground">无匹配项</div>
+                    ) : (
+                        visibleChoices.map((choice) => {
+                            const selected = choice.value === option.current_value;
+                            return (
+                                <button
+                                    key={`${option.id}:${choice.value}`}
+                                    type="button"
+                                    className={cn(
+                                        "focus:bg-accent focus:text-accent-foreground flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm outline-none",
+                                        selected && "bg-accent text-accent-foreground"
+                                    )}
+                                    onClick={() => handleSelect(choice.value)}
+                                    title={formatAcpConfigChoice(choice)}
+                                >
+                                    <span className="min-w-0 flex-1 truncate">{formatAcpConfigChoice(choice)}</span>
+                                    {selected ? <Check className="size-4 shrink-0" /> : null}
+                                </button>
+                            );
+                        })
+                    )}
+                </div>
+                {matchingChoices.length > visibleChoices.length ? (
+                    <div className="border-t px-2 py-1.5 text-xs text-muted-foreground">
+                        还有 {matchingChoices.length - visibleChoices.length} 项，输入关键词继续筛选
+                    </div>
+                ) : null}
+            </PopoverContent>
+        </Popover>
+    );
 }
 
 interface ConversationUIProps {
@@ -1217,24 +1317,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             {option.description}
                         </div>
                     ) : null}
-                    <Select
-                        value={option.current_value}
-                        onValueChange={(value) => void handleAcpConfigChange(option, value)}
+                    <AcpConfigSelect
+                        option={option}
                         disabled={Boolean(acpMutationKey)}
-                    >
-                        <SelectTrigger className="w-full">
-                            <SelectValue placeholder="选择配置" />
-                        </SelectTrigger>
-                        <SelectContent>
-                            {option.options.map((choice) => (
-                                <SelectItem key={`${option.id}:${choice.value}`} value={choice.value}>
-                                    {choice.group_name
-                                        ? `${choice.group_name} / ${choice.name}`
-                                        : choice.name}
-                                </SelectItem>
-                            ))}
-                        </SelectContent>
-                    </Select>
+                        onChange={(option, value) => void handleAcpConfigChange(option, value)}
+                    />
                 </div>
             );
             const statusLabel = (status: string) => {
