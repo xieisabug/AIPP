@@ -153,7 +153,7 @@ impl BrowserPool {
         Ok(browser)
     }
 
-    async fn recreate_browser(&self) -> Result<Arc<Mutex<Browser>>, String> {
+    pub(crate) async fn recreate_browser(&self) -> Result<Arc<Mutex<Browser>>, String> {
         info!("Recreating Chromium BrowserPool browser instance");
 
         self.idle_pages_lock().clear();
@@ -183,7 +183,7 @@ impl BrowserPool {
             .map_err(|e| format!("Page health check failed: {}", e))
     }
 
-    fn is_connection_closed_error(error: &str) -> bool {
+    pub(crate) fn is_connection_closed_error(error: &str) -> bool {
         let lower = error.to_lowercase();
         lower.contains("alreadyclosed")
             || lower.contains("ws(")
@@ -352,6 +352,14 @@ mod tests {
             headless: true,
             launch_args: Vec::new(),
         })
+    }
+
+    #[test]
+    fn connection_closed_detection_matches_chromiumoxide_ws_errors() {
+        assert!(BrowserPool::is_connection_closed_error("Ws(AlreadyClosed)"));
+        assert!(BrowserPool::is_connection_closed_error("websocket connection closed"));
+        assert!(BrowserPool::is_connection_closed_error("broken pipe"));
+        assert!(!BrowserPool::is_connection_closed_error("selector wait timeout"));
     }
 
     #[tokio::test]

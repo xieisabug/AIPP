@@ -93,6 +93,10 @@ impl ContentFetcher {
         lower.contains("timeout") || lower.contains("timed out") || error.contains("超时")
     }
 
+    fn should_retry_pooled_browser_error(error: &str, attempt: usize) -> bool {
+        attempt == 0 && BrowserPool::is_connection_closed_error(error)
+    }
+
     pub fn new(app_handle: AppHandle, config: FetchConfig) -> Self {
         let app_data_dir = app_handle
             .path()
@@ -1019,54 +1023,77 @@ impl ContentFetcher {
         url: &str,
         pool: &BrowserPool,
     ) -> Result<String, String> {
-        let pooled_page = pool.acquire_page().await?;
-        let page = pooled_page.page();
+        for attempt in 0..2 {
+            let pooled_page = pool.acquire_page().await?;
+            let page = pooled_page.page();
 
-        let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
+            let result = async {
+                let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
 
-        // 注入反检测脚本
-        self.inject_anti_detection_scripts(page).await?;
+                // 注入反检测脚本
+                self.inject_anti_detection_scripts(page).await?;
 
-        // 应用指纹配置和HTTP头
-        self.apply_fingerprint_overrides(page, &fingerprint).await?;
-        self.set_page_http_headers(page, &fingerprint).await?;
+                // 应用指纹配置和HTTP头
+                self.apply_fingerprint_overrides(page, &fingerprint).await?;
+                self.set_page_http_headers(page, &fingerprint).await?;
 
-        // 导航到 URL
-        self.goto_with_timeout(page, url, "fetch_content_pooled").await?;
+                // 导航到 URL
+                self.goto_with_timeout(page, url, "fetch_content_pooled").await?;
 
-        // 等待页面加载完成
-        self.wait_for_content(page).await?;
+                // 等待页面加载完成
+                self.wait_for_content(page).await?;
 
-        // 获取 HTML
-        let html =
-            page.content().await.map_err(|e| format!("Failed to get page content: {}", e))?;
+                // 获取 HTML
+                let html = page
+                    .content()
+                    .await
+                    .map_err(|e| format!("Failed to get page content: {}", e))?;
 
-        if html.trim().is_empty() {
-            let page_state = self.capture_page_state(page).await;
-            warn!(
-                stage = "fetch_content_pooled",
-                %url,
-                bytes = html.len(),
-                ?page_state,
-                "Empty HTML from Chromiumoxide (pooled)"
-            );
-            self.maybe_capture_debug_bundle(
-                "fetch_content_pooled_empty",
-                url,
-                "empty_html_from_chromiumoxide_pooled",
-                json!({
-                    "page_state": page_state,
-                    "wait_selectors": self.config.wait_selectors,
-                }),
-                BTreeMap::new(),
-            );
-            return Err("Empty HTML from Chromiumoxide (pooled)".to_string());
+                if html.trim().is_empty() {
+                    let page_state = self.capture_page_state(page).await;
+                    warn!(
+                        stage = "fetch_content_pooled",
+                        %url,
+                        bytes = html.len(),
+                        ?page_state,
+                        "Empty HTML from Chromiumoxide (pooled)"
+                    );
+                    self.maybe_capture_debug_bundle(
+                        "fetch_content_pooled_empty",
+                        url,
+                        "empty_html_from_chromiumoxide_pooled",
+                        json!({
+                            "page_state": page_state,
+                            "wait_selectors": self.config.wait_selectors,
+                        }),
+                        BTreeMap::new(),
+                    );
+                    return Err("Empty HTML from Chromiumoxide (pooled)".to_string());
+                }
+
+                Ok(html)
+            }
+            .await;
+
+            match result {
+                Ok(html) => {
+                    info!(bytes = html.len(), "Successfully fetched content (pooled)");
+                    return Ok(html);
+                }
+                Err(error) if Self::should_retry_pooled_browser_error(&error, attempt) => {
+                    drop(pooled_page.consume());
+                    warn!(
+                        error = %error,
+                        attempt = attempt + 1,
+                        "Pooled Chromium connection closed during fetch, recreating browser and retrying"
+                    );
+                    pool.recreate_browser().await?;
+                }
+                Err(error) => return Err(error),
+            }
         }
 
-        info!(bytes = html.len(), "Successfully fetched content (pooled)");
-
-        // pooled_page 离开作用域时自动归还到池中
-        Ok(html)
+        Err("Pooled Chromium fetch retry exhausted".to_string())
     }
 
     /// 使用系统浏览器headless模式抓取
@@ -2032,36 +2059,59 @@ impl ContentFetcher {
         search_engine: &SearchEngine,
         pool: &BrowserPool,
     ) -> Result<String, String> {
-        let pooled_page = pool.acquire_page().await?;
-        let page = pooled_page.page();
+        for attempt in 0..2 {
+            let pooled_page = pool.acquire_page().await?;
+            let page = pooled_page.page();
 
-        let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
+            let result = async {
+                let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
 
-        // 注入反检测脚本
-        self.inject_anti_detection_scripts(page).await?;
+                // 注入反检测脚本
+                self.inject_anti_detection_scripts(page).await?;
 
-        // 应用指纹配置和HTTP头
-        self.apply_fingerprint_overrides(page, &fingerprint).await?;
-        self.set_page_http_headers(page, &fingerprint).await?;
+                // 应用指纹配置和HTTP头
+                self.apply_fingerprint_overrides(page, &fingerprint).await?;
+                self.set_page_http_headers(page, &fingerprint).await?;
 
-        // 执行搜索流程（使用人性化的延时）
-        let html = self.perform_humanized_search(page, query, search_engine).await?;
+                // 执行搜索流程（使用人性化的延时）
+                let html = self.perform_humanized_search(page, query, search_engine).await?;
 
-        if html.trim().is_empty() {
-            warn!(
-                stage = "search_flow_pooled",
-                engine = search_engine.as_str(),
-                %query,
-                bytes = html.len(),
-                "Empty HTML from search flow (pooled)"
-            );
-            return Err("Empty HTML from search flow (pooled)".to_string());
+                if html.trim().is_empty() {
+                    warn!(
+                        stage = "search_flow_pooled",
+                        engine = search_engine.as_str(),
+                        %query,
+                        bytes = html.len(),
+                        "Empty HTML from search flow (pooled)"
+                    );
+                    return Err("Empty HTML from search flow (pooled)".to_string());
+                }
+
+                Ok(html)
+            }
+            .await;
+
+            match result {
+                Ok(html) => {
+                    info!(bytes = html.len(), "Successfully fetched search content (pooled)");
+                    return Ok(html);
+                }
+                Err(error) if Self::should_retry_pooled_browser_error(&error, attempt) => {
+                    drop(pooled_page.consume());
+                    warn!(
+                        error = %error,
+                        attempt = attempt + 1,
+                        engine = search_engine.as_str(),
+                        %query,
+                        "Pooled Chromium connection closed during search, recreating browser and retrying"
+                    );
+                    pool.recreate_browser().await?;
+                }
+                Err(error) => return Err(error),
+            }
         }
 
-        info!(bytes = html.len(), "Successfully fetched search content (pooled)");
-
-        // pooled_page 离开作用域时自动归还到池中
-        Ok(html)
+        Err("Pooled Chromium search retry exhausted".to_string())
     }
 
     /// 为搜索请求定制的获取方法
@@ -2249,47 +2299,74 @@ impl ContentFetcher {
         search_url: &str,
         pool: &BrowserPool,
     ) -> Result<String, String> {
-        let pooled_page = pool.acquire_page().await?;
-        let page = pooled_page.page();
+        for attempt in 0..2 {
+            let pooled_page = pool.acquire_page().await?;
+            let page = pooled_page.page();
 
-        let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
+            let result = async {
+                let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
 
-        // 注入反检测脚本
-        self.inject_anti_detection_scripts(page).await?;
+                // 注入反检测脚本
+                self.inject_anti_detection_scripts(page).await?;
 
-        // 应用指纹配置和HTTP头
-        self.apply_fingerprint_overrides(page, &fingerprint).await?;
-        self.set_page_http_headers(page, &fingerprint).await?;
+                // 应用指纹配置和HTTP头
+                self.apply_fingerprint_overrides(page, &fingerprint).await?;
+                self.set_page_http_headers(page, &fingerprint).await?;
 
-        // 直接导航到搜索结果页面
-        self.goto_with_timeout(page, search_url, "kagi_session_search_pooled").await?;
+                // 直接导航到搜索结果页面
+                self.goto_with_timeout(page, search_url, "kagi_session_search_pooled").await?;
 
-        // 等待 Kagi 搜索结果加载
-        let kagi_selectors = super::super::engines::kagi::KagiEngine::default_wait_selectors();
-        self.wait_for_results_with_selectors(page, &kagi_selectors).await?;
+                // 等待 Kagi 搜索结果加载
+                let kagi_selectors =
+                    super::super::engines::kagi::KagiEngine::default_wait_selectors();
+                self.wait_for_results_with_selectors(page, &kagi_selectors).await?;
 
-        // 提取 HTML
-        let html =
-            page.content().await.map_err(|e| format!("Failed to get page content: {}", e))?;
+                // 提取 HTML
+                let html = page
+                    .content()
+                    .await
+                    .map_err(|e| format!("Failed to get page content: {}", e))?;
 
-        if html.trim().is_empty() {
-            let page_state = self.capture_page_state(page).await;
-            warn!(
-                stage = "kagi_session_search_pooled",
-                %search_url,
-                bytes = html.len(),
-                ?page_state,
-                "Empty HTML from Kagi session URL search"
-            );
-            return Err("Empty HTML from Kagi session URL search".to_string());
+                if html.trim().is_empty() {
+                    let page_state = self.capture_page_state(page).await;
+                    warn!(
+                        stage = "kagi_session_search_pooled",
+                        %search_url,
+                        bytes = html.len(),
+                        ?page_state,
+                        "Empty HTML from Kagi session URL search"
+                    );
+                    return Err("Empty HTML from Kagi session URL search".to_string());
+                }
+
+                Ok(html)
+            }
+            .await;
+
+            match result {
+                Ok(html) => {
+                    info!(bytes = html.len(), "Successfully fetched Kagi search results (pooled)");
+
+                    // 保存调试HTML
+                    Self::save_debug_html(&html, "kagi_session_search_pooled");
+
+                    return Ok(html);
+                }
+                Err(error) if Self::should_retry_pooled_browser_error(&error, attempt) => {
+                    drop(pooled_page.consume());
+                    warn!(
+                        error = %error,
+                        attempt = attempt + 1,
+                        %search_url,
+                        "Pooled Chromium connection closed during Kagi session search, recreating browser and retrying"
+                    );
+                    pool.recreate_browser().await?;
+                }
+                Err(error) => return Err(error),
+            }
         }
 
-        info!(bytes = html.len(), "Successfully fetched Kagi search results (pooled)");
-
-        // 保存调试HTML
-        Self::save_debug_html(&html, "kagi_session_search_pooled");
-
-        Ok(html)
+        Err("Pooled Chromium Kagi session search retry exhausted".to_string())
     }
 }
 
