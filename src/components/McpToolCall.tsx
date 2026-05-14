@@ -156,7 +156,16 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const [isExpanded, setIsExpanded] = useState<boolean>(isStreaming || !callId);
     // 自动收起定时器引用
     const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
+    // 用户手动展开后，后续自动收起不能覆盖用户正在查看详情的意图。
+    const userExpandedRef = useRef(false);
     // 移除前端自动执行，避免与后端 detect_and_process_mcp_calls 的自动执行叠加
+
+    const setAutoExpanded = useCallback((nextExpanded: boolean) => {
+        if (!nextExpanded && userExpandedRef.current) {
+            return;
+        }
+        setIsExpanded(nextExpanded);
+    }, []);
 
     // 监听全局MCP状态变化
     useEffect(() => {
@@ -184,13 +193,13 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     setExecutionState("pending");
                     setExecutionResult(null);
                     setExecutionError(null);
-                    setIsExpanded(true); // 待执行的调用默认展开
+                    setAutoExpanded(true); // 待执行的调用默认展开
                     break;
                 case "executing":
                     setExecutionState("executing");
                     setExecutionResult(null);
                     setExecutionError(null);
-                    setIsExpanded(true); // 执行中的调用默认展开
+                    setAutoExpanded(true); // 执行中的调用默认展开
                     break;
                 case "success":
                     setExecutionState("success");
@@ -207,7 +216,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         setExecutionError(globalState.error || "执行失败");
                     }
                     setExecutionResult(null);
-                    setIsExpanded(!continueOnToolErrorEnabled); // 开启失败继续时，失败调用会自动续写并收起
+                    setAutoExpanded(!continueOnToolErrorEnabled); // 开启失败继续时，失败调用会自动续写并收起
                     break;
                 case "unknown":
                 default:
@@ -219,7 +228,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 mapKeys: Array.from(mcpToolCallStates.keys()),
             });
         }
-    }, [mcpToolCallStates, effectiveCallId, conversationId, messageId, serverName, toolName, llmCallId, continueOnToolErrorEnabled]);
+    }, [mcpToolCallStates, effectiveCallId, conversationId, messageId, serverName, toolName, llmCallId, continueOnToolErrorEnabled, setAutoExpanded]);
 
     // 检查执行状态
     const isFailed = executionState === "failed";
@@ -243,23 +252,23 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         setExecutionError(null);
                         setExecutionState("success");
                         if (result.result) {
-                            setIsExpanded(false); // 历史成功默认收起
+                            setAutoExpanded(false); // 历史成功默认收起
                         }
                     } else if (result.status === "failed") {
                         setExecutionError(result.error || "执行失败");
                         setExecutionResult(null);
                         setExecutionState("failed");
-                        setIsExpanded(!continueOnToolErrorEnabled);
+                        setAutoExpanded(!continueOnToolErrorEnabled);
                     } else if (result.status === "executing") {
                         setExecutionState("executing");
                         setExecutionResult(null);
                         setExecutionError(null);
-                        setIsExpanded(true);
+                        setAutoExpanded(true);
                     } else if (result.status === "pending") {
                         setExecutionState("pending");
                         setExecutionResult(null);
                         setExecutionError(null);
-                        setIsExpanded(true);
+                        setAutoExpanded(true);
                     }
                 } catch (error) {
                     console.warn("Failed to fetch existing tool call result:", error);
@@ -268,13 +277,13 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
 
             fetchExistingResult();
         }
-    }, [effectiveCallId, executionState, continueOnToolErrorEnabled]);
+    }, [effectiveCallId, executionState, continueOnToolErrorEnabled, setAutoExpanded]);
 
     useEffect(() => {
         if (executionState === "failed") {
-            setIsExpanded(!continueOnToolErrorEnabled);
+            setAutoExpanded(!continueOnToolErrorEnabled);
         }
-    }, [executionState, continueOnToolErrorEnabled]);
+    }, [executionState, continueOnToolErrorEnabled, setAutoExpanded]);
 
     // 成功后3秒自动收起
     useEffect(() => {
@@ -287,7 +296,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         // 只有当状态变为 success 时才启动定时器
         if (executionState === "success") {
             collapseTimerRef.current = setTimeout(() => {
-                setIsExpanded(false);
+                setAutoExpanded(false);
             }, 3000);
         }
 
@@ -296,7 +305,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 clearTimeout(collapseTimerRef.current);
             }
         };
-    }, [executionState]);
+    }, [executionState, setAutoExpanded]);
 
     // 注意：后端 `detect_and_process_mcp_calls` 已根据助手配置自动执行，这里不再做自动执行
 
@@ -326,7 +335,11 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             clearTimeout(collapseTimerRef.current);
             collapseTimerRef.current = null;
         }
-        setIsExpanded((prev) => !prev);
+        setIsExpanded((prev) => {
+            const nextExpanded = !prev;
+            userExpandedRef.current = nextExpanded;
+            return nextExpanded;
+        });
     }, []);
 
     const handleExecute = useCallback(async () => {
@@ -336,6 +349,8 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         }
 
         try {
+            userExpandedRef.current = false;
+            setIsExpanded(true);
             setExecutionState("executing");
             setExecutionResult(null);
             setExecutionError(null);
@@ -370,7 +385,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 setExecutionError(result.error || "执行失败");
                 setExecutionResult(null);
                 setExecutionState("failed");
-                setIsExpanded(!continueOnToolErrorEnabled);
+                setAutoExpanded(!continueOnToolErrorEnabled);
             } else if (result.status === "pending") {
                 setExecutionState("pending");
                 setExecutionResult(null);
@@ -384,9 +399,9 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             const errorMessage = getErrorMessage(error) || "执行失败";
             setExecutionError(errorMessage);
             setExecutionState("failed");
-            setIsExpanded(!continueOnToolErrorEnabled);
+            setAutoExpanded(!continueOnToolErrorEnabled);
         }
-    }, [conversationId, messageId, serverName, toolName, parameters, effectiveCallId, isLastCall, continueOnToolErrorEnabled]);
+    }, [conversationId, messageId, serverName, toolName, parameters, effectiveCallId, isLastCall, continueOnToolErrorEnabled, setAutoExpanded]);
 
     const handleStop = useCallback(async () => {
         if (!effectiveCallId) {
