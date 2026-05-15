@@ -153,11 +153,16 @@ use crate::db::scheduled_task_db::ScheduledTaskDatabase;
 use crate::db::system_db::SystemDatabase;
 use crate::feishu::FeishuButlerState;
 use crate::mcp::builtin_mcp::{
-    add_or_update_aipp_builtin_server, execute_aipp_builtin_tool,
-    handle_preview_file_relay_request, init_builtin_mcp_servers, list_aipp_builtin_templates,
-    list_preview_code_requests_for_conversation, prepare_preview_file_request_for_ui,
+    add_or_update_aipp_builtin_server, authorize_preview_code_external_resource_urls,
+    authorize_preview_external_resources, execute_aipp_builtin_tool,
+    get_preview_external_resource_policy, handle_preview_file_relay_request,
+    init_builtin_mcp_servers, list_aipp_builtin_templates,
+    list_preview_code_requests_for_conversation, prepare_preview_code_request_for_ui,
+    prepare_preview_file_request_for_ui, save_preview_external_resource_policy,
+    scan_preview_code_external_resources_for_ui,
     submit_ask_user_question_response, submit_preview_code_response, InteractionState,
-    OperationState, PreviewFileRelayState, TodoState, PREVIEW_FILE_RELAY_SCHEME,
+    OperationState, PreviewFileRelayState, PreviewResourceState, TodoState,
+    PREVIEW_FILE_RELAY_SCHEME,
 };
 use crate::mcp::execution_api::{
     continue_with_error, create_mcp_tool_call, execute_mcp_tool_call,
@@ -897,6 +902,7 @@ pub fn run() {
         .manage(TodoState::new())
         .manage(InteractionState::new())
         .manage(PreviewFileRelayState::new())
+        .manage(PreviewResourceState::new())
         .manage(FeishuButlerState::default());
     #[cfg(desktop)]
     let app = app.manage(CopilotLspState::default());
@@ -1115,7 +1121,13 @@ pub fn run() {
             list_aipp_builtin_templates,
             add_or_update_aipp_builtin_server,
             execute_aipp_builtin_tool,
+            prepare_preview_code_request_for_ui,
+            scan_preview_code_external_resources_for_ui,
             prepare_preview_file_request_for_ui,
+            authorize_preview_code_external_resource_urls,
+            authorize_preview_external_resources,
+            get_preview_external_resource_policy,
+            save_preview_external_resource_policy,
             list_preview_code_requests_for_conversation,
             submit_ask_user_question_response,
             submit_preview_code_response,

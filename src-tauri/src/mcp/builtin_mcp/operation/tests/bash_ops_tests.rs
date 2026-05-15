@@ -185,6 +185,19 @@ async fn test_execute_bash_stderr_capture() {
 
 // ============= 超时测试 =============
 
+/// 测试 execute_bash 默认超时为 60 秒
+#[test]
+fn test_execute_bash_default_timeout_is_60_seconds() {
+    assert_eq!(BashOperations::resolve_timeout_ms(None), 60_000);
+}
+
+/// 测试传入 timeout 时按参数值执行
+#[test]
+fn test_execute_bash_timeout_parameter_overrides_default() {
+    assert_eq!(BashOperations::resolve_timeout_ms(Some(500)), 500);
+    assert_eq!(BashOperations::resolve_timeout_ms(Some(900_000)), 900_000);
+}
+
 /// 测试命令超时
 ///
 /// 使用 sleep 命令测试超时机制

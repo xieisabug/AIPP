@@ -7,18 +7,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 
-interface CustomHeader {
-    key: string;
-    value: string;
-}
-
 interface NetworkConfigFormProps {
     form: UseFormReturn<any>;
     onSave: () => Promise<void>;
 }
 
 export const NetworkConfigForm: React.FC<NetworkConfigFormProps> = ({ form, onSave }) => {
-    const { featureConfig, saveFeatureConfig } = useFeatureConfig();
+    const { featureConfig } = useFeatureConfig();
 
     // 使用 useFieldArray 管理 custom_headers 数组字段
     const { fields, append, remove } = useFieldArray({
@@ -45,23 +40,11 @@ export const NetworkConfigForm: React.FC<NetworkConfigFormProps> = ({ form, onSa
     const handleSaveNetwork = useCallback(async () => {
         try {
             await onSave();
-
-            // 保存自定义 headers
-            const customHeaders = form.getValues("custom_headers") || [];
-            const headersMap: Record<string, string> = {};
-            customHeaders.forEach(({ key, value }: CustomHeader) => {
-                if (key.trim()) {
-                    headersMap[key.trim()] = value;
-                }
-            });
-
-            await saveFeatureConfig("network_config", { custom_headers: JSON.stringify(headersMap) });
-
             toast.success("网络配置保存成功");
         } catch (e) {
             toast.error("保存网络配置失败: " + e);
         }
-    }, [onSave, form, saveFeatureConfig]);
+    }, [onSave]);
 
     // 使用 useCallback 包装渲染函数，确保函数引用稳定
     const renderCustomHeaders = useCallback(() => {

@@ -8,6 +8,12 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import UnifiedMarkdown from "@/components/UnifiedMarkdown";
 import { FileText, ImageIcon, Shield, ShieldCheck } from "lucide-react";
+import PreviewExternalResourcesDialog from "@/components/PreviewExternalResourcesDialog";
+import {
+    hasActionablePreviewResources,
+    PreviewExternalResourcesPayload,
+    PreviewResourceAuthorizationResult,
+} from "@/utils/previewExternalResources";
 
 export interface AskUserQuestionOption {
     label: string;
@@ -51,6 +57,7 @@ export interface PreviewFileRequest {
     files: PreviewFileItem[];
     viewMode?: "tabs" | "list" | "grid";
     metadata?: PreviewFileMetadata;
+    externalResources?: PreviewExternalResourcesPayload;
 }
 
 interface AskUserQuestionCardProps {
@@ -523,18 +530,23 @@ export function PreviewFileCard({
     onOpenChange,
 }: PreviewFileCardProps) {
     const [activeTab, setActiveTab] = useState("0");
+    const [currentRequest, setCurrentRequest] = useState<PreviewFileRequest | null>(request);
+    const [isResourceDialogOpen, setIsResourceDialogOpen] = useState(false);
 
     useEffect(() => {
         if (request?.files.length) {
             setActiveTab("0");
         }
+        setCurrentRequest(request);
     }, [request]);
 
-    if (!request || !isOpen) return null;
+    if (!currentRequest || !isOpen) return null;
 
-    const viewMode = request.viewMode ?? "tabs";
-    const files = request.files;
+    const viewMode = currentRequest.viewMode ?? "tabs";
+    const files = currentRequest.files;
     const useTabs = viewMode === "tabs" && files.length > 1;
+    const showExternalResourceButton =
+        hasActionablePreviewResources(currentRequest.externalResources);
 
     const renderFileContent = (file: PreviewFileItem, index: number) => (
         <div
@@ -559,16 +571,30 @@ export function PreviewFileCard({
             className="w-full flex justify-center"
             data-message-item
             data-message-type="ui_interaction_preview_file"
-            data-request-id={request.request_id}
+            data-request-id={currentRequest.request_id}
         >
             <Card className="w-full max-w-5xl py-4 gap-3">
                 <CardHeader className="px-4 pb-0 gap-2">
-                    <CardTitle className="flex items-center gap-2 text-base">
-                        <FileText className="h-5 w-5" />
-                        文件预览
-                    </CardTitle>
-                    <div className="text-sm text-muted-foreground">
-                        由 PreviewFile 工具生成的只读文件展示组件。
+                    <div className="flex items-start justify-between gap-3">
+                        <div className="space-y-2">
+                            <CardTitle className="flex items-center gap-2 text-base">
+                                <FileText className="h-5 w-5" />
+                                文件预览
+                            </CardTitle>
+                            <div className="text-sm text-muted-foreground">
+                                由 PreviewFile 工具生成的只读文件展示组件。
+                            </div>
+                        </div>
+                        {showExternalResourceButton && (
+                            <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setIsResourceDialogOpen(true)}
+                            >
+                                需要加载外部资源
+                            </Button>
+                        )}
                     </div>
                 </CardHeader>
                 <CardContent className="px-4 space-y-3">
@@ -607,10 +633,10 @@ export function PreviewFileCard({
                             )}
                         </div>
                     )}
-                    {request.metadata?.origin && (
+                    {currentRequest.metadata?.origin && (
                         <div className="text-xs text-muted-foreground flex items-center gap-1">
                             <ShieldCheck className="h-3 w-3" />
-                            来源: {request.metadata.origin}
+                            来源: {currentRequest.metadata.origin}
                         </div>
                     )}
                     <div className="flex justify-end">
@@ -620,6 +646,16 @@ export function PreviewFileCard({
                     </div>
                 </CardContent>
             </Card>
+            <PreviewExternalResourcesDialog<unknown, PreviewFileRequest>
+                externalResources={currentRequest.externalResources}
+                open={isResourceDialogOpen}
+                onOpenChange={setIsResourceDialogOpen}
+                onAuthorized={(result: PreviewResourceAuthorizationResult<unknown, PreviewFileRequest>) => {
+                    if (result.previewFile) {
+                        setCurrentRequest(result.previewFile);
+                    }
+                }}
+            />
         </div>
     );
 }

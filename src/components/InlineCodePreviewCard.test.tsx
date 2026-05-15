@@ -53,6 +53,91 @@ describe("InlineCodePreviewCard", () => {
         );
     });
 
+    it("does not render raw external image URLs before authorization", async () => {
+        mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
+
+        render(
+            <InlineCodePreviewCard
+                parameters={JSON.stringify({
+                    title: "external_image",
+                    renderer: "html",
+                    code: '<img alt="remote" src=https://example.com/raw.png><style>.hero{background:url(https://example.com/bg.png)}</style>',
+                    interaction_mode: "submit_once",
+                })}
+                conversationId={1}
+                messageId={101}
+                mcpToolCallStates={new Map()}
+                isStreaming={false}
+            />
+        );
+
+        expect(await screen.findByRole("button", { name: "需要加载外部资源" })).toBeInTheDocument();
+        const host = await screen.findByTestId("preview-code-host");
+        await waitFor(() => {
+            const img = host.shadowRoot?.querySelector<HTMLImageElement>('img[alt="remote"]');
+            expect(img).not.toBeNull();
+            expect(img?.getAttribute("src")).not.toBe("https://example.com/raw.png");
+            expect(host.shadowRoot?.innerHTML).not.toContain("https://example.com/bg.png");
+        });
+    });
+
+    it("uses proxy when authorizing client-detected preview_code resources with proxy button", async () => {
+        mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
+        mockInvokeHandler("authorize_preview_code_external_resource_urls", () => ({
+            previewCode: {
+                request_id: "authorized-request",
+                conversation_id: 1,
+                title: "external_image",
+                renderer: "html",
+                code: '<img alt="remote" src="aipp-preview://localhost/image-ok">',
+                loadingMessages: [],
+                interactionMode: "submit_once",
+                externalResources: {
+                    requestId: "authorized-request",
+                    resources: [],
+                },
+            },
+        }));
+
+        render(
+            <InlineCodePreviewCard
+                parameters={JSON.stringify({
+                    title: "external_image",
+                    renderer: "html",
+                    code: '<img alt="remote" src=https://example.com/raw.png>',
+                    interaction_mode: "submit_once",
+                })}
+                conversationId={1}
+                messageId={102}
+                mcpToolCallStates={new Map()}
+                isStreaming={false}
+            />
+        );
+
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole("button", { name: "需要加载外部资源" }));
+        await user.click(await screen.findByRole("button", { name: "使用代理加载所选资源" }));
+
+        await waitFor(() => {
+            expect(invoke).toHaveBeenCalledWith(
+                "authorize_preview_code_external_resource_urls",
+                expect.objectContaining({
+                    conversationId: 1,
+                    conversation_id: 1,
+                    useProxy: true,
+                    use_proxy: true,
+                    resources: [
+                        expect.objectContaining({
+                            originalUrl: "https://example.com/raw.png",
+                            normalizedUrl: "https://example.com/raw.png",
+                            type: "image",
+                        }),
+                    ],
+                })
+            );
+        });
+    });
+
     it("keeps generated styles inside a shadow root", async () => {
         mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
 

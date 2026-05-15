@@ -10,6 +10,7 @@ use tracing::{debug, error, instrument};
 pub mod agent;
 pub mod interaction;
 pub mod operation;
+pub mod preview_resources;
 pub mod search;
 pub mod superadmin;
 pub mod templates;
@@ -22,6 +23,12 @@ pub use interaction::{
     PREVIEW_FILE_RELAY_SCHEME,
 };
 pub use operation::{OperationHandler, OperationState};
+pub use preview_resources::{
+    authorize_preview_code_external_resource_urls, authorize_preview_external_resources,
+    get_preview_external_resource_policy, prepare_preview_code_request_for_ui,
+    save_preview_external_resource_policy, scan_preview_code_external_resources_for_ui,
+    PreviewResourceState,
+};
 pub use search::SearchHandler;
 pub use templates::{
     add_or_update_aipp_builtin_server, get_builtin_tools_for_command, init_builtin_mcp_servers,
@@ -1551,7 +1558,7 @@ pub async fn execute_aipp_builtin_tool(
                 let request: PreviewFileRequest = serde_json::from_value(args.clone())
                     .map_err(|e| format!("Invalid PreviewFile parameters: {}", e))?;
 
-                match emit_preview_file_request(&app_handle, conversation_id, request) {
+                match emit_preview_file_request(&app_handle, conversation_id, request).await {
                     Ok(request_id) => serde_json::json!({
                         "content": [{"type": "json", "json": {"status": "preview_shown", "request_id": request_id}}],
                         "isError": false

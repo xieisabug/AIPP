@@ -2743,9 +2743,10 @@ async fn execute_builtin_tool(
     let command = server.command.clone().unwrap_or_default();
     // 获取超时配置，使用服务器配置的超时或默认值
     let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
-    // UI 交互工具需要等待用户操作，不应受超时限制。
-    let wait_indefinitely = command == "aipp:ui_interaction"
-        && matches!(tool_name, "ask_user_question" | "preview_code");
+    // 部分内置工具有自己的等待/超时语义，不应被 MCP server 的外层超时抢先截断。
+    let skip_outer_timeout = (command == "aipp:ui_interaction"
+        && matches!(tool_name, "ask_user_question" | "preview_code"))
+        || (command == "aipp:operation" && tool_name == "execute_bash");
     let start = std::time::Instant::now();
 
     // 验证是否为内置工具调用
@@ -2758,7 +2759,7 @@ async fn execute_builtin_tool(
         command = %command,
         tool_name = %tool_name,
         timeout_ms,
-        wait_indefinitely,
+        skip_outer_timeout,
         "Executing builtin MCP tool"
     );
 
@@ -2774,8 +2775,8 @@ async fn execute_builtin_tool(
         .await
     };
 
-    // 使用 select! 同时监听取消信号；ask_user_question 不做超时限制。
-    let raw: String = if wait_indefinitely {
+    // 使用 select! 同时监听取消信号；需要自管等待/超时的工具不套外层超时。
+    let raw: String = if skip_outer_timeout {
         tokio::select! {
             _ = cancel_token.cancelled() => {
                 return Err(anyhow!("Cancelled by user"));

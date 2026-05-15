@@ -73,13 +73,6 @@ const PREVIEW_CODE_RUNTIME_STYLES = `
     }
 }
 `;
-const ALLOWED_EXTERNAL_SCRIPT_ORIGINS = new Set([
-    "https://cdn.jsdelivr.net",
-    "https://unpkg.com",
-    "https://cdnjs.cloudflare.com",
-    "https://esm.sh",
-]);
-
 type ScheduledApplyHandle =
     | { kind: "raf"; id: number }
     | { kind: "timeout"; id: number };
@@ -210,8 +203,8 @@ function patchMountPoint(mountPoint: HTMLDivElement, nextMountPoint: HTMLDivElem
 
 function normalizeExternalScriptUrl(src: string): string {
     const url = new URL(src, window.location.href);
-    if (!ALLOWED_EXTERNAL_SCRIPT_ORIGINS.has(url.origin)) {
-        throw new Error(`preview_code 不允许加载外部脚本: ${url.origin}`);
+    if (url.protocol !== "aipp-preview:") {
+        throw new Error(`preview_code 不允许直接加载外部脚本: ${url.origin}`);
     }
     return url.toString();
 }

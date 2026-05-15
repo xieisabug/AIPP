@@ -171,6 +171,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             request_timeout: "180",
             retry_attempts: "3",
             network_proxy: "",
+            custom_headers: [{ key: "", value: "" }],
         },
     });
 
@@ -299,6 +300,22 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                     request_timeout: networkConfig.get("request_timeout") || "180",
                     retry_attempts: networkConfig.get("retry_attempts") || "3",
                     network_proxy: networkConfig.get("network_proxy") || "",
+                    custom_headers: (() => {
+                        const headersConfig = networkConfig.get("custom_headers");
+                        if (!headersConfig) {
+                            return [{ key: "", value: "" }];
+                        }
+                        try {
+                            const parsed = JSON.parse(headersConfig) as Record<string, string>;
+                            const headers = Object.entries(parsed).map(([key, value]) => ({
+                                key,
+                                value,
+                            }));
+                            return headers.length > 0 ? headers : [{ key: "", value: "" }];
+                        } catch {
+                            return [{ key: "", value: "" }];
+                        }
+                    })(),
                 });
             }
 
@@ -422,10 +439,19 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
 
     const handleSaveNetworkConfig = useCallback(async () => {
         const values = networkForm.getValues();
+        const customHeaders = values.custom_headers || [];
+        const headersMap: Record<string, string> = {};
+        customHeaders.forEach(({ key, value }: { key?: string; value?: string }) => {
+            const headerKey = key?.trim();
+            if (headerKey) {
+                headersMap[headerKey] = value || "";
+            }
+        });
         await saveFeatureConfig("network_config", {
-            request_timeout: values.request_timeout,
-            retry_attempts: values.retry_attempts,
-            network_proxy: values.network_proxy,
+            request_timeout: String(values.request_timeout ?? "180"),
+            retry_attempts: String(values.retry_attempts ?? "3"),
+            network_proxy: String(values.network_proxy ?? ""),
+            custom_headers: JSON.stringify(headersMap),
         });
     }, [networkForm, saveFeatureConfig]);
 

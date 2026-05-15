@@ -17,11 +17,13 @@ pub struct BashOperations;
 
 impl BashOperations {
     /// 默认超时时间（毫秒）
-    const DEFAULT_TIMEOUT_MS: u64 = 120000;
-    /// 最大超时时间（毫秒）
-    const MAX_TIMEOUT_MS: u64 = 600000;
+    const DEFAULT_TIMEOUT_MS: u64 = 60000;
     /// 最大输出长度（字符）
     const MAX_OUTPUT_LENGTH: usize = 30000;
+
+    pub(crate) fn resolve_timeout_ms(timeout: Option<u64>) -> u64 {
+        timeout.unwrap_or(Self::DEFAULT_TIMEOUT_MS)
+    }
 
     fn get_configured_default_shell(app_handle: Option<&AppHandle>) -> Option<String> {
         let app_handle = app_handle?;
@@ -65,8 +67,7 @@ impl BashOperations {
     ) -> Result<ExecuteBashResponse, String> {
         let command = &request.command;
         let run_in_background = request.run_in_background.unwrap_or(false);
-        let timeout_ms =
-            request.timeout.unwrap_or(Self::DEFAULT_TIMEOUT_MS).min(Self::MAX_TIMEOUT_MS);
+        let timeout_ms = Self::resolve_timeout_ms(request.timeout);
         let shell_command = Self::get_shell_command(app_handle, command)?;
 
         info!(

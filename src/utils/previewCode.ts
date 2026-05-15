@@ -1,3 +1,5 @@
+import type { PreviewExternalResourcesPayload } from "@/utils/previewExternalResources";
+
 export type PreviewCodeInteractionMode = "none" | "submit_once";
 
 export const PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX = 320;
@@ -14,6 +16,7 @@ export interface PreviewCodeRequest {
     loadingMessages: string[];
     interactionMode: PreviewCodeInteractionMode;
     metadata?: PreviewCodeMetadata;
+    externalResources?: PreviewExternalResourcesPayload;
 }
 
 export interface PreviewCodeRequestEvent extends PreviewCodeRequest {
@@ -128,6 +131,10 @@ function normalizePreviewCodeRecord(record: Record<string, unknown>): PreviewCod
         metadata:
             metadataRecord && typeof metadataRecord.origin === "string"
                 ? { origin: metadataRecord.origin }
+                : undefined,
+        externalResources:
+            record.externalResources && typeof record.externalResources === "object"
+                ? (record.externalResources as PreviewExternalResourcesPayload)
                 : undefined,
     };
 }
