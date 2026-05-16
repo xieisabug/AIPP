@@ -171,6 +171,9 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             request_timeout: "180",
             retry_attempts: "3",
             network_proxy: "",
+            openai_prompt_cache_key_enabled: "true",
+            openai_prompt_cache_retention: "24h",
+            openai_responses_stateful_enabled: "false",
             custom_headers: [{ key: "", value: "" }],
         },
     });
@@ -300,6 +303,12 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                     request_timeout: networkConfig.get("request_timeout") || "180",
                     retry_attempts: networkConfig.get("retry_attempts") || "3",
                     network_proxy: networkConfig.get("network_proxy") || "",
+                    openai_prompt_cache_key_enabled:
+                        networkConfig.get("openai_prompt_cache_key_enabled") || "true",
+                    openai_prompt_cache_retention:
+                        networkConfig.get("openai_prompt_cache_retention") || "24h",
+                    openai_responses_stateful_enabled:
+                        networkConfig.get("openai_responses_stateful_enabled") || "false",
                     custom_headers: (() => {
                         const headersConfig = networkConfig.get("custom_headers");
                         if (!headersConfig) {
@@ -451,6 +460,15 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             request_timeout: String(values.request_timeout ?? "180"),
             retry_attempts: String(values.retry_attempts ?? "3"),
             network_proxy: String(values.network_proxy ?? ""),
+            openai_prompt_cache_key_enabled: String(
+                values.openai_prompt_cache_key_enabled ?? "true"
+            ),
+            openai_prompt_cache_retention: String(
+                values.openai_prompt_cache_retention ?? "24h"
+            ),
+            openai_responses_stateful_enabled: String(
+                values.openai_responses_stateful_enabled ?? "false"
+            ),
             custom_headers: JSON.stringify(headersMap),
         });
     }, [networkForm, saveFeatureConfig]);

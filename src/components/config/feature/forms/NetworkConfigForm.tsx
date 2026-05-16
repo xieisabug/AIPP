@@ -127,6 +127,32 @@ export const NetworkConfigForm: React.FC<NetworkConfigFormProps> = ({ form, onSa
             },
         },
         {
+            key: "openai_prompt_cache_key_enabled",
+            config: {
+                type: "switch" as const,
+                label: "OpenAI Responses Prompt Cache Key",
+                description: "仅对 OpenAI / OpenAI API 且 request mode 为 Responses 的模型生效，默认开启",
+            },
+        },
+        {
+            key: "openai_prompt_cache_retention",
+            config: {
+                type: "select" as const,
+                label: "OpenAI Prompt Cache Retention",
+                description: "当前支持 24h；关闭上方开关后不会发送 cache 参数",
+                options: [{ value: "24h", label: "24h" }],
+            },
+        },
+        {
+            key: "openai_responses_stateful_enabled",
+            config: {
+                type: "switch" as const,
+                label: "OpenAI Responses Stateful Session",
+                description:
+                    "仅在关闭 Prompt Cache Key 时使用 previous_response_id/store 增量续接；缓存开启时优先发送完整历史以稳定命中缓存",
+            },
+        },
+        {
             key: "custom_headers",
             config: {
                 type: "custom" as const,

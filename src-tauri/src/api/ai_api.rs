@@ -9,13 +9,15 @@ use crate::api::ai::chat::{
     handle_stream_chat as ai_handle_stream_chat,
 };
 use crate::api::ai::config::{
-    get_network_proxy_from_config, get_request_timeout_from_config, ChatConfig, ConfigBuilder,
+    get_network_proxy_from_config, get_openai_prompt_cache_key_enabled,
+    get_openai_responses_stateful_enabled, get_request_timeout_from_config,
+    should_use_openai_responses_features, ChatConfig, ConfigBuilder, OpenAiCacheContext,
 };
 use crate::api::ai::context_manager::{self, budget::ContextBudget, CompactionContext};
 use crate::api::ai::conversation::{
     build_chat_request_from_messages, build_message_list_with_metadata_from_db,
-    filter_messages_for_parent_group, init_conversation, BranchSelection, ChatRequestBuildResult,
-    ToolCallStrategy, ToolConfig,
+    filter_messages_for_parent_group, init_conversation, select_responses_stateful_request,
+    BranchSelection, ChatRequestBuildResult, ToolCallStrategy, ToolConfig,
 };
 use crate::api::ai::events::{
     ActivityFocus, ConversationEvent, ConversationRuntimeState, ConversationShineState,
@@ -236,6 +238,130 @@ fn has_active_mcp_calls(app_handle: &tauri::AppHandle, conversation_id: i64) -> 
                 .any(|call| call.status == "pending" || call.status == "executing")
         })
         .unwrap_or(false)
+}
+
+fn collect_openai_responses_instructions(
+    messages: &[(String, String, Vec<MessageAttachment>)],
+) -> Option<String> {
+    let instructions = messages
+        .iter()
+        .filter(|(message_type, content, _)| {
+            message_type == "system" && !content.trim().is_empty()
+        })
+        .map(|(_, content, _)| content.trim())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if instructions.is_empty() {
+        None
+    } else {
+        Some(instructions)
+    }
+}
+
+fn prepare_openai_responses_request_messages(
+    provider_api_type: &str,
+    request_mode: &str,
+    messages: Vec<(String, String, Vec<MessageAttachment>)>,
+    instructions: Option<String>,
+) -> (Vec<(String, String, Vec<MessageAttachment>)>, Option<String>) {
+    if !should_use_openai_responses_features(provider_api_type, request_mode) {
+        return (messages, instructions);
+    }
+
+    let instructions =
+        instructions.or_else(|| collect_openai_responses_instructions(&messages));
+    if instructions.is_none() {
+        return (messages, None);
+    }
+
+    let messages = messages
+        .into_iter()
+        .filter(|(message_type, _, _)| message_type != "system")
+        .collect();
+
+    (messages, instructions)
+}
+
+fn maybe_select_openai_responses_stateful_messages(
+    config_feature_map: &HashMap<String, HashMap<String, crate::db::system_db::FeatureConfig>>,
+    provider_api_type: &str,
+    request_mode: &str,
+    conversation_id: i64,
+    init_message_list: &[(String, String, Vec<MessageAttachment>)],
+    init_message_ids: &[i64],
+    all_messages: &[(Message, Option<MessageAttachment>)],
+    is_regeneration: bool,
+    has_unfinished_tool_call: bool,
+    has_native_tools: bool,
+) -> (Vec<(String, String, Vec<MessageAttachment>)>, Option<String>, bool, Option<String>) {
+    if !should_use_openai_responses_features(provider_api_type, request_mode)
+        || !get_openai_responses_stateful_enabled(config_feature_map)
+    {
+        return (init_message_list.to_vec(), None, false, None);
+    }
+
+    if get_openai_prompt_cache_key_enabled(config_feature_map) {
+        debug!(
+            conversation_id,
+            "OpenAI Responses stateful continuation disabled because prompt cache key is enabled; using full history for prompt cache"
+        );
+        return (init_message_list.to_vec(), None, false, None);
+    }
+
+    if has_native_tools {
+        debug!(
+            conversation_id,
+            "OpenAI Responses stateful continuation disabled for native tool request; using full history"
+        );
+        return (init_message_list.to_vec(), None, true, None);
+    }
+
+    match select_responses_stateful_request(
+        init_message_list,
+        init_message_ids,
+        all_messages,
+        has_unfinished_tool_call,
+        is_regeneration,
+    ) {
+        Ok(Some(selection)) => {
+            debug!(
+                conversation_id,
+                skipped_prefix_len = selection.skipped_prefix_len,
+                incremental_messages = selection.messages.len(),
+                previous_response_id = %selection.previous_response_id,
+                "using OpenAI Responses stateful continuation"
+            );
+            let instructions = collect_openai_responses_instructions(init_message_list);
+            (selection.messages, Some(selection.previous_response_id), true, instructions)
+        }
+        Ok(None) => (init_message_list.to_vec(), None, true, None),
+        Err(reason) => {
+            warn!(
+                conversation_id,
+                reason,
+                "OpenAI Responses stateful continuation disabled for this request; using full history"
+            );
+            (init_message_list.to_vec(), None, true, None)
+        }
+    }
+}
+
+fn apply_openai_responses_stateful_request_options(
+    mut chat_request: genai::chat::ChatRequest,
+    previous_response_id: Option<String>,
+    store_response: bool,
+    instructions: Option<String>,
+) -> genai::chat::ChatRequest {
+    if let Some(previous_response_id) = previous_response_id {
+        chat_request = chat_request.with_previous_response_id(previous_response_id);
+    }
+    if let Some(instructions) = instructions {
+        chat_request = chat_request.with_system(instructions);
+    }
+    if store_response {
+        chat_request = chat_request.with_store(true);
+    }
+    chat_request
 }
 
 fn messages_to_hook_value(
@@ -1291,6 +1417,7 @@ pub async fn ask_ai(
     // 重新克隆 window，因为前面的 ACP 分支可能已经消费了
     let window_clone = window.clone(); // 在移动之前克隆
     let model_id = model_detail.model.id; // 提前获取模型ID
+    let provider_id = model_detail.provider.id;
     let model_code = model_detail.model.code.clone(); // 提前获取模型代码
     let model_request_mode = model_detail.model.request_mode.clone(); // 提前获取模型请求模式
     let model_configs = model_detail.configs.clone(); // 提前获取模型配置
@@ -1359,7 +1486,19 @@ pub async fn ask_ai(
 
         let model_name = config_map.get("model").cloned().unwrap_or_else(|| model_code.clone());
 
-        let chat_options = ConfigBuilder::build_chat_options(&config_map);
+        let openai_cache_context = OpenAiCacheContext {
+            provider_id,
+            provider_api_type: provider_api_type.clone(),
+            model_code: model_code.clone(),
+            request_mode: model_request_mode.clone(),
+            assistant_id: processed_request.assistant_id,
+            conversation_id,
+        };
+        let chat_options = ConfigBuilder::build_chat_options(
+            &config_map,
+            Some(&_config_feature_map),
+            Some(&openai_cache_context),
+        );
         let force_non_native_for_invalid_tool_args =
             has_missing_required_parameter_tool_error_in_message_list(&init_message_list);
         if force_non_native_for_invalid_tool_args {
@@ -1447,6 +1586,27 @@ pub async fn ask_ai(
             Some(conversation_id),
         );
 
+        let all_messages_for_stateful = match conversation_db.message_repo() {
+            Ok(repo) => repo.list_by_conversation_id(conversation_id).unwrap_or_else(|error| {
+                warn!(
+                    conversation_id,
+                    error = %error,
+                    "failed to read messages for OpenAI Responses stateful selector"
+                );
+                Vec::new()
+            }),
+            Err(error) => {
+                warn!(
+                    conversation_id,
+                    error = %error,
+                    "failed to open message repo for OpenAI Responses stateful selector"
+                );
+                Vec::new()
+            }
+        };
+        let has_unfinished_tool_call = has_active_mcp_calls(&app_handle_clone, conversation_id);
+        let init_message_ids_for_stateful = init_message_ids.clone();
+
         // Context budget management with LLM compaction
         let budget = ContextBudget::from_config(&_config_feature_map);
         let is_butler = is_butler_system_assistant_name(&assistant_detail.assistant.name);
@@ -1497,8 +1657,34 @@ pub async fn ask_ai(
             );
         }
 
+        let (request_message_list, previous_response_id, store_response, instructions) =
+            maybe_select_openai_responses_stateful_messages(
+                &_config_feature_map,
+                &provider_api_type,
+                &model_request_mode,
+                conversation_id,
+                &init_message_list,
+                &init_message_ids_for_stateful,
+                &all_messages_for_stateful,
+                false,
+                has_unfinished_tool_call,
+                has_available_tools,
+            );
+        let (request_message_list, instructions) = prepare_openai_responses_request_messages(
+            &provider_api_type,
+            &model_request_mode,
+            request_message_list,
+            instructions,
+        );
+
         let ChatRequestBuildResult { chat_request, tool_name_mapping } =
-            build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
+            build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
+        let chat_request = apply_openai_responses_stateful_request_options(
+            chat_request,
+            previous_response_id,
+            store_response,
+            instructions,
+        );
 
         if chat_config.stream {
             // 使用 genai 流式处理
@@ -1771,6 +1957,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
 
     let window_clone = window.clone();
     let model_id = model_detail.model.id;
+    let provider_id = model_detail.provider.id;
     let model_code = model_detail.model.code.clone();
     let model_request_mode = model_detail.model.request_mode.clone();
     let model_configs = model_detail.configs.clone();
@@ -1819,7 +2006,19 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
 
     let model_name = config_map.get("model").cloned().unwrap_or_else(|| model_code.clone());
 
-    let chat_options = ConfigBuilder::build_chat_options(&config_map);
+    let openai_cache_context = OpenAiCacheContext {
+        provider_id,
+        provider_api_type: provider_api_type.clone(),
+        model_code: model_code.clone(),
+        request_mode: model_request_mode.clone(),
+        assistant_id,
+        conversation_id: conversation_id_i64,
+    };
+    let chat_options = ConfigBuilder::build_chat_options(
+        &config_map,
+        Some(&config_feature_map),
+        Some(&openai_cache_context),
+    );
 
     // 先计算强制降级条件
     let force_non_native_for_gemini_toolresult =
@@ -1913,6 +2112,8 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         if has_available_tools { ToolCallStrategy::Native } else { ToolCallStrategy::NonNative };
     let tool_config =
         build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id_i64));
+    let init_message_ids_for_stateful = init_metadata.message_ids.clone();
+    let has_unfinished_tool_call = has_active_mcp_calls(&app_handle, conversation_id_i64);
 
     // Context budget management with compaction for continuation
     let budget = ContextBudget::from_config(&config_feature_map);
@@ -1963,8 +2164,34 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         );
     }
 
+    let (request_message_list, previous_response_id, store_response, instructions) =
+        maybe_select_openai_responses_stateful_messages(
+            &config_feature_map,
+            &provider_api_type,
+            &model_request_mode,
+            conversation_id_i64,
+            &init_message_list,
+            &init_message_ids_for_stateful,
+        &all_messages,
+        false,
+        has_unfinished_tool_call,
+        has_available_tools,
+    );
+    let (request_message_list, instructions) = prepare_openai_responses_request_messages(
+        &provider_api_type,
+        &model_request_mode,
+        request_message_list,
+        instructions,
+    );
+
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
-        build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
+        build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
+    let chat_request = apply_openai_responses_stateful_request_options(
+        chat_request,
+        previous_response_id,
+        store_response,
+        instructions,
+    );
 
     if chat_config.stream {
         ai_handle_stream_chat(
@@ -2140,6 +2367,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
 
     let window_clone = window.clone();
     let model_id = model_detail.model.id;
+    let provider_id = model_detail.provider.id;
     let model_code = model_detail.model.code.clone();
     let model_request_mode = model_detail.model.request_mode.clone();
     let model_configs = model_detail.configs.clone();
@@ -2188,7 +2416,19 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
 
     let model_name = config_map.get("model").cloned().unwrap_or_else(|| model_code.clone());
 
-    let chat_options = ConfigBuilder::build_chat_options(&config_map);
+    let openai_cache_context = OpenAiCacheContext {
+        provider_id,
+        provider_api_type: provider_api_type.clone(),
+        model_code: model_code.clone(),
+        request_mode: model_request_mode.clone(),
+        assistant_id,
+        conversation_id,
+    };
+    let chat_options = ConfigBuilder::build_chat_options(
+        &config_map,
+        Some(&config_feature_map),
+        Some(&openai_cache_context),
+    );
 
     // 先计算强制降级条件
     let force_non_native_for_gemini_toolresult =
@@ -2271,6 +2511,8 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         if has_available_tools { ToolCallStrategy::Native } else { ToolCallStrategy::NonNative };
     let tool_config =
         build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id));
+    let init_message_ids_for_stateful = init_metadata.message_ids.clone();
+    let has_unfinished_tool_call = has_active_mcp_calls(&app_handle, conversation_id);
 
     // Context budget management with compaction for batch continuation
     let budget = ContextBudget::from_config(&config_feature_map);
@@ -2321,8 +2563,34 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         );
     }
 
+    let (request_message_list, previous_response_id, store_response, instructions) =
+        maybe_select_openai_responses_stateful_messages(
+            &config_feature_map,
+            &provider_api_type,
+            &model_request_mode,
+            conversation_id,
+            &init_message_list,
+            &init_message_ids_for_stateful,
+            &all_messages,
+            false,
+            has_unfinished_tool_call,
+            has_available_tools,
+        );
+    let (request_message_list, instructions) = prepare_openai_responses_request_messages(
+        &provider_api_type,
+        &model_request_mode,
+        request_message_list,
+        instructions,
+    );
+
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
-        build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
+        build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
+    let chat_request = apply_openai_responses_stateful_request_options(
+        chat_request,
+        previous_response_id,
+        store_response,
+        instructions,
+    );
 
     if chat_config.stream {
         Box::pin(ai_handle_stream_chat(
@@ -2597,6 +2865,7 @@ pub async fn regenerate_ai(
     let window_clone = window.clone(); // 在移动之前克隆
     let app_handle_clone = app_handle.clone(); // 添加这行
     let regenerate_model_id = model_detail.model.id; // 提前获取模型ID
+    let regenerate_provider_id = model_detail.provider.id;
     let regenerate_model_code = model_detail.model.code.clone(); // 提前获取模型代码
     let regenerate_model_request_mode = model_detail.model.request_mode.clone(); // 提前获取模型请求模式
     let regenerate_model_configs = model_detail.configs.clone(); // 提前获取模型配置
@@ -2663,7 +2932,19 @@ pub async fn regenerate_ai(
         let model_name =
             config_map.get("model").cloned().unwrap_or_else(|| regenerate_model_code.clone());
 
-        let chat_options = ConfigBuilder::build_chat_options(&config_map);
+        let openai_cache_context = OpenAiCacheContext {
+            provider_id: regenerate_provider_id,
+            provider_api_type: regenerate_provider_api_type.clone(),
+            model_code: regenerate_model_code.clone(),
+            request_mode: regenerate_model_request_mode.clone(),
+            assistant_id,
+            conversation_id,
+        };
+        let chat_options = ConfigBuilder::build_chat_options(
+            &config_map,
+            Some(&_config_feature_map),
+            Some(&openai_cache_context),
+        );
 
         let force_non_native_for_invalid_tool_args =
             has_missing_required_parameter_tool_error_in_message_list(&init_message_list);
@@ -2803,8 +3084,20 @@ pub async fn regenerate_ai(
         )
         .await?;
 
+        let (request_message_list, instructions) = prepare_openai_responses_request_messages(
+            &regenerate_provider_api_type,
+            &regenerate_model_request_mode,
+            init_message_list,
+            None,
+        );
         let ChatRequestBuildResult { chat_request, tool_name_mapping } =
-            build_chat_request_from_messages(&init_message_list, tool_call_strategy, tool_config);
+            build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
+        let chat_request = apply_openai_responses_stateful_request_options(
+            chat_request,
+            None,
+            false,
+            instructions,
+        );
 
         if chat_config.stream {
             // 使用 genai 流式处理
@@ -3257,8 +3550,14 @@ pub async fn regenerate_conversation_title(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_hook_messages, resolve_tool_name, ToolNameMapping};
-    use crate::db::conversation_db::{AttachmentType, MessageAttachment};
+    use super::{
+        apply_hook_messages, apply_openai_responses_stateful_request_options,
+        collect_openai_responses_instructions, maybe_select_openai_responses_stateful_messages,
+        prepare_openai_responses_request_messages, resolve_tool_name, ToolNameMapping,
+    };
+    use crate::db::conversation_db::{AttachmentType, Message, MessageAttachment};
+    use crate::db::system_db::FeatureConfig;
+    use std::collections::HashMap;
 
     fn sample_attachment(hash: &str) -> MessageAttachment {
         MessageAttachment {
@@ -3271,6 +3570,580 @@ mod tests {
             use_vector: false,
             token_count: None,
         }
+    }
+
+    fn enabled_stateful_feature_config() -> HashMap<String, HashMap<String, FeatureConfig>> {
+        let mut network_config = HashMap::new();
+        network_config.insert(
+            "openai_responses_stateful_enabled".to_string(),
+            FeatureConfig {
+                id: None,
+                feature_code: "network_config".to_string(),
+                key: "openai_responses_stateful_enabled".to_string(),
+                value: "true".to_string(),
+                data_type: "boolean".to_string(),
+                description: None,
+            },
+        );
+        network_config.insert(
+            "openai_prompt_cache_key_enabled".to_string(),
+            FeatureConfig {
+                id: None,
+                feature_code: "network_config".to_string(),
+                key: "openai_prompt_cache_key_enabled".to_string(),
+                value: "false".to_string(),
+                data_type: "boolean".to_string(),
+                description: None,
+            },
+        );
+        HashMap::from([("network_config".to_string(), network_config)])
+    }
+
+    fn enabled_stateful_and_prompt_cache_feature_config() -> HashMap<String, HashMap<String, FeatureConfig>> {
+        let mut config = enabled_stateful_feature_config();
+        if let Some(network_config) = config.get_mut("network_config") {
+            if let Some(prompt_cache_config) =
+                network_config.get_mut("openai_prompt_cache_key_enabled")
+            {
+                prompt_cache_config.value = "true".to_string();
+            }
+        }
+        config
+    }
+
+    fn api_test_message(id: i64, message_type: &str, metadata_json: Option<&str>) -> Message {
+        Message {
+            id,
+            parent_id: None,
+            conversation_id: 1,
+            message_type: message_type.to_string(),
+            content: format!("{message_type}-{id}"),
+            llm_model_id: Some(1),
+            llm_model_name: Some("gpt-test".to_string()),
+            created_time: chrono::Utc::now(),
+            start_time: Some(chrono::Utc::now()),
+            finish_time: Some(chrono::Utc::now()),
+            token_count: 0,
+            input_token_count: 0,
+            output_token_count: 0,
+            generation_group_id: None,
+            parent_group_id: None,
+            tool_calls_json: None,
+            metadata_json: metadata_json.map(ToOwned::to_owned),
+            first_token_time: None,
+            ttft_ms: None,
+        }
+    }
+
+    #[test]
+    fn test_stateful_bootstrap_stores_full_history_without_previous_response_id() {
+        let messages = vec![("user".to_string(), "hello".to_string(), Vec::new())];
+        let feature_config = enabled_stateful_feature_config();
+
+        let (selected_messages, previous_response_id, store_response, instructions) =
+            maybe_select_openai_responses_stateful_messages(
+                &feature_config,
+                "openai_api",
+                "responses",
+                42,
+                &messages,
+                &[1],
+                &[],
+                false,
+                false,
+                false,
+            );
+
+        assert_eq!(selected_messages.len(), 1);
+        assert_eq!(selected_messages[0].0, "user");
+        assert_eq!(selected_messages[0].1, "hello");
+        assert_eq!(previous_response_id, None);
+        assert!(store_response);
+        assert_eq!(instructions, None);
+    }
+
+    #[test]
+    fn test_apply_stateful_options_sets_previous_response_id_and_store() {
+        let request = genai::chat::ChatRequest::from_user("again");
+        let request = apply_openai_responses_stateful_request_options(
+            request,
+            Some("resp_123".to_string()),
+            true,
+            Some("system stays current".to_string()),
+        );
+
+        assert_eq!(request.previous_response_id.as_deref(), Some("resp_123"));
+        assert_eq!(request.store, Some(true));
+        assert_eq!(request.system.as_deref(), Some("system stays current"));
+    }
+
+    #[test]
+    fn test_stateful_continuation_carries_system_as_instructions() {
+        let messages = vec![
+            ("system".to_string(), "follow this system prompt".to_string(), Vec::new()),
+            ("user".to_string(), "hello".to_string(), Vec::new()),
+        ];
+
+        assert_eq!(
+            collect_openai_responses_instructions(&messages).as_deref(),
+            Some("follow this system prompt")
+        );
+    }
+
+    #[test]
+    fn test_stateful_continuation_selects_incremental_input_and_keeps_system_instructions() {
+        let messages = vec![
+            ("system".to_string(), "follow this system prompt".to_string(), Vec::new()),
+            ("user".to_string(), "hello".to_string(), Vec::new()),
+            ("response".to_string(), "hi".to_string(), Vec::new()),
+            ("user".to_string(), "again".to_string(), Vec::new()),
+        ];
+        let all_messages = vec![
+            (api_test_message(1, "system", None), None),
+            (api_test_message(2, "user", None), None),
+            (
+                api_test_message(3, "response", Some(r#"{"response_id":"resp_1"}"#)),
+                None,
+            ),
+            (api_test_message(4, "user", None), None),
+        ];
+        let feature_config = enabled_stateful_feature_config();
+
+        let (selected_messages, previous_response_id, store_response, instructions) =
+            maybe_select_openai_responses_stateful_messages(
+                &feature_config,
+                "openai_api",
+                "responses",
+                42,
+                &messages,
+                &[1, 2, 3, 4],
+                &all_messages,
+                false,
+                false,
+                false,
+            );
+
+        assert_eq!(selected_messages.len(), 1);
+        assert_eq!(selected_messages[0].0, "user");
+        assert_eq!(selected_messages[0].1, "again");
+        assert_eq!(previous_response_id.as_deref(), Some("resp_1"));
+        assert!(store_response);
+        assert_eq!(
+            instructions.as_deref(),
+            Some("follow this system prompt")
+        );
+    }
+
+    #[test]
+    fn test_stateful_continuation_uses_full_history_when_native_tools_are_available() {
+        let messages = vec![
+            ("system".to_string(), "follow this system prompt".to_string(), Vec::new()),
+            ("user".to_string(), "hello".to_string(), Vec::new()),
+            ("response".to_string(), "hi".to_string(), Vec::new()),
+            ("tool_result".to_string(), "loaded tool catalog".to_string(), Vec::new()),
+            ("response".to_string(), "tool ready".to_string(), Vec::new()),
+            ("user".to_string(), "again".to_string(), Vec::new()),
+        ];
+        let all_messages = vec![
+            (api_test_message(1, "system", None), None),
+            (api_test_message(2, "user", None), None),
+            (
+                api_test_message(3, "response", Some(r#"{"response_id":"resp_1"}"#)),
+                None,
+            ),
+            (api_test_message(4, "tool_result", None), None),
+            (
+                api_test_message(5, "response", Some(r#"{"response_id":"resp_2"}"#)),
+                None,
+            ),
+            (api_test_message(6, "user", None), None),
+        ];
+        let feature_config = enabled_stateful_feature_config();
+
+        let (selected_messages, previous_response_id, store_response, instructions) =
+            maybe_select_openai_responses_stateful_messages(
+                &feature_config,
+                "openai_api",
+                "responses",
+                42,
+                &messages,
+                &[1, 2, 3, 4, 5, 6],
+                &all_messages,
+                false,
+                false,
+                true,
+            );
+
+        let selected_roles_and_content = selected_messages
+            .iter()
+            .map(|(role, content, _)| (role.as_str(), content.as_str()))
+            .collect::<Vec<_>>();
+        let expected_roles_and_content = messages
+            .iter()
+            .map(|(role, content, _)| (role.as_str(), content.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(selected_roles_and_content, expected_roles_and_content);
+        assert_eq!(previous_response_id, None);
+        assert!(store_response);
+        assert_eq!(instructions, None);
+    }
+
+    #[test]
+    fn test_prompt_cache_takes_priority_over_stateful_continuation() {
+        let messages = vec![
+            ("system".to_string(), "stable system prompt".to_string(), Vec::new()),
+            ("user".to_string(), "hello".to_string(), Vec::new()),
+            ("response".to_string(), "hi".to_string(), Vec::new()),
+            ("user".to_string(), "again".to_string(), Vec::new()),
+        ];
+        let all_messages = vec![
+            (api_test_message(1, "system", None), None),
+            (api_test_message(2, "user", None), None),
+            (
+                api_test_message(3, "response", Some(r#"{"response_id":"resp_1"}"#)),
+                None,
+            ),
+            (api_test_message(4, "user", None), None),
+        ];
+        let feature_config = enabled_stateful_and_prompt_cache_feature_config();
+
+        let (selected_messages, previous_response_id, store_response, instructions) =
+            maybe_select_openai_responses_stateful_messages(
+                &feature_config,
+                "openai_api",
+                "responses",
+                42,
+                &messages,
+                &[1, 2, 3, 4],
+                &all_messages,
+                false,
+                false,
+                false,
+            );
+
+        assert_eq!(selected_messages.len(), messages.len());
+        assert_eq!(selected_messages[0].0, "system");
+        assert_eq!(selected_messages[3].1, "again");
+        assert_eq!(previous_response_id, None);
+        assert!(!store_response);
+        assert_eq!(instructions, None);
+    }
+
+    #[test]
+    fn test_openai_responses_full_history_promotes_system_to_instructions() {
+        let messages = vec![
+            ("system".to_string(), "stable system".to_string(), Vec::new()),
+            ("user".to_string(), "hello".to_string(), Vec::new()),
+        ];
+
+        let (request_messages, instructions) = prepare_openai_responses_request_messages(
+            "openai_api",
+            "responses",
+            messages,
+            None,
+        );
+
+        assert_eq!(instructions.as_deref(), Some("stable system"));
+        assert_eq!(request_messages.len(), 1);
+        assert_eq!(request_messages[0].0, "user");
+        assert_eq!(request_messages[0].1, "hello");
+    }
+
+    #[test]
+    #[ignore = "temporary local probe: reads real AIPP conversation/mcp databases"]
+    fn probe_openai_responses_prompt_cache_prefix_stability_for_latest_conversation() {
+        use crate::api::ai::conversation::{build_message_list_with_metadata_from_db, BranchSelection};
+        use crate::utils::db_utils::{get_datetime_from_row, get_required_datetime_from_row};
+        use rusqlite::{Connection, OpenFlags};
+        use sha2::{Digest, Sha256};
+        use std::env;
+        use std::fs;
+        use std::path::PathBuf;
+
+        fn app_db_dir() -> PathBuf {
+            env::var("AIPP_CACHE_PREFIX_PROBE_DB_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| {
+                    let home = env::var("HOME").expect("HOME is required on macOS");
+                    PathBuf::from(home)
+                        .join("Library/Application Support/com.xieisabug.aipp/db")
+                })
+        }
+
+        fn snapshot_db_dir(source_db_dir: PathBuf) -> PathBuf {
+            let snapshot_dir = env::temp_dir()
+                .join(format!("aipp-cache-prefix-probe-{}", std::process::id()));
+            fs::create_dir_all(&snapshot_dir).expect("create probe db snapshot dir");
+            for db_name in ["conversation.db", "mcp.db"] {
+                let source = source_db_dir.join(db_name);
+                let target = snapshot_dir.join(db_name);
+                fs::copy(&source, &target).unwrap_or_else(|err| {
+                    panic!(
+                        "copy probe db snapshot from {} to {}: {err}",
+                        source.display(),
+                        target.display()
+                    )
+                });
+            }
+            snapshot_dir
+        }
+
+        fn open_readonly(path: PathBuf) -> Connection {
+            assert!(
+                path.exists(),
+                "probe sqlite db does not exist: {}",
+                path.display()
+            );
+            Connection::open_with_flags(
+                &path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .unwrap_or_else(|err| panic!("open readonly sqlite db {}: {err}", path.display()))
+        }
+
+        fn short_hash(value: &serde_json::Value) -> String {
+            let bytes = serde_json::to_vec(value).expect("serialize value for hash");
+            hex::encode(&Sha256::digest(bytes)[..8])
+        }
+
+        fn latest_conversation_id(conn: &Connection) -> i64 {
+            conn.query_row(
+                "select id from conversation order by datetime(created_time) desc limit 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read latest conversation id")
+        }
+
+        fn load_messages(
+            conn: &Connection,
+            conversation_id: i64,
+        ) -> Vec<(Message, Option<MessageAttachment>)> {
+            let mut stmt = conn
+                .prepare(
+                    "select id,parent_id,conversation_id,message_type,content,llm_model_id,\
+                            llm_model_name,created_time,start_time,finish_time,token_count,\
+                            input_token_count,output_token_count,generation_group_id,parent_group_id,\
+                            tool_calls_json,metadata_json,first_token_time,ttft_ms \
+                     from message where conversation_id = ? order by id",
+                )
+                .expect("prepare message query");
+            stmt.query_map([conversation_id], |row| {
+                Ok((
+                    Message {
+                        id: row.get(0)?,
+                        parent_id: row.get(1)?,
+                        conversation_id: row.get(2)?,
+                        message_type: row.get(3)?,
+                        content: row.get(4)?,
+                        llm_model_id: row.get(5)?,
+                        llm_model_name: row.get(6)?,
+                        created_time: get_required_datetime_from_row(row, 7, "created_time")?,
+                        start_time: get_datetime_from_row(row, 8)?,
+                        finish_time: get_datetime_from_row(row, 9)?,
+                        token_count: row.get(10)?,
+                        input_token_count: row.get(11)?,
+                        output_token_count: row.get(12)?,
+                        generation_group_id: row.get(13)?,
+                        parent_group_id: row.get(14)?,
+                        tool_calls_json: row.get(15)?,
+                        metadata_json: row.get(16)?,
+                        first_token_time: get_datetime_from_row(row, 17)?,
+                        ttft_ms: row.get(18)?,
+                    },
+                    None,
+                ))
+            })
+            .expect("query messages")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read messages")
+        }
+
+        fn load_tool_signature(db_dir: PathBuf, conversation_id: i64) -> serde_json::Value {
+            let conn = open_readonly(db_dir.join("mcp.db"));
+            let mut stmt = conn
+                .prepare(
+                    "select s.name, t.tool_name, coalesce(t.tool_description, ''), coalesce(t.parameters, '') \
+                     from mcp_server_tool t \
+                     join mcp_server s on s.id = t.server_id \
+                     where t.is_enabled = 1 and s.is_enabled = 1 and ( \
+                         (s.command = 'aipp:agent' and t.tool_name in ('load_mcp_server', 'load_mcp_tool')) \
+                         or t.id in ( \
+                             select tool_id from conversation_mcp_loaded_tool \
+                             where conversation_id = ? and status = 'valid' \
+                         ) \
+                     ) \
+                     order by s.name, t.tool_name",
+                )
+                .expect("prepare tool signature query");
+            let tools = stmt
+                .query_map([conversation_id], |row| {
+                    Ok(serde_json::json!({
+                        "server": row.get::<_, String>(0)?,
+                        "name": row.get::<_, String>(1)?,
+                        "description": row.get::<_, String>(2)?,
+                        "parameters": serde_json::from_str::<serde_json::Value>(
+                            &row.get::<_, String>(3)?
+                        ).unwrap_or_else(|_| serde_json::json!({ "type": "object" })),
+                    }))
+                })
+                .expect("query tool signature")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("read tool signature");
+            serde_json::json!(tools)
+        }
+
+        fn request_payload_shape(
+            messages: &[(Message, Option<MessageAttachment>)],
+            tools: &serde_json::Value,
+        ) -> (serde_json::Value, Vec<serde_json::Value>) {
+            let (message_list, _) =
+                build_message_list_with_metadata_from_db(messages, BranchSelection::LatestBranch);
+            let (input_messages, instructions) = prepare_openai_responses_request_messages(
+                "openai_api",
+                "responses",
+                message_list,
+                None,
+            );
+            let instructions = serde_json::json!(instructions.unwrap_or_default());
+            let input = input_messages
+                .iter()
+                .map(|(role, content, _)| {
+                    serde_json::json!({
+                        "role": role,
+                        "content": content,
+                    })
+                })
+                .collect::<Vec<_>>();
+            (
+                serde_json::json!({
+                    "instructions": instructions,
+                    "tools": tools,
+                    "input": input,
+                }),
+                input,
+            )
+        }
+
+        fn append_synthetic_message(
+            messages: &mut Vec<(Message, Option<MessageAttachment>)>,
+            conversation_id: i64,
+            message_type: &str,
+            content: String,
+        ) {
+            let now = chrono::Utc::now();
+            let next_id = messages.iter().map(|(message, _)| message.id).max().unwrap_or(0) + 1;
+            messages.push((
+                Message {
+                    id: next_id,
+                    parent_id: None,
+                    conversation_id,
+                    message_type: message_type.to_string(),
+                    content,
+                    llm_model_id: None,
+                    llm_model_name: if message_type == "response" {
+                        Some("gpt-5.5".to_string())
+                    } else {
+                        None
+                    },
+                    created_time: now,
+                    start_time: Some(now),
+                    finish_time: Some(now),
+                    token_count: 0,
+                    input_token_count: 0,
+                    output_token_count: 0,
+                    generation_group_id: None,
+                    parent_group_id: None,
+                    tool_calls_json: None,
+                    metadata_json: None,
+                    first_token_time: None,
+                    ttft_ms: None,
+                },
+                None,
+            ));
+        }
+
+        let source_db_dir = app_db_dir();
+        let db_dir = snapshot_db_dir(source_db_dir.clone());
+        println!(
+            "cache-prefix-probe source_db_dir={} snapshot_db_dir={}",
+            source_db_dir.display(),
+            db_dir.display()
+        );
+        let conversation_conn = open_readonly(db_dir.join("conversation.db"));
+        let conversation_id = env::var("AIPP_CACHE_PREFIX_PROBE_CONVERSATION_ID")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or_else(|| latest_conversation_id(&conversation_conn));
+        let mut messages = load_messages(&conversation_conn, conversation_id);
+        let tools = load_tool_signature(db_dir, conversation_id);
+        let tools_hash = short_hash(&tools);
+        let mut previous_input: Option<Vec<serde_json::Value>> = None;
+
+        println!(
+            "cache-prefix-probe conversation_id={conversation_id} initial_messages={} tools={} tools_hash={tools_hash}",
+            messages.len(),
+            tools.as_array().map(|tools| tools.len()).unwrap_or(0)
+        );
+
+        for round in 1..=4 {
+            append_synthetic_message(
+                &mut messages,
+                conversation_id,
+                "user",
+                format!("synthetic user follow-up round {round}"),
+            );
+
+            let (payload, input) = request_payload_shape(&messages, &tools);
+            let input_hash = short_hash(&serde_json::json!(input));
+            let instructions_hash = short_hash(payload.get("instructions").unwrap());
+            let previous_is_prefix = previous_input
+                .as_ref()
+                .map(|previous| input.starts_with(previous))
+                .unwrap_or(true);
+            let last_role = input
+                .last()
+                .and_then(|value| value.get("role"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let system_in_input = input
+                .iter()
+                .any(|value| value.get("role").and_then(|role| role.as_str()) == Some("system"));
+            println!(
+                "round={round} instructions_hash={instructions_hash} tools_hash={tools_hash} input_items={} input_hash={input_hash} previous_input_is_prefix={previous_is_prefix} last_role={last_role} system_in_input={system_in_input}",
+                input.len()
+            );
+            assert!(previous_is_prefix, "previous request input must remain next request prefix");
+            assert_eq!(last_role, "user", "new user message should be at the end");
+            assert!(!system_in_input, "Responses system prompt should stay in instructions");
+
+            previous_input = Some(input);
+            append_synthetic_message(
+                &mut messages,
+                conversation_id,
+                "response",
+                format!("synthetic assistant response round {round}"),
+            );
+        }
+    }
+
+    #[test]
+    fn test_non_responses_request_keeps_system_in_message_list() {
+        let messages = vec![
+            ("system".to_string(), "stable system".to_string(), Vec::new()),
+            ("user".to_string(), "hello".to_string(), Vec::new()),
+        ];
+
+        let (request_messages, instructions) = prepare_openai_responses_request_messages(
+            "openai_api",
+            "chat",
+            messages,
+            None,
+        );
+
+        assert_eq!(instructions, None);
+        assert_eq!(request_messages.len(), 2);
+        assert_eq!(request_messages[0].0, "system");
     }
 
     #[test]

@@ -85,6 +85,9 @@ describe("FeatureAssistantConfig network config", () => {
                         request_timeout: "180",
                         retry_attempts: "3",
                         network_proxy: "http://proxy.example.com:8080",
+                        openai_prompt_cache_key_enabled: "true",
+                        openai_prompt_cache_retention: "24h",
+                        openai_responses_stateful_enabled: "false",
                         custom_headers: "{}",
                     },
                 })

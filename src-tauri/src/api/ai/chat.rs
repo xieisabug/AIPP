@@ -60,7 +60,36 @@ fn cache_creation_tokens_from_usage(usage: &Usage) -> Option<i32> {
     positive_token_count(explicit.max(by_ttl))
 }
 
-fn merge_chat_usage_metadata(existing_metadata_json: Option<&str>, usage: &Usage) -> Option<String> {
+fn metadata_object_from_raw(existing_metadata_json: Option<&str>) -> serde_json::Map<String, serde_json::Value> {
+    match existing_metadata_json {
+        Some(raw) if !raw.trim().is_empty() => match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(serde_json::Value::Object(map)) => map,
+            Ok(_) | Err(_) => serde_json::Map::new(),
+        },
+        _ => serde_json::Map::new(),
+    }
+}
+
+fn merge_chat_response_metadata(
+    existing_metadata_json: Option<&str>,
+    usage: Option<&Usage>,
+    response_id: Option<&str>,
+) -> Option<String> {
+    if usage.is_none() && response_id.and_then(|id| (!id.trim().is_empty()).then_some(id)).is_none()
+    {
+        return existing_metadata_json.map(ToOwned::to_owned);
+    }
+
+    let mut map = metadata_object_from_raw(existing_metadata_json);
+
+    if let Some(response_id) = response_id.map(str::trim).filter(|id| !id.is_empty()) {
+        map.insert("response_id".to_string(), serde_json::json!(response_id));
+    }
+
+    let Some(usage) = usage else {
+        return serde_json::to_string(&serde_json::Value::Object(map)).ok();
+    };
+
     let thought_tokens = usage
         .completion_tokens_details
         .as_ref()
@@ -74,16 +103,8 @@ fn merge_chat_usage_metadata(existing_metadata_json: Option<&str>, usage: &Usage
     let cached_write_tokens = cache_creation_tokens_from_usage(usage);
 
     if thought_tokens.is_none() && cached_input_tokens.is_none() && cached_write_tokens.is_none() {
-        return existing_metadata_json.map(ToOwned::to_owned);
+        return serde_json::to_string(&serde_json::Value::Object(map)).ok();
     }
-
-    let mut map = match existing_metadata_json {
-        Some(raw) if !raw.trim().is_empty() => match serde_json::from_str::<serde_json::Value>(raw) {
-            Ok(serde_json::Value::Object(map)) => map,
-            Ok(_) | Err(_) => serde_json::Map::new(),
-        },
-        _ => serde_json::Map::new(),
-    };
 
     map.insert("usage_source".to_string(), serde_json::json!("reported"));
 
@@ -1040,7 +1061,9 @@ mod tests {
             total_tokens: Some(160),
         };
 
-        let merged = merge_chat_usage_metadata(Some(r#"{"existing":true}"#), &usage).unwrap();
+        let merged =
+            merge_chat_response_metadata(Some(r#"{"existing":true}"#), Some(&usage), None)
+                .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
 
         assert_eq!(parsed["existing"], true);
@@ -1049,6 +1072,21 @@ mod tests {
         assert_eq!(parsed["cached_input_tokens"], 30);
         assert_eq!(parsed["cached_read_tokens"], 30);
         assert_eq!(parsed["cache_creation_tokens"], 5);
+        assert_eq!(parsed["cached_write_tokens"], 5);
+    }
+
+    #[test]
+    fn test_merge_chat_response_metadata_preserves_usage_when_adding_response_id() {
+        let existing = r#"{"thought_tokens":12,"cached_input_tokens":30,"cached_read_tokens":30,"cached_write_tokens":5}"#;
+
+        let merged =
+            merge_chat_response_metadata(Some(existing), None, Some("resp_123")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
+
+        assert_eq!(parsed["response_id"], "resp_123");
+        assert_eq!(parsed["thought_tokens"], 12);
+        assert_eq!(parsed["cached_input_tokens"], 30);
+        assert_eq!(parsed["cached_read_tokens"], 30);
         assert_eq!(parsed["cached_write_tokens"], 5);
     }
 
@@ -3109,6 +3147,7 @@ async fn attempt_stream_chat(
                     }
                     ChatStreamEvent::End(mut end_event) => {
                         debug!(?end_event, "end event");
+                        let captured_response_id = end_event.captured_response_id.clone();
 
                         // Extract and store token usage data before ownership is taken
                         let token_data = end_event.captured_usage.as_ref().map(|usage| {
@@ -3256,9 +3295,10 @@ async fn attempt_stream_chat(
                                         message.input_token_count = input_tokens;
                                         message.output_token_count = output_tokens;
                                         message.token_count = total_tokens;
-                                        message.metadata_json = merge_chat_usage_metadata(
+                                        message.metadata_json = merge_chat_response_metadata(
                                             message.metadata_json.as_deref(),
-                                            &usage,
+                                            Some(&usage),
+                                            captured_response_id.as_deref(),
                                         );
 
                                         // Ensure the message used for metrics reflects the whole assistant generation
@@ -3381,6 +3421,27 @@ async fn attempt_stream_chat(
                             }
                         } else {
                             debug!("No usage data in End event - AI provider may not support it");
+                            let target_msg_id = response_message_id.or(reasoning_message_id);
+                            if let Some(response_id) = captured_response_id.as_deref() {
+                                if let Some(msg_id) = target_msg_id {
+                                    if let Ok(repo) = conversation_db.message_repo() {
+                                        if let Ok(Some(mut message)) = repo.read(msg_id) {
+                                            message.metadata_json = merge_chat_response_metadata(
+                                                message.metadata_json.as_deref(),
+                                                None,
+                                                Some(response_id),
+                                            );
+                                            if let Err(e) = repo.update(&message) {
+                                                warn!(
+                                                    message_id = msg_id,
+                                                    error = %e,
+                                                    "Failed to update message with response_id metadata"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         // Info summary for easier debugging / visibility
@@ -3975,7 +4036,11 @@ pub async fn handle_non_stream_chat(
                     generation_group_id: Some(generation_group_id.clone()),
                     parent_group_id: parent_group_id_override.clone(),
                     tool_calls_json: None,
-                    metadata_json: merge_chat_usage_metadata(None, usage),
+                    metadata_json: merge_chat_response_metadata(
+                        None,
+                        Some(usage),
+                        chat_response.response_id.as_deref(),
+                    ),
                     first_token_time: None, // non-stream: unknown, fallback to start_time
                     ttft_ms,
                 })

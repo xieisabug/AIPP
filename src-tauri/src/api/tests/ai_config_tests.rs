@@ -10,7 +10,7 @@
 use crate::api::ai::config::{
     build_proxy_env_vars, calculate_retry_delay, get_network_proxy_from_config,
     get_request_timeout_from_config, get_retry_attempts_from_config, ConfigBuilder,
-    DEFAULT_REQUEST_TIMEOUT_SECS, MAX_RETRY_ATTEMPTS, RETRY_DELAY_BASE_MS,
+    OpenAiCacheContext, DEFAULT_REQUEST_TIMEOUT_SECS, MAX_RETRY_ATTEMPTS, RETRY_DELAY_BASE_MS,
 };
 use crate::db::assistant_db::AssistantModelConfig;
 use crate::db::llm_db::{LLMModel, LLMProvider, LLMProviderConfig, ModelDetail};
@@ -25,7 +25,7 @@ use std::collections::HashMap;
 #[test]
 fn test_build_chat_options_empty_config() {
     let config_map: HashMap<String, String> = HashMap::new();
-    let options = ConfigBuilder::build_chat_options(&config_map);
+    let options = ConfigBuilder::build_chat_options(&config_map, None, None);
 
     // 默认选项，温度/max_tokens/top_p 都是 None
     // 由于 ChatOptions 没有公开的字段访问，我们只能验证它不会崩溃
@@ -38,7 +38,7 @@ fn test_build_chat_options_with_temperature() {
     let mut config_map: HashMap<String, String> = HashMap::new();
     config_map.insert("temperature".to_string(), "0.7".to_string());
 
-    let options = ConfigBuilder::build_chat_options(&config_map);
+    let options = ConfigBuilder::build_chat_options(&config_map, None, None);
     let debug_str = format!("{:?}", options);
 
     // 验证选项已创建
@@ -51,7 +51,7 @@ fn test_build_chat_options_with_max_tokens() {
     let mut config_map: HashMap<String, String> = HashMap::new();
     config_map.insert("max_tokens".to_string(), "4096".to_string());
 
-    let options = ConfigBuilder::build_chat_options(&config_map);
+    let options = ConfigBuilder::build_chat_options(&config_map, None, None);
     let debug_str = format!("{:?}", options);
 
     assert!(debug_str.contains("ChatOptions"));
@@ -63,7 +63,7 @@ fn test_build_chat_options_with_top_p() {
     let mut config_map: HashMap<String, String> = HashMap::new();
     config_map.insert("top_p".to_string(), "0.9".to_string());
 
-    let options = ConfigBuilder::build_chat_options(&config_map);
+    let options = ConfigBuilder::build_chat_options(&config_map, None, None);
     let debug_str = format!("{:?}", options);
 
     assert!(debug_str.contains("ChatOptions"));
@@ -77,7 +77,7 @@ fn test_build_chat_options_with_all_configs() {
     config_map.insert("max_tokens".to_string(), "2048".to_string());
     config_map.insert("top_p".to_string(), "0.95".to_string());
 
-    let options = ConfigBuilder::build_chat_options(&config_map);
+    let options = ConfigBuilder::build_chat_options(&config_map, None, None);
     let debug_str = format!("{:?}", options);
 
     assert!(debug_str.contains("ChatOptions"));
@@ -89,9 +89,66 @@ fn test_build_chat_options_with_reasoning_effort() {
     let mut config_map: HashMap<String, String> = HashMap::new();
     config_map.insert("reasoning_effort".to_string(), "medium".to_string());
 
-    let options = ConfigBuilder::build_chat_options(&config_map);
+    let options = ConfigBuilder::build_chat_options(&config_map, None, None);
 
     assert!(format!("{:?}", options).contains("ChatOptions"));
+}
+
+/// 测试 OpenAI Responses 默认启用 prompt cache key 和 24h retention
+#[test]
+fn test_build_chat_options_openai_responses_prompt_cache_defaults() {
+    let config_map: HashMap<String, String> = HashMap::new();
+    let feature_config_map: HashMap<String, HashMap<String, FeatureConfig>> = HashMap::new();
+    let context = OpenAiCacheContext {
+        provider_id: 7,
+        provider_api_type: "openai_api".to_string(),
+        model_code: "gpt-5.4".to_string(),
+        request_mode: "responses".to_string(),
+        assistant_id: 11,
+        conversation_id: 13,
+    };
+
+    let options =
+        ConfigBuilder::build_chat_options(&config_map, Some(&feature_config_map), Some(&context));
+
+    assert_eq!(
+        options.prompt_cache_key.as_deref(),
+        Some("aipp:7:gpt-5.4:11:13")
+    );
+    assert_eq!(options.cache_control, Some(genai::chat::CacheControl::Ephemeral24h));
+}
+
+/// 测试关闭 OpenAI prompt cache key 后不写入 cache 参数
+#[test]
+fn test_build_chat_options_openai_prompt_cache_can_be_disabled() {
+    let config_map: HashMap<String, String> = HashMap::new();
+    let mut network_config = HashMap::new();
+    network_config.insert(
+        "openai_prompt_cache_key_enabled".to_string(),
+        FeatureConfig {
+            id: None,
+            feature_code: "network_config".to_string(),
+            key: "openai_prompt_cache_key_enabled".to_string(),
+            value: "false".to_string(),
+            data_type: "boolean".to_string(),
+            description: None,
+        },
+    );
+    let feature_config_map = HashMap::from([("network_config".to_string(), network_config)]);
+    let context = OpenAiCacheContext {
+        provider_id: 7,
+        provider_api_type: "openai".to_string(),
+        model_code: "gpt-5.4".to_string(),
+        request_mode: "responses".to_string(),
+        assistant_id: 11,
+        conversation_id: 13,
+    };
+
+    let options =
+        ConfigBuilder::build_chat_options(&config_map, Some(&feature_config_map), Some(&context));
+
+    assert_eq!(options.prompt_cache_key, None);
+    assert_eq!(options.cache_control, None);
 }
 
 /// 测试无效的温度值（非数字）
@@ -101,7 +158,7 @@ fn test_build_chat_options_invalid_temperature() {
     config_map.insert("temperature".to_string(), "not_a_number".to_string());
 
     // 不应该崩溃，应该忽略无效值
-    let options = ConfigBuilder::build_chat_options(&config_map);
+    let options = ConfigBuilder::build_chat_options(&config_map, None, None);
     assert!(format!("{:?}", options).contains("ChatOptions"));
 }
 
@@ -111,7 +168,7 @@ fn test_build_chat_options_invalid_max_tokens() {
     let mut config_map: HashMap<String, String> = HashMap::new();
     config_map.insert("max_tokens".to_string(), "-100".to_string()); // 负数
 
-    let options = ConfigBuilder::build_chat_options(&config_map);
+    let options = ConfigBuilder::build_chat_options(&config_map, None, None);
     assert!(format!("{:?}", options).contains("ChatOptions"));
 }
 
