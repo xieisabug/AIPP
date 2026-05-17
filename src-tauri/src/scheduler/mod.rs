@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use crate::errors::AppError;
 
@@ -69,7 +69,6 @@ pub fn start_scheduler(app_handle: tauri::AppHandle, scheduler_state: SchedulerS
 
         loop {
             interval.tick().await;
-            debug!("定时任务调度器：开始执行周期任务");
 
             // 执行对话总结任务
             if let Err(e) = summary_task::run_summary_task(&app_handle, &scheduler_state).await {

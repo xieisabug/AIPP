@@ -103,6 +103,9 @@ export default function SlashCompletionList({
                               <span className="slash-completion-name">
                                   {namespace.name}
                               </span>
+                              {namespace.source === "acp" && (
+                                  <span className="slash-completion-pill">ACP</span>
+                              )}
                               {!namespace.isEnabled && (
                                   <span className="slash-completion-pill">即将支持</span>
                               )}
@@ -110,6 +113,11 @@ export default function SlashCompletionList({
                           <div className="slash-completion-description">
                               {namespace.description}
                           </div>
+                          {namespace.inputHint && (
+                              <div className="slash-completion-meta">
+                                  <span>{namespace.inputHint}</span>
+                              </div>
+                          )}
                       </button>
                   ))
                 : skills.map((skill, index) => (

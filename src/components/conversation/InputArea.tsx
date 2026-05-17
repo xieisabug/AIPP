@@ -53,7 +53,7 @@ import React, { useRef, useEffect, useState, useCallback, forwardRef, useImperat
 import "../../styles/InputArea.css";
 import CircleButton from "../CircleButton";
 import { Plus, Square, ArrowUp } from "lucide-react";
-import { FileInfo } from "../../data/Conversation";
+import { AcpAvailableCommand, FileInfo } from "../../data/Conversation";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCaretCoordinates } from "../../utils/caretCoordinates";
@@ -97,6 +97,7 @@ interface InputAreaProps {
     sidebarVisible?: boolean;
     sendButtonIcon?: ReactNode;
     sendButtonVisual?: ReactNode;
+    acpAvailableCommands?: AcpAvailableCommand[];
 }
 const IMAGE_AREA_HEIGHT = 80;
 
@@ -118,6 +119,7 @@ const InputArea = React.memo(
                 sidebarVisible = false,
                 sendButtonIcon,
                 sendButtonVisual,
+                acpAvailableCommands = [],
             },
             ref
         ) => {
@@ -210,18 +212,32 @@ const InputArea = React.memo(
                 [placement]
             );
 
+            const acpSlashNamespaces = useCallback((): SlashNamespaceItem[] => {
+                return acpAvailableCommands.map((command) => ({
+                    name: command.name.startsWith("/") ? command.name.slice(1) : command.name,
+                    description: command.description || "ACP 命令",
+                    isEnabled: true,
+                    source: "acp",
+                    inputHint: command.input_hint ?? null,
+                }));
+            }, [acpAvailableCommands]);
+
             const filterSlashNamespaces = useCallback((query: string) => {
                 const queryLower = query.trim().toLowerCase();
+                const allNamespaces = [
+                    ...DEFAULT_SLASH_NAMESPACES,
+                    ...acpSlashNamespaces(),
+                ];
                 if (!queryLower) {
-                    return DEFAULT_SLASH_NAMESPACES;
+                    return allNamespaces;
                 }
-                return DEFAULT_SLASH_NAMESPACES.filter((namespace) => {
+                return allNamespaces.filter((namespace) => {
                     return (
                         namespace.name.toLowerCase().includes(queryLower) ||
                         namespace.description.toLowerCase().includes(queryLower)
                     );
                 });
-            }, []);
+            }, [acpSlashNamespaces]);
 
             const loadBangList = useCallback(async () => {
                 try {
@@ -325,9 +341,15 @@ const InputArea = React.memo(
                     const afterSlash = textarea.value.substring(
                         slashContext.replaceEnd,
                     );
-                    const completionText = `/${namespace.name}()`;
+                    const completionText =
+                        namespace.source === "acp"
+                            ? `/${namespace.name}${namespace.inputHint ? " " : ""}`
+                            : `/${namespace.name}()`;
                     const newValue = beforeSlash + completionText + afterSlash;
-                    const newPosition = beforeSlash.length + completionText.length - 1;
+                    const newPosition =
+                        namespace.source === "acp"
+                            ? beforeSlash.length + completionText.length
+                            : beforeSlash.length + completionText.length - 1;
 
                     setInputText(newValue);
 
@@ -339,7 +361,7 @@ const InputArea = React.memo(
                             newPosition,
                         );
 
-                        if (nextContext?.kind === "skill") {
+                        if (namespace.source !== "acp" && nextContext?.kind === "skill") {
                             showSlashCompletion(
                                 nextContext,
                                 textarea,
@@ -1210,7 +1232,7 @@ const InputArea = React.memo(
             }, [textareaRef]);
 
             const baseRight = sidebarVisible ? 130 : 170;
-            const defaultSendButtonIcon = aiIsResponsing ? (
+            const defaultSendButtonIcon = aiIsResponsing && !inputText.trim() ? (
                 <Square size={20} className="text-action-foreground" />
             ) : (
                 <ArrowUp size={20} className="text-action-foreground" />

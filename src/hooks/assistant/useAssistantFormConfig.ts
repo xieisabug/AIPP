@@ -106,20 +106,30 @@ export const useAssistantFormConfig = ({
 
         const globalDynamicMcpEnabled =
             getConfigValue("experimental", "dynamic_mcp_loading_enabled") === "true";
-        const assistantDynamicRaw = currentAssistant.model_configs.find(
-            (config) => config.name === "dynamic_mcp_loading_enabled"
-        )?.value;
         const assistantDynamicEnabled =
             globalDynamicMcpEnabled &&
-            (assistantDynamicRaw == null ||
-                (assistantDynamicRaw !== "false" && assistantDynamicRaw !== "0"));
+            (() => {
+                const assistantDynamicRaw = currentAssistant.model_configs.find(
+                    (config) => config.name === "dynamic_mcp_loading_enabled"
+                )?.value;
+                return (
+                    assistantDynamicRaw == null ||
+                    (assistantDynamicRaw !== "false" && assistantDynamicRaw !== "0")
+                );
+            })();
 
         // ACP 助手类型 (assistant_type === 4) 的专用配置
         if (currentAssistant?.assistant.assistant_type === 4) {
             // 获取当前选择的提供商 ID
-            const currentProviderId = currentAssistant?.model.length ?? 0 > 0
-                ? currentAssistant.model[0].provider_id.toString()
-                : "-1";
+            const modelProviderId = currentAssistant.model[0]?.provider_id ?? 0;
+            const legacyProviderId =
+                currentAssistant.model_configs.find((config) => config.name === "acp_provider")?.value?.trim() ?? "";
+            const currentProviderId =
+                modelProviderId > 0
+                    ? modelProviderId.toString()
+                    : Number.parseInt(legacyProviderId, 10) > 0
+                      ? legacyProviderId
+                      : "-1";
 
             return [
                 {
@@ -136,19 +146,15 @@ export const useAssistantFormConfig = ({
                         type: "provider-select" as const,
                         label: "选择提供商",
                         value: currentProviderId,
-                        onChange: (value: string | boolean) => {
-                            // 保存提供商 ID 到 model 字段的 provider_id 部分
-                            // 使用特殊格式 "%%{provider_id}" 让保存逻辑正确处理
-                            onConfigChange("model", `%%${value}` as string, "string");
-                        },
                     },
                 },
                 {
                     key: "acp_working_directory",
                     config: {
-                        type: "input" as const,
+                        type: "folder-picker" as const,
                         label: "工作目录",
                         value: getAcpConfigValue("acp_working_directory", ""),
+                        placeholder: "选择工作目录",
                         tooltip: "Agent 将在此目录下运行",
                         onChange: (value: string | boolean) =>
                             handleConfigChange("acp_working_directory", value, "string"),
@@ -175,6 +181,22 @@ export const useAssistantFormConfig = ({
                         tooltip: "传递给 CLI 的额外参数，空格分隔",
                         onChange: (value: string | boolean) =>
                             handleConfigChange("acp_additional_args", value, "string"),
+                    },
+                },
+                {
+                    key: "mcp_config",
+                    config: {
+                        type: "custom" as const,
+                        label: "MCP工具",
+                        customRender: () => {
+                            return React.createElement(AssistantMCPFieldDisplay, {
+                                assistantId: currentAssistant?.assistant.id ?? 0,
+                                onConfigChange: () => {
+                                    console.log("MCP configuration changed");
+                                },
+                                navigateTo: navigateTo,
+                            });
+                        },
                     },
                 },
             ];

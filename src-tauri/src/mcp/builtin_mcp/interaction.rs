@@ -8,6 +8,11 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info, warn};
 
+use super::preview_resources::{
+    prepare_preview_code_event, prepare_preview_file_event, PreviewExternalResourcesPayload,
+    PreviewResourceState,
+};
+
 type AskUserQuestionDecision = Result<HashMap<String, String>, String>;
 type PreviewCodeDecision = Result<PreviewCodeResponse, String>;
 pub const PREVIEW_FILE_RELAY_SCHEME: &str = "aipp-preview";
@@ -207,6 +212,8 @@ pub struct PreviewFileRequestEvent {
     pub view_mode: String,
     #[serde(default)]
     pub metadata: Option<PreviewFileMetadata>,
+    #[serde(default, rename = "externalResources", skip_serializing_if = "Option::is_none")]
+    pub external_resources: Option<PreviewExternalResourcesPayload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +229,8 @@ pub struct PreviewCodeRequestEvent {
     pub interaction_mode: String,
     #[serde(default)]
     pub metadata: Option<PreviewCodeMetadata>,
+    #[serde(default, rename = "externalResources", skip_serializing_if = "Option::is_none")]
+    pub external_resources: Option<PreviewExternalResourcesPayload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +245,7 @@ pub struct PreviewCodeResponse {
 struct PreviewFileRelayEntry {
     file_path: PathBuf,
     file_type: String,
+    content_type: Option<String>,
     expires_at: Instant,
     conversation_id: Option<i64>,
 }
@@ -270,11 +280,35 @@ impl PreviewFileRelayState {
             PreviewFileRelayEntry {
                 file_path,
                 file_type,
+                content_type: None,
                 expires_at: Instant::now() + Duration::from_secs(PREVIEW_FILE_RELAY_TTL_SECS),
                 conversation_id,
             },
         );
         Ok(token)
+    }
+
+    pub fn register_preview_resource(
+        &self,
+        token: String,
+        file_path: PathBuf,
+        content_type: String,
+        conversation_id: Option<i64>,
+    ) -> Result<(), String> {
+        let mut entries =
+            self.entries.lock().map_err(|_| "Preview relay state poisoned".to_string())?;
+        Self::prune_expired_locked(&mut entries);
+        entries.insert(
+            token,
+            PreviewFileRelayEntry {
+                file_path,
+                file_type: "resource".to_string(),
+                content_type: Some(content_type),
+                expires_at: Instant::now() + Duration::from_secs(PREVIEW_FILE_RELAY_TTL_SECS),
+                conversation_id,
+            },
+        );
+        Ok(())
     }
 
     fn get_entry(&self, token: &str) -> Result<Option<PreviewFileRelayEntry>, String> {
@@ -336,7 +370,7 @@ fn normalize_local_path_string(mut raw_path: String) -> String {
     raw_path
 }
 
-fn resolve_local_file_path(raw_url: &str) -> Option<PathBuf> {
+pub(super) fn resolve_local_file_path(raw_url: &str) -> Option<PathBuf> {
     let trimmed = raw_url.trim().trim_matches(|c| matches!(c, '"' | '\''));
     if trimmed.is_empty() {
         return None;
@@ -538,7 +572,10 @@ pub fn handle_preview_file_relay_request<R: tauri::Runtime>(
         }
     };
 
-    let content_type = detect_relay_content_type(&entry.file_type, &entry.file_path);
+    let content_type = entry
+        .content_type
+        .clone()
+        .unwrap_or_else(|| detect_relay_content_type(&entry.file_type, &entry.file_path));
     debug!(
         token = %token,
         path = %entry.file_path.display(),
@@ -851,7 +888,7 @@ pub async fn request_ask_user_question(
     result
 }
 
-pub fn emit_preview_file_request(
+pub async fn emit_preview_file_request(
     app_handle: &AppHandle,
     conversation_id: Option<i64>,
     request: PreviewFileRequest,
@@ -873,6 +910,28 @@ pub fn emit_preview_file_request(
         files: request.files,
         view_mode: resolved_view_mode,
         metadata: request.metadata,
+        external_resources: None,
+    };
+    let event = if let Some(resource_state) = app_handle.try_state::<PreviewResourceState>() {
+        match prepare_preview_file_event(
+            app_handle,
+            resource_state.inner(),
+            event,
+        )
+        .await
+        {
+            Ok(event) => event,
+            Err(error) => {
+                warn!(
+                    request_id = %request_id,
+                    error = %error,
+                    "Failed to prepare preview_file external resources"
+                );
+                return Err(error);
+            }
+        }
+    } else {
+        event
     };
 
     if let Err(e) = app_handle.emit("preview-file-request", &event) {
@@ -902,6 +961,12 @@ pub async fn request_preview_code(
         loading_messages: request.loading_messages,
         interaction_mode,
         metadata: request.metadata,
+        external_resources: None,
+    };
+    let event = if let Some(resource_state) = app_handle.try_state::<PreviewResourceState>() {
+        prepare_preview_code_event(app_handle, resource_state.inner(), event).await?
+    } else {
+        event
     };
 
     let interaction_mode = event.interaction_mode.clone();
@@ -948,11 +1013,29 @@ pub async fn prepare_preview_file_request_for_ui(
     app_handle: AppHandle,
     conversation_id: Option<i64>,
     request: PreviewFileRequest,
-) -> Result<PreviewFileRequest, String> {
+) -> Result<PreviewFileRequestEvent, String> {
     let mut request = request;
     request.validate()?;
     rewrite_local_preview_urls(&app_handle, conversation_id, &mut request.files)?;
-    Ok(request)
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let resolved_view_mode = match request.view_mode.as_deref() {
+        Some("tabs") | Some("list") | Some("grid") => {
+            request.view_mode.unwrap_or_else(|| "tabs".to_string())
+        }
+        _ => "tabs".to_string(),
+    };
+    let event = PreviewFileRequestEvent {
+        request_id,
+        conversation_id,
+        files: request.files,
+        view_mode: resolved_view_mode,
+        metadata: request.metadata,
+        external_resources: None,
+    };
+    let Some(resource_state) = app_handle.try_state::<PreviewResourceState>() else {
+        return Ok(event);
+    };
+    prepare_preview_file_event(&app_handle, resource_state.inner(), event).await
 }
 
 #[tauri::command]

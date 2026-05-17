@@ -10,6 +10,7 @@ use tracing::{debug, error, instrument};
 pub mod agent;
 pub mod interaction;
 pub mod operation;
+pub mod preview_resources;
 pub mod search;
 pub mod superadmin;
 pub mod templates;
@@ -22,6 +23,12 @@ pub use interaction::{
     PREVIEW_FILE_RELAY_SCHEME,
 };
 pub use operation::{OperationHandler, OperationState};
+pub use preview_resources::{
+    authorize_preview_code_external_resource_urls, authorize_preview_external_resources,
+    get_preview_external_resource_policy, prepare_preview_code_request_for_ui,
+    save_preview_external_resource_policy, scan_preview_code_external_resources_for_ui,
+    PreviewResourceState,
+};
 pub use search::SearchHandler;
 pub use templates::{
     add_or_update_aipp_builtin_server, get_builtin_tools_for_command, init_builtin_mcp_servers,
@@ -76,6 +83,48 @@ fn parse_tool_selector(selector: &str) -> (Option<String>, String) {
         }
     }
     (None, trimmed.to_string())
+}
+
+fn should_filter_acp_native_dynamic_tools(
+    app_handle: &AppHandle,
+    conversation_id: Option<i64>,
+) -> bool {
+    let Some(conversation_id) = conversation_id else {
+        return false;
+    };
+
+    crate::db::conversation_db::ConversationDatabase::new(app_handle)
+        .ok()
+        .and_then(|db| db.get_acp_session_id(conversation_id).ok().flatten())
+        .is_some()
+}
+
+fn acp_native_operation_server_ids(
+    db: &MCPDatabase,
+) -> Result<std::collections::HashSet<i64>, String> {
+    let servers = db
+        .get_mcp_servers()
+        .map_err(|e| format!("Failed to load ACP duplicate tool filter: {}", e))?;
+
+    Ok(servers
+        .into_iter()
+        .filter(|server| {
+            server.is_builtin && server.command.as_deref() == Some("aipp:operation")
+        })
+        .map(|server| server.id)
+        .collect())
+}
+
+fn is_acp_native_duplicate_dynamic_tool(
+    operation_server_ids: &std::collections::HashSet<i64>,
+    server_id: i64,
+    tool_name: &str,
+) -> bool {
+    operation_server_ids.contains(&server_id)
+        && matches!(
+            tool_name,
+            "read_file" | "write_file" | "execute_bash" | "get_bash_output"
+        )
 }
 
 fn parse_builtin_parameters(parameters: &str) -> Result<serde_json::Value, String> {
@@ -497,6 +546,14 @@ fn execute_dynamic_mcp_tool(
     let db =
         MCPDatabase::new(app_handle).map_err(|e| format!("Failed to open MCP database: {}", e))?;
     let _ = db.rebuild_dynamic_mcp_catalog();
+    let acp_native_operation_server_ids = if should_filter_acp_native_dynamic_tools(
+        app_handle,
+        conversation_id,
+    ) {
+        acp_native_operation_server_ids(&db)?
+    } else {
+        std::collections::HashSet::new()
+    };
 
     match tool_name {
         "load_mcp_server" => {
@@ -528,9 +585,17 @@ fn execute_dynamic_mcp_tool(
                             && tool.tool_enabled
                             && tool.summary_generated_at.is_some()
                             && tool.server_name != "MCP 动态加载工具"
+                            && !is_acp_native_duplicate_dynamic_tool(
+                                &acp_native_operation_server_ids,
+                                tool.server_id,
+                                &tool.tool_name,
+                            )
                     })
                     .map(|tool| build_dynamic_mcp_server_tool_item(&tool.tool_name, &tool.summary))
                     .collect();
+                if acp_native_operation_server_ids.contains(&server.server_id) && tools.is_empty() {
+                    continue;
+                }
                 matched_servers.push(build_dynamic_mcp_server_item(
                     &server.server_name,
                     &server.summary,
@@ -592,6 +657,13 @@ fn execute_dynamic_mcp_tool(
                         continue;
                     }
                     if tool.server_name == "MCP 动态加载工具" {
+                        continue;
+                    }
+                    if is_acp_native_duplicate_dynamic_tool(
+                        &acp_native_operation_server_ids,
+                        tool.server_id,
+                        &tool.tool_name,
+                    ) {
                         continue;
                     }
                     if let Some(filter) = &server_filter {
@@ -1486,7 +1558,7 @@ pub async fn execute_aipp_builtin_tool(
                 let request: PreviewFileRequest = serde_json::from_value(args.clone())
                     .map_err(|e| format!("Invalid PreviewFile parameters: {}", e))?;
 
-                match emit_preview_file_request(&app_handle, conversation_id, request) {
+                match emit_preview_file_request(&app_handle, conversation_id, request).await {
                     Ok(request_id) => serde_json::json!({
                         "content": [{"type": "json", "json": {"status": "preview_shown", "request_id": request_id}}],
                         "isError": false
@@ -2582,6 +2654,58 @@ mod tests {
         assert!(payload.get("parameters_json").is_none());
         assert!(payload.get("is_auto_run").is_none());
         assert!(payload.get("tool_definition").is_none());
+    }
+
+    #[test]
+    fn acp_native_duplicate_filter_hides_file_and_terminal_overlap() {
+        let operation_server_ids = std::collections::HashSet::from([7]);
+
+        assert!(is_acp_native_duplicate_dynamic_tool(
+            &operation_server_ids,
+            7,
+            "read_file"
+        ));
+        assert!(is_acp_native_duplicate_dynamic_tool(
+            &operation_server_ids,
+            7,
+            "write_file"
+        ));
+        assert!(is_acp_native_duplicate_dynamic_tool(
+            &operation_server_ids,
+            7,
+            "execute_bash"
+        ));
+        assert!(is_acp_native_duplicate_dynamic_tool(
+            &operation_server_ids,
+            7,
+            "get_bash_output"
+        ));
+    }
+
+    #[test]
+    fn acp_native_duplicate_filter_keeps_non_overlapping_tools() {
+        let operation_server_ids = std::collections::HashSet::from([7]);
+
+        assert!(!is_acp_native_duplicate_dynamic_tool(
+            &operation_server_ids,
+            7,
+            "edit_file"
+        ));
+        assert!(!is_acp_native_duplicate_dynamic_tool(
+            &operation_server_ids,
+            7,
+            "list_directory"
+        ));
+        assert!(!is_acp_native_duplicate_dynamic_tool(
+            &operation_server_ids,
+            7,
+            "ask_user_question"
+        ));
+        assert!(!is_acp_native_duplicate_dynamic_tool(
+            &operation_server_ids,
+            8,
+            "read_file"
+        ));
     }
 
     #[test]

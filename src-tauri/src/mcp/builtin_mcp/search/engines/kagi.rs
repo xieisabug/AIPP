@@ -31,8 +31,11 @@ impl KagiEngine {
         vec![
             "._0_SRI".to_string(),
             ".search-result".to_string(),
-            "#main".to_string(),
+            "a.__sri_title_link".to_string(),
+            "a._0_sri_title_link".to_string(),
+            ".__sri-title-box".to_string(),
             ".__sri-title".to_string(),
+            ".__srgi-title a".to_string(),
         ]
     }
 
@@ -219,6 +222,8 @@ mod tests {
         assert!(!selectors.is_empty());
         assert!(selectors.contains(&"._0_SRI".to_string()));
         assert!(selectors.contains(&".search-result".to_string()));
+        assert!(selectors.contains(&"a.__sri_title_link".to_string()));
+        assert!(!selectors.contains(&"#main".to_string()));
     }
 
     // ==================== Parse Search Results Tests ====================

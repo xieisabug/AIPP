@@ -158,7 +158,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
     const feishuAppId = String(form.watch("butler_feishu_app_id") || "");
     const feishuAppSecret = String(form.watch("butler_feishu_app_secret") || "");
     const feishuBaseUrl = String(form.watch("butler_feishu_base_url") || "https://open.feishu.cn");
-    const contextCompactionEnabled = isEnabledValue(form.watch("context_compaction_enabled"));
     const trustAllWorkspaces = isEnabledValue(form.watch("butler_trust_all_workspaces"));
     const [newTrustedPath, setNewTrustedPath] = useState("");
     const [newTrustedDesc, setNewTrustedDesc] = useState("");
@@ -1115,103 +1114,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                         </FormItem>
                                     )}
                                 />
-
-                                {/* ── 上下文压缩配置 ── */}
-                                <div className="space-y-3 pt-3 border-t border-border/50">
-                                    <p className="text-sm font-medium text-muted-foreground">上下文压缩</p>
-
-                                    <Controller
-                                        control={form.control}
-                                        name="context_compaction_enabled"
-                                        render={({ field }) => (
-                                            <FormItem className={toggleCardClassName}>
-                                                <div>
-                                                    <FormLabel className="text-base">自动上下文压缩</FormLabel>
-                                                    <p className="text-sm text-muted-foreground mt-1">
-                                                        当对话上下文接近模型窗口上限时，自动通过 LLM 摘要压缩历史消息。
-                                                    </p>
-                                                </div>
-                                                <FormControl>
-                                                    <Switch
-                                                        checked={isEnabledValue(field.value)}
-                                                        onCheckedChange={field.onChange}
-                                                    />
-                                                </FormControl>
-                                            </FormItem>
-                                        )}
-                                    />
-
-                                    {contextCompactionEnabled && (
-                                        <div className={nestedGroupClassName}>
-                                            <Controller
-                                                control={form.control}
-                                                name="context_max_input_tokens"
-                                                render={({ field }) => (
-                                                    <FormItem>
-                                                        <FormLabel>模型上下文窗口</FormLabel>
-                                                        <FormControl>
-                                                            <Input
-                                                                type="number"
-                                                                value={field.value || "128000"}
-                                                                onChange={field.onChange}
-                                                                placeholder="128000"
-                                                            />
-                                                        </FormControl>
-                                                        <FormDescription>
-                                                            模型的上下文窗口总大小（含输入与输出），系统会自动预留输出空间。
-                                                        </FormDescription>
-                                                    </FormItem>
-                                                )}
-                                            />
-                                            <Controller
-                                                control={form.control}
-                                                name="context_compaction_threshold"
-                                                render={({ field }) => (
-                                                    <FormItem>
-                                                        <FormLabel>压缩触发比例</FormLabel>
-                                                        <FormControl>
-                                                            <Input
-                                                                type="number"
-                                                                step="0.05"
-                                                                min="0.5"
-                                                                max="0.99"
-                                                                value={field.value || "0.80"}
-                                                                onChange={field.onChange}
-                                                                placeholder="0.80"
-                                                            />
-                                                        </FormControl>
-                                                        <FormDescription>
-                                                            当 Token 使用量达到此比例时触发自动压缩（0.5 ~ 0.99）。
-                                                        </FormDescription>
-                                                    </FormItem>
-                                                )}
-                                            />
-                                            <Controller
-                                                control={form.control}
-                                                name="context_tail_ratio"
-                                                render={({ field }) => (
-                                                    <FormItem>
-                                                        <FormLabel>尾部保留比例</FormLabel>
-                                                        <FormControl>
-                                                            <Input
-                                                                type="number"
-                                                                step="0.05"
-                                                                min="0.05"
-                                                                max="0.80"
-                                                                value={field.value || "0.30"}
-                                                                onChange={field.onChange}
-                                                                placeholder="0.30"
-                                                            />
-                                                        </FormControl>
-                                                        <FormDescription>
-                                                            为最近消息保留的上下文预算比例。系统按 Token 从最新消息往前自动计算保留条数，永远不会超出上下文容量（0.05 ~ 0.80）。
-                                                        </FormDescription>
-                                                    </FormItem>
-                                                )}
-                                            />
-                                        </div>
-                                    )}
-                                </div>
 
                                 {/* ── 可信工作区配置 ── */}
                                 <div className="space-y-3 pt-3 border-t border-border/50">

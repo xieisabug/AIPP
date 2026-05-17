@@ -66,6 +66,7 @@ pub fn create_test_db() -> Connection {
             generation_group_id TEXT,
             parent_group_id TEXT,
             tool_calls_json TEXT,
+            metadata_json TEXT,
             first_token_time TEXT,
             ttft_ms INTEGER
         )",
@@ -84,6 +85,22 @@ pub fn create_test_db() -> Connection {
             attachment_hash TEXT,
             use_vector BOOLEAN DEFAULT 0,
             token_count INTEGER
+        )",
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        "CREATE TABLE queued_conversation_message (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL,
+            queue_kind TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued',
+            request_json TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            assistant_id INTEGER NOT NULL,
+            created_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )",
         [],
     )

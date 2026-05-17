@@ -16,7 +16,7 @@ pub struct ReadFileRequest {
 pub struct ReadFileResponse {
     /// 文件路径
     pub file_path: String,
-    /// 文件内容（带行号格式）
+    /// 文件内容
     pub content: String,
     /// 实际读取的起始行号
     pub start_line: usize,
@@ -116,7 +116,7 @@ pub struct ExecuteBashRequest {
     pub command: String,
     /// 命令描述（可选）
     pub description: Option<String>,
-    /// 超时时间（毫秒，可选，默认 120000）
+    /// 超时时间（毫秒，可选，默认 60000）
     pub timeout: Option<u64>,
     /// 是否后台运行（可选，默认 false）
     pub run_in_background: Option<bool>,

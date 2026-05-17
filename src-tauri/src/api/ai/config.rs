@@ -1,5 +1,6 @@
 use crate::db::assistant_db::AssistantModelConfig;
-use genai::chat::ChatOptions;
+use crate::db::system_db::FeatureConfig;
+use genai::chat::{CacheControl, ChatOptions};
 use genai::Client;
 use std::collections::HashMap;
 
@@ -13,8 +14,22 @@ pub struct ChatConfig {
 
 pub struct ConfigBuilder;
 
+#[derive(Debug, Clone)]
+pub struct OpenAiCacheContext {
+    pub provider_id: i64,
+    pub provider_api_type: String,
+    pub model_code: String,
+    pub request_mode: String,
+    pub assistant_id: i64,
+    pub conversation_id: i64,
+}
+
 impl ConfigBuilder {
-    pub fn build_chat_options(config_map: &HashMap<String, String>) -> ChatOptions {
+    pub fn build_chat_options(
+        config_map: &HashMap<String, String>,
+        feature_config_map: Option<&HashMap<String, HashMap<String, FeatureConfig>>>,
+        openai_cache_context: Option<&OpenAiCacheContext>,
+    ) -> ChatOptions {
         let mut chat_options = ChatOptions::default();
         if let Some(temp_str) = config_map.get("temperature") {
             if let Ok(temp) = temp_str.parse::<f64>() {
@@ -35,6 +50,12 @@ impl ConfigBuilder {
             if let Some(effort) = genai::chat::ReasoningEffort::from_keyword(reasoning_str) {
                 chat_options = chat_options.with_reasoning_effort(effort);
             }
+        }
+        if let (Some(feature_config_map), Some(context)) =
+            (feature_config_map, openai_cache_context)
+        {
+            chat_options =
+                apply_openai_prompt_cache_options(chat_options, feature_config_map, context);
         }
         chat_options
     }
@@ -89,6 +110,80 @@ impl ConfigBuilder {
 
         model_config_clone
     }
+}
+
+fn is_openai_like_provider(api_type: &str) -> bool {
+    let api_type = api_type.trim().to_ascii_lowercase();
+    api_type == "openai" || api_type == "openai_api"
+}
+
+fn is_enabled_feature_value(value: Option<&str>, default_value: bool) -> bool {
+    match value.map(str::trim).map(str::to_ascii_lowercase) {
+        Some(value) if value == "false" || value == "0" || value == "off" => false,
+        Some(value) if value == "true" || value == "1" || value == "on" => true,
+        _ => default_value,
+    }
+}
+
+fn network_config_value<'a>(
+    config_feature_map: &'a HashMap<String, HashMap<String, FeatureConfig>>,
+    key: &str,
+) -> Option<&'a str> {
+    config_feature_map
+        .get("network_config")
+        .and_then(|network_config| network_config.get(key))
+        .map(|config| config.value.as_str())
+}
+
+pub fn get_openai_prompt_cache_key_enabled(
+    config_feature_map: &HashMap<String, HashMap<String, FeatureConfig>>,
+) -> bool {
+    is_enabled_feature_value(
+        network_config_value(config_feature_map, "openai_prompt_cache_key_enabled"),
+        true,
+    )
+}
+
+pub fn get_openai_responses_stateful_enabled(
+    config_feature_map: &HashMap<String, HashMap<String, FeatureConfig>>,
+) -> bool {
+    is_enabled_feature_value(
+        network_config_value(config_feature_map, "openai_responses_stateful_enabled"),
+        false,
+    )
+}
+
+pub fn should_use_openai_responses_features(provider_api_type: &str, request_mode: &str) -> bool {
+    is_openai_like_provider(provider_api_type) && request_mode.eq_ignore_ascii_case("responses")
+}
+
+pub fn build_openai_prompt_cache_key(context: &OpenAiCacheContext) -> String {
+    format!(
+        "aipp:{}:{}:{}:{}",
+        context.provider_id, context.model_code, context.assistant_id, context.conversation_id
+    )
+}
+
+fn apply_openai_prompt_cache_options(
+    mut chat_options: ChatOptions,
+    config_feature_map: &HashMap<String, HashMap<String, FeatureConfig>>,
+    context: &OpenAiCacheContext,
+) -> ChatOptions {
+    if !should_use_openai_responses_features(&context.provider_api_type, &context.request_mode)
+        || !get_openai_prompt_cache_key_enabled(config_feature_map)
+    {
+        return chat_options;
+    }
+
+    chat_options = chat_options.with_prompt_cache_key(build_openai_prompt_cache_key(context));
+
+    let retention =
+        network_config_value(config_feature_map, "openai_prompt_cache_retention").unwrap_or("24h");
+    if retention.trim().eq_ignore_ascii_case("24h") {
+        chat_options = chat_options.with_cache_control(CacheControl::Ephemeral24h);
+    }
+
+    chat_options
 }
 
 pub const MAX_RETRY_ATTEMPTS: u32 = 3;

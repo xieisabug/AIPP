@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+pub mod acp_mcp_bridge;
 mod api;
 mod artifacts;
 mod db;
@@ -25,17 +26,19 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 use crate::api::ai::acp::{
-    get_acp_session_state, set_acp_session_config_option, set_acp_session_mode,
-    AcpPermissionState,
+    get_acp_session_state, set_acp_session_config_option, AcpPermissionState,
 };
 use crate::api::ai_api::{
-    ask_ai, cancel_ai, get_activity_focus, get_conversation_runtime_state, get_shine_state,
-    regenerate_ai, regenerate_conversation_title, tool_result_continue_ask_ai,
+    ask_ai, cancel_ai, enqueue_conversation_message, get_activity_focus,
+    get_conversation_runtime_state, get_shine_state, list_queued_conversation_messages,
+    promote_queued_conversation_message, regenerate_ai, regenerate_conversation_title,
+    tool_result_continue_ask_ai,
 };
 use crate::api::assistant_api::{
     add_assistant, add_assistant_workspace, bulk_update_assistant_mcp_tools, copy_assistant,
-    delete_assistant, export_assistant, get_acp_launch_diagnostics, get_acp_working_directory,
-    get_assistant, get_assistant_field_value, get_assistant_mcp_servers_with_tools,
+    delete_assistant, ensure_acp_session_connected, export_assistant, get_acp_launch_diagnostics,
+    get_acp_working_directory, get_assistant, get_assistant_field_value,
+    get_assistant_mcp_servers_with_tools,
     get_assistant_workspaces, get_assistants, import_assistant, remove_assistant_workspace,
     save_assistant, update_assistant_mcp_config, update_assistant_mcp_tool_config,
     update_assistant_model_config_value,
@@ -150,11 +153,16 @@ use crate::db::scheduled_task_db::ScheduledTaskDatabase;
 use crate::db::system_db::SystemDatabase;
 use crate::feishu::FeishuButlerState;
 use crate::mcp::builtin_mcp::{
-    add_or_update_aipp_builtin_server, execute_aipp_builtin_tool,
-    handle_preview_file_relay_request, init_builtin_mcp_servers, list_aipp_builtin_templates,
-    list_preview_code_requests_for_conversation, prepare_preview_file_request_for_ui,
+    add_or_update_aipp_builtin_server, authorize_preview_code_external_resource_urls,
+    authorize_preview_external_resources, execute_aipp_builtin_tool,
+    get_preview_external_resource_policy, handle_preview_file_relay_request,
+    init_builtin_mcp_servers, list_aipp_builtin_templates,
+    list_preview_code_requests_for_conversation, prepare_preview_code_request_for_ui,
+    prepare_preview_file_request_for_ui, save_preview_external_resource_policy,
+    scan_preview_code_external_resources_for_ui,
     submit_ask_user_question_response, submit_preview_code_response, InteractionState,
-    OperationState, PreviewFileRelayState, TodoState, PREVIEW_FILE_RELAY_SCHEME,
+    OperationState, PreviewFileRelayState, PreviewResourceState, TodoState,
+    PREVIEW_FILE_RELAY_SCHEME,
 };
 use crate::mcp::execution_api::{
     continue_with_error, create_mcp_tool_call, execute_mcp_tool_call,
@@ -894,6 +902,7 @@ pub fn run() {
         .manage(TodoState::new())
         .manage(InteractionState::new())
         .manage(PreviewFileRelayState::new())
+        .manage(PreviewResourceState::new())
         .manage(FeishuButlerState::default());
     #[cfg(desktop)]
     let app = app.manage(CopilotLspState::default());
@@ -901,6 +910,9 @@ pub fn run() {
     let app = app
         .invoke_handler(tauri::generate_handler![
             ask_ai,
+            enqueue_conversation_message,
+            list_queued_conversation_messages,
+            promote_queued_conversation_message,
             tool_result_continue_ask_ai,
             regenerate_ai,
             get_activity_focus,
@@ -957,8 +969,8 @@ pub fn run() {
             get_assistant,
             get_assistant_field_value,
             get_acp_working_directory,
+            ensure_acp_session_connected,
             get_acp_session_state,
-            set_acp_session_mode,
             set_acp_session_config_option,
             save_assistant,
             add_assistant,
@@ -1109,7 +1121,13 @@ pub fn run() {
             list_aipp_builtin_templates,
             add_or_update_aipp_builtin_server,
             execute_aipp_builtin_tool,
+            prepare_preview_code_request_for_ui,
+            scan_preview_code_external_resources_for_ui,
             prepare_preview_file_request_for_ui,
+            authorize_preview_code_external_resource_urls,
+            authorize_preview_external_resources,
+            get_preview_external_resource_policy,
+            save_preview_external_resource_policy,
             list_preview_code_requests_for_conversation,
             submit_ask_user_question_response,
             submit_preview_code_response,

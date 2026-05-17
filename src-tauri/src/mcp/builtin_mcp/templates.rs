@@ -78,7 +78,68 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
             description: "内置的 UI 交互工具集，用于向用户提问和展示文件预览。".into(),
             command: "aipp:ui_interaction".into(),
             transport_type: "stdio".into(),
-            required_envs: vec![],
+            required_envs: vec![
+                BuiltinTemplateEnvVar {
+                    key: "PREVIEW_EXTERNAL_RESOURCES_ENABLED".into(),
+                    label: "预览外部资源白名单".into(),
+                    required: false,
+                    tip: Some("启用后，符合白名单规则的 HTTPS 外部资源可自动通过本地 preview relay 加载；关闭后仍会提示用户手动授权。".into()),
+                    field_type: "boolean".into(),
+                    default_value: Some("true".into()),
+                    placeholder: None,
+                    options: None,
+                },
+                BuiltinTemplateEnvVar {
+                    key: "PREVIEW_REQUEST_TIMEOUT_SECS".into(),
+                    label: "预览资源下载超时".into(),
+                    required: false,
+                    tip: Some("单个外部资源下载的超时时间（秒）。普通加载会先直连，直连超时后尝试全局 network_proxy；“使用代理加载”会直接使用全局 network_proxy。".into()),
+                    field_type: "number".into(),
+                    default_value: Some("30".into()),
+                    placeholder: Some("30".into()),
+                    options: None,
+                },
+                BuiltinTemplateEnvVar {
+                    key: "PREVIEW_MAX_RESOURCE_BYTES".into(),
+                    label: "预览资源大小上限".into(),
+                    required: false,
+                    tip: Some("单个外部资源允许下载的最大字节数，默认 20971520（20MB）。".into()),
+                    field_type: "number".into(),
+                    default_value: Some("20971520".into()),
+                    placeholder: Some("20971520".into()),
+                    options: None,
+                },
+                BuiltinTemplateEnvVar {
+                    key: "PREVIEW_CACHE_TTL_SECS".into(),
+                    label: "预览资源缓存 TTL".into(),
+                    required: false,
+                    tip: Some("外部资源缓存有效期（秒），默认 600。".into()),
+                    field_type: "number".into(),
+                    default_value: Some("600".into()),
+                    placeholder: Some("600".into()),
+                    options: None,
+                },
+                BuiltinTemplateEnvVar {
+                    key: "PREVIEW_ALLOWED_DOMAINS_JSON".into(),
+                    label: "预览资源白名单域名".into(),
+                    required: false,
+                    tip: Some("白名单规则 JSON 数组。只对 HTTPS 自动加载生效，types 可填 image/css/script/font/pdf/html/text/markdown/media。".into()),
+                    field_type: "textarea".into(),
+                    default_value: Some(r#"[]"#.into()),
+                    placeholder: Some(r#"[{"domain":"cdn.jsdelivr.net","includeSubdomains":false,"types":["script","css"],"autoLoad":true}]"#.into()),
+                    options: None,
+                },
+                BuiltinTemplateEnvVar {
+                    key: "PREVIEW_EXTERNAL_RESOURCE_POLICY".into(),
+                    label: "预览资源完整策略 JSON".into(),
+                    required: false,
+                    tip: Some("可选。填写完整 policy JSON 时会覆盖 feature_config 中的 preview_external_resources.policy；随后上方的白名单和限制字段会继续覆盖对应部分。".into()),
+                    field_type: "textarea".into(),
+                    default_value: None,
+                    placeholder: Some(r#"{"allowedDomains":[],"limits":{"maxResourceBytes":20971520,"requestTimeoutSecs":30,"cacheTtlSecs":600}}"#.into()),
+                    options: None,
+                },
+            ],
             default_timeout: Some(30000),
         },
         // 搜索工具
@@ -264,10 +325,10 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
                     key: "COMMAND_TIMEOUT_MS".into(),
                     label: "命令超时时间".into(),
                     required: false,
-                    tip: Some("命令执行的默认超时时间（毫秒），默认 120000（2分钟），最大 600000（10分钟）".into()),
+                    tip: Some("命令执行的默认超时时间（毫秒），默认 60000（60秒）".into()),
                     field_type: "number".into(),
-                    default_value: Some("120000".into()),
-                    placeholder: Some("120000".into()),
+                    default_value: Some("60000".into()),
+                    placeholder: Some("60000".into()),
                     options: None,
                 },
             ],
@@ -881,7 +942,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
         Some("operation") => vec![
             BuiltinToolInfo {
                 name: "read_file".into(),
-                description: "读取文件内容。支持部分读取（通过 offset 和 limit 参数）。返回带行号的内容（类似 cat -n 格式）。必须使用绝对路径。".into(),
+                description: "读取文件内容。支持部分读取（通过 offset 和 limit 参数）。返回文件内容，不额外添加行号。必须使用绝对路径。".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -971,7 +1032,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "execute_bash".into(),
-                description: "执行 Shell 命令。根据操作系统自动选择 Shell（macOS/Linux: zsh/bash, Windows: PowerShell）。默认超时 2 分钟，最长 10 分钟。对于长时间运行的命令（如服务器、watch 模式），请设置 run_in_background=true，然后使用 get_bash_output 获取输出。".into(),
+                description: "执行 Shell 命令。根据操作系统自动选择 Shell（macOS/Linux: zsh/bash, Windows: PowerShell）。默认超时 60 秒；如果设置 timeout 参数，则按参数值执行。对于长时间运行的命令（如服务器、watch 模式），请设置 run_in_background=true，然后使用 get_bash_output 获取输出。".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -985,7 +1046,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "timeout": {
                             "type": "number",
-                            "description": "超时时间（毫秒），默认 120000，最大 600000"
+                            "description": "超时时间（毫秒），默认 60000；设置后按该参数值执行"
                         },
                         "run_in_background": {
                             "type": "boolean",
@@ -1517,6 +1578,26 @@ mod tests {
     fn test_get_tools_for_ui_interaction_command() {
         let tools = get_builtin_tools_for_command("aipp:ui_interaction");
         assert_eq!(tools.len(), 2, "UI interaction command should have 2 tools");
+    }
+
+    #[test]
+    fn test_ui_interaction_template_has_preview_resource_env_vars() {
+        let templates = builtin_templates();
+        let ui_interaction = templates.iter().find(|t| t.id == "ui_interaction").unwrap();
+
+        let timeout_env = ui_interaction
+            .required_envs
+            .iter()
+            .find(|env| env.key == "PREVIEW_REQUEST_TIMEOUT_SECS");
+        assert!(timeout_env.is_some(), "preview resource timeout env should exist");
+        assert_eq!(timeout_env.unwrap().default_value, Some("30".into()));
+
+        let whitelist_env = ui_interaction
+            .required_envs
+            .iter()
+            .find(|env| env.key == "PREVIEW_ALLOWED_DOMAINS_JSON");
+        assert!(whitelist_env.is_some(), "preview resource whitelist env should exist");
+        assert_eq!(whitelist_env.unwrap().field_type, "textarea");
     }
 
     #[test]

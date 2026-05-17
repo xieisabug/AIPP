@@ -7,18 +7,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 
-interface CustomHeader {
-    key: string;
-    value: string;
-}
-
 interface NetworkConfigFormProps {
     form: UseFormReturn<any>;
     onSave: () => Promise<void>;
 }
 
 export const NetworkConfigForm: React.FC<NetworkConfigFormProps> = ({ form, onSave }) => {
-    const { featureConfig, saveFeatureConfig } = useFeatureConfig();
+    const { featureConfig } = useFeatureConfig();
 
     // 使用 useFieldArray 管理 custom_headers 数组字段
     const { fields, append, remove } = useFieldArray({
@@ -45,23 +40,11 @@ export const NetworkConfigForm: React.FC<NetworkConfigFormProps> = ({ form, onSa
     const handleSaveNetwork = useCallback(async () => {
         try {
             await onSave();
-
-            // 保存自定义 headers
-            const customHeaders = form.getValues("custom_headers") || [];
-            const headersMap: Record<string, string> = {};
-            customHeaders.forEach(({ key, value }: CustomHeader) => {
-                if (key.trim()) {
-                    headersMap[key.trim()] = value;
-                }
-            });
-
-            await saveFeatureConfig("network_config", { custom_headers: JSON.stringify(headersMap) });
-
             toast.success("网络配置保存成功");
         } catch (e) {
             toast.error("保存网络配置失败: " + e);
         }
-    }, [onSave, form, saveFeatureConfig]);
+    }, [onSave]);
 
     // 使用 useCallback 包装渲染函数，确保函数引用稳定
     const renderCustomHeaders = useCallback(() => {
@@ -141,6 +124,32 @@ export const NetworkConfigForm: React.FC<NetworkConfigFormProps> = ({ form, onSa
                 label: "网络代理",
                 placeholder: "http://127.0.0.1:7890",
                 description: "支持 http、https 和 socks 协议，例如：http://127.0.0.1:7890",
+            },
+        },
+        {
+            key: "openai_prompt_cache_key_enabled",
+            config: {
+                type: "switch" as const,
+                label: "OpenAI Responses Prompt Cache Key",
+                description: "仅对 OpenAI / OpenAI API 且 request mode 为 Responses 的模型生效，默认开启",
+            },
+        },
+        {
+            key: "openai_prompt_cache_retention",
+            config: {
+                type: "select" as const,
+                label: "OpenAI Prompt Cache Retention",
+                description: "当前支持 24h；关闭上方开关后不会发送 cache 参数",
+                options: [{ value: "24h", label: "24h" }],
+            },
+        },
+        {
+            key: "openai_responses_stateful_enabled",
+            config: {
+                type: "switch" as const,
+                label: "OpenAI Responses Stateful Session",
+                description:
+                    "仅在关闭 Prompt Cache Key 时使用 previous_response_id/store 增量续接；缓存开启时优先发送完整历史以稳定命中缓存",
             },
         },
         {

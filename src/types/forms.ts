@@ -23,6 +23,7 @@ export interface FieldConfig {
 
 export type FieldType =
     | "input"
+    | "folder-picker"
     | "textarea"
     | "select"
     | "checkbox"

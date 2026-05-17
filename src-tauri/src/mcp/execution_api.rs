@@ -13,6 +13,7 @@ use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
 use crate::api::ai_api::{
     batch_tool_result_continue_ask_ai_impl, sanitize_tool_name, tool_result_continue_ask_ai_impl,
 };
+use crate::db::assistant_db::AssistantDatabase;
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::{ConversationLoadedMCPTool, MCPDatabase, MCPServer, MCPToolCall};
 use crate::mcp::builtin_mcp::{execute_aipp_builtin_tool, is_builtin_mcp_call};
@@ -72,6 +73,42 @@ fn pick_continuation_window(app_handle: &tauri::AppHandle) -> Option<tauri::Wind
 
 fn pending_batch_continuation_registry() -> &'static PendingBatchContinuationRegistry {
     PENDING_BATCH_CONTINUATIONS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+fn is_acp_assistant(app_handle: &tauri::AppHandle, assistant_id: i64) -> Result<bool> {
+    let assistant_db = AssistantDatabase::new(app_handle).context("初始化助手数据库失败")?;
+    let assistant = assistant_db
+        .get_assistant(assistant_id)
+        .map_err(|e| anyhow!("获取助手信息失败: {}", e))?;
+    Ok(assistant.assistant_type == Some(4))
+}
+
+fn is_acp_tool_call_record(
+    app_handle: &tauri::AppHandle,
+    tool_call: &MCPToolCall,
+) -> Result<bool> {
+    if tool_call.llm_call_id.is_none() {
+        return Ok(false);
+    }
+
+    let conversation_db = ConversationDatabase::new(app_handle).context("初始化对话数据库失败")?;
+    let conversation = conversation_db
+        .conversation_repo()
+        .map_err(|e| anyhow!("获取对话仓库失败: {}", e))?
+        .read(tool_call.conversation_id)
+        .map_err(|e| anyhow!("获取对话信息失败: {}", e))?
+        .ok_or_else(|| anyhow!("未找到对话"))?;
+    let Some(assistant_id) = conversation.assistant_id else {
+        return Ok(false);
+    };
+
+    is_acp_assistant(app_handle, assistant_id)
+}
+
+async fn clear_conversation_focus(app_handle: &tauri::AppHandle, conversation_id: i64) {
+    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+        activity_manager.clear_focus(app_handle, conversation_id).await;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1478,6 +1515,12 @@ pub async fn execute_mcp_tool_call(
         db.get_mcp_tool_call(call_id).map_err(|e| format!("获取工具调用信息失败: {}", e))?;
     debug!(tool_call_name=%tool_call.tool_name, tool_call_server=%tool_call.server_name, tool_call_params=%tool_call.parameters, "准备调用的mcp工具");
 
+    if is_acp_tool_call_record(&app_handle, &tool_call).map_err(|e| e.to_string())? {
+        return Err(
+            "ACP Agent 的工具调用由 ACP 会话处理，不能通过 AIPP MCP 卡片执行或续写".to_string(),
+        );
+    }
+
     // 验证工具调用状态
     let is_retry = validate_tool_call_execution(&tool_call).map_err(|e| e.to_string())?;
     debug!(retry=?is_retry, status=%tool_call.status, "validated tool call status");
@@ -2075,6 +2118,16 @@ async fn trigger_conversation_continuation(
 
     let assistant_id = conversation.assistant_id.ok_or_else(|| anyhow!("对话未关联助手"))?;
 
+    if is_acp_assistant(app_handle, assistant_id)? {
+        info!(
+            conversation_id = tool_call.conversation_id,
+            call_id = tool_call.id,
+            "ACP conversation owns tool-call continuation; skipping generic MCP continuation"
+        );
+        clear_conversation_focus(app_handle, tool_call.conversation_id).await;
+        return Ok(());
+    }
+
     // 使用数据库中保存的 llm_call_id（若存在），否则退回到兼容格式
     let tool_call_id =
         tool_call.llm_call_id.clone().unwrap_or_else(|| format!("mcp_tool_call_{}", tool_call.id));
@@ -2176,6 +2229,16 @@ async fn trigger_conversation_continuation_with_error(
         .ok_or_else(|| anyhow!("未找到对话"))?;
 
     let assistant_id = conversation.assistant_id.ok_or_else(|| anyhow!("对话未关联助手"))?;
+
+    if is_acp_assistant(app_handle, assistant_id)? {
+        info!(
+            conversation_id = tool_call.conversation_id,
+            call_id = tool_call.id,
+            "ACP conversation owns tool-call error continuation; skipping generic MCP continuation"
+        );
+        clear_conversation_focus(app_handle, tool_call.conversation_id).await;
+        return Ok(());
+    }
 
     // 使用数据库中保存的 llm_call_id（若存在），否则退回到兼容格式
     let tool_call_id =
@@ -2281,6 +2344,17 @@ async fn run_batch_continuation_once(
     anchor_message_id: Option<i64>,
 ) -> Result<()> {
     let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+
+    if is_acp_assistant(&app_handle, assistant_id)? {
+        info!(
+            conversation_id,
+            tool_count,
+            "ACP conversation owns batch tool-call continuation; skipping generic MCP continuation"
+        );
+        clear_conversation_focus(&app_handle, conversation_id).await;
+        return Ok(());
+    }
+
     mark_continuation_running_on_message(&app_handle, conversation_id, anchor_message_id).await;
     match batch_tool_result_continue_ask_ai_impl(
         app_handle.clone(),
@@ -2669,9 +2743,10 @@ async fn execute_builtin_tool(
     let command = server.command.clone().unwrap_or_default();
     // 获取超时配置，使用服务器配置的超时或默认值
     let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
-    // UI 交互工具需要等待用户操作，不应受超时限制。
-    let wait_indefinitely = command == "aipp:ui_interaction"
-        && matches!(tool_name, "ask_user_question" | "preview_code");
+    // 部分内置工具有自己的等待/超时语义，不应被 MCP server 的外层超时抢先截断。
+    let skip_outer_timeout = (command == "aipp:ui_interaction"
+        && matches!(tool_name, "ask_user_question" | "preview_code"))
+        || (command == "aipp:operation" && tool_name == "execute_bash");
     let start = std::time::Instant::now();
 
     // 验证是否为内置工具调用
@@ -2684,7 +2759,7 @@ async fn execute_builtin_tool(
         command = %command,
         tool_name = %tool_name,
         timeout_ms,
-        wait_indefinitely,
+        skip_outer_timeout,
         "Executing builtin MCP tool"
     );
 
@@ -2700,8 +2775,8 @@ async fn execute_builtin_tool(
         .await
     };
 
-    // 使用 select! 同时监听取消信号；ask_user_question 不做超时限制。
-    let raw: String = if wait_indefinitely {
+    // 使用 select! 同时监听取消信号；需要自管等待/超时的工具不套外层超时。
+    let raw: String = if skip_outer_timeout {
         tokio::select! {
             _ = cancel_token.cancelled() => {
                 return Err(anyhow!("Cancelled by user"));

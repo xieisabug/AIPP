@@ -9,6 +9,7 @@ import React, {
 
 import { applyScrollHighlight } from "./scrollHighlight";
 import {
+    VIRTUAL_OVERSCAN_PX,
     buildVirtualizedLayout,
     findVisibleRange,
     getCenteredScrollTopForIndex,
@@ -162,9 +163,13 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
         () => buildVirtualizedLayout(virtualizedItems, measuredHeights),
         [virtualizedItems, measuredHeights],
     );
+    const overscanPx = useMemo(
+        () => Math.max(VIRTUAL_OVERSCAN_PX, viewportHeight * 6),
+        [viewportHeight],
+    );
     const visibleRange = useMemo(
-        () => findVisibleRange(layout, scrollTop, viewportHeight),
-        [layout, scrollTop, viewportHeight],
+        () => findVisibleRange(layout, scrollTop, viewportHeight, overscanPx),
+        [layout, overscanPx, scrollTop, viewportHeight],
     );
     const visibleItems = useMemo(() => {
         return virtualizedItems.slice(

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Badge } from "@/components/ui/badge";
@@ -18,6 +18,14 @@ import {
 import { createPreviewCodeRuntime } from "@/utils/previewCodeRuntime";
 import { CheckCircle, Loader2, Sparkles, XCircle } from "lucide-react";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
+import PreviewExternalResourcesDialog from "@/components/PreviewExternalResourcesDialog";
+import {
+    hasActionablePreviewResources,
+    PreviewExternalResource,
+    PreviewExternalResourcesPayload,
+    PreviewExternalResourceType,
+    PreviewResourceAuthorizationResult,
+} from "@/utils/previewExternalResources";
 
 interface InlineCodePreviewCardProps {
     parameters: string;
@@ -40,6 +48,273 @@ type DisplayState =
     | "failed"
     | "idle";
 
+function hasRawExternalPreviewResources(code?: string) {
+    if (!code) {
+        return false;
+    }
+    return /<(img|script|link|video|audio|source|iframe|object|embed|image)\b[^>]*(src|href|data|srcset|xlink:href)\s*=\s*["']?\s*(https?:\/\/|file:|\/)/i.test(code)
+        || /(?:url\(|@import\s+(?:url\()?)\s*["']?\s*(https?:\/\/|file:|\/)/i.test(code);
+}
+
+function isRawExternalPreviewUrl(rawUrl: string) {
+    return /^(https?:\/\/|file:|\/)/i.test(rawUrl.trim());
+}
+
+function getClientPreviewPlaceholder(type: PreviewExternalResourceType) {
+    switch (type) {
+        case "image":
+            return "data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22/%3E";
+        case "css":
+            return "data:text/css,";
+        case "script":
+            return "data:text/javascript,";
+        case "font":
+            return "data:font/woff2;base64,";
+        case "pdf":
+        case "html":
+            return "about:blank";
+        case "media":
+        case "text":
+        case "markdown":
+        case "unknown":
+        default:
+            return "";
+    }
+}
+
+function rewriteClientPreviewCss(css: string) {
+    return css
+        .replace(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^'")\s][^)]*?))\s*\)/gi, (_match, doubleQuoted, singleQuoted, unquoted) => {
+            const rawUrl = String(doubleQuoted ?? singleQuoted ?? unquoted ?? "").trim();
+            if (!rawUrl || !isRawExternalPreviewUrl(rawUrl)) {
+                return _match;
+            }
+            return 'url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22/%3E")';
+        })
+        .replace(/@import\s+(?:url\(\s*)?(?:"([^"]*)"|'([^']*)'|([^\s"'()]+))\s*\)?/gi, (_match, doubleQuoted, singleQuoted, unquoted) => {
+            const rawUrl = String(doubleQuoted ?? singleQuoted ?? unquoted ?? "").trim();
+            if (!rawUrl || !isRawExternalPreviewUrl(rawUrl)) {
+                return _match;
+            }
+            return '@import url("data:text/css,")';
+        });
+}
+
+function sanitizeClientPreviewCode(code: string) {
+    const template = document.createElement("template");
+    template.innerHTML = code;
+
+    template.content.querySelectorAll("style").forEach((style) => {
+        style.textContent = rewriteClientPreviewCss(style.textContent ?? "");
+    });
+
+    template.content.querySelectorAll("[style]").forEach((element) => {
+        const styleValue = element.getAttribute("style");
+        if (!styleValue) {
+            return;
+        }
+        element.setAttribute("style", rewriteClientPreviewCss(styleValue));
+    });
+
+    template.content.querySelectorAll("img, image, script, link, video, audio, source, iframe, object, embed").forEach((element) => {
+        const tagName = element.tagName.toLowerCase();
+        const resourceType: PreviewExternalResourceType =
+            tagName === "img" || tagName === "image"
+                ? "image"
+                : tagName === "script"
+                  ? "script"
+                  : tagName === "link"
+                    ? "css"
+                    : tagName === "iframe" || tagName === "object" || tagName === "embed"
+                      ? "html"
+                      : tagName === "video" || tagName === "audio" || tagName === "source"
+                        ? "media"
+                        : "unknown";
+        const placeholder = getClientPreviewPlaceholder(resourceType);
+        for (const attrName of ["src", "href", "data"]) {
+            const rawValue = element.getAttribute(attrName);
+            if (!rawValue || !isRawExternalPreviewUrl(rawValue)) {
+                continue;
+            }
+            element.setAttribute(attrName, placeholder);
+        }
+        const srcset = element.getAttribute("srcset");
+        if (srcset) {
+            const rewritten = srcset
+                .split(",")
+                .map((entry) => {
+                    const trimmed = entry.trim();
+                    if (!trimmed) {
+                        return trimmed;
+                    }
+                    const [rawUrl, ...descriptorParts] = trimmed.split(/\s+/);
+                    if (!rawUrl || !isRawExternalPreviewUrl(rawUrl)) {
+                        return trimmed;
+                    }
+                    const descriptor = descriptorParts.join(" ");
+                    return descriptor ? `${getClientPreviewPlaceholder("image")} ${descriptor}` : getClientPreviewPlaceholder("image");
+                })
+                .filter(Boolean)
+                .join(", ");
+            element.setAttribute("srcset", rewritten);
+        }
+    });
+
+    return template.innerHTML;
+}
+
+function normalizePreviewResourceUrl(rawUrl: string) {
+    try {
+        return new URL(rawUrl).toString();
+    } catch {
+        return rawUrl;
+    }
+}
+
+function inferPreviewResourceType(
+    rawUrl: string,
+    fallback: PreviewExternalResourceType
+): PreviewExternalResourceType {
+    const path = rawUrl.split(/[?#]/, 1)[0]?.toLowerCase() ?? "";
+    if (/\.(png|jpe?g|gif|webp|avif|svg|bmp|ico)$/.test(path)) {
+        return "image";
+    }
+    if (/\.(css)$/.test(path)) {
+        return "css";
+    }
+    if (/\.(js|mjs|cjs)$/.test(path)) {
+        return "script";
+    }
+    if (/\.(woff2?|ttf|otf|eot)$/.test(path)) {
+        return "font";
+    }
+    if (/\.(mp4|webm|ogg|mp3|wav|m4a)$/.test(path)) {
+        return "media";
+    }
+    if (/\.(pdf)$/.test(path)) {
+        return "pdf";
+    }
+    if (/\.(html?|xhtml)$/.test(path)) {
+        return "html";
+    }
+    return fallback;
+}
+
+function buildClientDetectedExternalResources(code?: string): PreviewExternalResourcesPayload | null {
+    if (!code) {
+        return null;
+    }
+    const candidates: Array<{
+        url: string;
+        type: PreviewExternalResourceType;
+        occurrence: string;
+    }> = [];
+    const pushCandidate = (
+        url: string,
+        type: PreviewExternalResourceType,
+        occurrence: string
+    ) => {
+        const trimmed = url.trim();
+        if (!/^(https?:\/\/|file:|\/)/i.test(trimmed)) {
+            return;
+        }
+        candidates.push({
+            url: trimmed,
+            type: inferPreviewResourceType(trimmed, type),
+            occurrence,
+        });
+    };
+
+    const tagRegex = /<(img|script|link|video|audio|source|iframe|object|embed|image)\b[^>]*>/gi;
+    const attrRegex = /\b(srcset|src|href|data|xlink:href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))/gi;
+    let tagMatch: RegExpExecArray | null;
+    while ((tagMatch = tagRegex.exec(code)) !== null) {
+        const tag = tagMatch[0];
+        const tagName = tagMatch[1].toLowerCase();
+        const lowerTag = tag.toLowerCase();
+        const fallback: PreviewExternalResourceType =
+            tagName === "img" || tagName === "image"
+                ? "image"
+                : tagName === "script"
+                  ? "script"
+                  : tagName === "link" && lowerTag.includes("stylesheet")
+                    ? "css"
+                    : tagName === "video" || tagName === "audio" || tagName === "source"
+                      ? "media"
+                      : tagName === "iframe" || tagName === "object" || tagName === "embed"
+                        ? "html"
+                        : "unknown";
+        if (fallback === "unknown") {
+            continue;
+        }
+        attrRegex.lastIndex = 0;
+        let attrMatch: RegExpExecArray | null;
+        while ((attrMatch = attrRegex.exec(tag)) !== null) {
+            const attrName = attrMatch[1].toLowerCase();
+            const rawValue = attrMatch[2] ?? attrMatch[3] ?? attrMatch[4];
+            if (!rawValue) {
+                continue;
+            }
+            if (attrName === "srcset") {
+                rawValue.split(",").forEach((entry) => {
+                    const [url] = entry.trim().split(/\s+/);
+                    if (url) {
+                        pushCandidate(url, fallback, `${tagName} srcset`);
+                    }
+                });
+            } else {
+                pushCandidate(rawValue, fallback, `${tagName} ${attrName}`);
+            }
+        }
+    }
+
+    const cssUrlRegex = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
+    const cssImportRegex = /@import\s+(?:url\(\s*)?(?:"([^"]*)"|'([^']*)'|([^\s"'()]+))\s*\)?/gi;
+    let cssMatch: RegExpExecArray | null;
+    while ((cssMatch = cssUrlRegex.exec(code)) !== null) {
+        pushCandidate(cssMatch[2], "image", "css url");
+    }
+    while ((cssMatch = cssImportRegex.exec(code)) !== null) {
+        const rawUrl = cssMatch[2] ?? cssMatch[3] ?? cssMatch[4];
+        if (rawUrl) {
+            pushCandidate(rawUrl, "css", "css import");
+        }
+    }
+
+    const seen = new Set<string>();
+    const resources = candidates
+        .filter((candidate) => {
+            const key = `${candidate.type}\n${candidate.url}`;
+            if (seen.has(key)) {
+                return false;
+            }
+            seen.add(key);
+            return true;
+        })
+        .map((candidate, index) => ({
+            id: `client-detected-${index}`,
+            originalUrl: candidate.url,
+            normalizedUrl: normalizePreviewResourceUrl(candidate.url),
+            type: candidate.type,
+            source: "preview_code",
+            occurrence: candidate.occurrence,
+            status: "pending" as const,
+            risk:
+                candidate.type === "script" || candidate.type === "html"
+                    ? ("high" as const)
+                    : candidate.type === "css"
+                      ? ("medium" as const)
+                      : ("low" as const),
+        }));
+
+    return resources.length > 0
+        ? {
+              requestId: "client-detected-preview-resources",
+              resources,
+          }
+        : null;
+}
+
 export default function InlineCodePreviewCard({
     parameters,
     llmCallId,
@@ -58,6 +333,11 @@ export default function InlineCodePreviewCard({
     const [persistedToolCall, setPersistedToolCall] = useState<MCPToolCall | null>(null);
     const [runtimeError, setRuntimeError] = useState<string | null>(null);
     const [interactionError, setInteractionError] = useState<string | null>(null);
+    const [preparedPreviewRequest, setPreparedPreviewRequest] =
+        useState<PreviewCodeRequestEvent | null>(null);
+    const [clientDetectedExternalResources, setClientDetectedExternalResources] =
+        useState<PreviewExternalResourcesPayload | null>(null);
+    const [isResourceDialogOpen, setIsResourceDialogOpen] = useState(false);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [isCollapsed, setIsCollapsed] = useState(!isLastMessage && !isStreaming);
     const [isHidden, setIsHidden] = useState(false);
@@ -198,27 +478,28 @@ export default function InlineCodePreviewCard({
         };
     }, []);
 
-    const previewRequest = useMemo(() => {
+    const rawPreviewRequest = useMemo(() => {
         if (isStreaming && activeStreamingPreviewState) {
             return activeStreamingPreviewState;
         }
         return parsePreviewCodeRequestLoose(effectiveParameters);
     }, [activeStreamingPreviewState, effectiveParameters, isStreaming]);
+    const previewRequest = preparedPreviewRequest ?? rawPreviewRequest;
     const requestSignature = useMemo(
         () =>
             isStreaming
                 ? null
                 : buildPreviewCodeSignature(
-                      previewRequest
+                          rawPreviewRequest
                           ? {
-                                title: previewRequest.title,
-                                renderer: previewRequest.renderer,
-                                code: previewRequest.code,
-                                interactionMode: previewRequest.interactionMode,
+                                title: rawPreviewRequest.title,
+                                renderer: rawPreviewRequest.renderer,
+                                code: rawPreviewRequest.code,
+                                interactionMode: rawPreviewRequest.interactionMode,
                             }
                           : null
                   ),
-        [isStreaming, previewRequest]
+        [isStreaming, rawPreviewRequest]
     );
     const hasScriptContent = useMemo(() => {
         if (activeStreamingPreviewState) {
@@ -296,6 +577,8 @@ export default function InlineCodePreviewCard({
     useEffect(() => {
         const defaultCollapsed = !isLastMessage && !isStreaming;
         setResolvedRequestId(null);
+        setPreparedPreviewRequest(null);
+        setClientDetectedExternalResources(null);
         setOptimisticResult(null);
         setInteractionError(null);
         setRuntimeError(null);
@@ -303,6 +586,66 @@ export default function InlineCodePreviewCard({
         setIsHidden(false);
         setIsRuntimeActivated(isStreaming || !defaultCollapsed);
     }, [conversationId, hasScriptContent, isLastMessage, isStreaming, requestSignature]);
+
+    const authorizeSelectedPreviewResources = useCallback(
+        async (
+            selectedResourceIds: string[],
+            options: { addToWhitelist: boolean; useProxy: boolean }
+        ) => {
+            let resourcesPayload = previewRequest?.externalResources ?? null;
+            let resourceIds = selectedResourceIds;
+
+            if (!resourcesPayload || resourcesPayload.requestId === "client-detected-preview-resources") {
+                const selectedClientResources =
+                    clientDetectedExternalResources?.resources.filter((resource) =>
+                        selectedResourceIds.includes(resource.id)
+                    ) ?? [];
+                if (!rawPreviewRequest || selectedClientResources.length === 0) {
+                    throw new Error("没有可加载的外部资源。");
+                }
+                return invoke<PreviewResourceAuthorizationResult<PreviewCodeRequestEvent, unknown>>(
+                    "authorize_preview_code_external_resource_urls",
+                    {
+                        conversationId,
+                        conversation_id: conversationId,
+                        request: rawPreviewRequest,
+                        resources: selectedClientResources.map((resource: PreviewExternalResource) => ({
+                            originalUrl: resource.originalUrl,
+                            original_url: resource.originalUrl,
+                            normalizedUrl: resource.normalizedUrl,
+                            normalized_url: resource.normalizedUrl,
+                            type: resource.type,
+                            occurrence: resource.occurrence,
+                        })),
+                        addToWhitelist: options.addToWhitelist,
+                        add_to_whitelist: options.addToWhitelist,
+                        useProxy: options.useProxy,
+                        use_proxy: options.useProxy,
+                    }
+                );
+            }
+
+            return invoke<PreviewResourceAuthorizationResult<PreviewCodeRequestEvent, unknown>>(
+                "authorize_preview_external_resources",
+                {
+                    requestId: resourcesPayload.requestId,
+                    request_id: resourcesPayload.requestId,
+                    resourceIds,
+                    resource_ids: resourceIds,
+                    addToWhitelist: options.addToWhitelist,
+                    add_to_whitelist: options.addToWhitelist,
+                    useProxy: options.useProxy,
+                    use_proxy: options.useProxy,
+                }
+            );
+        },
+        [
+            clientDetectedExternalResources,
+            conversationId,
+            previewRequest?.externalResources,
+            rawPreviewRequest,
+        ]
+    );
 
     useEffect(() => {
         if (!effectiveCallId) {
@@ -346,10 +689,17 @@ export default function InlineCodePreviewCard({
                         code: event.code,
                         interactionMode: event.interactionMode,
                     });
-                    return signature === requestSignature;
+                    return signature === requestSignature
+                        || (
+                            rawPreviewRequest
+                            && event.title === rawPreviewRequest.title
+                            && event.renderer === rawPreviewRequest.renderer
+                            && event.interactionMode === rawPreviewRequest.interactionMode
+                        );
                 });
                 if (matched) {
                     setResolvedRequestId(matched.request_id);
+                    setPreparedPreviewRequest(matched);
                 }
             })
             .catch((error) => {
@@ -361,7 +711,7 @@ export default function InlineCodePreviewCard({
         return () => {
             active = false;
         };
-    }, [conversationId, requestSignature]);
+    }, [conversationId, rawPreviewRequest, requestSignature]);
 
     useEffect(() => {
         if (!conversationId || !requestSignature) {
@@ -383,15 +733,24 @@ export default function InlineCodePreviewCard({
                 code: payload.code,
                 interactionMode: payload.interactionMode,
             });
-            if (signature === requestSignature) {
+            if (
+                signature === requestSignature
+                || (
+                    rawPreviewRequest
+                    && payload.title === rawPreviewRequest.title
+                    && payload.renderer === rawPreviewRequest.renderer
+                    && payload.interactionMode === rawPreviewRequest.interactionMode
+                )
+            ) {
                 setResolvedRequestId(payload.request_id);
+                setPreparedPreviewRequest(payload);
             }
         });
 
         return () => {
             unsubscribe.then((dispose) => dispose());
         };
-    }, [conversationId, requestSignature]);
+    }, [conversationId, rawPreviewRequest, requestSignature]);
 
     useEffect(() => {
         if (!hostRef.current || runtimeRef.current || !isRuntimeActivated || !shouldRenderRuntimeHost) {
@@ -421,7 +780,10 @@ export default function InlineCodePreviewCard({
                 ? activeStreamingPreviewState.renderableHtml
                 : previewRequest.code;
         runtimeRef.current.update({
-            code: renderCode,
+            code:
+                previewRequest === rawPreviewRequest && hasRawExternalPreviewResources(rawPreviewRequest?.code)
+                    ? sanitizeClientPreviewCode(renderCode)
+                    : renderCode,
             isFinal: !isStreaming && (!hasScriptContent || isInteractionEnabled),
             bridgeId,
             bridge: {
@@ -547,6 +909,10 @@ export default function InlineCodePreviewCard({
                 );
         }
     })();
+    const hasPreparedExternalResources = Boolean(previewRequest?.externalResources);
+    const showExternalResourceButton =
+        hasActionablePreviewResources(previewRequest?.externalResources)
+        || (!hasPreparedExternalResources && hasRawExternalPreviewResources(rawPreviewRequest?.code));
 
     useEffect(() => {
         if (hostHidden || isRuntimeActivated) {
@@ -634,6 +1000,25 @@ export default function InlineCodePreviewCard({
                 </div>
             )}
             <div className="space-y-3">
+                {showExternalResourceButton && (
+                    <div className="flex justify-end">
+                        <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                                if (!hasActionablePreviewResources(previewRequest?.externalResources)) {
+                                    setClientDetectedExternalResources(
+                                        buildClientDetectedExternalResources(rawPreviewRequest?.code)
+                                    );
+                                }
+                                setIsResourceDialogOpen(true);
+                            }}
+                        >
+                            需要加载外部资源
+                        </Button>
+                    </div>
+                )}
                 {runtimeError && (
                     <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
                         {runtimeError}
@@ -745,6 +1130,20 @@ export default function InlineCodePreviewCard({
                     </div>
                 )}
             </div>
+            <PreviewExternalResourcesDialog<PreviewCodeRequestEvent, unknown>
+                externalResources={previewRequest?.externalResources ?? clientDetectedExternalResources}
+                open={isResourceDialogOpen}
+                onOpenChange={setIsResourceDialogOpen}
+                canAuthorize={true}
+                onAuthorizeSelected={authorizeSelectedPreviewResources}
+                onAuthorized={(result: PreviewResourceAuthorizationResult<PreviewCodeRequestEvent, unknown>) => {
+                    if (result.previewCode) {
+                        setPreparedPreviewRequest(result.previewCode);
+                        setClientDetectedExternalResources(null);
+                        setResolvedRequestId(result.previewCode.request_id);
+                    }
+                }}
+            />
         </div>
     );
 }

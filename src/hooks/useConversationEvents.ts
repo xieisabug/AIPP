@@ -19,6 +19,7 @@ import {
     ShineStateSnapshotEvent,
     AcpConversationSessionState,
     AcpSessionStateSnapshotEvent,
+    QueuedConversationMessage,
 } from "../data/Conversation";
 import { MCPToolCall } from "@/data/MCPToolCall";
 import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
@@ -36,6 +37,9 @@ export interface UseConversationEventsOptions {
     onAiResponseStart?: () => void;
     onAiResponseComplete?: () => void;
     onError?: (errorMessage: string) => void;
+    onQueuedMessageAdd?: (message: QueuedConversationMessage) => void;
+    onQueuedMessageUpdate?: (message: QueuedConversationMessage) => void;
+    onQueuedMessageRemove?: (payload: { id: number; conversation_id: number }) => void;
 }
 
 const MCP_POLL_BASE_INTERVAL_MS = 1200;
@@ -47,6 +51,53 @@ type McpRefreshResult = "success" | "failed" | "stale";
 export function shouldFlushStreamingMessageImmediately(content: string): boolean {
     return content.includes("MCP_TOOL_CALL_STREAMING")
         && messageContainsPreviewCode(content);
+}
+
+function normalizeAcpSessionState(state: any): AcpConversationSessionState | null {
+    if (!state) {
+        return null;
+    }
+
+    const promptCapabilities = state.prompt_capabilities ?? state.promptCapabilities ?? {};
+    const configOptions = state.config_options ?? state.configOptions ?? [];
+    const availableCommands = state.available_commands ?? state.availableCommands ?? [];
+
+    return {
+        ...state,
+        conversation_id: state.conversation_id ?? state.conversationId,
+        session_id: state.session_id ?? state.sessionId ?? null,
+        updated_at: state.updated_at ?? state.updatedAt ?? null,
+        load_session_supported: state.load_session_supported ?? state.loadSessionSupported ?? false,
+        session_resume_supported: state.session_resume_supported ?? state.sessionResumeSupported ?? false,
+        restored_session_method: state.restored_session_method ?? state.restoredSessionMethod ?? null,
+        prompt_capabilities: {
+            image: Boolean(promptCapabilities.image),
+            audio: Boolean(promptCapabilities.audio),
+            embedded_context: Boolean(
+                promptCapabilities.embedded_context ?? promptCapabilities.embeddedContext
+            ),
+        },
+        current_mode_id: state.current_mode_id ?? state.currentModeId ?? null,
+        modes: state.modes ?? [],
+        config_options: configOptions.map((option: any) => ({
+            ...option,
+            current_value: option.current_value ?? option.currentValue ?? "",
+            options: (option.options ?? []).map((choice: any) => ({
+                ...choice,
+                group_name: choice.group_name ?? choice.groupName ?? null,
+            })),
+        })),
+        plan: state.plan ?? [],
+        available_commands: availableCommands.map((command: any) => ({
+            ...command,
+            input_hint: command.input_hint ?? command.inputHint ?? null,
+        })),
+        has_active_prompt: state.has_active_prompt ?? state.hasActivePrompt ?? false,
+        context_tokens_used: state.context_tokens_used ?? state.contextTokensUsed ?? null,
+        context_window_size: state.context_window_size ?? state.contextWindowSize ?? null,
+        session_cost_amount: state.session_cost_amount ?? state.sessionCostAmount ?? null,
+        session_cost_currency: state.session_cost_currency ?? state.sessionCostCurrency ?? null,
+    };
 }
 
 export function useConversationEvents(options: UseConversationEventsOptions) {
@@ -357,7 +408,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         })
             .then((state) => {
                 if (acpSessionSyncRequestIdRef.current !== requestId) return;
-                setAcpSessionState(state);
+                setAcpSessionState(normalizeAcpSessionState(state));
             })
             .catch((error) => {
                 if (acpSessionSyncRequestIdRef.current !== requestId) return;
@@ -601,6 +652,18 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     message_id: metadataUpdateData.message_id,
                     message_type: "metadata_update",
                 });
+            } else if (conversationEvent.type === "queued_message_add") {
+                callbacksRef.current.onQueuedMessageAdd?.(
+                    conversationEvent.data as QueuedConversationMessage,
+                );
+            } else if (conversationEvent.type === "queued_message_update") {
+                callbacksRef.current.onQueuedMessageUpdate?.(
+                    conversationEvent.data as QueuedConversationMessage,
+                );
+            } else if (conversationEvent.type === "queued_message_remove") {
+                callbacksRef.current.onQueuedMessageRemove?.(
+                    conversationEvent.data as { id: number; conversation_id: number },
+                );
             } else if (conversationEvent.type === "message_update") {
                 const messageUpdateData =
                     conversationEvent.data as MessageUpdateEvent;
@@ -887,7 +950,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 }
             } else if (conversationEvent.type === "acp_session_state_snapshot") {
                 const snapshotEvent = conversationEvent.data as AcpSessionStateSnapshotEvent;
-                setAcpSessionState(snapshotEvent?.state ?? null);
+                setAcpSessionState(normalizeAcpSessionState(snapshotEvent?.state));
             } else if (conversationEvent.type === "activity_focus_change") {
                 // 处理活动焦点变化事件 - 由后端统一管理闪亮边框状态
                 const focusEvent = conversationEvent.data as ActivityFocusChangeEvent;
@@ -1143,6 +1206,11 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         functionMapRef.current = functionMap;
     }, []);
 
+    const applyAcpSessionState = useCallback((state: AcpConversationSessionState | null) => {
+        acpSessionSyncRequestIdRef.current += 1;
+        setAcpSessionState(normalizeAcpSessionState(state));
+    }, []);
+
     return {
         streamingMessages,
         shiningMessageIds,
@@ -1157,6 +1225,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         activityFocus, // 导出活动焦点状态（后端驱动）
         runtimeState, // 导出后端语义化运行态（发送按钮等）
         acpSessionState,
+        applyAcpSessionState,
         clearStreamingMessages,
         clearShiningMessages,
         handleError,

@@ -32,6 +32,7 @@ export interface UseMessageListElementsProps {
     onMessageRegenerate: (messageId: number) => void;
     onMessageEdit: (message: Message) => void;
     onMessageFork: (messageId: number) => void;
+    onQueuedMessagePromote?: (queueId: number) => void;
     onToggleReasoningExpand: (messageId: number) => void;
     inlineInteractionItems?: InlineInteractionItem[];
     allowFeishuDebugResend?: boolean;
@@ -221,6 +222,7 @@ export function useMessageListElements({
     onMessageRegenerate,
     onMessageEdit,
     onMessageFork,
+    onQueuedMessagePromote,
     onToggleReasoningExpand,
     inlineInteractionItems,
     allowFeishuDebugResend = false,
@@ -307,6 +309,7 @@ export function useMessageListElements({
                             onMessageRegenerate={() => onMessageRegenerate(message.id)}
                             onMessageEdit={() => onMessageEdit(message)}
                             onMessageFork={() => onMessageFork(message.id)}
+                            onQueuedMessagePromote={onQueuedMessagePromote}
                             isReasoningExpanded={
                                 reasoningExpandStates.get(message.id) || false
                             }
@@ -377,6 +380,7 @@ export function useMessageListElements({
                                         onMessageRegenerate={() => onMessageRegenerate(message.id)}
                                         onMessageEdit={() => onMessageEdit(message)}
                                         onMessageFork={() => onMessageFork(message.id)}
+                                        onQueuedMessagePromote={onQueuedMessagePromote}
                                         isReasoningExpanded={
                                             reasoningExpandStates.get(message.id) || false
                                         }
@@ -408,6 +412,7 @@ export function useMessageListElements({
 
                             return (
                                 <MessageActionButtons
+                                    messageId={toolbarMessage.id}
                                     messageType={lastResponse ? "response" : toolbarMessage.message_type}
                                     isUserMessage={false}
                                     copyIconState="copy"
@@ -428,9 +433,6 @@ export function useMessageListElements({
                                             : undefined
                                     }
                                     isResendToFeishuDebugPending={pendingMessageId === resendTargetMessage?.id}
-                                    tokenCount={toolbarMessage.token_count}
-                                    inputTokenCount={toolbarMessage.input_token_count}
-                                    outputTokenCount={toolbarMessage.output_token_count}
                                     messageContent={toolbarMessage.content}
                                 />
                             );
@@ -478,6 +480,7 @@ export function useMessageListElements({
                             onMessageRegenerate={() => onMessageRegenerate(message.id)}
                             onMessageEdit={() => onMessageEdit(message)}
                             onMessageFork={() => onMessageFork(message.id)}
+                            onQueuedMessagePromote={onQueuedMessagePromote}
                             isReasoningExpanded={
                                 reasoningExpandStates.get(message.id) || false
                             }
@@ -513,6 +516,7 @@ export function useMessageListElements({
         onMessageRegenerate,
         onMessageEdit,
         onMessageFork,
+        onQueuedMessagePromote,
         reasoningExpandStates,
         onToggleReasoningExpand,
         mcpToolCallStates,

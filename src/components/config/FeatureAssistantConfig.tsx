@@ -50,7 +50,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
         {
             id: "conversation_summary",
             name: "辅助AI",
-            description: "配置AI辅助功能：对话标题生成、表单自动填写、记忆生成",
+            description: "配置AI辅助功能：对话标题生成、表单自动填写和上下文压缩",
             icon: <MessageSquare className="h-5 w-5" />,
             code: "conversation_summary",
         },
@@ -149,6 +149,11 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             // 记忆总结（实验功能，默认关闭）
             memory_summary_enabled: false,
             memory_summary_model: "",
+            // 上下文压缩（底层仍存储在 experimental）
+            context_compaction_enabled: false,
+            context_max_input_tokens: "128000",
+            context_compaction_threshold: "0.80",
+            context_tail_ratio: "0.30",
         },
     });
 
@@ -166,6 +171,10 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             request_timeout: "180",
             retry_attempts: "3",
             network_proxy: "",
+            openai_prompt_cache_key_enabled: "true",
+            openai_prompt_cache_retention: "24h",
+            openai_responses_stateful_enabled: "false",
+            custom_headers: [{ key: "", value: "" }],
         },
     });
 
@@ -211,6 +220,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
 
             // 更新 summary 表单 - 支持新旧配置键兼容
             const summaryConfig = featureConfig.get("conversation_summary");
+            const experimentalConfig = featureConfig.get("experimental");
             if (summaryConfig) {
                 // 读取新配置键
                 const titleModel = summaryConfig.get("title_model") || "";
@@ -241,6 +251,35 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                         const providerId = summaryConfig.get("memory_summary_provider_id") || "";
                         return model && providerId ? `${model}%%${providerId}` : "";
                     })(),
+                    // 上下文压缩（全局实验配置，展示在辅助AI）
+                    context_compaction_enabled:
+                        experimentalConfig?.get("context_compaction_enabled") === "true",
+                    context_max_input_tokens:
+                        experimentalConfig?.get("context_max_input_tokens") || "128000",
+                    context_compaction_threshold:
+                        experimentalConfig?.get("context_compaction_threshold") || "0.80",
+                    context_tail_ratio:
+                        experimentalConfig?.get("context_tail_ratio") || "0.30",
+                });
+            } else {
+                summaryForm.reset({
+                    assistant_ai_enabled: true,
+                    title_summary_enabled: true,
+                    title_model: "",
+                    title_summary_length: "100",
+                    title_prompt: "",
+                    form_autofill_enabled: true,
+                    form_autofill_model: "",
+                    memory_summary_enabled: false,
+                    memory_summary_model: "",
+                    context_compaction_enabled:
+                        experimentalConfig?.get("context_compaction_enabled") === "true",
+                    context_max_input_tokens:
+                        experimentalConfig?.get("context_max_input_tokens") || "128000",
+                    context_compaction_threshold:
+                        experimentalConfig?.get("context_compaction_threshold") || "0.80",
+                    context_tail_ratio:
+                        experimentalConfig?.get("context_tail_ratio") || "0.30",
                 });
             }
 
@@ -264,6 +303,28 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                     request_timeout: networkConfig.get("request_timeout") || "180",
                     retry_attempts: networkConfig.get("retry_attempts") || "3",
                     network_proxy: networkConfig.get("network_proxy") || "",
+                    openai_prompt_cache_key_enabled:
+                        networkConfig.get("openai_prompt_cache_key_enabled") || "true",
+                    openai_prompt_cache_retention:
+                        networkConfig.get("openai_prompt_cache_retention") || "24h",
+                    openai_responses_stateful_enabled:
+                        networkConfig.get("openai_responses_stateful_enabled") || "false",
+                    custom_headers: (() => {
+                        const headersConfig = networkConfig.get("custom_headers");
+                        if (!headersConfig) {
+                            return [{ key: "", value: "" }];
+                        }
+                        try {
+                            const parsed = JSON.parse(headersConfig) as Record<string, string>;
+                            const headers = Object.entries(parsed).map(([key, value]) => ({
+                                key,
+                                value,
+                            }));
+                            return headers.length > 0 ? headers : [{ key: "", value: "" }];
+                        } catch {
+                            return [{ key: "", value: "" }];
+                        }
+                    })(),
                 });
             }
 
@@ -366,14 +427,49 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             memory_summary_model: memorySummaryModel.model_code,
             memory_summary_provider_id: memorySummaryModel.provider_id,
         });
-    }, [summaryForm, saveFeatureConfig]);
+
+        const currentExperimentalConfig = featureConfig.get("experimental");
+        const preservedExperimentalValues = {
+            ...EXPERIMENTAL_CONFIG_DEFAULT_VALUES,
+            ...Object.fromEntries(currentExperimentalConfig?.entries() ?? []),
+            butler_feishu_app_secret: "",
+        };
+
+        await saveExperimentalConfigValues(saveFeatureConfig, {
+            ...preservedExperimentalValues,
+            context_compaction_enabled: String(values.context_compaction_enabled),
+            context_max_input_tokens: String(values.context_max_input_tokens || "128000"),
+            context_compaction_threshold: String(
+                values.context_compaction_threshold || "0.80"
+            ),
+            context_tail_ratio: String(values.context_tail_ratio || "0.30"),
+        });
+    }, [summaryForm, saveFeatureConfig, featureConfig]);
 
     const handleSaveNetworkConfig = useCallback(async () => {
         const values = networkForm.getValues();
+        const customHeaders = values.custom_headers || [];
+        const headersMap: Record<string, string> = {};
+        customHeaders.forEach(({ key, value }: { key?: string; value?: string }) => {
+            const headerKey = key?.trim();
+            if (headerKey) {
+                headersMap[headerKey] = value || "";
+            }
+        });
         await saveFeatureConfig("network_config", {
-            request_timeout: values.request_timeout,
-            retry_attempts: values.retry_attempts,
-            network_proxy: values.network_proxy,
+            request_timeout: String(values.request_timeout ?? "180"),
+            retry_attempts: String(values.retry_attempts ?? "3"),
+            network_proxy: String(values.network_proxy ?? ""),
+            openai_prompt_cache_key_enabled: String(
+                values.openai_prompt_cache_key_enabled ?? "true"
+            ),
+            openai_prompt_cache_retention: String(
+                values.openai_prompt_cache_retention ?? "24h"
+            ),
+            openai_responses_stateful_enabled: String(
+                values.openai_responses_stateful_enabled ?? "false"
+            ),
+            custom_headers: JSON.stringify(headersMap),
         });
     }, [networkForm, saveFeatureConfig]);
 

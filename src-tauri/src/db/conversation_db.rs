@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{prelude::*, SecondsFormat};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize, Serializer};
+use serde_json::Value as JsonValue;
 use tracing::{debug, instrument};
 
 use crate::errors::AppError;
@@ -113,6 +114,45 @@ fn sqlite_write_lock_poisoned_error(db_name: &str) -> rusqlite::Error {
     )))
 }
 
+#[derive(Debug, Default, Clone)]
+struct PersistedUsageMetadata {
+    usage_source: Option<String>,
+    thought_tokens: i64,
+    cached_input_tokens: i64,
+    cached_read_tokens: i64,
+    cached_write_tokens: i64,
+}
+
+fn parse_persisted_usage_metadata(raw: Option<&str>) -> PersistedUsageMetadata {
+    let Some(raw) = raw else {
+        return PersistedUsageMetadata::default();
+    };
+    let Ok(JsonValue::Object(map)) = serde_json::from_str::<JsonValue>(raw) else {
+        return PersistedUsageMetadata::default();
+    };
+
+    let cached_input_tokens = map
+        .get("cached_input_tokens")
+        .or_else(|| map.get("cached_read_tokens"))
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0);
+
+    PersistedUsageMetadata {
+        usage_source: map
+            .get("usage_source")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        thought_tokens: map.get("thought_tokens").and_then(|value| value.as_i64()).unwrap_or(0),
+        cached_input_tokens,
+        cached_read_tokens: cached_input_tokens,
+        cached_write_tokens: map
+            .get("cached_write_tokens")
+            .or_else(|| map.get("cache_creation_tokens"))
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0),
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Conversation {
     pub id: i64,
@@ -198,6 +238,21 @@ pub struct MessageAttachment {
     pub attachment_hash: Option<String>,
     pub use_vector: bool,
     pub token_count: Option<i32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct QueuedConversationMessage {
+    pub id: i64,
+    pub conversation_id: i64,
+    pub queue_kind: String,
+    pub status: String,
+    pub request_json: String,
+    pub prompt: String,
+    pub assistant_id: i64,
+    #[serde(serialize_with = "serialize_datetime_millis")]
+    pub created_time: DateTime<Utc>,
+    #[serde(serialize_with = "serialize_datetime_millis")]
+    pub updated_time: DateTime<Utc>,
 }
 
 pub trait Repository<T> {
@@ -1019,6 +1074,176 @@ impl Repository<MessageAttachment> for MessageAttachmentRepository {
     }
 }
 
+pub struct QueuedConversationMessageRepository {
+    conn: Connection,
+    write_lock: Arc<Mutex<()>>,
+}
+
+impl QueuedConversationMessageRepository {
+    #[instrument(level = "debug", skip(conn, write_lock))]
+    pub fn new_with_write_lock(conn: Connection, write_lock: Arc<Mutex<()>>) -> Self {
+        QueuedConversationMessageRepository { conn, write_lock }
+    }
+
+    fn with_serialized_write<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T>,
+    {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| sqlite_write_lock_poisoned_error("conversation.db"))?;
+        f(&self.conn)
+    }
+
+    fn queued_message_from_row(row: &rusqlite::Row<'_>) -> Result<QueuedConversationMessage> {
+        Ok(QueuedConversationMessage {
+            id: row.get(0)?,
+            conversation_id: row.get(1)?,
+            queue_kind: row.get(2)?,
+            status: row.get(3)?,
+            request_json: row.get(4)?,
+            prompt: row.get(5)?,
+            assistant_id: row.get(6)?,
+            created_time: get_required_datetime_from_row(row, 7, "created_time")?,
+            updated_time: get_required_datetime_from_row(row, 8, "updated_time")?,
+        })
+    }
+
+    #[instrument(level = "debug", skip(self, request_json, prompt), fields(conversation_id, queue_kind, assistant_id))]
+    pub fn enqueue(
+        &self,
+        conversation_id: i64,
+        queue_kind: &str,
+        request_json: &str,
+        prompt: &str,
+        assistant_id: i64,
+    ) -> Result<QueuedConversationMessage> {
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "INSERT INTO queued_conversation_message
+                    (conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time)
+                 VALUES (?1, ?2, 'queued', ?3, ?4, ?5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                params![conversation_id, queue_kind, request_json, prompt, assistant_id],
+            )?;
+            let id = conn.last_insert_rowid();
+            conn.query_row(
+                "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
+                 FROM queued_conversation_message
+                 WHERE id = ?1",
+                params![id],
+                Self::queued_message_from_row,
+            )
+        })
+    }
+
+    #[instrument(level = "debug", skip(self), fields(conversation_id))]
+    pub fn list_queued_by_conversation(
+        &self,
+        conversation_id: i64,
+    ) -> Result<Vec<QueuedConversationMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
+             FROM queued_conversation_message
+             WHERE conversation_id = ?1 AND status = 'queued'
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![conversation_id], Self::queued_message_from_row)?;
+        rows.collect()
+    }
+
+    #[instrument(level = "debug", skip(self), fields(id))]
+    pub fn promote_to_interrupt(&self, id: i64) -> Result<Option<QueuedConversationMessage>> {
+        self.with_serialized_write(|conn| {
+            let changed = conn.execute(
+                "UPDATE queued_conversation_message
+                 SET queue_kind = 'interrupt', updated_time = CURRENT_TIMESTAMP
+                 WHERE id = ?1 AND status = 'queued'",
+                params![id],
+            )?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            conn.query_row(
+                "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
+                 FROM queued_conversation_message
+                 WHERE id = ?1",
+                params![id],
+                Self::queued_message_from_row,
+            )
+            .optional()
+        })
+    }
+
+    #[instrument(level = "debug", skip(self), fields(conversation_id, interrupt_only))]
+    pub fn take_next_for_dispatch(
+        &self,
+        conversation_id: i64,
+        interrupt_only: bool,
+    ) -> Result<Option<QueuedConversationMessage>> {
+        self.with_serialized_write(|conn| {
+            let sql = if interrupt_only {
+                "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
+                 FROM queued_conversation_message
+                 WHERE conversation_id = ?1 AND status = 'queued' AND queue_kind = 'interrupt'
+                 ORDER BY id ASC
+                 LIMIT 1"
+            } else {
+                "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
+                 FROM queued_conversation_message
+                 WHERE conversation_id = ?1 AND status = 'queued'
+                 ORDER BY CASE queue_kind WHEN 'interrupt' THEN 0 ELSE 1 END, id ASC
+                 LIMIT 1"
+            };
+            let queued = conn
+                .query_row(sql, params![conversation_id], Self::queued_message_from_row)
+                .optional()?;
+            let Some(mut queued) = queued else {
+                return Ok(None);
+            };
+            let changed = conn.execute(
+                "UPDATE queued_conversation_message
+                 SET status = 'dispatching', updated_time = CURRENT_TIMESTAMP
+                 WHERE id = ?1 AND status = 'queued'",
+                params![queued.id],
+            )?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            queued.status = "dispatching".to_string();
+            Ok(Some(queued))
+        })
+    }
+
+    #[instrument(level = "debug", skip(self), fields(id))]
+    pub fn finish_dispatch(&self, id: i64) -> Result<()> {
+        self.with_serialized_write(|conn| {
+            conn.execute("DELETE FROM queued_conversation_message WHERE id = ?1", params![id])?;
+            Ok(())
+        })
+    }
+
+    #[instrument(level = "debug", skip(self), fields(id))]
+    pub fn reset_dispatch(&self, id: i64) -> Result<Option<QueuedConversationMessage>> {
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE queued_conversation_message
+                 SET status = 'queued', updated_time = CURRENT_TIMESTAMP
+                 WHERE id = ?1",
+                params![id],
+            )?;
+            conn.query_row(
+                "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
+                 FROM queued_conversation_message
+                 WHERE id = ?1",
+                params![id],
+                Self::queued_message_from_row,
+            )
+            .optional()
+        })
+    }
+}
+
 pub struct ConversationDatabase {
     db_path: PathBuf,
     write_lock: Arc<Mutex<()>>,
@@ -1163,6 +1388,12 @@ impl ConversationDatabase {
     }
 
     #[instrument(level = "debug", skip(self), err)]
+    pub fn queued_message_repo(&self) -> Result<QueuedConversationMessageRepository, AppError> {
+        let conn = self.get_connection().map_err(AppError::from)?;
+        Ok(QueuedConversationMessageRepository::new_with_write_lock(conn, self.write_lock()))
+    }
+
+    #[instrument(level = "debug", skip(self), err)]
     pub fn conversation_summary_repo(&self) -> Result<ConversationSummaryRepository, AppError> {
         let conn = self.get_connection().map_err(AppError::from)?;
         Ok(ConversationSummaryRepository::new_with_write_lock(conn, self.write_lock()))
@@ -1275,6 +1506,26 @@ impl ConversationDatabase {
         conn.execute("CREATE INDEX IF NOT EXISTS idx_message_parent_id ON message(parent_id)", [])?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_message_attachment_message_id ON message_attachment(message_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS queued_conversation_message (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                queue_kind TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                request_json TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                assistant_id INTEGER NOT NULL,
+                created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (conversation_id) REFERENCES conversation(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_queued_conversation_message_pending
+             ON queued_conversation_message(conversation_id, status, queue_kind, id)",
             [],
         )?;
         conn.execute(
@@ -1586,6 +1837,44 @@ impl ConversationDatabase {
             },
         )?;
 
+        let mut thought_tokens_total: i64 = 0;
+        let mut cached_input_tokens_total: i64 = 0;
+        let mut cached_read_tokens_total: i64 = 0;
+        let mut cached_write_tokens_total: i64 = 0;
+        let mut estimated_message_count: i64 = 0;
+        let mut metadata_by_model: HashMap<Option<i64>, PersistedUsageMetadata> = HashMap::new();
+
+        let mut metadata_stmt = conn.prepare(
+            "SELECT llm_model_id, metadata_json
+             FROM message
+             WHERE conversation_id = ?1 AND message_type IN ('response', 'reasoning')",
+        )?;
+
+        let metadata_rows = metadata_stmt.query_map(&[&conversation_id], |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })?;
+
+        for row in metadata_rows {
+            let (model_id, metadata_json) = row?;
+            let metadata = parse_persisted_usage_metadata(metadata_json.as_deref());
+            thought_tokens_total += metadata.thought_tokens;
+            cached_input_tokens_total += metadata.cached_input_tokens;
+            cached_read_tokens_total += metadata.cached_read_tokens;
+            cached_write_tokens_total += metadata.cached_write_tokens;
+            if metadata.usage_source.as_deref() == Some("estimated") {
+                estimated_message_count += 1;
+            }
+
+            let entry = metadata_by_model.entry(model_id).or_default();
+            entry.thought_tokens += metadata.thought_tokens;
+            entry.cached_input_tokens += metadata.cached_input_tokens;
+            entry.cached_read_tokens += metadata.cached_read_tokens;
+            entry.cached_write_tokens += metadata.cached_write_tokens;
+        }
+
         // 获取对话的开始时间和结束时间
         let (start_time, finish_time): (Option<String>, Option<String>) = conn
             .query_row(
@@ -1641,12 +1930,18 @@ impl ConversationDatabase {
 
         let mut by_model = stmt
             .query_map(&[&conversation_id], |row| {
+                let model_id: Option<i64> = row.get(0)?;
+                let extra_usage = metadata_by_model.get(&model_id).cloned().unwrap_or_default();
                 Ok(ModelTokenBreakdown {
-                    model_id: row.get(0)?,
+                    model_id,
                     model_name: row.get(1).unwrap_or_else(|_| "Unknown".to_string()),
                     total_tokens: row.get(2)?,
                     input_tokens: row.get(3)?,
                     output_tokens: row.get(4)?,
+                    thought_tokens: extra_usage.thought_tokens,
+                    cached_input_tokens: extra_usage.cached_input_tokens,
+                    cached_read_tokens: extra_usage.cached_read_tokens,
+                    cached_write_tokens: extra_usage.cached_write_tokens,
                     message_count: row.get(5)?,
                     avg_ttft_ms: row.get(6).ok(),
                     avg_tps: row.get(7).ok(),
@@ -1811,7 +2106,12 @@ impl ConversationDatabase {
             total_tokens: total_tokens as i32,
             input_tokens: input_tokens as i32,
             output_tokens: output_tokens as i32,
+            thought_tokens: thought_tokens_total as i32,
+            cached_input_tokens: cached_input_tokens_total as i32,
+            cached_read_tokens: cached_read_tokens_total as i32,
+            cached_write_tokens: cached_write_tokens_total as i32,
             by_model,
+            estimated_message_count: estimated_message_count as i32,
             message_count: message_count as i32,
             system_message_count: system_count as i32,
             user_message_count: user_count as i32,
@@ -1835,6 +2135,7 @@ impl ConversationDatabase {
                 token_count,
                 input_token_count,
                 output_token_count,
+                metadata_json,
                 llm_model_name,
                 ttft_ms,
                 first_token_time,
@@ -1848,12 +2149,13 @@ impl ConversationDatabase {
                 let total_tokens: i32 = row.get(1)?;
                 let input_tokens: i32 = row.get(2)?;
                 let output_tokens: i32 = row.get(3)?;
-                let first_token_time = get_datetime_from_row(row, 6)?;
-                let finish_time = get_datetime_from_row(row, 7)?;
-                let start_time = get_datetime_from_row(row, 8)?;
-                let created_time = get_required_datetime_from_row(row, 9, "created_time")?;
+                let metadata = parse_persisted_usage_metadata(row.get::<_, Option<String>>(4)?.as_deref());
+                let first_token_time = get_datetime_from_row(row, 7)?;
+                let finish_time = get_datetime_from_row(row, 8)?;
+                let start_time = get_datetime_from_row(row, 9)?;
+                let created_time = get_required_datetime_from_row(row, 10, "created_time")?;
                 let ttft_ms: Option<i64> =
-                    row.get(5).ok().or_else(|| match (start_time, first_token_time) {
+                    row.get(6).ok().or_else(|| match (start_time, first_token_time) {
                         (Some(start), Some(first_token)) => {
                             Some((first_token.timestamp_millis() - start.timestamp_millis()).max(0))
                         }
@@ -1912,7 +2214,12 @@ impl ConversationDatabase {
                     total_tokens,
                     input_tokens,
                     output_tokens,
-                    model_name: row.get(4).ok(),
+                    thought_tokens: metadata.thought_tokens as i32,
+                    cached_input_tokens: metadata.cached_input_tokens as i32,
+                    cached_read_tokens: metadata.cached_read_tokens as i32,
+                    cached_write_tokens: metadata.cached_write_tokens as i32,
+                    usage_source: metadata.usage_source,
+                    model_name: row.get(5).ok(),
                     ttft_ms,
                     tps,
                     start_time,
@@ -2053,7 +2360,12 @@ pub struct ConversationTokenStats {
     pub total_tokens: i32,
     pub input_tokens: i32,
     pub output_tokens: i32,
+    pub thought_tokens: i32,
+    pub cached_input_tokens: i32,
+    pub cached_read_tokens: i32,
+    pub cached_write_tokens: i32,
     pub by_model: Vec<ModelTokenBreakdown>,
+    pub estimated_message_count: i32,
     pub message_count: i32,
     // 按消息类型统计
     pub system_message_count: i32,
@@ -2079,6 +2391,10 @@ pub struct ModelTokenBreakdown {
     pub total_tokens: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub thought_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub cached_read_tokens: i64,
+    pub cached_write_tokens: i64,
     pub message_count: i64,
     // 性能指标统计
     pub avg_ttft_ms: Option<f64>,
@@ -2092,6 +2408,11 @@ pub struct MessageTokenStats {
     pub total_tokens: i32,
     pub input_tokens: i32,
     pub output_tokens: i32,
+    pub thought_tokens: i32,
+    pub cached_input_tokens: i32,
+    pub cached_read_tokens: i32,
+    pub cached_write_tokens: i32,
+    pub usage_source: Option<String>,
     pub model_name: Option<String>,
     pub ttft_ms: Option<i64>, // Time to First Token (毫秒)
     pub tps: Option<f64>,     // Tokens Per Second

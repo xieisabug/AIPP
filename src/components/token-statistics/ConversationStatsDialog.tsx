@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
     Dialog,
     DialogContent,
@@ -10,8 +11,9 @@ import {
 import IconButton from "../IconButton";
 import { Info } from "lucide-react";
 import { tokenStatisticsService } from "@/services/tokenStatisticsService";
-import type { ConversationTokenStats } from "@/data/Conversation";
+import type { AcpConversationSessionState, ConversationTokenStats } from "@/data/Conversation";
 import { TokenUsageDisplay } from "./TokenUsageDisplay";
+import { Badge } from "@/components/ui/badge";
 
 interface ConversationStatsDialogProps {
     conversationId: string;
@@ -28,6 +30,7 @@ export function ConversationStatsDialog({
     const open = externalOpen !== undefined ? externalOpen : internalOpen;
     const setOpen = onExternalOpenChange || setInternalOpen;
     const [stats, setStats] = useState<ConversationTokenStats | null>(null);
+    const [acpSessionState, setAcpSessionState] = useState<AcpConversationSessionState | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
@@ -35,11 +38,15 @@ export function ConversationStatsDialog({
         if (open && conversationId) {
             setLoading(true);
             setError(null);
-
-            tokenStatisticsService
-                .getConversationTokenStats(conversationId)
-                .then((data) => {
-                    setStats(data);
+            Promise.all([
+                tokenStatisticsService.getConversationTokenStats(conversationId),
+                invoke<AcpConversationSessionState | null>("get_acp_session_state", {
+                    conversationId: Number(conversationId),
+                }).catch(() => null),
+            ])
+                .then(([statsData, acpState]) => {
+                    setStats(statsData);
+                    setAcpSessionState(acpState);
                     setLoading(false);
                 })
                 .catch((err) => {
@@ -47,6 +54,8 @@ export function ConversationStatsDialog({
                     setError(err.message || "Failed to load statistics");
                     setLoading(false);
                 });
+        } else if (!open) {
+            setAcpSessionState(null);
         }
     }, [open, conversationId]);
 
@@ -68,12 +77,30 @@ export function ConversationStatsDialog({
         });
     };
 
+    const formatCurrency = (amount: number, currency: string) => {
+        try {
+            return new Intl.NumberFormat("en-US", {
+                style: "currency",
+                currency,
+                maximumFractionDigits: 4,
+            }).format(amount);
+        } catch {
+            return `${amount.toFixed(4)} ${currency}`;
+        }
+    };
+
+    const hasAcpSessionUsage =
+        acpSessionState?.context_tokens_used !== null
+        && acpSessionState?.context_tokens_used !== undefined
+        && acpSessionState?.context_window_size !== null
+        && acpSessionState?.context_window_size !== undefined;
+
     return (
         <Dialog open={open} onOpenChange={setOpen}>
             <DialogTrigger asChild>
                 <IconButton icon={<Info className="h-4 w-4 text-icon" />} onClick={() => { }} border />
             </DialogTrigger>
-            <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
+            <DialogContent className="max-h-[85vh] flex flex-col sm:min-w-2xl sm:max-w-[50vw]">
                 <DialogHeader>
                     <DialogTitle>对话信息</DialogTitle>
                     <DialogDescription>
@@ -96,6 +123,20 @@ export function ConversationStatsDialog({
                 {stats && !loading && !error && (
                     <div className="flex-1 overflow-y-auto px-6 pb-6">
                         <div className="space-y-6">
+                            <div className="flex items-center justify-between gap-3">
+                                <div>
+                                    <h3 className="text-lg font-semibold">Token 用量</h3>
+                                    <p className="text-sm text-muted-foreground">
+                                        对话级 token、缓存与会话 usage 统计
+                                    </p>
+                                </div>
+                                {stats.estimated_message_count > 0 && (
+                                    <Badge variant="secondary">
+                                        含估算 {formatNumber(stats.estimated_message_count)} 条
+                                    </Badge>
+                                )}
+                            </div>
+
                             {/* 时间戳信息 */}
                             {(stats.start_time || stats.finish_time) && (
                                 <div className="pt-4 border-t">
@@ -126,8 +167,49 @@ export function ConversationStatsDialog({
                                 total={stats.total_tokens}
                                 input={stats.input_tokens}
                                 output={stats.output_tokens}
+                                thought={stats.thought_tokens}
+                                cachedInput={stats.cached_input_tokens ?? stats.cached_read_tokens}
+                                cachedWrite={stats.cached_write_tokens}
                                 showPercentage={true}
                             />
+
+                            {hasAcpSessionUsage && (
+                                <div className="space-y-3 rounded-lg border p-4">
+                                    <div className="flex items-center justify-between">
+                                        <h4 className="text-sm font-medium">ACP 会话 Usage</h4>
+                                        <span className="text-xs text-muted-foreground">
+                                            实时会话上下文
+                                        </span>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div className="rounded-md bg-muted/40 p-3 text-center">
+                                            <p className="text-xs text-muted-foreground mb-1">已用上下文</p>
+                                            <p className="text-lg font-semibold">
+                                                {formatNumber(acpSessionState?.context_tokens_used ?? 0)}
+                                            </p>
+                                        </div>
+                                        <div className="rounded-md bg-muted/40 p-3 text-center">
+                                            <p className="text-xs text-muted-foreground mb-1">上下文窗口</p>
+                                            <p className="text-lg font-semibold">
+                                                {formatNumber(acpSessionState?.context_window_size ?? 0)}
+                                            </p>
+                                        </div>
+                                    </div>
+                                    {acpSessionState?.session_cost_amount !== null
+                                        && acpSessionState?.session_cost_amount !== undefined
+                                        && acpSessionState?.session_cost_currency && (
+                                        <div className="flex justify-between text-sm">
+                                            <span className="text-muted-foreground">累计成本</span>
+                                            <span className="font-medium">
+                                                {formatCurrency(
+                                                    acpSessionState.session_cost_amount,
+                                                    acpSessionState.session_cost_currency,
+                                                )}
+                                            </span>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
 
                             {/* Breakdown by Model */}
                             {stats.by_model.length > 0 && (
@@ -167,9 +249,10 @@ export function ConversationStatsDialog({
                                                 <TokenUsageDisplay
                                                     total={model.total_tokens}
                                                     input={model.input_tokens}
-                                                    output={
-                                                        model.output_tokens
-                                                    }
+                                                    output={model.output_tokens}
+                                                    thought={model.thought_tokens}
+                                                    cachedInput={model.cached_input_tokens ?? model.cached_read_tokens}
+                                                    cachedWrite={model.cached_write_tokens}
                                                     compact={true}
                                                 />
                                             </div>

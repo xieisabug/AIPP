@@ -49,14 +49,14 @@ fn test_absolute_path_accepted() {
 
 // ============= 读取文件核心逻辑测试 =============
 
-/// 测试文件内容读取和行号格式
+/// 测试文件内容读取保持原始格式
 ///
 /// 验证内容：
 /// - 文件内容正确读取
-/// - 行号格式符合 cat -n 格式
+/// - 不额外添加行号前缀
 /// - offset 和 limit 参数正确工作
 #[test]
-fn test_read_file_line_formatting() {
+fn test_read_file_plain_content_formatting() {
     let temp_dir = create_temp_dir();
     let content = "line 1\nline 2\nline 3\nline 4\nline 5";
     let file_path = create_temp_file(&temp_dir, "test.txt", content);
@@ -70,14 +70,15 @@ fn test_read_file_line_formatting() {
     // 验证行数
     assert_eq!(lines.len(), 5);
 
-    // 验证格式化输出
+    // 验证输出不额外添加行号前缀
     let mut formatted = String::new();
-    for (idx, line) in lines.iter().enumerate() {
-        formatted.push_str(&format!("{:>6}\t{}\n", idx + 1, line));
+    for line in &lines {
+        formatted.push_str(line);
+        formatted.push('\n');
     }
 
-    assert!(formatted.contains("     1\tline 1\n"));
-    assert!(formatted.contains("     5\tline 5\n"));
+    assert_eq!(formatted, "line 1\nline 2\nline 3\nline 4\nline 5\n");
+    assert!(!formatted.contains("     1\tline 1\n"));
 }
 
 /// 测试 offset 和 limit 参数

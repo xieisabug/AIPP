@@ -1496,6 +1496,7 @@ function ButlerExperimentWindow() {
                                     }
                                     virtualizeMessages
                                     windowLabel="butler_experiment"
+                                    busySendBehavior="interrupt"
                                 />
                             </div>
                         </>

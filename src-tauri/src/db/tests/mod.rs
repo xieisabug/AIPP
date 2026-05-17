@@ -27,5 +27,6 @@ mod conversation_db_tests;
 mod llm_db_tests;
 mod mcp_db_tests;
 mod message_db_tests;
+mod message_queue_db_tests;
 mod plugin_db_tests;
 mod system_db_tests;

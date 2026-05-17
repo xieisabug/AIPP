@@ -16,10 +16,13 @@ import {
     Conversation,
     ConversationCancelEvent,
     Message,
+    QueuedConversationMessage,
     StreamEvent,
     ConversationWithMessages,
     GroupMergeEvent,
     MCPToolCallUpdateEvent,
+    AcpConversationSessionState,
+    AcpSessionConfigChoice,
     AcpSessionConfigOption,
 } from "../data/Conversation";
 import "katex/dist/katex.min.css";
@@ -49,27 +52,24 @@ import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 import ConversationHeader from "./conversation/ConversationHeader";
 import ConversationContent from "./conversation/ConversationContent";
 import { applyScrollHighlight } from "./conversation/scrollHighlight";
+import { ToolErrorContinueProvider } from "./McpToolCall";
 import IconButton from "./IconButton";
 import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import {
-    Select,
-    SelectContent,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
-} from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import { Bot, LoaderCircle } from "lucide-react";
+import { Bot, Check, ChevronDown, LoaderCircle } from "lucide-react";
 import { toast } from "sonner";
+import { cn } from "@/utils/utils";
 
 // 导入 Chat Sidebar 相关
-import { ChatSidebar } from "./chat-sidebar";
+import { ChatSidebar, type TodoItem } from "./chat-sidebar";
 import { useTodoList } from "@/hooks/useTodoList";
 import { useArtifactExtractor } from "@/hooks/useArtifactExtractor";
 import { useExplicitArtifacts } from "@/hooks/useExplicitArtifacts";
 import { useContextList } from "@/hooks/useContextList";
 import { mergeMessagesWithStreamingState } from "@/utils/streamingMessageState";
+import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 
 // 暴露给外部的方法接口
 export interface ConversationUIRef {
@@ -91,6 +91,104 @@ export interface InlineInteractionItem {
     content: ReactNode;
 }
 
+interface AcpConfigSelectProps {
+    option: AcpSessionConfigOption;
+    disabled: boolean;
+    onChange: (option: AcpSessionConfigOption, value: string) => void;
+}
+
+function formatAcpConfigChoice(choice: AcpSessionConfigChoice) {
+    return choice.group_name ? `${choice.group_name} / ${choice.name}` : choice.name;
+}
+
+const ACP_CONFIG_VISIBLE_CHOICE_LIMIT = 80;
+
+function AcpConfigSelect({ option, disabled, onChange }: AcpConfigSelectProps) {
+    const [open, setOpen] = useState(false);
+    const [query, setQuery] = useState("");
+    const currentChoice = useMemo(
+        () => option.options.find((choice) => choice.value === option.current_value),
+        [option.current_value, option.options]
+    );
+    const currentLabel = currentChoice ? formatAcpConfigChoice(currentChoice) : option.current_value || "选择配置";
+    const normalizedQuery = query.trim().toLowerCase();
+    const matchingChoices = useMemo(() => {
+        if (!normalizedQuery) {
+            return option.options;
+        }
+        return option.options.filter((choice) => {
+            const label = formatAcpConfigChoice(choice).toLowerCase();
+            return label.includes(normalizedQuery) || choice.value.toLowerCase().includes(normalizedQuery);
+        });
+    }, [normalizedQuery, option.options]);
+    const visibleChoices = matchingChoices.slice(0, ACP_CONFIG_VISIBLE_CHOICE_LIMIT);
+
+    const handleOpenChange = (nextOpen: boolean) => {
+        setOpen(nextOpen);
+        if (!nextOpen) {
+            setQuery("");
+        }
+    };
+
+    const handleSelect = (value: string) => {
+        onChange(option, value);
+        setOpen(false);
+        setQuery("");
+    };
+
+    return (
+        <Popover open={open} onOpenChange={handleOpenChange}>
+            <PopoverTrigger asChild>
+                <button
+                    type="button"
+                    disabled={disabled}
+                    className="border-input focus-visible:border-ring focus-visible:ring-ring/50 flex h-9 w-full items-center justify-between gap-2 rounded-md border bg-transparent px-3 py-2 text-left text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                    <span className="min-w-0 truncate">{currentLabel}</span>
+                    <ChevronDown className="size-4 shrink-0 opacity-50" />
+                </button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] p-1">
+                <Input
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder="搜索配置"
+                    className="mb-1 h-8"
+                />
+                <div className="max-h-72 overflow-y-auto">
+                    {visibleChoices.length === 0 ? (
+                        <div className="px-2 py-6 text-center text-sm text-muted-foreground">无匹配项</div>
+                    ) : (
+                        visibleChoices.map((choice) => {
+                            const selected = choice.value === option.current_value;
+                            return (
+                                <button
+                                    key={`${option.id}:${choice.value}`}
+                                    type="button"
+                                    className={cn(
+                                        "focus:bg-accent focus:text-accent-foreground flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm outline-none",
+                                        selected && "bg-accent text-accent-foreground"
+                                    )}
+                                    onClick={() => handleSelect(choice.value)}
+                                    title={formatAcpConfigChoice(choice)}
+                                >
+                                    <span className="min-w-0 flex-1 truncate">{formatAcpConfigChoice(choice)}</span>
+                                    {selected ? <Check className="size-4 shrink-0" /> : null}
+                                </button>
+                            );
+                        })
+                    )}
+                </div>
+                {matchingChoices.length > visibleChoices.length ? (
+                    <div className="border-t px-2 py-1.5 text-xs text-muted-foreground">
+                        还有 {matchingChoices.length - visibleChoices.length} 项，输入关键词继续筛选
+                    </div>
+                ) : null}
+            </PopoverContent>
+        </Popover>
+    );
+}
+
 interface ConversationUIProps {
     conversationId: string;
     onChangeConversationId: (conversationId: string) => void;
@@ -107,6 +205,7 @@ interface ConversationUIProps {
     allowFeishuDebugResend?: boolean;
     virtualizeMessages?: boolean;
     windowLabel?: string;
+    busySendBehavior?: "queue" | "interrupt";
 }
 
 const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
@@ -127,6 +226,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             allowFeishuDebugResend = false,
             virtualizeMessages = false,
             windowLabel = "chat_ui",
+            busySendBehavior = "queue",
         },
         ref
     ) => {
@@ -142,9 +242,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // ACP assistant working directory (resolved by backend)
         const [acpWorkingDirectory, setAcpWorkingDirectory] = useState<string | null>(null);
+        const [acpMutationKey, setAcpMutationKey] = useState<string | null>(null);
 
         // 常规消息列表
         const [messages, setMessages] = useState<Array<Message>>([]);
+        const [queuedMessages, setQueuedMessages] = useState<QueuedConversationMessage[]>([]);
         const streamingMessagesRef = useRef<Map<number, StreamEvent>>(new Map());
         const smartScrollRef = useRef<
             ((forceScroll?: boolean, behaviorOverride?: ScrollBehavior) => void) | null
@@ -179,6 +281,25 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 防泄露模式：获取重置函数
         const { resetReveal } = useAntiLeakage();
+        const {
+            getConfigValue,
+            loadFeatureConfig,
+            loading: featureConfigLoading,
+        } = useFeatureConfig();
+        const continueOnToolErrorEnabled = featureConfigLoading
+            ? true
+            : !["false", "0"].includes(
+                getConfigValue("tool_error_continue", "enabled", "true").trim().toLowerCase(),
+            );
+
+        useEffect(() => {
+            const unlisten = listen("feature_config_changed", () => {
+                void loadFeatureConfig();
+            });
+            return () => {
+                unlisten.then((f) => f());
+            };
+        }, [loadFeatureConfig]);
 
         // ============= Chat Sidebar Hooks =============
         
@@ -290,6 +411,22 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             // MCP状态更新已经在useConversationEvents中处理，这里可以添加额外的逻辑
         }, []);
 
+        const upsertQueuedMessage = useCallback((queued: QueuedConversationMessage) => {
+            setQueuedMessages((current) => {
+                const withoutCurrent = current.filter((item) => item.id !== queued.id);
+                return [...withoutCurrent, queued].sort((left, right) => left.id - right.id);
+            });
+        }, []);
+
+        const handleQueuedMessageRemove = useCallback(
+            (payload: { id: number; conversation_id: number }) => {
+                setQueuedMessages((current) =>
+                    current.filter((item) => item.id !== payload.id)
+                );
+            },
+            []
+        );
+
         // ============= 消息处理逻辑 =============
 
         // 处理消息完成时的状态更新，确保消息在streamingMessages清理后仍能显示
@@ -362,6 +499,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 onAiResponseStart: handleAiResponseStart,
                 onAiResponseComplete: handleAiResponseComplete,
                 onError: handleError,
+                onQueuedMessageAdd: upsertQueuedMessage,
+                onQueuedMessageUpdate: upsertQueuedMessage,
+                onQueuedMessageRemove: handleQueuedMessageRemove,
             };
         }, [
             conversationId,
@@ -372,6 +512,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             handleAiResponseComplete,
             handleError,
             handleMessageCompletion,
+            upsertQueuedMessage,
+            handleQueuedMessageRemove,
             conversation?.id,
             // 移除 functionMap 依赖，改为在回调内部访问
         ]);
@@ -391,13 +533,119 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             clearShiningMessages,
             setPendingUserMessage,
             acpSessionState,
+            applyAcpSessionState,
         } = useConversationEvents(conversationEventsOptions);
 
-        const [acpMutationKey, setAcpMutationKey] = useState<string | null>(null);
+        const acpLoadUnsupportedNoticeRef = useRef<string | null>(null);
+        const acpRestoreNoticeRef = useRef<string | null>(null);
+        const acpAutoConnectKeyRef = useRef<string | null>(null);
+        const acpConnectionErrorNoticeRef = useRef<string | null>(null);
+
+        useEffect(() => {
+            const conversationIdNum = Number(conversationId);
+            if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
+                setQueuedMessages([]);
+                return;
+            }
+
+            let cancelled = false;
+            invoke<QueuedConversationMessage[]>("list_queued_conversation_messages", {
+                conversationId: conversationIdNum,
+            })
+                .then((items) => {
+                    if (cancelled) {
+                        return;
+                    }
+                    setQueuedMessages(items.sort((left, right) => left.id - right.id));
+                })
+                .catch((error) => {
+                    if (cancelled) {
+                        return;
+                    }
+                    console.warn("Failed to load queued conversation messages:", error);
+                    setQueuedMessages([]);
+                });
+
+            return () => {
+                cancelled = true;
+            };
+        }, [conversationId]);
+
+        const showAcpConnectionError = useCallback(
+            (assistantId: number, error: unknown) => {
+                const errorMessage =
+                    error instanceof Error
+                        ? error.message
+                        : typeof error === "string"
+                          ? error
+                          : JSON.stringify(error) || "未知错误";
+                const noticeKey = `${conversationId}:${assistantId}:${errorMessage}`;
+                if (acpConnectionErrorNoticeRef.current === noticeKey) {
+                    return;
+                }
+
+                acpConnectionErrorNoticeRef.current = noticeKey;
+                toast.error("ACP 会话启动失败", {
+                    description: errorMessage,
+                    position: "bottom-right",
+                });
+            },
+            [conversationId]
+        );
 
         useEffect(() => {
             streamingMessagesRef.current = streamingMessages;
         }, [streamingMessages]);
+
+        useEffect(() => {
+            const canRestoreAcpSession =
+                acpSessionState?.load_session_supported ||
+                acpSessionState?.session_resume_supported;
+            if (!acpSessionState?.session_id || canRestoreAcpSession) {
+                return;
+            }
+
+            const noticeKey = `${conversationId}:${acpSessionState.session_id}`;
+            if (acpLoadUnsupportedNoticeRef.current === noticeKey) {
+                return;
+            }
+
+            acpLoadUnsupportedNoticeRef.current = noticeKey;
+            toast.info("该 Agent 不支持恢复历史 ACP 会话", {
+                description: "AIPP 会使用本地对话上下文继续当前请求。",
+            });
+        }, [
+            acpSessionState?.load_session_supported,
+            acpSessionState?.session_resume_supported,
+            acpSessionState?.session_id,
+            conversationId,
+        ]);
+
+        useEffect(() => {
+            const method = acpSessionState?.restored_session_method;
+            if (!acpSessionState?.session_id || !method) {
+                return;
+            }
+
+            const noticeKey = `${conversationId}:${acpSessionState.session_id}:${method}`;
+            if (acpRestoreNoticeRef.current === noticeKey) {
+                return;
+            }
+
+            acpRestoreNoticeRef.current = noticeKey;
+            const methodLabel = method === "resume" ? "session/resume" : "session/load";
+            const description =
+                method === "resume"
+                    ? "AIPP 保留本地对话展示，Agent 仅恢复内部上下文。"
+                    : "AIPP 已抑制历史回放，避免重复写入当前对话。";
+            toast.success(`已通过 ${methodLabel} 恢复 ACP 会话`, {
+                description,
+            });
+        }, [
+            acpSessionState?.restored_session_method,
+            acpSessionState?.session_id,
+            conversationId,
+        ]);
 
         const effectiveAiIsResponsing = useMemo(() => {
             if (runtimeState && runtimeState.conversation_id === Number(conversationId || 0)) {
@@ -412,6 +660,41 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         ]);
         const attachedFileCount = Array.isArray(fileInfoList) ? fileInfoList.length : 0;
 
+        const queuedDisplayMessages = useMemo<Message[]>(() => {
+            return queuedMessages.map((queued) => {
+                const queueKind = queued.queue_kind === "interrupt" ? "interrupt" : "normal";
+                const createdTime = queued.created_time ? new Date(queued.created_time) : new Date();
+                return {
+                    id: -queued.id,
+                    conversation_id: queued.conversation_id,
+                    message_type: "user",
+                    content: queued.prompt,
+                    llm_model_id: null,
+                    created_time: createdTime,
+                    start_time: null,
+                    finish_time: null,
+                    token_count: 0,
+                    input_token_count: 0,
+                    output_token_count: 0,
+                    generation_group_id: null,
+                    parent_group_id: null,
+                    parent_id: null,
+                    regenerate: null,
+                    attachment_list: [],
+                    metadata_json: JSON.stringify({
+                        queue_status: "queued",
+                        queue_kind: queueKind,
+                        queue_id: queued.id,
+                    }),
+                };
+            });
+        }, [queuedMessages]);
+
+        const messagesWithQueued = useMemo(
+            () => [...messages, ...queuedDisplayMessages],
+            [messages, queuedDisplayMessages]
+        );
+
         // 当 functionMap 变化时更新事件处理器
         useEffect(() => {
             updateFunctionMap(functionMap);
@@ -422,7 +705,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 第一步：消息处理 - 获取合并的消息用于分组
         const { combinedMessagesForGrouping } = useMessageProcessing({
-            messages,
+            messages: messagesWithQueued,
             streamingMessages,
             conversation,
             generationGroups: new Map(), // 第一步只需要合并消息用于分组
@@ -438,7 +721,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 第三步：基于分组信息与选择的版本，计算最终需要展示的消息列表
         const { allDisplayMessages } = useMessageProcessing({
-            messages,
+            messages: messagesWithQueued,
             streamingMessages,
             conversation,
             generationGroups: messageGroupsData.generationGroups,
@@ -548,6 +831,17 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             setAiIsResponsing,
         });
 
+        const handleQueuedMessagePromote = useCallback((queueId: number) => {
+            void invoke<QueuedConversationMessage>("promote_queued_conversation_message", {
+                queueId,
+            }).catch((error) => {
+                toast.error("提升打断消息失败", {
+                    description: String(error),
+                    position: "bottom-right",
+                });
+            });
+        }, []);
+
         // 对话操作
         const {
             handleDeleteConversationSuccess,
@@ -582,6 +876,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             clearShiningMessages,
             assistantTypePluginMap,
             assistantRunApi,
+            busySendBehavior,
         });
 
         // ============= 初始化和生命周期逻辑 =============
@@ -753,43 +1048,67 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             ),
         });
 
+        const activeAssistantId = conversation?.assistant_id ?? selectedAssistant;
+        const isAcpAssistant = useMemo(() => {
+            if (!activeAssistantId) {
+                return false;
+            }
+            return assistants.some(
+                (assistant) => assistant.id === activeAssistantId && assistant.assistant_type === 4
+            );
+        }, [activeAssistantId, assistants]);
+
         // Fetch ACP working directory for current assistant
         useEffect(() => {
-            const assistantId = conversation?.assistant_id ?? selectedAssistant;
-            if (!assistantId) {
+            const assistantId = activeAssistantId;
+            if (!assistantId || !isAcpAssistant) {
                 setAcpWorkingDirectory(null);
+                applyAcpSessionState(null);
                 return;
             }
 
             invoke<string>("get_acp_working_directory", { assistantId })
                 .then((workingDirectory) => {
                     setAcpWorkingDirectory(workingDirectory);
-                })
-                .catch(() => {
-                    setAcpWorkingDirectory(null);
-                });
-        }, [conversation?.assistant_id, selectedAssistant, assistants]);
-
-        const handleAcpModeChange = useCallback(
-            async (modeId: string) => {
-                const conversationIdNum = Number(conversationId);
-                if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
-                    return;
-                }
-                setAcpMutationKey(`mode:${modeId}`);
-                try {
-                    await invoke("set_acp_session_mode", {
+                    const conversationIdNum = Number(conversationId);
+                    if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
+                        return;
+                    }
+                    const connectKey = `${conversationIdNum}:${assistantId}`;
+                    if (acpAutoConnectKeyRef.current === connectKey) {
+                        return;
+                    }
+                    acpAutoConnectKeyRef.current = connectKey;
+                    void invoke<AcpConversationSessionState | null>("ensure_acp_session_connected", {
                         conversationId: conversationIdNum,
-                        modeId,
-                    });
-                } catch (error) {
-                    toast.error(`切换 ACP 模式失败: ${String(error)}`);
-                } finally {
-                    setAcpMutationKey(null);
-                }
-            },
-            [conversationId]
-        );
+                        assistantId,
+                    })
+                        .then((state) => {
+                            if (acpAutoConnectKeyRef.current !== connectKey) {
+                                return;
+                            }
+                            acpAutoConnectKeyRef.current = null;
+                            applyAcpSessionState(state);
+                        })
+                        .catch((error) => {
+                            if (acpAutoConnectKeyRef.current === connectKey) {
+                                acpAutoConnectKeyRef.current = null;
+                            }
+                            console.warn("[ACP] Auto connect failed", error);
+                            showAcpConnectionError(assistantId, error);
+                        });
+                })
+                .catch((error) => {
+                    setAcpWorkingDirectory(null);
+                    showAcpConnectionError(assistantId, error);
+                });
+        }, [
+            activeAssistantId,
+            isAcpAssistant,
+            conversationId,
+            applyAcpSessionState,
+            showAcpConnectionError,
+        ]);
 
         const handleAcpConfigChange = useCallback(
             async (option: AcpSessionConfigOption, value: string) => {
@@ -797,6 +1116,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
                     return;
                 }
+
                 setAcpMutationKey(`config:${option.id}`);
                 try {
                     await invoke("set_acp_session_config_option", {
@@ -805,7 +1125,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         value,
                     });
                 } catch (error) {
-                    toast.error(`更新 ACP 配置失败: ${String(error)}`);
+                    toast.error("更新 ACP 配置失败", {
+                        description: String(error),
+                        position: "bottom-right",
+                    });
                 } finally {
                     setAcpMutationKey(null);
                 }
@@ -962,20 +1285,50 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         );
 
         const acpHeaderActions = useMemo(() => {
-            const isAcpConversation = Boolean(acpWorkingDirectory) || Boolean(acpSessionState);
-            if (!isAcpConversation) {
+            if (!isAcpAssistant) {
                 return combinedHeaderActions;
             }
 
-            const currentMode = acpSessionState?.modes.find(
-                (mode) => mode.id === acpSessionState.current_mode_id
+            const modelOption = acpSessionState?.config_options.find((option) => option.category === "model");
+            const modeOption = acpSessionState?.config_options.find((option) => option.category === "mode");
+            const thoughtOption = acpSessionState?.config_options.find((option) => option.category === "thought_level");
+            const primaryOptionIds = new Set(
+                [modelOption?.id, modeOption?.id, thoughtOption?.id].filter(Boolean)
             );
-            const hasModeConfigOption = acpSessionState?.config_options.some(
-                (option) => option.category === "mode"
-            );
+            const otherOptions = acpSessionState?.config_options.filter(
+                (option) => !primaryOptionIds.has(option.id)
+            ) ?? [];
             const updatedAtText = acpSessionState?.updated_at
                 ? new Date(acpSessionState.updated_at).toLocaleString()
                 : null;
+            const configOptionCount = acpSessionState?.config_options.length ?? 0;
+            const renderAcpConfigSelect = (option: AcpSessionConfigOption) => (
+                <div key={option.id} className="space-y-1.5">
+                    <div className="flex items-center gap-2">
+                        <span className="text-xs font-medium">{option.name}</span>
+                        {option.category ? (
+                            <Badge variant="outline" className="text-[10px]">
+                                {option.category}
+                            </Badge>
+                        ) : null}
+                    </div>
+                    {option.description ? (
+                        <div className="text-xs text-muted-foreground">
+                            {option.description}
+                        </div>
+                    ) : null}
+                    <AcpConfigSelect
+                        option={option}
+                        disabled={Boolean(acpMutationKey)}
+                        onChange={(option, value) => void handleAcpConfigChange(option, value)}
+                    />
+                </div>
+            );
+            const statusLabel = (status: string) => {
+                if (status === "completed") return "完成";
+                if (status === "in_progress") return "进行中";
+                return "待处理";
+            };
 
             return (
                 <>
@@ -1023,84 +1376,80 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                         工作目录：{acpWorkingDirectory}
                                     </div>
                                 ) : null}
+                                {acpSessionState?.session_id &&
+                                !(
+                                    acpSessionState.load_session_supported ||
+                                    acpSessionState.session_resume_supported
+                                ) ? (
+                                    <div className="text-xs text-muted-foreground">
+                                        该 Agent 不支持恢复历史 ACP 会话，新会话会使用 AIPP 对话上下文继续。
+                                    </div>
+                                ) : null}
                             </div>
 
-                            {!acpSessionState?.session_id ? (
-                                <div className="text-xs text-muted-foreground">
-                                    首次发送消息后才会创建 ACP 会话。
+                            <Separator />
+
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between gap-2">
+                                    <span className="text-xs font-medium">会话配置</span>
+                                    <Badge variant="secondary" className="text-[10px]">
+                                        {configOptionCount} 项
+                                    </Badge>
                                 </div>
-                            ) : (
-                                <>
-                                    {currentMode ? (
-                                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                                            <span>当前模式</span>
-                                            <Badge variant="outline">{currentMode.name}</Badge>
-                                        </div>
-                                    ) : null}
-
-                                    {!hasModeConfigOption && acpSessionState.modes.length > 0 ? (
-                                        <div className="space-y-1.5">
-                                            <div className="text-xs font-medium">切换模式</div>
-                                            <Select
-                                                value={acpSessionState.current_mode_id ?? undefined}
-                                                onValueChange={(value) => void handleAcpModeChange(value)}
-                                                disabled={Boolean(acpMutationKey)}
-                                            >
-                                                <SelectTrigger className="w-full">
-                                                    <SelectValue placeholder="选择模式" />
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    {acpSessionState.modes.map((mode) => (
-                                                        <SelectItem key={mode.id} value={mode.id}>
-                                                            {mode.name}
-                                                        </SelectItem>
-                                                    ))}
-                                                </SelectContent>
-                                            </Select>
-                                        </div>
-                                    ) : null}
-
-                                    {acpSessionState.config_options.length > 0 ? <Separator /> : null}
-
-                                    <div className="space-y-3">
-                                        {acpSessionState.config_options.map((option) => (
-                                            <div key={option.id} className="space-y-1.5">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-xs font-medium">{option.name}</span>
-                                                    {option.category ? (
-                                                        <Badge variant="outline" className="text-[10px]">
-                                                            {option.category}
-                                                        </Badge>
-                                                    ) : null}
-                                                </div>
-                                                {option.description ? (
-                                                    <div className="text-xs text-muted-foreground">
-                                                        {option.description}
-                                                    </div>
-                                                ) : null}
-                                                <Select
-                                                    value={option.current_value}
-                                                    onValueChange={(value) => void handleAcpConfigChange(option, value)}
-                                                    disabled={Boolean(acpMutationKey)}
-                                                >
-                                                    <SelectTrigger className="w-full">
-                                                        <SelectValue placeholder="选择配置" />
-                                                    </SelectTrigger>
-                                                    <SelectContent>
-                                                        {option.options.map((choice) => (
-                                                            <SelectItem key={`${option.id}:${choice.value}`} value={choice.value}>
-                                                                {choice.group_name
-                                                                    ? `${choice.group_name} / ${choice.name}`
-                                                                    : choice.name}
-                                                            </SelectItem>
-                                                        ))}
-                                                    </SelectContent>
-                                                </Select>
-                                            </div>
-                                        ))}
+                                {!acpSessionState?.session_id ? (
+                                    <div className="text-xs text-muted-foreground">
+                                        正在连接 ACP session；连接成功后会读取 Agent 返回的 configOptions。
                                     </div>
+                                ) : configOptionCount === 0 ? (
+                                    <div className="text-xs text-muted-foreground">
+                                        {acpSessionState.restored_session_method
+                                            ? `该 Agent 本次通过 session/${acpSessionState.restored_session_method} 恢复，但没有返回可配置的 configOptions。`
+                                            : "该 Agent 当前没有返回可配置的 configOptions。"}
+                                    </div>
+                                ) : (
+                                    <div className="space-y-3">
+                                        {[modelOption, modeOption, thoughtOption]
+                                            .filter((option): option is AcpSessionConfigOption => Boolean(option))
+                                            .map(renderAcpConfigSelect)}
+                                        {otherOptions.length > 0 ? <Separator /> : null}
+                                        {otherOptions.map(renderAcpConfigSelect)}
+                                    </div>
+                                )}
+                            </div>
+
+                            {acpSessionState?.session_id ? (
+                                <>
+                                    {acpSessionState.plan.length > 0 ? (
+                                        <>
+                                            <Separator />
+                                            <div className="space-y-2">
+                                                <div className="text-xs font-medium">执行计划</div>
+                                                <div className="space-y-1.5">
+                                                    {acpSessionState.plan.map((entry, index) => (
+                                                        <div key={`${entry.content}:${index}`} className="flex items-start gap-2 text-xs">
+                                                            <Badge variant="outline" className="mt-0.5 text-[10px]">
+                                                                {statusLabel(entry.status)}
+                                                            </Badge>
+                                                            <span className="min-w-0 flex-1 text-muted-foreground">
+                                                                {entry.content}
+                                                            </span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        </>
+                                    ) : null}
+
+                                    {acpSessionState.available_commands.length > 0 ? (
+                                        <>
+                                            <Separator />
+                                            <div className="text-xs text-muted-foreground">
+                                                可用 ACP 命令：{acpSessionState.available_commands.length} 个，可在输入框输入 / 选择。
+                                            </div>
+                                        </>
+                                    ) : null}
                                 </>
-                            )}
+                            ) : null}
                         </PopoverContent>
                     </Popover>
                 </>
@@ -1111,8 +1460,22 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             acpWorkingDirectory,
             combinedHeaderActions,
             handleAcpConfigChange,
-            handleAcpModeChange,
+            isAcpAssistant,
         ]);
+
+        const sidebarTodos = useMemo<TodoItem[]>(() => {
+            const acpPlanTodos: TodoItem[] = (acpSessionState?.plan ?? []).map((entry) => ({
+                content: entry.content,
+                status:
+                    entry.status === "completed"
+                        ? "completed"
+                        : entry.status === "in_progress"
+                          ? "in_progress"
+                          : "pending",
+                activeForm: entry.priority ? `ACP ${entry.priority}` : "ACP Plan",
+            }));
+            return [...acpPlanTodos, ...todos];
+        }, [acpSessionState?.plan, todos]);
 
         // 监听错误通知事件
         useEffect(() => {
@@ -1220,11 +1583,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // ============= 组件渲染 =============
 
         return (
-            <div
-                ref={dropRef}
-                className={`h-full relative flex bg-background ${isMobile ? '' : 'rounded-xl'}`}
-                data-aipp-slot="chat-conversation-root"
-            >
+            <ToolErrorContinueProvider value={continueOnToolErrorEnabled}>
+                <div
+                    ref={dropRef}
+                    className={`h-full relative flex bg-background ${isMobile ? '' : 'rounded-xl'}`}
+                    data-aipp-slot="chat-conversation-root"
+                >
                 {/* Main content area */}
                 <div className="flex-1 flex flex-col min-w-0" data-aipp-slot="chat-conversation-main">
                     {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}
@@ -1269,6 +1633,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onMessageRegenerate={handleMessageRegenerate}
                             onMessageEdit={handleMessageEdit}
                             onMessageFork={handleMessageFork}
+                            onQueuedMessagePromote={handleQueuedMessagePromote}
                             onToggleReasoningExpand={toggleReasoningExpand}
                             inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
                             allowFeishuDebugResend={allowFeishuDebugResend}
@@ -1306,13 +1671,14 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         sidebarVisible={!isMobile && !hideSidebar && Boolean(conversationId)}
                         sendButtonIcon={sendButtonIconSlot}
                         sendButtonVisual={sendButtonVisualSlot}
+                        acpAvailableCommands={acpSessionState?.available_commands ?? []}
                     />
                 </div>
 
                 {/* Right sidebar - only show on desktop when sidebar window is not open */}
                 {!isMobile && !hideSidebar && conversationId && !sidebarWindowOpen && (
                         <ChatSidebar
-                            todos={todos}
+                            todos={sidebarTodos}
                             artifacts={artifacts}
                             contextItems={contextItems}
                             conversationId={conversationId}
@@ -1349,7 +1715,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         <div className="text-primary text-base font-medium">加载中...</div>
                     </div>
                 ) : null}
-            </div>
+                </div>
+            </ToolErrorContinueProvider>
         );
     }
 );

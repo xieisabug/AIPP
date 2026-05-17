@@ -61,17 +61,17 @@ impl FileOperations {
         let start_idx = (offset - 1).min(total_lines);
         let end_idx = (start_idx + limit).min(total_lines);
 
-        // 构建带行号的输出（cat -n 格式）
+        // 构建原始内容输出，保留 offset/limit 范围与长行截断逻辑。
         let mut content = String::new();
-        for (idx, line) in lines[start_idx..end_idx].iter().enumerate() {
-            let line_num = start_idx + idx + 1;
+        for line in &lines[start_idx..end_idx] {
             // 截断过长的行
             let truncated_line = if line.len() > Self::MAX_LINE_LENGTH {
                 format!("{}...[truncated]", &line[..Self::MAX_LINE_LENGTH])
             } else {
                 line.clone()
             };
-            content.push_str(&format!("{:>6}\t{}\n", line_num, truncated_line));
+            content.push_str(&truncated_line);
+            content.push('\n');
         }
 
         // 记录文件已读取

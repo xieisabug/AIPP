@@ -25,6 +25,11 @@ export interface ChatScrollProbeResult extends ChatScrollFrameSummary {
     startScrollTop: number;
     endScrollTop: number;
     scrollEventCount: number;
+    viewportSampleCount: number;
+    blankViewportSampleCount: number;
+    averageBlankViewportRatio: number;
+    maxBlankViewportRatio: number;
+    minVisibleMessageCount: number;
     warning?: string;
 }
 
@@ -142,6 +147,76 @@ function easeInOutQuad(progress: number): number {
         : 1 - Math.pow(-2 * progress + 2, 2) / 2;
 }
 
+function getMergedIntervalLength(intervals: Array<[number, number]>): number {
+    if (intervals.length === 0) {
+        return 0;
+    }
+
+    const sortedIntervals = [...intervals].sort((a, b) => a[0] - b[0]);
+    let coveredLength = 0;
+    let [currentStart, currentEnd] = sortedIntervals[0];
+
+    for (let index = 1; index < sortedIntervals.length; index += 1) {
+        const [nextStart, nextEnd] = sortedIntervals[index];
+        if (nextStart <= currentEnd) {
+            currentEnd = Math.max(currentEnd, nextEnd);
+            continue;
+        }
+
+        coveredLength += currentEnd - currentStart;
+        currentStart = nextStart;
+        currentEnd = nextEnd;
+    }
+
+    coveredLength += currentEnd - currentStart;
+    return coveredLength;
+}
+
+function measureViewportBlankness(container: HTMLElement): {
+    blankRatio: number;
+    visibleMessageCount: number;
+} {
+    const viewportHeight = container.clientHeight;
+    if (viewportHeight <= 0) {
+        return {
+            blankRatio: 0,
+            visibleMessageCount: 0,
+        };
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    const viewportTop = containerRect.top;
+    const viewportBottom = containerRect.bottom;
+    const visibleIntervals: Array<[number, number]> = [];
+    let visibleMessageCount = 0;
+
+    container.querySelectorAll<HTMLElement>("[data-message-item]").forEach((item) => {
+        const rect = item.getBoundingClientRect();
+        const intersectionTop = Math.max(rect.top, viewportTop);
+        const intersectionBottom = Math.min(rect.bottom, viewportBottom);
+        if (intersectionBottom <= intersectionTop) {
+            return;
+        }
+
+        visibleMessageCount += 1;
+        visibleIntervals.push([
+            intersectionTop - viewportTop,
+            intersectionBottom - viewportTop,
+        ]);
+    });
+
+    const coveredHeight = getMergedIntervalLength(visibleIntervals);
+    const blankRatio = Math.max(
+        0,
+        Math.min(1, 1 - coveredHeight / viewportHeight),
+    );
+
+    return {
+        blankRatio,
+        visibleMessageCount,
+    };
+}
+
 async function runScrollPass(
     container: HTMLElement,
     fromScrollTop: number,
@@ -150,10 +225,12 @@ async function runScrollPass(
     frameDurations: number[],
     lastFrameAtRef: { current: number | null },
     observeMaxScrollTop: () => void,
+    recordViewportSample: () => void,
 ): Promise<void> {
     if (durationMs <= 0 || Math.abs(toScrollTop - fromScrollTop) < 1) {
         container.scrollTop = toScrollTop;
         observeMaxScrollTop();
+        recordViewportSample();
         return;
     }
 
@@ -175,9 +252,11 @@ async function runScrollPass(
             const easedProgress = easeInOutQuad(progress);
             container.scrollTop =
                 fromScrollTop + (toScrollTop - fromScrollTop) * easedProgress;
+            recordViewportSample();
 
             if (progress >= 1) {
                 container.scrollTop = toScrollTop;
+                recordViewportSample();
                 resolve();
                 return;
             }
@@ -234,15 +313,34 @@ export async function runScrollPerformanceProbe(
             startScrollTop,
             endScrollTop: container.scrollTop,
             scrollEventCount: 0,
+            viewportSampleCount: 0,
+            blankViewportSampleCount: 0,
+            averageBlankViewportRatio: 0,
+            maxBlankViewportRatio: 0,
+            minVisibleMessageCount: 0,
             warning: "Scroll container does not overflow; no scroll probe was run.",
         };
     }
 
     const frameDurations: number[] = [];
+    const blankViewportRatios: number[] = [];
+    let blankViewportSampleCount = 0;
+    let minVisibleMessageCount = Number.POSITIVE_INFINITY;
     let scrollEventCount = 0;
     const handleScroll = () => {
         scrollEventCount += 1;
         observeMaxScrollTop();
+    };
+    const recordViewportSample = () => {
+        const sample = measureViewportBlankness(container);
+        blankViewportRatios.push(sample.blankRatio);
+        if (sample.blankRatio >= 0.98) {
+            blankViewportSampleCount += 1;
+        }
+        minVisibleMessageCount = Math.min(
+            minVisibleMessageCount,
+            sample.visibleMessageCount,
+        );
     };
 
     container.addEventListener("scroll", handleScroll, { passive: true });
@@ -262,6 +360,7 @@ export async function runScrollPerformanceProbe(
             frameDurations,
             lastFrameAtRef,
             observeMaxScrollTop,
+            recordViewportSample,
         );
 
         if (includeReturnTrip) {
@@ -273,6 +372,7 @@ export async function runScrollPerformanceProbe(
                 frameDurations,
                 lastFrameAtRef,
                 observeMaxScrollTop,
+                recordViewportSample,
             );
         }
     } finally {
@@ -285,6 +385,14 @@ export async function runScrollPerformanceProbe(
         0,
         container.scrollHeight - container.clientHeight,
     );
+    const viewportSampleCount = blankViewportRatios.length;
+    const averageBlankViewportRatio = viewportSampleCount > 0
+        ? blankViewportRatios.reduce((sum, value) => sum + value, 0)
+            / viewportSampleCount
+        : 0;
+    const maxBlankViewportRatio = viewportSampleCount > 0
+        ? Math.max(...blankViewportRatios)
+        : 0;
 
     return {
         ...summarizeFrameDurations(frameDurations),
@@ -296,5 +404,13 @@ export async function runScrollPerformanceProbe(
         startScrollTop: roundToTwo(startScrollTop),
         endScrollTop: roundToTwo(container.scrollTop),
         scrollEventCount,
+        viewportSampleCount,
+        blankViewportSampleCount,
+        averageBlankViewportRatio: roundToTwo(averageBlankViewportRatio),
+        maxBlankViewportRatio: roundToTwo(maxBlankViewportRatio),
+        minVisibleMessageCount:
+            minVisibleMessageCount === Number.POSITIVE_INFINITY
+                ? 0
+                : minVisibleMessageCount,
     };
 }

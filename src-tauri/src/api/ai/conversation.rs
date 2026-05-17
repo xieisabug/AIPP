@@ -29,7 +29,31 @@ fn strip_skill_attachment_tags(content: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_skill_attachment_tags;
+    use super::*;
+
+    fn test_message(id: i64, message_type: &str, metadata_json: Option<&str>) -> Message {
+        Message {
+            id,
+            parent_id: None,
+            conversation_id: 1,
+            message_type: message_type.to_string(),
+            content: format!("{message_type}-{id}"),
+            llm_model_id: Some(1),
+            llm_model_name: Some("gpt-test".to_string()),
+            created_time: chrono::Utc::now(),
+            start_time: Some(chrono::Utc::now()),
+            finish_time: Some(chrono::Utc::now()),
+            token_count: 0,
+            input_token_count: 0,
+            output_token_count: 0,
+            generation_group_id: None,
+            parent_group_id: None,
+            tool_calls_json: None,
+            metadata_json: metadata_json.map(ToOwned::to_owned),
+            first_token_time: None,
+            ttft_ms: None,
+        }
+    }
 
     #[test]
     fn strip_skill_attachment_tags_removes_non_empty_skill_blocks() {
@@ -41,6 +65,68 @@ mod tests {
         );
 
         assert_eq!(strip_skill_attachment_tags(content), "用户正文");
+    }
+
+    #[test]
+    fn select_responses_stateful_request_uses_latest_response_id() {
+        let messages = vec![
+            test_message(1, "system", None),
+            test_message(2, "user", None),
+            test_message(3, "response", Some(r#"{"response_id":"resp_1"}"#)),
+            test_message(4, "user", None),
+        ];
+        let all_messages = messages.into_iter().map(|message| (message, None)).collect::<Vec<_>>();
+        let init_message_list = vec![
+            ("system".to_string(), "system".to_string(), vec![]),
+            ("user".to_string(), "hello".to_string(), vec![]),
+            ("response".to_string(), "hi".to_string(), vec![]),
+            ("user".to_string(), "again".to_string(), vec![]),
+        ];
+        let message_ids = vec![1, 2, 3, 4];
+
+        let selected = select_responses_stateful_request(
+            &init_message_list,
+            &message_ids,
+            &all_messages,
+            false,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(selected.previous_response_id, "resp_1");
+        assert_eq!(selected.skipped_prefix_len, 3);
+        assert_eq!(selected.messages.len(), 1);
+        assert_eq!(selected.messages[0].1, "again");
+    }
+
+    #[test]
+    fn select_responses_stateful_request_disables_for_branch() {
+        let mut response = test_message(3, "response", Some(r#"{"response_id":"resp_1"}"#));
+        response.parent_group_id = Some("old_group".to_string());
+        let all_messages = vec![
+            (test_message(1, "system", None), None),
+            (test_message(2, "user", None), None),
+            (response, None),
+            (test_message(4, "user", None), None),
+        ];
+        let init_message_list = vec![
+            ("system".to_string(), "system".to_string(), vec![]),
+            ("user".to_string(), "hello".to_string(), vec![]),
+            ("response".to_string(), "hi".to_string(), vec![]),
+            ("user".to_string(), "again".to_string(), vec![]),
+        ];
+        let message_ids = vec![1, 2, 3, 4];
+
+        let result = select_responses_stateful_request(
+            &init_message_list,
+            &message_ids,
+            &all_messages,
+            false,
+            false,
+        );
+
+        assert!(matches!(result, Err("branched or regenerated history")));
     }
 }
 
@@ -448,6 +534,86 @@ pub struct ToolConfig {
 pub struct ChatRequestBuildResult {
     pub chat_request: ChatRequest,
     pub tool_name_mapping: ToolNameMapping,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResponsesStatefulRequestSelection {
+    pub previous_response_id: String,
+    pub messages: Vec<(String, String, Vec<MessageAttachment>)>,
+    pub skipped_prefix_len: usize,
+}
+
+fn response_id_from_message_metadata(message: &Message) -> Option<String> {
+    let raw = message.metadata_json.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    value
+        .get("response_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+pub fn select_responses_stateful_request(
+    init_message_list: &[(String, String, Vec<MessageAttachment>)],
+    message_ids: &[i64],
+    all_messages: &[(Message, Option<MessageAttachment>)],
+    has_unfinished_tool_call: bool,
+    is_regeneration: bool,
+) -> Result<Option<ResponsesStatefulRequestSelection>, &'static str> {
+    if is_regeneration {
+        return Err("regenerate request");
+    }
+    if has_unfinished_tool_call {
+        return Err("unfinished tool call exists");
+    }
+    if init_message_list.len() != message_ids.len() {
+        return Err("message list metadata is not aligned");
+    }
+
+    let message_by_id: HashMap<i64, &Message> =
+        all_messages.iter().map(|(message, _)| (message.id, message)).collect();
+
+    if message_ids
+        .iter()
+        .filter_map(|id| message_by_id.get(id).copied())
+        .any(|message| message.parent_group_id.is_some())
+    {
+        return Err("branched or regenerated history");
+    }
+
+    let mut selected: Option<(usize, String)> = None;
+    for (index, message_id) in message_ids.iter().enumerate() {
+        let Some(message) = message_by_id.get(message_id).copied() else {
+            continue;
+        };
+        if message.message_type != "response" && message.message_type != "reasoning" {
+            continue;
+        }
+        if message.finish_time.is_none() {
+            continue;
+        }
+        if let Some(response_id) = response_id_from_message_metadata(message) {
+            selected = Some((index, response_id));
+        }
+    }
+
+    let Some((response_index, previous_response_id)) = selected else {
+        return Err("no previous response_id");
+    };
+    let start_index = response_index + 1;
+    if start_index >= init_message_list.len() {
+        return Err("no incremental messages after previous response_id");
+    }
+
+    Ok(Some(ResponsesStatefulRequestSelection {
+        previous_response_id,
+        messages: init_message_list[start_index..].to_vec(),
+        skipped_prefix_len: start_index,
+    }))
 }
 
 pub fn build_chat_request_from_messages(

@@ -31,6 +31,7 @@ export interface UseConversationOperationsProps {
     clearShiningMessages: () => void;
     assistantTypePluginMap: Map<number, any>;
     assistantRunApi: any;
+    busySendBehavior?: "queue" | "interrupt";
 }
 
 export interface UseConversationOperationsReturn {
@@ -75,6 +76,7 @@ export function useConversationOperations({
     clearShiningMessages,
     assistantTypePluginMap,
     assistantRunApi,
+    busySendBehavior = "queue",
 }: UseConversationOperationsProps): UseConversationOperationsReturn {
 
     // 对话标题管理相关状态
@@ -233,6 +235,45 @@ export function useConversationOperations({
     // 发送消息的主要处理函数，使用节流防止频繁点击
     const handleSend = throttle(() => {
         if (aiIsResponsing) {
+            if (inputText.trim() !== "" && conversation?.id) {
+                let assistantId = conversation.assistant_id ?? selectedAssistant;
+                let finalPrompt = inputText;
+                let parsedAssistantId = assistantId;
+                try {
+                    const parsed = extractAssistantFromMessage(assistants, inputText, assistantId);
+                    parsedAssistantId = parsed.assistantId;
+                    finalPrompt = parsed.cleanedPrompt;
+                } catch (e) {
+                    console.warn("extractAssistantFromMessage failed for queued message, fallback original", e);
+                }
+                const assistantData = assistants.find((assistant) => assistant.id === parsedAssistantId);
+                const assistantType = assistantData?.assistant_type;
+                const isPluginAssistant = assistantType !== undefined && assistantType !== 0 && assistantType !== 4;
+                if (isPluginAssistant) {
+                    toast.error("插件助手暂不支持消息排队");
+                    return;
+                }
+
+                invoke("enqueue_conversation_message", {
+                    request: {
+                        prompt: finalPrompt,
+                        conversation_id: String(conversation.id),
+                        assistant_id: parsedAssistantId,
+                        attachment_list: fileInfoList?.map((i) => i.id),
+                    },
+                    queueKind: busySendBehavior === "interrupt" ? "interrupt" : "normal",
+                })
+                    .then(() => {
+                        setInputText("");
+                        clearFileInfoList();
+                    })
+                    .catch((error) => {
+                        console.error("Queue message error:", error);
+                        toast.error("消息排队失败: " + error);
+                    });
+                return;
+            }
+
             // AI正在响应时，点击取消
             console.log("Cancelling AI");
             console.log(conversation?.id);

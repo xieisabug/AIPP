@@ -143,3 +143,55 @@ describe("useAssistantFormConfig plugin field visibility", () => {
         ).toBe(false);
     });
 });
+
+describe("useAssistantFormConfig ACP MCP option", () => {
+    beforeEach(() => {
+        clearAllMockHandlers();
+        mockInvokeHandler("get_all_feature_config", () => []);
+    });
+
+    it("shows manual MCP selector for ACP assistants", async () => {
+        const onConfigChange = vi.fn();
+        const acpAssistant: AssistantDetail = {
+            ...baseAssistantDetail,
+            assistant: {
+                ...baseAssistantDetail.assistant,
+                assistant_type: 4,
+            },
+            model_configs: [],
+        };
+
+        const { result } = renderHook(() =>
+            useAssistantFormConfig({
+                currentAssistant: acpAssistant,
+                assistantTypeNameMap: new Map([[4, "ACP 助手"]]),
+                assistantTypeCustomField: [],
+                assistantTypeCustomLabel: new Map(),
+                assistantTypeCustomTips: new Map(),
+                assistantTypeHideField: [],
+                navigateTo: vi.fn(),
+                onConfigChange,
+                onPromptChange: vi.fn(),
+                pluginAssistantFormFields: [],
+                pluginAssistantConfigValues: {},
+                onPluginConfigChange: vi.fn(),
+            })
+        );
+
+        await waitFor(() => {
+            expect(result.current.formConfig.length).toBeGreaterThan(0);
+        });
+
+        const mcpField = result.current.formConfig.find((item) => item.key === "mcp_config");
+        const workingDirectoryField = result.current.formConfig.find(
+            (item) => item.key === "acp_working_directory"
+        );
+        expect(mcpField?.config.label).toBe("MCP工具");
+        expect(mcpField?.config.type).toBe("custom");
+        expect(workingDirectoryField?.config.type).toBe("folder-picker");
+        expect(workingDirectoryField?.config.placeholder).toBe("选择工作目录");
+        expect(
+            result.current.formConfig.some((item) => item.key === "dynamic_mcp_loading_enabled")
+        ).toBe(false);
+    });
+});

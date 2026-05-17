@@ -1,6 +1,10 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { UseFormReturn } from "react-hook-form";
 import ConfigForm from "@/components/ConfigForm";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { getErrorMessage } from "@/utils/error";
 
 interface PreviewConfigFormProps {
     form: UseFormReturn<any>;
@@ -65,8 +69,76 @@ export const PreviewConfigForm: React.FC<PreviewConfigFormProps> = ({
 }) => {
     const bunNotInstalled = bunVersion === "Not Installed";
     const uvNotInstalled = uvVersion === "Not Installed";
+    const [resourcePolicyText, setResourcePolicyText] = useState("");
+    const [resourcePolicyStatus, setResourcePolicyStatus] = useState("");
+    const [isSavingResourcePolicy, setIsSavingResourcePolicy] = useState(false);
+
+    useEffect(() => {
+        let active = true;
+        invoke("get_preview_external_resource_policy")
+            .then((policy) => {
+                if (active) {
+                    setResourcePolicyText(JSON.stringify(policy, null, 2));
+                    setResourcePolicyStatus("");
+                }
+            })
+            .catch((error) => {
+                if (active) {
+                    setResourcePolicyStatus(getErrorMessage(error));
+                }
+            });
+        return () => {
+            active = false;
+        };
+    }, []);
+
+    const saveResourcePolicy = async () => {
+        setIsSavingResourcePolicy(true);
+        setResourcePolicyStatus("");
+        try {
+            const policy = JSON.parse(resourcePolicyText);
+            await invoke("save_preview_external_resource_policy", { policy });
+            setResourcePolicyStatus("已保存");
+        } catch (error) {
+            setResourcePolicyStatus(getErrorMessage(error));
+        } finally {
+            setIsSavingResourcePolicy(false);
+        }
+    };
 
     const PREVIEW_FORM_CONFIG: Array<{ key: string; config: any }> = [];
+
+    PREVIEW_FORM_CONFIG.push({
+        key: "preview_external_resources_policy",
+        config: {
+            type: "custom" as const,
+            label: "外部资源白名单策略",
+            customRender: () => (
+                <div className="space-y-2">
+                    <Textarea
+                        value={resourcePolicyText}
+                        onChange={(event) => setResourcePolicyText(event.target.value)}
+                        className="min-h-48 font-mono text-xs"
+                        spellCheck={false}
+                    />
+                    <div className="flex items-center justify-between gap-3">
+                        <div className="text-xs text-muted-foreground">
+                            {resourcePolicyStatus}
+                        </div>
+                        <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void saveResourcePolicy()}
+                            disabled={isSavingResourcePolicy || !resourcePolicyText.trim()}
+                        >
+                            保存策略
+                        </Button>
+                    </div>
+                </div>
+            ),
+        },
+    });
 
     // Bun 配置
     if (bunNotInstalled) {

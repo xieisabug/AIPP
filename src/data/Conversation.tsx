@@ -46,6 +46,20 @@ export interface Message {
     tps?: number | null;
 }
 
+export type QueuedConversationMessageKind = "normal" | "interrupt";
+
+export interface QueuedConversationMessage {
+    id: number;
+    conversation_id: number;
+    queue_kind: QueuedConversationMessageKind | string;
+    status: string;
+    request_json: string;
+    prompt: string;
+    assistant_id: number;
+    created_time: Date | string;
+    updated_time: Date | string;
+}
+
 // 流式事件数据类型
 export interface StreamEvent {
     message_id: number;
@@ -202,15 +216,43 @@ export interface AcpSessionConfigOption {
     options: AcpSessionConfigChoice[];
 }
 
+export interface AcpPromptCapabilities {
+    image: boolean;
+    audio: boolean;
+    embedded_context: boolean;
+}
+
+export interface AcpPlanEntry {
+    content: string;
+    priority: "high" | "medium" | "low" | string;
+    status: "pending" | "in_progress" | "completed" | string;
+}
+
+export interface AcpAvailableCommand {
+    name: string;
+    description: string;
+    input_hint?: string | null;
+}
+
 export interface AcpConversationSessionState {
     conversation_id: number;
     session_id?: string | null;
     title?: string | null;
     updated_at?: string | null;
+    load_session_supported: boolean;
+    session_resume_supported?: boolean;
+    restored_session_method?: "resume" | "load" | string | null;
+    prompt_capabilities: AcpPromptCapabilities;
     current_mode_id?: string | null;
     modes: AcpSessionMode[];
     config_options: AcpSessionConfigOption[];
+    plan: AcpPlanEntry[];
+    available_commands: AcpAvailableCommand[];
     has_active_prompt: boolean;
+    context_tokens_used?: number | null;
+    context_window_size?: number | null;
+    session_cost_amount?: number | null;
+    session_cost_currency?: string | null;
 }
 
 export interface AcpSessionStateSnapshotEvent {
@@ -247,7 +289,12 @@ export interface ConversationTokenStats {
     total_tokens: number;
     input_tokens: number;
     output_tokens: number;
+    thought_tokens: number;
+    cached_input_tokens?: number;
+    cached_read_tokens: number;
+    cached_write_tokens: number;
     by_model: ModelTokenBreakdown[];
+    estimated_message_count: number;
     message_count: number;
     // 按消息类型统计
     system_message_count: number;
@@ -269,6 +316,10 @@ export interface ModelTokenBreakdown {
     total_tokens: number;
     input_tokens: number;
     output_tokens: number;
+    thought_tokens: number;
+    cached_input_tokens?: number;
+    cached_read_tokens: number;
+    cached_write_tokens: number;
     message_count: number;
     percentage?: number; // 用于UI显示的百分比
     // 性能指标统计
@@ -281,6 +332,11 @@ export interface MessageTokenStats {
     total_tokens: number;
     input_tokens: number;
     output_tokens: number;
+    thought_tokens: number;
+    cached_input_tokens?: number;
+    cached_read_tokens: number;
+    cached_write_tokens: number;
+    usage_source?: "reported" | "estimated" | string | null;
     model_name: string | null;
     // 性能指标
     ttft_ms?: number;

@@ -69,6 +69,24 @@ const operationLabels: Record<string, string> = {
     list_directory: "列出目录",
 };
 
+const permissionDialogClassName =
+    "grid !max-h-[calc(100dvh-2rem)] !w-[calc(100vw-2rem)] grid-rows-[minmax(0,1fr)_auto] overflow-hidden";
+const permissionDialogHeaderClassName = "min-h-0 min-w-0 overflow-hidden";
+const permissionDialogBodyClassName = "min-h-0 min-w-0 space-y-3 overflow-y-auto overflow-x-hidden pr-1";
+const permissionDetailPanelClassName = "min-w-0 space-y-2 overflow-hidden rounded-md bg-muted p-3";
+const permissionCodeBlockClassName =
+    "mt-2 max-h-56 w-full max-w-full overflow-auto rounded-md bg-background p-2 font-mono text-xs whitespace-pre-wrap break-all";
+const neutralActionClassName =
+    "flex !h-auto min-h-9 w-full items-center !justify-start gap-2 !whitespace-normal !border-border !bg-background py-2 text-left !text-foreground hover:!bg-muted hover:!text-foreground";
+const denyActionClassName =
+    "flex !h-auto min-h-9 w-full items-center !justify-start gap-2 !whitespace-normal !border-red-500/60 !bg-red-50 py-2 text-left !text-red-700 hover:!bg-red-100 hover:!text-red-800 dark:!border-red-500/40 dark:!bg-red-950/30 dark:!text-red-300 dark:hover:!bg-red-950/50";
+const denyStrongActionClassName =
+    "flex !h-auto min-h-9 w-full items-center !justify-start gap-2 !whitespace-normal !bg-red-600 py-2 text-left !text-white hover:!bg-red-700 dark:!bg-red-700 dark:hover:!bg-red-800";
+const allowActionClassName =
+    "flex !h-auto min-h-9 w-full items-center !justify-start gap-2 !whitespace-normal !border-emerald-500/60 !bg-emerald-50 py-2 text-left !text-emerald-800 hover:!bg-emerald-100 hover:!text-emerald-900 dark:!border-emerald-500/40 dark:!bg-emerald-950/30 dark:!text-emerald-300 dark:hover:!bg-emerald-950/50";
+const allowStrongActionClassName =
+    "flex !h-auto min-h-9 w-full items-center !justify-start gap-2 !whitespace-normal !bg-emerald-600 py-2 text-left !text-white hover:!bg-emerald-700 dark:!bg-emerald-700 dark:hover:!bg-emerald-800";
+
 export function OperationPermissionDialog({
     request,
     isOpen,
@@ -102,16 +120,16 @@ export function OperationPermissionDialog({
 
     return (
         <AlertDialog open={isOpen}>
-            <AlertDialogContent className="max-h-[85vh] max-w-lg overflow-hidden">
-                <AlertDialogHeader>
+            <AlertDialogContent className={`${permissionDialogClassName} !max-w-lg`}>
+                <AlertDialogHeader className={permissionDialogHeaderClassName}>
                     <AlertDialogTitle className="flex items-center gap-2">
                         <Shield className="h-5 w-5 text-yellow-500" />
                         操作权限请求
                     </AlertDialogTitle>
                     <AlertDialogDescription asChild>
-                        <div className="max-h-[50vh] space-y-3 overflow-y-auto pr-1">
+                        <div className={permissionDialogBodyClassName}>
                             <p>AI 助手请求执行以下操作：</p>
-                            <div className="space-y-2 rounded-md bg-muted p-3">
+                            <div className={permissionDetailPanelClassName}>
                                 <div className="flex items-start gap-2 text-sm">
                                     <span className="shrink-0 font-medium text-foreground">操作:</span>
                                     <span className="min-w-0 text-muted-foreground">{operationLabel}</span>
@@ -138,7 +156,7 @@ export function OperationPermissionDialog({
                             variant="outline"
                             onClick={handleDeny}
                             disabled={isSubmitting}
-                            className="flex w-full items-center justify-start gap-2 whitespace-normal text-left"
+                            className={denyActionClassName}
                         >
                             <ShieldAlert className="h-4 w-4 shrink-0" />
                             拒绝
@@ -147,7 +165,7 @@ export function OperationPermissionDialog({
                             variant="outline"
                             onClick={handleAllow}
                             disabled={isSubmitting}
-                            className="flex w-full items-center justify-start gap-2 whitespace-normal text-left"
+                            className={allowActionClassName}
                         >
                             <Shield className="h-4 w-4 shrink-0" />
                             仅本次允许
@@ -156,7 +174,7 @@ export function OperationPermissionDialog({
                             variant="outline"
                             onClick={handleAllowForConversation}
                             disabled={isSubmitting}
-                            className="flex w-full items-center justify-start gap-2 whitespace-normal text-left"
+                            className={allowActionClassName}
                         >
                             <Shield className="h-4 w-4 shrink-0" />
                             对话期间信任
@@ -165,7 +183,7 @@ export function OperationPermissionDialog({
                             variant="outline"
                             onClick={handleAllowForAssistant}
                             disabled={isSubmitting}
-                            className="flex w-full items-center justify-start gap-2 whitespace-normal text-left"
+                            className={allowActionClassName}
                         >
                             <ShieldCheck className="h-4 w-4 shrink-0" />
                             添加到助手工作区
@@ -173,7 +191,7 @@ export function OperationPermissionDialog({
                         <Button
                             onClick={handleAllowAndSave}
                             disabled={isSubmitting}
-                            className="flex w-full items-center justify-start gap-2 whitespace-normal text-left sm:col-span-2"
+                            className={`${allowStrongActionClassName} sm:col-span-2`}
                         >
                             <ShieldCheck className="h-4 w-4 shrink-0" />
                             允许并加入全局白名单
@@ -185,17 +203,33 @@ export function OperationPermissionDialog({
     );
 }
 
-const acpOptionStyle = (kind: string) => {
+const acpOptionLabel = (option: AcpPermissionOption) => {
+    switch (option.kind) {
+        case "allow_once":
+            return "本次允许";
+        case "allow_always":
+            return "始终允许";
+        case "reject_once":
+            return "本次拒绝";
+        case "reject_always":
+            return "始终拒绝";
+        default:
+            return option.name || "未知选项";
+    }
+};
+
+const acpOptionClassName = (kind: string) => {
     switch (kind) {
         case "allow_always":
-            return "default" as const;
+            return allowStrongActionClassName;
         case "allow_once":
-            return "outline" as const;
-        case "reject_once":
+            return allowActionClassName;
         case "reject_always":
-            return "destructive" as const;
+            return denyStrongActionClassName;
+        case "reject_once":
+            return denyActionClassName;
         default:
-            return "outline" as const;
+            return neutralActionClassName;
     }
 };
 
@@ -210,16 +244,16 @@ export function AcpPermissionDialog({
 
     return (
         <AlertDialog open={isOpen}>
-            <AlertDialogContent className="max-h-[85vh] max-w-2xl overflow-hidden">
-                <AlertDialogHeader>
+            <AlertDialogContent className={`${permissionDialogClassName} sm:!max-w-xl`}>
+                <AlertDialogHeader className={permissionDialogHeaderClassName}>
                     <AlertDialogTitle className="flex items-center gap-2">
                         <Shield className="h-5 w-5 text-yellow-500" />
                         ACP 工具权限请求
                     </AlertDialogTitle>
                     <AlertDialogDescription asChild>
-                        <div className="max-h-[50vh] space-y-3 overflow-y-auto pr-1">
+                        <div className={permissionDialogBodyClassName}>
                             <p>AI 助手请求执行以下工具调用：</p>
-                            <div className="space-y-2 rounded-md bg-muted p-3">
+                            <div className={permissionDetailPanelClassName}>
                                 <div className="flex items-start gap-2 text-sm">
                                     <span className="shrink-0 font-medium text-foreground">标题:</span>
                                     <span className="min-w-0 break-words text-muted-foreground">
@@ -229,19 +263,19 @@ export function AcpPermissionDialog({
                                 <div className="flex items-start gap-2 text-sm">
                                     <span className="shrink-0 font-medium text-foreground">类型:</span>
                                     <span className="min-w-0 break-words text-muted-foreground">
-                                        {request.kind || "unknown"}
+                                        {request.kind || "未知"}
                                     </span>
                                 </div>
                                 <div className="flex items-start gap-2 text-sm">
-                                    <span className="shrink-0 font-medium text-foreground">ToolCallId:</span>
+                                    <span className="shrink-0 font-medium text-foreground">工具调用 ID:</span>
                                     <span className="min-w-0 break-all font-mono text-xs text-foreground">
                                         {request.tool_call_id}
                                     </span>
                                 </div>
                                 {request.parameters && (
-                                    <div className="text-sm">
+                                    <div className="min-w-0 text-sm">
                                         <span className="font-medium text-foreground">参数:</span>
-                                        <pre className="mt-2 max-h-60 overflow-auto rounded-md bg-background p-2 font-mono text-xs whitespace-pre-wrap break-words">
+                                        <pre className={permissionCodeBlockClassName}>
                                             {request.parameters}
                                         </pre>
                                     </div>
@@ -253,31 +287,31 @@ export function AcpPermissionDialog({
                         </div>
                     </AlertDialogDescription>
                 </AlertDialogHeader>
-                <AlertDialogFooter>
-                    <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2">
+                <AlertDialogFooter className="min-w-0 overflow-hidden">
+                    <div className="grid min-w-0 w-full grid-cols-1 gap-2 sm:grid-cols-2">
                         <Button
                             variant="outline"
                             onClick={() => onDecision(request.request_id, undefined, true)}
                             disabled={isSubmitting}
-                            className="flex w-full items-center justify-start gap-2 whitespace-normal text-left"
+                            className={neutralActionClassName}
                         >
                             <ShieldAlert className="h-4 w-4 shrink-0" />
-                            取消
+                            取消请求
                         </Button>
                         {request.options.map((option) => (
                             <Button
                                 key={option.option_id}
-                                variant={acpOptionStyle(option.kind)}
+                                variant={option.kind === "allow_always" || option.kind === "reject_always" ? "default" : "outline"}
                                 onClick={() => onDecision(request.request_id, option.option_id, false)}
                                 disabled={isSubmitting}
-                                className="flex w-full items-center justify-start gap-2 whitespace-normal text-left"
+                                className={acpOptionClassName(option.kind)}
                             >
                                 {option.kind.startsWith("allow") ? (
                                     <ShieldCheck className="h-4 w-4 shrink-0" />
                                 ) : (
                                     <ShieldAlert className="h-4 w-4 shrink-0" />
                                 )}
-                                {option.name}
+                                {acpOptionLabel(option)}
                             </Button>
                         ))}
                     </div>
