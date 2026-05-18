@@ -1495,6 +1495,7 @@ function ButlerExperimentWindow() {
                                         showFeishuStatus && isMainConversationFeishuBound
                                     }
                                     virtualizeMessages
+                                    virtualizedListEngine="virtuoso"
                                     windowLabel="butler_experiment"
                                     busySendBehavior="interrupt"
                                 />

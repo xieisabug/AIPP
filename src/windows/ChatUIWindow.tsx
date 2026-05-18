@@ -610,6 +610,7 @@ function ChatUIWindow() {
                             inlineInteractionItems={inlineInteractionItems}
                             inlineInteractionVisible={hasInlineInteraction}
                             virtualizeMessages
+                            virtualizedListEngine="virtuoso"
                         />
                     </div>
 
@@ -663,6 +664,7 @@ function ChatUIWindow() {
                         inlineInteractionItems={inlineInteractionItems}
                         inlineInteractionVisible={hasInlineInteraction}
                         virtualizeMessages
+                        virtualizedListEngine="virtuoso"
                     />
                 </div>
 

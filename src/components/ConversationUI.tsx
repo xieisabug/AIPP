@@ -50,7 +50,9 @@ import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 
 // 导入新创建的组件
 import ConversationHeader from "./conversation/ConversationHeader";
-import ConversationContent from "./conversation/ConversationContent";
+import ConversationContent, {
+    type VirtualizedListEngine,
+} from "./conversation/ConversationContent";
 import { applyScrollHighlight } from "./conversation/scrollHighlight";
 import { ToolErrorContinueProvider } from "./McpToolCall";
 import IconButton from "./IconButton";
@@ -204,6 +206,7 @@ interface ConversationUIProps {
     headerExtraActions?: ReactNode;
     allowFeishuDebugResend?: boolean;
     virtualizeMessages?: boolean;
+    virtualizedListEngine?: VirtualizedListEngine;
     windowLabel?: string;
     busySendBehavior?: "queue" | "interrupt";
 }
@@ -225,6 +228,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             headerExtraActions,
             allowFeishuDebugResend = false,
             virtualizeMessages = false,
+            virtualizedListEngine = "legacy",
             windowLabel = "chat_ui",
             busySendBehavior = "queue",
         },
@@ -1638,6 +1642,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
                             allowFeishuDebugResend={allowFeishuDebugResend}
                             virtualizeMessages={virtualizeMessages}
+                            virtualizedListEngine={virtualizedListEngine}
                             scrollContainerRef={scrollContainerRef}
                             pendingScrollMessageId={pendingScrollMessageId}
                             clearPendingScrollMessageId={setPendingScrollMessageId}

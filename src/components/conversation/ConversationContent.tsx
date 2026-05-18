@@ -1,10 +1,13 @@
 import React, { memo } from "react";
 import MessageList from "./MessageList";
 import VirtualizedMessageList from "./VirtualizedMessageList";
+import VirtuosoMessageList from "./VirtuosoMessageList";
 import NewChatComponent from "../NewChatComponent";
 import { Message, StreamEvent } from "../../data/Conversation";
 import { AssistantListItem } from "../../data/Assistant";
 import type { InlineInteractionItem } from "../ConversationUI";
+
+export type VirtualizedListEngine = "legacy" | "virtuoso";
 
 export interface ConversationContentProps {
     conversationId: string;
@@ -28,6 +31,7 @@ export interface ConversationContentProps {
     inlineInteractionItems?: InlineInteractionItem[];
     allowFeishuDebugResend?: boolean;
     virtualizeMessages?: boolean;
+    virtualizedListEngine?: VirtualizedListEngine;
     scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
     pendingScrollMessageId?: number | null;
     clearPendingScrollMessageId?: (messageId: number | null) => void;
@@ -63,6 +67,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     inlineInteractionItems,
     allowFeishuDebugResend = false,
     virtualizeMessages = false,
+    virtualizedListEngine = "legacy",
     scrollContainerRef,
     pendingScrollMessageId = null,
     clearPendingScrollMessageId,
@@ -75,6 +80,27 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     assistants,
     setSelectedAssistant,
 }) => {
+    const sharedMessageListProps = {
+        allDisplayMessages,
+        streamingMessages,
+        shiningMessageIds,
+        shiningMcpCallId,
+        reasoningExpandStates,
+        mcpToolCallStates,
+        generationGroups,
+        selectedVersions,
+        getGenerationGroupControl,
+        handleGenerationVersionChange,
+        onCodeRun,
+        onMessageRegenerate,
+        onMessageEdit,
+        onMessageFork,
+        onQueuedMessagePromote,
+        onToggleReasoningExpand,
+        inlineInteractionItems,
+        allowFeishuDebugResend,
+    };
+
     if (conversationId) {
         return (
             <>
@@ -84,57 +110,33 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
                         && clearPendingScrollMessageId
                         && setShiningMessageIds
                         && smartScroll ? (
-                        <VirtualizedMessageList
-                            allDisplayMessages={allDisplayMessages}
-                            streamingMessages={streamingMessages}
-                            shiningMessageIds={shiningMessageIds}
-                            shiningMcpCallId={shiningMcpCallId}
-                            reasoningExpandStates={reasoningExpandStates}
-                            mcpToolCallStates={mcpToolCallStates}
-                            generationGroups={generationGroups}
-                            selectedVersions={selectedVersions}
-                            getGenerationGroupControl={getGenerationGroupControl}
-                            handleGenerationVersionChange={handleGenerationVersionChange}
-                            onCodeRun={onCodeRun}
-                            onMessageRegenerate={onMessageRegenerate}
-                            onMessageEdit={onMessageEdit}
-                            onMessageFork={onMessageFork}
-                            onQueuedMessagePromote={onQueuedMessagePromote}
-                            onToggleReasoningExpand={onToggleReasoningExpand}
-                            inlineInteractionItems={inlineInteractionItems}
-                            allowFeishuDebugResend={allowFeishuDebugResend}
-                            scrollContainerRef={scrollContainerRef}
-                            pendingScrollMessageId={pendingScrollMessageId}
-                            clearPendingScrollMessageId={
-                                clearPendingScrollMessageId
-                            }
-                            setShiningMessageIds={setShiningMessageIds}
-                            onScrollStateChange={onScrollStateChange}
-                            smartScroll={smartScroll}
-                        />
+                        virtualizedListEngine === "virtuoso" ? (
+                            <VirtuosoMessageList
+                                {...sharedMessageListProps}
+                                scrollContainerRef={scrollContainerRef}
+                                pendingScrollMessageId={pendingScrollMessageId}
+                                clearPendingScrollMessageId={
+                                    clearPendingScrollMessageId
+                                }
+                                setShiningMessageIds={setShiningMessageIds}
+                                onScrollStateChange={onScrollStateChange}
+                                smartScroll={smartScroll}
+                            />
+                        ) : (
+                            <VirtualizedMessageList
+                                {...sharedMessageListProps}
+                                scrollContainerRef={scrollContainerRef}
+                                pendingScrollMessageId={pendingScrollMessageId}
+                                clearPendingScrollMessageId={
+                                    clearPendingScrollMessageId
+                                }
+                                setShiningMessageIds={setShiningMessageIds}
+                                onScrollStateChange={onScrollStateChange}
+                                smartScroll={smartScroll}
+                            />
+                        )
                     ) : (
-                        <MessageList
-                            allDisplayMessages={allDisplayMessages}
-                            streamingMessages={streamingMessages}
-                            shiningMessageIds={shiningMessageIds}
-                            shiningMcpCallId={shiningMcpCallId}
-                            reasoningExpandStates={reasoningExpandStates}
-                            mcpToolCallStates={mcpToolCallStates}
-                            generationGroups={generationGroups}
-                            selectedVersions={selectedVersions}
-                            getGenerationGroupControl={getGenerationGroupControl}
-                            handleGenerationVersionChange={
-                                handleGenerationVersionChange
-                            }
-                            onCodeRun={onCodeRun}
-                            onMessageRegenerate={onMessageRegenerate}
-                            onMessageEdit={onMessageEdit}
-                            onMessageFork={onMessageFork}
-                            onQueuedMessagePromote={onQueuedMessagePromote}
-                            onToggleReasoningExpand={onToggleReasoningExpand}
-                            inlineInteractionItems={inlineInteractionItems}
-                            allowFeishuDebugResend={allowFeishuDebugResend}
-                        />
+                        <MessageList {...sharedMessageListProps} />
                     )}
                 </>
             </>
