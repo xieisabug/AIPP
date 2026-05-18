@@ -98,6 +98,7 @@ declare global {
                 lastHeight: number;
             }>;
         };
+        __AIPP_CHAT_SCROLL_PERF_ACTIVE__?: boolean;
     }
 }
 
@@ -251,6 +252,10 @@ function ChatUIWindow() {
                     ...extra,
                 });
             };
+            const perfWindow = window as Window & {
+                __AIPP_CHAT_SCROLL_PERF_ACTIVE__?: boolean;
+            };
+            perfWindow.__AIPP_CHAT_SCROLL_PERF_ACTIVE__ = true;
             try {
                 emitProgress("start");
                 if (isMobile) {
@@ -357,6 +362,8 @@ function ChatUIWindow() {
                     }),
                 );
                 throw error;
+            } finally {
+                perfWindow.__AIPP_CHAT_SCROLL_PERF_ACTIVE__ = false;
             }
         },
         [isMobile, listConversations],

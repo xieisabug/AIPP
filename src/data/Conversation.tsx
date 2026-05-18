@@ -44,6 +44,17 @@ export interface Message {
     first_token_time?: Date | null;
     ttft_ms?: number | null;
     tps?: number | null;
+    large_message_preview?: LargeMessagePreviewMetadata | null;
+}
+
+export interface LargeMessagePreviewMetadata {
+    lineCount: number;
+    payloadCharCount: number;
+    contentHash: string;
+    reason: "tool_result" | "mcp_payload";
+    shouldPreview: boolean;
+    summary: string;
+    previewText: string;
 }
 
 export type QueuedConversationMessageKind = "normal" | "interrupt";

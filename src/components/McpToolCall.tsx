@@ -169,6 +169,9 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             return;
         }
         setIsExpanded(nextExpanded);
+        if (!nextExpanded) {
+            setShouldRenderDetails(false);
+        }
     }, []);
 
     // 监听全局MCP状态变化
@@ -333,6 +336,8 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             const nextExpanded = !prev;
             if (nextExpanded) {
                 setShouldRenderDetails(true);
+            } else {
+                setShouldRenderDetails(false);
             }
             userExpandedRef.current = nextExpanded;
             return nextExpanded;

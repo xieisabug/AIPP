@@ -189,6 +189,8 @@ describe("McpToolCall call_id binding", () => {
         expect(screen.queryByText(/search-result/)).not.toBeInTheDocument();
         await userEvent.click(screen.getByTitle("展开详情"));
         expect(screen.getByText(/search-result/)).toBeInTheDocument();
+        await userEvent.click(screen.getByTitle("收起详情"));
+        expect(screen.queryByText(/search-result/)).not.toBeInTheDocument();
 
         const laterState = new Map<number, MCPToolCallUpdateEvent>([
             [callId, {
@@ -215,6 +217,8 @@ describe("McpToolCall call_id binding", () => {
         );
 
         await flushEffects();
+        expect(screen.queryByText(/search-result/)).not.toBeInTheDocument();
+        await userEvent.click(screen.getByTitle("展开详情"));
         expect(screen.getByText(/search-result/)).toBeInTheDocument();
     });
 

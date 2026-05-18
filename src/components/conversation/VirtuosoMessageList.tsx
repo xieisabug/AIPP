@@ -100,7 +100,6 @@ const MeasuredVirtuosoItem = React.memo(
                 ref={rowRef}
                 style={{
                     boxSizing: "border-box",
-                    minHeight: item.estimatedHeight,
                     paddingBottom: hasGapAfter ? VIRTUAL_ROW_GAP_PX : 0,
                 }}
             >

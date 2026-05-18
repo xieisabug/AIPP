@@ -1,18 +1,207 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::LazyLock};
 
 use chrono::{DateTime, Utc};
-use regex;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tauri::Emitter;
 
 use crate::{
     db::connection::params,
     db::conversation_db::{
-        ConversationDatabase, Message, MessageAttachment, MessageDetail, Repository,
+        ConversationDatabase, LargeMessagePreviewMetadata, Message, MessageAttachment,
+        MessageDetail, Repository,
     },
     errors::AppError,
     NameCacheState,
 };
+
+const LARGE_TOOL_RESULT_CHAR_THRESHOLD: usize = 12_000;
+const LARGE_TOOL_RESULT_LINE_THRESHOLD: usize = 240;
+const LARGE_MCP_PAYLOAD_CHAR_THRESHOLD: usize = 5_000;
+const LARGE_MESSAGE_PREVIEW_CHAR_LIMIT: usize = 5_000;
+const LARGE_MESSAGE_PREVIEW_LINE_LIMIT: usize = 40;
+
+static MCP_TOOL_CALL_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<!--\s*MCP_TOOL_CALL(?:_STREAMING)?\:([\s\S]*?)-->")
+        .expect("valid MCP tool call comment regex")
+});
+static MCP_TOOL_CALL_XML_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)<mcp_tool_call[\s\S]*?</mcp_tool_call>")
+        .expect("valid MCP tool call XML regex")
+});
+
+#[derive(Debug, Clone)]
+struct McpToolCallPreviewInfo {
+    call_id: Option<String>,
+    tool_name: Option<String>,
+    payload_len: usize,
+}
+
+fn line_count(content: &str) -> usize {
+    if content.is_empty() {
+        1
+    } else {
+        content.as_bytes().iter().filter(|&&byte| byte == b'\n').count() + 1
+    }
+}
+
+fn char_count(content: &str) -> usize {
+    content.chars().count()
+}
+
+fn content_hash(content: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())))
+}
+
+fn slice_content_preview(content: &str) -> String {
+    content
+        .split('\n')
+        .take(LARGE_MESSAGE_PREVIEW_LINE_LIMIT)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .chars()
+        .take(LARGE_MESSAGE_PREVIEW_CHAR_LIMIT)
+        .collect()
+}
+
+fn parse_mcp_tool_call_preview_info(segment_body: &str, segment_len: usize) -> McpToolCallPreviewInfo {
+    let Ok(parsed) = serde_json::from_str::<Value>(segment_body.trim()) else {
+        return McpToolCallPreviewInfo {
+            call_id: None,
+            tool_name: None,
+            payload_len: segment_len,
+        };
+    };
+
+    let payload_len = parsed
+        .get("parameters")
+        .map(|parameters| {
+            parameters
+                .as_str()
+                .map(char_count)
+                .unwrap_or_else(|| char_count(&parameters.to_string()))
+        })
+        .unwrap_or(segment_len);
+    let call_id = parsed.get("call_id").and_then(|value| {
+        value
+            .as_str()
+            .map(ToOwned::to_owned)
+            .or_else(|| value.as_i64().map(|id| id.to_string()))
+    });
+    let tool_name = parsed
+        .get("tool_name")
+        .or_else(|| parsed.get("name"))
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned);
+
+    McpToolCallPreviewInfo {
+        call_id,
+        tool_name,
+        payload_len,
+    }
+}
+
+fn collect_mcp_tool_call_preview_info(content: &str) -> Vec<McpToolCallPreviewInfo> {
+    let mut infos = Vec::new();
+
+    for capture in MCP_TOOL_CALL_COMMENT_RE.captures_iter(content) {
+        let segment = capture.get(0).map(|value| value.as_str()).unwrap_or_default();
+        let body = capture.get(1).map(|value| value.as_str()).unwrap_or_default();
+        infos.push(parse_mcp_tool_call_preview_info(body, char_count(segment)));
+    }
+
+    for segment in MCP_TOOL_CALL_XML_RE.find_iter(content) {
+        infos.push(McpToolCallPreviewInfo {
+            call_id: None,
+            tool_name: None,
+            payload_len: char_count(segment.as_str()),
+        });
+    }
+
+    infos
+}
+
+fn strip_mcp_tool_call_segments(content: &str) -> String {
+    let without_comments = MCP_TOOL_CALL_COMMENT_RE.replace_all(content, "");
+    MCP_TOOL_CALL_XML_RE
+        .replace_all(&without_comments, "")
+        .trim()
+        .to_string()
+}
+
+pub fn build_large_message_preview_metadata(
+    message_type: &str,
+    content: &str,
+) -> Option<LargeMessagePreviewMetadata> {
+    if message_type == "tool_result" {
+        let line_count = line_count(content);
+        let content_len = char_count(content);
+        let should_preview =
+            content_len > LARGE_TOOL_RESULT_CHAR_THRESHOLD
+            || line_count > LARGE_TOOL_RESULT_LINE_THRESHOLD;
+        if !should_preview {
+            return None;
+        }
+
+        return Some(LargeMessagePreviewMetadata {
+            line_count,
+            payload_char_count: content_len,
+            content_hash: content_hash(content),
+            reason: "tool_result".to_string(),
+            should_preview: true,
+            summary: "大型工具结果已折叠".to_string(),
+            preview_text: slice_content_preview(content),
+        });
+    }
+
+    if message_type != "response" {
+        return None;
+    }
+    if !content.contains("MCP_TOOL_CALL") && !content.contains("<mcp_tool_call") {
+        return None;
+    }
+
+    let largest_payload = collect_mcp_tool_call_preview_info(content)
+        .into_iter()
+        .max_by_key(|payload| payload.payload_len)?;
+    if largest_payload.payload_len < LARGE_MCP_PAYLOAD_CHAR_THRESHOLD {
+        return None;
+    }
+
+    let line_count = line_count(content);
+    let mut summary_parts = vec!["大型 MCP 工具调用已折叠".to_string()];
+    if let Some(tool_name) = largest_payload.tool_name.as_deref() {
+        summary_parts.push(format!("工具: {}", tool_name));
+    }
+    if let Some(call_id) = largest_payload.call_id.as_deref() {
+        summary_parts.push(format!("Call ID: {}", call_id));
+    }
+    let summary = summary_parts.join(" · ");
+    let visible_tail = strip_mcp_tool_call_segments(content);
+    let mut preview_parts = vec![
+        summary.clone(),
+        format!(
+            "参数约 {} 字符，完整内容可展开查看。",
+            largest_payload.payload_len
+        ),
+    ];
+    if !visible_tail.is_empty() {
+        preview_parts.push(String::new());
+        preview_parts.push(slice_content_preview(&visible_tail));
+    }
+
+    Some(LargeMessagePreviewMetadata {
+        line_count,
+        payload_char_count: largest_payload.payload_len,
+        content_hash: content_hash(content),
+        reason: "mcp_payload".to_string(),
+        should_preview: true,
+        summary,
+        preview_text: preview_parts.join("\n"),
+    })
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConversationSearchHit {
@@ -287,6 +476,10 @@ pub async fn get_conversation_with_messages(
     // Second pass: Create MessageDetail with the collected attachments
     for (message_id, message) in message_map {
         let attachment_list = attachment_map.get(&message_id).cloned().unwrap_or_default();
+        let large_message_preview = build_large_message_preview_metadata(
+            &message.message_type,
+            &message.content,
+        );
         message_details.push(MessageDetail {
             id: message.id,
             parent_id: message.parent_id,
@@ -308,6 +501,7 @@ pub async fn get_conversation_with_messages(
             ttft_ms: message.ttft_ms,
             attachment_list,
             regenerate: Vec::new(),
+            large_message_preview,
         });
     }
     let process_duration = process_start.elapsed();

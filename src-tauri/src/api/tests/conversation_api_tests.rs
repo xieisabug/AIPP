@@ -1,4 +1,6 @@
-use crate::api::conversation_api::process_message_versions;
+use crate::api::conversation_api::{
+    build_large_message_preview_metadata, process_message_versions,
+};
 use crate::db::conversation_db::MessageDetail;
 use chrono::Utc;
 use uuid::Uuid;
@@ -39,6 +41,7 @@ fn create_message_detail(
         metadata_json: None,
         first_token_time: None,
         ttft_ms: None,
+        large_message_preview: None,
     }
 }
 
@@ -62,6 +65,60 @@ fn quick_message(
         None,
         base_time + chrono::Duration::seconds(offset_secs),
     )
+}
+
+// ============================================================================
+// 大消息预览元数据测试
+// ============================================================================
+
+#[test]
+fn test_large_tool_result_preview_metadata() {
+    let content = (0..260)
+        .map(|index| format!("tool result line {}", index))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let metadata = build_large_message_preview_metadata("tool_result", &content)
+        .expect("large tool result should produce preview metadata");
+
+    assert!(metadata.should_preview);
+    assert_eq!(metadata.reason, "tool_result");
+    assert!(metadata.content_hash.starts_with("sha256:"));
+    assert!(metadata.preview_text.contains("tool result line 0"));
+    assert!(!metadata.preview_text.contains("tool result line 259"));
+}
+
+#[test]
+fn test_large_mcp_payload_preview_metadata() {
+    let payload = "x".repeat(5_200);
+    let content = format!(
+        "<!-- MCP_TOOL_CALL:{} -->\nvisible tail",
+        serde_json::json!({
+            "call_id": 1751,
+            "tool_name": "write_file",
+            "parameters": payload,
+        })
+    );
+
+    let metadata = build_large_message_preview_metadata("response", &content)
+        .expect("large MCP payload should produce preview metadata");
+
+    assert!(metadata.should_preview);
+    assert_eq!(metadata.reason, "mcp_payload");
+    assert!(metadata.content_hash.starts_with("sha256:"));
+    assert!(metadata.summary.contains("write_file"));
+    assert!(metadata.preview_text.contains("visible tail"));
+    assert!(!metadata.preview_text.contains(&payload));
+}
+
+#[test]
+fn test_plain_large_response_does_not_preview_in_phase_one() {
+    let content = (0..260)
+        .map(|index| format!("plain response line {}", index))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(build_large_message_preview_metadata("response", &content).is_none());
 }
 
 // ============================================================================

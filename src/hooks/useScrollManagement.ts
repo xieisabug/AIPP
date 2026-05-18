@@ -6,6 +6,14 @@ const SMOOTH_SCROLL_LOCK_MS = 350;
 const AUTO_SCROLL_LOCK_MS = 100;
 const USER_SCROLL_SUPPRESSION_MS = 250;
 
+function isChatScrollPerfProbeActive(): boolean {
+    return (
+        typeof window !== "undefined"
+        && (window as Window & { __AIPP_CHAT_SCROLL_PERF_ACTIVE__?: boolean })
+            .__AIPP_CHAT_SCROLL_PERF_ACTIVE__ === true
+    );
+}
+
 export interface UseScrollManagementReturn {
     messagesEndRef: React.RefObject<HTMLDivElement | null>;
     scrollContainerRef: React.RefObject<HTMLDivElement | null>;
@@ -171,6 +179,9 @@ export function useScrollManagement(
 
     // 智能滚动函数
     const smartScroll = useCallback((forceScroll: boolean = false, behaviorOverride?: ScrollBehavior) => {
+        if (isChatScrollPerfProbeActive()) {
+            return;
+        }
         if (hasRecentUserScrollIntent()) {
             return;
         }
@@ -248,6 +259,9 @@ export function useScrollManagement(
 
     // 发送用户消息后滚动到最后一组消息所在的底部位置，利用 min-height 占位让用户消息贴近顶部
     const scrollToUserMessage = useCallback(() => {
+        if (isChatScrollPerfProbeActive()) {
+            return;
+        }
         const container = scrollContainerRef.current;
         if (!container) return;
 

@@ -8,6 +8,10 @@ import { PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX } from "../../utils/previewCode
 import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
 import { useFeishuDebugResend } from "@/hooks/useFeishuDebugResend";
+import {
+    LARGE_MESSAGE_PREVIEW_HEIGHT_ESTIMATE,
+    shouldUseLargeMessagePreview,
+} from "@/utils/largeMessagePreview";
 import { ShineBorder } from "../magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import MessageActionButtons from "../message-item/MessageActionButtons";
@@ -166,8 +170,22 @@ function estimateMessageHeight(
     const tableRowCount = (content.match(/^\|.*\|$/gm) ?? []).length;
     const hasToolCall = mcpToolCallCount > 0;
 
+    if (
+        shouldUseLargeMessagePreview({
+            content: rawContent,
+            isLastMessage,
+            isStreaming: false,
+            messageType: message.message_type,
+            previewMetadata: message.large_message_preview,
+        })
+    ) {
+        return LARGE_MESSAGE_PREVIEW_HEIGHT_ESTIMATE;
+    }
+
+    const structureContributionCap =
+        lineCount > 240 || contentLength > 6000 ? 12000 : 5200;
     const structureContribution = Math.min(
-        5200,
+        structureContributionCap,
         Math.max(0, lineCount - 1) * 22
         + wrappedLineCount * 18
         + codeBlockCount * 240
