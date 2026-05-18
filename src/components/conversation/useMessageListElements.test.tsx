@@ -1,6 +1,7 @@
 import { render, renderHook, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+    findFirstLiveSuffixIndex,
     useMessageListElements,
     type UseMessageListElementsProps,
 } from "./useMessageListElements";
@@ -236,5 +237,29 @@ describe("useMessageListElements merged assistant preview state", () => {
         expect(codeItem?.estimatedHeight ?? 0).toBeLessThan(
             plainItem?.estimatedHeight ?? 0,
         );
+    });
+});
+
+describe("findFirstLiveSuffixIndex", () => {
+    it("only treats the trailing live segment as non-virtualized", () => {
+        expect(
+            findFirstLiveSuffixIndex([
+                { virtualizationMode: "virtualized" },
+                { virtualizationMode: "live" },
+                { virtualizationMode: "virtualized" },
+                { virtualizationMode: "live" },
+                { virtualizationMode: "live" },
+            ]),
+        ).toBe(3);
+    });
+
+    it("does not create a live suffix when no trailing item is live", () => {
+        expect(
+            findFirstLiveSuffixIndex([
+                { virtualizationMode: "virtualized" },
+                { virtualizationMode: "live" },
+                { virtualizationMode: "virtualized" },
+            ]),
+        ).toBe(-1);
     });
 });

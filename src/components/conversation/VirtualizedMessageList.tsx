@@ -15,6 +15,7 @@ import {
     getCenteredScrollTopForIndex,
 } from "./virtualizedMessageListLayout";
 import {
+    findFirstLiveSuffixIndex,
     useMessageListElements,
     type UseMessageListElementsProps,
 } from "./useMessageListElements";
@@ -114,10 +115,7 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
 }) => {
     const { renderItems } = useMessageListElements(messageListProps);
     const firstLiveIndex = useMemo(
-        () =>
-            renderItems.findIndex(
-                (item) => item.virtualizationMode === "live",
-            ),
+        () => findFirstLiveSuffixIndex(renderItems),
         [renderItems],
     );
     const virtualizedItems = useMemo(

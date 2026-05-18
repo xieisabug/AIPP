@@ -55,6 +55,17 @@ export interface RenderableConversationItem {
     virtualizationMode?: "virtualized" | "live";
 }
 
+export function findFirstLiveSuffixIndex(
+    items: Pick<RenderableConversationItem, "virtualizationMode">[],
+): number {
+    let index = items.length;
+    while (index > 0 && items[index - 1].virtualizationMode === "live") {
+        index -= 1;
+    }
+
+    return index < items.length ? index : -1;
+}
+
 function stripMcpToolCallMarkup(content: string): string {
     return content
         .replace(/<!--\s*MCP_TOOL_CALL(?:_STREAMING)?[\s\S]*?-->/g, "")

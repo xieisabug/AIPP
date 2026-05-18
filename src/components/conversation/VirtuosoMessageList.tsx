@@ -18,6 +18,7 @@ import {
     VIRTUAL_ROW_GAP_PX,
 } from "./virtualizedMessageListLayout";
 import {
+    findFirstLiveSuffixIndex,
     useMessageListElements,
     type RenderableConversationItem,
     type UseMessageListElementsProps,
@@ -99,6 +100,7 @@ const MeasuredVirtuosoItem = React.memo(
                 ref={rowRef}
                 style={{
                     boxSizing: "border-box",
+                    minHeight: item.estimatedHeight,
                     paddingBottom: hasGapAfter ? VIRTUAL_ROW_GAP_PX : 0,
                 }}
             >
@@ -194,12 +196,10 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     const virtuosoRef = useRef<VirtuosoHandle | null>(null);
     const scrollSyncFrameRef = useRef<number | null>(null);
     const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null);
+    const [viewportHeight, setViewportHeight] = useState(0);
 
     const firstLiveIndex = useMemo(
-        () =>
-            renderItems.findIndex(
-                (item) => item.virtualizationMode === "live",
-            ),
+        () => findFirstLiveSuffixIndex(renderItems),
         [renderItems],
     );
     const historyItems = useMemo(
@@ -258,6 +258,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 
             scrollSyncFrameRef.current = requestAnimationFrame(() => {
                 scrollSyncFrameRef.current = null;
+                setViewportHeight(container.clientHeight);
                 onScrollStateChange?.(container);
             });
         };
@@ -276,6 +277,10 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             resizeObserver.disconnect();
         };
     }, [onScrollStateChange, scrollParent]);
+    const overscanPx = useMemo(
+        () => Math.max(VIRTUAL_OVERSCAN_PX, viewportHeight * 8),
+        [viewportHeight],
+    );
 
     const itemContent = useCallback(
         (index: number, item: RenderableConversationItem) => (
@@ -373,10 +378,10 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             defaultItemHeight={defaultItemHeight}
             heightEstimates={heightEstimates}
             increaseViewportBy={{
-                top: VIRTUAL_OVERSCAN_PX,
-                bottom: VIRTUAL_OVERSCAN_PX,
+                top: overscanPx,
+                bottom: overscanPx,
             }}
-            minOverscanItemCount={{ top: 2, bottom: 2 }}
+            minOverscanItemCount={{ top: 8, bottom: 8 }}
             alignToBottom
             style={{ width: "100%" }}
         />

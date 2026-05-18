@@ -451,18 +451,6 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             );
         }
 
-        console.log(
-            "[MCP] detected MCP_TOOL_CALL comments",
-            mcpCalls.map((match) => ({
-                complete: match.complete,
-                call_id: match.data.call_id,
-                llm_call_id: match.data.llm_call_id,
-                server_name: match.data.server_name,
-                tool_name: match.data.tool_name,
-            })),
-            { conversationId, messageId },
-        );
-
         const renderedInlineKeys = new Set<string>();
 
         // 将注释替换为实际的 React 组件

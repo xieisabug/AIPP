@@ -154,6 +154,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const [executionError, setExecutionError] = useState<string | null>(null);
     // 默认展开：流式调用和新工具调用默认展开，历史调用根据状态决定
     const [isExpanded, setIsExpanded] = useState<boolean>(isStreaming || !callId);
+    const [shouldRenderDetails, setShouldRenderDetails] = useState<boolean>(isStreaming || !callId);
     // 自动收起定时器引用
     const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
     // 用户手动展开后，后续自动收起不能覆盖用户正在查看详情的意图。
@@ -161,6 +162,9 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     // 移除前端自动执行，避免与后端 detect_and_process_mcp_calls 的自动执行叠加
 
     const setAutoExpanded = useCallback((nextExpanded: boolean) => {
+        if (nextExpanded) {
+            setShouldRenderDetails(true);
+        }
         if (!nextExpanded && userExpandedRef.current) {
             return;
         }
@@ -172,20 +176,11 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         if (!mcpToolCallStates) return;
 
         if (!effectiveCallId) {
-            console.log("[MCP] McpToolCall missing callId; waiting for streamed call_id", {
-                conversationId,
-                messageId,
-                serverName,
-                toolName,
-                llmCallId,
-                knownIds: Array.from(mcpToolCallStates.keys()),
-            });
             return;
         }
 
         if (mcpToolCallStates.has(effectiveCallId)) {
             const globalState = mcpToolCallStates.get(effectiveCallId)!;
-            console.log(`McpToolCall ${effectiveCallId} received global state update:`, globalState);
 
             // 同步全局状态到本地状态
             switch (globalState.status) {
@@ -220,13 +215,8 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     break;
                 case "unknown":
                 default:
-                    console.log(`[MCP] McpToolCall ${effectiveCallId} ignoring transient unknown state`, globalState);
                     break;
             }
-        } else {
-            console.log(`[MCP] McpToolCall ${effectiveCallId} no match in map`, {
-                mapKeys: Array.from(mcpToolCallStates.keys()),
-            });
         }
     }, [mcpToolCallStates, effectiveCallId, conversationId, messageId, serverName, toolName, llmCallId, continueOnToolErrorEnabled, setAutoExpanded]);
 
@@ -316,18 +306,22 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
 
     // 计算内容高度用于动画（使用内部容器的高度）
     useLayoutEffect(() => {
-        if (innerContentRef.current) {
-            const resizeObserver = new ResizeObserver((entries) => {
-                for (const entry of entries) {
-                    setContentHeight(entry.contentRect.height);
-                }
-            });
-            resizeObserver.observe(innerContentRef.current);
-            // 初始设置高度
-            setContentHeight(innerContentRef.current.offsetHeight);
-            return () => resizeObserver.disconnect();
+        const innerContent = innerContentRef.current;
+        if (!shouldRenderDetails || !innerContent) {
+            setContentHeight(0);
+            return;
         }
-    }, []);
+
+        const resizeObserver = new ResizeObserver((entries) => {
+            for (const entry of entries) {
+                setContentHeight(entry.contentRect.height);
+            }
+        });
+        resizeObserver.observe(innerContent);
+        // 初始设置高度
+        setContentHeight(innerContent.offsetHeight);
+        return () => resizeObserver.disconnect();
+    }, [shouldRenderDetails]);
 
     // 切换展开/收起状态，同时清除自动收起的定时器
     const handleToggleExpand = useCallback(() => {
@@ -337,6 +331,9 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         }
         setIsExpanded((prev) => {
             const nextExpanded = !prev;
+            if (nextExpanded) {
+                setShouldRenderDetails(true);
+            }
             userExpandedRef.current = nextExpanded;
             return nextExpanded;
         });
@@ -350,6 +347,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
 
         try {
             userExpandedRef.current = false;
+            setShouldRenderDetails(true);
             setIsExpanded(true);
             setExecutionState("executing");
             setExecutionResult(null);
@@ -541,57 +539,59 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     opacity: isExpanded ? 1 : 0,
                 }}
             >
-                <div ref={innerContentRef} className="mt-2 space-y-2 max-w-full overflow-hidden">
-                    <div className="max-w-full overflow-hidden">
-                        <span className="text-xs font-medium mb-1 text-muted-foreground">参数:</span>
-                        <JsonDisplay content={displayParameters} maxHeight="120px" className="mt-1" />
-                    </div>
-                    {canShowExecutionActions && (
-                        <div className="flex items-center gap-2">
-                            {isExecuting ? (
-                                <>
-                                    <Button
-                                        onClick={handleStop}
-                                        size="sm"
-                                        variant="ghost"
-                                        className="flex items-center gap-1 h-7 text-xs text-destructive"
-                                        title="停止"
-                                    >
-                                        <Square className="h-3 w-3 fill-current" />
-                                        停止
-                                    </Button>
-                                </>
-                            ) : (
-                                <>
-                                    <Button
-                                        onClick={handleExecute}
-                                        size="sm"
-                                        className="flex items-center gap-1 h-7 text-xs"
-                                    >
-                                        {isFailed ? (
-                                            <RotateCcw className="h-3 w-3" />
-                                        ) : (
-                                            <Play className="h-3 w-3" />
-                                        )}
-                                        {isFailed ? "重新执行" : "执行"}
-                                    </Button>
-                                    {isFailed && !shouldHideFailedActions && (
+                {shouldRenderDetails ? (
+                    <div ref={innerContentRef} className="mt-2 space-y-2 max-w-full overflow-hidden">
+                        <div className="max-w-full overflow-hidden">
+                            <span className="text-xs font-medium mb-1 text-muted-foreground">参数:</span>
+                            <JsonDisplay content={displayParameters} maxHeight="120px" className="mt-1" />
+                        </div>
+                        {canShowExecutionActions && (
+                            <div className="flex items-center gap-2">
+                                {isExecuting ? (
+                                    <>
                                         <Button
-                                            onClick={handleContinueWithError}
+                                            onClick={handleStop}
                                             size="sm"
-                                            variant="outline"
+                                            variant="ghost"
+                                            className="flex items-center gap-1 h-7 text-xs text-destructive"
+                                            title="停止"
+                                        >
+                                            <Square className="h-3 w-3 fill-current" />
+                                            停止
+                                        </Button>
+                                    </>
+                                ) : (
+                                    <>
+                                        <Button
+                                            onClick={handleExecute}
+                                            size="sm"
                                             className="flex items-center gap-1 h-7 text-xs"
                                         >
-                                            <ArrowRight className="h-3 w-3" />
-                                            以错误继续
+                                            {isFailed ? (
+                                                <RotateCcw className="h-3 w-3" />
+                                            ) : (
+                                                <Play className="h-3 w-3" />
+                                            )}
+                                            {isFailed ? "重新执行" : "执行"}
                                         </Button>
-                                    )}
-                                </>
-                            )}
-                        </div>
-                    )}
-                    <div className="max-w-full overflow-hidden">{renderResult()}</div>
-                </div>
+                                        {isFailed && !shouldHideFailedActions && (
+                                            <Button
+                                                onClick={handleContinueWithError}
+                                                size="sm"
+                                                variant="outline"
+                                                className="flex items-center gap-1 h-7 text-xs"
+                                            >
+                                                <ArrowRight className="h-3 w-3" />
+                                                以错误继续
+                                            </Button>
+                                        )}
+                                    </>
+                                )}
+                            </div>
+                        )}
+                        <div className="max-w-full overflow-hidden">{renderResult()}</div>
+                    </div>
+                ) : null}
             </div>
         </div>
     );

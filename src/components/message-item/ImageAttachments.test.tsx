@@ -81,7 +81,7 @@ describe('ImageAttachments', () => {
         expect(container).toBeEmptyDOMElement();
     });
 
-    it('renders images with contain sizing to preserve aspect ratio', () => {
+    it('renders images in a fixed preview frame to avoid layout shift', () => {
         render(
             <ImageAttachments
                 attachments={[
@@ -94,7 +94,30 @@ describe('ImageAttachments', () => {
             />
         );
 
+        expect(screen.getByRole('button', { name: '点击使用系统默认程序打开图片' })).toHaveClass('aspect-[4/3]');
         expect(screen.getByRole('img')).toHaveClass('object-contain');
-        expect(screen.getByRole('img')).toHaveClass('h-auto');
+        expect(screen.getByRole('img')).toHaveClass('h-full');
+    });
+
+    it('uses a compact grid layout when there are multiple image attachments', () => {
+        render(
+            <ImageAttachments
+                attachments={[
+                    {
+                        attachment_type: 'Image',
+                        attachment_url: 'generated-image-1.png',
+                        attachment_content: 'data:image/png;base64,Zm9v',
+                    },
+                    {
+                        attachment_type: 'Image',
+                        attachment_url: 'generated-image-2.png',
+                        attachment_content: 'data:image/png;base64,Zm9v',
+                    },
+                ]}
+            />
+        );
+
+        expect(screen.getAllByRole('button', { name: '点击使用系统默认程序打开图片' })[0]).toHaveClass('aspect-square');
+        expect(screen.getAllByRole('img')[0]).toHaveClass('object-contain');
     });
 });
