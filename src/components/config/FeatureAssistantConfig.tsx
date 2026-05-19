@@ -178,7 +178,13 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
         },
     });
 
-    const dataFolderForm = useForm({});
+    const dataFolderForm = useForm({
+        defaultValues: {
+            mode: "local",
+            server_url: "",
+            token: "",
+        },
+    });
 
     // 根据平台设置快捷键默认值
     const isMac = typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().indexOf('mac') !== -1;

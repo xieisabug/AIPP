@@ -240,9 +240,10 @@ pub async fn add_mcp_server(
             request.is_builtin.unwrap_or(false),
             true, // is_deletable - 通过 API 添加的默认可删除
             request.proxy_enabled,
-        )
-        .map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
     let _ = db.rebuild_dynamic_mcp_catalog();
+    crate::sync::schedule_sync_after_local_change(&app_handle);
 
     Ok(server_id)
 }
@@ -273,6 +274,7 @@ pub async fn update_mcp_server(
     )
     .map_err(|e| e.to_string())?;
     let _ = db.rebuild_dynamic_mcp_catalog();
+    crate::sync::schedule_sync_after_local_change(&app_handle);
 
     Ok(())
 }
@@ -290,6 +292,7 @@ pub async fn delete_mcp_server(app_handle: tauri::AppHandle, id: i64) -> Result<
 
     db.delete_mcp_server(id).map_err(|e| e.to_string())?;
     let _ = db.rebuild_dynamic_mcp_catalog();
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(())
 }
 
@@ -303,6 +306,7 @@ pub async fn toggle_mcp_server(
     let db = open_db(&app_handle)?;
     db.toggle_mcp_server(id, is_enabled).map_err(|e| e.to_string())?;
     let _ = db.rebuild_dynamic_mcp_catalog();
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(())
 }
 
@@ -328,6 +332,7 @@ pub async fn update_mcp_server_tool(
     let db = open_db(&app_handle)?;
     db.update_mcp_server_tool(tool_id, is_enabled, is_auto_run).map_err(|e| e.to_string())?;
     let _ = db.rebuild_dynamic_mcp_catalog();
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(())
 }
 
@@ -515,6 +520,7 @@ pub async fn update_mcp_server_prompt(
 ) -> Result<(), String> {
     let db = open_db(&app_handle)?;
     db.update_mcp_server_prompt(prompt_id, is_enabled).map_err(|e| e.to_string())?;
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(())
 }
 
@@ -564,6 +570,7 @@ pub async fn refresh_mcp_server_capabilities(
                 app_handle.clone(),
                 server_id,
             );
+            crate::sync::schedule_sync_after_local_change(&app_handle);
             let tools = db.get_mcp_server_tools(server_id).map_err(|e| e.to_string())?;
             let resources = db.get_mcp_server_resources(server_id).map_err(|e| e.to_string())?;
             let prompts = db.get_mcp_server_prompts(server_id).map_err(|e| e.to_string())?;

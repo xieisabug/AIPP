@@ -102,6 +102,7 @@ pub async fn add_llm_provider(
 ) -> Result<(), String> {
     let db = LLMDatabase::new(&app).map_err(|e| e.to_string())?;
     db.add_llm_provider(&*name, &*api_type, "", false, false).map_err(|e| e.to_string())?;
+    crate::sync::schedule_sync_after_local_change(&app);
     Ok(())
 }
 
@@ -117,6 +118,7 @@ pub async fn update_llm_provider(
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.update_llm_provider(id, &*name, &*api_type, &*description, is_enabled)
         .map_err(|e| e.to_string())?;
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(())
 }
 
@@ -127,6 +129,7 @@ pub async fn delete_llm_provider(
 ) -> Result<(), String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.delete_llm_provider(llm_provider_id).map_err(|e| e.to_string())?;
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(())
 }
 
@@ -160,6 +163,7 @@ pub async fn update_llm_provider_config(
 ) -> Result<(), String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.update_llm_provider_config(llm_provider_id, &*name, &*value).map_err(|e| e.to_string())?;
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(())
 }
 
@@ -302,6 +306,7 @@ pub async fn fetch_model_list(
                 result.push(model);
             }
 
+            crate::sync::schedule_sync_after_local_change(&app_handle);
             Ok(result)
         }
         Err(e) => {
@@ -329,6 +334,7 @@ pub async fn add_llm_model(
             resolve_request_mode_or_default(&llm_provider.api_type, &code_str, None).to_string()
         });
 
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(LlmModel {
         id: 0,
         name: code.clone(),
@@ -350,6 +356,7 @@ pub async fn delete_llm_model(
 ) -> Result<(), String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.delete_llm_model(llm_provider_id, code).map_err(|e| e.to_string())?;
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(())
 }
 
@@ -564,6 +571,7 @@ pub async fn update_selected_models(
         }
     }
 
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(())
 }
 
@@ -591,6 +599,7 @@ pub async fn update_llm_model_request_mode(
         normalize_request_mode(Some(&request_mode)),
     )
     .map_err(|e| e.to_string())?;
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(())
 }
 
@@ -676,6 +685,7 @@ pub async fn import_llm_provider(
         .map_err(|e| e.to_string())?;
 
     // Return the created provider
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(LlmProvider {
         id: provider_id,
         name: provider_name,

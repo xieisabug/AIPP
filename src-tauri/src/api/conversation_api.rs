@@ -389,6 +389,7 @@ pub async fn create_conversation_with_messages(
 
     // 发送事件通知前端更新
     let _ = app_handle.emit("conversation_created", conversation.id);
+    crate::sync::schedule_sync_after_local_change(&app_handle);
 
     // 更新助手名称缓存（确保UI显示正确）
     let mut assistant_name_cache = name_cache_state.assistant_names.lock().await;
@@ -538,6 +539,7 @@ pub fn delete_conversation(
 
     // 发送删除事件通知前端更新列表
     let _ = app_handle.emit("conversation_deleted", conversation_id);
+    crate::sync::schedule_sync_after_local_change(&app_handle);
 
     Ok(())
 }
@@ -559,6 +561,7 @@ pub fn update_conversation(
     db.conversation_repo().unwrap().update(&conversation).map_err(|e| e.to_string())?;
 
     let _ = app_handle.emit("title_change", (conversation_id, name));
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(())
 }
 
@@ -569,7 +572,9 @@ pub fn update_message_content(
     content: String,
 ) -> Result<(), String> {
     let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    db.message_repo().unwrap().update_content(message_id, &content).map_err(|e| e.to_string())
+    db.message_repo().unwrap().update_content(message_id, &content).map_err(|e| e.to_string())?;
+    crate::sync::schedule_sync_after_local_change(&app_handle);
+    Ok(())
 }
 
 #[tauri::command]
@@ -681,6 +686,7 @@ pub async fn fork_conversation(
         }
     }
 
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(created_conversation.id)
 }
 
@@ -722,6 +728,7 @@ pub async fn create_message(
     };
 
     let created_message = repo.create(&new_message).map_err(|e| e.to_string())?;
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(created_message)
 }
 
@@ -755,6 +762,7 @@ pub async fn update_assistant_message(
             // Update finish time to mark when the update was completed
             repo.update_finish_time(message_id).map_err(|e| e.to_string())?;
 
+            crate::sync::schedule_sync_after_local_change(&app_handle);
             Ok(())
         }
         None => Err(format!("Message with ID {} not found", message_id)),

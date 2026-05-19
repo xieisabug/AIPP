@@ -33,8 +33,8 @@ export default defineConfig(async () => ({
 			port: 3000,
 		},
 		watch: {
-			// 3. tell vite to ignore watching `src-tauri`
-			ignored: ["**/src-tauri/**", '**/target/**'],
+			// 3. tell vite to ignore backend, generated, and documentation folders
+			ignored: ["**/src-tauri/**", "**/target/**", "**/sync-server/**", "**/docs/**"],
 		},
 	},
 	resolve: {

@@ -13,6 +13,7 @@ mod scheduler;
 mod skills;
 mod slash;
 mod state;
+mod sync;
 mod template_engine;
 mod utils;
 mod window;
@@ -106,6 +107,7 @@ use crate::api::system_api::{
     suspend_global_shortcut, trigger_assistant_summary_generation,
     trigger_conversation_summary_generation, trigger_mcp_summary_generation,
 };
+use crate::sync::{get_sync_status, save_sync_settings, trigger_sync_now};
 use crate::api::todo_api::get_todos;
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
 use crate::api::updater_api::{
@@ -886,6 +888,7 @@ pub fn run() {
             }
 
             crate::feishu::refresh_runtime_async(&app_handle);
+            crate::sync::start_worker_from_config(app_handle.clone());
 
             Ok(())
         })
@@ -903,6 +906,7 @@ pub fn run() {
         .manage(InteractionState::new())
         .manage(PreviewFileRelayState::new())
         .manage(PreviewResourceState::new())
+        .manage(crate::sync::SyncState::new())
         .manage(FeishuButlerState::default());
     #[cfg(desktop)]
     let app = app.manage(CopilotLspState::default());
@@ -945,6 +949,9 @@ pub fn run() {
             debug_resend_message_to_feishu,
             conversation_has_feishu_target,
             open_data_folder,
+            get_sync_status,
+            save_sync_settings,
+            trigger_sync_now,
             get_llm_providers,
             get_filtered_providers,
             update_llm_provider,
@@ -1249,6 +1256,8 @@ pub fn run() {
                             if let Err(e) = crate::mcp::builtin_mcp::search::handler::shutdown_search_browser_pool().await {
                                 warn!(error = %e, "Failed to shutdown search browser pool");
                             }
+                            let sync_flush = crate::sync::flush_before_exit(&app_handle);
+                            let _ = tokio::time::timeout(Duration::from_secs(8), sync_flush).await;
                             EXIT_STATE.store(EXIT_STATE_READY, Ordering::SeqCst);
                             app_handle.exit(0);
                         });
@@ -1266,6 +1275,13 @@ pub fn run() {
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => {
             crate::window::awaken_aipp(app_handle);
+            crate::sync::schedule_sync_after_local_change(app_handle);
+        }
+        RunEvent::WindowEvent {
+            event: tauri::WindowEvent::Focused(true),
+            ..
+        } => {
+            crate::sync::schedule_sync_after_local_change(app_handle);
         }
         _ => {}
     });
