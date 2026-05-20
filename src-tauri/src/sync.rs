@@ -557,6 +557,24 @@ pub async fn trigger_sync_now(app_handle: AppHandle) -> Result<SyncStatusDto, St
     sync_status(&app_handle).await
 }
 
+#[tauri::command]
+pub async fn retry_failed_sync_outbox(app_handle: AppHandle) -> Result<SyncStatusDto, String> {
+    let settings = load_settings(&app_handle)?;
+    if settings.mode != SyncMode::SelfHosted {
+        return Err("当前是本地模式，未启用自建同步".to_string());
+    }
+    if settings.token.as_deref().unwrap_or_default().trim().is_empty() {
+        return Err("缺少同步 token，请先保存自建同步配置".to_string());
+    }
+
+    let retried = reset_failed_events(&app_handle)?;
+    if retried > 0 {
+        emit_status_changed(&app_handle).await;
+        run_sync_once(&app_handle).await;
+    }
+    sync_status(&app_handle).await
+}
+
 async fn start_worker(app_handle: AppHandle) {
     let state = app_handle.state::<SyncState>();
     let mut task = state.worker_task.lock().await;
@@ -616,7 +634,9 @@ async fn run_sync_once(app_handle: &AppHandle) {
         Ok(()) => {
             runtime.connected = true;
             runtime.last_error = None;
-            runtime.last_sync_at = Some(now_string());
+            let synced_at = now_string();
+            runtime.last_sync_at = Some(synced_at.clone());
+            let _ = set_device_last_sync_at(app_handle, &synced_at);
         }
         Err(err) => {
             runtime.connected = false;
@@ -1162,6 +1182,17 @@ fn reset_pushing_events(app_handle: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn reset_failed_events(app_handle: &AppHandle) -> Result<usize, String> {
+    let conn = open_sync_db(app_handle)?;
+    conn.execute(
+        "UPDATE sync_outbox
+         SET status = 'pending', last_error = NULL
+         WHERE status = 'failed'",
+        [],
+    )
+    .map_err(|e| e.to_string())
+}
+
 fn handle_push_response(
     app_handle: &AppHandle,
     events: &[(i64, PushEvent)],
@@ -1362,6 +1393,34 @@ fn ensure_device_id(app_handle: &AppHandle) -> Result<String, String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(id)
+}
+
+fn get_device_last_sync_at(app_handle: &AppHandle) -> Result<Option<String>, String> {
+    ensure_sync_db(app_handle)?;
+    let conn = open_sync_db(app_handle)?;
+    let value = conn
+        .query_row(
+            "SELECT last_sync_at FROM sync_device LIMIT 1",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .flatten();
+    Ok(value)
+}
+
+fn set_device_last_sync_at(app_handle: &AppHandle, last_sync_at: &str) -> Result<(), String> {
+    ensure_sync_db(app_handle)?;
+    let conn = open_sync_db(app_handle)?;
+    conn.execute(
+        "UPDATE sync_device
+         SET last_sync_at = ?1
+         WHERE device_id = (SELECT device_id FROM sync_device LIMIT 1)",
+        params![last_sync_at],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn device_name() -> String {
@@ -1606,6 +1665,7 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
     } else {
         SyncRuntimeStatus::default()
     };
+    let persisted_last_sync_at = get_device_last_sync_at(app_handle).unwrap_or(None);
     let last_error = runtime.last_error.or(latest_failed_error);
     Ok(SyncStatusDto {
         mode: settings.mode,
@@ -1614,7 +1674,7 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
         connected: runtime.connected,
         running: runtime.running,
         syncing: runtime.syncing,
-        last_sync_at: runtime.last_sync_at,
+        last_sync_at: runtime.last_sync_at.or(persisted_last_sync_at),
         last_error,
         pending_outbox_count,
         pushing_outbox_count,
@@ -1631,13 +1691,17 @@ async fn emit_status_changed(app_handle: &AppHandle) {
 
 fn load_settings(app_handle: &AppHandle) -> Result<SyncSettings, String> {
     let db = SystemDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    let rows = db.get_all_feature_config().map_err(|e| e.to_string())?;
-    let mut map = HashMap::new();
-    for row in rows.into_iter().filter(|row| row.feature_code == FEATURE_CODE) {
-        map.insert(row.key, row.value);
-    }
-    let mode = SyncMode::from_config(map.get("mode").map(String::as_str).unwrap_or("local"));
-    let server_url = map.get("server_url").cloned().unwrap_or_default();
+    let mode_value = db
+        .get_feature_config(FEATURE_CODE, "mode")
+        .map_err(|e| e.to_string())?
+        .map(|config| config.value)
+        .unwrap_or_else(|| "local".to_string());
+    let server_url = db
+        .get_feature_config(FEATURE_CODE, "server_url")
+        .map_err(|e| e.to_string())?
+        .map(|config| config.value)
+        .unwrap_or_default();
+    let mode = SyncMode::from_config(&mode_value);
     let token = load_sync_token(app_handle)?;
     Ok(SyncSettings { mode, server_url, token })
 }

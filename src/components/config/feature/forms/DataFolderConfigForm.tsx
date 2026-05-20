@@ -25,10 +25,13 @@ interface SyncStatus {
     server_cursor: number;
 }
 
+const STATUS_FALLBACK_POLL_MS = 30_000;
+
 export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form }) => {
     const [status, setStatus] = useState<SyncStatus | null>(null);
     const [saving, setSaving] = useState(false);
     const [syncing, setSyncing] = useState(false);
+    const [retryingFailed, setRetryingFailed] = useState(false);
     const watchedMode = useWatch({ control: form.control, name: "mode" });
     const mode = watchedMode || "local";
 
@@ -64,7 +67,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         }
         const timer = window.setInterval(() => {
             void loadStatus(false);
-        }, 1500);
+        }, STATUS_FALLBACK_POLL_MS);
         return () => window.clearInterval(timer);
     }, [mode, loadStatus]);
 
@@ -131,6 +134,19 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             toast.error("触发同步失败: " + getErrorMessage(error));
         } finally {
             setSyncing(false);
+        }
+    }, []);
+
+    const handleRetryFailed = useCallback(async () => {
+        setRetryingFailed(true);
+        try {
+            const nextStatus = await invoke<SyncStatus>("retry_failed_sync_outbox");
+            setStatus(nextStatus);
+            toast.success("已重新触发失败项");
+        } catch (error) {
+            toast.error("重试失败项失败: " + getErrorMessage(error));
+        } finally {
+            setRetryingFailed(false);
         }
     }, []);
 
@@ -226,6 +242,16 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 value: syncing ? "同步中..." : "立即同步",
                 disabled: mode !== "self_hosted" || syncing || saving,
                 onClick: handleSyncNow,
+            },
+        },
+        {
+            key: "retryFailed",
+            config: {
+                type: "button" as const,
+                label: "失败重试",
+                value: retryingFailed ? "重试中..." : "重试失败",
+                disabled: mode !== "self_hosted" || retryingFailed || saving || (status?.failed_outbox_count ?? 0) === 0,
+                onClick: handleRetryFailed,
             },
         },
     ];

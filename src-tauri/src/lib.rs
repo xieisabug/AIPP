@@ -107,7 +107,7 @@ use crate::api::system_api::{
     suspend_global_shortcut, trigger_assistant_summary_generation,
     trigger_conversation_summary_generation, trigger_mcp_summary_generation,
 };
-use crate::sync::{get_sync_status, save_sync_settings, trigger_sync_now};
+use crate::sync::{get_sync_status, retry_failed_sync_outbox, save_sync_settings, trigger_sync_now};
 use crate::api::todo_api::get_todos;
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
 use crate::api::updater_api::{
@@ -950,6 +950,7 @@ pub fn run() {
             conversation_has_feishu_target,
             open_data_folder,
             get_sync_status,
+            retry_failed_sync_outbox,
             save_sync_settings,
             trigger_sync_now,
             get_llm_providers,
