@@ -88,10 +88,18 @@ function useRecordedHeight(
 interface MeasuredVirtuosoItemProps {
     item: RenderableConversationItem;
     hasGapAfter: boolean;
+    minHeight?: number;
+}
+
+export function getVirtuosoRowMinHeight(
+    index: number,
+    item: Pick<RenderableConversationItem, "estimatedHeight">,
+): number | undefined {
+    return index === 0 ? item.estimatedHeight : undefined;
 }
 
 const MeasuredVirtuosoItem = React.memo(
-    ({ item, hasGapAfter }: MeasuredVirtuosoItemProps) => {
+    ({ item, hasGapAfter, minHeight }: MeasuredVirtuosoItemProps) => {
         const rowRef = useRef<HTMLDivElement | null>(null);
         useRecordedHeight(item.key, rowRef);
 
@@ -100,6 +108,7 @@ const MeasuredVirtuosoItem = React.memo(
                 ref={rowRef}
                 style={{
                     boxSizing: "border-box",
+                    minHeight,
                     paddingBottom: hasGapAfter ? VIRTUAL_ROW_GAP_PX : 0,
                 }}
             >
@@ -286,6 +295,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             <MeasuredVirtuosoItem
                 item={item}
                 hasGapAfter={index < historyItems.length - 1 || liveItems.length > 0}
+                minHeight={getVirtuosoRowMinHeight(index, item)}
             />
         ),
         [historyItems.length, liveItems.length],
