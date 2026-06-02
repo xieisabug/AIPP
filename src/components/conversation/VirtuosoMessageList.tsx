@@ -14,6 +14,10 @@ import {
 
 import { applyScrollHighlight } from "./scrollHighlight";
 import {
+    CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR,
+    CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR,
+} from "./layoutConstants";
+import {
     VIRTUAL_OVERSCAN_PX,
     VIRTUAL_ROW_GAP_PX,
 } from "./virtualizedMessageListLayout";
@@ -39,6 +43,9 @@ interface VirtuosoMessageListContext {
 
 const MAX_SCROLL_HIGHLIGHT_ATTEMPTS = 60;
 const DEFAULT_ITEM_HEIGHT = 160;
+const LIVE_ONLY_FOOTER_STYLE = {
+    [CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR]: `var(${CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR}, var(${CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR}, 0px))`,
+} as React.CSSProperties;
 
 function itemMatchesMessageId(
     item: RenderableConversationItem,
@@ -136,7 +143,11 @@ const VirtuosoLiveFooter = React.memo(
         }
 
         return (
-            <div ref={footerRef} className="flex flex-col gap-4">
+            <div
+                ref={footerRef}
+                className="flex flex-col gap-4"
+                style={LIVE_ONLY_FOOTER_STYLE}
+            >
                 {liveItems.map((item) => (
                     <React.Fragment key={item.key}>{item.element}</React.Fragment>
                 ))}

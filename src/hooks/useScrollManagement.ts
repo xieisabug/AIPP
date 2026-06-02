@@ -1,6 +1,9 @@
 import { useRef, useCallback, useEffect } from "react";
 import type { TouchEvent, WheelEvent } from "react";
-import { CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR } from "@/components/conversation/layoutConstants";
+import {
+    CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR,
+    CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR,
+} from "@/components/conversation/layoutConstants";
 
 const SMOOTH_SCROLL_LOCK_MS = 350;
 const AUTO_SCROLL_LOCK_MS = 100;
@@ -58,9 +61,22 @@ export function useScrollManagement(
         }
 
         const syncViewportHeightVar = () => {
+            const viewportHeight = Math.max(0, container.clientHeight - 10);
+            const style = window.getComputedStyle(container);
+            const paddingTop = Number.parseFloat(style.paddingTop) || 0;
+            const paddingBottom = Number.parseFloat(style.paddingBottom) || 0;
+            const rowGap = Number.parseFloat(style.rowGap) || 0;
+
             container.style.setProperty(
                 CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR,
-                `${container.clientHeight - 10}px`,
+                `${viewportHeight}px`,
+            );
+            container.style.setProperty(
+                CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR,
+                `${Math.max(
+                    0,
+                    viewportHeight - paddingTop - paddingBottom - rowGap,
+                )}px`,
             );
         };
 
@@ -74,6 +90,9 @@ export function useScrollManagement(
         return () => {
             resizeObserver.disconnect();
             container.style.removeProperty(CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR);
+            container.style.removeProperty(
+                CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR,
+            );
         };
     }, []);
 
