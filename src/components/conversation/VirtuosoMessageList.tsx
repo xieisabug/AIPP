@@ -39,6 +39,7 @@ interface VirtuosoMessageListProps extends UseMessageListElementsProps {
 
 interface VirtuosoMessageListContext {
     liveItems: RenderableConversationItem[];
+    useLiveOnlyViewportHeight?: boolean;
 }
 
 const MAX_SCROLL_HIGHLIGHT_ATTEMPTS = 60;
@@ -130,7 +131,7 @@ MeasuredVirtuosoItem.displayName = "MeasuredVirtuosoItem";
 const VirtuosoLiveFooter = React.memo(
     ({ context }: { context: VirtuosoMessageListContext }) => {
         const footerRef = useRef<HTMLDivElement | null>(null);
-        const { liveItems } = context;
+        const { liveItems, useLiveOnlyViewportHeight = false } = context;
         const footerKey = useMemo(
             () => `live-tail:${liveItems.map((item) => item.key).join("|")}`,
             [liveItems],
@@ -146,7 +147,11 @@ const VirtuosoLiveFooter = React.memo(
             <div
                 ref={footerRef}
                 className="flex flex-col gap-4"
-                style={LIVE_ONLY_FOOTER_STYLE}
+                style={
+                    useLiveOnlyViewportHeight
+                        ? LIVE_ONLY_FOOTER_STYLE
+                        : undefined
+                }
             >
                 {liveItems.map((item) => (
                     <React.Fragment key={item.key}>{item.element}</React.Fragment>
@@ -383,7 +388,14 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     }
 
     if (historyItems.length === 0) {
-        return <VirtuosoLiveFooter context={context} />;
+        return (
+            <VirtuosoLiveFooter
+                context={{
+                    ...context,
+                    useLiveOnlyViewportHeight: true,
+                }}
+            />
+        );
     }
 
     return (
