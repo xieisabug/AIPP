@@ -55,6 +55,30 @@ describe("InlineCodePreviewCard", () => {
 
     it("does not render raw external image URLs before authorization", async () => {
         mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
+        mockInvokeHandler("prepare_preview_code_request_for_ui", () => ({
+            request_id: "prepared-external-image",
+            conversation_id: 1,
+            title: "external_image",
+            renderer: "html",
+            code: '<img alt="remote" src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22/%3E"><style>.hero{background:url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22/%3E")}</style>',
+            loadingMessages: [],
+            interactionMode: "submit_once",
+            externalResources: {
+                requestId: "prepared-external-image",
+                resources: [
+                    {
+                        id: "image-raw",
+                        originalUrl: "https://example.com/raw.png",
+                        normalizedUrl: "https://example.com/raw.png",
+                        type: "image",
+                        source: "preview_code",
+                        occurrence: "<img> src",
+                        status: "pending",
+                        risk: "low",
+                    },
+                ],
+            },
+        }));
 
         render(
             <InlineCodePreviewCard
@@ -81,8 +105,105 @@ describe("InlineCodePreviewCard", () => {
         });
     });
 
+    it("prepares raw external resources before rendering a restored preview_code message", async () => {
+        mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
+        mockInvokeHandler("prepare_preview_code_request_for_ui", () => ({
+            request_id: "prepared-jsdelivr-script",
+            conversation_id: 1,
+            title: "external_script",
+            renderer: "html",
+            code: '<div id="status">Prepared</div>',
+            loadingMessages: [],
+            interactionMode: "submit_once",
+            externalResources: {
+                requestId: "prepared-jsdelivr-script",
+                resources: [
+                    {
+                        id: "script-ok",
+                        originalUrl: "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4",
+                        normalizedUrl: "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4",
+                        type: "script",
+                        source: "preview_code",
+                        occurrence: "<script> src",
+                        status: "allowed",
+                        allowedBy: "whitelist",
+                        risk: "high",
+                    },
+                ],
+            },
+        }));
+
+        render(
+            <InlineCodePreviewCard
+                parameters={JSON.stringify({
+                    title: "external_script",
+                    renderer: "html",
+                    code: '<div id="status">Raw</div><script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>',
+                    interaction_mode: "submit_once",
+                })}
+                conversationId={1}
+                messageId={103}
+                isLastMessage
+                mcpToolCallStates={new Map()}
+                isStreaming={false}
+            />
+        );
+
+        const host = await screen.findByTestId("preview-code-host");
+        await waitFor(() => {
+            expect(invoke).toHaveBeenCalledWith(
+                "prepare_preview_code_request_for_ui",
+                expect.objectContaining({
+                    conversationId: 1,
+                    conversation_id: 1,
+                })
+            );
+            expect(host.shadowRoot?.textContent).toContain("Prepared");
+            expect(host.shadowRoot?.innerHTML).not.toContain("https://cdn.jsdelivr.net");
+        });
+    });
+
+    it("removes unauthorized external script src values while waiting for preparation", async () => {
+        mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
+        mockInvokeHandler("prepare_preview_code_request_for_ui", () => new Promise(() => undefined));
+
+        render(
+            <InlineCodePreviewCard
+                parameters={JSON.stringify({
+                    title: "blocked_script",
+                    renderer: "html",
+                    code: '<div>Blocked Script</div><script src="https://example.com/app.js"></script>',
+                    interaction_mode: "submit_once",
+                })}
+                conversationId={1}
+                messageId={104}
+                isLastMessage
+                mcpToolCallStates={new Map()}
+                isStreaming={false}
+            />
+        );
+
+        const host = await screen.findByTestId("preview-code-host");
+        await waitFor(() => {
+            const script = host.shadowRoot?.querySelector("script");
+            expect(script).not.toBeNull();
+            expect(script?.getAttribute("src")).toBeNull();
+            expect(host.shadowRoot?.innerHTML).not.toContain("data:text/javascript");
+            expect(host.shadowRoot?.innerHTML).not.toContain("https://example.com/app.js");
+        });
+    });
+
     it("uses proxy when authorizing client-detected preview_code resources with proxy button", async () => {
         mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
+        mockInvokeHandler("prepare_preview_code_request_for_ui", () => ({
+            request_id: "prepared-raw-external-image",
+            conversation_id: 1,
+            title: "external_image",
+            renderer: "html",
+            code: '<img alt="remote" src=https://example.com/raw.png>',
+            loadingMessages: [],
+            interactionMode: "submit_once",
+        }));
         mockInvokeHandler("authorize_preview_code_external_resource_urls", () => ({
             previewCode: {
                 request_id: "authorized-request",

@@ -67,7 +67,7 @@ function getClientPreviewPlaceholder(type: PreviewExternalResourceType) {
         case "css":
             return "data:text/css,";
         case "script":
-            return "data:text/javascript,";
+            return "";
         case "font":
             return "data:font/woff2;base64,";
         case "pdf":
@@ -134,6 +134,10 @@ function sanitizeClientPreviewCode(code: string) {
         for (const attrName of ["src", "href", "data"]) {
             const rawValue = element.getAttribute(attrName);
             if (!rawValue || !isRawExternalPreviewUrl(rawValue)) {
+                continue;
+            }
+            if (resourceType === "script" && attrName === "src") {
+                element.removeAttribute(attrName);
                 continue;
             }
             element.setAttribute(attrName, placeholder);
@@ -354,6 +358,7 @@ export default function InlineCodePreviewCard({
     const streamingPreviewTimerRef = useRef<number | null>(null);
     const lastStreamingPreviewAppliedAtRef = useRef(0);
     const lastStreamingPreviewIdentityRef = useRef<string | null>(null);
+    const preparingRequestSignatureRef = useRef<string | null>(null);
 
     const matchedStateByLlmCallId = useMemo(() => {
         if (!mcpToolCallStates || !llmCallId || callId) {
@@ -501,6 +506,10 @@ export default function InlineCodePreviewCard({
                   ),
         [isStreaming, rawPreviewRequest]
     );
+    const rawPreviewTitle = rawPreviewRequest?.title ?? null;
+    const rawPreviewRenderer = rawPreviewRequest?.renderer ?? null;
+    const rawPreviewInteractionMode = rawPreviewRequest?.interactionMode ?? null;
+    const rawPreviewCode = rawPreviewRequest?.code ?? null;
     const hasScriptContent = useMemo(() => {
         if (activeStreamingPreviewState) {
             return activeStreamingPreviewState.containsScript;
@@ -585,6 +594,7 @@ export default function InlineCodePreviewCard({
         setIsCollapsed(defaultCollapsed);
         setIsHidden(false);
         setIsRuntimeActivated(isStreaming || !defaultCollapsed);
+        preparingRequestSignatureRef.current = null;
     }, [conversationId, hasScriptContent, isLastMessage, isStreaming, requestSignature]);
 
     const authorizeSelectedPreviewResources = useCallback(
@@ -692,9 +702,9 @@ export default function InlineCodePreviewCard({
                     return signature === requestSignature
                         || (
                             rawPreviewRequest
-                            && event.title === rawPreviewRequest.title
-                            && event.renderer === rawPreviewRequest.renderer
-                            && event.interactionMode === rawPreviewRequest.interactionMode
+                            && event.title === rawPreviewTitle
+                            && event.renderer === rawPreviewRenderer
+                            && event.interactionMode === rawPreviewInteractionMode
                         );
                 });
                 if (matched) {
@@ -711,7 +721,13 @@ export default function InlineCodePreviewCard({
         return () => {
             active = false;
         };
-    }, [conversationId, rawPreviewRequest, requestSignature]);
+    }, [
+        conversationId,
+        requestSignature,
+        rawPreviewInteractionMode,
+        rawPreviewRenderer,
+        rawPreviewTitle,
+    ]);
 
     useEffect(() => {
         if (!conversationId || !requestSignature) {
@@ -737,9 +753,9 @@ export default function InlineCodePreviewCard({
                 signature === requestSignature
                 || (
                     rawPreviewRequest
-                    && payload.title === rawPreviewRequest.title
-                    && payload.renderer === rawPreviewRequest.renderer
-                    && payload.interactionMode === rawPreviewRequest.interactionMode
+                    && payload.title === rawPreviewTitle
+                    && payload.renderer === rawPreviewRenderer
+                    && payload.interactionMode === rawPreviewInteractionMode
                 )
             ) {
                 setResolvedRequestId(payload.request_id);
@@ -748,9 +764,65 @@ export default function InlineCodePreviewCard({
         });
 
         return () => {
-            unsubscribe.then((dispose) => dispose());
+            void unsubscribe.then((dispose) => dispose()).catch(() => undefined);
         };
-    }, [conversationId, rawPreviewRequest, requestSignature]);
+    }, [
+        conversationId,
+        requestSignature,
+        rawPreviewInteractionMode,
+        rawPreviewRenderer,
+        rawPreviewTitle,
+    ]);
+
+    useEffect(() => {
+        if (
+            isStreaming
+            || !rawPreviewRequest
+            || !requestSignature
+            || preparedPreviewRequest
+            || !hasRawExternalPreviewResources(rawPreviewCode ?? undefined)
+        ) {
+            return;
+        }
+        if (preparingRequestSignatureRef.current === requestSignature) {
+            return;
+        }
+
+        let active = true;
+        preparingRequestSignatureRef.current = requestSignature;
+        invoke<PreviewCodeRequestEvent>("prepare_preview_code_request_for_ui", {
+            conversationId,
+            conversation_id: conversationId,
+            request: rawPreviewRequest,
+        })
+            .then((payload) => {
+                if (!active || preparingRequestSignatureRef.current !== requestSignature) {
+                    return;
+                }
+                setResolvedRequestId(payload.request_id);
+                setPreparedPreviewRequest(payload);
+                setClientDetectedExternalResources(null);
+            })
+            .catch((error) => {
+                if (!active || preparingRequestSignatureRef.current !== requestSignature) {
+                    return;
+                }
+                setRuntimeError(`preview_code 外部资源准备失败: ${getErrorMessage(error)}`);
+            });
+
+        return () => {
+            active = false;
+        };
+    }, [
+        conversationId,
+        isStreaming,
+        preparedPreviewRequest,
+        rawPreviewCode,
+        rawPreviewInteractionMode,
+        rawPreviewRenderer,
+        rawPreviewTitle,
+        requestSignature,
+    ]);
 
     useEffect(() => {
         if (!hostRef.current || runtimeRef.current || !isRuntimeActivated || !shouldRenderRuntimeHost) {

@@ -25,6 +25,7 @@ declare global {
         aippPreviewCode?: PreviewCodeBridge;
         __AIPP_PREVIEW_CODE_BRIDGES__?: Record<string, PreviewCodeBridge>;
         __AIPP_PREVIEW_CODE_SCRIPT_LOADS__?: Record<string, Promise<void> | undefined>;
+        __AIPP_PREVIEW_CODE_SCRIPT_TEXTS__?: Record<string, Promise<string> | undefined>;
     }
 }
 
@@ -125,6 +126,13 @@ function getScriptLoadRegistry(): Record<string, Promise<void> | undefined> {
     return window.__AIPP_PREVIEW_CODE_SCRIPT_LOADS__;
 }
 
+function getScriptTextRegistry(): Record<string, Promise<string> | undefined> {
+    if (!window.__AIPP_PREVIEW_CODE_SCRIPT_TEXTS__) {
+        window.__AIPP_PREVIEW_CODE_SCRIPT_TEXTS__ = {};
+    }
+    return window.__AIPP_PREVIEW_CODE_SCRIPT_TEXTS__;
+}
+
 function getLiveBridgeOrThrow(bridgeId: string): PreviewCodeBridge {
     const bridge = getBridgeRegistry()[bridgeId];
     if (!bridge) {
@@ -147,11 +155,19 @@ function normalizeStyleNodes(root: ParentNode) {
 }
 
 function collectScriptNodes(root: ParentNode) {
-    return Array.from(root.querySelectorAll("script")).map((script) => ({
-        src: script.getAttribute("src"),
-        type: script.getAttribute("type"),
-        content: script.textContent ?? "",
-    }));
+    return Array.from(root.querySelectorAll("script")).map((script) => {
+        const src = script.getAttribute("src");
+        const type = script.getAttribute("type");
+        const content = script.textContent ?? "";
+        if (src) {
+            script.removeAttribute("src");
+            script.setAttribute("data-aipp-preview-script-src", src);
+            if (type) {
+                script.setAttribute("data-aipp-preview-script-type", type);
+            }
+        }
+        return { src, type, content };
+    });
 }
 
 function buildTargetMountPoint(code: string): {
@@ -209,30 +225,121 @@ function normalizeExternalScriptUrl(src: string): string {
     return url.toString();
 }
 
-async function ensureExternalScriptLoaded(src: string, type: string | null) {
-    const normalizedSrc = normalizeExternalScriptUrl(src);
-    const registry = getScriptLoadRegistry();
-    if (registry[normalizedSrc]) {
-        await registry[normalizedSrc];
+async function fetchExternalScriptText(src: string) {
+    const registry = getScriptTextRegistry();
+    if (!registry[src]) {
+        registry[src] = fetch(src)
+            .then((response) => {
+                if (!response.ok) {
+                    throw new Error(`preview_code 获取外部脚本失败: ${src}`);
+                }
+                return response.text();
+            })
+            .catch((error) => {
+                delete registry[src];
+                throw error;
+            });
+    }
+    return registry[src];
+}
+
+const previewScopedExternalScriptRuns = new WeakMap<ShadowRoot, Set<string>>();
+
+function isClassicJavaScriptType(type: string | null) {
+    if (!type) {
+        return true;
+    }
+    const normalized = type.trim().toLowerCase();
+    return normalized === ""
+        || normalized === "text/javascript"
+        || normalized === "application/javascript"
+        || normalized === "application/ecmascript"
+        || normalized === "text/ecmascript";
+}
+
+function runScriptContent(
+    host: HTMLElement,
+    shadowRoot: ShadowRoot,
+    environment: PreviewScriptEnvironment,
+    scriptContent: string
+) {
+    const scriptRunner = new Function(
+        "window",
+        "document",
+        "globalThis",
+        "self",
+        "host",
+        "shadowRoot",
+        "aippPreviewCode",
+        appendWindowExports(scriptContent)
+    );
+    scriptRunner.call(
+        environment.previewWindow,
+        environment.previewWindow,
+        environment.previewDocument,
+        environment.previewWindow,
+        environment.previewWindow,
+        host,
+        shadowRoot,
+        environment.previewWindow.aippPreviewCode
+    );
+}
+
+async function runPreviewScopedExternalScript(
+    src: string,
+    host: HTMLElement,
+    shadowRoot: ShadowRoot,
+    environment: PreviewScriptEnvironment
+) {
+    let runs = previewScopedExternalScriptRuns.get(shadowRoot);
+    if (!runs) {
+        runs = new Set<string>();
+        previewScopedExternalScriptRuns.set(shadowRoot, runs);
+    }
+    if (runs.has(src)) {
         return;
     }
+    const scriptContent = await fetchExternalScriptText(src);
+    runScriptContent(host, shadowRoot, environment, scriptContent);
+    runs.add(src);
+}
 
-    registry[normalizedSrc] = new Promise<void>((resolve, reject) => {
-        const scriptElement = document.createElement("script");
-        if (type) {
-            scriptElement.type = type;
-        }
-        scriptElement.src = normalizedSrc;
-        scriptElement.async = false;
-        scriptElement.onload = () => resolve();
-        scriptElement.onerror = () => {
-            delete registry[normalizedSrc];
-            reject(new Error(`preview_code 加载外部脚本失败: ${normalizedSrc}`));
-        };
-        document.head.appendChild(scriptElement);
-    });
+async function loadExternalScriptElement(src: string, type: string | null) {
+    const registry = getScriptLoadRegistry();
+    if (!registry[src]) {
+        registry[src] = new Promise<void>((resolve, reject) => {
+            const scriptElement = document.createElement("script");
+            if (type) {
+                scriptElement.type = type;
+            }
+            scriptElement.src = src;
+            scriptElement.async = false;
+            scriptElement.onload = () => resolve();
+            scriptElement.onerror = () => {
+                reject(new Error(`preview_code 加载外部脚本失败: ${src}`));
+            };
+            document.head.appendChild(scriptElement);
+        }).catch((error) => {
+            delete registry[src];
+            throw error;
+        });
+    }
+    await registry[src];
+}
 
-    await registry[normalizedSrc];
+async function ensureExternalScriptLoaded(
+    src: string,
+    type: string | null,
+    host: HTMLElement,
+    shadowRoot: ShadowRoot,
+    environment: PreviewScriptEnvironment
+) {
+    const normalizedSrc = normalizeExternalScriptUrl(src);
+    if (isClassicJavaScriptType(type)) {
+        await runPreviewScopedExternalScript(normalizedSrc, host, shadowRoot, environment);
+        return;
+    }
+    await loadExternalScriptElement(normalizedSrc, type);
 }
 
 function getElementByIdFromShadowRoot(shadowRoot: ShadowRoot, id: string): HTMLElement | null {
@@ -244,7 +351,14 @@ function getElementByIdFromShadowRoot(shadowRoot: ShadowRoot, id: string): HTMLE
 
 function createPreviewDocumentFacade(shadowRoot: ShadowRoot, host: HTMLElement) {
     const ownerDocument = host.ownerDocument;
+    const previewHead = {
+        append: (...nodes: Node[]) => {
+            nodes.forEach((node) => shadowRoot.appendChild(node));
+        },
+        appendChild: (node: Node) => shadowRoot.appendChild(node),
+    };
     return {
+        head: previewHead,
         body: shadowRoot,
         documentElement: shadowRoot,
         querySelector: shadowRoot.querySelector.bind(shadowRoot),
@@ -422,31 +536,14 @@ async function executeScripts(
 ) {
     for (const script of scripts) {
         if (script.src) {
-            await ensureExternalScriptLoaded(script.src, script.type);
+            await ensureExternalScriptLoaded(script.src, script.type, host, shadowRoot, environment);
             continue;
         }
         if (!script.content.trim()) {
             continue;
         }
 
-        const scriptRunner = new Function(
-            "window",
-            "document",
-            "globalThis",
-            "host",
-            "shadowRoot",
-            "aippPreviewCode",
-            appendWindowExports(script.content)
-        );
-        scriptRunner.call(
-            environment.previewWindow,
-            environment.previewWindow,
-            environment.previewDocument,
-            environment.previewWindow,
-            host,
-            shadowRoot,
-            environment.previewWindow.aippPreviewCode
-        );
+        runScriptContent(host, shadowRoot, environment, script.content);
     }
 }
 
