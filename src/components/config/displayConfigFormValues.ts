@@ -1,4 +1,5 @@
 export interface DisplayFormValues {
+    default_home_window: string;
     theme: string;
     color_mode: string;
     user_message_markdown_render: string;
@@ -12,8 +13,17 @@ export interface DisplayFormValues {
 
 export function buildDisplayFormValues(
     displayConfig?: Map<string, string>,
+    experimentalConfig?: Map<string, string>,
 ): DisplayFormValues {
+    const butlerEnabled = experimentalConfig?.get("butler_experiment_enabled") === "true";
+    const savedHomeWindow = experimentalConfig?.get("default_home_window") || "ask";
+    const defaultHomeWindow =
+        savedHomeWindow === "butler_experiment" && !butlerEnabled
+            ? "ask"
+            : savedHomeWindow;
+
     return {
+        default_home_window: defaultHomeWindow,
         theme: displayConfig?.get("theme") || "default",
         color_mode: displayConfig?.get("color_mode") || "system",
         user_message_markdown_render:

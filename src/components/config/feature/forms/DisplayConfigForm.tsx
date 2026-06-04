@@ -11,9 +11,14 @@ import { pluginRuntime } from "@/services/PluginRuntime";
 interface DisplayConfigFormProps {
     form: UseFormReturn<any>;
     onSave: () => Promise<void>;
+    showButlerHomeWindow: boolean;
 }
 
-export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({ form, onSave }) => {
+export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
+    form,
+    onSave,
+    showButlerHomeWindow,
+}) => {
     const previousNotificationValue = useRef<boolean | undefined>(undefined);
     const { themes, themeInfo } = useSyntectThemes();
     const [pluginThemeOptions, setPluginThemeOptions] = useState<Array<{ value: string; label: string }>>([]);
@@ -72,6 +77,23 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({ form, onSa
         { value: "enabled", label: "开启" },
         { value: "disabled", label: "关闭" },
     ];
+
+    const defaultHomeWindowOptions = useMemo(() => {
+        const options = [
+            { value: "ask", label: "Ask 悬浮窗" },
+            { value: "chat_ui", label: "Chat 主窗口" },
+        ];
+        if (showButlerHomeWindow) {
+            options.push({ value: "butler_experiment", label: "总管家实验窗口" });
+        }
+        return options;
+    }, [showButlerHomeWindow]);
+
+    useEffect(() => {
+        if (!showButlerHomeWindow && form.getValues("default_home_window") === "butler_experiment") {
+            form.setValue("default_home_window", "ask");
+        }
+    }, [form, showButlerHomeWindow]);
 
     const syntectThemeOptions = useMemo(() => {
         if (!themes || themes.length === 0) return null;
@@ -177,6 +199,15 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({ form, onSa
 
     const DISPLAY_FORM_CONFIG = [
         {
+            key: "default_home_window",
+            config: {
+                type: "select" as const,
+                label: "默认主页窗口",
+                options: defaultHomeWindowOptions,
+                tooltip: "影响应用启动、托盘点击和唤醒时默认打开的主窗口",
+            },
+        },
+        {
             key: "theme",
             config: {
                 type: "select" as const,
@@ -253,7 +284,7 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({ form, onSa
     return (
         <ConfigForm
             title="显示"
-            description="配置系统外观主题、深浅色模式和用户消息渲染方式"
+            description="配置默认主页窗口、系统外观主题、深浅色模式和用户消息渲染方式"
             config={DISPLAY_FORM_CONFIG}
             layout="default"
             classNames="bottom-space"

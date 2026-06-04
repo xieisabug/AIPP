@@ -1085,36 +1085,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                     )}
                                 />
 
-                                <Controller
-                                    control={form.control}
-                                    name="default_home_window"
-                                    render={({ field }) => (
-                                        <FormItem>
-                                            <FormLabel>默认主页窗口</FormLabel>
-                                            <FormControl>
-                                                <Select
-                                                    value={field.value || "ask"}
-                                                    onValueChange={field.onChange}
-                                                >
-                                                    <SelectTrigger>
-                                                        <SelectValue placeholder="选择默认主页窗口" />
-                                                    </SelectTrigger>
-                                                    <SelectContent>
-                                                        <SelectItem value="ask">Ask 悬浮窗</SelectItem>
-                                                        <SelectItem value="chat_ui">Chat 主窗口</SelectItem>
-                                                        <SelectItem value="butler_experiment">
-                                                            总管家实验窗口
-                                                        </SelectItem>
-                                                    </SelectContent>
-                                                </Select>
-                                            </FormControl>
-                                            <p className="text-sm text-muted-foreground mt-1">
-                                                影响应用启动、托盘点击和唤醒时默认打开的主窗口。
-                                            </p>
-                                        </FormItem>
-                                    )}
-                                />
-
                                 {/* ── 可信工作区配置 ── */}
                                 <div className="space-y-3 pt-3 border-t border-border/50">
                                     <p className="text-sm font-medium text-muted-foreground">可信工作区</p>

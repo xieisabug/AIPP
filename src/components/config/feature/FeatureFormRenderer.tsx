@@ -89,6 +89,10 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
                 <DisplayConfigForm
                     form={forms.displayForm}
                     onSave={onSaveDisplay}
+                    showButlerHomeWindow={
+                        String(forms.experimentalForm.watch("butler_experiment_enabled")) ===
+                        "true"
+                    }
                 />
             );
         case "conversation_summary":

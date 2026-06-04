@@ -218,15 +218,12 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
         if (!loading && featureConfig.size > 0) {
             console.log("feature config loaded", featureConfig);
 
-            // 更新 display 表单
             const displayConfig = featureConfig.get("display");
-            if (displayConfig) {
-                displayForm.reset(buildDisplayFormValues(displayConfig));
-            }
+            const experimentalConfig = featureConfig.get("experimental");
+            displayForm.reset(buildDisplayFormValues(displayConfig, experimentalConfig));
 
             // 更新 summary 表单 - 支持新旧配置键兼容
             const summaryConfig = featureConfig.get("conversation_summary");
-            const experimentalConfig = featureConfig.get("experimental");
             if (summaryConfig) {
                 // 读取新配置键
                 const titleModel = summaryConfig.get("title_model") || "";
@@ -391,7 +388,24 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
     const handleSaveDisplayConfig = useCallback(async () => {
         const values = displayForm.getValues();
         await saveFeatureConfig("display", serializeDisplayFormValues(values));
-    }, [displayForm, saveFeatureConfig]);
+
+        const currentExperimentalConfig = featureConfig.get("experimental");
+        const preservedExperimentalValues = {
+            ...EXPERIMENTAL_CONFIG_DEFAULT_VALUES,
+            ...Object.fromEntries(currentExperimentalConfig?.entries() ?? []),
+            butler_feishu_app_secret: "",
+        };
+        const canUseButlerHomeWindow =
+            String(preservedExperimentalValues.butler_experiment_enabled) === "true";
+        const defaultHomeWindow =
+            values.default_home_window === "butler_experiment" && !canUseButlerHomeWindow
+                ? "ask"
+                : String(values.default_home_window || "ask");
+        await saveExperimentalConfigValues(saveFeatureConfig, {
+            ...preservedExperimentalValues,
+            default_home_window: defaultHomeWindow,
+        });
+    }, [displayForm, featureConfig, saveFeatureConfig]);
 
     const handleSaveSummaryConfig = useCallback(async () => {
         const values = summaryForm.getValues();

@@ -19,6 +19,7 @@ describe("displayConfigFormValues", () => {
         ]);
 
         expect(buildDisplayFormValues(config)).toEqual({
+            default_home_window: "ask",
             theme: "default",
             color_mode: "dark",
             user_message_markdown_render: "enabled",
@@ -31,10 +32,33 @@ describe("displayConfigFormValues", () => {
         });
     });
 
+    it("reads the default home window from experimental config", () => {
+        const displayConfig = new Map<string, string>();
+        const experimentalConfig = new Map<string, string>([
+            ["butler_experiment_enabled", "true"],
+            ["default_home_window", "butler_experiment"],
+        ]);
+
+        expect(buildDisplayFormValues(displayConfig, experimentalConfig).default_home_window)
+            .toBe("butler_experiment");
+    });
+
+    it("hides the butler home window value when butler mode is disabled", () => {
+        const displayConfig = new Map<string, string>();
+        const experimentalConfig = new Map<string, string>([
+            ["butler_experiment_enabled", "false"],
+            ["default_home_window", "butler_experiment"],
+        ]);
+
+        expect(buildDisplayFormValues(displayConfig, experimentalConfig).default_home_window)
+            .toBe("ask");
+    });
+
     it("serializes display form switches back to persisted config values", () => {
         expect(
             serializeDisplayFormValues({
                 theme: "default",
+                default_home_window: "chat_ui",
                 color_mode: "system",
                 user_message_markdown_render: "enabled",
                 notification_on_completion: false,
