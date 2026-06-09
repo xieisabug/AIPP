@@ -132,6 +132,7 @@ export interface GroupMergeEvent {
 export interface MCPToolCallUpdateEvent {
     call_id: number;
     conversation_id: number;
+    message_id?: number;
     status: 'pending' | 'executing' | 'success' | 'failed' | 'unknown';
     llm_call_id?: string;
     server_name?: string;

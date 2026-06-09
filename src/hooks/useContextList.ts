@@ -56,6 +56,37 @@ interface ParsedToolResult {
     json?: unknown;
 }
 
+interface PreviewFileContextFile {
+    title: string;
+    type: string;
+    content?: string;
+    url?: string;
+    language?: string;
+    description?: string;
+}
+
+interface ParsedPreviewFileRequest {
+    files: PreviewFileContextFile[];
+    viewMode?: string;
+}
+
+const pathSegments = (value: string): string[] => value.split(/[\\/]+/).filter((part) => part.length > 0);
+
+const getPathBasename = (value?: string): string | undefined => {
+    const normalized = value?.trim();
+    if (!normalized) return undefined;
+    return pathSegments(normalized).pop() || normalized;
+};
+
+const getPathDirectory = (value?: string): string | undefined => {
+    const normalized = value?.trim();
+    if (!normalized) return undefined;
+    const separatorIndex = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'));
+    if (separatorIndex < 0) return undefined;
+    if (separatorIndex === 0) return normalized.slice(0, 1);
+    return normalized.slice(0, separatorIndex);
+};
+
 const parseSearchResultItems = (rawResult: string): SearchResultItem[] | undefined => {
     if (!rawResult) return undefined;
     try {
@@ -78,6 +109,103 @@ const parseSearchResultItems = (rawResult: string): SearchResultItem[] | undefin
     } catch {
         return undefined;
     }
+};
+
+const normalizePreviewFiles = (raw: unknown): PreviewFileContextFile[] => {
+    if (!Array.isArray(raw)) return [];
+    return raw
+        .map((item): PreviewFileContextFile | null => {
+            if (!item || typeof item !== 'object') return null;
+            const record = item as Record<string, unknown>;
+            const title = typeof record.title === 'string' ? record.title.trim() : '';
+            const type = typeof record.type === 'string' ? record.type.trim() : '';
+            if (!title || !type) return null;
+
+            return {
+                title,
+                type,
+                content: typeof record.content === 'string' ? record.content : undefined,
+                url: typeof record.url === 'string' ? record.url : undefined,
+                language: typeof record.language === 'string' ? record.language : undefined,
+                description: typeof record.description === 'string' ? record.description : undefined,
+            };
+        })
+        .filter((item): item is PreviewFileContextFile => item !== null);
+};
+
+const parsePreviewFileRequest = (parameters?: string): ParsedPreviewFileRequest | undefined => {
+    if (!parameters) return undefined;
+    try {
+        const parsed = JSON.parse(parameters);
+        if (!parsed || typeof parsed !== 'object') return undefined;
+        const record = parsed as Record<string, unknown>;
+        const files = normalizePreviewFiles(record.files);
+        if (files.length === 0) return undefined;
+        const viewMode =
+            typeof record.viewMode === 'string'
+                ? record.viewMode
+                : typeof record.view_mode === 'string'
+                    ? record.view_mode
+                    : undefined;
+        return { files, viewMode };
+    } catch {
+        return undefined;
+    }
+};
+
+const extractRequestIdFromNode = (node: unknown): string | undefined => {
+    if (!node) return undefined;
+    if (typeof node === 'string') {
+        try {
+            return extractRequestIdFromNode(JSON.parse(node));
+        } catch {
+            return undefined;
+        }
+    }
+    if (Array.isArray(node)) {
+        for (const item of node) {
+            const requestId = extractRequestIdFromNode(item);
+            if (requestId) return requestId;
+        }
+        return undefined;
+    }
+    if (typeof node !== 'object') return undefined;
+
+    const record = node as Record<string, unknown>;
+    if (typeof record.request_id === 'string' && record.request_id.trim()) {
+        return record.request_id.trim();
+    }
+    return (
+        extractRequestIdFromNode(record.json) ||
+        extractRequestIdFromNode(record.content) ||
+        extractRequestIdFromNode(record.result)
+    );
+};
+
+const parsePreviewFileRequestId = (rawResult?: string): string | undefined => {
+    if (!rawResult) return undefined;
+    try {
+        return extractRequestIdFromNode(JSON.parse(rawResult));
+    } catch {
+        return undefined;
+    }
+};
+
+const buildPreviewFileDisplayName = (files: PreviewFileContextFile[]): string => {
+    const firstPath = files.find((file) => file.url?.trim())?.url;
+    const directory = getPathDirectory(firstPath);
+    if (directory) {
+        return files.length > 1 ? `${directory} 等 ${files.length} 项` : directory;
+    }
+
+    const firstTitle = files[0]?.title?.trim();
+    return files.length > 1 && firstTitle ? `${firstTitle} 等 ${files.length} 项` : firstTitle || 'PreviewFile';
+};
+
+const buildPreviewFileDetails = (files: PreviewFileContextFile[]): string | undefined => {
+    const titles = files.map((file) => file.title).filter(Boolean);
+    if (titles.length === 0) return undefined;
+    return titles.length > 2 ? `${titles.slice(0, 2).join(', ')} 等 ${titles.length} 项` : titles.join(', ');
 };
 
 const parseSearchResultText = (rawResult: string): string | undefined => {
@@ -525,6 +653,61 @@ export function useContextList({
             }
 
             const contextType = getContextTypeFromToolName(toolName);
+
+            if (contextType === 'preview_file') {
+                const parsedPreviewFile = parsePreviewFileRequest(toolCall.parameters);
+                if (!parsedPreviewFile) return;
+
+                const displayName = buildPreviewFileDisplayName(parsedPreviewFile.files);
+                const details = buildPreviewFileDetails(parsedPreviewFile.files) || toolCall.tool_name;
+                const requestId = parsePreviewFileRequestId(toolCall.result);
+                const firstPath = parsedPreviewFile.files.find((file) => file.url?.trim())?.url;
+                const directory = getPathDirectory(firstPath);
+                const fileNames = parsedPreviewFile.files
+                    .map((file) => getPathBasename(file.url) || file.title)
+                    .filter(Boolean);
+
+                items.push({
+                    id: `mcp-${callId}`,
+                    type: 'preview_file',
+                    name: displayName,
+                    details,
+                    source: 'mcp',
+                    timestamp: new Date(),
+                    previewStatus: 'ready',
+                    previewData: {
+                        title: displayName,
+                        subtitle: details,
+                        rawValue: requestId || String(callId),
+                        contentType: 'file-meta',
+                        path: directory || firstPath,
+                        items: parsedPreviewFile.files.map((file) => ({
+                            label: file.title,
+                            value: file.url || (file.content ? `${file.content.length} 字符内容` : undefined),
+                            description:
+                                file.description ||
+                                [file.type, file.language].filter(Boolean).join(' / ') ||
+                                undefined,
+                        })),
+                        metadata: buildMetadata({
+                            来源: 'PreviewFile',
+                            工具: toolCall.tool_name,
+                            请求: requestId,
+                            目录: directory,
+                            文件: fileNames.length > 0 ? fileNames.join(', ') : undefined,
+                            视图: parsedPreviewFile.viewMode,
+                        }),
+                    },
+                    previewFileData: {
+                        callId,
+                        conversationId: toolCall.conversation_id,
+                        messageId: toolCall.message_id ?? null,
+                        requestId: requestId ?? null,
+                    },
+                });
+                return;
+            }
+
             const displayName = rawValue || toolCall.tool_name || 'Unknown';
             const parsedResult = parseToolResultPayload(toolCall.result);
             const searchResults =

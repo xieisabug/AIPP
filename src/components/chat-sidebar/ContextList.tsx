@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from 'react';
-import { File, Search, FolderOpen, FileInput, FileQuestion, ExternalLink, ChevronDown, Image, Sparkles } from 'lucide-react';
+import { File, FileText, Search, FolderOpen, FileInput, FileQuestion, ExternalLink, ChevronDown, Image, Sparkles } from 'lucide-react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { invoke } from '@tauri-apps/api/core';
 import { ContextItem } from './types';
@@ -10,7 +10,21 @@ interface ContextListProps {
     items: ContextItem[];
     className?: string;
     onItemClick?: (item: ContextItem) => void;
+    onPreviewFileClick?: (item: ContextItem) => void;
 }
+
+const getPathBasename = (value: string): string => {
+    const trimmed = value.trim();
+    const parts = trimmed.split(/[\\/]+/).filter(Boolean);
+    return parts.pop() || trimmed;
+};
+
+const getDisplayName = (item: ContextItem): string => {
+    if (item.type === 'read_file') {
+        return getPathBasename(item.name);
+    }
+    return item.name;
+};
 
 const getContextIcon = (type: ContextItem['type'], attachmentType?: string) => {
     if ((type === 'user_file' || type === 'generated_image') && attachmentType === 'Image') {
@@ -25,6 +39,8 @@ const getContextIcon = (type: ContextItem['type'], attachmentType?: string) => {
             return <Sparkles className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
         case 'read_file':
             return <File className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
+        case 'preview_file':
+            return <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
         case 'search':
             return <Search className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
         case 'list_directory':
@@ -46,6 +62,8 @@ const getContextLabel = (type: ContextItem['type']): string => {
             return 'Skills';
         case 'read_file':
             return '读取文件';
+        case 'preview_file':
+            return '预览文件';
         case 'search':
             return '搜索';
         case 'list_directory':
@@ -57,7 +75,12 @@ const getContextLabel = (type: ContextItem['type']): string => {
     }
 };
 
-const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick }) => {
+const ContextList: React.FC<ContextListProps> = ({
+    items,
+    className,
+    onItemClick,
+    onPreviewFileClick,
+}) => {
     const [collapsedSearchIds, setCollapsedSearchIds] = useState<Set<string>>(new Set());
 
     const handleOpenUrl = useCallback((url?: string) => {
@@ -109,6 +132,9 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
     }, []);
 
     const handleItemClick = useCallback((item: ContextItem) => {
+        if (item.type === 'preview_file' && onPreviewFileClick) {
+            onPreviewFileClick(item);
+        }
         if (onItemClick) {
             onItemClick(item);
             return;
@@ -118,7 +144,7 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
         } else if (item.attachmentData) {
             handleOpenAttachment(item);
         }
-    }, [handleOpenAttachment, handleOpenMarkdownPreview, onItemClick]);
+    }, [handleOpenAttachment, handleOpenMarkdownPreview, onItemClick, onPreviewFileClick]);
 
     if (items.length === 0) {
         return (
@@ -164,7 +190,7 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
                                     {getContextIcon(item.type, item.attachmentData?.type)}
                                     <div className="flex-1 min-w-0">
                                         <p className="text-sm font-medium truncate" title={item.name}>
-                                            {item.name}
+                                            {getDisplayName(item)}
                                         </p>
                                         {item.details && item.details !== item.name && (
                                             <p className="text-xs text-muted-foreground truncate mt-0.5" title={item.details}>

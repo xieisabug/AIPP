@@ -2423,6 +2423,7 @@ impl AcpTauriClient {
                 data: serde_json::to_value(MCPToolCallUpdateEvent {
                     call_id,
                     conversation_id: self.conversation_id,
+                    message_id: call.message_id,
                     status: status.to_string(),
                     llm_call_id: call.llm_call_id.clone(),
                     server_name: Some(call.server_name.clone()),
@@ -2946,6 +2947,7 @@ impl AcpClient for AcpTauriClient {
                         data: serde_json::to_value(MCPToolCallUpdateEvent {
                             call_id: existing_call_id,
                             conversation_id: self.conversation_id,
+                            message_id: None,
                             status: status_str,
                             llm_call_id: None,
                             server_name: Some(display_name),
@@ -3056,6 +3058,7 @@ impl AcpClient for AcpTauriClient {
                             data: serde_json::to_value(MCPToolCallUpdateEvent {
                                 call_id,
                                 conversation_id: self.conversation_id,
+                                message_id: None,
                                 status: status_str,
                                 llm_call_id: None,
                                 server_name: Some(display_name),
@@ -3100,6 +3103,7 @@ impl AcpClient for AcpTauriClient {
                                 data: serde_json::to_value(MCPToolCallUpdateEvent {
                                     call_id,
                                     conversation_id: self.conversation_id,
+                                    message_id: None,
                                     status: status_str.clone(),
                                     llm_call_id: None,
                                     server_name: Some(display_name),
@@ -3164,6 +3168,7 @@ impl AcpClient for AcpTauriClient {
                     data: serde_json::to_value(MCPToolCallUpdateEvent {
                         call_id: tool_call_record.id,
                         conversation_id: self.conversation_id,
+                        message_id: tool_call_record.message_id,
                         status: status_str,
                         llm_call_id: None,
                         server_name: Some(display_name),
@@ -3429,6 +3434,7 @@ impl AcpClient for AcpTauriClient {
                     data: serde_json::to_value(MCPToolCallUpdateEvent {
                         call_id,
                         conversation_id: self.conversation_id,
+                        message_id: None,
                         status: status_str,
                         llm_call_id: None,
                         server_name: updated_server_name,

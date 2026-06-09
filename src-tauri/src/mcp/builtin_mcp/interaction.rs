@@ -136,9 +136,6 @@ pub struct PreviewCodeRequest {
 
 impl PreviewCodeRequest {
     pub fn validate(&self) -> Result<(), String> {
-        if self.title.trim().is_empty() {
-            return Err("PreviewCode title cannot be empty".to_string());
-        }
         if self.renderer.trim() != "html" {
             return Err(format!(
                 "Unsupported preview_code renderer '{}'; only 'html' is currently supported",
@@ -1241,6 +1238,20 @@ mod tests {
         };
 
         assert_eq!(request.interaction_mode(), "none");
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn preview_code_request_allows_empty_title() {
+        let request = PreviewCodeRequest {
+            title: "".to_string(),
+            renderer: "html".to_string(),
+            code: "<div>Hello</div>".to_string(),
+            loading_messages: vec![],
+            interaction_mode: Some("none".to_string()),
+            metadata: None,
+        };
+
         assert!(request.validate().is_ok());
     }
 

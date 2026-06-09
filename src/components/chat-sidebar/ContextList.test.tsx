@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import ContextList from './ContextList';
 import { ContextItem } from './types';
@@ -53,6 +54,10 @@ describe('ContextList skills', () => {
 
         render(<ContextList items={items} />);
 
+        expect(screen.getByText('App.tsx')).toBeInTheDocument();
+        expect(
+            screen.queryByText('/very/long/path/to/a/file/that/gets/truncated/in/the/sidebar/App.tsx'),
+        ).not.toBeInTheDocument();
         expect(
             screen.getByTitle('/very/long/path/to/a/file/that/gets/truncated/in/the/sidebar/App.tsx'),
         ).toBeInTheDocument();
@@ -91,5 +96,30 @@ describe('ContextList skills', () => {
         expect(screen.getByText('生成图片')).toBeInTheDocument();
         expect(screen.getByText('图片 1')).toBeInTheDocument();
         expect(screen.queryByText('用户文件')).not.toBeInTheDocument();
+    });
+
+    it('groups preview files and invokes the preview click callback', async () => {
+        const user = userEvent.setup();
+        const onPreviewFileClick = vi.fn();
+        const item: ContextItem = {
+            id: 'preview-1',
+            type: 'preview_file',
+            name: '/workspace/src',
+            details: 'App.tsx',
+            source: 'mcp',
+            previewFileData: {
+                callId: 12,
+                conversationId: 1,
+                messageId: 20,
+                requestId: 'req-1',
+            },
+        };
+
+        render(<ContextList items={[item]} onPreviewFileClick={onPreviewFileClick} />);
+
+        expect(screen.getByText('预览文件')).toBeInTheDocument();
+        await user.click(screen.getByText('/workspace/src'));
+
+        expect(onPreviewFileClick).toHaveBeenCalledWith(item);
     });
 });

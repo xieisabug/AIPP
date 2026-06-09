@@ -278,6 +278,115 @@ describe('useContextList', () => {
         });
     });
 
+    it('builds preview_file context item from file URLs using the directory label', async () => {
+        const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
+            [12, {
+                call_id: 12,
+                conversation_id: 1,
+                message_id: 20,
+                status: 'success',
+                tool_name: 'preview_file',
+                parameters: JSON.stringify({
+                    files: [
+                        {
+                            title: 'App.tsx',
+                            type: 'text',
+                            url: '/workspace/src/App.tsx',
+                            language: 'typescript',
+                        },
+                    ],
+                    viewMode: 'tabs',
+                }),
+                result: JSON.stringify({
+                    content: [{ type: 'json', json: { status: 'preview_shown', request_id: 'req-1' } }],
+                }),
+            }],
+        ]);
+
+        const { result } = renderHook(() =>
+            useContextList({
+                conversationId: 1,
+                userFiles: null,
+                mcpToolCallStates,
+                messages: [],
+                acpWorkingDirectory: null,
+            }),
+        );
+
+        await waitFor(() => {
+            expect(
+                result.current.contextItems.find((item) => item.type === 'preview_file'),
+            ).toEqual(
+                expect.objectContaining({
+                    name: '/workspace/src',
+                    details: 'App.tsx',
+                    previewFileData: {
+                        callId: 12,
+                        conversationId: 1,
+                        messageId: 20,
+                        requestId: 'req-1',
+                    },
+                    previewData: expect.objectContaining({
+                        path: '/workspace/src',
+                        metadata: expect.objectContaining({
+                            目录: '/workspace/src',
+                            文件: 'App.tsx',
+                        }),
+                    }),
+                }),
+            );
+        });
+    });
+
+    it('builds preview_file context item from inline content using the title label', async () => {
+        const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
+            [13, {
+                call_id: 13,
+                conversation_id: 1,
+                status: 'success',
+                tool_name: 'preview_file',
+                parameters: JSON.stringify({
+                    files: [
+                        {
+                            title: '分析结果',
+                            type: 'markdown',
+                            content: '# 分析结果',
+                        },
+                    ],
+                }),
+            }],
+        ]);
+
+        const { result } = renderHook(() =>
+            useContextList({
+                conversationId: 1,
+                userFiles: null,
+                mcpToolCallStates,
+                messages: [],
+                acpWorkingDirectory: null,
+            }),
+        );
+
+        await waitFor(() => {
+            expect(
+                result.current.contextItems.find((item) => item.type === 'preview_file'),
+            ).toEqual(
+                expect.objectContaining({
+                    name: '分析结果',
+                    details: '分析结果',
+                    previewData: expect.objectContaining({
+                        items: [
+                            expect.objectContaining({
+                                label: '分析结果',
+                                value: '6 字符内容',
+                            }),
+                        ],
+                    }),
+                }),
+            );
+        });
+    });
+
     it('keeps recursive directory hierarchy in list_directory preview content', async () => {
         const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
             [1, {

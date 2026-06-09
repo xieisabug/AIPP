@@ -7,6 +7,7 @@ import ConversationSearchDialog from "../components/ConversationSearchDialog";
 import ConversationUI, {
     ConversationUIRef,
     type InlineInteractionItem,
+    type PreviewFileContextSelection,
 } from "../components/ConversationUI";
 import {
     AcpPermissionDialog,
@@ -116,6 +117,8 @@ function ChatUIWindow() {
     const [conversationTitle, setConversationTitle] = useState("");
     const [searchOpen, setSearchOpen] = useState(false);
     const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
+    const [pendingPreviewFileSelection, setPendingPreviewFileSelection] =
+        useState<PreviewFileContextSelection | null>(null);
 
     const [pluginList, setPluginList] = useState<any[]>([]);
 
@@ -171,6 +174,7 @@ function ChatUIWindow() {
         callId: previewFileCallId,
         messageId: previewFileMessageId,
         handleOpenChange: handlePreviewFileOpenChange,
+        reopenPersistedPreview: reopenPersistedPreviewFile,
     } = usePreviewFile({
         conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
     });
@@ -375,6 +379,41 @@ function ChatUIWindow() {
             setPendingScrollMessageId(hit.message_id);
         }
     }, []);
+
+    const handlePreviewFileContextSelection = useCallback((selection: PreviewFileContextSelection) => {
+        if (selection.conversationId) {
+            setSelectedConversation(selection.conversationId.toString());
+        }
+        if (selection.messageId) {
+            setPendingScrollMessageId(selection.messageId);
+        }
+        setPendingPreviewFileSelection(selection);
+    }, []);
+
+    useEffect(() => {
+        const unsubscribe = listen<PreviewFileContextSelection>("preview-file-context-selected", (event) => {
+            handlePreviewFileContextSelection(event.payload);
+        });
+
+        return () => {
+            unsubscribe.then((unlisten) => unlisten());
+        };
+    }, [handlePreviewFileContextSelection]);
+
+    useEffect(() => {
+        if (!pendingPreviewFileSelection) {
+            return;
+        }
+        if (
+            pendingPreviewFileSelection.conversationId &&
+            selectedConversation !== pendingPreviewFileSelection.conversationId.toString()
+        ) {
+            return;
+        }
+
+        reopenPersistedPreviewFile(pendingPreviewFileSelection.callId);
+        setPendingPreviewFileSelection(null);
+    }, [pendingPreviewFileSelection, reopenPersistedPreviewFile, selectedConversation]);
 
     // 应用内快捷键
     useAppShortcuts("chat", {
@@ -616,6 +655,7 @@ function ChatUIWindow() {
                             onConversationChange={handleConversationChange}
                             inlineInteractionItems={inlineInteractionItems}
                             inlineInteractionVisible={hasInlineInteraction}
+                            onPreviewFileContextClick={handlePreviewFileContextSelection}
                             virtualizeMessages
                             virtualizedListEngine="virtuoso"
                         />
@@ -670,6 +710,7 @@ function ChatUIWindow() {
                         onChangeConversationId={setSelectedConversation}
                         inlineInteractionItems={inlineInteractionItems}
                         inlineInteractionVisible={hasInlineInteraction}
+                        onPreviewFileContextClick={handlePreviewFileContextSelection}
                         virtualizeMessages
                         virtualizedListEngine="virtuoso"
                     />

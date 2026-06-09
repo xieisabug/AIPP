@@ -17,6 +17,7 @@ interface ChatSidebarProps {
     onOpenWindow?: () => void;
     onArtifactClick?: (artifact: CodeArtifact) => void;
     onContextClick?: (item: ContextItem) => void;
+    onPreviewFileClick?: (item: ContextItem) => void;
     onExpandChange?: (isExpanded: boolean, width: number) => void;
 }
 
@@ -36,6 +37,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
     onOpenWindow,
     onArtifactClick,
     onContextClick,
+    onPreviewFileClick,
     onExpandChange,
 }) => {
     const [isExpanded, setIsExpanded] = useState(false);
@@ -207,6 +209,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
                             conversationId={conversationId}
                             onArtifactClick={onArtifactClick}
                             onContextClick={onContextClick}
+                            onPreviewFileClick={onPreviewFileClick}
                         />
                     </div>
                 </div>

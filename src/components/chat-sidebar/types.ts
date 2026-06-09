@@ -79,6 +79,7 @@ export interface ContextItem {
         | 'generated_image'
         | 'skill'
         | 'read_file'
+        | 'preview_file'
         | 'search'
         | 'list_directory'
         | 'loaded_mcp_tool'
@@ -96,6 +97,12 @@ export interface ContextItem {
     timestamp?: Date;
     previewData?: ContextPreviewData;
     previewStatus?: ContextPreviewStatus;
+    previewFileData?: {
+        callId: number;
+        conversationId?: number;
+        messageId?: number | null;
+        requestId?: string | null;
+    };
     // Attachment data for file/image items
     attachmentData?: {
         type: 'Image' | 'Text' | 'PDF' | 'Word' | 'PowerPoint' | 'Excel' | string;
@@ -117,6 +124,7 @@ export interface ContextItem {
 // Tool names that represent context operations
 export const CONTEXT_TOOL_NAMES = [
     'read_file',
+    'preview_file',
     'get_file_contents',
     'list_directory',
     'list_allowed_directories',
@@ -131,6 +139,9 @@ export const CONTEXT_TOOL_NAMES = [
 
 export function getContextTypeFromToolName(toolName: string): ContextItem['type'] {
     const normalizedName = toolName.toLowerCase();
+    if (normalizedName.includes('preview_file')) {
+        return 'preview_file';
+    }
     if (normalizedName.includes('read') || normalizedName.includes('get_file') || normalizedName === 'view') {
         return 'read_file';
     }

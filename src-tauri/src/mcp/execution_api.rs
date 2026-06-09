@@ -898,6 +898,7 @@ fn build_mcp_tool_call_update_event(tool_call: &MCPToolCall) -> ConversationEven
         data: serde_json::to_value(MCPToolCallUpdateEvent {
             call_id: tool_call.id,
             conversation_id: tool_call.conversation_id,
+            message_id: tool_call.message_id,
             status: tool_call.status.clone(),
             llm_call_id: tool_call.llm_call_id.clone(),
             server_name: Some(tool_call.server_name.clone()),

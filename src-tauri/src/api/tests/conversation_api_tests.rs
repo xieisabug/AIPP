@@ -666,6 +666,49 @@ async fn test_local_reasoning_response_tie_break_does_not_reorder_other_groups()
     assert_eq!(ids, vec![1, 2, 4, 3, 5, 6]);
 }
 
+#[tokio::test]
+async fn test_equal_timestamp_interleaved_groups_use_total_order() {
+    let base_time =
+        chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
+
+    let messages = vec![
+        create_message_detail(
+            1,
+            1,
+            "response",
+            "Response 1",
+            None,
+            Some("g1".to_string()),
+            None,
+            base_time,
+        ),
+        create_message_detail(
+            2,
+            1,
+            "response",
+            "Response 2",
+            None,
+            Some("g2".to_string()),
+            None,
+            base_time,
+        ),
+        create_message_detail(
+            3,
+            1,
+            "reasoning",
+            "Reasoning 1",
+            None,
+            Some("g1".to_string()),
+            None,
+            base_time,
+        ),
+    ];
+
+    let result = process_message_versions(messages);
+    let ids: Vec<i64> = result.iter().map(|message| message.id).collect();
+    assert_eq!(ids, vec![3, 1, 2]);
+}
+
 /// 测试多个 reasoning+response 组的排序
 #[tokio::test]
 async fn test_multiple_reasoning_response_groups() {

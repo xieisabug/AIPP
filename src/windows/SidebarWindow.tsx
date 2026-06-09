@@ -32,6 +32,13 @@ interface SidebarData {
     conversationId: string;
 }
 
+interface PreviewFileContextSelection {
+    callId: number;
+    conversationId?: number;
+    messageId?: number | null;
+    requestId?: string | null;
+}
+
 const resolveContextPreviewImageSrc = (content?: string, url?: string): string | null => {
     const normalizedContent = content?.trim();
     if (normalizedContent) {
@@ -282,6 +289,22 @@ function SidebarWindow() {
             setPreviewPayload(null);
         }
     }, [cacheContextItem]);
+
+    const handlePreviewFileClick = useCallback((item: ContextItem) => {
+        if (!item.previewFileData) {
+            return;
+        }
+
+        const payload: PreviewFileContextSelection = {
+            ...item.previewFileData,
+            conversationId:
+                item.previewFileData.conversationId ??
+                (sidebarData.conversationId ? Number(sidebarData.conversationId) : undefined),
+        };
+        emit("preview-file-context-selected", payload).catch((error) => {
+            console.error("Failed to emit preview file context selection:", error);
+        });
+    }, [sidebarData.conversationId]);
 
     // Close the window
     const handleClose = useCallback(() => {
@@ -604,6 +627,7 @@ function SidebarWindow() {
                             conversationId={sidebarData.conversationId}
                             onArtifactClick={handleArtifactClick}
                             onContextClick={handleContextClick}
+                            onPreviewFileClick={handlePreviewFileClick}
                         />
                     ) : (
                         <div className="flex items-center justify-center h-full text-muted-foreground">

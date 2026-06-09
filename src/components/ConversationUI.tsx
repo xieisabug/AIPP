@@ -65,7 +65,7 @@ import { toast } from "sonner";
 import { cn } from "@/utils/utils";
 
 // 导入 Chat Sidebar 相关
-import { ChatSidebar, type TodoItem } from "./chat-sidebar";
+import { ChatSidebar, type ContextItem, type TodoItem } from "./chat-sidebar";
 import { useTodoList } from "@/hooks/useTodoList";
 import { useArtifactExtractor } from "@/hooks/useArtifactExtractor";
 import { useExplicitArtifacts } from "@/hooks/useExplicitArtifacts";
@@ -91,6 +91,13 @@ export interface InlineInteractionItem {
     callId?: number | null;
     messageId?: number | null;
     content: ReactNode;
+}
+
+export interface PreviewFileContextSelection {
+    callId: number;
+    conversationId?: number;
+    messageId?: number | null;
+    requestId?: string | null;
 }
 
 interface AcpConfigSelectProps {
@@ -209,6 +216,7 @@ interface ConversationUIProps {
     virtualizedListEngine?: VirtualizedListEngine;
     windowLabel?: string;
     busySendBehavior?: "queue" | "interrupt";
+    onPreviewFileContextClick?: (selection: PreviewFileContextSelection) => void;
 }
 
 const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
@@ -231,6 +239,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             virtualizedListEngine = "legacy",
             windowLabel = "chat_ui",
             busySendBehavior = "queue",
+            onPreviewFileContextClick,
         },
         ref
     ) => {
@@ -767,6 +776,16 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             messages,
             acpWorkingDirectory,
         });
+
+        const handlePreviewFileContextClick = useCallback((item: ContextItem) => {
+            if (!item.previewFileData) {
+                return;
+            }
+            onPreviewFileContextClick?.({
+                ...item.previewFileData,
+                conversationId: item.previewFileData.conversationId ?? Number(conversationId),
+            });
+        }, [conversationId, onPreviewFileContextClick]);
 
         // ============= Sidebar Window 事件处理 =============
         
@@ -1692,6 +1711,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onExpandChange={handleSidebarExpandChange}
                             onOpenWindow={handleOpenSidebarWindow}
                             onArtifactClick={(artifact) => handleArtifact(artifact.language, artifact.code)}
+                            onPreviewFileClick={handlePreviewFileContextClick}
                         />
                 )}
 

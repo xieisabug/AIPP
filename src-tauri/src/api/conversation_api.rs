@@ -223,38 +223,62 @@ pub struct ConversationSearchHit {
 /// 此函数仅按时间排序并保证 reasoning 排在 response 之前。
 pub fn process_message_versions(message_details: Vec<MessageDetail>) -> Vec<MessageDetail> {
     let mut final_messages = message_details;
+    let mut group_sort_info: HashMap<(i64, String), (i64, bool, bool)> = HashMap::new();
+
+    for message in &final_messages {
+        let Some(group_id) = &message.generation_group_id else {
+            continue;
+        };
+        let info = group_sort_info
+            .entry((message_order_value(message), group_id.clone()))
+            .or_insert((message.id, false, false));
+        info.0 = info.0.min(message.id);
+        match message.message_type.as_str() {
+            "reasoning" => info.1 = true,
+            "response" => info.2 = true,
+            _ => {}
+        }
+    }
+
+    let sort_keys: HashMap<i64, (i64, i64, i64, i64)> = final_messages
+        .iter()
+        .map(|message| {
+            let time = message_order_value(message);
+            let paired_group_info = message
+                .generation_group_id
+                .as_ref()
+                .and_then(|group_id| group_sort_info.get(&(time, group_id.clone())))
+                .filter(|(_, has_reasoning, has_response)| *has_reasoning && *has_response);
+
+            let (group_order, type_rank) =
+                if let Some((group_min_id, _, _)) = paired_group_info {
+                    let rank = match message.message_type.as_str() {
+                        "reasoning" => 0,
+                        "response" => 1,
+                        _ => 2,
+                    };
+                    (*group_min_id, rank)
+                } else {
+                    (message.id, 0)
+                };
+
+            (message.id, (time, group_order, type_rank, message.id))
+        })
+        .collect();
 
     // 按消息时间顺序排序。只有在同一 generation_group_id 且时间完全相同的情况下，
     // 才用 reasoning -> response 作为兜底 tie-break，避免跨轮次按类型扎堆。
-    final_messages.sort_by(|a, b| {
-        let time_order = message_order_value(a).cmp(&message_order_value(b));
-        if time_order != std::cmp::Ordering::Equal {
-            return time_order;
-        }
-
-        if belongs_to_same_group(a, b) {
-            match (a.message_type.as_str(), b.message_type.as_str()) {
-                ("reasoning", "response") => return std::cmp::Ordering::Less,
-                ("response", "reasoning") => return std::cmp::Ordering::Greater,
-                _ => {}
-            }
-        }
-
-        a.id.cmp(&b.id)
+    final_messages.sort_by_key(|message| {
+        sort_keys
+            .get(&message.id)
+            .copied()
+            .unwrap_or_else(|| (message_order_value(message), message.id, 0, message.id))
     });
     final_messages
 }
 
 fn message_order_value(message: &MessageDetail) -> i64 {
     message.created_time.timestamp_millis()
-}
-
-/// 检查两条消息是否属于同一个 generation_group_id
-fn belongs_to_same_group(a: &MessageDetail, b: &MessageDetail) -> bool {
-    match (&a.generation_group_id, &b.generation_group_id) {
-        (Some(group_a), Some(group_b)) => group_a == group_b,
-        _ => false,
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

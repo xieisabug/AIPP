@@ -18,6 +18,7 @@ interface ChatSidebarContentProps {
     className?: string;
     onArtifactClick?: (artifact: CodeArtifact) => void;
     onContextClick?: (item: ContextItem) => void;
+    onPreviewFileClick?: (item: ContextItem) => void;
 }
 
 interface SectionState {
@@ -93,6 +94,7 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
     className,
     onArtifactClick,
     onContextClick,
+    onPreviewFileClick,
 }) => {
     const [todoOpen, setTodoOpen] = React.useState(todos.length > 0);
     const [artifactOpen, setArtifactOpen] = React.useState(artifacts.length > 0);
@@ -163,7 +165,11 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
                     isOpen={contextOpen}
                     onOpenChange={setContextOpen}
                 >
-                    <ContextList items={contextItems} onItemClick={onContextClick} />
+                    <ContextList
+                        items={contextItems}
+                        onItemClick={onContextClick}
+                        onPreviewFileClick={onPreviewFileClick}
+                    />
                 </CollapsibleSection>
 
                 {sidebarPluginViews.length > 0 && (
